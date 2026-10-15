@@ -15,12 +15,15 @@
 //! what `uxduck service install` wrote before (a launchd file, a scheduled
 //! task), which people could not see or switch off.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use uxduck_contracts::dto::settings::{LoginItem, LoginItemState};
 
 /// The first line of the files UXDuck writes, so it only removes its own.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 const MARK: &str = "Written by UXDuck";
 /// The old launchd agent (S64) and Task Scheduler task.
 const OLD_LABEL: &str = "com.uxduck.daemon";
@@ -42,6 +45,7 @@ fn item(state: LoginItemState) -> LoginItem {
     }
 }
 
+#[cfg(unix)]
 fn unavailable(detail: impl Into<String>) -> LoginItem {
     LoginItem {
         state: LoginItemState::Unavailable,
@@ -269,7 +273,7 @@ mod platform {
 }
 
 /// `~/.config`, or `XDG_CONFIG_HOME`.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn config_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -278,7 +282,7 @@ fn config_dir() -> Option<PathBuf> {
 
 /// The Linux desktop's autostart entry: UXDuck with no page, at login.
 #[must_use]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 pub fn autostart_entry(exe: &Path) -> String {
     format!(
         "# {MARK}: UXDuck opens at login.\n\

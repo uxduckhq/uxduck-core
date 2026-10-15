@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "f41e4ae4f497fa90e3ddc4bca1771965f1594d2e",
+  "sourceCommit": "4124cd77753d4265b625aeabd4d1bc160d97bbca",
   "licenseReady": true,
   "files": [
     {
@@ -4151,7 +4151,7 @@
     },
     {
       "path": "crates/uxduck/src/adapters/login_item.rs",
-      "sha256": "886e951515d035e75db0a25d7ad6b41f82fa0b7f84c37fa29d39c3251c54e180",
+      "sha256": "9dd91972a7eb1ba099f49ee4263fcfd1a86a17fa6b5e629b3a503e31d234e890",
       "executable": false
     },
     {
