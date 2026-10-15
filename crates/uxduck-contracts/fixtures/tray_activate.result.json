@@ -1,0 +1,5 @@
+{
+  "type": "launch",
+  "path": "/Applications/UXDuck.app/Contents/MacOS/UXDuck",
+  "args": ["--feedback=ss0123456789abcdef"]
+}

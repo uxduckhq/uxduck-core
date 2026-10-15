@@ -1,0 +1,10 @@
+{
+  "method": "mavlink/history",
+  "params": {
+    "vehicleId": "vh0000000001234abcd",
+    "direction": "received",
+    "id": 33,
+    "before": "t1790000000.81920",
+    "limit": 2
+  }
+}

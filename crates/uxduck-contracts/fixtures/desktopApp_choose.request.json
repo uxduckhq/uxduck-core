@@ -1,0 +1,6 @@
+{
+  "method": "desktopApp/choose",
+  "params": {
+    "on": true
+  }
+}

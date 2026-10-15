@@ -1,0 +1,4 @@
+{
+  "method": "telemetry/subscribe",
+  "params": {}
+}

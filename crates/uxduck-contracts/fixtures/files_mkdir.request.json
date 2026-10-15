@@ -1,0 +1,7 @@
+{
+  "method": "files/mkdir",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "path": "/APM/old"
+  }
+}

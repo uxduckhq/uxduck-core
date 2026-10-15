@@ -1,0 +1,19 @@
+doc-valid-idents = [
+  "MAVLink",
+  "ArduPilot",
+  "PX4",
+  "OpenAPI",
+  "JSON-RPC",
+  "WebSocket",
+  "WebAssembly",
+  "..",
+  "SITL",
+  "OpenAI",
+  "UXDuck",
+  "PostHog",
+  "MAVProxy",
+  "QGroundControl",
+  "WebCodecs",
+]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

@@ -1,0 +1,48 @@
+{
+  "id": "mode-tour-vtol",
+  "version": 1,
+  "title": "Mode tour",
+  "audience": "first-flight",
+  "vehicles": ["vtol"],
+  "goal": "Put it in Loiter, then Guided, then Return to launch, then Land.",
+  "start": { "heightM": 50 },
+  "steps": [
+    {
+      "text": "Choose LOITER in the Mode menu in the Control tab.",
+      "hint": "Loiter flies it forward like a plane and circles where it is.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "LOITER" },
+        { "check": "mode", "mode": "LOITER" }
+      ]
+    },
+    {
+      "text": "Choose GUIDED.",
+      "hint": "Guided waits for you to tell it where to go.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "GUIDED" },
+        { "check": "mode", "mode": "GUIDED" }
+      ]
+    },
+    {
+      "text": "Press Return to launch in the Control tab.",
+      "hint": "Return to launch flies it home by itself.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "mode", "mode": "RTL", "or": ["QRTL"] }
+      ]
+    },
+    {
+      "text": "Press Land in the Control tab.",
+      "hint": "Land slows it to a hover and brings it straight down where it is.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "land" },
+        { "check": "mode", "mode": "QLAND" }
+      ]
+    }
+  ],
+  "passed": "Passed. Four modes, in order."
+}

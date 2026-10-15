@@ -1,0 +1,15 @@
+{
+  "own": [
+    {
+      "id": "own-3f9a1c2b7d4e",
+      "label": "My fork",
+      "firmware": "ArduCopter",
+      "commit": "2a3dc4b7",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "parameterCount": 4504,
+      "addedAtUs": 1790000000000000
+    }
+  ],
+  "catalogue": "ready",
+  "catalogueSets": 312
+}

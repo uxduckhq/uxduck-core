@@ -1,0 +1,9 @@
+{
+  "id": "cl9f3a1c2b4d5e6f70",
+  "name": "Claude Code",
+  "kind": "agent",
+  "executable": "/usr/local/bin/uxduck",
+  "capabilities": ["read", "control"],
+  "createdAtUs": 1790668800000000,
+  "version": 2
+}

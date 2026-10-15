@@ -1,0 +1,7 @@
+{
+  "method": "telemetry/window",
+  "params": {
+    "vehicleId": "v1",
+    "keys": ["vibration.x_mps2"]
+  }
+}

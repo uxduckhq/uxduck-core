@@ -1,0 +1,4 @@
+{
+  "method": "video/assign",
+  "params": { "sourceId": "udp-5600-192.168.144.25", "vehicleId": "veh-7f3a" }
+}

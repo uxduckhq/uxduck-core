@@ -1,0 +1,47 @@
+{
+  "id": "plan-the-survey",
+  "version": 1,
+  "title": "Plan the survey",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Plan a mission that covers the field at 40 m, upload it, fly it in Auto, and land.",
+  "start": { "onGround": true },
+  "features": [
+    {
+      "id": "field",
+      "label": "Field",
+      "offset": { "bearingDeg": 51.34, "distanceM": 128.062 },
+      "outline": [
+        { "bearingDeg": 45.0, "distanceM": 56.569 },
+        { "bearingDeg": 75.964, "distanceM": 164.924 },
+        { "bearingDeg": 53.13, "distanceM": 200.0 },
+        { "bearingDeg": 18.435, "distanceM": 126.491 }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "text": "On the Mission tab, plan lines back and forth across the field at 40 m, then upload the mission.",
+      "hint": "Start with a take-off, then put waypoints at the ends of lines about 20 m apart across the field.",
+      "hintAfterS": 120,
+      "all": [{ "check": "missionUploaded", "items": 4 }]
+    },
+    {
+      "text": "Arm, switch to Auto, and let it fly the mission and land.",
+      "hint": "Auto flies the mission from the start. End it with Return to launch so it comes back and lands.",
+      "hintAfterS": 120,
+      "all": [
+        { "check": "missionCovers", "feature": "field", "fraction": 0.85 },
+        { "check": "landed" }
+      ]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "missionOutside", "feature": "field", "byM": 20 }],
+      "says": "Failed. A waypoint is more than 20 m outside the field."
+    }
+  ],
+  "passed": "Passed. Covered {coverage:field}% of the field.",
+  "measure": { "measure": "coverage", "feature": "field" }
+}

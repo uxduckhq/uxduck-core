@@ -1,0 +1,7 @@
+{
+  "method": "tray/activate",
+  "params": {
+    "item": "feedback",
+    "screenshot": "/9j/4AAQSkZJRg"
+  }
+}

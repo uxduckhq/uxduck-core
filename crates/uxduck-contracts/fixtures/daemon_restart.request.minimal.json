@@ -1,0 +1,4 @@
+{
+  "method": "daemon/restart",
+  "params": {}
+}

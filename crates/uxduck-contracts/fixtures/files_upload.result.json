@@ -1,0 +1,12 @@
+{
+  "id": "fu3f9a1c0d7e2b4a6c",
+  "vehicleId": "veh-7f3a",
+  "direction": "upload",
+  "path": "/APM/scripts/hello.lua",
+  "name": "hello.lua",
+  "size": 15,
+  "done": 0,
+  "state": "queued",
+  "startedAtUs": 1790000000000000,
+  "updatedAtUs": 1790000000000000
+}

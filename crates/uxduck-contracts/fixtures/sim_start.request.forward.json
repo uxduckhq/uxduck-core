@@ -1,0 +1,13 @@
+{
+  "method": "sim/start",
+  "params": {
+    "vehicle": "multicopter",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523,
+    "forward": {
+      "host": "127.0.0.1",
+      "port": 14550,
+      "policy": "read-write"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "sn9c1e7b3d5a604f2a",
+  "name": "Ridge, again",
+  "vehicle": "plane",
+  "frame": "plane",
+  "firmware": "ArduPlane V4.7.0-dev",
+  "latitudeDeg": -35.3591,
+  "longitudeDeg": 149.1712,
+  "groundAltitudeM": 584.0,
+  "heightM": 120.5,
+  "headingDeg": 42.0,
+  "groundSpeedMps": 22.4,
+  "mode": "AUTO",
+  "armed": true,
+  "flying": true,
+  "parameterCount": 1043,
+  "missionCount": 6,
+  "currentItem": 3,
+  "createdAtUs": 1790668800000000,
+  "version": 2
+}

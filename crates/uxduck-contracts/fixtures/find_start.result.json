@@ -1,0 +1,41 @@
+{
+  "finds": [
+    {
+      "id": "serial:/dev/cu.usbmodem1101",
+      "place": "usb",
+      "link": {
+        "type": "serial",
+        "device": "/dev/cu.usbmodem1101",
+        "baud": 115200,
+        "usb": { "vendorId": 11694, "productId": 4118 }
+      },
+      "evidence": "USB id 2DAE:1016, a heartbeat",
+      "usb": { "vendorId": 11694, "productId": 4118 },
+      "deviceName": "Cube Orange",
+      "vehicle": {
+        "systemId": 1,
+        "vehicleType": "Quadrotor",
+        "autopilot": "Ardupilotmega",
+        "armed": false
+      },
+      "seenUs": 1790000000000000
+    },
+    {
+      "id": "serial:/dev/cu.usbserial-0001",
+      "place": "usb",
+      "evidence": "USB id 0403:6015, nothing at 57600, 115200, 921600 or 460800 baud",
+      "usb": { "vendorId": 1027, "productId": 24597 },
+      "deviceName": "FTDI serial adapter",
+      "reason": "no-mavlink",
+      "seenUs": 1790000000000000
+    },
+    {
+      "id": "udp:14550",
+      "place": "this-computer",
+      "evidence": "UDP port 14550",
+      "reason": "busy",
+      "detail": "UDP port 14550 is in use by MissionPlanner (pid 812)",
+      "seenUs": 1790000000000000
+    }
+  ]
+}

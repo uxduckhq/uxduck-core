@@ -1,0 +1,28 @@
+{
+  "hits": [
+    {
+      "kind": "telemetry",
+      "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41|speed.air_mps",
+      "title": "Airspeed",
+      "subtitle": "Telemetry \u00b7 Copter 1",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"
+    },
+    {
+      "kind": "parameter",
+      "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41/ARSPD_TYPE",
+      "title": "ARSPD_TYPE",
+      "subtitle": "Parameters \u00b7 Copter 1 = 0",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"
+    },
+    {
+      "kind": "place",
+      "id": "pl1a2b3c4d5e6f7a8b",
+      "title": "Home field",
+      "subtitle": "Saved places",
+      "place": {
+        "latitudeDeg": -35.363261,
+        "longitudeDeg": 149.16523
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "vehicleId": "veh-7f3a",
+  "path": "/APM/LOGS",
+  "entries": [
+    {
+      "name": "old",
+      "path": "/APM/LOGS/old",
+      "dir": true
+    },
+    {
+      "name": "00000012.BIN",
+      "path": "/APM/LOGS/00000012.BIN",
+      "dir": false,
+      "size": 104857600
+    }
+  ]
+}

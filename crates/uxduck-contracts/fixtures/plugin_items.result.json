@@ -1,0 +1,27 @@
+{
+  "plugins": [
+    {
+      "pluginId": "clock",
+      "items": [
+        {
+          "key": "stopwatch.elapsed_s",
+          "label": "Stopwatch",
+          "unit": "second",
+          "value": 83.0,
+          "source": "plugin:clock",
+          "componentId": 0,
+          "timeUs": 1791370000000000
+        },
+        {
+          "key": "clock.utc",
+          "label": "UTC",
+          "unit": "none",
+          "text": "14:26:40",
+          "source": "plugin:clock",
+          "componentId": 0,
+          "timeUs": 1791370000000000
+        }
+      ]
+    }
+  ]
+}

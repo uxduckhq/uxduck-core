@@ -1,0 +1,6 @@
+{
+  "method": "feedback/screenshot",
+  "params": {
+    "id": "ss0123456789abcdef"
+  }
+}

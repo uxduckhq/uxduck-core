@@ -1,0 +1,19 @@
+{
+  "computers": [
+    {
+      "id": "dv0000000000000001",
+      "name": "Ana's laptop",
+      "online": true,
+      "lastSeenAtMs": 1790000000000,
+      "daemonVersion": "0.1.0"
+    },
+    {
+      "id": "dv0000000000000002",
+      "name": "Hangar Pi",
+      "online": false,
+      "lastSeenAtMs": 1789990000000
+    }
+  ],
+  "thisComputer": "dv0000000000000001",
+  "edge": { "state": "connected", "roundTripMs": 42, "clockOffsetMs": -12 }
+}

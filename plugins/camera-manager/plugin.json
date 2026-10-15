@@ -1,0 +1,44 @@
+{
+  "abi": 2,
+  "id": "camera-manager",
+  "name": "Camera",
+  "version": "0.2.1",
+  "description": "Photos, video and zoom through the MAVLink camera protocol.",
+  "wasm": "camera_manager.wasm",
+  "capabilities": ["read", "control"],
+  "subscribe": {
+    "messages": {
+      "names": ["COMMAND_ACK"],
+      "cadenceMs": 200
+    }
+  },
+  "commands": [
+    {
+      "name": "photo",
+      "title": "Take a photo",
+      "description": "One photo from every camera.",
+      "risk": "none",
+      "shortcut": "Alt+C"
+    },
+    {
+      "name": "video-start",
+      "title": "Start video",
+      "risk": "none"
+    },
+    {
+      "name": "video-stop",
+      "title": "Stop video",
+      "risk": "none"
+    },
+    {
+      "name": "zoom-in",
+      "title": "Zoom in",
+      "risk": "none"
+    },
+    {
+      "name": "zoom-out",
+      "title": "Zoom out",
+      "risk": "none"
+    }
+  ]
+}

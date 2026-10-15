@@ -1,0 +1,20 @@
+{
+  "sessions": [
+    {
+      "id": "s1",
+      "current": true,
+      "computer": "Field Pi",
+      "userAgent": "uxduck/0.4.0",
+      "createdAt": "2026-10-11T09:00:00.000Z",
+      "lastActiveAt": "2026-10-11T09:00:00.000Z"
+    },
+    {
+      "id": "s2",
+      "current": false,
+      "computer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+      "createdAt": "2026-10-10T18:30:00.000Z",
+      "lastActiveAt": "2026-10-11T08:12:00.000Z"
+    }
+  ]
+}

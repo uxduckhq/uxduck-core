@@ -1,0 +1,22 @@
+{
+  "id": "li4f2a9c1e7b3d5a60",
+  "name": "Simulated VTOL",
+  "kind": {
+    "type": "simulator",
+    "vehicle": "vtol",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523,
+    "altitudeM": 584.0,
+    "headingDeg": 353.0,
+    "frame": "quadplane-tilt",
+    "speedup": 2,
+    "wipe": true,
+    "instance": 0
+  },
+  "policy": "read-write",
+  "topology": "auto",
+  "status": "configured",
+  "createdAtUs": 1790668800000000,
+  "keepAlive": false,
+  "version": 1
+}

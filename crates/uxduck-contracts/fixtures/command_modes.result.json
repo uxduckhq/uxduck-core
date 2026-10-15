@@ -1,0 +1,30 @@
+{
+  "families": [
+    {
+      "key": "copter",
+      "name": "Multicopters",
+      "modes": [
+        {
+          "mode": "LOITER",
+          "description": "Holds its position and height; the sticks nudge it"
+        },
+        {
+          "mode": "FLIP",
+          "description": "Flips over once, then carries on",
+          "advanced": true
+        }
+      ]
+    },
+    {
+      "key": "plane",
+      "name": "Planes",
+      "modes": [
+        {
+          "mode": "FBWA",
+          "description": "You fly; it limits how far it banks and pitches"
+        }
+      ]
+    }
+  ],
+  "vehicleFamily": "copter"
+}

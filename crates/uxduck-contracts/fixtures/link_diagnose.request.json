@@ -1,0 +1,6 @@
+{
+  "method": "link/diagnose",
+  "params": {
+    "query": "Alpha"
+  }
+}

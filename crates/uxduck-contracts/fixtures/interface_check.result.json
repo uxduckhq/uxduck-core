@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0+e05d65f4.20261011T120000Z",
+  "publishedAt": "2026-10-11T12:00:00Z",
+  "builtIn": false,
+  "updates": true,
+  "updateUxduck": false,
+  "checkedAtMs": 1791720000000,
+  "problem": "Couldn't check for a new interface: no connection"
+}

@@ -1,0 +1,21 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-terrain"
+description = "Terrain heights (ADR-0026): the signed manifest, the chunk cache, lookup and ArduPilot's grid maths. No I/O; the daemons fetch and keep the bytes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flate2.workspace = true
+minisign-verify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+minisign.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+{
+  "method": "operator/update",
+  "params": {
+    "id": "op5f1c0a91b2d3e4f5",
+    "expectedVersion": 1,
+    "parameterGroups": [
+      {
+        "name": "Hover tuning",
+        "parameters": ["ATC_RAT_RLL_P", "ATC_RAT_PIT_P"]
+      },
+      {
+        "name": "Battery",
+        "parameters": ["BATT_CAPACITY"]
+      }
+    ],
+    "inspectorPinned": ["received:HEARTBEAT", "sent:COMMAND_LONG"],
+    "controlActions": [{ "class": "copter", "actions": ["vehicle:arm", "vehicle:mode:guided"] }]
+  }
+}

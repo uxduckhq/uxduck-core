@@ -1,0 +1,53 @@
+{
+  "id": "read-the-panel",
+  "version": 1,
+  "title": "Read the panel",
+  "audience": "first-flight",
+  "vehicles": ["multicopter"],
+  "goal": "Answer three questions from Telemetry: how high it is, its mode and its battery.",
+  "start": { "heightM": 60 },
+  "questions": [
+    {
+      "id": "height",
+      "text": "How high is it above home?",
+      "reads": "height-above-home",
+      "tolerance": 5,
+      "unit": "m"
+    },
+    { "id": "mode", "text": "What mode is it in?", "reads": "mode" },
+    {
+      "id": "battery",
+      "text": "How much battery is left?",
+      "reads": "battery-pct",
+      "tolerance": 5,
+      "unit": "%"
+    }
+  ],
+  "steps": [
+    {
+      "text": "Find its height above home in Telemetry and answer.",
+      "hint": "Telemetry lists the height above home near the top.",
+      "hintAfterS": 60,
+      "all": [{ "check": "answered", "question": "height" }]
+    },
+    {
+      "text": "Find its mode and answer.",
+      "hint": "The mode is at the top of the Control tab, and in Telemetry.",
+      "hintAfterS": 60,
+      "all": [{ "check": "answered", "question": "mode" }]
+    },
+    {
+      "text": "Find how much battery is left and answer.",
+      "hint": "Look for the battery's remaining charge, in percent.",
+      "hintAfterS": 60,
+      "all": [{ "check": "answered", "question": "battery" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "wrongAnswers", "count": 3 }],
+      "says": "Failed. Three wrong answers to one question."
+    }
+  ],
+  "passed": "Passed. All three read right."
+}

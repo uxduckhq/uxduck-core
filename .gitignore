@@ -1,0 +1,6 @@
+/target/
+/plugins/target/
+/.cache/
+/.env
+/.env.*
+.DS_Store

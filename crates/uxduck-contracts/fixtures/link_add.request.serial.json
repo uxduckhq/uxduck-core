@@ -1,0 +1,15 @@
+{
+  "method": "link/add",
+  "params": {
+    "kind": {
+      "type": "serial",
+      "device": "/dev/cu.usbmodem1101",
+      "baud": 115200,
+      "usb": {
+        "vendorId": 4617,
+        "productId": 22337,
+        "serialNumber": "3E0024001051"
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1700,
+    "tsUs": 1790669200000000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "plugin",
+        "id": "camera-manager",
+        "op": "upsert",
+        "plugin": {
+          "id": "camera-manager",
+          "name": "Camera",
+          "version": "0.2.0",
+          "description": "Photos, video and zoom through the MAVLink camera protocol.",
+          "path": "/Users/ana/plugins/camera-manager",
+          "capabilities": ["read", "control"],
+          "subscribe": {
+            "messages": {
+              "names": ["COMMAND_ACK"],
+              "cadenceMs": 200
+            }
+          },
+          "sends": [],
+          "commands": [
+            {
+              "name": "photo",
+              "title": "Take a photo",
+              "description": "One photo from every camera.",
+              "risk": "none"
+            },
+            {
+              "name": "zoom",
+              "title": "Zoom",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "step": {
+                    "type": "integer",
+                    "minimum": -10,
+                    "maximum": 10
+                  }
+                }
+              },
+              "risk": "none"
+            }
+          ],
+          "status": "failed",
+          "panels": [
+            {
+              "id": "camera",
+              "title": "Camera",
+              "widgets": [
+                {
+                  "type": "value",
+                  "item": "camera.photos",
+                  "label": "Photos"
+                },
+                {
+                  "type": "button",
+                  "label": "Take a photo",
+                  "command": "photo"
+                }
+              ]
+            }
+          ],
+          "clientId": "plugin:camera-manager",
+          "detail": "on_frames: wasm trap: out of fuel"
+        }
+      }
+    ]
+  }
+}

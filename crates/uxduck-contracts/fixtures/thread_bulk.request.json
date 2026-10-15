@@ -1,0 +1,8 @@
+{
+  "method": "thread/bulk",
+  "params": {
+    "threadIds": ["th9a8b7c6d5e4f3a2b", "th0000000000000000"],
+    "action": "move",
+    "folderId": "fo1a2b3c4d5e6f7a8b"
+  }
+}

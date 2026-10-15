@@ -1,0 +1,11 @@
+{
+  "id": "pa8c21d0e94b7f3a51",
+  "exerciseId": "guide-vtol",
+  "guide": true,
+  "vehicleId": "veh-7f3a",
+  "state": "running",
+  "step": 1,
+  "startedAtUs": 1790000000000000,
+  "stepStartedAtUs": 1790000042000000,
+  "version": 2
+}

@@ -1,0 +1,40 @@
+{
+  "method": "mapping/update",
+  "params": {
+    "id": "mode-2",
+    "name": "Mode 2",
+    "roll": {
+      "axis": "right-stick-x",
+      "inverted": false
+    },
+    "pitch": {
+      "axis": "right-stick-y",
+      "inverted": false
+    },
+    "yaw": {
+      "axis": "left-stick-x",
+      "inverted": false
+    },
+    "throttle": {
+      "axis": "left-stick-y",
+      "inverted": false
+    },
+    "deadzone": 0.05,
+    "buttons": [
+      {
+        "button": "east",
+        "command": {
+          "type": "rtl"
+        }
+      },
+      {
+        "button": "north",
+        "command": {
+          "type": "set-mode",
+          "mode": "LOITER"
+        }
+      }
+    ],
+    "expectedVersion": 1
+  }
+}

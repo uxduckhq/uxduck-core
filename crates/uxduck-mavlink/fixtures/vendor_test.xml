@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!-- A test vendor dialect (S60): two messages a gimbal maker might add. -->
+<mavlink>
+  <include>common.xml</include>
+  <version>1</version>
+  <enums>
+    <enum name="ACME_GIMBAL_MODE">
+      <entry value="0" name="ACME_GIMBAL_MODE_STOW"/>
+      <entry value="1" name="ACME_GIMBAL_MODE_TRACK"/>
+    </enum>
+  </enums>
+  <messages>
+    <message id="46000" name="ACME_GIMBAL_STATUS">
+      <description>The gimbal's attitude and mode.</description>
+      <field type="uint64_t" name="time_usec" units="us">Time since boot.</field>
+      <field type="float" name="pan" units="deg">Pan angle.</field>
+      <field type="float" name="tilt" units="deg">Tilt angle.</field>
+      <field type="uint8_t" name="mode" enum="ACME_GIMBAL_MODE">Mode.</field>
+      <field type="char[16]" name="serial">Serial number.</field>
+      <extensions/>
+      <field type="int16_t" name="temperature" units="cdegC">Motor temperature.</field>
+    </message>
+    <message id="46001" name="ACME_GIMBAL_POINT">
+      <description>Points the gimbal.</description>
+      <field type="uint8_t" name="target_system">System.</field>
+      <field type="uint8_t" name="target_component">Component.</field>
+      <field type="float" name="pan" units="deg">Pan angle.</field>
+      <field type="float" name="tilt" units="deg">Tilt angle.</field>
+    </message>
+  </messages>
+</mavlink>

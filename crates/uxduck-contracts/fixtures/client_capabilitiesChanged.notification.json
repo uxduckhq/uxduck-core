@@ -1,0 +1,6 @@
+{
+  "method": "client/capabilitiesChanged",
+  "params": {
+    "granted": ["read", "control"]
+  }
+}

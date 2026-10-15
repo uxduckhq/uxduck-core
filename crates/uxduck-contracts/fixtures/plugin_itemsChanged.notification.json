@@ -1,0 +1,17 @@
+{
+  "method": "plugin/itemsChanged",
+  "params": {
+    "pluginId": "clock",
+    "items": [
+      {
+        "key": "stopwatch.elapsed_s",
+        "label": "Stopwatch",
+        "unit": "second",
+        "value": 84.0,
+        "source": "plugin:clock",
+        "componentId": 0,
+        "timeUs": 1791370001000000
+      }
+    ]
+  }
+}

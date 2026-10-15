@@ -1,0 +1,10 @@
+{
+  "method": "telemetry/window",
+  "params": {
+    "vehicleId": "v1",
+    "keys": ["vibration.x_mps2"],
+    "positionSources": [],
+    "durationMs": 60000,
+    "maxSamples": 20
+  }
+}

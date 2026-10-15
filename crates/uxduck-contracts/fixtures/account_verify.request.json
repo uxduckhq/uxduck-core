@@ -1,0 +1,4 @@
+{
+  "method": "account/verify",
+  "params": { "email": "ana@example.com", "code": "482913", "productUpdates": true }
+}

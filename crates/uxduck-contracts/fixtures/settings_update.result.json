@@ -1,0 +1,30 @@
+{
+  "closePolicy": "quit",
+  "closePolicySet": true,
+  "usageAnalytics": true,
+  "shareConversations": true,
+  "shareFlightData": false,
+  "autoDelete": [
+    {
+      "category": "tlogs",
+      "days": 30
+    }
+  ],
+  "version": 3,
+  "shellPath": "/Applications/UXDuck.app/Contents/MacOS/UXDuck",
+  "videoPorts": [5601],
+  "videoRecording": "while-armed",
+  "showInMenuBar": true,
+  "connectToAccount": true,
+  "watchFromAccount": true,
+  "remoteControl": [],
+  "supervisionGraceS": 10,
+  "gcsSystemId": 255,
+  "storeFlights": true,
+  "uploadWhileArmed": true,
+  "uploadVideoWhileFlying": false,
+  "startAtLogin": false,
+  "messageNotifySeverity": 4,
+  "recreateSimulations": false,
+  "terrainDataset": "alos"
+}

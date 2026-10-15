@@ -1,0 +1,9 @@
+{
+  "method": "param/definitions/add",
+  "params": {
+    "text": "{\"json\": {\"version\": 0}, \"Copter\": {\"MYFORK_GAIN\": {\"DisplayName\": \"My fork's gain\", \"Description\": \"Ours.\"}}}",
+    "label": "My fork",
+    "commit": "2a3dc4b7",
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"
+  }
+}

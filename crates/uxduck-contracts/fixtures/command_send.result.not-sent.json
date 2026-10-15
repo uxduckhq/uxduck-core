@@ -1,0 +1,17 @@
+{
+  "id": "rc2",
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "command": {
+    "type": "arm"
+  },
+  "status": "not-sent",
+  "sentWithoutRecentHeartbeat": true,
+  "forced": false,
+  "attempts": 0,
+  "clientId": "c1a2b3c4d5e6f7a8b",
+  "operatorId": "op5f1c0a91b2d3e4f5",
+  "createdAtUs": 1790668900000000,
+  "completedAtUs": 1790668900180000,
+  "version": 1,
+  "detail": "Can't send Arm while UXDuck can't hear Copter 1."
+}

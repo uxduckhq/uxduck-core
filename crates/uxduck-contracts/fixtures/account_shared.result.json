@@ -1,0 +1,12 @@
+{
+  "count": 12,
+  "keptForDays": 180,
+  "turns": [
+    {
+      "id": "7a1e5b2c-0d43-4f6e-8b9a-1c2d3e4f5a6b",
+      "createdAt": "2026-09-30T12:00:00.000Z",
+      "model": "gpt-6-sol",
+      "preview": "why did it switch to RTL?"
+    }
+  ]
+}

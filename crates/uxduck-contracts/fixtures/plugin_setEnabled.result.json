@@ -1,0 +1,18 @@
+{
+  "id": "clock",
+  "name": "Clock",
+  "version": "0.2.0",
+  "description": "A clock, a stopwatch and a timer, in one tab.",
+  "path": "/Users/ana/Library/Application Support/UXDuck/plugins/included/clock",
+  "capabilities": ["read"],
+  "subscribe": {
+    "tickMs": 250
+  },
+  "sends": [],
+  "commands": [],
+  "status": "off",
+  "panels": [],
+  "clientId": "plugin:clock",
+  "enabled": false,
+  "included": true
+}

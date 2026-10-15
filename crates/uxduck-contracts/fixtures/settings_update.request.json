@@ -1,0 +1,13 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 2,
+    "closePolicy": "quit",
+    "autoDelete": [
+      {
+        "category": "tlogs",
+        "days": 30
+      }
+    ]
+  }
+}

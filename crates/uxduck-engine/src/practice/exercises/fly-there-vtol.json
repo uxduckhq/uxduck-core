@@ -1,0 +1,65 @@
+{
+  "id": "fly-there-vtol",
+  "version": 2,
+  "title": "Fly there",
+  "audience": "first-flight",
+  "vehicles": ["vtol"],
+  "goal": "Send it to each ring in turn with Go to.",
+  "start": {
+    "heightM": 50
+  },
+  "features": [
+    {
+      "id": "ring-1",
+      "label": "1",
+      "offset": { "bearingDeg": 30, "distanceM": 150 },
+      "radiusM": 90
+    },
+    {
+      "id": "ring-2",
+      "label": "2",
+      "offset": { "bearingDeg": 120, "distanceM": 180 },
+      "radiusM": 90
+    },
+    {
+      "id": "ring-3",
+      "label": "3",
+      "offset": { "bearingDeg": 240, "distanceM": 140 },
+      "radiusM": 90
+    }
+  ],
+  "steps": [
+    {
+      "text": "Press Go to in the Control tab, then click ring 1 on the map.",
+      "hint": "Go to flies it to the place you clicked like a plane, then circles there.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "within", "feature": "ring-1" }
+      ]
+    },
+    {
+      "text": "Now ring 2.",
+      "hintAfterS": 60,
+      "hint": "Press Go to again, then click ring 2.",
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "within", "feature": "ring-2" }
+      ]
+    },
+    {
+      "text": "And ring 3.",
+      "hintAfterS": 60,
+      "hint": "Press Go to again, then click ring 3.",
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "within", "feature": "ring-3" }
+      ]
+    }
+  ],
+  "fails": [
+    { "all": [{ "check": "landed" }], "says": "Failed. It landed before reaching every ring." }
+  ],
+  "passed": "Passed. Three rings in {elapsed} s.",
+  "measure": { "measure": "elapsed" }
+}

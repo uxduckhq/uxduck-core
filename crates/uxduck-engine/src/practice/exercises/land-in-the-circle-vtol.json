@@ -1,0 +1,36 @@
+{
+  "id": "land-in-the-circle-vtol",
+  "version": 2,
+  "title": "Land in the circle",
+  "audience": "first-flight",
+  "vehicles": ["vtol"],
+  "goal": "Land inside the ring.",
+  "start": {
+    "heightM": 40,
+    "parameters": [{ "name": "Q_GUIDED_MODE", "value": 1 }]
+  },
+  "features": [
+    {
+      "id": "ring",
+      "label": "Land here",
+      "offset": { "bearingDeg": 0, "distanceM": 80 },
+      "radiusM": 10
+    }
+  ],
+  "steps": [
+    {
+      "text": "Fly it over the ring, then press Land in the Control tab.",
+      "hint": "Use Go to on the ring and wait for it to hover over it, then press Land.",
+      "hintAfterS": 90,
+      "all": [{ "check": "landed" }, { "check": "within", "feature": "ring" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "landed" }, { "check": "outside", "feature": "ring" }],
+      "says": "Failed. Landed {distance:ring} m from the ring."
+    }
+  ],
+  "passed": "Passed. Landed {distance:ring} m from the centre.",
+  "measure": { "measure": "distanceTo", "feature": "ring" }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "parameter-puzzle",
+  "version": 1,
+  "title": "Parameter puzzle",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "It is too slow to reach the ring in time. Find out why and fix it.",
+  "start": {
+    "heightM": 50,
+    "parameters": [{ "name": "WPNAV_SPEED", "value": 50 }]
+  },
+  "features": [
+    {
+      "id": "ring",
+      "label": "Ring",
+      "offset": { "bearingDeg": 300, "distanceM": 300 },
+      "radiusM": 20
+    }
+  ],
+  "steps": [
+    {
+      "text": "Find what makes it slow, and set it right in Parameters.",
+      "hint": "Its speed between places is WPNAV_SPEED, in centimetres a second. Search Parameters for it.",
+      "hintAfterS": 60,
+      "all": [{ "check": "parameterAtLeast", "name": "WPNAV_SPEED", "value": 500 }]
+    },
+    {
+      "text": "Now use Go to on the ring.",
+      "hint": "Press Go to in the Control tab, then click the ring on the map.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "within", "feature": "ring" }
+      ]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "elapsed", "s": 180, "sinceStart": true }],
+      "says": "Failed. Three minutes passed."
+    }
+  ],
+  "passed": "Passed. At the ring in {elapsed} s.",
+  "measure": { "measure": "elapsed" }
+}

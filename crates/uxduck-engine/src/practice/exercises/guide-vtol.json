@@ -1,0 +1,46 @@
+{
+  "id": "guide-vtol",
+  "version": 1,
+  "title": "Get started",
+  "audience": "first-flight",
+  "vehicles": ["vtol"],
+  "guide": true,
+  "goal": "A first flight: send it somewhere, change its mode, bring it home and land.",
+  "start": {},
+  "steps": [
+    {
+      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "hint": "Go to sends it to the place you clicked, flying forward like a plane.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "mode", "mode": "GUIDED" }
+      ]
+    },
+    {
+      "text": "Choose LOITER in the Mode menu in the Control tab.",
+      "hint": "Loiter circles where it is, flying forward like a plane.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "LOITER" },
+        { "check": "mode", "mode": "LOITER" }
+      ]
+    },
+    {
+      "text": "Press Return to launch in the Control tab.",
+      "hint": "Return to launch flies it home.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "mode", "mode": "RTL", "or": ["QRTL"] }
+      ]
+    },
+    {
+      "text": "Press Land in the Control tab.",
+      "hint": "Land slows it to a hover and brings it straight down where it is. This step ticks once it's on the ground.",
+      "hintAfterS": 45,
+      "all": [{ "check": "landed" }]
+    }
+  ],
+  "passed": "Done. It's back on the ground."
+}

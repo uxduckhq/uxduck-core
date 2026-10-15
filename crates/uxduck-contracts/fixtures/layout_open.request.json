@@ -1,0 +1,7 @@
+{
+  "method": "layout/open",
+  "params": {
+    "kind": "instruments",
+    "threadId": "th0000000001234abcd"
+  }
+}

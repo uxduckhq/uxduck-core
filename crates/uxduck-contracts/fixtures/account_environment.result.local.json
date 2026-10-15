@@ -1,0 +1,7 @@
+{
+  "environment": "local",
+  "apiUrl": "http://localhost:8787",
+  "selected": "local",
+  "canChange": true,
+  "restartRequired": false
+}

@@ -1,0 +1,28 @@
+//! One module per entity.
+
+pub mod approval;
+pub mod client;
+pub mod command;
+pub mod controller;
+pub mod failsafe;
+pub mod files;
+pub mod find;
+pub mod history;
+pub mod link;
+pub mod mission;
+pub mod modes;
+pub mod notification;
+pub mod operator;
+pub mod param_definitions;
+pub mod parameter;
+pub mod place;
+pub mod plugin;
+pub mod practice;
+pub mod settings;
+pub mod snapshot;
+pub mod sync;
+pub mod telemetry;
+pub mod telemetry_layout;
+pub mod thread;
+pub mod vehicle;
+pub mod video;

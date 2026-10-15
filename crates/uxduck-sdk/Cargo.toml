@@ -1,0 +1,27 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-sdk"
+description = "Write UXDuck plugins in Rust: the plugin ABI types from the contracts, every MAVLink message as a type with its units, and helpers (ADR-0006)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uxduck-contracts.workspace = true
+extism-pdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+uxduck-mavlink = { workspace = true, features = ["named"] }
+
+[build-dependencies]
+# The dialect's definitions, read on the build machine only: a plugin gets
+# the generated types, not the definitions.
+mavio = { workspace = true, features = ["definitions"] }
+mavinspect.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "runsIn": "browser",
+  "protocolVersion": 1,
+  "releaseStage": "flight",
+  "commit": "ce4c7dd",
+  "builtAt": "2026-10-05T09:30:00Z",
+  "target": "wasm32-unknown-unknown",
+  "dev": false,
+  "uptimeUs": 120000000
+}

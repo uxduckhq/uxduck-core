@@ -1,0 +1,9 @@
+{
+  "latitudeDeg": 53.1,
+  "longitudeDeg": -4.9,
+  "dataset": "copernicus",
+  "release": "2026-10-14",
+  "geoid": "EGM2008",
+  "missing": "offline",
+  "detail": "Not available offline: this place was never fetched"
+}

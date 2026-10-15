@@ -1,0 +1,13 @@
+{
+  "plugins": [
+    {
+      "pluginId": "clock",
+      "callsPerMin": 242,
+      "busyPct": 0.5,
+      "slowestMs": 3.25,
+      "storageBytes": 86,
+      "storageLimitBytes": 65536,
+      "memoryLimitBytes": 16777216
+    }
+  ]
+}

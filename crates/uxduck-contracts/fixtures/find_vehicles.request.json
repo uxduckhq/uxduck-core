@@ -1,0 +1,1 @@
+{ "method": "find/vehicles", "params": { "scope": "network", "allSerial": true } }

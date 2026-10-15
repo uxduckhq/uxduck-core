@@ -1,0 +1,7 @@
+{
+  "method": "feedback/suggest",
+  "params": {
+    "title": "Airspeed for rovers",
+    "text": "I want to see airspeed in a rover's Telemetry, like a plane's."
+  }
+}

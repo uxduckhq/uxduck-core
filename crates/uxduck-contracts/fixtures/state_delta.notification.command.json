@@ -1,0 +1,62 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1260,
+    "tsUs": 1790668900180000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "receipt",
+        "id": "rc1a2b3c4d5e6f7a8b",
+        "op": "upsert",
+        "receipt": {
+          "id": "rc1a2b3c4d5e6f7a8b",
+          "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+          "command": {
+            "type": "arm"
+          },
+          "status": "accepted",
+          "sentWithoutRecentHeartbeat": false,
+          "forced": false,
+          "attempts": 1,
+          "clientId": "c1a2b3c4d5e6f7a8b",
+          "operatorId": "op5f1c0a91b2d3e4f5",
+          "createdAtUs": 1790668900000000,
+          "completedAtUs": 1790668900180000,
+          "version": 2
+        }
+      },
+      {
+        "entity": "notification",
+        "id": "no1a2b3c4d5e6f7a8b",
+        "op": "upsert",
+        "notification": {
+          "id": "no1a2b3c4d5e6f7a8b",
+          "severity": "alarm",
+          "kind": "persistent",
+          "state": "active",
+          "subject": {
+            "type": "link",
+            "id": "lifw1a2b3c4d5e6f70"
+          },
+          "title": "Mission Planner turned off: its messages were looping back",
+          "body": "frames it sent came back on link li3c4d5e6f7a8b9c0d: a forwarding loop",
+          "actions": [
+            {
+              "label": "Turn on",
+              "action": {
+                "type": "enable-link",
+                "linkId": "lifw1a2b3c4d5e6f70"
+              }
+            }
+          ],
+          "condition": "link-loop:lifw1a2b3c4d5e6f70",
+          "createdAtUs": 1790668802000000,
+          "version": 1
+        }
+      }
+    ]
+  }
+}

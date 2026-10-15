@@ -1,0 +1,13 @@
+{
+  "method": "link/add",
+  "params": {
+    "name": "Field radio",
+    "kind": {
+      "type": "udp-listen",
+      "host": "127.0.0.1",
+      "port": 14551
+    },
+    "policy": "read",
+    "topology": "single"
+  }
+}

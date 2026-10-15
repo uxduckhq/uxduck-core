@@ -1,0 +1,4 @@
+{
+  "method": "vehicle/editNote",
+  "params": { "id": "hi8c2f0a9b1d3e4f56", "expectedVersion": 1, "text": "Replaced motors 3 and 4" }
+}

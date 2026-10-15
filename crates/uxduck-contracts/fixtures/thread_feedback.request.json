@@ -1,0 +1,8 @@
+{
+  "method": "thread/feedback",
+  "params": {
+    "itemId": "it0123456789abcdef",
+    "rating": "down",
+    "comment": "It should say how far away it is."
+  }
+}

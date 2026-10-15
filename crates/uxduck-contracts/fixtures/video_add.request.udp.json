@@ -1,0 +1,1 @@
+{ "method": "video/add", "params": { "url": "udp:5601" } }

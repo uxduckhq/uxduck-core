@@ -1,0 +1,11 @@
+# First-party plugins (ADR-0006), built for WebAssembly:
+# `cargo xtask plugins` builds them into `plugins/dist/<id>/`.
+[workspace]
+resolver = "3"
+members = ["camera-manager", "home-distance", "script-host"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

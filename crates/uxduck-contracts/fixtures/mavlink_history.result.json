@@ -1,0 +1,38 @@
+{
+  "messages": [
+    {
+      "atUs": 1790000412250000,
+      "systemId": 1,
+      "componentId": 1,
+      "fields": {
+        "time_boot_ms": 301200,
+        "lat": -353632621,
+        "lon": 1491652374,
+        "alt": 584090,
+        "relative_alt": 10120,
+        "vx": 0,
+        "vy": 0,
+        "vz": 0,
+        "hdg": 35999
+      }
+    },
+    {
+      "atUs": 1790000412000000,
+      "systemId": 1,
+      "componentId": 1,
+      "fields": {
+        "time_boot_ms": 300950,
+        "lat": -353632620,
+        "lon": 1491652371,
+        "alt": 584100,
+        "relative_alt": 10130,
+        "vx": 2,
+        "vy": -1,
+        "vz": 0,
+        "hdg": 35998
+      }
+    }
+  ],
+  "older": "t1790000000.81412",
+  "fromLog": true
+}

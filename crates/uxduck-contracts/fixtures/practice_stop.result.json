@@ -1,0 +1,12 @@
+{
+  "id": "pa3f9a1c0d7e2b4a6c",
+  "exerciseId": "bring-it-home",
+  "vehicleId": "veh-7f3a",
+  "state": "given-up",
+  "step": 0,
+  "line": "Given up.",
+  "startedAtUs": 1790000000000000,
+  "stepStartedAtUs": 1790000000000000,
+  "endedAtUs": 1790000060000000,
+  "version": 4
+}

@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "pluginId": "camera-manager",
+      "pluginName": "Camera",
+      "command": "photo",
+      "title": "Take a photo",
+      "description": "One photo from every camera.",
+      "risk": "none"
+    },
+    {
+      "pluginId": "camera-manager",
+      "pluginName": "Camera",
+      "command": "zoom",
+      "title": "Zoom",
+      "parameters": {
+        "type": "object",
+        "properties": { "step": { "type": "integer", "minimum": -10, "maximum": 10 } },
+        "required": ["step"]
+      },
+      "risk": "none"
+    }
+  ]
+}

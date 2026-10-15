@@ -1,0 +1,8 @@
+{
+  "method": "place/update",
+  "params": {
+    "id": "pl1",
+    "expectedVersion": 1,
+    "name": "Home field renamed"
+  }
+}

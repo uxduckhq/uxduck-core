@@ -1,0 +1,31 @@
+{
+  "id": "udp-5600-192.168.144.25",
+  "name": "192.168.144.25",
+  "port": 5600,
+  "sender": "192.168.144.25:41000",
+  "container": "rtp-ts",
+  "codec": "hvc1.1.2.L120",
+  "width": 1280,
+  "height": 720,
+  "frameRate": 50.0,
+  "state": "receiving",
+  "vehicleId": "veh-7f3a",
+  "assignedByHand": true,
+  "klv": true,
+  "counters": {
+    "bitrateBps": 4200000,
+    "datagrams": 51230,
+    "pictures": 960,
+    "keyframes": 10,
+    "lost": 0,
+    "damaged": 0,
+    "pesLengthMismatches": 1920,
+    "pesLengthMaxExcess": 8,
+    "nalsDropped": 964,
+    "klv": 0,
+    "klvBad": 0
+  },
+  "firstSeenUs": 1790000000000000,
+  "changedAtUs": 1790000000000000,
+  "version": 3
+}

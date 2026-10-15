@@ -1,0 +1,10 @@
+{
+  "method": "plugin/draft",
+  "params": {
+    "id": "distance-from-home",
+    "name": "Distance from home",
+    "script": "import { value } from \"@uxduck/sdk\";\nexport function onMessages(batch) {\n  return { items: batch.messages.map((m) => value(m.vehicleId, \"home.distance_m\", \"From home\", \"meter\", 0)) };\n}\n",
+    "subscribe": { "messages": { "names": ["GLOBAL_POSITION_INT"], "cadenceMs": 500 } },
+    "threadId": "th9a8b7c6d5e4f3a2b"
+  }
+}

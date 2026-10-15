@@ -1,0 +1,19 @@
+{
+  "id": "pa3f9a1c0d7e2b4a6c",
+  "exerciseId": "bring-it-home",
+  "vehicleId": "veh-7f3a",
+  "state": "running",
+  "step": 0,
+  "features": [
+    {
+      "id": "home",
+      "label": "Home",
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.16523,
+      "radiusM": 20.0
+    }
+  ],
+  "startedAtUs": 1790000000000000,
+  "stepStartedAtUs": 1790000000000000,
+  "version": 3
+}

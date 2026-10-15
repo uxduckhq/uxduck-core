@@ -1,0 +1,7 @@
+{
+  "method": "socket/inspect",
+  "params": {
+    "protocol": "udp",
+    "port": 14550
+  }
+}

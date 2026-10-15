@@ -1,0 +1,185 @@
+{
+  "method": "operator/update",
+  "params": {
+    "id": "op5f1c0a91b2d3e4f5",
+    "expectedVersion": 1,
+    "layout": {
+      "paneOpen": true,
+      "dock": {
+        "type": "split",
+        "direction": "row",
+        "children": [
+          {
+            "size": 700,
+            "node": {
+              "type": "group",
+              "tabs": [
+                {
+                  "id": "map",
+                  "kind": "map"
+                }
+              ],
+              "active": 0
+            }
+          },
+          {
+            "size": 300,
+            "node": {
+              "type": "split",
+              "direction": "column",
+              "children": [
+                {
+                  "size": 400,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "control",
+                        "kind": "control"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 600,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "telemetry",
+                        "kind": "telemetry"
+                      }
+                    ],
+                    "active": 0
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "saved": [
+        {
+          "id": "preset-simple",
+          "name": "Simple",
+          "dock": {
+            "type": "split",
+            "direction": "row",
+            "children": [
+              {
+                "size": 700,
+                "node": {
+                  "type": "group",
+                  "tabs": [
+                    {
+                      "id": "map",
+                      "kind": "map"
+                    }
+                  ],
+                  "active": 0
+                }
+              },
+              {
+                "size": 300,
+                "node": {
+                  "type": "split",
+                  "direction": "column",
+                  "children": [
+                    {
+                      "size": 400,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "control",
+                            "kind": "control"
+                          }
+                        ],
+                        "active": 0
+                      }
+                    },
+                    {
+                      "size": 600,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "telemetry",
+                            "kind": "telemetry"
+                          }
+                        ],
+                        "active": 0
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "preset": {
+            "kind": "simple",
+            "version": 2,
+            "base": {
+              "type": "split",
+              "direction": "row",
+              "children": [
+                {
+                  "size": 700,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map",
+                        "kind": "map"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 300,
+                  "node": {
+                    "type": "split",
+                    "direction": "column",
+                    "children": [
+                      {
+                        "size": 400,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "control",
+                              "kind": "control"
+                            }
+                          ],
+                          "active": 0
+                        }
+                      },
+                      {
+                        "size": 600,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "telemetry",
+                              "kind": "telemetry"
+                            }
+                          ],
+                          "active": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "arranged": false,
+      "flightOpened": true,
+      "current": "preset-simple"
+    }
+  }
+}

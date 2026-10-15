@@ -1,0 +1,54 @@
+{
+  "status": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "status": "ready",
+    "setId": "arducopter-4.5.7",
+    "title": "Copter 4.5.7",
+    "matched": "approximate",
+    "detail": "Descriptions are from Copter 4.5.7; this vehicle runs 4.5.8."
+  },
+  "definitions": [
+    {
+      "name": "FRAME_CLASS",
+      "displayName": "Frame Class",
+      "description": "The frame's major class.",
+      "group": "FRAME_",
+      "values": [
+        { "value": 0.0, "name": "Undefined" },
+        { "value": 1.0, "name": "Quad" }
+      ],
+      "user": "standard",
+      "rebootRequired": true
+    },
+    {
+      "name": "LOG_BITMASK",
+      "displayName": "Log bitmask",
+      "description": "Which messages to log.",
+      "group": "LOG_",
+      "bitmask": [
+        { "bit": 0, "name": "Fast Attitude" },
+        { "bit": 2, "name": "GPS" }
+      ],
+      "user": "standard"
+    },
+    {
+      "name": "RTL_ALT",
+      "displayName": "RTL Altitude",
+      "description": "Height above home to climb to before flying back.",
+      "group": "RTL_",
+      "units": "cm",
+      "range": { "low": 200.0, "high": 300000.0 },
+      "increment": 1.0,
+      "user": "standard"
+    },
+    {
+      "name": "ATC_RAT_PIT_D",
+      "displayName": "Pitch axis rate controller D gain",
+      "description": "Pitch rate derivative gain for helicopters.",
+      "group": "ATC_",
+      "range": { "low": 0.0, "high": 0.02 },
+      "user": "standard",
+      "variant": "AC_AttitudeControl_Heli"
+    }
+  ]
+}

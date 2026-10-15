@@ -1,0 +1,8 @@
+{
+  "method": "search/query",
+  "params": {
+    "query": "airspeed",
+    "kinds": ["parameter", "telemetry"],
+    "limit": 10
+  }
+}

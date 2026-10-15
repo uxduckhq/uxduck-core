@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": 42,
+      "vehicleId": "vh0000000001234abcd",
+      "componentId": 1,
+      "severity": 4,
+      "text": "Vibration high",
+      "firstUs": 1790000000000000,
+      "lastUs": 1790000004000000,
+      "count": 5
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "method": "operator/update",
+  "params": {
+    "id": "op5f1c0a91b2d3e4f5",
+    "expectedVersion": 1,
+    "name": "Ana K",
+    "shortcuts": [
+      {
+        "action": "open-map",
+        "shortcut": "Alt+G"
+      },
+      {
+        "action": "send-feedback",
+        "shortcut": null
+      }
+    ],
+    "skippedConfirmations": ["vehicle:take-off"]
+  }
+}

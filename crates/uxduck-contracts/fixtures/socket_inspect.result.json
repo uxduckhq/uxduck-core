@@ -1,0 +1,14 @@
+{
+  "protocol": "udp",
+  "port": 14550,
+  "owners": [
+    {
+      "pid": 812,
+      "name": "QGroundControl",
+      "localAddress": "*:14550"
+    }
+  ],
+  "available": true,
+  "complete": true,
+  "notes": []
+}

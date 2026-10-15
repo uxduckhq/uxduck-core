@@ -1,0 +1,10 @@
+{
+  "requests": [
+    {
+      "code": "482913",
+      "origin": "http://localhost:5173",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Firefox/131.0",
+      "requestedAtUs": 1790668800000000
+    }
+  ]
+}

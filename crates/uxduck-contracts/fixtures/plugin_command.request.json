@@ -1,0 +1,11 @@
+{
+  "method": "plugin/command",
+  "params": {
+    "pluginId": "camera-manager",
+    "command": "zoom",
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "params": {
+      "step": 2
+    }
+  }
+}

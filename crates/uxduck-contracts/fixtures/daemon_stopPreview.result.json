@@ -1,0 +1,13 @@
+{
+  "stops": [
+    {
+      "kind": "simulation",
+      "count": 2
+    },
+    {
+      "kind": "forward-link",
+      "count": 1
+    }
+  ],
+  "summary": "2 simulations and a forward link will stop."
+}

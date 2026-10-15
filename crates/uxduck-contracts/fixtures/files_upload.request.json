@@ -1,0 +1,8 @@
+{
+  "method": "files/upload",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "path": "/APM/scripts/hello.lua",
+    "contentBase64": "cHJpbnQoImhlbGxvIikK"
+  }
+}

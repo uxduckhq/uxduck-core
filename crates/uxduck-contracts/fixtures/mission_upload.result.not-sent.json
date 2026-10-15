@@ -1,0 +1,49 @@
+{
+  "status": "not-sent",
+  "detail": "Copter 1 is offline: a mission needs a conversation",
+  "mission": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "items": [
+      {
+        "command": 16,
+        "frame": 0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.3632611,
+        "longitudeDeg": 149.1652302,
+        "altitudeM": 584.0,
+        "autocontinue": true
+      },
+      {
+        "command": 22,
+        "frame": 3,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": 0.0,
+        "longitudeDeg": 0.0,
+        "altitudeM": 20.0,
+        "autocontinue": true
+      },
+      {
+        "command": 16,
+        "frame": 3,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.3625,
+        "longitudeDeg": 149.1661,
+        "altitudeM": 30.0,
+        "autocontinue": true
+      }
+    ],
+    "status": "synced",
+    "bootInstantUs": 1790668000000000,
+    "syncedAtUs": 1790668900000000,
+    "version": 4
+  }
+}

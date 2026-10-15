@@ -1,0 +1,26 @@
+{
+  "id": "li4f2a9c1e7b3d5a60",
+  "name": "Over the ridge",
+  "kind": {
+    "type": "simulator",
+    "vehicle": "plane",
+    "latitudeDeg": -35.3591,
+    "longitudeDeg": 149.1712,
+    "altitudeM": 584.0,
+    "headingDeg": 42.0,
+    "frame": "plane",
+    "speedup": 2,
+    "inAirM": 120.5,
+    "snapshotId": "sn9c1e7b3d5a604f2a",
+    "instance": 0
+  },
+  "policy": "read-write",
+  "topology": "auto",
+  "status": "configured",
+  "createdAtUs": 1790668800000000,
+  "keepAlive": false,
+  "version": 1,
+  "launch": {
+    "stage": "climbing"
+  }
+}

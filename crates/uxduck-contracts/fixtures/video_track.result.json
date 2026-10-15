@@ -1,0 +1,41 @@
+{
+  "id": "vs3f9a1c0d7e2b4a6c",
+  "name": "rtsp://admin@192.168.144.25:8554/main#track=2",
+  "port": 8554,
+  "sender": "192.168.144.25:8554",
+  "container": "rtp-h265",
+  "codec": "hvc1.1.6.L93",
+  "width": 640,
+  "height": 512,
+  "frameRate": 9.0,
+  "state": "receiving",
+  "url": "rtsp://admin@192.168.144.25:8554/main#track=2",
+  "addedByHand": true,
+  "tracks": [
+    { "number": 1, "codec": "H.264", "width": 1920, "height": 1080, "frameRate": 30.0 },
+    {
+      "number": 2,
+      "codec": "H.265",
+      "width": 640,
+      "height": 512,
+      "frameRate": 9.0,
+      "playing": true
+    }
+  ],
+  "counters": {
+    "bitrateBps": 900000,
+    "datagrams": 4100,
+    "pictures": 270,
+    "keyframes": 3,
+    "lost": 0,
+    "damaged": 0,
+    "pesLengthMismatches": 0,
+    "pesLengthMaxExcess": 0,
+    "nalsDropped": 12,
+    "klv": 0,
+    "klvBad": 0
+  },
+  "firstSeenUs": 1790000000000000,
+  "changedAtUs": 1790000030000000,
+  "version": 4
+}

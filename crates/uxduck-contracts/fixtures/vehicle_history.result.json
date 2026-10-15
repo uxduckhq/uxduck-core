@@ -1,0 +1,53 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "vehicleName": "Copter 1",
+  "entries": [
+    {
+      "id": "hi8c2f0a9b1d3e4f56",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "kind": {
+        "type": "note",
+        "text": "Replaced motors 3 and 4",
+        "category": "repair",
+        "tags": ["motors"],
+        "earlier": [
+          {
+            "text": "Replaced motor 3",
+            "category": "repair",
+            "happenedAtUs": 1790000000000000,
+            "replacedAtUs": 1790086400000000
+          }
+        ]
+      },
+      "happenedAtUs": 1790000000000000,
+      "writtenAtUs": 1790086000000000,
+      "author": {
+        "clientName": "uxduck-web",
+        "clientKind": "operator-ui",
+        "operatorId": "op1",
+        "operatorName": "Ben"
+      },
+      "editedAtUs": 1790086400000000,
+      "version": 2
+    },
+    {
+      "id": "hi0000000000000001",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "kind": {
+        "type": "event",
+        "event": {
+          "type": "firmware-changed",
+          "from": "4.5.7",
+          "to": "4.6.0",
+          "commit": "2a3dc4b7"
+        }
+      },
+      "happenedAtUs": 1789900000000000,
+      "writtenAtUs": 1789900000000000,
+      "author": { "clientName": "UXDuck" },
+      "local": true,
+      "version": 1
+    }
+  ],
+  "total": 2
+}

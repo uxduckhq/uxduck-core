@@ -1,0 +1,31 @@
+{
+  "method": "tray/menuChanged",
+  "params": {
+    "status": "Waiting for your answer: 1 request",
+    "tone": "waiting",
+    "items": [
+      {
+        "id": "open",
+        "label": "Open UXDuck"
+      },
+      {
+        "id": "open-browser",
+        "label": "Open in a browser"
+      },
+      {
+        "id": "docs",
+        "label": "Open documentation",
+        "separatorBefore": true
+      },
+      {
+        "id": "feedback",
+        "label": "Send feedback…"
+      },
+      {
+        "id": "quit",
+        "label": "Quit UXDuck",
+        "separatorBefore": true
+      }
+    ]
+  }
+}

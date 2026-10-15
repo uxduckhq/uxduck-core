@@ -1,0 +1,5 @@
+{
+  "code": -32002,
+  "message": "This page (0.0.9) is too old for UXDuck on this computer. Reload to update it.",
+  "data": { "kind": "update-required", "minClientVersion": "0.1.0" }
+}

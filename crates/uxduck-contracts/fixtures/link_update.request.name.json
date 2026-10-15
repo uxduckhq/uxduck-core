@@ -1,0 +1,8 @@
+{
+  "method": "link/update",
+  "params": {
+    "id": "lk3c4d5e6f7a8b9c0d",
+    "name": "Field radio",
+    "keepAlive": true
+  }
+}

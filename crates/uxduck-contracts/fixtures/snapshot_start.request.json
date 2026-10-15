@@ -1,0 +1,7 @@
+{
+  "method": "snapshot/start",
+  "params": {
+    "id": "sn9c1e7b3d5a604f2a",
+    "speedup": 2
+  }
+}

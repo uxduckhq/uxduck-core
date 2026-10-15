@@ -1,0 +1,4 @@
+{
+  "method": "analytics/track",
+  "params": { "event": "simulation_started", "vehicle": "multicopter" }
+}

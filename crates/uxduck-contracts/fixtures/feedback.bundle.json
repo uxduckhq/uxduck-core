@@ -1,0 +1,59 @@
+{
+  "schema": "uxduck.feedback/1",
+  "report": {
+    "id": "0192f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6",
+    "kind": "problem",
+    "timeUs": 1790000000000000,
+    "surface": "desktop",
+    "daemonVersion": "0.1.0",
+    "platform": "macos",
+    "arch": "aarch64"
+  },
+  "ui": {
+    "route": "/",
+    "panes": ["map", "vehicle"],
+    "theme": "dark",
+    "density": "comfortable",
+    "mapEngine": "maplibre",
+    "actions": [],
+    "appVersion": "0.1.0",
+    "locale": "en-AU"
+  },
+  "daemon": {
+    "seq": 1204,
+    "uptimeS": 3600,
+    "vehicles": [
+      {
+        "id": "5d0f7a3e-8c1b-5a2e-9f40-2b1c3d4e5f60",
+        "autopilot": "ArduPilot",
+        "vehicleType": "Copter",
+        "firmware": "4.5.1",
+        "presence": "online",
+        "armed": false,
+        "mode": "GUIDED",
+        "link": "udp-listen"
+      }
+    ],
+    "links": [{ "kind": "udp-listen", "status": "listening" }],
+    "notifications": [
+      { "severity": "warning", "title": "Set mode was rejected", "createdAtUs": 1789999990000000 }
+    ],
+    "settings": { "usageAnalytics": true }
+  },
+  "trace": [
+    {
+      "tsUs": 1789999999000000,
+      "direction": "in",
+      "kind": "request",
+      "clientId": "c1",
+      "transport": "socket",
+      "method": "command/send",
+      "id": 7,
+      "bytes": 120,
+      "payload": { "vehicleId": "5d0f7a3e-8c1b-5a2e-9f40-2b1c3d4e5f60" }
+    }
+  ],
+  "errors": [],
+  "log": ["INFO uxduck::daemon: listening"],
+  "chat": [{ "kind": "user-message", "text": "why did it do that?" }]
+}

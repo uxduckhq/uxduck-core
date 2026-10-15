@@ -1,0 +1,59 @@
+{
+  "method": "mapping/update",
+  "params": {
+    "id": "mode-2",
+    "name": "TBS Tango 2",
+    "roll": {
+      "axis": "right-stick-x",
+      "inverted": false
+    },
+    "pitch": {
+      "axis": "right-stick-y",
+      "inverted": false
+    },
+    "yaw": {
+      "axis": "left-stick-x",
+      "inverted": false
+    },
+    "throttle": {
+      "axis": "left-stick-y",
+      "code": 65586,
+      "inverted": false
+    },
+    "deadzone": 0.05,
+    "buttons": [
+      {
+        "button": "east",
+        "command": {
+          "type": "rtl"
+        }
+      },
+      {
+        "button": "north",
+        "command": {
+          "type": "set-mode",
+          "mode": "LOITER"
+        }
+      },
+      {
+        "button": "south",
+        "code": 589827,
+        "command": {
+          "type": "land"
+        }
+      }
+    ],
+    "expectedVersion": 1,
+    "positions": [
+      {
+        "axis": "left-stick-x",
+        "code": 65589,
+        "at": -0.2,
+        "command": {
+          "type": "set-mode",
+          "mode": "LOITER"
+        }
+      }
+    ]
+  }
+}

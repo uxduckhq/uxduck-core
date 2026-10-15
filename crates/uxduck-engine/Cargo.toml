@@ -1,0 +1,31 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-engine"
+description = "State engine, journal, subscriptions and JSON-RPC router. No Tokio and no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uxduck-core.workspace = true
+uxduck-contracts.workspace = true
+# The session is logic over frames; its links stay in the daemon (`native`).
+uxduck-mavlink.workspace = true
+# Terrain heights (S23): the cache, lookup and grid maths.
+uxduck-terrain.workspace = true
+flate2.workspace = true
+futures = { workspace = true }
+minisign-verify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Signing a terrain manifest in tests (S23).
+minisign.workspace = true
+
+[lints]
+workspace = true

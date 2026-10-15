@@ -1,0 +1,50 @@
+{
+  "controllers": [
+    {
+      "id": "gp-3a4f",
+      "layoutKnown": false,
+      "axes": [
+        {
+          "code": 65586,
+          "name": "Z",
+          "number": 3,
+          "value": -1.0
+        },
+        {
+          "code": 65587,
+          "name": "Rx",
+          "number": 4,
+          "value": 0.5
+        }
+      ],
+      "buttons": [
+        {
+          "code": 589848,
+          "name": "Button 24",
+          "number": 24,
+          "pressed": true,
+          "seen": true
+        }
+      ]
+    },
+    {
+      "id": "fake",
+      "layoutKnown": true,
+      "axes": [
+        {
+          "name": "left-z",
+          "axis": "left-z",
+          "value": 0.0
+        }
+      ],
+      "buttons": [
+        {
+          "name": "south",
+          "button": "south",
+          "pressed": false,
+          "seen": false
+        }
+      ]
+    }
+  ]
+}

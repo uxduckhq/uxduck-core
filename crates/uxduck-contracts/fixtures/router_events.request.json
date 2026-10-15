@@ -1,0 +1,10 @@
+{
+  "method": "router/events",
+  "params": {
+    "linkId": "li-forward",
+    "fromUs": 1000000,
+    "toUs": 3000000,
+    "limit": 10,
+    "decision": "dropped-loop"
+  }
+}

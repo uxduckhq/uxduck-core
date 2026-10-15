@@ -1,0 +1,7 @@
+{
+  "method": "sync/set",
+  "params": {
+    "enabled": true,
+    "activation": "mirror-all"
+  }
+}

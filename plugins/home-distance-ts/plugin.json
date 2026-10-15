@@ -1,0 +1,21 @@
+{
+  "abi": 2,
+  "id": "home-distance-ts",
+  "name": "Home distance (TypeScript)",
+  "version": "0.1.0",
+  "description": "The example plugin as one TypeScript file: how far each vehicle is from home, and a notice when its battery is low.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": {
+    "items": { "keys": ["battery.*"], "cadenceMs": 1000 },
+    "messages": { "names": ["GLOBAL_POSITION_INT"], "cadenceMs": 500 }
+  },
+  "commands": [
+    {
+      "name": "mark",
+      "title": "Mark",
+      "parameters": { "type": "object", "properties": { "label": { "type": "string" } } },
+      "risk": "none"
+    }
+  ]
+}

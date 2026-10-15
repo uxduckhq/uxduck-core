@@ -1,0 +1,13 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-media"
+description = "Camera streams without I/O (S38, ADR-0017): a tolerant MPEG-TS demuxer, access units a strict decoder accepts, the WebCodecs codec string and KLV. Never decodes a picture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

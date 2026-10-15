@@ -1,0 +1,5 @@
+{
+  "code": -32008,
+  "message": "UDP port 14550 is in use by MissionPlanner (pid 812)",
+  "data": { "kind": "port-in-use" }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "th9a8b7c6d5e4f3a2b",
+  "title": "what vehicles do I have",
+  "operatorId": "op5f1c0a91b2d3e4f5",
+  "model": "gpt-6-sol",
+  "autoApprove": false,
+  "createdAtUs": 1790668800000000,
+  "updatedAtUs": 1790668801000000,
+  "version": 3,
+  "folderId": "fo1a2b3c4d5e6f7a8b",
+  "sortKey": "V",
+  "pinned": false,
+  "archived": false,
+  "excludeFromLearning": false
+}

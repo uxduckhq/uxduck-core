@@ -1,0 +1,4 @@
+{
+  "method": "thread/update",
+  "params": { "id": "th9a8b7c6d5e4f3a2b", "expectedVersion": 3, "model": "gpt-6-luna" }
+}

@@ -1,0 +1,29 @@
+{
+  "source": {
+    "id": "vs3f9a2c1d7e8b4a60",
+    "name": "192.168.144.25",
+    "port": 554,
+    "sender": "192.168.144.25:554",
+    "container": "rtp",
+    "state": "stopped",
+    "stateDetail": "Connecting to rtsp://admin@192.168.144.25:554/main.264",
+    "url": "rtsp://admin@192.168.144.25:554/main.264",
+    "addedByHand": true,
+    "counters": {
+      "bitrateBps": 0,
+      "datagrams": 0,
+      "pictures": 0,
+      "keyframes": 0,
+      "lost": 0,
+      "damaged": 0,
+      "pesLengthMismatches": 0,
+      "pesLengthMaxExcess": 0,
+      "nalsDropped": 0,
+      "klv": 0,
+      "klvBad": 0
+    },
+    "firstSeenUs": 1790000000000000,
+    "changedAtUs": 1790000000000000,
+    "version": 1
+  }
+}

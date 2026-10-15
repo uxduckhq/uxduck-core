@@ -1,0 +1,20 @@
+{
+  "available": true,
+  "enabled": true,
+  "activation": "pick",
+  "exported": 42,
+  "pulled": 7,
+  "lastSyncedAtUs": 1790770548834528,
+  "library": [
+    {
+      "id": "0b6e5f3c-6f1d-5a8e-9d2e-3c1f4a7b8e90",
+      "name": "Survey quad",
+      "autopilot": "Ardupilotmega",
+      "vehicleType": "Quadrotor",
+      "uid": "1a2b3c4d5e6f",
+      "device": "Hangar laptop",
+      "updatedAtUs": 1790770548000000,
+      "active": true
+    }
+  ]
+}

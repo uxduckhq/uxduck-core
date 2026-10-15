@@ -1,0 +1,7 @@
+{
+  "method": "mapping/create",
+  "params": {
+    "name": "TBS Tango 2",
+    "from": "mode-1"
+  }
+}

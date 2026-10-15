@@ -1,0 +1,40 @@
+{
+  "id": "timed-delivery",
+  "version": 1,
+  "title": "Timed delivery",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Reach the drop point, stay there for 20 s, then come back and land, all in under 4 minutes.",
+  "start": { "onGround": true },
+  "features": [
+    {
+      "id": "drop",
+      "label": "Drop point",
+      "offset": { "bearingDeg": 45, "distanceM": 600 },
+      "radiusM": 15
+    },
+    { "id": "home", "label": "Home", "radiusM": 20 }
+  ],
+  "steps": [
+    {
+      "text": "Take off, then use Go to on the drop point and keep it there for 20 seconds.",
+      "hint": "Arm and Take off in the Control tab, then press Go to and click the drop point. It holds there by itself.",
+      "hintAfterS": 60,
+      "all": [{ "check": "within", "feature": "drop", "forS": 20 }]
+    },
+    {
+      "text": "Bring it back and land at home.",
+      "hint": "Return to launch flies it home and lands it by itself.",
+      "hintAfterS": 60,
+      "all": [{ "check": "landed" }, { "check": "within", "feature": "home" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "elapsed", "s": 240, "sinceStart": true }],
+      "says": "Failed. Four minutes passed."
+    }
+  ],
+  "passed": "Passed. There and back in {elapsed} s.",
+  "measure": { "measure": "elapsed" }
+}

@@ -1,0 +1,16 @@
+{
+  "ports": [
+    {
+      "device": "/dev/cu.usbmodem1101",
+      "usb": {
+        "vendorId": 4617,
+        "productId": 22337,
+        "serialNumber": "3E0024001051"
+      },
+      "description": "ArduPilot CubeOrange"
+    },
+    {
+      "device": "/dev/ttyAMA0"
+    }
+  ]
+}

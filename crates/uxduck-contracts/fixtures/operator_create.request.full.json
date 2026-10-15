@@ -1,0 +1,9 @@
+{
+  "method": "operator/create",
+  "params": {
+    "name": "Ben",
+    "units": "imperial",
+    "coordinateFormat": "mgrs",
+    "altitudeFrame": "amsl"
+  }
+}

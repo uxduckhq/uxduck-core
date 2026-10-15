@@ -1,0 +1,25 @@
+{
+  "method": "feedback/send",
+  "params": {
+    "reportId": "0192f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6",
+    "kind": "problem",
+    "text": "The altitude jumped when I switched to Guided",
+    "screenshot": "UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=",
+    "includeDetails": true,
+    "flightDataVehicleId": "5d0f7a3e-8c1b-5a2e-9f40-2b1c3d4e5f60",
+    "surface": "desktop",
+    "ui": {
+      "route": "/",
+      "panes": ["map", "vehicle"],
+      "vehicleId": "5d0f7a3e-8c1b-5a2e-9f40-2b1c3d4e5f60",
+      "theme": "dark",
+      "density": "comfortable",
+      "mapEngine": "maplibre",
+      "actions": ["open:map", "command:set-mode"],
+      "appVersion": "0.1.0",
+      "locale": "en-AU",
+      "shell": { "version": "0.1.0", "capabilities": ["tray", "notifications", "screenshot"] }
+    },
+    "errors": [{ "code": "map-unavailable", "atUs": 1790000000000000 }]
+  }
+}

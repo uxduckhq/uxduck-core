@@ -1,0 +1,6 @@
+{
+  "method": "plugin/install",
+  "params": {
+    "path": "/Users/ana/plugins/camera-manager"
+  }
+}

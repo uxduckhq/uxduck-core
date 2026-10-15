@@ -1,0 +1,9 @@
+{
+  "method": "daemon/logs",
+  "params": {
+    "level": "warn",
+    "component": "data_plane",
+    "query": "loop",
+    "limit": 20
+  }
+}

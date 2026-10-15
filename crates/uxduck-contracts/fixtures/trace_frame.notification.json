@@ -1,0 +1,15 @@
+{
+  "method": "trace/frame",
+  "params": {
+    "tsUs": 1790668800123456,
+    "direction": "out",
+    "kind": "response",
+    "clientId": "c1a2b3c4d5e6f7a8b",
+    "transport": "web-socket",
+    "method": "initialize",
+    "id": 1,
+    "bytes": 245,
+    "latencyUs": 180,
+    "payload": { "jsonrpc": "2.0", "id": 1, "result": { "daemonVersion": "0.1.0" } }
+  }
+}

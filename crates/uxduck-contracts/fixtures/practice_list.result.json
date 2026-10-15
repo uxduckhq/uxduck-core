@@ -1,0 +1,50 @@
+{
+  "exercises": [
+    {
+      "id": "bring-it-home",
+      "title": "Bring it home",
+      "audience": "first-flight",
+      "vehicles": ["multicopter", "vtol"],
+      "goal": "Get it back on the ground at home before the battery runs low.",
+      "steps": [
+        {
+          "text": "Press Return to launch in the Control tab.",
+          "hint": "Return to launch flies it home and lands it by itself.",
+          "hintAfterS": 60.0
+        },
+        { "text": "Wait for it to land at home." }
+      ],
+      "best": {
+        "passed": true,
+        "line": "Passed. Home with 31% left.",
+        "measure": 31.0,
+        "unit": "%"
+      }
+    },
+    {
+      "id": "read-the-panel",
+      "title": "Read the panel",
+      "audience": "first-flight",
+      "vehicles": ["multicopter", "vtol"],
+      "goal": "Answer three questions from Telemetry: how high it is, its mode and its battery.",
+      "steps": [{ "text": "Find its height above home in Telemetry and answer." }],
+      "questions": [{ "id": "height", "text": "How high is it above home?", "unit": "m" }],
+      "unavailable": "Practice needs a simulated vehicle started in UXDuck."
+    },
+    {
+      "id": "guide-vtol",
+      "title": "Get started",
+      "audience": "first-flight",
+      "vehicles": ["vtol"],
+      "guide": true,
+      "goal": "A first flight: send it somewhere, change its mode, bring it home and land.",
+      "steps": [
+        {
+          "text": "Right-click the map, or press and hold it, and choose Fly here.",
+          "hint": "Fly here sends it to the place you chose and holds it there.",
+          "hintAfterS": 45.0
+        }
+      ]
+    }
+  ]
+}

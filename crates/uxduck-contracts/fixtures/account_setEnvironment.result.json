@@ -1,0 +1,7 @@
+{
+  "environment": "staging",
+  "apiUrl": "https://api-staging.uxduck.com",
+  "selected": "production",
+  "canChange": true,
+  "restartRequired": true
+}

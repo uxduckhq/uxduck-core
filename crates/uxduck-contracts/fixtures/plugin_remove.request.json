@@ -1,0 +1,6 @@
+{
+  "method": "plugin/remove",
+  "params": {
+    "id": "camera-manager"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "describedBy": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "vehicleName": "Copter 1",
+    "firmware": "4.5.7",
+    "definitions": {
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "status": "ready",
+      "setId": "arducopter-4.5.7",
+      "title": "Copter 4.5.7",
+      "matched": "exact"
+    }
+  },
+  "hits": [
+    {
+      "name": "BATT_FS_LOW_ACT",
+      "displayName": "Low battery failsafe action",
+      "summary": "What the vehicle does when the battery runs low.",
+      "value": 2.0,
+      "valueName": "RTL"
+    }
+  ],
+  "total": 1
+}

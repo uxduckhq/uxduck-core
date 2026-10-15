@@ -1,0 +1,17 @@
+{
+  "method": "journal/import",
+  "params": {
+    "source": "browser 1f3a9c2e",
+    "changes": [
+      {
+        "type": "folderUpserted",
+        "folder": {
+          "id": "fo1a2b3c4d5e6f7a8b",
+          "name": "Test flights",
+          "createdAtUs": 1790668800000000,
+          "version": 1
+        }
+      }
+    ]
+  }
+}

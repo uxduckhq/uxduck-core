@@ -1,0 +1,10 @@
+{
+  "token": "q3XvO2b9kLm4Nf7Rt1Yw8Ze5Ha6Jc0Pd",
+  "pluginId": "camera-manager",
+  "name": "Camera",
+  "version": "0.2.0",
+  "digest": "9f2c000000000000000000000000000000000000000000000000000000000000",
+  "capabilities": ["read", "control"],
+  "createdAt": "2026-10-02T09:30:00.000Z",
+  "sharedBy": "Sam"
+}

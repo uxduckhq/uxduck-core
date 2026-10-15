@@ -1,0 +1,4 @@
+{
+  "method": "terrain/areaSize",
+  "params": { "southDeg": 53.0, "westDeg": -4.3, "northDeg": 53.2, "eastDeg": -3.9 }
+}

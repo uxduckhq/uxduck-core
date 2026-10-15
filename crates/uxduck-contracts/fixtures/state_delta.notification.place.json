@@ -1,0 +1,27 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1800,
+    "tsUs": 1790669300000000,
+    "actor": {
+      "clientId": "c1a2b3c4d5e6f7a8b",
+      "operatorId": "op5f1c0a91b2d3e4f5"
+    },
+    "changes": [
+      {
+        "entity": "place",
+        "id": "pl1a2b3c4d5e6f7a8b",
+        "op": "upsert",
+        "place": {
+          "id": "pl1a2b3c4d5e6f7a8b",
+          "operatorId": "op5f1c0a91b2d3e4f5",
+          "name": "Home field",
+          "latitudeDeg": -35.363261,
+          "longitudeDeg": 149.16523,
+          "createdAtUs": 1790669300000000,
+          "version": 1
+        }
+      }
+    ]
+  }
+}

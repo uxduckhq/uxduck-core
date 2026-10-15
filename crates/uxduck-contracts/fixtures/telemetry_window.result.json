@@ -1,0 +1,42 @@
+{
+  "vehicleId": "v1",
+  "startTimeUs": 1000000,
+  "endTimeUs": 2000000,
+  "retainedFromUs": 1000000,
+  "historyTruncated": false,
+  "capture": "producer-updates; core-mavlink-coalesced-up-to-10hz",
+  "missingKeys": ["gps.unknown"],
+  "missingPositionSources": [],
+  "omittedSeriesCount": 0,
+  "samplesLimited": false,
+  "items": [
+    {
+      "key": "vibration.x_mps2",
+      "label": "Vibration X",
+      "unit": "meter-per-second-squared",
+      "source": "autopilot",
+      "componentId": 1,
+      "coverage": {
+        "count": 3,
+        "firstTimeUs": 1000000,
+        "lastTimeUs": 2000000,
+        "maxGapUs": 900000,
+        "downsampled": true
+      },
+      "numeric": {
+        "count": 3,
+        "missingNumericCount": 0,
+        "min": 1.0,
+        "minTimeUs": 1000000,
+        "max": 99.0,
+        "maxTimeUs": 1100000
+      },
+      "textStatesTruncated": false,
+      "samples": [
+        { "timeUs": 1000000, "value": 1.0 },
+        { "timeUs": 2000000, "value": 2.0 }
+      ]
+    }
+  ],
+  "positions": []
+}

@@ -1,0 +1,136 @@
+[workspace]
+resolver = "3"
+members = ["crates/uxduck","crates/uxduck-core","crates/uxduck-contracts","crates/uxduck-engine","crates/uxduck-mavlink","crates/uxduck-agent","crates/uxduck-media","crates/uxduck-sdk","crates/uxduck-terrain","crates/uxduck-web"]
+# Plugins build for WebAssembly in a workspace of their own.
+exclude = ["plugins"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+repository = "https://github.com/uxduckhq/uxduck-core"
+
+[workspace.dependencies]
+uxduck-core = { path = "crates/uxduck-core" }
+uxduck-contracts = { path = "crates/uxduck-contracts" }
+uxduck-mavlink = { path = "crates/uxduck-mavlink", default-features = false }
+uxduck-agent = { path = "crates/uxduck-agent" }
+uxduck-engine = { path = "crates/uxduck-engine" }
+uxduck-media = { path = "crates/uxduck-media" }
+uxduck-sdk = { path = "crates/uxduck-sdk" }
+uxduck-terrain = { path = "crates/uxduck-terrain" }
+
+clap = { version = "4", features = ["derive", "env"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+eventsource-stream = "0.2"
+axum = { version = "0.8", default-features = false, features = [
+  "http1",
+  "json",
+  "tokio",
+  "ws",
+  "query",
+] }
+directories = "6"
+getrandom = "0.3"
+minisign = "0.10"
+minisign-verify = "0.3"
+# Parameter definition sets are published gzipped (S67).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# ArduPilot's apm.pdef.xml parameter definitions (S67).
+quick-xml = "0.37"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rust-embed = { version = "8", features = ["include-exclude", "mime-guess"] }
+semver = "1"
+# Process CPU time and memory for `cargo xtask perf` (S24).
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+mavio = { version = "0.5.10", default-features = false, features = ["std", "dlct-ardupilotmega"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mavinspect = { version = "0.6.6", default-features = false }
+sha2 = "0.10"
+# Interface archives (S109): a tar of the web build, zstd-compressed.
+tar = { version = "0.4", default-features = false }
+zstd = { version = "0.13", default-features = false }
+md-5 = "0.10"
+base64 = "0.22"
+thiserror = "2"
+serialport = { version = "4.10", default-features = false }
+# Gamepads (S12); on Linux it needs libudev.
+gilrs = "0.11"
+# Plugins (S14): WebAssembly through wasmtime.
+extism = { version = "1.41", default-features = false }
+# Extism's engine, with only what it needs: no component model, no WASI
+# filesystem, no profiling or debugging extras.
+wasmtime = { version = "49", default-features = false, features = [
+  "std",
+  "anyhow",
+  "runtime",
+  "cranelift",
+  "gc",
+  "gc-drc",
+  "parallel-compilation",
+] }
+extism-pdk = "1.4"
+# Free disk space for the storage page (S13).
+fs4 = { version = "1.1", default-features = false }
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "net",
+  "io-util",
+  "io-std",
+  "sync",
+  "time",
+  "signal",
+  "fs",
+  "process",
+] }
+tokio-tungstenite = "0.29"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+uuid = { version = "1", default-features = false, features = ["v5"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Every daemon compiles the script host (about 4 MB of WebAssembly) for the
+# Clock it comes with, one plugin at a time. Unoptimised, wasmtime's compiler
+# takes 15 s on it and every plugin installed after waits.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+# The browser's daemon (S20): small over fast, since every visitor who runs a
+# simulation downloads it. `cargo xtask web` builds with it.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+panic = "abort"
+strip = true

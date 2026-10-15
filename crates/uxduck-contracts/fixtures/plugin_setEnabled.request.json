@@ -1,0 +1,1 @@
+{ "method": "plugin/setEnabled", "params": { "id": "clock", "enabled": false } }

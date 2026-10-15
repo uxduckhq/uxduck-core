@@ -1,0 +1,8 @@
+{
+  "method": "files/download",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "path": "/APM/LOGS/00000012.BIN",
+    "size": 104857600
+  }
+}

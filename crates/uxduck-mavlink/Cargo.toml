@@ -1,0 +1,34 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-mavlink"
+description = "MAVLink links, byte-preserving routing, decoders, reducers and tlog."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uxduck-core.workspace = true
+# The fake vehicle's terrain grid (S118), as ArduPilot keeps it.
+uxduck-terrain.workspace = true
+mavio.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, optional = true }
+serialport = { workspace = true, optional = true }
+mavinspect = { workspace = true, optional = true }
+# Messages decoded by name (`dialect`), in the browser too.
+serde_json.workspace = true
+quick-xml = { workspace = true, optional = true }
+
+[features]
+default = ["native"]
+# Links over sockets and serial devices. Everything else is logic over frames
+# and builds for wasm32 without this feature.
+native = ["dep:tokio", "dep:serialport"]
+# Every message of the dialect by name, for plugins (S54): the dialect's
+# definitions are large, so only the installed daemon has them.
+# Vendors' dialect files are read at run time with quick-xml (S60).
+named = ["mavio/definitions", "dep:mavinspect", "dep:quick-xml"]
+
+[lints]
+workspace = true

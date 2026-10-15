@@ -1,0 +1,29 @@
+{
+  "messages": [
+    {
+      "atUs": 2500000,
+      "systemId": 1,
+      "componentId": 1,
+      "id": 164,
+      "name": "SIMSTATE",
+      "sequence": 144,
+      "linkId": "li-sim",
+      "peer": "127.0.0.1:5760",
+      "fingerprint": "fnv1a64:1234",
+      "rawHex": "fd00",
+      "fields": {
+        "yaw": 1.0
+      }
+    }
+  ],
+  "fromLog": true,
+  "coverage": {
+    "requestedFromUs": 1000000,
+    "requestedToUs": 3000000,
+    "availableFromUs": 1500000,
+    "availableToUs": 2500000,
+    "truncated": false,
+    "source": "memory",
+    "notes": []
+  }
+}

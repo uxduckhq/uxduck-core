@@ -1,0 +1,21 @@
+{
+  "binaries": [
+    {
+      "path": "/Users/ana/Library/Application Support/UXDuck/simulators/bin/arduplane",
+      "autopilot": "ardupilot",
+      "program": "arduplane",
+      "vehicles": ["plane", "vtol"],
+      "frames": ["plane", "plane-elevon", "quadplane", "quadplane-tilt"],
+      "defaultFrame": "plane"
+    },
+    {
+      "path": "/Users/ana/Library/Application Support/UXDuck/simulators/bin/px4/bin/px4",
+      "autopilot": "px4",
+      "program": "px4",
+      "vehicles": ["multicopter", "plane", "vtol", "rover"],
+      "frames": ["quadx", "airplane", "xvert", "standard_vtol", "hex", "rover_ackermann"],
+      "defaultFrame": "quadx",
+      "version": "1.17.0"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "code": -32601,
+  "message": "unknown method vehicle/fly",
+  "data": { "kind": "method-not-found" }
+}

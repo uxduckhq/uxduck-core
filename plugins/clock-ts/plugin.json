@@ -1,0 +1,119 @@
+{
+  "abi": 2,
+  "id": "clock",
+  "name": "Clock",
+  "version": "0.4.0",
+  "description": "A clock in your own time and in UTC, a stopwatch with laps, a countdown timer and an alarm that counts down to a time of day, in one tab. They keep running in UXDuck with the page closed and after it restarts, and look the same in every window.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": {},
+  "commands": [
+    {
+      "name": "stopwatch-start",
+      "title": "Start the stopwatch",
+      "description": "Starts the stopwatch, or carries on after Stop.",
+      "risk": "none"
+    },
+    {
+      "name": "stopwatch-stop",
+      "title": "Stop the stopwatch",
+      "risk": "none"
+    },
+    {
+      "name": "stopwatch-lap",
+      "title": "Lap",
+      "description": "Writes down the stopwatch's time as a lap and keeps it running.",
+      "risk": "none"
+    },
+    {
+      "name": "stopwatch-reset",
+      "title": "Reset the stopwatch",
+      "description": "Stops the stopwatch at zero and clears its laps.",
+      "risk": "none"
+    },
+    {
+      "name": "timer-start",
+      "title": "Start a timer",
+      "description": "Counts down from a number of minutes, replacing any timer running, and says so when the time is up.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "minutes": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1440
+          }
+        },
+        "required": ["minutes"]
+      },
+      "risk": "none"
+    },
+    {
+      "name": "timer-add",
+      "title": "Add a minute to the timer",
+      "description": "Adds minutes to the timer, one if not said; starts one if none is running.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "minutes": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1440
+          }
+        }
+      },
+      "risk": "none"
+    },
+    {
+      "name": "timer-pause",
+      "title": "Pause the timer",
+      "risk": "none"
+    },
+    {
+      "name": "timer-resume",
+      "title": "Resume the timer",
+      "risk": "none"
+    },
+    {
+      "name": "timer-cancel",
+      "title": "Cancel the timer",
+      "risk": "none"
+    },
+    {
+      "name": "alarm-set",
+      "title": "Set the alarm",
+      "description": "Rings at a moment within the next week, replacing any alarm set, and counts down to it. The moment is in seconds since 1970.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "number"
+          }
+        },
+        "required": ["at"]
+      },
+      "risk": "none"
+    },
+    {
+      "name": "alarm-snooze",
+      "title": "Snooze the alarm",
+      "description": "Rings again in a number of minutes, five if not said.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "minutes": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1440
+          }
+        }
+      },
+      "risk": "none"
+    },
+    {
+      "name": "alarm-cancel",
+      "title": "Cancel the alarm",
+      "risk": "none"
+    }
+  ]
+}

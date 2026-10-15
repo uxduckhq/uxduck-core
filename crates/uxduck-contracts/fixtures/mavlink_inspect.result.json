@@ -1,0 +1,81 @@
+{
+  "decoded": true,
+  "messages": [
+    {
+      "direction": "received",
+      "id": 33,
+      "name": "GLOBAL_POSITION_INT",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 4.0,
+      "count": 1204,
+      "ageMs": 180,
+      "dialect": "common",
+      "fields": {
+        "time_boot_ms": 301200,
+        "lat": -353632621,
+        "lon": 1491652374,
+        "alt": 584090,
+        "relative_alt": 10120,
+        "vx": 0,
+        "vy": 0,
+        "vz": 0,
+        "hdg": 35999
+      }
+    },
+    {
+      "direction": "received",
+      "id": 0,
+      "name": "HEARTBEAT",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 1.0,
+      "count": 301,
+      "ageMs": 420,
+      "dialect": "common",
+      "fields": {
+        "custom_mode": 5,
+        "type": 2,
+        "autopilot": 3,
+        "base_mode": 89,
+        "system_status": 4,
+        "mavlink_version": 3
+      }
+    },
+    {
+      "direction": "received",
+      "id": 152,
+      "name": "MEMINFO",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 0.0,
+      "count": 12,
+      "ageMs": 65000,
+      "dialect": "ardupilotmega",
+      "fields": {
+        "brkval": 0,
+        "freemem": 65535,
+        "freemem32": 131072
+      }
+    },
+    {
+      "direction": "sent",
+      "id": 0,
+      "name": "HEARTBEAT",
+      "systemId": 255,
+      "componentId": 190,
+      "hz": 1.0,
+      "count": 300,
+      "ageMs": 610,
+      "dialect": "common",
+      "fields": {
+        "custom_mode": 0,
+        "type": 6,
+        "autopilot": 8,
+        "base_mode": 0,
+        "system_status": 4,
+        "mavlink_version": 3
+      }
+    }
+  ]
+}

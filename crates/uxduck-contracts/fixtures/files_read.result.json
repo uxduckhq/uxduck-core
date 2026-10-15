@@ -1,0 +1,8 @@
+{
+  "vehicleId": "veh-7f3a",
+  "path": "@SYS/uarts.txt",
+  "text": "UARTV1\nSERIAL2 UART5 TX =       0 RX =     513\n",
+  "bytes": 46,
+  "truncated": false,
+  "binary": false
+}

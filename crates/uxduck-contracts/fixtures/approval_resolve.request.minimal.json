@@ -1,0 +1,7 @@
+{
+  "method": "approval/resolve",
+  "params": {
+    "id": "ap1a2b3c4d5e6f7a8b",
+    "allow": false
+  }
+}

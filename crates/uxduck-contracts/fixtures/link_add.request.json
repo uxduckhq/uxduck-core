@@ -1,0 +1,10 @@
+{
+  "method": "link/add",
+  "params": {
+    "kind": {
+      "type": "udp-listen",
+      "host": "0.0.0.0",
+      "port": 14550
+    }
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1300,
+    "tsUs": 1790668900000000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "client",
+        "id": "cl9f3a1c2b4d5e6f70",
+        "op": "upsert",
+        "client": {
+          "id": "cl9f3a1c2b4d5e6f70",
+          "name": "Claude Code",
+          "kind": "agent",
+          "executable": "/usr/local/bin/uxduck",
+          "capabilities": ["read", "control"],
+          "createdAtUs": 1790668800000000,
+          "version": 2
+        }
+      },
+      {
+        "entity": "approval",
+        "id": "ap1a2b3c4d5e6f7a8b",
+        "op": "upsert",
+        "approval": {
+          "id": "ap1a2b3c4d5e6f7a8b",
+          "clientId": "cl9f3a1c2b4d5e6f70",
+          "clientName": "Claude Code",
+          "capability": "control",
+          "method": "command/send",
+          "summary": "arm Copter 1",
+          "state": "pending",
+          "deadlineUs": 1790668960000000,
+          "createdAtUs": 1790668900000000,
+          "version": 1
+        }
+      },
+      {
+        "entity": "notification",
+        "id": "no2b3c4d5e6f7a8b9c",
+        "op": "upsert",
+        "notification": {
+          "id": "no2b3c4d5e6f7a8b9c",
+          "severity": "warning",
+          "kind": "persistent",
+          "state": "active",
+          "subject": {
+            "type": "client",
+            "id": "cl9f3a1c2b4d5e6f70"
+          },
+          "title": "Claude Code wants to arm Copter 1",
+          "body": "It needs the control capability. Denied in 60 s if nobody answers.",
+          "actions": [
+            {
+              "label": "Allow once",
+              "action": {
+                "type": "resolve-approval",
+                "approvalId": "ap1a2b3c4d5e6f7a8b",
+                "allow": true,
+                "remember": "once"
+              }
+            },
+            {
+              "label": "Deny",
+              "action": {
+                "type": "resolve-approval",
+                "approvalId": "ap1a2b3c4d5e6f7a8b",
+                "allow": false,
+                "remember": "once"
+              }
+            }
+          ],
+          "condition": "approval:ap1a2b3c4d5e6f7a8b",
+          "createdAtUs": 1790668900000000,
+          "version": 1
+        }
+      }
+    ]
+  }
+}

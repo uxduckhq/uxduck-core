@@ -1,0 +1,18 @@
+{
+  "method": "analytics/track",
+  "params": {
+    "event": "exception",
+    "error_type": "TypeError",
+    "code": "uncaught",
+    "handled": false,
+    "frames": [
+      {
+        "function": "draw",
+        "file": "https://app.uxduck.com/assets/index-C13WCHB8.js",
+        "line": 1,
+        "column": 20412,
+        "in_app": true
+      }
+    ]
+  }
+}

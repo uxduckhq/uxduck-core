@@ -1,0 +1,5 @@
+{
+  "code": -32009,
+  "message": "Set mode GUIDED needs confirming: Copter 1 is stale",
+  "data": { "kind": "confirmation-required" }
+}

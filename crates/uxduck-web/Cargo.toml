@@ -1,0 +1,35 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck-web"
+description = "The browser's own daemon (S20, ADR-0011): the engine, the RPC router and the MAVLink session in a Web Worker, for simulated vehicles."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+uxduck-core.workspace = true
+uxduck-contracts.workspace = true
+uxduck-engine.workspace = true
+uxduck-mavlink.workspace = true
+# Terrain heights (S23): the files the engine's cache asks for.
+uxduck-terrain.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+minisign.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pinned to what `cargo xtask web` installs as wasm-bindgen-cli.
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["Blob", "Crypto", "Url"] }
+
+[lints]
+workspace = true

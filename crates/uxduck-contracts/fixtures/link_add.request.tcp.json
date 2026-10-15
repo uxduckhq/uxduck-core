@@ -1,0 +1,10 @@
+{
+  "method": "link/add",
+  "params": {
+    "kind": {
+      "type": "tcp-client",
+      "host": "127.0.0.1",
+      "port": 5760
+    }
+  }
+}

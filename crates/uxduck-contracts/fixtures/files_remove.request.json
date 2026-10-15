@@ -1,0 +1,8 @@
+{
+  "method": "files/remove",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "path": "/APM/LOGS/00000001.BIN",
+    "dir": false
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "method": "param/definitions/add",
+  "params": {
+    "text": "<paramfile/>",
+    "firmware": "ArduPlane"
+  }
+}

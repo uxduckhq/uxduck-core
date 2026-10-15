@@ -1,0 +1,91 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1400,
+    "tsUs": 1790668900000000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "parameter",
+        "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41/SYSID_SW_MREV",
+        "op": "remove"
+      },
+      {
+        "entity": "parameter",
+        "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41/RTL_ALT",
+        "op": "upsert",
+        "parameter": {
+          "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41/RTL_ALT",
+          "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+          "name": "RTL_ALT",
+          "value": 1500.0,
+          "kind": "int32"
+        }
+      },
+      {
+        "entity": "parameter-set",
+        "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+        "op": "upsert",
+        "parameterSet": {
+          "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+          "status": "synced",
+          "count": 1043,
+          "bootInstantUs": 1790668000000000,
+          "syncedAtUs": 1790668900000000
+        }
+      },
+      {
+        "entity": "mission",
+        "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+        "op": "upsert",
+        "mission": {
+          "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+          "items": [
+            {
+              "command": 16,
+              "frame": 0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0,
+              "latitudeDeg": -35.3632611,
+              "longitudeDeg": 149.1652302,
+              "altitudeM": 584.0,
+              "autocontinue": true
+            },
+            {
+              "command": 22,
+              "frame": 3,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "altitudeM": 20.0,
+              "autocontinue": true
+            },
+            {
+              "command": 16,
+              "frame": 3,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0,
+              "latitudeDeg": -35.3625,
+              "longitudeDeg": 149.1661,
+              "altitudeM": 30.0,
+              "autocontinue": true
+            }
+          ],
+          "status": "synced",
+          "bootInstantUs": 1790668000000000,
+          "syncedAtUs": 1790668900000000,
+          "version": 4
+        }
+      }
+    ]
+  }
+}

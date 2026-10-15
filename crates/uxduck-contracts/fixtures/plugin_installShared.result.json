@@ -1,0 +1,47 @@
+{
+  "id": "camera-manager",
+  "name": "Camera",
+  "version": "0.2.0",
+  "description": "Photos, video and zoom through the MAVLink camera protocol.",
+  "path": "/Users/ana/Library/Application Support/UXDuck/plugins/shared/camera-manager",
+  "capabilities": ["read", "control"],
+  "subscribe": {
+    "messages": {
+      "names": ["COMMAND_ACK"],
+      "cadenceMs": 200
+    }
+  },
+  "sends": [],
+  "commands": [
+    {
+      "name": "photo",
+      "title": "Take a photo",
+      "description": "One photo from every camera.",
+      "risk": "none",
+      "shortcut": "Alt+C"
+    },
+    {
+      "name": "zoom",
+      "title": "Zoom",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "integer",
+            "minimum": -10,
+            "maximum": 10
+          }
+        }
+      },
+      "risk": "none"
+    }
+  ],
+  "status": "starting",
+  "panels": [],
+  "clientId": "plugin:camera-manager",
+  "origin": {
+    "type": "shared",
+    "sharedBy": "Sam",
+    "token": "q3XvO2b9kLm4Nf7Rt1Yw8Ze5Ha6Jc0Pd"
+  }
+}

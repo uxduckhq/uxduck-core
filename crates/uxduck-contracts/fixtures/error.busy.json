@@ -1,0 +1,5 @@
+{
+  "code": -32007,
+  "message": "the agent is still answering in this thread",
+  "data": { "kind": "busy" }
+}

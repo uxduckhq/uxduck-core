@@ -1,0 +1,20 @@
+{
+  "finds": [
+    {
+      "id": "tcp:192.168.4.1:5760",
+      "place": "wifi",
+      "link": { "type": "tcp-client", "host": "192.168.4.1", "port": 5760 },
+      "evidence": "a heartbeat on TCP 5760 at the gateway",
+      "vehicle": {
+        "systemId": 1,
+        "vehicleType": "Quadrotor",
+        "autopilot": "Ardupilotmega",
+        "armed": false,
+        "vehicleId": "3f2a",
+        "name": "Copter 1"
+      },
+      "seenUs": 1790000000000000
+    }
+  ],
+  "subnets": ["192.168.4.0/24"]
+}

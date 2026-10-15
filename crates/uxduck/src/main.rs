@@ -1,0 +1,81 @@
+//! The native executable: composition root only.
+
+mod account;
+mod adapters;
+mod analytics;
+mod api;
+mod build;
+mod cli;
+mod daemon;
+mod desktop_app;
+mod dev_api;
+mod diagnostics;
+mod edge;
+mod errors;
+mod feedback;
+mod find;
+mod grants;
+mod inspect;
+mod interface;
+mod live_video;
+mod logs;
+mod mcp;
+mod online;
+mod params;
+mod parent;
+mod paths;
+mod plugin_bundle;
+mod ports;
+mod remote_users;
+mod remote_view;
+mod service;
+mod shipped;
+mod sim;
+mod spool;
+mod store;
+mod sync;
+mod terrain;
+mod tlog_index;
+mod tray;
+mod update;
+mod uploader;
+mod vehicle_files;
+mod video;
+mod wakes;
+mod watch;
+
+use std::process::ExitCode;
+
+use clap::Parser;
+
+fn main() -> ExitCode {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let (console, _console_guard) = match logs::Tee::new(std::io::stderr()) {
+        Ok(console) => console,
+        Err(error) => {
+            eprintln!("uxduck: cannot start the console writer: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(tracing_subscriber::fmt::layer().with_writer(console))
+        .with(errors::ErrorLayer)
+        .init();
+    errors::install_panic_hook();
+    let cli = cli::Cli::parse();
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(cli::run(cli)),
+        Err(error) => {
+            eprintln!("uxduck: cannot start the runtime: {error}");
+            ExitCode::from(2)
+        }
+    }
+}

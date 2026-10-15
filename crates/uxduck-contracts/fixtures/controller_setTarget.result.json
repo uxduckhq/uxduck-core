@@ -1,0 +1,15 @@
+{
+  "id": "gp-030000005e0400000b0b000000000000",
+  "name": "Xbox Wireless Controller",
+  "connected": true,
+  "claim": {
+    "clientId": "c1a2b3c4d5e6f7a8b",
+    "clientName": "uxduck-web",
+    "operatorId": "op5f1c0a91b2d3e4f5"
+  },
+  "mode": "follows-selection",
+  "target": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "pendingTarget": "7a1e0c2d-9b3f-5e4d-8c21-0f6a3b9d2e17",
+  "mappingId": "mode-2",
+  "version": 7
+}

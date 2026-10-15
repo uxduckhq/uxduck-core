@@ -1,0 +1,75 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "positions": [
+    {
+      "source": "fused",
+      "componentId": 1,
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.1661123,
+      "altitudes": [
+        {
+          "meters": 614.0,
+          "frame": "amsl"
+        },
+        {
+          "meters": 30.0,
+          "frame": "above-home"
+        }
+      ],
+      "headingDeg": 180.0,
+      "groundSpeedMps": 8.38,
+      "climbMps": 0.0,
+      "timeUs": 1790668800123456
+    },
+    {
+      "source": "gps",
+      "componentId": 1,
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.1661123,
+      "altitudes": [
+        {
+          "meters": 614.0,
+          "frame": "amsl"
+        },
+        {
+          "meters": 636.2,
+          "frame": "ellipsoid"
+        }
+      ],
+      "headingDeg": 180.0,
+      "groundSpeedMps": 8.38,
+      "horizontalAccuracyM": 0.8,
+      "verticalAccuracyM": 1.4,
+      "timeUs": 1790668800100000
+    }
+  ],
+  "items": [
+    {
+      "key": "battery.voltage_v",
+      "label": "Battery",
+      "unit": "volt",
+      "value": 12.4,
+      "source": "power",
+      "componentId": 1,
+      "timeUs": 1790668800000000
+    },
+    {
+      "key": "gps.fix",
+      "label": "GPS fix",
+      "unit": "none",
+      "text": "3D",
+      "source": "gps",
+      "componentId": 1,
+      "timeUs": 1790668800100000
+    },
+    {
+      "key": "attitude.roll_deg",
+      "label": "Roll",
+      "unit": "degree",
+      "value": 12.0,
+      "source": "attitude",
+      "componentId": 1,
+      "timeUs": 1790668800120000
+    }
+  ]
+}

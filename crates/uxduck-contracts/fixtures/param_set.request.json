@@ -1,0 +1,9 @@
+{
+  "method": "param/set",
+  "params": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "name": "RTL_ALT",
+    "value": 3000.0,
+    "expectedValue": 1500.0
+  }
+}

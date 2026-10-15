@@ -1,0 +1,4 @@
+{
+  "method": "param/history",
+  "params": { "vehicleId": "vh0000000001234abcd", "name": "RTL_ALT", "limit": 10 }
+}

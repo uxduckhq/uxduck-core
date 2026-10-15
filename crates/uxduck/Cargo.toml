@@ -1,0 +1,124 @@
+[package]
+license = "Apache-2.0"
+name = "uxduck"
+description = "The UXDuck daemon and command-line interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+uxduck-core.workspace = true
+uxduck-contracts.workspace = true
+uxduck-engine.workspace = true
+# Terrain heights (S23): the files the engine's cache asks for.
+uxduck-terrain.workspace = true
+uxduck-media.workspace = true
+md-5.workspace = true
+base64.workspace = true
+uxduck-mavlink = { workspace = true, features = ["native", "named"] }
+uxduck-agent.workspace = true
+clap.workspace = true
+axum.workspace = true
+directories.workspace = true
+flate2.workspace = true
+# Flights kept in the account (S82): tlog chunks compressed before upload.
+zstd.workspace = true
+# Interface archives (S109).
+tar.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+minisign-verify.workspace = true
+reqwest = { workspace = true, features = ["json", "query", "stream"] }
+rust-embed = { workspace = true, optional = true }
+gilrs = { workspace = true, optional = true }
+fs4.workspace = true
+extism = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+semver.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+# Checks the cloud's signed grants for control from away (S80): Ed25519,
+# already built for rustls.
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+# The edge connection to the relay (S78): one outbound wss:// with the
+# system's roots, as reqwest has.
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+oxc = { version = "0.152", features = ["transformer", "codegen", "semantic"], optional = true }
+
+# Every input of a joystick and its value when it connects (macOS): gilrs
+# reports an input only once it changes. The crates and versions gilrs uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-io-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "libc",
+  "hid",
+], optional = true }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFArray",
+  "CFDictionary",
+  "CFNumber",
+  "CFString",
+  "CFSet",
+], optional = true }
+
+[features]
+default = ["gamepad", "plugins"]
+# Build the web app into the executable (release builds). Needs `apps/web/dist`.
+embed-ui = ["dep:rust-embed"]
+# Controllers through the platform's gamepad support (gilrs). Without it,
+# only `--fake-controller` exists: for headless builds with no libudev.
+gamepad = ["dep:gilrs", "dep:objc2-io-kit", "dep:objc2-core-foundation"]
+# The WebAssembly plugin host (Extism and wasmtime). Without it, plugins
+# cannot be installed.
+plugins = ["dep:extism", "dep:wasmtime", "dep:oxc"]
+
+[dev-dependencies]
+minisign.workspace = true
+semver.workspace = true
+tempfile.workspace = true
+serialport.workspace = true
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true
+
+# `cargo deb --target <triple> --no-build` after a release build (S8).
+[package.metadata.deb]
+name = "uxduck"
+maintainer = "UXDuck <hello@uxduck.com>"
+copyright = "UXDuck"
+extended-description = "The UXDuck daemon and command line: MAVLink links, vehicles, recording and forwarding, with the web app built in. Run `uxduck open`, or `systemctl --user enable --now uxduck`."
+section = "net"
+priority = "optional"
+# The tray icon (S64) needs an app indicator; UXDuck runs without one.
+recommends = "libayatana-appindicator3-1"
+assets = [
+  [
+    "target/release/uxduck",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "target/release/uxduck-tray",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "../../packaging/linux/uxduck.service",
+    "usr/lib/systemd/user/",
+    "644",
+  ],
+]
+
+[[bin]]
+name = "uxduck"
+path = "src/main.rs"

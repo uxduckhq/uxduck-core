@@ -1,0 +1,20 @@
+{
+  "entries": [
+    {
+      "id": 1,
+      "atUs": 2500000,
+      "level": "WARN",
+      "component": "uxduck::daemon::data_plane",
+      "text": "forward disabled by loop detection"
+    }
+  ],
+  "coverage": {
+    "requestedFromUs": 1000000,
+    "requestedToUs": 3000000,
+    "availableFromUs": 1500000,
+    "availableToUs": 2500000,
+    "truncated": false,
+    "source": "memory",
+    "notes": []
+  }
+}

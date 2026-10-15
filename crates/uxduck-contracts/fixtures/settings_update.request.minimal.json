@@ -1,0 +1,6 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 2
+  }
+}

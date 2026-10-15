@@ -1,0 +1,14 @@
+{
+  "method": "link/add",
+  "params": {
+    "name": "Mission Planner",
+    "kind": {
+      "type": "udp-forward",
+      "host": "127.0.0.1",
+      "port": 14551
+    },
+    "policy": "read-write",
+    "vehicleFilter": ["12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+    "keepAlive": true
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "guide-airship",
+  "version": 1,
+  "title": "Get started",
+  "audience": "first-flight",
+  "vehicles": ["airship"],
+  "guide": true,
+  "goal": "A first flight: arm it, stop it, bring it home and land.",
+  "start": {},
+  "steps": [
+    {
+      "text": "Press and hold Arm in the Control tab.",
+      "hint": "Armed, its motors answer commands. Disarmed, it drifts.",
+      "hintAfterS": 45,
+      "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
+    },
+    {
+      "text": "Choose HOLD in the Mode menu in the Control tab.",
+      "hint": "HOLD stops it moving.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "HOLD" },
+        { "check": "mode", "mode": "HOLD" }
+      ]
+    },
+    {
+      "text": "Press Return to launch in the Control tab.",
+      "hint": "Return to launch brings it back to where it started.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "mode", "mode": "RTL" }
+      ]
+    },
+    {
+      "text": "Press Land in the Control tab.",
+      "hint": "Land brings it down where it is.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "land" },
+        { "check": "mode", "mode": "LAND" }
+      ]
+    }
+  ],
+  "passed": "Done. It's coming down."
+}

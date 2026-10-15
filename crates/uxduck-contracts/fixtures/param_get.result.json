@@ -1,0 +1,30 @@
+{
+  "describedBy": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "vehicleName": "Copter 1",
+    "firmware": "4.5.7",
+    "definitions": {
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "status": "ready",
+      "setId": "arducopter-4.5.7",
+      "title": "Copter 4.5.7",
+      "matched": "exact"
+    }
+  },
+  "parameters": [
+    {
+      "name": "RTL_ALT",
+      "value": 1500.0,
+      "definition": {
+        "name": "RTL_ALT",
+        "displayName": "RTL Altitude",
+        "description": "Height above home to climb to before flying back.",
+        "group": "RTL_",
+        "units": "cm",
+        "range": { "low": 200.0, "high": 300000.0 },
+        "user": "standard"
+      }
+    },
+    { "name": "MYFORK_GAIN", "value": 3.0 }
+  ]
+}

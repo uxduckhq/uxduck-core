@@ -1,0 +1,19 @@
+[package]
+license = "Apache-2.0"
+name = "script-host"
+description = "Runs TypeScript plugins (types already stripped) inside the plugin sandbox: one JavaScript engine, shipped once with UXDuck (ADR-0006 X7)."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+boa_engine = { version = "0.22", default-features = false }
+serde_json = "1"
+getrandom = "0.4"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

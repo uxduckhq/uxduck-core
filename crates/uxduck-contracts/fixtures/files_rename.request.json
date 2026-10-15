@@ -1,0 +1,8 @@
+{
+  "method": "files/rename",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "from": "/APM/LOGS/00000001.BIN",
+    "to": "/APM/old/00000001.BIN"
+  }
+}

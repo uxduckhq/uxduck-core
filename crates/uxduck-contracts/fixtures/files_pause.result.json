@@ -1,0 +1,12 @@
+{
+  "id": "fd3f9a1c0d7e2b4a6c",
+  "vehicleId": "veh-7f3a",
+  "direction": "download",
+  "path": "/APM/LOGS/00000012.BIN",
+  "name": "00000012.BIN",
+  "size": 104857600,
+  "done": 31457280,
+  "state": "paused",
+  "startedAtUs": 1790000000000000,
+  "updatedAtUs": 1790000025000000
+}

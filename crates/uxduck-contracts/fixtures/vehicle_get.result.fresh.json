@@ -1,0 +1,20 @@
+{
+  "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "name": "Copter 1",
+  "aliases": ["7a1e5b2c-0d43-5f6e-8b9a-1c2d3e4f5a6b"],
+  "linkId": "lk3c4d5e6f7a8b9c0d",
+  "peer": "127.0.0.1:14550",
+  "systemId": 1,
+  "componentIds": [1],
+  "autopilot": "Ardupilotmega",
+  "vehicleType": "Quadrotor",
+  "uid": "000000001234abcd",
+  "firmware": "4.5.1",
+  "presence": "online",
+  "lastHeartbeatUs": 1790668800123456,
+  "armed": false,
+  "saved": false,
+  "dismissed": false,
+  "version": 3,
+  "heartbeatAgeMs": 250
+}

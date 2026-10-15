@@ -1,0 +1,20 @@
+{
+  "dataset": "alos",
+  "areas": [
+    {
+      "area": {
+        "id": "ta0123456789abcdef",
+        "name": "Snowdonia",
+        "southDeg": 53.0,
+        "westDeg": -4.3,
+        "northDeg": 53.2,
+        "eastDeg": -3.9
+      },
+      "state": "fetching",
+      "chunks": 8,
+      "done": 3,
+      "bytes": 210000
+    }
+  ],
+  "manifestCheckedAtUs": 1791935617252782
+}

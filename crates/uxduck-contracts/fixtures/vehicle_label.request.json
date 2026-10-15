@@ -1,0 +1,8 @@
+{
+  "method": "vehicle/label",
+  "params": {
+    "ids": ["12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+    "add": ["Survey"],
+    "remove": ["Site B"]
+  }
+}

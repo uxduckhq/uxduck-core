@@ -1,0 +1,26 @@
+{
+  "state": "ready",
+  "builds": [
+    {
+      "build": {
+        "id": "ardupilot-arducopter-4.7.1-aarch64-macos",
+        "firmware": "ardupilot",
+        "program": "arducopter",
+        "version": "4.7.1",
+        "platform": "aarch64-macos",
+        "files": [
+          {
+            "name": "arducopter",
+            "url": "https://simulators.uxduck.com/ardupilot/4.7.1/aarch64-macos/arducopter",
+            "size": 5045480,
+            "sha256": "9f2c4a1b0e7d3c5a6b8e9f0a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+          }
+        ],
+        "sourceUrl": "https://simulators.uxduck.com/ardupilot/4.7.1/source.tar.gz"
+      },
+      "state": "downloading",
+      "receivedBytes": 1048576,
+      "totalBytes": 5045480
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "id": "bring-it-home-vtol",
+  "version": 2,
+  "title": "Bring it home",
+  "audience": "first-flight",
+  "vehicles": ["vtol"],
+  "goal": "Get it back on the ground at home from 400 m away.",
+  "start": {
+    "heightM": 50,
+    "offset": { "bearingDeg": 90, "distanceM": 400 }
+  },
+  "features": [{ "id": "home", "label": "Home", "radiusM": 150 }],
+  "steps": [
+    {
+      "text": "Press Return to launch in the Control tab.",
+      "hint": "Return to launch flies it home like a plane. Over home it circles.",
+      "hintAfterS": 60,
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "mode", "mode": "RTL", "or": ["QRTL"] }
+      ]
+    },
+    {
+      "text": "Wait for it to circle over home.",
+      "hint": "Watch it on the map: it flies back and circles over the Home ring.",
+      "hintAfterS": 120,
+      "all": [
+        { "check": "mode", "mode": "RTL", "or": ["QRTL"] },
+        { "check": "within", "feature": "home" }
+      ]
+    },
+    {
+      "text": "Press Land in the Control tab.",
+      "hint": "Land slows it to a hover and brings it straight down where it is. This step ticks once it's on the ground.",
+      "hintAfterS": 60,
+      "all": [{ "check": "landed" }, { "check": "within", "feature": "home" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "landed" }, { "check": "outside", "feature": "home" }],
+      "says": "Failed. Landed {distance:home} m from home."
+    }
+  ],
+  "passed": "Passed. Home in {elapsed} s.",
+  "measure": { "measure": "elapsed" }
+}

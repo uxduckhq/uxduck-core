@@ -1,0 +1,12 @@
+{
+  "method": "initialize",
+  "params": {
+    "clientInfo": { "name": "uxduck-web", "version": "0.1.0", "kind": "operator-ui" },
+    "capabilities": {
+      "protocolVersion": 1,
+      "binaryChannels": true,
+      "approvals": true,
+      "optOutNotifications": ["log/line"]
+    }
+  }
+}

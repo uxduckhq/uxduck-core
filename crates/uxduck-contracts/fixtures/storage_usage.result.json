@@ -1,0 +1,49 @@
+{
+  "dataDir": "/Users/ana/Library/Application Support/uxduck",
+  "categories": [
+    {
+      "category": "tlogs",
+      "bytes": 812000000,
+      "files": 14,
+      "deletable": true
+    },
+    {
+      "category": "event-log",
+      "bytes": 3100000,
+      "files": 1,
+      "deletable": false
+    },
+    {
+      "category": "database",
+      "bytes": 2400000,
+      "files": 3,
+      "deletable": false
+    },
+    {
+      "category": "backups",
+      "bytes": 1900000,
+      "files": 2,
+      "deletable": true
+    },
+    {
+      "category": "logs",
+      "bytes": 0,
+      "files": 0,
+      "deletable": true
+    },
+    {
+      "category": "plugins",
+      "bytes": 0,
+      "files": 0,
+      "deletable": false
+    },
+    {
+      "category": "video",
+      "bytes": 0,
+      "files": 0,
+      "deletable": true
+    }
+  ],
+  "freeBytes": 120000000000,
+  "totalBytes": 494000000000
+}

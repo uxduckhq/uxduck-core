@@ -1,0 +1,23 @@
+{
+  "flightS": 298.4,
+  "calls": { "on_messages": 597, "describe": 1 },
+  "panels": [
+    {
+      "id": "home",
+      "title": "Distance from home",
+      "widgets": [{ "type": "value", "item": "home.distance_m", "label": "From home" }]
+    }
+  ],
+  "items": [
+    {
+      "key": "home.distance_m",
+      "label": "From home",
+      "unit": "meter",
+      "value": 81.2,
+      "count": 1194
+    }
+  ],
+  "notifications": [],
+  "features": 0,
+  "log": []
+}

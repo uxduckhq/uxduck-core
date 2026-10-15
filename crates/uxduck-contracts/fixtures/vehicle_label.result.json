@@ -1,0 +1,22 @@
+{
+  "vehicles": [
+    {
+      "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "name": "Survey quad",
+      "aliases": [],
+      "linkId": "lk3c4d5e6f7a8b9c0d",
+      "peer": "127.0.0.1:14550",
+      "systemId": 1,
+      "componentIds": [1],
+      "autopilot": "Ardupilotmega",
+      "vehicleType": "Quadrotor",
+      "presence": "online",
+      "lastHeartbeatUs": 1790668800123456,
+      "armed": false,
+      "saved": true,
+      "dismissed": false,
+      "labels": ["Survey"],
+      "version": 5
+    }
+  ]
+}

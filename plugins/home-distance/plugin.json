@@ -1,0 +1,42 @@
+{
+  "abi": 2,
+  "id": "home-distance",
+  "name": "Home distance",
+  "version": "0.2.0",
+  "description": "How far each vehicle is from where it started, and a notice when its battery is low.",
+  "wasm": "home_distance.wasm",
+  "capabilities": ["read"],
+  "subscribe": {
+    "items": {
+      "keys": ["battery.*"],
+      "cadenceMs": 1000
+    },
+    "messages": {
+      "names": ["GLOBAL_POSITION_INT"],
+      "cadenceMs": 500
+    }
+  },
+  "commands": [
+    {
+      "name": "mark",
+      "title": "Mark",
+      "description": "Notes this moment with a label.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      },
+      "risk": "none"
+    },
+    {
+      "name": "set-home",
+      "title": "Set home here",
+      "description": "Moves home to where the vehicle is now.",
+      "risk": "none"
+    }
+  ]
+}

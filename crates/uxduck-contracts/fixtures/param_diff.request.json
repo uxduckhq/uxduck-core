@@ -1,0 +1,7 @@
+{
+  "method": "param/diff",
+  "params": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "text": "RTL_ALT,3000\nWPNAV_SPEED,1000\n"
+  }
+}

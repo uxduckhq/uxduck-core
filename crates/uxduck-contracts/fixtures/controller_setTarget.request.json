@@ -1,0 +1,7 @@
+{
+  "method": "controller/setTarget",
+  "params": {
+    "id": "gp-030000005e0400000b0b000000000000",
+    "mode": "follows-selection"
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "commands": [
+    {
+      "command": {
+        "type": "arm"
+      },
+      "label": "Arm",
+      "offlineBehaviour": "block",
+      "risk": {
+        "level": "confirm"
+      },
+      "riskInFlight": {
+        "level": "confirm"
+      },
+      "forcedRisk": {
+        "level": "dangerous",
+        "reason": "Forcing skips the pre-arm checks that stop a vehicle arming when something is wrong."
+      },
+      "class": "critical",
+      "maxAgeMs": 5000
+    },
+    {
+      "command": {
+        "type": "disarm"
+      },
+      "label": "Disarm",
+      "offlineBehaviour": "allow",
+      "risk": {
+        "level": "none"
+      },
+      "riskInFlight": {
+        "level": "dangerous",
+        "reason": "Disarming in flight stops the motors, and the vehicle falls."
+      },
+      "forcedRisk": {
+        "level": "none"
+      },
+      "class": "critical",
+      "maxAgeMs": 5000
+    },
+    {
+      "command": {
+        "type": "set-mode",
+        "mode": "LOITER"
+      },
+      "label": "Set mode LOITER",
+      "offlineBehaviour": "allow",
+      "risk": {
+        "level": "none"
+      },
+      "riskInFlight": {
+        "level": "none"
+      },
+      "class": "safety",
+      "maxAgeMs": 5000
+    },
+    {
+      "command": {
+        "type": "set-mode",
+        "mode": "GUIDED"
+      },
+      "label": "Set mode GUIDED",
+      "offlineBehaviour": "warn",
+      "risk": {
+        "level": "confirm"
+      },
+      "riskInFlight": {
+        "level": "confirm"
+      },
+      "class": "mission",
+      "maxAgeMs": 10000
+    },
+    {
+      "command": {
+        "type": "long",
+        "command": 22,
+        "params": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0]
+      },
+      "label": "Take off",
+      "offlineBehaviour": "warn",
+      "risk": {
+        "level": "confirm"
+      },
+      "riskInFlight": {
+        "level": "confirm"
+      },
+      "class": "critical",
+      "maxAgeMs": 5000
+    },
+    {
+      "command": {
+        "type": "rtl"
+      },
+      "label": "Return to launch",
+      "offlineBehaviour": "allow",
+      "risk": {
+        "level": "none"
+      },
+      "riskInFlight": {
+        "level": "none"
+      },
+      "class": "safety",
+      "maxAgeMs": 5000
+    }
+  ],
+  "flyingAboveHomeM": 2.0
+}

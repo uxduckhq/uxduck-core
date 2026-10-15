@@ -1,0 +1,15 @@
+{
+  "id": "lk3c4d5e6f7a8b9c0d",
+  "name": "UDP 14550",
+  "kind": {
+    "type": "udp-listen",
+    "host": "0.0.0.0",
+    "port": 14550
+  },
+  "policy": "read-write",
+  "topology": "auto",
+  "status": "disabled",
+  "createdAtUs": 1790668800000000,
+  "keepAlive": false,
+  "version": 2
+}

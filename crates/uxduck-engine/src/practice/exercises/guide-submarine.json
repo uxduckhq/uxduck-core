@@ -1,0 +1,46 @@
+{
+  "id": "guide-submarine",
+  "version": 1,
+  "title": "Get started",
+  "audience": "first-flight",
+  "vehicles": ["submarine"],
+  "guide": true,
+  "goal": "A first dive: arm it, send it somewhere, hold its depth and bring it up.",
+  "start": {},
+  "steps": [
+    {
+      "text": "Press and hold Arm in the Control tab.",
+      "hint": "Armed, it answers commands. Disarmed, it stays where it is.",
+      "hintAfterS": 45,
+      "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
+    },
+    {
+      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "hint": "Go to takes it to the place you clicked and holds it there.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "mode", "mode": "GUIDED" }
+      ]
+    },
+    {
+      "text": "Choose POSHOLD in the Mode menu in the Control tab.",
+      "hint": "Position hold keeps it where it is, at its depth.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "POSHOLD" },
+        { "check": "mode", "mode": "POSHOLD" }
+      ]
+    },
+    {
+      "text": "Press Land in the Control tab to bring it up.",
+      "hint": "On a submarine, Land comes up to the surface.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "land" },
+        { "check": "mode", "mode": "SURFACE" }
+      ]
+    }
+  ],
+  "passed": "Done. It's coming up to the surface."
+}

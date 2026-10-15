@@ -1,0 +1,7 @@
+{
+  "method": "initialize",
+  "params": {
+    "clientInfo": { "name": "claude-code", "version": "2.0.0", "kind": "agent" },
+    "capabilities": { "protocolVersion": 1 }
+  }
+}

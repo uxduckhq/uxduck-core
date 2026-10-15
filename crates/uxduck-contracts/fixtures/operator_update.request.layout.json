@@ -1,0 +1,113 @@
+{
+  "method": "operator/update",
+  "params": {
+    "id": "op5f1c0a91b2d3e4f5",
+    "expectedVersion": 2,
+    "layout": {
+      "paneOpen": true,
+      "dock": {
+        "type": "split",
+        "direction": "row",
+        "children": [
+          {
+            "size": 280,
+            "node": {
+              "type": "group",
+              "tabs": [
+                {
+                  "id": "chat",
+                  "kind": "chat"
+                }
+              ],
+              "active": 0
+            }
+          },
+          {
+            "size": 720,
+            "node": {
+              "type": "split",
+              "direction": "column",
+              "children": [
+                {
+                  "size": 600,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map",
+                        "kind": "map"
+                      },
+                      {
+                        "id": "mission",
+                        "kind": "mission"
+                      },
+                      {
+                        "id": "t7f3a91c2",
+                        "kind": "map",
+                        "vehicleId": "veh2"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 400,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "telemetry",
+                        "kind": "telemetry"
+                      }
+                    ],
+                    "active": 0
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "saved": [
+        {
+          "id": "ly3c9e1f",
+          "name": "Survey",
+          "dock": {
+            "type": "split",
+            "direction": "row",
+            "children": [
+              {
+                "size": 400,
+                "node": {
+                  "type": "group",
+                  "tabs": [
+                    {
+                      "id": "chat",
+                      "kind": "chat"
+                    }
+                  ],
+                  "active": 0
+                }
+              },
+              {
+                "size": 600,
+                "node": {
+                  "type": "group",
+                  "tabs": [
+                    {
+                      "id": "map",
+                      "kind": "map"
+                    }
+                  ],
+                  "active": 0
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "arranged": false,
+      "flightOpened": false
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "vehicleId": "veh-7f3a",
+  "dataset": "alos",
+  "verdict": "matchesOther",
+  "differenceM": 4.2,
+  "points": [
+    {
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.16523,
+      "vehicleM": 588.0,
+      "expectedM": 583.8,
+      "otherM": 587.6,
+      "answered": true
+    }
+  ],
+  "checkedAtUs": 1791935617252782
+}

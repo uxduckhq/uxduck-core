@@ -1,0 +1,4 @@
+# Plugins run in Extism, which has no JavaScript and no WASI: the script
+# host's engine gets its random bytes from a function of its own (S56).
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

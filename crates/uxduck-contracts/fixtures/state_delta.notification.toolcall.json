@@ -1,0 +1,31 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1240,
+    "tsUs": 1790668801200000,
+    "actor": { "clientId": "c7e6d5c4b3a291807" },
+    "changes": [
+      {
+        "entity": "item",
+        "id": "it2c3d4e5f6a7b8c9d",
+        "op": "upsert",
+        "item": {
+          "id": "it2c3d4e5f6a7b8c9d",
+          "threadId": "th9a8b7c6d5e4f3a2b",
+          "index": 1,
+          "kind": "toolCall",
+          "status": "completed",
+          "text": "",
+          "toolCall": {
+            "method": "vehicle/list",
+            "params": {},
+            "clientId": "c7e6d5c4b3a291807",
+            "result": { "vehicles": [] }
+          },
+          "createdAtUs": 1790668801100000,
+          "version": 2
+        }
+      }
+    ]
+  }
+}

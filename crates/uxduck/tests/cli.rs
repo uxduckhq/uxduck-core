@@ -1,0 +1,61 @@
+//! The real binary, spawned.
+
+use std::process::Command;
+
+#[test]
+fn plugin_scaffolding_and_tlog_decoding_work_without_a_plugin_host() {
+    let temp = tempfile::tempdir().unwrap();
+    let plugin = temp.path().join("example");
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .args(["plugin", "new", "example", "--typescript", "--dir"])
+        .arg(&plugin)
+        .output()
+        .expect("spawn uxduck");
+    assert!(output.status.success(), "{output:?}");
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .args(["dev", "decode"])
+        .arg(plugin.join("test.tlog"))
+        .output()
+        .expect("spawn uxduck");
+    assert!(output.status.success(), "{output:?}");
+    let decoded = String::from_utf8(output.stdout).unwrap();
+    assert!(decoded.contains("HEARTBEAT"), "{decoded}");
+}
+
+#[cfg(not(feature = "plugins"))]
+#[test]
+fn decoding_with_a_plugin_explains_the_disabled_feature() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .args(["dev", "decode", "test.tlog", "--plugin", "example"])
+        .output()
+        .expect("spawn uxduck");
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("this build has no plugin support"),
+        "{error}"
+    );
+}
+
+#[test]
+fn version_prints_the_crate_version() {
+    let version = |flag: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+            .arg(flag)
+            .output()
+            .expect("spawn uxduck");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).expect("utf-8")
+    };
+    assert_eq!(
+        version("-V").trim(),
+        concat!("uxduck ", env!("CARGO_PKG_VERSION"))
+    );
+    // `--version` adds the build, as the About page's "Copy details" (S87).
+    let long = version("--version");
+    let lines: Vec<&str> = long.lines().collect();
+    assert_eq!(lines[0], concat!("uxduck ", env!("CARGO_PKG_VERSION")));
+    assert!(lines[1].starts_with("commit "), "{long}");
+    assert!(lines[2].starts_with("built "), "{long}");
+    assert_eq!(lines[3], concat!("target ", env!("UXDUCK_TARGET")));
+}

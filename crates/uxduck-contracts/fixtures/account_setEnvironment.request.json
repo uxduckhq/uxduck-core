@@ -1,0 +1,1 @@
+{ "method": "account/setEnvironment", "params": { "environment": "production" } }

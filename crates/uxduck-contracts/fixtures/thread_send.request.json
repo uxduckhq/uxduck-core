@@ -1,0 +1,16 @@
+{
+  "method": "thread/send",
+  "params": {
+    "threadId": "th9a8b7c6d5e4f3a2b",
+    "text": "is this enough for another ten minutes?",
+    "attachments": [
+      {
+        "title": "Battery voltage",
+        "key": "battery.voltage_v",
+        "value": "15.8",
+        "unit": "V",
+        "help": "The voltage of the battery pack, from the flight controller."
+      }
+    ]
+  }
+}

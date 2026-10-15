@@ -1,0 +1,37 @@
+{
+  "id": "tbs-tango-2",
+  "name": "TBS Tango 2",
+  "roll": {
+    "axis": "right-stick-x",
+    "inverted": false
+  },
+  "pitch": {
+    "axis": "right-stick-y",
+    "inverted": false
+  },
+  "yaw": {
+    "axis": "left-stick-x",
+    "inverted": false
+  },
+  "throttle": {
+    "axis": "left-stick-y",
+    "inverted": false
+  },
+  "deadzone": 0.05,
+  "buttons": [
+    {
+      "button": "east",
+      "command": {
+        "type": "rtl"
+      }
+    },
+    {
+      "button": "north",
+      "command": {
+        "type": "set-mode",
+        "mode": "LOITER"
+      }
+    }
+  ],
+  "version": 1
+}

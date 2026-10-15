@@ -1,0 +1,9 @@
+{
+  "method": "vehicle/messages",
+  "params": {
+    "vehicleId": "vh0000000001234abcd",
+    "maxSeverity": 4,
+    "query": "vibration",
+    "subscribe": true
+  }
+}

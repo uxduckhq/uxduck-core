@@ -1,0 +1,18 @@
+{
+  "method": "telemetry/update",
+  "params": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "positions": [],
+    "items": [
+      {
+        "key": "throttle.output_pct",
+        "label": "Throttle",
+        "unit": "percent",
+        "value": 42.0,
+        "source": "hud",
+        "componentId": 1,
+        "timeUs": 1790668800200000
+      }
+    ]
+  }
+}

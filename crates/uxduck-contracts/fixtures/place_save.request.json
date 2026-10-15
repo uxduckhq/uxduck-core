@@ -1,0 +1,8 @@
+{
+  "method": "place/save",
+  "params": {
+    "name": "Home field",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523
+  }
+}

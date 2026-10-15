@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "programs": {
+    "arducopter": { "frames": {} },
+    "arduplane": { "frames": {} },
+    "ardurover": {
+      "frames": {
+        "rover": {
+          "MANUAL_STR_EXPO": 0.35,
+          "MANUAL_OPTIONS": 1,
+          "ACRO_TURN_RATE": 60
+        },
+        "rover-skid": {
+          "MANUAL_STR_EXPO": 0.35,
+          "ACRO_TURN_RATE": 60
+        },
+        "motorboat": {
+          "MANUAL_STR_EXPO": 0.35,
+          "MANUAL_OPTIONS": 1,
+          "ACRO_TURN_RATE": 60
+        },
+        "motorboat-skid": {
+          "MANUAL_STR_EXPO": 0.35,
+          "ACRO_TURN_RATE": 60
+        }
+      }
+    },
+    "ardusub": { "frames": {} },
+    "blimp": { "frames": {} }
+  }
+}

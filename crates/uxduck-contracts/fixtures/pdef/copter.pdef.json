@@ -1,0 +1,111 @@
+{
+  "json": {
+    "version": 0
+  },
+  "Copter": {
+    "RTL_ALT": {
+      "Description": "Height above home to climb to before flying back. Written for UXDuck's tests.",
+      "DisplayName": "RTL Altitude",
+      "Increment": "1",
+      "Range": {
+        "high": "300000",
+        "low": "200"
+      },
+      "Units": "cm",
+      "User": "Standard"
+    },
+    "FS_THR_ENABLE": {
+      "Description": "What to do when the throttle input is lost. Written for UXDuck's tests.",
+      "DisplayName": "Throttle Failsafe Enable",
+      "User": "Standard",
+      "Values": {
+        "0": "Disabled",
+        "1": "Enabled always RTL",
+        "3": "Enabled always Land"
+      }
+    },
+    "LOG_BITMASK": {
+      "Description": "Which messages to log. Written for UXDuck's tests.",
+      "DisplayName": "Log bitmask",
+      "User": "Standard",
+      "Bitmask": {
+        "0": "Fast Attitude",
+        "1": "Medium Attitude",
+        "2": "GPS",
+        "10": "RC output"
+      }
+    },
+    "FRAME_CLASS": {
+      "Description": "The frame's major class. Written for UXDuck's tests.",
+      "DisplayName": "Frame Class",
+      "RebootRequired": "True",
+      "User": "Standard",
+      "Values": {
+        "0": "Undefined",
+        "1": "Quad",
+        "2": "Hexa",
+        "6": "Heli"
+      }
+    }
+  },
+  "BATT_": {
+    "BATT_FS_LOW_ACT": {
+      "Description": "What the vehicle does when the battery runs low. Written for UXDuck's tests.",
+      "DisplayName": "Low battery failsafe action",
+      "User": "Standard",
+      "Values": {
+        "0": "None",
+        "1": "Land",
+        "2": "RTL"
+      }
+    },
+    "BATT_CAPACITY": {
+      "Description": "The battery's capacity when full. Written for UXDuck's tests.",
+      "DisplayName": "Battery capacity",
+      "Increment": "50",
+      "Units": "mAh",
+      "User": "Standard"
+    }
+  },
+  "ATC_": {
+    "ATC_RAT_PIT_D": {
+      "Description": "Pitch rate derivative gain for helicopters. Written for UXDuck's tests.",
+      "DisplayName": "Pitch axis rate controller D gain",
+      "Range": {
+        "high": "0.02",
+        "low": "0.0"
+      },
+      "User": "Standard",
+      "path": "AC_AttitudeControl_Heli"
+    }
+  },
+  "INS_": {
+    "INS_ACC_ID": {
+      "Description": "The first accelerometer's device ID. Written for UXDuck's tests.",
+      "DisplayName": "Accelerometer ID",
+      "ReadOnly": "True",
+      "User": "Advanced"
+    },
+    "INS_ACCOFFS_X": {
+      "Description": "Accelerometer offset on the X axis. Written for UXDuck's tests.",
+      "DisplayName": "Accelerometer offsets of X axis",
+      "Calibration": "1",
+      "Range": {
+        "high": "3.5",
+        "low": "-3.5"
+      },
+      "Units": "m/s/s",
+      "User": "Advanced"
+    }
+  },
+  "BARO1_": {
+    "BARO1_GND_PRESS": {
+      "Description": "Ground pressure, measured at start-up. Written for UXDuck's tests.",
+      "DisplayName": "Ground Pressure",
+      "ReadOnly": "True",
+      "Units": "Pa",
+      "Volatile": "True",
+      "User": "Advanced"
+    }
+  }
+}

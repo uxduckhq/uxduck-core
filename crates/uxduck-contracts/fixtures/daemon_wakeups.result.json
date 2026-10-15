@@ -1,0 +1,7 @@
+{
+  "sinceUs": 1767225600000000,
+  "tasks": [
+    { "name": "engine", "count": 412 },
+    { "name": "data plane: tick (10 Hz)", "count": 120 }
+  ]
+}

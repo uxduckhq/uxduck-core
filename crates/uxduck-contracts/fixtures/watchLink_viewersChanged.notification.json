@@ -1,0 +1,4 @@
+{
+  "method": "watchLink/viewersChanged",
+  "params": { "vehicles": [{ "vehicleId": "vid_7f3a", "watching": 3 }] }
+}

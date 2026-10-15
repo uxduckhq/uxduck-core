@@ -1,0 +1,34 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1250,
+    "tsUs": 1790668802000000,
+    "actor": {
+      "clientId": "data-plane"
+    },
+    "changes": [
+      {
+        "entity": "link",
+        "id": "lifw1a2b3c4d5e6f70",
+        "op": "upsert",
+        "link": {
+          "id": "lifw1a2b3c4d5e6f70",
+          "name": "Mission Planner",
+          "kind": {
+            "type": "udp-forward",
+            "host": "127.0.0.1",
+            "port": 14551
+          },
+          "policy": "read-write",
+          "topology": "auto",
+          "status": "disabled-by-loop-detection",
+          "statusDetail": "frames it sent came back on link li3c4d5e6f7a8b9c0d: a forwarding loop",
+          "createdAtUs": 1790668800000000,
+          "vehicleFilter": ["12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+          "keepAlive": true,
+          "version": 3
+        }
+      }
+    ]
+  }
+}

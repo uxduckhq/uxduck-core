@@ -1,0 +1,8 @@
+{
+  "method": "link/add",
+  "params": {
+    "kind": { "type": "udp-forward", "host": "127.0.0.1", "port": 14551 },
+    "policy": "read",
+    "fromLink": "sim1"
+  }
+}

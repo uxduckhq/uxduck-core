@@ -1,0 +1,105 @@
+{
+  "link": {
+    "id": "li-forward",
+    "name": "Other ground station",
+    "kind": {
+      "type": "udp-forward",
+      "host": "127.0.0.1",
+      "port": 14550
+    },
+    "policy": "read-write",
+    "topology": "auto",
+    "status": "up",
+    "createdAtUs": 1,
+    "keepAlive": false,
+    "version": 1
+  },
+  "vehicles": [],
+  "forwards": [],
+  "routing": "Sends all vehicle traffic to the other program.",
+  "recentEvents": {
+    "events": [
+      {
+        "id": "run-1",
+        "packet": {
+          "atUs": 2500000,
+          "endpoint": {
+            "linkId": "li-relay",
+            "name": "Telemetry wire",
+            "peer": "127.0.0.1:44000"
+          },
+          "messageId": 0,
+          "systemId": 1,
+          "componentId": 1,
+          "sequence": 144,
+          "fingerprint": "fnv1a64:0000000000001234"
+        },
+        "decision": "dropped-loop",
+        "destinations": [],
+        "reason": "An exact-wire fingerprint returned through a different source.",
+        "matchedPacket": {
+          "atUs": 2400000,
+          "endpoint": {
+            "linkId": "li-source",
+            "name": "Telemetry wire",
+            "peer": "127.0.0.1:43000"
+          },
+          "messageId": 0,
+          "systemId": 1,
+          "componentId": 1,
+          "sequence": 144,
+          "fingerprint": "fnv1a64:0000000000001234"
+        },
+        "forwardLinkId": "li-forward",
+        "disabled": true,
+        "threshold": 5,
+        "windowUs": 2000000
+      }
+    ],
+    "coverage": {
+      "requestedFromUs": 1000000,
+      "requestedToUs": 3000000,
+      "availableFromUs": 1500000,
+      "availableToUs": 2500000,
+      "truncated": false,
+      "source": "memory",
+      "notes": []
+    }
+  },
+  "lastIncident": {
+    "id": "run-1",
+    "packet": {
+      "atUs": 2500000,
+      "endpoint": {
+        "linkId": "li-relay",
+        "name": "Telemetry wire",
+        "peer": "127.0.0.1:44000"
+      },
+      "messageId": 0,
+      "systemId": 1,
+      "componentId": 1,
+      "sequence": 144,
+      "fingerprint": "fnv1a64:0000000000001234"
+    },
+    "decision": "dropped-loop",
+    "destinations": [],
+    "reason": "An exact-wire fingerprint returned through a different source.",
+    "matchedPacket": {
+      "atUs": 2400000,
+      "endpoint": {
+        "linkId": "li-source",
+        "name": "Telemetry wire",
+        "peer": "127.0.0.1:43000"
+      },
+      "messageId": 0,
+      "systemId": 1,
+      "componentId": 1,
+      "sequence": 144,
+      "fingerprint": "fnv1a64:0000000000001234"
+    },
+    "forwardLinkId": "li-forward",
+    "disabled": true,
+    "threshold": 5,
+    "windowUs": 2000000
+  }
+}

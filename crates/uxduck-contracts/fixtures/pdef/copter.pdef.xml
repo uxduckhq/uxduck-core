@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The shape of ArduPilot's apm.pdef.xml (param_parse.py), with UXDuck's own words. -->
+<paramfile>
+  <vehicles>
+    <parameters name="ArduCopter">
+      <param humanName="RTL Altitude" name="ArduCopter:RTL_ALT" documentation="Height above home to climb to before flying back. Written for UXDuck's tests." user="Standard">
+        <field name="Increment">1</field>
+        <field name="Range">200 300000</field>
+        <field name="Units">cm</field>
+        <field name="UnitText">centimeters</field>
+      </param>
+      <param humanName="Throttle Failsafe Enable" name="ArduCopter:FS_THR_ENABLE" documentation="What to do when the throttle input is lost. Written for UXDuck's tests." user="Standard">
+        <values>
+          <value code="0">Disabled</value>
+          <value code="1">Enabled always RTL</value>
+          <value code="3">Enabled always Land</value>
+        </values>
+      </param>
+      <param humanName="Log bitmask" name="ArduCopter:LOG_BITMASK" documentation="Which messages to log. Written for UXDuck's tests." user="Standard">
+        <field name="Bitmask">0:Fast Attitude,1:Medium Attitude,2:GPS,10:RC output</field>
+      </param>
+      <param humanName="Frame Class" name="ArduCopter:FRAME_CLASS" documentation="The frame's major class. Written for UXDuck's tests." user="Standard">
+        <field name="RebootRequired">True</field>
+        <values>
+          <value code="0">Undefined</value>
+          <value code="1">Quad</value>
+          <value code="2">Hexa</value>
+          <value code="6">Heli</value>
+        </values>
+      </param>
+    </parameters>
+  </vehicles>
+  <libraries>
+    <parameters name="BATT_">
+      <param humanName="Low battery failsafe action" name="BATT_FS_LOW_ACT" documentation="What the vehicle does when the battery runs low. Written for UXDuck's tests." user="Standard">
+        <values>
+          <value code="0">None</value>
+          <value code="1">Land</value>
+          <value code="2">RTL</value>
+        </values>
+      </param>
+      <param humanName="Battery capacity" name="BATT_CAPACITY" documentation="The battery's capacity when full. Written for UXDuck's tests." user="Standard">
+        <field name="Increment">50</field>
+        <field name="Units">mAh</field>
+      </param>
+    </parameters>
+    <parameters name="ATC_">
+      <param humanName="Pitch axis rate controller D gain" name="ATC_RAT_PIT_D" documentation="Pitch rate derivative gain for multicopters. Written for UXDuck's tests." user="Standard">
+        <field name="Range">0.0 0.05</field>
+      </param>
+      <param humanName="Pitch axis rate controller D gain" name="ATC_RAT_PIT_D" documentation="Pitch rate derivative gain for helicopters. Written for UXDuck's tests." user="Standard">
+        <field name="Range">0.0 0.02</field>
+      </param>
+    </parameters>
+    <parameters name="INS_">
+      <param humanName="Accelerometer ID" name="INS_ACC_ID" documentation="The first accelerometer's device ID. Written for UXDuck's tests." user="Advanced">
+        <field name="ReadOnly">True</field>
+      </param>
+      <param humanName="Accelerometer offsets of X axis" name="INS_ACCOFFS_X" documentation="Accelerometer offset on the X axis. Written for UXDuck's tests." user="Advanced">
+        <field name="Calibration">1</field>
+        <field name="Range">-3.5 3.5</field>
+        <field name="Units">m/s/s</field>
+      </param>
+    </parameters>
+    <parameters name="BARO1_">
+      <param humanName="Ground Pressure" name="BARO1_GND_PRESS" documentation="Ground pressure, measured at start-up. Written for UXDuck's tests." user="Advanced">
+        <field name="ReadOnly">True</field>
+        <field name="Units">Pa</field>
+        <field name="Volatile">True</field>
+      </param>
+    </parameters>
+  </libraries>
+</paramfile>

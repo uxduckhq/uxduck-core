@@ -1,0 +1,53 @@
+{
+  "id": "guide-rover",
+  "version": 1,
+  "title": "Get started",
+  "audience": "first-flight",
+  "vehicles": ["rover"],
+  "guide": true,
+  "goal": "A first drive: arm it, send it somewhere, stop it and bring it home.",
+  "start": {},
+  "features": [{ "id": "home", "label": "Home", "radiusM": 10 }],
+  "steps": [
+    {
+      "text": "Press and hold Arm in the Control tab.",
+      "hint": "Armed, it answers commands. Disarmed, it stays where it is.",
+      "hintAfterS": 45,
+      "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
+    },
+    {
+      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "hint": "Go to drives it to the place you clicked and stops it there.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "goTo" },
+        { "check": "mode", "mode": "GUIDED" }
+      ]
+    },
+    {
+      "text": "Choose HOLD in the Mode menu in the Control tab.",
+      "hint": "HOLD stops it where it is.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "setMode", "mode": "HOLD" },
+        { "check": "mode", "mode": "HOLD" }
+      ]
+    },
+    {
+      "text": "Press Return to launch in the Control tab.",
+      "hint": "Return to launch drives it back to where it started.",
+      "hintAfterS": 45,
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "mode", "mode": "RTL" }
+      ]
+    },
+    {
+      "text": "Wait for it to get home.",
+      "hint": "Watch it on the map: it stops in the Home ring.",
+      "hintAfterS": 60,
+      "all": [{ "check": "within", "feature": "home" }]
+    }
+  ],
+  "passed": "Done. It's back home."
+}

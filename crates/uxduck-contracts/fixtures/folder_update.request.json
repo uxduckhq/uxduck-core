@@ -1,0 +1,9 @@
+{
+  "method": "folder/update",
+  "params": {
+    "id": "fo1a2b3c4d5e6f7a8b",
+    "expectedVersion": 1,
+    "parentId": null,
+    "beforeId": "fo9f8e7d6c5b4a3f2e"
+  }
+}

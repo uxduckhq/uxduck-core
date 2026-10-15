@@ -1,0 +1,45 @@
+{
+  "id": "hold-the-box",
+  "version": 1,
+  "title": "Hold the box",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Keep it inside the box by hand for a minute in Loiter, then a minute in Stabilize.",
+  "needsController": true,
+  "start": { "heightM": 30 },
+  "features": [
+    {
+      "id": "box",
+      "label": "Box",
+      "outline": [
+        { "bearingDeg": 315, "distanceM": 28.284 },
+        { "bearingDeg": 45, "distanceM": 28.284 },
+        { "bearingDeg": 135, "distanceM": 28.284 },
+        { "bearingDeg": 225, "distanceM": 28.284 }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "text": "Switch to Loiter and keep it inside the box for 60 seconds with your controller.",
+      "hint": "In Loiter it holds its place when you let go of the sticks. Nudge it back towards the middle.",
+      "hintAfterS": 45,
+      "all": [{ "check": "within", "feature": "box", "forS": 60, "mode": "LOITER" }]
+    },
+    {
+      "text": "Now switch to Stabilize and keep it in for 60 seconds more.",
+      "hint": "In Stabilize it drifts and you hold the height with the throttle. Small, early corrections keep it in.",
+      "hintAfterS": 45,
+      "all": [{ "check": "within", "feature": "box", "forS": 60, "mode": "STABILIZE" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "outside", "feature": "box", "forS": 5 }],
+      "says": "Failed. Out of the box for 5 s."
+    },
+    { "all": [{ "check": "noController" }], "says": "Failed. The controller was released." }
+  ],
+  "passed": "Passed. In the box in both modes.",
+  "measure": { "measure": "longestStay", "feature": "box" }
+}

@@ -1,0 +1,14 @@
+{
+  "method": "sim/start",
+  "params": {
+    "vehicle": "vtol",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523,
+    "altitudeM": 584.0,
+    "headingDeg": 353.0,
+    "frame": "quadplane-tilt",
+    "speedup": 2,
+    "wipe": true,
+    "inAirM": 80.0
+  }
+}

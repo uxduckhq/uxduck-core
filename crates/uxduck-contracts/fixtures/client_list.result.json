@@ -1,0 +1,29 @@
+{
+  "clients": [
+    {
+      "client": {
+        "id": "cl9f3a1c2b4d5e6f70",
+        "name": "Claude Code",
+        "kind": "agent",
+        "executable": "/usr/local/bin/uxduck",
+        "capabilities": ["read", "control"],
+        "createdAtUs": 1790668800000000,
+        "version": 2
+      },
+      "connections": 1,
+      "operator": false
+    },
+    {
+      "client": {
+        "id": "cl0a1b2c3d4e5f6a7b",
+        "name": "UXDuck",
+        "kind": "operator-ui",
+        "capabilities": ["read", "control", "config", "approve"],
+        "createdAtUs": 0,
+        "version": 0
+      },
+      "connections": 2,
+      "operator": true
+    }
+  ]
+}

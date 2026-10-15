@@ -1,0 +1,11 @@
+{
+  "method": "interface/updated",
+  "params": {
+    "version": "0.1.0+e05d65f4.20261011T120000Z",
+    "publishedAt": "2026-10-11T12:00:00Z",
+    "builtIn": false,
+    "updates": true,
+    "updateUxduck": true,
+    "checkedAtMs": 1791720000000
+  }
+}

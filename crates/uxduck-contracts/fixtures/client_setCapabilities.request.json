@@ -1,0 +1,8 @@
+{
+  "method": "client/setCapabilities",
+  "params": {
+    "id": "cl9f3a1c2b4d5e6f70",
+    "expectedVersion": 1,
+    "capabilities": ["read", "control"]
+  }
+}

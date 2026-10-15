@@ -1,0 +1,15 @@
+{
+  "decoded": false,
+  "messages": [
+    {
+      "direction": "received",
+      "id": 0,
+      "name": "#0",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 1.0,
+      "count": 301,
+      "ageMs": 420
+    }
+  ]
+}

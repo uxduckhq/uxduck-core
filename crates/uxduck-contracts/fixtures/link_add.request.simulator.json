@@ -1,0 +1,13 @@
+{
+  "method": "link/add",
+  "params": {
+    "kind": {
+      "type": "simulator",
+      "vehicle": "multicopter",
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.16523,
+      "altitudeM": 584.0,
+      "headingDeg": 353.0
+    }
+  }
+}

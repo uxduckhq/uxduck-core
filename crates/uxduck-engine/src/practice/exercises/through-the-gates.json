@@ -1,0 +1,91 @@
+{
+  "id": "through-the-gates",
+  "version": 2,
+  "title": "Through the gates",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Fly through the five gates in order, by hand, between 20 and 40 m up.",
+  "needsController": true,
+  "start": { "heightM": 30 },
+  "features": [
+    {
+      "id": "gate-1",
+      "label": "1",
+      "offset": { "bearingDeg": 0, "distanceM": 100 },
+      "outline": [
+        { "bearingDeg": 0, "distanceM": 90 },
+        { "bearingDeg": 0, "distanceM": 110 }
+      ]
+    },
+    {
+      "id": "gate-2",
+      "label": "2",
+      "offset": { "bearingDeg": 72, "distanceM": 100 },
+      "outline": [
+        { "bearingDeg": 72, "distanceM": 90 },
+        { "bearingDeg": 72, "distanceM": 110 }
+      ]
+    },
+    {
+      "id": "gate-3",
+      "label": "3",
+      "offset": { "bearingDeg": 144, "distanceM": 100 },
+      "outline": [
+        { "bearingDeg": 144, "distanceM": 90 },
+        { "bearingDeg": 144, "distanceM": 110 }
+      ]
+    },
+    {
+      "id": "gate-4",
+      "label": "4",
+      "offset": { "bearingDeg": 216, "distanceM": 100 },
+      "outline": [
+        { "bearingDeg": 216, "distanceM": 90 },
+        { "bearingDeg": 216, "distanceM": 110 }
+      ]
+    },
+    {
+      "id": "gate-5",
+      "label": "5",
+      "offset": { "bearingDeg": 288, "distanceM": 100 },
+      "outline": [
+        { "bearingDeg": 288, "distanceM": 90 },
+        { "bearingDeg": 288, "distanceM": 110 }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "text": "Fly through gate 1.",
+      "hint": "Fly across the gate's line on the map, between its ends, at 20 to 40 m up.",
+      "hintAfterS": 60,
+      "all": [{ "check": "gateCrossed", "feature": "gate-1", "minM": 20, "maxM": 40 }]
+    },
+    {
+      "text": "Now gate 2.",
+      "all": [{ "check": "gateCrossed", "feature": "gate-2", "minM": 20, "maxM": 40 }]
+    },
+    {
+      "text": "Gate 3.",
+      "all": [{ "check": "gateCrossed", "feature": "gate-3", "minM": 20, "maxM": 40 }]
+    },
+    {
+      "text": "Gate 4.",
+      "all": [{ "check": "gateCrossed", "feature": "gate-4", "minM": 20, "maxM": 40 }]
+    },
+    {
+      "text": "And gate 5.",
+      "all": [{ "check": "gateCrossed", "feature": "gate-5", "minM": 20, "maxM": 40 }]
+    }
+  ],
+  "fails": [
+    { "all": [{ "check": "landed" }], "says": "Failed. It landed before the last gate." },
+    {
+      "all": [{ "check": "outOfOrder", "count": 2 }],
+      "says": "Failed. Gates crossed out of order twice."
+    },
+    { "all": [{ "check": "noController" }], "says": "Failed. The controller was released." }
+  ],
+  "passed": "Passed. Through all five in {elapsed} s.",
+  "measure": { "measure": "elapsed" }
+}

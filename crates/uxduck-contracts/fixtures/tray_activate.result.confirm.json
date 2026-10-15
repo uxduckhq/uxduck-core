@@ -1,0 +1,7 @@
+{
+  "type": "confirm",
+  "title": "Quit UXDuck?",
+  "message": "1 simulation will stop.",
+  "confirm": "Quit",
+  "item": "quit-now"
+}

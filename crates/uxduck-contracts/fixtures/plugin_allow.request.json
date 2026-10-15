@@ -1,0 +1,6 @@
+{
+  "method": "plugin/allow",
+  "params": {
+    "id": "camera-manager"
+  }
+}

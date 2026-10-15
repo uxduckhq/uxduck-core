@@ -1,0 +1,8 @@
+{
+  "method": "analytics/track",
+  "params": {
+    "event": "download_clicked",
+    "platform": "linux_arm64",
+    "from": "home"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "method": "terrain/at",
+  "params": { "latitudeDeg": 53.0685, "longitudeDeg": -4.0763, "dataset": "alos" }
+}

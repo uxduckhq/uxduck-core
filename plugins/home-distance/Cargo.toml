@@ -1,0 +1,17 @@
+[package]
+license = "Apache-2.0"
+name = "home-distance"
+description = "How far each vehicle is from home, a low-battery notice and a Mark command: the plugin ABI v2's example (ADR-0006)."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+uxduck-sdk = { path = "../../crates/uxduck-sdk" }
+serde_json = "1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

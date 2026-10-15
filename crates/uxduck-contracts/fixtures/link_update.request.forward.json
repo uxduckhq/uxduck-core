@@ -1,0 +1,8 @@
+{
+  "method": "link/update",
+  "params": {
+    "id": "lk4d5e6f7a8b9c0d1e",
+    "vehicleFilter": ["12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+    "policy": "read-write"
+  }
+}
