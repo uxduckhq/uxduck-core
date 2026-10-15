@@ -244,9 +244,16 @@ fn claim(
             .vehicle_id
             .or_else(|| engine.live.selection.get(&connection).cloned()),
     };
-    let target = engine.drivable(&controller.id, target)?;
-    engine.require_claim_neutral(&controller, &target)?;
-    engine.require_rc_channels(&controller.mapping_id, &target)?;
+    // Following a selection that is not there yet holds the controller and
+    // drives nothing: the first vehicle selected is a switch to confirm.
+    let target = match (mode, target) {
+        (TargetMode::FollowsSelection, None) => None,
+        (_, target) => Some(engine.drivable(&controller.id, target)?),
+    };
+    engine.require_claim_neutral(&controller, target.as_deref())?;
+    if let Some(target) = &target {
+        engine.require_rc_channels(&controller.mapping_id, target)?;
+    }
     let actor = engine.actor(connection);
     controller.claim = Some(Claim {
         client_id: actor.client_id.clone(),
@@ -254,7 +261,7 @@ fn claim(
         operator_id: actor.operator_id.clone(),
     });
     controller.mode = mode;
-    controller.target = Some(target);
+    controller.target = target;
     controller.pending_target = None;
     controller.version += 1;
     engine
@@ -302,7 +309,10 @@ fn set_target(
     let target = engine.drivable(&controller.id, wanted)?;
     engine.require_rc_channels(&controller.mapping_id, &target)?;
     let moving = controller.target.as_deref() != Some(target.as_str());
-    if moving {
+    if moving && controller.target.is_none() {
+        // Its first vehicle: judged as a claim is, the throttle included.
+        engine.require_claim_neutral(&controller, Some(&target))?;
+    } else if moving {
         let stays = controller.target.as_deref().map_or_else(String::new, |t| {
             format!(": it stays on {}", engine.target_name(t))
         });
@@ -643,7 +653,11 @@ impl Engine {
     /// this controller's pitch. Judged here through the mapping it will
     /// drive by, from its raw input now; by the data plane's word when the
     /// host reads no raw input for it.
-    fn require_claim_neutral(&self, controller: &Controller, target: &str) -> Result<(), ApiError> {
+    fn require_claim_neutral(
+        &self,
+        controller: &Controller,
+        target: Option<&str>,
+    ) -> Result<(), ApiError> {
         let inputs = self.system.controller_inputs();
         let raw = inputs.controllers.iter().find(|c| c.id == controller.id);
         let (Some(raw), Some(mapping)) = (raw, mapping(self, &controller.mapping_id)) else {
@@ -725,10 +739,10 @@ impl Engine {
     fn require_throttle_to_hold(
         &self,
         controller: &Controller,
-        target: &str,
+        target: Option<&str>,
         throttle: f64,
     ) -> Result<(), ApiError> {
-        let Some(vehicle) = self.vehicle(target) else {
+        let Some((target, vehicle)) = target.and_then(|t| Some((t, self.vehicle(t)?))) else {
             return Ok(());
         };
         let copter = Family::of(&vehicle.vehicle_type) == Some(Family::Copter);

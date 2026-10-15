@@ -26,8 +26,12 @@ use crate::paths::{self, DaemonInfo};
 use crate::store;
 use engine_task::EngineHandle;
 
-/// The default loopback port.
-pub const DEFAULT_PORT: u16 = 47800;
+/// Production/snapshots use 450xx; development uses 451xx (scripts/ports.ts).
+pub const DEFAULT_PORT: u16 = 45_000;
+pub const DEV_PORT: u16 = 45_100;
+pub const DEV_ORIGIN: &str = "http://localhost:45101";
+pub const DEV_VIDEO_PORT: u16 = 45_110;
+pub const DEV_FIND_UDP_PORTS: [u16; 2] = [45_111, 45_112];
 
 /// Where controller input comes from.
 #[derive(Clone, Copy, Debug)]

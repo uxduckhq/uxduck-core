@@ -8,7 +8,7 @@ use uxduck_contracts::dto::account::{AccountEnvironment, AccountEnvironmentState
 
 const STAGING: &str = "https://api-staging.uxduck.com";
 const PRODUCTION: &str = "https://api.uxduck.com";
-const LOCAL: &str = "http://localhost:8787";
+const LOCAL: &str = "http://localhost:45103";
 const FILE: &str = "dev-api.json";
 static ACTIVE: OnceLock<Active> = OnceLock::new();
 
@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn default_restores_custom_or_disabled_startup_configuration() {
         assert_eq!(
-            target(None, Some("http://127.0.0.1:8787"), LOCAL),
-            Some("http://127.0.0.1:8787".into())
+            target(None, Some("http://127.0.0.1:45103"), LOCAL),
+            Some("http://127.0.0.1:45103".into())
         );
         assert_eq!(target(None, None, LOCAL), None);
         assert_eq!(
@@ -295,18 +295,18 @@ mod tests {
         assert_eq!(local_url(None).unwrap(), LOCAL);
         for url in [
             "http://127.0.0.1:47985",
-            "http://[::1]:8787/",
-            "https://localhost:8788",
+            "http://[::1]:45103/",
+            "https://localhost:45104",
         ] {
             assert_eq!(local_url(Some(url)).unwrap(), url.trim_end_matches('/'));
         }
         for url in [
             "https://api.uxduck.com",
-            "http://192.168.1.2:8787",
+            "http://192.168.1.2:45103",
             "file:///tmp/api",
-            "http://user:secret@localhost:8787",
-            "http://localhost:8787?token=secret",
-            "http://localhost:8787#api",
+            "http://user:secret@localhost:45103",
+            "http://localhost:45103?token=secret",
+            "http://localhost:45103#api",
         ] {
             assert!(local_url(Some(url)).is_err(), "{url}");
         }

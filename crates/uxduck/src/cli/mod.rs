@@ -17,7 +17,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use crate::daemon::{self, DEFAULT_PORT, DaemonOptions};
+use crate::daemon::{
+    self, DEFAULT_PORT, DEV_FIND_UDP_PORTS, DEV_ORIGIN, DEV_PORT, DEV_VIDEO_PORT, DaemonOptions,
+};
 use client::{CliError, LocalClient};
 
 /// Ground control daemon and command-line interface for MAVLink vehicles.
@@ -230,11 +232,11 @@ impl OpenArgs {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct DaemonArgs {
-    /// Loopback port for the app and WebSocket clients; 0 picks a free one.
-    #[arg(long, env = "UXDUCK_PORT", default_value_t = DEFAULT_PORT)]
-    port: u16,
+    /// Loopback port: 45000 normally, 45100 with --dev; 0 picks a free one.
+    #[arg(long, env = "UXDUCK_PORT")]
+    port: Option<u16>,
     /// The dev server's origin, allowed and used as the UI address with `--dev`.
-    #[arg(long, default_value = "http://localhost:8793")]
+    #[arg(long, default_value = DEV_ORIGIN)]
     dev_origin: String,
     /// Another site that may pair and connect with a token, as UXDuck on the
     /// web does; for tests. Repeatable.
@@ -296,12 +298,12 @@ pub struct DaemonArgs {
     #[arg(long)]
     no_gamepads: bool,
     /// The UDP port cameras send video to (MPEG-TS, or RTP carrying it), or
-    /// `off`.
-    #[arg(long, value_name = "PORT", default_value = "5600", value_parser = video_port, env = "UXDUCK_VIDEO_PORT")]
-    video_port: VideoPort,
+    /// `off`. Defaults to 5600 normally, 45110 with --dev.
+    #[arg(long, value_name = "PORT", value_parser = video_port, env = "UXDUCK_VIDEO_PORT")]
+    video_port: Option<VideoPort>,
     /// Where finding vehicles listens for UDP (tests).
-    #[arg(long = "find-udp-port", value_delimiter = ',', default_values_t = [14_550u16, 15_010], hide = true)]
-    find_udp_ports: Vec<u16>,
+    #[arg(long = "find-udp-port", value_delimiter = ',', hide = true)]
+    find_udp_ports: Option<Vec<u16>>,
     /// Which TCP ports on this computer finding vehicles tries (tests).
     #[arg(long, value_delimiter = ',', default_values_t = [5760u16, 5761, 5762, 5763], hide = true)]
     find_tcp_ports: Vec<u16>,
@@ -2647,7 +2649,9 @@ async fn run_daemon(
     let options = DaemonOptions {
         data_dir,
         exit_on_stdin_close,
-        port: args.port,
+        port: args
+            .port
+            .unwrap_or(if dev { DEV_PORT } else { DEFAULT_PORT }),
         dev_origin: dev.then_some(args.dev_origin),
         hosted_origins: crate::api::listeners::http::HOSTED_ORIGINS
             .iter()
@@ -2680,9 +2684,18 @@ async fn run_daemon(
             gamepads: !args.no_gamepads,
             fake: args.fake_controller,
         },
-        video_port: args.video_port.0,
+        video_port: args
+            .video_port
+            .unwrap_or(VideoPort(Some(if dev { DEV_VIDEO_PORT } else { 5600 })))
+            .0,
         find: crate::find::Places {
-            udp_ports: args.find_udp_ports,
+            udp_ports: args.find_udp_ports.unwrap_or_else(|| {
+                if dev {
+                    DEV_FIND_UDP_PORTS.to_vec()
+                } else {
+                    vec![14_550, 15_010]
+                }
+            }),
             tcp_ports: args.find_tcp_ports,
             gateway: !args.find_no_gateway,
         },

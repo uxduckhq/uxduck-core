@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn only_pages_on_this_computer_are_uxduck_s_own() {
-        assert!(is_own("http://127.0.0.1:47800/?bootstrap=x"));
+        assert!(is_own("http://127.0.0.1:45000/?bootstrap=x"));
         assert!(is_own("http://localhost:5173/home"));
         assert!(!is_own("https://uxduck.com/docs?from=tray"));
         assert!(!is_own("http://127.0.0.1.example.com/"));

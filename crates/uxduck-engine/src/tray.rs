@@ -33,7 +33,7 @@ pub const DOCS: &str = "https://uxduck.com/docs?from=tray";
 
 /// The docs on the website's dev server (apps/website, `pnpm dev`), which a
 /// development build opens (maintainer, 2026-10-12: "not production").
-const LOCAL_DOCS: &str = "http://localhost:8792/docs?from=tray";
+const LOCAL_DOCS: &str = "http://localhost:45102/docs?from=tray";
 
 /// Where "Open documentation" goes from this build: `UXDUCK_DOCS_URL`
 /// when set, the local website in a development build, else [`DOCS`].
@@ -159,21 +159,9 @@ fn activate(
             let id = keep_screenshot(engine, params.screenshot)?;
             opened(engine.open_app(None, &[format!("--feedback={id}")], None)?)
         }
-        // Asks first when something would stop (S107, ADR-0025 D1).
-        "quit" => {
-            if let Some(message) = engine.stop_preview().summary {
-                TrayAction::Confirm {
-                    title: "Quit UXDuck?".into(),
-                    message,
-                    confirm: "Quit".into(),
-                    item: "quit-now".into(),
-                }
-            } else {
-                engine.stop = true;
-                TrayAction::Done
-            }
-        }
-        "quit-now" => {
+        // Explicit menu Quit stops immediately. Keep the old confirmation's
+        // follow-up id working for clients connected before an update.
+        "quit" | "quit-now" => {
             engine.stop = true;
             TrayAction::Done
         }
@@ -465,7 +453,7 @@ impl Engine {
     }
 
     fn simulation_menu(&self) -> Vec<TrayItem> {
-        let mut items = vec![item("simulations", "Open simulations", true)];
+        let mut items = Vec::new();
         for link in self
             .state
             .links
@@ -499,7 +487,7 @@ impl Engine {
             let mut simulation = item(
                 &format!("simulation:{}", link.id),
                 &format!("{name} · {status}"),
-                false,
+                items.is_empty(),
             );
             // One from the last run is not running: stopping removes it.
             let stop_words = if link.status == LinkStatus::Stopped {
@@ -513,7 +501,7 @@ impl Engine {
             ];
             items.push(simulation);
         }
-        let mut stop_all = item("stop-simulations", "Stop all simulations", false);
+        let mut stop_all = item("stop-simulations", "Stop all simulations", items.is_empty());
         stop_all.enabled = self
             .state
             .links

@@ -111,14 +111,14 @@ mod tests {
         let frame = json!({
             "jsonrpc": "2.0",
             "id": 3,
-            "result": { "token": "abc", "uiUrl": "http://127.0.0.1:47800/", "nested": [{ "Password": "x" }] },
+            "result": { "token": "abc", "uiUrl": "http://127.0.0.1:45000/", "nested": [{ "Password": "x" }] },
             "error": { "code": -32601, "message": "nope" },
             "params": { "code": "123456" }
         });
         let redacted = redact(&frame);
         assert_eq!(redacted["result"]["token"], REDACTED);
         assert_eq!(redacted["result"]["nested"][0]["Password"], REDACTED);
-        assert_eq!(redacted["result"]["uiUrl"], "http://127.0.0.1:47800/");
+        assert_eq!(redacted["result"]["uiUrl"], "http://127.0.0.1:45000/");
         assert_eq!(redacted["error"]["code"], -32601);
         assert_eq!(redacted["params"]["code"], REDACTED);
     }

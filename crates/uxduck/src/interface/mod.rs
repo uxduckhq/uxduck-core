@@ -7,7 +7,7 @@
 //! UXDuck's protocol, checks the archive and every file in it, and keeps it
 //! in `<data dir>/interface/`. Offline it serves the last one it followed;
 //! never online, the copy built into `uxduck`. Not a PWA: the browser and
-//! the desktop app just load `http://127.0.0.1:47800`.
+//! the desktop app just load `http://127.0.0.1:45000`.
 //!
 //! An open page is never swapped under the person: the daemon pushes
 //! `interface/updated` and the page offers a reload. A version whose page

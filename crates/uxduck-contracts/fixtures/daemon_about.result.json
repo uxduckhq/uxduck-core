@@ -8,6 +8,6 @@
   "target": "aarch64-apple-darwin",
   "dev": false,
   "dataDir": "/Users/ben/Library/Application Support/UXDuck",
-  "port": 47800,
+  "port": 45000,
   "uptimeUs": 3600000000
 }

@@ -17,9 +17,12 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 | ------------------------ | ----- | ----------------- |
 | Focus the input          | ⌘K    | Ctrl+K            |
 | Show or hide the sidebar | ⌘B    | Ctrl+B            |
+| Show or hide Home        | ⌥H    | Alt+H             |
+| Show or hide Vehicles    | ⌥V    | Alt+V             |
+| Show or hide Places      | ⌥P    | Alt+P             |
 | Send feedback            | ⌥B    | Alt+B             |
 | Open the Map tab         | ⌥M    | Alt+M             |
-| Open the Telemetry tab   | ⌥V    | Alt+V             |
+| Open the Telemetry tab   | ⌥T    | Alt+T             |
 | Back                     | ⌘[    | Alt+←             |
 | Forward                  | ⌘]    | Alt+→             |
 
@@ -27,7 +30,7 @@ Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever charac
 
 ## Change a shortcut
 
-1. Open **Settings › Keyboard**.
+1. Open **Settings › Keyboard & approvals**.
 2. Choose an action's shortcut, then press the new keys. Hold ⌘, ⌃ or ⌥ (Ctrl or Alt) with the key.
 3. **Clear** removes it, **Reset** puts it back, and **Reset all shortcuts** puts them all back.
 

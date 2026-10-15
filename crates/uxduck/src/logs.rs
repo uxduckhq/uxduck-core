@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn lines_are_kept_without_colour_and_scrubbed() {
-        keep("\u{1b}[32m INFO\u{1b}[0m uxduck::daemon: listening on 192.168.1.4:47800");
+        keep("\u{1b}[32m INFO\u{1b}[0m uxduck::daemon: listening on 192.168.1.4:45000");
         let tail = tail();
         assert!(
             tail.iter()

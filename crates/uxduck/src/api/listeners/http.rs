@@ -46,9 +46,9 @@ const TOKEN_PROTOCOL: &str = "uxduck-token.";
 /// Who may talk to the listener.
 #[derive(Clone, Debug)]
 pub struct Allowlist {
-    /// `Host` header values, such as `127.0.0.1:47800`.
+    /// `Host` header values, such as `127.0.0.1:45000`.
     pub hosts: Vec<String>,
-    /// `Origin` header values, such as `http://localhost:8793`.
+    /// `Origin` header values, such as `http://localhost:45101`.
     pub origins: Vec<String>,
     /// Origins of other sites, such as `https://app.uxduck.com`: allowed
     /// with CORS, and with a token instead of the cookie. Their hosts are not.

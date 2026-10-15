@@ -647,8 +647,8 @@ mod tests {
     #[test]
     fn free_text_keeps_ordinary_words_and_ids() {
         assert_eq!(
-            scrub_text("INFO uxduck::daemon: listening port=47800 socket=/tmp/x.sock"),
-            "INFO uxduck::daemon: listening port=47800 socket=/tmp/x.sock"
+            scrub_text("INFO uxduck::daemon: listening port=45000 socket=/tmp/x.sock"),
+            "INFO uxduck::daemon: listening port=45000 socket=/tmp/x.sock"
         );
         assert_eq!(
             scrub_text("link opened on /dev/ttyUSB0."),

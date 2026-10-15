@@ -981,7 +981,7 @@ mod watch_tests {
             "https://app-staging.uxduck.com"
         );
         assert_eq!(
-            app_origin("http://127.0.0.1:8787"),
+            app_origin("http://127.0.0.1:45103"),
             "https://app.uxduck.com"
         );
     }
