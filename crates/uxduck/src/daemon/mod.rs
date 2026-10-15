@@ -729,6 +729,7 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.supervise(now);
                 // Downloads waiting for a vehicle that is back (S121).
                 e.resume_waiting_files(now);
+                e.review_idle_simulations();
             })
             .await
             .is_err()

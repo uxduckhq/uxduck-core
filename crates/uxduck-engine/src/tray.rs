@@ -166,6 +166,15 @@ fn activate(
             TrayAction::Done
         }
         other => {
+            for (prefix, stop) in [
+                ("stop-idle-simulations:", true),
+                ("keep-idle-simulations:", false),
+            ] {
+                if let Some(token) = other.strip_prefix(prefix) {
+                    engine.answer_simulation_reminder(connection, token, stop, granted)?;
+                    return Ok(TrayAction::Done);
+                }
+            }
             if let Some(id) = other.strip_prefix("stop-simulation:") {
                 stop_simulation(engine, connection, id, granted)?;
                 return Ok(TrayAction::Done);
@@ -276,7 +285,7 @@ fn opened(result: AppOpenResult) -> TrayAction {
         .map_or(TrayAction::Done, |url| TrayAction::OpenUrl { url })
 }
 
-fn stop_simulation(
+pub(crate) fn stop_simulation(
     engine: &mut Engine,
     connection: ConnectionId,
     id: &str,
@@ -416,6 +425,22 @@ impl Engine {
             launch,
         ];
         items.extend(self.simulation_menu());
+        if let Some(reminder) = &self.idle_simulations.reminder {
+            let mut row = item("idle-simulations", &reminder.title, false);
+            row.children = vec![
+                item(
+                    &format!("stop-idle-simulations:{}", reminder.id),
+                    "Stop simulations",
+                    false,
+                ),
+                item(
+                    &format!("keep-idle-simulations:{}", reminder.id),
+                    "Keep running",
+                    false,
+                ),
+            ];
+            items.push(row);
+        }
         items.push(item("show-files", "Show files", true));
         items.extend(self.login_menu());
         items.extend([
@@ -427,6 +452,7 @@ impl Engine {
             status,
             tone,
             items,
+            simulation_reminder: self.idle_simulations.reminder.clone(),
         }
     }
 

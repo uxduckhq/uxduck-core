@@ -61,6 +61,19 @@ pub struct TrayMenu {
     pub status: String,
     pub tone: TrayTone,
     pub items: Vec<TrayItem>,
+    /// An unattended-simulation reminder, also delivered while no UI is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation_reminder: Option<SimulationReminder>,
+}
+
+/// A native notification whose opaque token limits its actions to one snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulationReminder {
+    /// An opaque token: actions apply only to this reminder's simulations.
+    pub id: String,
+    pub title: String,
+    pub message: String,
 }
 
 /// `tray/activate`: the item chosen. For `feedback`, the screen as the tray

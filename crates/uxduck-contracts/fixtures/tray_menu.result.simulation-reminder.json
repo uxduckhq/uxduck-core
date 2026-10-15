@@ -1,0 +1,25 @@
+{
+  "status": "UXDuck is running",
+  "tone": "plain",
+  "items": [
+    {
+      "id": "idle-simulations",
+      "label": "2 simulations are still running",
+      "children": [
+        {
+          "id": "stop-idle-simulations:notice-1",
+          "label": "Stop simulations"
+        },
+        {
+          "id": "keep-idle-simulations:notice-1",
+          "label": "Keep running"
+        }
+      ]
+    }
+  ],
+  "simulationReminder": {
+    "id": "notice-1",
+    "title": "2 simulations are still running",
+    "message": "No UXDuck window has been visible for 30 minutes. Stop these simulations to save CPU and battery, or keep them running."
+  }
+}

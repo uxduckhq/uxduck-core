@@ -108,6 +108,13 @@ pub(crate) struct Pending {
     pub(crate) boots: BTreeMap<String, u64>,
 }
 
+impl Pending {
+    pub(crate) fn uses_vehicle(&self, id: &str) -> bool {
+        self.writes.values().any(|write| write.vehicle_id == id)
+            || self.uploads.values().any(|upload| upload.vehicle_id == id)
+    }
+}
+
 fn daemon() -> Actor {
     Actor {
         client_id: "daemon".into(),

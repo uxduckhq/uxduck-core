@@ -28,6 +28,7 @@ mod flight_time;
 mod forwarding;
 mod grounded;
 mod history;
+mod idle_simulations;
 mod import;
 pub mod interface;
 mod klv;
@@ -346,6 +347,7 @@ pub struct Engine {
     login_item: Option<uxduck_contracts::dto::settings::LoginItem>,
     /// Screenshots the tray took for "Send feedback…".
     tray_screenshots: tray::Screenshots,
+    idle_simulations: idle_simulations::IdleSimulations,
     /// Vehicles' own messages (S26).
     messages: messages::Messages,
     /// Which simulated vehicles have flown, for the notice when one is
@@ -466,6 +468,7 @@ impl Engine {
             last_tray_menu: None,
             login_item: None,
             tray_screenshots: tray::Screenshots::default(),
+            idle_simulations: idle_simulations::IdleSimulations::default(),
             messages: messages::Messages::default(),
             flights: grounded::Flights::default(),
             flight_times: flight_time::FlightTimes::default(),
@@ -609,6 +612,7 @@ impl Engine {
         self.tracers.remove(&id);
         self.telemetry_subscribers.remove(&id);
         self.subscribers.remove(&id);
+        self.review_idle_simulations();
     }
 
     #[must_use]
@@ -630,6 +634,7 @@ impl Engine {
         if let Some(reply) = rpc::router::dispatch(self, id, text) {
             self.send(id, &reply);
         }
+        self.review_idle_simulations();
     }
 
     /// Journals one change and pushes it to subscribers: the only way state
@@ -664,6 +669,7 @@ impl Engine {
         }
         self.broadcast(&event);
         self.wake_sync_for(&event);
+        self.review_idle_simulations();
         self.push_tray();
         event
     }

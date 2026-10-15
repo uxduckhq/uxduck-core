@@ -408,7 +408,8 @@ fn sync_tree(dir: &Path) -> std::io::Result<()> {
         if path.is_dir() {
             sync_tree(&path)?;
         } else {
-            File::open(&path)?.sync_all()?;
+            // Windows requires a writable handle for FlushFileBuffers.
+            File::options().write(true).open(&path)?.sync_all()?;
         }
     }
     // Directories cannot be opened for syncing on Windows.

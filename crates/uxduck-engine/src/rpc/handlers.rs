@@ -66,6 +66,8 @@ pub(crate) fn handle(
         }
     };
 
+    engine.note_simulation_consumer(connection, &request);
+
     match request {
         ClientRequest::Initialize(_) => Err(ApiError::new(
             ErrorKind::Internal,
