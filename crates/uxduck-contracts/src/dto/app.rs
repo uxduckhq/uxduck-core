@@ -71,6 +71,9 @@ pub struct AppOpenResult {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AppOpenParams {
+    /// Explicit window/browser actions override the saved launch choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::dto::settings::LaunchAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
     /// UXDuck was opened again while it ran (the Start menu, `uxduck

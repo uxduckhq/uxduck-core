@@ -1,6 +1,6 @@
-//! The tray's supervisor (S64, ADR-0008 "The tray"). In a desktop session
-//! the daemon starts `uxduck-tray` from beside its own executable and keeps
-//! it running while "Show UXDuck in the menu bar" is on: restarted if it
+//! The tray's supervisor (S64, ADR-0008 "The tray"). With `desktop-tray`,
+//! a desktop session starts `uxduck-tray` beside the daemon executable and
+//! keeps it running while "Show UXDuck in the menu bar" is on: restarted if it
 //! crashes, stopped when the daemon stops. It is never orphaned: its stdin
 //! is a pipe from the daemon, and it quits when that closes, even after
 //! `kill -9`. With no display (a Pi, a server, an SSH session) or for a
@@ -79,7 +79,8 @@ fn missing() -> std::io::Error {
 /// # Errors
 /// Missing or unlaunchable required helpers, invalid artwork, or a timeout.
 pub async fn preflight(headless: bool, enabled: bool) -> std::io::Result<Option<Tray>> {
-    if headless
+    if !cfg!(feature = "desktop-tray")
+        || headless
         || !has_display()
         || std::env::var_os("UXDUCK_TRAY").is_some_and(|path| path.is_empty())
     {

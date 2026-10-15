@@ -73,7 +73,10 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [features]
 default = ["gamepad", "plugins"]
 # Build the web app into the executable (release builds). Needs `apps/web/dist`.
-embed-ui = ["dep:rust-embed"]
+embed-ui = ["dep:rust-embed", "desktop-tray"]
+# The UXDuck desktop product requires and supervises its separate tray helper.
+# Core and custom clients run independently by default.
+desktop-tray = []
 # Controllers through the platform's gamepad support (gilrs). Without it,
 # only `--fake-controller` exists: for headless builds with no libudev.
 gamepad = ["dep:gilrs", "dep:objc2-io-kit", "dep:objc2-core-foundation"]
@@ -99,6 +102,8 @@ copyright = "UXDuck"
 extended-description = "The UXDuck daemon and command line: MAVLink links, vehicles, recording and forwarding, with the web app built in. Run `uxduck open`, or `systemctl --user enable --now uxduck`."
 section = "net"
 priority = "optional"
+# Electron runtime dependencies, alongside the native daemon's detected libraries.
+depends = "$auto, libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0, libgbm1, libasound2"
 # The tray icon (S64) needs an app indicator; UXDuck runs without one.
 recommends = "libayatana-appindicator3-1"
 assets = [

@@ -2,6 +2,26 @@ use uxduck_core::domain::settings as s;
 
 use crate::dto::settings as dto;
 
+impl From<s::LaunchAction> for dto::LaunchAction {
+    fn from(value: s::LaunchAction) -> Self {
+        match value {
+            s::LaunchAction::Window => Self::Window,
+            s::LaunchAction::Browser => Self::Browser,
+            s::LaunchAction::MenuBar => Self::MenuBar,
+        }
+    }
+}
+
+impl From<dto::LaunchAction> for s::LaunchAction {
+    fn from(value: dto::LaunchAction) -> Self {
+        match value {
+            dto::LaunchAction::Window => Self::Window,
+            dto::LaunchAction::Browser => Self::Browser,
+            dto::LaunchAction::MenuBar => Self::MenuBar,
+        }
+    }
+}
+
 impl From<s::ClosePolicy> for dto::ClosePolicy {
     fn from(v: s::ClosePolicy) -> Self {
         match v {
@@ -106,6 +126,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
             })
             .collect(),
         shell_path: settings.shell_path.clone(),
+        launch_action: Some(settings.launch_action.into()),
         usage_analytics: settings.usage_analytics,
         share_conversations: settings.share_conversations,
         share_flight_data: settings.share_flight_data,

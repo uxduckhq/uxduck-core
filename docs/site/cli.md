@@ -24,6 +24,21 @@ uxduck rpc call vehicle/list
 
 If you started UXDuck with `--dev` or a custom `--data-dir`, use the same option for your CLI and MCP connection. Otherwise they read a different installation's state.
 
+## Open UXDuck
+
+`uxduck open` starts or reuses UXDuck and follows **When I open UXDuck** from
+Settings. Explicit actions leave that preference unchanged:
+
+```sh
+uxduck open --window
+uxduck open --browser
+uxduck open --print
+```
+
+`--print` prints the browser address without opening it. `uxduck daemon start`
+starts UXDuck in the background without a window; `uxduck mcp` does the same
+when an AI agent connects and UXDuck is not running.
+
 ## Read one vehicle
 
 Copy a vehicle ID from `vehicle/list` in place of `VEHICLE_ID`:

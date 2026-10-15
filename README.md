@@ -1,70 +1,78 @@
 # UXDuck Core
 
-The runtime behind [UXDuck](https://uxduck.com): vehicle connections, MAVLink,
-telemetry, simulations, parameters, missions, plugins, recording, the agent,
-and the command-line and MCP interfaces.
+The open-source runtime behind [UXDuck](https://uxduck.com). Connect MAVLink
+vehicles, understand their telemetry and build tools for drones and robotics.
 
-UXDuck Core is licensed under [Apache-2.0](LICENSE). See [NOTICE](NOTICE) and
-[third-party notices](THIRD_PARTY.md).
+Written in Rust, Core brings vehicle connections, simulation and AI tools into
+one local service. Use it from a terminal, connect your AI assistant over MCP,
+or build your own application with its RPC contracts and plugin SDK.
+
+[Try UXDuck in your browser](https://app.uxduck.com/?fly) · [Apache-2.0 license](LICENSE)
+
+## What you can do
+
+- **Connect real vehicles.** Work with ArduPilot and PX4 over serial, UDP or TCP,
+  and forward MAVLink to other ground stations and tools.
+- **Understand what is happening.** Read live telemetry, inspect vehicle messages
+  and parameter descriptions, and record flights for later investigation.
+- **Work in simulation.** Run ArduPilot and PX4 simulations to explore vehicle
+  behaviour and try your integrations.
+- **Bring your AI assistant.** Ask about telemetry, diagnose connection problems
+  and investigate parameters through MCP. Vehicle commands and changes go through
+  operator permissions and approvals.
+- **Build something of your own.** Create plugins in JavaScript, TypeScript or
+  Rust, or use the RPC interface for your own clients and workflows.
 
 ## Build and run
 
-Install [Rust through rustup](https://rustup.rs). The pinned toolchain installs
-the WebAssembly target needed by the plugin runtime. On Debian or Ubuntu, install
-`build-essential`, `pkg-config` and `libudev-dev` first.
+Install [Rust through rustup](https://rustup.rs). The repository pins the compiler
+and WebAssembly target. On Debian or Ubuntu, also install `build-essential`,
+`pkg-config` and `libudev-dev`.
 
 ```sh
+git clone https://github.com/uxduckhq/uxduck-core.git
+cd uxduck-core
 cargo build --locked -p uxduck
 cargo run --locked -p uxduck -- --help
 ```
 
-Start a headless session on macOS or Linux with:
+Start a headless service on macOS or Linux:
 
 ```sh
 UXDUCK_NO_TRAY=1 cargo run --locked -p uxduck -- daemon
 ```
 
-In PowerShell, set `$env:UXDUCK_NO_TRAY = '1'`, then run the same Cargo command
-without the environment prefix. For development-server access with `--dev`, also
-set `UXDUCK_TERRAIN_URL=none` unless you supply your own terrain verification key.
+In PowerShell, set `$env:UXDUCK_NO_TRAY = '1'`, then run
+`cargo run --locked -p uxduck -- daemon`.
 
-Default builds include gamepads and the plugin runtime, which Cargo builds from
-the included `plugins/script-host` and `packages/sdk/src/runtime.js`. For a headless
-build without those features:
+In another terminal, from the same directory:
 
 ```sh
-cargo build --locked -p uxduck --no-default-features
+cargo run --locked -p uxduck -- rpc call vehicle/list
 ```
 
-This builds the background service and CLI. Connect through the CLI, MCP, or
-your own client.
+An empty list means the service is running and waiting for a vehicle connection.
 
-See `docs/site/` for user guides and `crates/uxduck-contracts/` for RPC types and
-fixtures. No account or signing credentials are required to build locally;
-hosted services and signed catalogues have their own access requirements.
+## Explore
 
-## Verify
+| Start here                                  | What you will find                                    |
+| ------------------------------------------- | ----------------------------------------------------- |
+| [Command line](docs/site/cli.md)            | Inspect vehicles, read telemetry and script commands. |
+| [AI assistants and MCP](docs/site/mcp.md)   | Connect an assistant and investigate your vehicles.   |
+| [Plugin guide](docs/site/write-a-plugin.md) | Build and test your own plugins.                      |
+| [RPC contracts](crates/uxduck-contracts/)   | Types and fixtures for building a client.             |
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo check --locked --target wasm32-unknown-unknown -p uxduck-web
-```
+MCP clients can launch `cargo run --locked -p uxduck -- mcp` over stdio from
+this directory. See the [CI workflow](.github/workflows/ci.yml) for build and test
+commands.
 
-Simulation tests use native ArduPilot builds. On macOS or Linux, run
-`scripts/sitl.sh copter plane rover blimp` before running them. It downloads and
-builds ArduPilot separately; its source and licensing remain upstream's.
+## Contributing
 
-## Contributions and synchronization
+Bug reports, ideas, documentation improvements and pull requests are welcome.
+[Open an issue](https://github.com/uxduckhq/uxduck-core/issues) to share what you
+are building or discuss a change. For bugs, include your platform, the UXDuck
+version and steps to reproduce the problem.
 
-Development currently happens in the private UXDuck workspace. This repository
-receives reviewed exports from that workspace. Open issues and pull requests here;
-accepted changes are applied there first and arrive in the next export. Public
-commits contain public files only, with no private Git history or commit messages.
+## License
 
-`core-export.json` records the source commit, file hashes and executable flags.
-The source commit identifies an export; it does not grant access to the private
-repository. The private workspace publishes a one-way export after its independent
-Core build and tests pass. Public main is managed by that sync; submit changes
-through issues and pull requests rather than editing it directly.
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE) and [third-party notices](THIRD_PARTY.md).

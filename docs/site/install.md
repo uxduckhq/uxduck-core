@@ -26,11 +26,20 @@ systemctl --user start uxduck
 
 ## Open the app
 
+Open **UXDuck** from Applications, Spotlight or the Start menu. It starts UXDuck
+in the background and opens its desktop window. The installer finishes without
+opening a window. You can also use:
+
 ```
 uxduck open
 ```
 
-This opens the app already connected to UXDuck on this computer. Check it is running with:
+In **Settings › Connections › When I open UXDuck**, choose **Open a window**,
+**Open in browser** or **Run in menu bar only**. The menu bar has the same
+preference and separate **Open window** and **Open in browser** actions. Changing
+the preference opens nothing.
+
+Check UXDuck is running with:
 
 ```
 uxduck status

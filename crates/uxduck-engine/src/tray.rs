@@ -20,6 +20,7 @@ use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::LinkStatus;
 use uxduck_core::domain::notification::{NotificationKind, NotificationState, Severity, Subject};
+use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::Change;
 
@@ -116,7 +117,9 @@ fn activate(
     params: TrayActivateParams,
     granted: &[Capability],
 ) -> Result<TrayAction, ApiError> {
-    if (params.item.starts_with("stop-") || params.item == "login-item")
+    if (params.item.starts_with("stop-")
+        || params.item == "login-item"
+        || params.item.starts_with("launch-"))
         && !granted.contains(&Capability::Config)
     {
         return Err(ApiError::new(
@@ -124,18 +127,20 @@ fn activate(
             Capability::Config.denied_message(),
         ));
     }
-    let browser = |engine: &mut Engine, extra: &str| {
-        let token = engine.create_bootstrap();
-        TrayAction::OpenUrl {
-            url: format!("{}?bootstrap={token}{extra}", engine.config.ui_url),
-        }
-    };
     Ok(match params.item.as_str() {
         // What `uxduck open` does: the desktop app when chosen (S110), else
         // the page already open, else a new one (S107: never a second).
-        "open" => opened(engine.open_app(None, &[])),
-        "open-browser" => browser(engine, ""),
-        "simulations" => open_page(engine, "/vehicles#simulated"),
+        "open" => opened(engine.open_app(None, &[], Some(LaunchAction::Window))?),
+        "open-browser" => opened(engine.open_app(None, &[], Some(LaunchAction::Browser))?),
+        "launch-window" | "launch-browser" | "launch-menu-bar" => {
+            engine.set_launch_action(match params.item.as_str() {
+                "launch-browser" => LaunchAction::Browser,
+                "launch-menu-bar" => LaunchAction::MenuBar,
+                _ => LaunchAction::Window,
+            });
+            TrayAction::Done
+        }
+        "simulations" => open_page(engine, "/vehicles#simulated")?,
         "stop-simulations" => stop_all_simulations(engine, connection, granted)?,
         "docs" => TrayAction::OpenUrl { url: docs_url() },
         // The whole data folder: recordings, logs, the database (S108).
@@ -152,7 +157,7 @@ fn activate(
         },
         "feedback" => {
             let id = keep_screenshot(engine, params.screenshot)?;
-            opened(engine.open_app(None, &[format!("--feedback={id}")]))
+            opened(engine.open_app(None, &[format!("--feedback={id}")], None)?)
         }
         // Asks first when something would stop (S107, ADR-0025 D1).
         "quit" => {
@@ -198,7 +203,7 @@ fn activate(
                         ApiError::new(ErrorKind::NotFound, "This simulation has no vehicle yet")
                     })?;
                 let page = format!("/vehicles/{}", vehicle.id);
-                return Ok(open_page(engine, &page));
+                return open_page(engine, &page);
             }
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -271,8 +276,8 @@ fn item(id: &str, label: &str, separator_before: bool) -> TrayItem {
 pub const LOGIN_ITEMS_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
 
-fn open_page(engine: &mut Engine, page: &str) -> TrayAction {
-    opened(engine.open_app(Some(page), &[]))
+fn open_page(engine: &mut Engine, page: &str) -> Result<TrayAction, ApiError> {
+    Ok(opened(engine.open_app(Some(page), &[], None)?))
 }
 
 /// What the tray does after `open_app`: nothing when UXDuck opened, else
@@ -400,10 +405,28 @@ impl Engine {
             };
             (status, TrayTone::Plain)
         };
-        let mut items = vec![item("open", "Open UXDuck", false)];
-        if state.settings.shell_path.is_some() {
-            items.push(item("open-browser", "Open in a browser", false));
-        }
+        let mut launch = item("launch", "When I open UXDuck", false);
+        launch.children = [
+            ("launch-window", "Open a window", LaunchAction::Window),
+            ("launch-browser", "Open in browser", LaunchAction::Browser),
+            (
+                "launch-menu-bar",
+                "Run in menu bar only",
+                LaunchAction::MenuBar,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, label, action)| {
+            let mut choice = item(id, label, false);
+            choice.checked = Some(state.settings.launch_action == action);
+            choice
+        })
+        .collect();
+        let mut items = vec![
+            item("open", "Open window", false),
+            item("open-browser", "Open in browser", false),
+            launch,
+        ];
         items.extend(self.simulation_menu());
         items.push(item("show-files", "Show files", true));
         items.extend(self.login_menu());

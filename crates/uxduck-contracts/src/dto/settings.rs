@@ -12,6 +12,16 @@ pub enum ClosePolicy {
     Quit,
 }
 
+/// What opening UXDuck from its app icon does; not MCP or login startup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaunchAction {
+    #[default]
+    Window,
+    Browser,
+    MenuBar,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageCategory {
@@ -73,6 +83,9 @@ pub struct Settings {
     /// The desktop shell that registered itself; `uxduck open` starts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_path: Option<String>,
+    /// Absent on older daemons, so a newer interface can ask for an update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_action: Option<LaunchAction>,
     /// Usage analytics (Settings > Data): on until switched off.
     pub usage_analytics: bool,
     /// Whether conversations may be kept to improve the agent.
@@ -171,6 +184,8 @@ const fn warning() -> u8 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_action: Option<LaunchAction>,
     /// Set one vehicle's pilot input method. Requires its controller released.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pilot_input: Option<PilotInputSetting>,

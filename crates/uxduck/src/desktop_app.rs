@@ -1,16 +1,6 @@
-//! The desktop app (S110, ADR-0025 D6): Electron, downloaded only when the
-//! person asks, into `<data dir>/desktop-app/<version>/`, and started by
-//! UXDuck as its own child, as the menu-bar helper is. It is never put in
-//! /Applications or the Start menu, so it is part of the one app.
-//!
-//! The release manifest (signed with the release key) names its version
-//! and, for each platform, the archive's URL, size, SHA-256 and size on
-//! disk. A download must match both before it is unpacked; on macOS the
-//! app must then be signed by the same developer as UXDuck itself, which is
-//! checked again before every start. One that fails its checks is deleted
-//! and the reason kept for Settings. A new UXDuck keeps it: it is
-//! downloaded again only when the manifest names another version, and only
-//! when the person asks.
+//! The desktop window: shipped with UXDuck, loaded only on an explicit
+//! app/window action. Signed runtime updates may also be kept in the data
+//! folder. The daemon and menu-bar helper run independently of Electron.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -64,6 +54,8 @@ pub struct DesktopApp {
     key: Option<String>,
     target: String,
     dir: PathBuf,
+    /// Shipped with the installer; never downloaded or started implicitly.
+    bundled_dir: PathBuf,
     data_dir: PathBuf,
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
@@ -92,6 +84,7 @@ impl DesktopApp {
             key,
             target: crate::update::TARGET.to_owned(),
             dir: data_dir.join("desktop-app"),
+            bundled_dir: bundled_directory(&std::env::current_exe().unwrap_or_default()),
             data_dir: data_dir.to_owned(),
             runtime,
             state: Mutex::new(State::default()),
@@ -118,6 +111,23 @@ impl DesktopApp {
             .map(|(_, name, path)| (name, path))
     }
 
+    fn available_installation(&self) -> Option<(String, PathBuf)> {
+        let bundled = std::fs::read(self.bundled_dir.join(INSTALLED))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value["version"].as_str().map(str::to_owned))
+            .filter(|_| executable(&self.bundled_dir).is_file())
+            .map(|version| (version, self.bundled_dir.clone()));
+        [self.installed(), bundled]
+            .into_iter()
+            .flatten()
+            .filter_map(|(version, folder)| {
+                Some((semver::Version::parse(&version).ok()?, version, folder))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, version, folder)| (version, folder))
+    }
+
     /// Where it stands; asks the release channel the first time, and again
     /// when `refresh`. The engine fills in `chosen`.
     pub fn status(self: &Arc<Self>, refresh: bool) -> DesktopAppStatus {
@@ -130,7 +140,7 @@ impl DesktopApp {
         if fetch_now {
             self.fetch();
         }
-        let installed = self.installed();
+        let installed = self.available_installation();
         let state = self.lock();
         let offered = match &state.fetch {
             Fetch::Ready(offered) => offered.clone(),
@@ -338,10 +348,14 @@ impl DesktopApp {
     /// # Errors
     /// When none is installed, or it fails its checks (it is then deleted).
     pub fn path(&self) -> Result<String, String> {
-        let (_, folder) = self.installed().ok_or("Download the desktop app first.")?;
+        let (_, folder) = self.available_installation().ok_or(
+            "UXDuck's desktop window is missing. Reinstall UXDuck, or run `uxduck open --browser`. For a development window, package apps/desktop first."
+        )?;
         let exe = executable(&folder);
         if let Err(why) = check_signature(&exe) {
-            let _ = std::fs::remove_dir_all(&folder);
+            if folder != self.bundled_dir {
+                let _ = std::fs::remove_dir_all(&folder);
+            }
             self.lock().failed = Some(why.clone());
             return Err(why);
         }
@@ -356,12 +370,17 @@ impl DesktopApp {
     /// start.
     pub fn open(&self, path: &str, args: &[String]) -> Result<(), String> {
         let path = Path::new(path);
-        let inside = std::fs::canonicalize(path)
-            .ok()
-            .zip(std::fs::canonicalize(&self.dir).ok())
-            .is_some_and(|(exe, dir)| exe.starts_with(dir));
+        let inside = std::fs::canonicalize(path).is_ok_and(|exe| {
+            std::fs::canonicalize(executable(&self.bundled_dir))
+                .ok()
+                .as_ref()
+                == Some(&exe)
+                || std::fs::canonicalize(&self.dir).is_ok_and(|dir| exe.starts_with(dir))
+        });
         if !inside {
-            return Err("It is not the desktop app UXDuck downloaded.".into());
+            return Err(
+                "It is not the desktop window shipped with UXDuck or an installed update.".into(),
+            );
         }
         if let Err(why) = check_signature(path) {
             if let Some((_, folder)) = self.installed() {
@@ -412,6 +431,18 @@ impl DesktopApp {
     }
 }
 
+/// Installers and portable archives use the same runtime folder name.
+fn bundled_directory(daemon: &Path) -> PathBuf {
+    let parent = daemon.parent().unwrap_or_else(|| Path::new("."));
+    if cfg!(target_os = "macos") && parent.ends_with("Contents/MacOS") {
+        return parent.join("../Resources/desktop-app");
+    }
+    if cfg!(target_os = "linux") && parent == Path::new("/usr/bin") {
+        return PathBuf::from("/usr/lib/uxduck/desktop-app");
+    }
+    parent.join("desktop-app")
+}
+
 /// The version and archive the manifest offers for this computer.
 #[must_use]
 pub fn offered(manifest: &ReleaseManifest, target: &str) -> Option<(String, DesktopAppArtifact)> {
@@ -420,6 +451,11 @@ pub fn offered(manifest: &ReleaseManifest, target: &str) -> Option<(String, Desk
         .artifacts
         .iter()
         .find(|artifact| artifact.target == target)
+        .or_else(|| {
+            release.artifacts.iter().find(|artifact| {
+                target.ends_with("apple-darwin") && artifact.target == "universal-apple-darwin"
+            })
+        })
         .map(|artifact| (release.version.clone(), artifact.clone()))
 }
 
@@ -563,7 +599,7 @@ fn check_signature(exe: &Path) -> Result<(), String> {
     if valid && team(app).as_deref() == Some(own.as_str()) {
         Ok(())
     } else {
-        Err("The desktop app is not signed by UXDuck's developer, so it was deleted.".into())
+        Err("The desktop app is not signed by UXDuck's developer. Reinstall UXDuck.".into())
     }
 }
 
@@ -615,6 +651,53 @@ mod tests {
         let app = DesktopApp::new(data, runtime.handle().clone());
         std::mem::forget(runtime);
         app
+    }
+
+    #[test]
+    fn bundled_runtime_is_available_without_a_download_and_newer_updates_win() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(&tmp.path().join("data"));
+        Arc::get_mut(&mut app).unwrap().bundled_dir = tmp.path().join("bundled");
+        let write_runtime = |dir: &Path, version: &str| {
+            let exe = executable(dir);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+            std::fs::write(
+                dir.join(INSTALLED),
+                format!("{{\"version\":\"{version}\"}}"),
+            )
+            .unwrap();
+        };
+        write_runtime(&app.bundled_dir, "0.2.0");
+        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        assert_eq!(
+            app.path().unwrap(),
+            executable(&app.bundled_dir).display().to_string()
+        );
+        assert!(
+            app.children.lock().unwrap().is_empty(),
+            "finding a runtime never starts it"
+        );
+        write_runtime(&app.dir.join("0.1.0"), "0.1.0");
+        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        write_runtime(&app.dir.join("0.3.0"), "0.3.0");
+        assert_eq!(app.available_installation().unwrap().0, "0.3.0");
+        app.remove().unwrap();
+        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        assert!(
+            executable(&app.bundled_dir).is_file(),
+            "the installer owns the bundled runtime"
+        );
+    }
+
+    #[test]
+    fn a_missing_runtime_has_an_actionable_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        Arc::get_mut(&mut app).unwrap().bundled_dir = tmp.path().join("missing");
+        let error = app.path().unwrap_err();
+        assert!(error.contains("Reinstall UXDuck"));
+        assert!(error.contains("open --browser"));
     }
 
     #[test]
@@ -725,7 +808,7 @@ mod tests {
         assert!(
             app.open(&elsewhere.display().to_string(), &[])
                 .unwrap_err()
-                .contains("not the desktop app")
+                .contains("not the desktop window")
         );
     }
 }

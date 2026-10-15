@@ -29,7 +29,7 @@ fn failure(id: &Value, code: i64, message: &str) -> Value {
 ///
 /// # Errors
 /// When stdin or stdout fail.
-pub async fn run(data_dir: &Path) -> Result<(), CliError> {
+pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     let catalogue = tools();
@@ -50,7 +50,7 @@ pub async fn run(data_dir: &Path) -> Result<(), CliError> {
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or("MCP client")
                     .to_owned();
-                match connect(data_dir, &name).await {
+                match connect(data_dir, dev, &name).await {
                     Ok(client) => {
                         daemon = Some(client);
                         reply(
@@ -101,8 +101,12 @@ pub async fn run(data_dir: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn connect(data_dir: &Path, name: &str) -> Result<LocalClient, CliError> {
-    let mut client = LocalClient::connect(data_dir).await?;
+async fn connect(data_dir: &Path, dev: bool, name: &str) -> Result<LocalClient, CliError> {
+    let mut client = match LocalClient::connect(data_dir).await {
+        Ok(client) => client,
+        Err(CliError::NoDaemon(_)) => crate::cli::start_daemon(data_dir, dev).await?,
+        Err(error) => return Err(error),
+    };
     client.initialize_as(name, "agent", false).await?;
     Ok(client)
 }

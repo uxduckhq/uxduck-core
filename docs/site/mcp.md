@@ -19,7 +19,9 @@ On Windows the file is `%APPDATA%\Claude\claude_desktop_config.json`; use `"comm
 
 ## Check the connection
 
-Start UXDuck, then reconnect or restart the agent's MCP connection after adding it. Ask: **“List the vehicles UXDuck can hear, and show the running version and link status.”** It should use `vehicle_list`, `daemon_about` and `link_list`.
+Reconnect or restart the agent's MCP connection after adding it. MCP starts
+UXDuck in the background if needed, without opening a window or browser. Closing
+the MCP connection leaves UXDuck and its work running. Ask: **“List the vehicles UXDuck can hear, and show the running version and link status.”** It should use `vehicle_list`, `daemon_about` and `link_list`.
 
 An empty vehicle list means the connection reached UXDuck but has no vehicle to inspect. Follow [Connect a vehicle](/docs/connect-a-vehicle) or [Troubleshooting](/docs/troubleshooting). A simulation running only inside a browser is separate from the installed UXDuck that `uxduck mcp` connects to.
 

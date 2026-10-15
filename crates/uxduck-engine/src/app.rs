@@ -11,13 +11,12 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::link::{LinkKind, LinkStatus};
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::domain::video::RecordingState;
 use uxduck_core::events::Change;
 use uxduck_core::policy::admission::Trust;
 
-use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
@@ -92,11 +91,15 @@ pub(crate) fn handle(
         ClientRequest::AppFocus(_) => to_value(&AppFocusResult {
             focused: engine.focus_page(),
         }),
-        ClientRequest::AppOpen(AppOpenParams { page, reopened }) => {
+        ClientRequest::AppOpen(AppOpenParams {
+            page,
+            reopened,
+            target,
+        }) => {
             if *reopened {
                 engine.tray_reopened();
             }
-            to_value(&engine.open_app(page.as_deref(), &[]))
+            to_value(&engine.open_app(page.as_deref(), &[], target.map(Into::into))?)
         }
         ClientRequest::DaemonStopPreview(_) => to_value(&engine.stop_preview()),
         _ => Err(ApiError::new(ErrorKind::Internal, "not an app method")),
@@ -121,42 +124,45 @@ fn words(kind: StopKind, count: u32, vehicle: Option<&str>) -> String {
 }
 
 impl Engine {
-    /// Opens UXDuck as chosen (S110): the desktop app, which UXDuck starts
-    /// (a running one comes forward); else a page already open comes
-    /// forward; else the address to open, already paired. A desktop app
-    /// that fails its checks or does not start is said so, and the browser
-    /// is used instead.
-    pub(crate) fn open_app(&mut self, page: Option<&str>, extra: &[String]) -> AppOpenResult {
-        if let Some(path) = self.state.settings.shell_path.clone() {
+    /// Only deliberate launches consult the saved choice. Explicit menu
+    /// actions can always open a window or browser, without changing it.
+    pub(crate) fn open_app(
+        &mut self,
+        page: Option<&str>,
+        extra: &[String],
+        target: Option<LaunchAction>,
+    ) -> Result<AppOpenResult, ApiError> {
+        let action = target.unwrap_or(self.state.settings.launch_action);
+        if action == LaunchAction::MenuBar && page.is_none() && extra.is_empty() {
+            return Ok(AppOpenResult {
+                opened: true,
+                url: None,
+            });
+        }
+        // Opening a particular page is explicit, even in menu-bar-only mode.
+        if action != LaunchAction::Browser {
+            let path = self
+                .system
+                .desktop_app_path()
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
             let args: Vec<String> = page
                 .map(|page| format!("--page={page}"))
                 .into_iter()
                 .chain(extra.iter().cloned())
                 .collect();
-            match self.system.desktop_app_open(&path, &args) {
-                Ok(()) => {
-                    return AppOpenResult {
-                        opened: true,
-                        url: None,
-                    };
-                }
-                Err(why) => self.raise(Raise {
-                    severity: Severity::Warning,
-                    kind: NotificationKind::Transient,
-                    subject: Subject::System,
-                    title: "The desktop app couldn't open".into(),
-                    body: Some(format!("{why} UXDuck opened in your browser instead.")),
-                    actions: Vec::new(),
-                    condition: None,
-                    report: None,
-                }),
-            }
-        }
-        if page.is_none() && extra.is_empty() && self.focus_page() {
-            return AppOpenResult {
+            self.system
+                .desktop_app_open(&path, &args)
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            return Ok(AppOpenResult {
                 opened: true,
                 url: None,
-            };
+            });
+        }
+        if page.is_none() && extra.is_empty() && self.focus_page() {
+            return Ok(AppOpenResult {
+                opened: true,
+                url: None,
+            });
         }
         let token = self.create_bootstrap();
         let base = self.config.ui_url.trim_end_matches('/').to_owned();
@@ -174,19 +180,42 @@ impl Engine {
         } else {
             format!("#{hash}")
         };
-        AppOpenResult {
+        Ok(AppOpenResult {
             opened: false,
             url: Some(format!("{base}{path}?{query}{hash}")),
-        }
+        })
     }
 
     /// Opens UXDuck in the desktop app at `path`, or in a browser.
     pub(crate) fn set_shell_path(&mut self, path: Option<String>) {
-        if self.state.settings.shell_path == path {
+        let action = if path.is_some() {
+            LaunchAction::Window
+        } else {
+            LaunchAction::Browser
+        };
+        if self.state.settings.shell_path == path && self.state.settings.launch_action == action {
             return;
         }
         let mut settings = self.state.settings.clone();
+        settings.launch_action = action;
         settings.shell_path = path;
+        settings.version += 1;
+        self.commit_as(
+            crate::plugins::daemon(),
+            Change::SettingsChanged { settings },
+        );
+        self.push_tray();
+    }
+
+    pub(crate) fn set_launch_action(&mut self, action: LaunchAction) {
+        let mut settings = self.state.settings.clone();
+        settings.launch_action = action;
+        if action == LaunchAction::MenuBar {
+            settings.show_in_menu_bar = true;
+        }
+        if settings == self.state.settings {
+            return;
+        }
         settings.version += 1;
         self.commit_as(
             crate::plugins::daemon(),
@@ -207,9 +236,8 @@ impl Engine {
             DesktopAppState::Installed => {
                 let path = self.system.desktop_app_path()?;
                 self.set_shell_path(Some(path));
-                if !self.open_app(None, &[]).opened {
-                    return Err("The desktop app couldn't open.".into());
-                }
+                self.open_app(None, &[], Some(LaunchAction::Window))
+                    .map_err(|error| error.message)?;
             }
             DesktopAppState::Available | DesktopAppState::Failed if status.version.is_some() => {
                 self.system.desktop_app_download()?;
@@ -227,13 +255,12 @@ impl Engine {
     /// The desktop app as the host has it, and whether it is chosen.
     pub fn desktop_app_status(&mut self, refresh: bool) -> DesktopAppStatus {
         let mut status = self.system.desktop_app(refresh);
-        status.chosen = self.state.settings.shell_path.is_some();
+        status.chosen = self.state.settings.launch_action == LaunchAction::Window;
         status
     }
 
-    /// Asks one connected page to come forward: a page on screen first,
-    /// else the one seen last. False when no page is connected. Pages
-    /// reached through the account's relay are someone else's screen.
+    /// Asks one browser page to come forward, never an Electron or remote
+    /// page. A desktop window is brought forward by its own process.
     pub(crate) fn focus_page(&mut self) -> bool {
         let page = self
             .connections
@@ -242,7 +269,7 @@ impl Engine {
                 c.admitted
                     .as_ref()
                     .is_some_and(|a| a.kind == ClientKind::OperatorUi)
-                    && !matches!(c.trust, Trust::Relay { .. })
+                    && matches!(c.trust, Trust::PairedBrowser { .. })
             })
             .max_by_key(|(_, c)| (c.visible, c.seen))
             .map(|(id, _)| *id);

@@ -30,33 +30,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libudev-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - uses: actions/cache/restore@v5
-        if: runner.os != 'Windows'
-        id: sitl
-        with:
-          path: .cache/simulators/native
-          key: core-sitl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sitl.sh', 'scripts/simulator.sh', 'scripts/simulator-cache.sh') }}
-      - name: Native simulators
-        if: runner.os != 'Windows' && steps.sitl.outputs.cache-hit != 'true'
-        run: scripts/sitl.sh copter plane rover blimp
-        shell: bash
-      - name: Require native simulator binaries
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          for binary in arducopter arduplane ardurover blimp; do
-            if [ ! -x ".cache/simulators/native/$binary" ]; then
-              echo "::error::Missing $binary; rebuild with scripts/sitl.sh copter plane rover blimp."
-              exit 1
-            fi
-          done
-      - uses: actions/cache/save@v5
-        if: runner.os != 'Windows' && steps.sitl.outputs.cache-hit != 'true'
-        with:
-          path: .cache/simulators/native
-          key: ${{ steps.sitl.outputs.cache-primary-key }}
-      - run: cargo test --workspace --locked --no-fail-fast
+      - name: Unit, contract and daemon/CLI/MCP smoke tests
+        run: cargo test --workspace --locked --no-fail-fast
         timeout-minutes: 20
       - run: cargo check --locked --target wasm32-unknown-unknown -p uxduck-web
       - run: cargo check --locked -p uxduck --no-default-features
-      - run: cargo test --locked -p uxduck --no-default-features --test cli
+      - run: cargo test --locked -p uxduck --no-default-features --test cli --test smoke

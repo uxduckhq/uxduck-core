@@ -198,13 +198,32 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Open the app in a browser, already paired with UXDuck. Starts UXDuck
-    /// in the background first when it isn't running, as opening UXDuck.app does.
-    Open {
-        /// Print the address instead of opening it.
-        #[arg(long)]
-        print: bool,
-    },
+    /// Open UXDuck using its saved launch preference. Starts the background
+    /// daemon first when needed, as opening UXDuck.app does.
+    Open(OpenArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct OpenArgs {
+    /// Print the address instead of opening it.
+    #[arg(long)]
+    print: bool,
+    /// Open in a browser without changing the saved launch preference.
+    #[arg(long, conflicts_with_all = ["window", "print"])]
+    browser: bool,
+    /// Open a desktop window without changing the saved launch preference.
+    #[arg(long, conflicts_with = "print")]
+    window: bool,
+}
+
+impl OpenArgs {
+    fn target(&self) -> Option<&'static str> {
+        match (self.browser, self.window) {
+            (true, _) => Some("browser"),
+            (_, true) => Some("window"),
+            _ => None,
+        }
+    }
 }
 
 // Each bool is a command-line switch.
@@ -934,7 +953,7 @@ async fn run_command(cli: Cli) -> ExitCode {
                 }
             };
         }
-        Some(Command::Mcp) => crate::mcp::run(&data_dir).await,
+        Some(Command::Mcp) => crate::mcp::run(&data_dir, cli.dev).await,
         Some(Command::Approvals { command }) => approvals(&data_dir, command).await,
         Some(Command::Plugin { command }) => plugin(&data_dir, command).await,
         Some(Command::Ports { command: None }) => ports_list(&data_dir).await,
@@ -979,7 +998,7 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Config {
             command: ConfigCommand::Set { name, value },
         }) => config_set(&data_dir, &name, value).await,
-        Some(Command::Open { print }) => open(&data_dir, cli.dev, print).await,
+        Some(Command::Open(args)) => open(&data_dir, cli.dev, args.print, args.target()).await,
         Some(Command::Service { command }) => service(&command),
         Some(Command::Status { json }) => {
             status(&data_dir, json);
@@ -1817,7 +1836,27 @@ fn status(data_dir: &std::path::Path, json: bool) {
 
 /// Starts UXDuck in the background for `open` and waits until it answers.
 /// It outlives this command, in its own process group, with no terminal.
-async fn start_daemon(data_dir: &std::path::Path, dev: bool) -> Result<LocalClient, CliError> {
+pub(crate) async fn start_daemon(
+    data_dir: &std::path::Path,
+    dev: bool,
+) -> Result<LocalClient, CliError> {
+    // Several MCP clients and the app may arrive together. Serialize startup,
+    // then check again: the daemon's lifetime lock alone only rejects a loser.
+    std::fs::create_dir_all(data_dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join("daemon-start.lock"))?;
+    let _startup = tokio::task::spawn_blocking(move || {
+        lock.lock()?;
+        Ok::<_, std::io::Error>(lock)
+    })
+    .await
+    .map_err(|error| CliError::Usage(format!("could not coordinate UXDuck startup: {error}")))??;
+    if let Ok(client) = LocalClient::connect(data_dir).await {
+        return Ok(client);
+    }
     let exe = std::env::current_exe()
         .map_err(|e| CliError::Usage(format!("cannot find uxduck to start it: {e}")))?;
     let mut command = std::process::Command::new(exe);
@@ -1864,7 +1903,12 @@ async fn start_daemon(data_dir: &std::path::Path, dev: bool) -> Result<LocalClie
     }
 }
 
-async fn open(data_dir: &std::path::Path, dev: bool, print: bool) -> Result<(), CliError> {
+async fn open(
+    data_dir: &std::path::Path,
+    dev: bool,
+    print: bool,
+    target: Option<&str>,
+) -> Result<(), CliError> {
     let (mut client, reopened) = match LocalClient::connect(data_dir).await {
         Ok(client) => (client, true),
         Err(CliError::NoDaemon(_)) => (start_daemon(data_dir, dev).await?, false),
@@ -1872,28 +1916,20 @@ async fn open(data_dir: &std::path::Path, dev: bool, print: bool) -> Result<(), 
     };
     client.initialize().await?;
     if !print {
-        // After an update stopped UXDuck, the pages that were open are
-        // reconnecting: they get a few seconds to come back (S107).
-        if std::fs::remove_file(data_dir.join(REOPEN_AFTER_UPDATE)).is_ok() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while std::time::Instant::now() < deadline {
-                let focus = client
-                    .call("app/focus", Value::Object(serde_json::Map::new()))
-                    .await?;
-                if focus["focused"] == true {
-                    return Ok(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
+        if focus_after_update(&mut client, data_dir, target).await? {
+            return Ok(());
         }
         // The desktop app when chosen (S110), else a page already open comes
         // forward (S107), else a new page in a browser. Opened again while
         // it ran, the tray says so under its icon; never at first start.
         let opened = client
-            .call("app/open", serde_json::json!({ "reopened": reopened }))
+            .call(
+                "app/open",
+                serde_json::json!({ "reopened": reopened, "target": target }),
+            )
             .await?;
         let Some(url) = opened["url"].as_str() else {
-            eprintln!("UXDuck is open.");
+            eprintln!("UXDuck is running.");
             return Ok(());
         };
         crate::adapters::browser::open(url)
@@ -1914,6 +1950,41 @@ async fn open(data_dir: &std::path::Path, dev: bool, print: bool) -> Result<(), 
     };
     println!("{ui_url}?bootstrap={token}");
     Ok(())
+}
+
+/// Reconnecting browser pages get a grace period after an update. A saved
+/// menu-bar/window choice must never focus a browser as a side effect.
+async fn focus_after_update(
+    client: &mut LocalClient,
+    data_dir: &std::path::Path,
+    target: Option<&str>,
+) -> Result<bool, CliError> {
+    if std::fs::remove_file(data_dir.join(REOPEN_AFTER_UPDATE)).is_err() {
+        return Ok(false);
+    }
+    let browser = if let Some(target) = target {
+        target == "browser"
+    } else {
+        let state = client
+            .call(
+                "state/subscribe",
+                serde_json::json!({"entities":["settings"]}),
+            )
+            .await?;
+        state["snapshot"]["settings"]["launchAction"] == "browser"
+    };
+    if !browser {
+        return Ok(false);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let focus = client.call("app/focus", serde_json::json!({})).await?;
+        if focus["focused"] == true {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Ok(false)
 }
 
 /// Release builds use the hosted model only (ADR-0013 P5).

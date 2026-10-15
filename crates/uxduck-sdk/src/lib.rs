@@ -42,6 +42,7 @@
 use base64::Engine as _;
 use serde_json::{Map, Value};
 
+#[cfg(target_arch = "wasm32")]
 pub use extism_pdk;
 pub use uxduck_contracts::dto::command::{Command, Risk};
 pub use uxduck_contracts::dto::notification::Severity;

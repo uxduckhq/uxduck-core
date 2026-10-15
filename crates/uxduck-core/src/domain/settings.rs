@@ -42,6 +42,16 @@ pub enum ClosePolicy {
     Quit,
 }
 
+/// What a deliberate app launch opens. Background startup never uses it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaunchAction {
+    #[default]
+    Window,
+    Browser,
+    MenuBar,
+}
+
 /// Where the daemon's disk space goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -106,6 +116,8 @@ pub struct Settings {
     /// instead of a browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_path: Option<String>,
+    #[serde(default)]
+    pub launch_action: LaunchAction,
     /// Usage analytics (ADR-0013 P1, P2): on until switched off. Off, the
     /// daemon keeps no install id and sends no events (ADR-0016 O15).
     #[serde(default = "on")]
@@ -247,6 +259,7 @@ impl Default for Settings {
             close_policy: None,
             auto_delete_days: BTreeMap::new(),
             shell_path: None,
+            launch_action: LaunchAction::default(),
             usage_analytics: true,
             share_conversations: true,
             share_flight_data: false,

@@ -16,6 +16,3 @@ third-party licenses or notices.
   downloads, not relicensed or bundled into this source export. ArduPilot's
   applicable GPL terms continue to apply to those downloads. Test parameter
   fixtures in `crates/uxduck-contracts/fixtures/pdef/` use UXDuck-authored wording.
-- `crates/uxduck-media/fixtures/testsrc-h264.mpegts` is a generated FFmpeg test
-  pattern, not a customer recording. Vendor-dialect and flight fixtures in this
-  repository are test inputs; personal feedback bundles are excluded.

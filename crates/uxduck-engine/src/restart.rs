@@ -251,6 +251,18 @@ fn desktop(
     if let Some(on) = show_in_menu_bar {
         settings.show_in_menu_bar = on;
     }
+    if let Some(action) = params.launch_action {
+        settings.launch_action = action.into();
+    }
+    if settings.launch_action == uxduck_core::domain::settings::LaunchAction::MenuBar {
+        if params.show_in_menu_bar == Some(false) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Choose a window or browser before hiding UXDuck from the menu bar.",
+            ));
+        }
+        settings.show_in_menu_bar = true;
+    }
     // Registered first: the setting says what is true. Asked again even
     // when it looks the same, as the system may have changed it.
     if let Some(on) = start_at_login {

@@ -1,6 +1,7 @@
 {
   "closePolicy": "quit",
   "closePolicySet": true,
+  "launchAction": "window",
   "usageAnalytics": true,
   "shareConversations": true,
   "shareFlightData": false,
