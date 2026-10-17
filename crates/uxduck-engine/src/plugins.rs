@@ -222,7 +222,7 @@ fn command(
         return Err(ApiError::new(
             ErrorKind::NotFound,
             format!(
-                "the {} plugin has no command {command}; tool/search lists them",
+                "the {} plugin has no command {command}. Use tool/search to list available commands",
                 plugin.name
             ),
         ));
@@ -322,7 +322,7 @@ fn test(
     else {
         return Err(ApiError::new(
             ErrorKind::NotFound,
-            format!("no draft {}; plugin/draft writes one", params.id),
+            format!("no draft {}. Use plugin/draft to create one", params.id),
         ));
     };
     let vehicle = match &params.vehicle_id {
@@ -392,7 +392,7 @@ fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
     }
     if manifest.abi != PLUGIN_ABI {
         return Err(format!(
-            "{} is built for plugin ABI v{}; this UXDuck runs v{PLUGIN_ABI}. Rebuild it with the current SDK.",
+            "{} is built for plugin ABI v{}. This UXDuck runs v{PLUGIN_ABI}. Rebuild it with the current SDK.",
             manifest.id, manifest.abi
         ));
     }
@@ -619,7 +619,7 @@ impl Engine {
                 self.plugin_failed(
                     &id,
                     &format!(
-                        "It is built for plugin ABI v{}; this UXDuck runs v{PLUGIN_ABI}. Rebuild it with the current SDK and install it again.",
+                        "It is built for plugin ABI v{}. This UXDuck runs v{PLUGIN_ABI}. Rebuild it with the current SDK and install it again.",
                         plugin.abi
                     ),
                 );

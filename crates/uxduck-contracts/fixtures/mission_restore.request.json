@@ -1,0 +1,7 @@
+{
+  "method": "mission/restore",
+  "params": {
+    "recordId": "v1a2b3c:9f2b6c1d0e4a7b38",
+    "vehicleId": "v1a2b3c"
+  }
+}

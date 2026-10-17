@@ -18,6 +18,7 @@ macro_rules! both_ways {
 }
 
 both_ways!(c::TargetMode, dto::TargetMode, Pinned, FollowsSelection);
+both_ways!(c::StickMode, dto::StickMode, Mode1, Mode2, Mode3, Mode4);
 both_ways!(
     c::ThrottleRange,
     dto::ThrottleRange,
@@ -128,6 +129,7 @@ impl From<&c::InputMapping> for dto::InputMapping {
             yaw: v.yaw.into(),
             throttle: v.throttle.into(),
             throttle_range: v.throttle_range.into(),
+            stick_mode: v.stick_mode.map(Into::into),
             deadzone: v.deadzone,
             buttons: v.buttons.iter().map(Into::into).collect(),
             positions: v.positions.iter().map(Into::into).collect(),

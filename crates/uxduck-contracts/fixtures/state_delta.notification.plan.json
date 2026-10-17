@@ -1,0 +1,113 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 42,
+    "changes": [
+      {
+        "entity": "plan",
+        "id": "plan1a2b3c4d5e6f7a8b",
+        "op": "upsert",
+        "plan": {
+          "id": "plan1a2b3c4d5e6f7a8b",
+          "name": "Ridge survey",
+          "vehicleType": "vtol",
+          "autopilot": "ardupilot",
+          "frame": "above-terrain",
+          "items": [
+            {
+              "command": 22,
+              "frame": 10,
+              "params": [0.0, 0.0, 0.0, null],
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "altitudeM": 30.0,
+              "autocontinue": true
+            },
+            {
+              "command": 16,
+              "frame": 10,
+              "params": [0.0, 0.0, 0.0, null],
+              "latitudeDeg": -35.3605,
+              "longitudeDeg": 149.1652,
+              "altitudeM": 40.0,
+              "autocontinue": true
+            }
+          ],
+          "fence": {
+            "polygons": [
+              {
+                "inclusion": true,
+                "points": [
+                  {
+                    "latitudeDeg": -35.35,
+                    "longitudeDeg": 149.15
+                  },
+                  {
+                    "latitudeDeg": -35.37,
+                    "longitudeDeg": 149.15
+                  },
+                  {
+                    "latitudeDeg": -35.37,
+                    "longitudeDeg": 149.17
+                  }
+                ]
+              }
+            ],
+            "circles": [
+              {
+                "inclusion": false,
+                "center": {
+                  "latitudeDeg": -35.36,
+                  "longitudeDeg": 149.16
+                },
+                "radiusM": 25.0
+              }
+            ],
+            "settings": {
+              "ceilingM": 100.0,
+              "action": "return-to-launch"
+            }
+          },
+          "rally": [
+            {
+              "latitudeDeg": -35.365,
+              "longitudeDeg": 149.161,
+              "altitudeM": 60.0
+            }
+          ],
+          "plannedHome": {
+            "latitudeDeg": -35.363261,
+            "longitudeDeg": 149.16523,
+            "altitudeM": 584.0
+          },
+          "nextAltitudeM": 40.0,
+          "minClearanceM": 10.0,
+          "labels": ["Survey"],
+          "notes": "",
+          "placeName": "Canberra",
+          "placeAt": {
+            "latitudeDeg": -35.36,
+            "longitudeDeg": 149.16
+          },
+          "bounds": {
+            "southDeg": -35.37,
+            "westDeg": 149.15,
+            "northDeg": -35.35,
+            "eastDeg": 149.17
+          },
+          "madeBy": "person",
+          "createdAtUs": 1790669300000000,
+          "changedAtUs": 1790669400000000,
+          "uploads": [],
+          "undo": 1,
+          "redo": 0,
+          "version": 2
+        }
+      }
+    ],
+    "tsUs": 1790669400000000,
+    "actor": {
+      "clientId": "c1a2b3c4d5e6f7a8b"
+    }
+  }
+}

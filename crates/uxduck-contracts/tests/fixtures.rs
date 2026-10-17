@@ -83,7 +83,11 @@ fn check(name: &str) {
         ("result", "vehicle_list" | "vehicle_label") => {
             round_trip::<VehicleListResult>(name, &json);
         }
-        ("result", "vehicle_get" | "vehicle_save" | "vehicle_size" | "vehicle_dismiss") => {
+        (
+            "result",
+            "vehicle_get" | "vehicle_save" | "vehicle_size" | "vehicle_bookmarks"
+            | "vehicle_dismiss",
+        ) => {
             round_trip::<Vehicle>(name, &json);
         }
         ("result", "link_add" | "link_enable" | "link_disable" | "link_update") => {
@@ -112,6 +116,37 @@ fn check(name: &str) {
         }
         ("result", "place_save" | "place_update") => {
             round_trip::<uxduck_contracts::dto::search::SavedPlace>(name, &json);
+        }
+        (
+            "result",
+            "plan_get" | "plan_create" | "plan_update" | "plan_undo" | "plan_redo" | "plan_place"
+            | "plan_delete" | "plan_restore",
+        ) => {
+            round_trip::<uxduck_contracts::dto::plan::Plan>(name, &json);
+        }
+        ("result", "plan_list") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanListResult>(name, &json);
+        }
+        ("result", "plan_import") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanImportResult>(name, &json);
+        }
+        ("result", "plan_check") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanCheckResult>(name, &json);
+        }
+        ("result", "mission_restore") => {
+            round_trip::<uxduck_contracts::dto::mission::MissionRestoreResult>(name, &json);
+        }
+        ("result", "mission_history") => {
+            round_trip::<uxduck_contracts::dto::mission::MissionHistoryResult>(name, &json);
+        }
+        ("result", "plan_examples") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanExamplesResult>(name, &json);
+        }
+        ("result", "plan_upload") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanUploadResult>(name, &json);
+        }
+        ("result", "plan_export") => {
+            round_trip::<uxduck_contracts::dto::plan::PlanExportResult>(name, &json);
         }
         ("result", "plugin_share" | "plugin_shared") => {
             round_trip::<uxduck_contracts::dto::plugin::PluginShare>(name, &json);
@@ -191,6 +226,9 @@ fn check(name: &str) {
         ("result", "daemon_wakeups") => {
             round_trip::<uxduck_contracts::dto::settings::Wakeups>(name, &json);
         }
+        ("result", "location_status" | "location_start" | "location_stop") => {
+            round_trip::<uxduck_contracts::dto::location::LocationStatus>(name, &json);
+        }
         ("result", "interface_status" | "interface_check") => {
             round_trip::<uxduck_contracts::dto::interface::InterfaceStatus>(name, &json);
         }
@@ -200,7 +238,7 @@ fn check(name: &str) {
         ("result", "storage_usage") => {
             round_trip::<uxduck_contracts::dto::settings::StorageUsage>(name, &json);
         }
-        ("result", "controller_claim" | "controller_setTarget") => {
+        ("result", "controller_claim" | "controller_setTarget" | "controller_keyboardStart") => {
             round_trip::<uxduck_contracts::dto::controller::Controller>(name, &json);
         }
         ("result", "controller_inputs") => {
@@ -231,10 +269,20 @@ fn check(name: &str) {
         ("result", "vehicle_addNote" | "vehicle_editNote" | "vehicle_deleteNote") => {
             round_trip::<uxduck_contracts::dto::history::HistoryEntry>(name, &json);
         }
+        ("result", "video_devices") => {
+            round_trip::<uxduck_contracts::dto::video::VideoDevicesResult>(name, &json);
+        }
         ("result", "video_list") => {
             round_trip::<uxduck_contracts::dto::video::VideoListResult>(name, &json);
         }
-        ("result", "video_assign" | "video_rename" | "video_track") => {
+        (
+            "result",
+            "video_assign"
+            | "video_rename"
+            | "video_track"
+            | "video_capture"
+            | "video_capture_enable",
+        ) => {
             round_trip::<uxduck_contracts::dto::video::VideoSource>(name, &json);
         }
         ("result", "find_start" | "find_vehicles") => {
@@ -293,6 +341,9 @@ fn check(name: &str) {
         }
         ("result", "client_list") => {
             round_trip::<uxduck_contracts::dto::client::ClientListResult>(name, &json);
+        }
+        ("result", "network_status") => {
+            round_trip::<uxduck_contracts::dto::network::NetworkStatus>(name, &json);
         }
         ("result", "client_setCapabilities") => {
             round_trip::<uxduck_contracts::dto::client::ClientRecord>(name, &json);
@@ -428,12 +479,15 @@ fn check(name: &str) {
             | "folder_delete"
             | "link_remove"
             | "controller_release"
+            | "controller_keyboardInput"
+            | "controller_keyboardStop"
             | "controller_forget"
             | "daemon_restart"
             | "daemon_stop"
             | "client_visibility"
             | "desktopApp_download"
             | "place_remove"
+            | "transfer_cancel"
             | "plugin_remove"
             | "plugin_command"
             | "client_select"
@@ -463,7 +517,9 @@ fn check(name: &str) {
             | "files_mkdir"
             | "files_rename"
             | "files_cancel"
-            | "terrain_removeArea",
+            | "terrain_removeArea"
+            | "tray_location"
+            | "client_forget",
         ) => {
             round_trip::<Empty>(name, &json);
         }
@@ -519,7 +575,8 @@ fn initialize_result_grants_in_order() {
             Capability::Read,
             Capability::Control,
             Capability::Config,
-            Capability::Approve
+            Capability::Approve,
+            Capability::Location
         ]
     );
 }

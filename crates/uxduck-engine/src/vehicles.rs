@@ -96,7 +96,9 @@ impl Engine {
     }
 
     /// Holds the wake lock while any vehicle is online (ADR-0004), so a
-    /// closed lid or an idle timer does not drop a link.
+    /// closed lid or an idle timer does not drop a link, and keeps the
+    /// display on while a real one is armed, so the screen does not lock in
+    /// flight; a simulated one never keeps it on (maintainer, 2026-10-16).
     pub(crate) fn refresh_wake_lock(&mut self) {
         let online = self
             .state
@@ -106,6 +108,15 @@ impl Engine {
         if online != self.awake {
             self.awake = online;
             self.system.wake_lock(online);
+        }
+        let flying = self
+            .state
+            .vehicles
+            .values()
+            .any(|v| v.presence == Presence::Online && v.armed && !self.is_simulated(v));
+        if flying != self.display_awake {
+            self.display_awake = flying;
+            self.system.display_awake(flying);
         }
     }
 
@@ -155,6 +166,7 @@ impl Engine {
             dismissed: false,
             local_only: false,
             labels: Vec::new(),
+            bookmarks: Vec::new(),
             size_cm: None,
             version: 0,
         });

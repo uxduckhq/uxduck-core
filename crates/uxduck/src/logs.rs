@@ -236,7 +236,7 @@ pub fn query(
     for e in &mut found {
         e.text = uxduck_engine::feedback::scrub_text(&e.text);
     }
-    let coverage = DiagnosticCoverage { requested_from_us: from, requested_to_us: to, available_from_us: kept.front().map(|e| e.at_us), available_to_us: kept.back().map(|e| e.at_us), truncated: LOST.load(Ordering::Relaxed), source: "memory".into(), notes: vec!["Only the last 500 lines of this daemon run are retained. Text is redacted using the feedback scrubber; timestamps mark capture time.".into()] };
+    let coverage = DiagnosticCoverage { requested_from_us: from, requested_to_us: to, available_from_us: kept.front().map(|e| e.at_us), available_to_us: kept.back().map(|e| e.at_us), truncated: LOST.load(Ordering::Relaxed), source: "memory".into(), notes: vec!["Only the last 500 lines of this daemon run are retained. Text is redacted using the feedback scrubber. Timestamps mark capture time.".into()] };
     Ok(DaemonLogsResult {
         entries: found,
         older,

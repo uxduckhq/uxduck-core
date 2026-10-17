@@ -16,6 +16,7 @@ use crate::dto::notification::Notification;
 use crate::dto::operator::Operator;
 use crate::dto::param_definitions::VehicleDefinitions;
 use crate::dto::parameter::{Parameter, ParameterSet};
+use crate::dto::plan::Plan;
 use crate::dto::plugin::Plugin;
 use crate::dto::practice::PracticeAttempt;
 use crate::dto::search::SavedPlace;
@@ -54,6 +55,8 @@ pub enum EntityType {
     Plugin,
     /// A saved place.
     Place,
+    /// A saved plan (ADR-0029).
+    Plan,
     /// A simulation snapshot (S34).
     Snapshot,
     /// Which definition set describes a vehicle's parameters, keyed by
@@ -124,6 +127,8 @@ pub struct Snapshot {
     pub plugins: Option<Vec<Plugin>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub places: Option<Vec<SavedPlace>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plans: Option<Vec<Plan>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<Vec<SimSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +207,8 @@ pub struct EntityChange {
     pub plugin: Option<Plugin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<SavedPlace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SimSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

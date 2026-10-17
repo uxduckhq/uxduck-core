@@ -7,6 +7,42 @@ summary: Receive camera video, resolve port conflicts and find recordings.
 
 Watch and record your vehicle's camera beside the map, and see on the map where it's looking.
 
+## A webcam, USB camera or analog FPV receiver
+
+Connect the camera, or the receiver's yellow RCA video output through a USB
+capture adapter, to the computer running UXDuck. In a Camera tab choose **Add a
+camera › Webcam or USB capture adapter**, choose the device and press **Connect
+camera**. The adapter needs an OS-compatible driver; its product title alone does
+not establish compatibility.
+
+Use **Camera default** for webcams and USB cameras. For analog FPV, choose **PAL**
+or **NTSC** to request the matching input mode, correct the 4:3 picture shape and
+deinterlace each field. Camera default also lets you specify picture size and
+frame rate. Some analog adapters need their input/standard configured in their
+driver. In **Camera settings**, choose the vehicle by hand. **Capture settings**
+changes the mode; **Pause capture** closes the device, and **Resume capture** opens
+it again.
+
+Capture and recording belong to UXDuck running in the background. **Record**
+continues with every tab and window closed. Unplugging ends the current recording
+segment; reconnecting the same device resumes capture and recording in another
+segment. Quitting UXDuck stops capture. An adapter without a stable identity may
+need selecting again after a reconnect or a change of USB port. Sound is not
+captured.
+
+```
+uxduck video devices
+uxduck video capture "<device id>" --standard pal
+uxduck video list
+uxduck video record <source id>
+uxduck video record <source id> --stop
+uxduck video pause <source id>
+uxduck video resume <source id>
+```
+
+Local footage is encoded by UXDuck's capture helper; its capture settings are
+kept with the recording. Network-camera originals keep their existing path.
+
 ## Send the stream to UXDuck
 
 1. Set the camera to send to this computer's address on UDP port **5600**: MPEG-TS, plain or in RTP, or H.264 or H.265 in RTP as QGroundControl expects.

@@ -65,7 +65,7 @@ async fn check_mcp(directory: &Path) {
         (
             3,
             "tools/call",
-            json!({ "name": "vehicle_list", "arguments": {} }),
+            json!({ "name": "uxduck_call_tool", "arguments": { "name": "vehicle_list" } }),
         ),
     ] {
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -88,7 +88,7 @@ async fn check_mcp(directory: &Path) {
                     .as_array()
                     .expect("tool list")
                     .iter()
-                    .any(|tool| tool["name"] == "vehicle_list")
+                    .any(|tool| tool["name"] == "uxduck_call_tool")
             ),
             3 => {
                 assert_ne!(reply["result"]["isError"], true, "{reply}");

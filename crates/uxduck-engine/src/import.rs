@@ -103,6 +103,9 @@ impl Engine {
                 state.places.get(&place.id).map(|p| p.version),
                 place.version,
             ),
+            Change::PlanSaved { plan, .. } => {
+                newer(state.plans.get(&plan.id).map(|p| p.version), plan.version)
+            }
             Change::SnapshotUpserted { snapshot } => newer(
                 state.snapshots.get(&snapshot.id).map(|s| s.version),
                 snapshot.version,

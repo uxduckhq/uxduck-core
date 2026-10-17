@@ -6,6 +6,7 @@
 //! [`root`] is the root itself and has no JavaScript in it. On `wasm32`,
 //! [`WebDaemon`] wraps it for the worker with wasm-bindgen.
 
+pub mod gamepads;
 pub mod root;
 
 #[cfg(target_arch = "wasm32")]
@@ -88,6 +89,10 @@ mod web {
         /// # Errors
         /// When the checkpoint cannot be read.
         #[wasm_bindgen(constructor)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the worker's JavaScript constructor has a fixed positional callback ABI"
+        )]
         #[allow(
             clippy::needless_pass_by_value,
             reason = "wasm-bindgen passes an optional string by value"

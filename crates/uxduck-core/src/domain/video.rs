@@ -5,6 +5,39 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A camera attached to the computer running the daemon, never to a UI session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureInput {
+    /// Opaque platform device identity returned by `video/devices`.
+    pub device_id: String,
+    /// The device's name when selected; retained while unplugged.
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    /// Analog input standard; Auto keeps the device's default mode.
+    #[serde(default)]
+    pub standard: CaptureStandard,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<f64>,
+    /// Bob deinterlacing preserves each field's time for analog FPV.
+    #[serde(default)]
+    pub deinterlace: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureStandard {
+    #[default]
+    Auto,
+    Pal,
+    Ntsc,
+}
+
 /// How the stream arrives (V3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -105,6 +138,9 @@ pub struct VideoSource {
     /// Someone added it; it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,
+    /// Local device capture and its encoding provenance; absent for network cameras.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureInput>,
     /// Every video track an RTSP camera offers, the one playing marked
     /// (S90); empty until it answers, and for UDP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -268,6 +304,9 @@ pub struct VideoRecording {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub trigger: RecordingTrigger,
+    /// Capture settings at the start; these pictures were encoded by UXDuck's helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureInput>,
     pub version: u64,
 }
 

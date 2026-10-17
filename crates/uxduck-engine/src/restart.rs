@@ -24,6 +24,7 @@ use uxduck_core::domain::parameter::TransferStatus;
 use uxduck_core::domain::settings::{ClosePolicy, Settings, StorageCategory};
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::{Actor, Change};
+use uxduck_core::policy::admission::Trust;
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -330,6 +331,45 @@ fn remote_control(
     Ok(())
 }
 
+/// "Phones and tablets on this network" (S97): one of this computer's
+/// IPv4 addresses, or off. Only at this computer: not from a phone on the
+/// network, nor from away, so nobody lets themselves in.
+fn network_address(
+    engine: &Engine,
+    connection: ConnectionId,
+    params: &SettingsUpdateParams,
+    settings: &mut uxduck_core::domain::settings::Settings,
+) -> Result<(), ApiError> {
+    let Some(address) = &params.network_address else {
+        return Ok(());
+    };
+    let here = engine
+        .connections
+        .get(&connection)
+        .is_some_and(|c| matches!(c.trust, Trust::LocalUser | Trust::PairedBrowser { .. }));
+    if !here {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Phones and tablets can only be let in at the computer itself.",
+        ));
+    }
+    let address = address.trim();
+    if address.is_empty() {
+        settings.network_address = None;
+        return Ok(());
+    }
+    match address.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() => {
+            settings.network_address = Some(ip.to_string());
+            Ok(())
+        }
+        _ => Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!("{address} isn't one of this computer's addresses on a network."),
+        )),
+    }
+}
+
 /// A new ground station system id goes to the data plane, and to a search
 /// under way, whose probes say hello from it.
 fn gcs_system_id_changed(engine: &mut Engine, before: u8, after: u8) {
@@ -434,6 +474,7 @@ fn update_settings(
     }
 
     remote_control(engine, connection, &params, &mut settings)?;
+    network_address(engine, connection, &params, &mut settings)?;
     desktop(engine, &mut settings, &params)?;
     if let Some(on) = params.share_conversations {
         settings.share_conversations = on;
@@ -689,7 +730,7 @@ impl Engine {
         for mut set in sets {
             set.status = TransferStatus::Failed;
             set.detail = Some(
-                "interrupted by a restart; it downloads again when the vehicle is heard".into(),
+                "interrupted by a restart. It downloads again when the vehicle is heard".into(),
             );
             self.commit_as(daemon(), Change::ParameterSetUpserted { set });
         }

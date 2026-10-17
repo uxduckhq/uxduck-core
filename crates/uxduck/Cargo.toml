@@ -51,10 +51,16 @@ aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sy
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# This computer's addresses, for "Phones and tablets on this network" (S97).
+if-addrs = "0.15"
 oxc = { version = "0.152", features = ["transformer", "codegen", "semantic"], optional = true }
 
 # Every input of a joystick and its value when it connects (macOS): gilrs
 # reports an input only once it changes. The crates and versions gilrs uses.
+# Keeping the system and display awake on Windows (SetThreadExecutionState).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-io-kit = { version = "0.3.2", default-features = false, features = [
   "std",

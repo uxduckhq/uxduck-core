@@ -4,6 +4,6 @@
   "minClientVersion": "0.1.0",
   "capabilities": { "video": false, "mcp": true, "runsIn": "installed", "simulator": false },
   "clientId": "c7d0a3f2-5b1e-4c8a-9f3d-2e6b8a1c4d50",
-  "granted": ["read", "control", "config", "approve"],
+  "granted": ["read", "control", "config", "approve", "location"],
   "releaseStage": "flight"
 }

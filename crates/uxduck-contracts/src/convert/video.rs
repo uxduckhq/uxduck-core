@@ -75,6 +75,7 @@ impl From<&core::VideoSource> for dto::VideoSource {
             klv: v.klv,
             url: v.url.as_deref().map(core::redact),
             added_by_hand: v.added_by_hand,
+            capture: v.capture.as_ref().map(Into::into),
             tracks: v.tracks.iter().map(Into::into).collect(),
             counters: (&v.counters).into(),
             first_seen_us: v.first_seen_us,
@@ -124,12 +125,50 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
                 core::RecordingState::Failed => dto::RecordingState::Failed,
             },
             detail: v.detail.clone(),
+            capture: v.capture.as_ref().map(Into::into),
             trigger: match v.trigger {
                 core::RecordingTrigger::ByHand => dto::RecordingTrigger::ByHand,
                 core::RecordingTrigger::Armed => dto::RecordingTrigger::Armed,
                 core::RecordingTrigger::Always => dto::RecordingTrigger::Always,
             },
             version: v.version,
+        }
+    }
+}
+
+impl From<&core::CaptureInput> for dto::CaptureInput {
+    fn from(v: &core::CaptureInput) -> Self {
+        Self {
+            device_id: v.device_id.clone(),
+            name: v.name.clone(),
+            enabled: v.enabled,
+            standard: match v.standard {
+                core::CaptureStandard::Auto => dto::CaptureStandard::Auto,
+                core::CaptureStandard::Pal => dto::CaptureStandard::Pal,
+                core::CaptureStandard::Ntsc => dto::CaptureStandard::Ntsc,
+            },
+            width: v.width,
+            height: v.height,
+            frame_rate: v.frame_rate,
+            deinterlace: v.deinterlace,
+        }
+    }
+}
+impl From<dto::CaptureInput> for core::CaptureInput {
+    fn from(v: dto::CaptureInput) -> Self {
+        Self {
+            device_id: v.device_id,
+            name: v.name,
+            enabled: v.enabled,
+            standard: match v.standard {
+                dto::CaptureStandard::Auto => core::CaptureStandard::Auto,
+                dto::CaptureStandard::Pal => core::CaptureStandard::Pal,
+                dto::CaptureStandard::Ntsc => core::CaptureStandard::Ntsc,
+            },
+            width: v.width,
+            height: v.height,
+            frame_rate: v.frame_rate,
+            deinterlace: v.deinterlace,
         }
     }
 }

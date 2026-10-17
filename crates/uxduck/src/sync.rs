@@ -344,7 +344,7 @@ impl Task {
 }
 
 fn unreachable() -> Stop {
-    Stop::Problem("UXDuck cannot reach its server; it will try again.".into())
+    Stop::Problem("UXDuck cannot reach its server. It will try again.".into())
 }
 
 fn refused(answer: &reqwest::Response) -> Result<(), Stop> {

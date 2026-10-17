@@ -27,6 +27,9 @@ pub(crate) struct IdleSimulations {
     /// A non-UI consumer keeps its scope until the connection ends.
     consumers: BTreeMap<ConnectionId, BTreeSet<String>>,
     all_consumers: BTreeSet<ConnectionId>,
+    /// Since when no UXDuck window has been visible: vehicles' warnings
+    /// raised since go to the system's notifications through the tray.
+    pub unseen_since_us: Option<u64>,
 }
 
 impl Engine {
@@ -52,6 +55,17 @@ impl Engine {
             .all_consumers
             .retain(|connection| self.connections.contains_key(connection));
         let previous = self.idle_simulations.reminder.clone();
+        let unseen = if self.has_visible_ui() {
+            None
+        } else {
+            Some(
+                self.idle_simulations
+                    .unseen_since_us
+                    .unwrap_or_else(|| self.clock.now_us()),
+            )
+        };
+        let unseen_changed = unseen != self.idle_simulations.unseen_since_us;
+        self.idle_simulations.unseen_since_us = unseen;
         if self.has_visible_ui()
             || self.config.capabilities.runs_in != RunsIn::Installed
             || !self.opened.desktop
@@ -100,7 +114,7 @@ impl Engine {
                 }
             }
         }
-        if previous != self.idle_simulations.reminder {
+        if previous != self.idle_simulations.reminder || unseen_changed {
             self.push_tray();
         }
     }
@@ -285,7 +299,7 @@ impl Engine {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(ApiError::new(ErrorKind::Internal, failures.join("; ")))
+            Err(ApiError::new(ErrorKind::Internal, failures.join(". ")))
         }
     }
 }

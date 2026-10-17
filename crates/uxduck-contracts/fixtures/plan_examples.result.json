@@ -1,0 +1,25 @@
+{
+  "examples": [
+    {
+      "name": "Example box",
+      "vehicleType": "multicopter",
+      "autopilot": "ardupilot",
+      "frame": "above-home",
+      "items": [],
+      "fence": {
+        "polygons": [],
+        "circles": [],
+        "settings": {}
+      },
+      "rally": [],
+      "plannedHome": {
+        "latitudeDeg": -35.363,
+        "longitudeDeg": 149.165
+      },
+      "nextAltitudeM": 40.5,
+      "minClearanceM": 10.5,
+      "labels": [],
+      "notes": ""
+    }
+  ]
+}

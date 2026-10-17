@@ -72,7 +72,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         )
     {
         return Err(invalid(
-            "this vehicle starts at its selected location; automatic take-off is unavailable",
+            "this vehicle starts at its selected location. Automatic take-off is unavailable",
         ));
     }
     if in_air_m.is_some_and(|h| !(MIN_IN_AIR_M..=MAX_IN_AIR_M).contains(&h)) {
@@ -83,7 +83,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
     if *autopilot == SimAutopilot::Px4 {
         if capabilities.runs_in == RunsIn::Browser {
             return Err(invalid(
-                "UXDuck Web runs ArduPilot only; PX4 runs in UXDuck Desktop",
+                "UXDuck Web runs ArduPilot only. PX4 runs in UXDuck Desktop",
             ));
         }
         if matches!(
@@ -112,7 +112,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         // starts (maintainer, 2026-10-02).
         if simulators >= MAX_IN_BROWSER {
             return Err(invalid(format!(
-                "{MAX_IN_BROWSER} simulated vehicles are already running in this browser; stop one first"
+                "{MAX_IN_BROWSER} simulated vehicles are already running in this browser. Stop one first"
             )));
         }
     } else {
@@ -121,7 +121,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         }
         if simulators >= usize::from(MAX_INSTANCES) {
             return Err(invalid(format!(
-                "{MAX_INSTANCES} simulated vehicles are running; stop one first"
+                "{MAX_INSTANCES} simulated vehicles are running. Stop one first"
             )));
         }
     }
@@ -156,6 +156,7 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         snapshot_id,
         binary,
         wipe,
+        with_mission,
         ..
     } = kind
     else {
@@ -189,6 +190,7 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         snapshot_id,
         binary,
         wipe,
+        with_mission,
         instance,
     }
 }
@@ -367,6 +369,7 @@ fn add_params(params: SimStartParams) -> LinkAddParams {
             snapshot_id: None,
             binary: params.binary.map(|b| b.trim().to_owned()),
             wipe: params.wipe,
+            with_mission: params.with_mission,
             instance: None,
         },
         policy: None,

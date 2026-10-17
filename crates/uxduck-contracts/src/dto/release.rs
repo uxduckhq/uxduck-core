@@ -60,7 +60,7 @@ pub struct DesktopAppArtifact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseArtifact {
-    /// The Rust target triple, or `universal-apple-darwin`.
+    /// The Rust target triple (`universal-apple-darwin` for macOS before 0.1.1).
     pub target: String,
     /// `pkg`, `msi`, `deb`, `tar.gz` or `zip`.
     pub kind: String,

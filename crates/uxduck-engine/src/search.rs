@@ -118,7 +118,7 @@ pub(crate) fn handle(
             if place.version != expected_version {
                 let mut error = ApiError::new(
                     ErrorKind::VersionConflict,
-                    "this place changed in another window; cancel and rename it again",
+                    "this place changed in another window. Cancel and rename it again",
                 );
                 error.data.current_version = Some(place.version);
                 return Err(error);

@@ -1,0 +1,12 @@
+{
+  "method": "location/changed",
+  "params": {
+    "state": "unavailable",
+    "fix": {
+      "latitudeDeg": 37.7936,
+      "longitudeDeg": -122.4836,
+      "atMs": 1791720000000
+    },
+    "reason": "UXDuck could not find where this computer is."
+  }
+}

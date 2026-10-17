@@ -193,12 +193,27 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     let _ = engine.run(move |e| e.set_files(Box::new(port_files))).await;
     let extra_origins: Vec<String> = options.dev_origin.iter().cloned().collect();
     let interfaces = open_interfaces(&options, &engine)?;
+    // Phones and tablets on this network (S97): off until chosen.
+    crate::network::start(
+        engine.clone(),
+        port,
+        crate::network::Served {
+            interfaces: interfaces.clone(),
+            video: video.clone(),
+            files: vehicle_files.clone(),
+            referrer: ui_url.clone(),
+        },
+    );
     let app = http::router(
         engine.clone(),
         http::Allowlist::new(port, &extra_origins).with_hosted(&options.hosted_origins),
         interfaces,
         video,
         vehicle_files,
+        options
+            .dev_origin
+            .is_some()
+            .then(|| crate::paths::DevCli::new(data_dir)),
     );
     tokio::spawn(async move {
         if let Err(error) = axum::serve(tcp, app).await {
@@ -726,6 +741,8 @@ async fn expire_approvals(engine: EngineHandle) {
             .run(move |e| {
                 e.expire_approvals(now);
                 e.expire_pairings();
+                // Controllers no reloaded window took back.
+                e.expire_detached_claims(now);
                 e.supervise(now);
                 // Downloads waiting for a vehicle that is back (S121).
                 e.resume_waiting_files(now);

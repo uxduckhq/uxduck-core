@@ -15,13 +15,19 @@ ap="$work/ardupilot"
 out="$sim_cache/native"
 mkdir -p "$out"
 
-if [ ! -d "$ap/.git" ]; then
+if [ ! -x "$ap/waf" ]; then
   # The WebAssembly script fetches and pins the checkout; build nothing there.
+  # A cache can restore its .git without its files, so the files decide.
   "$root/scripts/simulator.sh" --checkout-only
 fi
 
 cd "$ap"
-python3 -m venv "$work/venv" >/dev/null 2>&1 || true
+# A CI cache can restore part of a venv; one without its activate script is
+# made again, and a failure to make it stops here.
+if [ ! -f "$work/venv/bin/activate" ]; then
+  rm -rf "$work/venv"
+  python3 -m venv "$work/venv"
+fi
 # shellcheck disable=SC1091
 source "$work/venv/bin/activate"
 pip install --quiet empy==3.3.4 pexpect future lxml

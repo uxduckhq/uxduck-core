@@ -1,0 +1,7 @@
+{
+  "method": "transfer/cancel",
+  "params": {
+    "vehicleId": "v1a2b3c",
+    "what": "mission"
+  }
+}

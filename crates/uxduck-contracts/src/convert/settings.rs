@@ -140,6 +140,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
             .iter()
             .map(|c| (*c).into())
             .collect(),
+        network_address: settings.network_address.clone(),
         supervision_grace_s: settings.supervision_grace_s,
         gcs_system_id: settings.gcs_system_id,
         store_flights: settings.store_flights,

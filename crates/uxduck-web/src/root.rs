@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use serde::Serialize;
+use uxduck_contracts::dto::controller::ControllerInputsResult;
 use uxduck_contracts::dto::initialize::{DaemonCapabilities, RunsIn};
 use uxduck_contracts::dto::inspect::{
     InspectDirection, MavlinkHistoryParams, MavlinkHistoryResult, MavlinkInspectResult,
@@ -19,13 +20,15 @@ use uxduck_core::domain::link::{Link, LinkKind, LinkStatus, SimVehicle};
 use uxduck_core::domain::param_definitions::DefinitionSet;
 use uxduck_core::events::{Change, Event};
 use uxduck_core::policy::admission::Trust;
+use uxduck_engine::controller_input::{Controls, InputEvent, Report};
 use uxduck_engine::mavlink_inspect::{self, Inspector};
 use uxduck_engine::param_definitions::files;
 use uxduck_engine::param_definitions::{DefinitionsArrived, DefinitionsOrder, DefinitionsPort};
 use uxduck_engine::plane::{self, Routed};
 use uxduck_engine::runtime::{
-    AgentPort, Clock, CommandOrder, HistoryOf, LinkPort, MemoryCredentials, NoPlugins, NoSystem,
-    Persistence, Ports, Random, SerialPortInfo, System, TransferOrder, TurnRequest,
+    AgentPort, Clock, CommandOrder, ControlRoute, HistoryOf, LinkPort, MemoryCredentials,
+    NoPlugins, NoSystem, Persistence, Ports, Random, SerialPortInfo, System, TransferOrder,
+    TurnRequest,
 };
 use uxduck_engine::state::{self, State};
 use uxduck_engine::terrain::TerrainPort;
@@ -35,10 +38,14 @@ use uxduck_mavlink::session::{Config, Effect, Session};
 use uxduck_terrain::manifest::DEFAULT_BASE_URL;
 use uxduck_terrain::{Arrived, FetchError};
 
+use crate::gamepads::{self, Pads};
+
 /// The simulator is one peer on its link: its serial port.
 const PEER: &str = "serial0";
 /// Approvals expire on this beat, as in the daemon.
 const EXPIRY_EVERY_US: u64 = 1_000_000;
+/// Pilot input goes at most this often: 25 Hz, as in the daemon.
+const PILOT_EVERY_US: u64 = 35_000;
 /// The answer to every message until the agent runs here on the hosted
 /// model (ADR-0011 M9, ADR-0013 P20): signing in is here since S114.
 pub const NO_ACCOUNT: &str =
@@ -210,6 +217,9 @@ enum Call {
     Turn(TurnRequest),
     Definitions(DefinitionsOrder),
     Terrain(uxduck_terrain::Order),
+    /// What a controller drives now, as the engine decided.
+    Route(String, Option<ControlRoute>),
+    Input(InputEvent),
 }
 
 type Queue = Arc<Mutex<VecDeque<Call>>>;
@@ -265,6 +275,12 @@ impl LinkPort for Links {
     }
     fn gcs_system_id(&mut self, id: u8) {
         push(&self.0, Call::GcsSystemId(id));
+    }
+    fn controller_input(&mut self, event: InputEvent) {
+        push(&self.0, Call::Input(event));
+    }
+    fn route_controller(&mut self, controller_id: &str, route: Option<ControlRoute>) {
+        push(&self.0, Call::Route(controller_id.to_owned(), route));
     }
 }
 
@@ -325,11 +341,13 @@ impl Clock for SharedClock {
 }
 
 /// The browser as a host: nothing to report, as [`NoSystem`], except the
-/// MAVLink inspector's table, which the root records frames in.
+/// MAVLink inspector's table, which the root records frames in, and the
+/// gamepads the page reads.
 struct Host {
     none: NoSystem,
     inspector: Arc<Mutex<Inspector>>,
     clock: SharedClock,
+    inputs: Arc<Mutex<ControllerInputsResult>>,
 }
 
 impl System for Host {
@@ -344,6 +362,12 @@ impl System for Host {
     }
     fn wake_lock(&mut self, hold: bool) {
         self.none.wake_lock(hold);
+    }
+    fn controller_inputs(&self) -> ControllerInputsResult {
+        self.inputs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
     fn mavlink_inspect(&self, vehicle_ids: &[String]) -> MavlinkInspectResult {
         let now_us = self.clock.now_us();
@@ -429,6 +453,12 @@ pub struct Browser {
     /// Sets people added, for this visit: the browser keeps them nowhere
     /// else yet.
     own_sets: HashMap<String, DefinitionSet>,
+    /// Gamepads the pages read, and each one's input and route.
+    pads: Pads,
+    controls: Controls,
+    /// What `controller/inputs` returns, shared with the host.
+    inputs: Arc<Mutex<ControllerInputsResult>>,
+    last_pilot_us: u64,
 }
 
 impl std::fmt::Debug for Browser {
@@ -471,6 +501,7 @@ impl Browser {
         let queue: Queue = Arc::default();
         let clock = SharedClock(Arc::new(Mutex::new(clock)));
         let inspector: Arc<Mutex<Inspector>> = Arc::default();
+        let inputs: Arc<Mutex<ControllerInputsResult>> = Arc::default();
         let ports = Ports {
             persistence: Box::new(Journal(queue.clone())),
             agent: Box::new(Agent(queue.clone())),
@@ -480,6 +511,7 @@ impl Browser {
                 none: NoSystem::default(),
                 inspector: inspector.clone(),
                 clock: clock.clone(),
+                inputs: inputs.clone(),
             }),
             plugins: Box::new(NoPlugins),
         };
@@ -537,6 +569,10 @@ impl Browser {
             terrain_url: DEFAULT_BASE_URL.to_owned(),
             reading: BTreeMap::new(),
             own_sets: HashMap::new(),
+            pads: Pads::default(),
+            controls: Controls::browser(),
+            inputs,
+            last_pilot_us: 0,
         };
         let port = Definitions(browser.queue.clone());
         browser.engine.set_definitions(Box::new(port));
@@ -674,7 +710,7 @@ impl Browser {
             }
             DefinitionsOrder::Own { id } => {
                 let result = self.own_sets.get(&id).cloned().ok_or_else(|| {
-                    "added in an earlier visit; this browser keeps sets only while it is open"
+                    "Added during an earlier visit. This browser keeps parameter definitions only while it is open."
                         .to_owned()
                 });
                 self.engine
@@ -729,6 +765,10 @@ impl Browser {
         changes.extend(state.places.values().map(|place| Change::PlaceUpserted {
             place: place.clone(),
         }));
+        changes.extend(state.plans.values().map(|plan| Change::PlanSaved {
+            plan: plan.clone(),
+            revision: uxduck_core::domain::plan::PlanRevision::None,
+        }));
         changes.extend(
             state
                 .snapshots
@@ -757,6 +797,11 @@ impl Browser {
 
     /// One JSON-RPC frame from a page.
     pub fn receive(&mut self, connection: u32, text: &str) -> Vec<Output> {
+        if text.contains(gamepads::METHOD)
+            && let Some(frame) = gamepad_frame(text)
+        {
+            return self.gamepads(connection, frame);
+        }
         if let Some((id, _)) = self.connections.get(&connection) {
             self.engine.receive(*id, text);
         }
@@ -764,10 +809,87 @@ impl Browser {
     }
 
     pub fn disconnect(&mut self, connection: u32) -> Vec<Output> {
+        let gone = self.pads.forget(connection);
+        let mut outputs = Vec::new();
+        self.controller_input(gone, &mut outputs);
         if let Some((id, _)) = self.connections.remove(&connection) {
             self.engine.disconnect(id);
         }
-        self.drain()
+        outputs.extend(self.drain());
+        outputs
+    }
+
+    /// A page's gamepads, read by its Gamepad API (UXDuck Web only): the
+    /// changes go to the controllers, then the routed ones' sticks to their
+    /// vehicles, at most at 25 Hz.
+    fn gamepads(&mut self, connection: u32, frame: gamepads::Frame) -> Vec<Output> {
+        let now = self.clock.now_us();
+        let mut outputs = Vec::new();
+        if self.connections.contains_key(&connection) {
+            let events = self.pads.frame(connection, now, frame);
+            self.controller_input(events, &mut outputs);
+        }
+        self.send_pilot(&mut outputs);
+        outputs.extend(self.drain());
+        outputs
+    }
+
+    fn send_pilot(&mut self, outputs: &mut Vec<Output>) {
+        let now = self.clock.now_us();
+        let gone = self.controls.stale_keyboard_inputs(now);
+        self.controller_input(gone, outputs);
+        if self.controls.routed() && now.saturating_sub(self.last_pilot_us) >= PILOT_EVERY_US {
+            self.last_pilot_us = now;
+            let mut effects = Vec::new();
+            for (vehicle_id, sticks, auxiliary, method) in self.controls.pilot_outputs() {
+                effects.extend(self.session.pilot_control_with_method(
+                    &vehicle_id,
+                    sticks,
+                    &auxiliary,
+                    method,
+                ));
+            }
+            self.apply(effects, outputs);
+        }
+    }
+
+    /// Input events, as the daemon's data plane takes them: an unplugged
+    /// controller's vehicle gets its inputs back first.
+    fn controller_input(&mut self, events: Vec<InputEvent>, outputs: &mut Vec<Output>) {
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            if let InputEvent::Disconnected { id } = &event
+                && let Some(target) = self.controls.target(id)
+            {
+                let effects = self.session.release_control(&target);
+                self.apply(effects, outputs);
+            }
+            let reports = self.controls.input(event);
+            self.report_controls(reports);
+        }
+        *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) = self.controls.snapshot();
+    }
+
+    fn report_controls(&mut self, reports: Vec<Report>) {
+        for report in reports {
+            match report {
+                Report::Connected {
+                    id,
+                    name,
+                    layout_known,
+                } => self.engine.controller_connected(&id, &name, layout_known),
+                Report::Disconnected { id } => self.engine.controller_disconnected(&id),
+                Report::Neutral { id, neutral } => self.engine.controller_neutral(&id, neutral),
+                Report::Pressed { id, button, code } => {
+                    self.engine.controller_pressed(&id, button, code);
+                }
+                Report::Positioned { id, position } => {
+                    self.engine.controller_positioned(&id, &position);
+                }
+            }
+        }
     }
 
     /// The simulator started, or stopped with a reason.
@@ -815,6 +937,14 @@ impl Browser {
         if now.saturating_sub(self.last_expiry_us) >= EXPIRY_EVERY_US {
             self.last_expiry_us = now;
             self.engine.expire_approvals(now);
+            self.engine.expire_detached_claims(now);
+        }
+        let gone = self.controls.stale_keyboard_inputs(now);
+        self.controller_input(gone, &mut outputs);
+        // A page that stopped reporting (hidden, frozen) lets its pads go.
+        if self.pads.any() {
+            let gone = self.pads.expire(now);
+            self.controller_input(gone, &mut outputs);
         }
         outputs.extend(self.drain());
         outputs
@@ -924,6 +1054,19 @@ impl Browser {
             }
             Call::Definitions(order) => self.definitions(order, outputs),
             Call::Terrain(order) => self.terrain(order, outputs),
+            Call::Input(event) => {
+                self.controller_input(vec![event], outputs);
+                // Keyboard frames arrive without any gamepad notifications.
+                self.send_pilot(outputs);
+            }
+            Call::Route(id, route) => {
+                if let Some(target) = self.controls.target(&id) {
+                    let effects = self.session.release_control(&target);
+                    self.apply(effects, outputs);
+                }
+                let reports = self.controls.route(&id, route);
+                self.report_controls(reports);
+            }
         }
     }
 }
@@ -948,6 +1091,20 @@ impl Browser {
             Order::Remove { prefix } => outputs.push(Output::Store(Store::Remove { prefix })),
         }
     }
+}
+
+/// A page's gamepads, from its `browser/gamepads` notification.
+fn gamepad_frame(text: &str) -> Option<gamepads::Frame> {
+    #[derive(serde::Deserialize)]
+    struct Notification {
+        method: String,
+        #[serde(default)]
+        params: gamepads::Frame,
+    }
+    serde_json::from_str::<Notification>(text)
+        .ok()
+        .filter(|n| n.method == gamepads::METHOD)
+        .map(|n| n.params)
 }
 
 /// The release key this build trusts, if it was built with one.

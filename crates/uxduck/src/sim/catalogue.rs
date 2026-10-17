@@ -72,16 +72,16 @@ pub struct Catalogue {
 }
 
 impl Catalogue {
-    /// `UXDUCK_SIM_CATALOGUE_URL` points elsewhere, and `none` turns the
-    /// catalogue off. The key is the release key built into this binary; a
+    /// `UXDUCK_SIM_CATALOGUE_URL` points a development build elsewhere, and
+    /// `none` turns the catalogue off. The key is the release key built into this binary; a
     /// development build takes `UXDUCK_SIM_CATALOGUE_KEY` instead, for
     /// tests.
     #[must_use]
     pub fn new(simulators: Arc<Simulators>, runtime: tokio::runtime::Handle) -> Arc<Self> {
-        let url = match std::env::var("UXDUCK_SIM_CATALOGUE_URL") {
-            Ok(url) if url == "none" => None,
-            Ok(url) => Some(url),
-            Err(_) => Some(DEFAULT_URL.to_owned()),
+        let url = match crate::update::url_override("UXDUCK_SIM_CATALOGUE_URL") {
+            Some(url) if url == "none" => None,
+            Some(url) => Some(url),
+            None => Some(DEFAULT_URL.to_owned()),
         };
         let key = std::env::var("UXDUCK_SIM_CATALOGUE_KEY")
             .ok()
@@ -211,7 +211,7 @@ impl Catalogue {
             .unwrap_or_default();
         if catalogue.published_at < seen.published_at {
             return Err(format!(
-                "the catalogue was published at {}, before one already seen ({}); it is ignored",
+                "the catalogue was published at {}, before one already seen ({}). It is ignored",
                 catalogue.published_at, seen.published_at
             ));
         }
@@ -557,7 +557,8 @@ pub fn check_signature(bytes: &[u8], signature: &str, public_key: &str) -> Resul
 }
 
 /// A build this daemon can install safely: files that stay in its folder,
-/// the program first, over HTTPS (or plain HTTP to this machine, for tests).
+/// the program first, over HTTPS (or, in a development build, plain HTTP
+/// to this machine, for tests).
 fn valid(build: &CatalogueBuild) -> bool {
     let safe_id = !build.id.is_empty()
         && build
@@ -567,8 +568,8 @@ fn valid(build: &CatalogueBuild) -> bool {
         && !build.id.starts_with('.');
     let fetched = |url: &str| {
         url.starts_with("https://")
-            || url.starts_with("http://127.0.0.1")
-            || url.starts_with("http://localhost")
+            || cfg!(debug_assertions)
+                && (url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost"))
     };
     let safe_files = !build.files.is_empty()
         && build.files.iter().all(|f| {

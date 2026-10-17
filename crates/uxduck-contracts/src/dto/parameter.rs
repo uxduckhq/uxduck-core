@@ -67,6 +67,9 @@ pub struct ParameterSet {
     #[schemars(schema_with = "crate::safe::optional_integer")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_at_us: Option<u64>,
+    /// How far a download has come while it runs (S127).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TransferProgress>,
 }
 
 /// Sets one parameter, as a compare-and-swap: refused with
@@ -127,4 +130,20 @@ pub struct ParamSetResult {
     /// A new value takes effect only after the autopilot reboots.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reboot_required: bool,
+}
+
+/// How far a transfer has come (S127): what is done of the total, which
+/// try this is (above 1 when the vehicle went quiet and it asked again),
+/// and when it last moved, so a stall can be shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferProgress {
+    pub done: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+    pub attempt: u8,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    #[serde(default)]
+    pub upload: bool,
 }

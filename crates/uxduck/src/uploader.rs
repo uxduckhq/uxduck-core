@@ -239,7 +239,7 @@ async fn round(
 }
 
 fn unreachable(_: reqwest::Error) -> String {
-    "UXDuck cannot reach its server; the flights wait here".to_owned()
+    "UXDuck cannot reach its server. Flights remain on this computer.".to_owned()
 }
 
 /// Grants for the chunks not put yet, and the puts, straight to storage.
@@ -540,7 +540,7 @@ pub async fn download(
             eprintln!("{} ({} KB)", out.display(), tlog.len() / 1024);
             for gap in flight["gaps"].as_array().into_iter().flatten() {
                 eprintln!(
-                    "Segments {} to {} are not in your account; the video jumps there.",
+                    "Segments {} to {} are not in your account. Playback skips those segments.",
                     gap["fromSeq"], gap["toSeq"]
                 );
             }

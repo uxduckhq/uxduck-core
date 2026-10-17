@@ -7,10 +7,10 @@
       "paneOpen": true,
       "dock": {
         "type": "split",
-        "direction": "row",
+        "direction": "column",
         "children": [
           {
-            "size": 700,
+            "size": 560,
             "node": {
               "type": "group",
               "tabs": [
@@ -23,38 +23,24 @@
             }
           },
           {
-            "size": 300,
+            "size": 440,
             "node": {
-              "type": "split",
-              "direction": "column",
-              "children": [
+              "type": "group",
+              "tabs": [
                 {
-                  "size": 400,
-                  "node": {
-                    "type": "group",
-                    "tabs": [
-                      {
-                        "id": "control",
-                        "kind": "control"
-                      }
-                    ],
-                    "active": 0
-                  }
+                  "id": "telemetry",
+                  "kind": "telemetry"
                 },
                 {
-                  "size": 600,
-                  "node": {
-                    "type": "group",
-                    "tabs": [
-                      {
-                        "id": "telemetry",
-                        "kind": "telemetry"
-                      }
-                    ],
-                    "active": 0
-                  }
+                  "id": "control",
+                  "kind": "control"
+                },
+                {
+                  "id": "history",
+                  "kind": "history"
                 }
-              ]
+              ],
+              "active": 0
             }
           }
         ]
@@ -65,10 +51,10 @@
           "name": "Simple",
           "dock": {
             "type": "split",
-            "direction": "row",
+            "direction": "column",
             "children": [
               {
-                "size": 700,
+                "size": 560,
                 "node": {
                   "type": "group",
                   "tabs": [
@@ -81,51 +67,37 @@
                 }
               },
               {
-                "size": 300,
+                "size": 440,
                 "node": {
-                  "type": "split",
-                  "direction": "column",
-                  "children": [
+                  "type": "group",
+                  "tabs": [
                     {
-                      "size": 400,
-                      "node": {
-                        "type": "group",
-                        "tabs": [
-                          {
-                            "id": "control",
-                            "kind": "control"
-                          }
-                        ],
-                        "active": 0
-                      }
+                      "id": "telemetry",
+                      "kind": "telemetry"
                     },
                     {
-                      "size": 600,
-                      "node": {
-                        "type": "group",
-                        "tabs": [
-                          {
-                            "id": "telemetry",
-                            "kind": "telemetry"
-                          }
-                        ],
-                        "active": 0
-                      }
+                      "id": "control",
+                      "kind": "control"
+                    },
+                    {
+                      "id": "history",
+                      "kind": "history"
                     }
-                  ]
+                  ],
+                  "active": 0
                 }
               }
             ]
           },
           "preset": {
             "kind": "simple",
-            "version": 2,
+            "version": 3,
             "base": {
               "type": "split",
-              "direction": "row",
+              "direction": "column",
               "children": [
                 {
-                  "size": 700,
+                  "size": 560,
                   "node": {
                     "type": "group",
                     "tabs": [
@@ -138,38 +110,24 @@
                   }
                 },
                 {
-                  "size": 300,
+                  "size": 440,
                   "node": {
-                    "type": "split",
-                    "direction": "column",
-                    "children": [
+                    "type": "group",
+                    "tabs": [
                       {
-                        "size": 400,
-                        "node": {
-                          "type": "group",
-                          "tabs": [
-                            {
-                              "id": "control",
-                              "kind": "control"
-                            }
-                          ],
-                          "active": 0
-                        }
+                        "id": "telemetry",
+                        "kind": "telemetry"
                       },
                       {
-                        "size": 600,
-                        "node": {
-                          "type": "group",
-                          "tabs": [
-                            {
-                              "id": "telemetry",
-                              "kind": "telemetry"
-                            }
-                          ],
-                          "active": 0
-                        }
+                        "id": "control",
+                        "kind": "control"
+                      },
+                      {
+                        "id": "history",
+                        "kind": "history"
                       }
-                    ]
+                    ],
+                    "active": 0
                   }
                 }
               ]

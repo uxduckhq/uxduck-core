@@ -158,7 +158,7 @@ impl Engine {
                 id: vehicle.id.clone(),
             },
             title: format!(
-                "UXDuck's ground station heartbeat to {} resumed; it stays in the mode its failsafe chose",
+                "UXDuck's ground station heartbeat to {} resumed. It stays in the mode its failsafe chose",
                 vehicle.name
             ),
             body: None,

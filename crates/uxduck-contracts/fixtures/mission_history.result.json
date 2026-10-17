@@ -1,0 +1,46 @@
+{
+  "records": [
+    {
+      "id": "v1a2b3c:9f2b6c1d0e4a7b38",
+      "vehicleId": "v1a2b3c",
+      "items": [
+        {
+          "command": 16,
+          "frame": 3,
+          "param1": 0.5,
+          "param2": 0.5,
+          "param3": 0.5,
+          "param4": 0.5,
+          "latitudeDeg": -35.3625,
+          "longitudeDeg": 149.1655,
+          "altitudeM": 30.5,
+          "autocontinue": true
+        }
+      ],
+      "origin": {
+        "kind": "uploaded",
+        "planId": "plan1a2b3c4d5e6f7a8b",
+        "planName": "Ridge survey",
+        "verified": true
+      },
+      "originText": "Uploaded from Ridge survey",
+      "counts": "1 item",
+      "clientId": "c1a2b3c4d5e6f7a8b",
+      "operatorId": "op1",
+      "firstSeenUs": 1792130000000000,
+      "lastSeenUs": 1792130000000000,
+      "times": 1
+    },
+    {
+      "id": "v1a2b3c:0a1b2c3d4e5f6a7b",
+      "vehicleId": "v1a2b3c",
+      "items": [],
+      "origin": { "kind": "found" },
+      "originText": "Found when it connected",
+      "counts": "No mission",
+      "firstSeenUs": 1792120000000000,
+      "lastSeenUs": 1792120000000000,
+      "times": 1
+    }
+  ]
+}

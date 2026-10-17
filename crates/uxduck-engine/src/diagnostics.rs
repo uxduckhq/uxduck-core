@@ -143,7 +143,7 @@ fn diagnose(engine: &Engine, query: &str) -> Result<Value, ApiError> {
     forwards.truncate(200);
     let routing = match &link.kind {
         LinkKind::UdpForward { host, port } => format!(
-            "Sends to UDP {host}:{port}; {}. {}",
+            "Sends to UDP {host}:{port}. {}. {}",
             if link.policy == uxduck_core::domain::link::LinkPolicy::Read {
                 "telemetry only"
             } else {

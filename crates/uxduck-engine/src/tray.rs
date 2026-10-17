@@ -12,14 +12,16 @@ use serde_json::{Value, json};
 use uxduck_contracts::dto::app::AppOpenResult;
 use uxduck_contracts::dto::settings::LoginItemState;
 use uxduck_contracts::dto::tray::{
-    FeedbackScreenshot, FeedbackScreenshotParams, TrayAction, TrayActivateParams, TrayItem,
-    TrayMenu, TrayTone,
+    FeedbackScreenshot, FeedbackScreenshotParams, TrayAction, TrayActivateParams, TrayAlert,
+    TrayItem, TrayMenu, TrayQuestion, TrayTone,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
-use uxduck_core::domain::client::Capability;
+use uxduck_core::domain::client::{Capability, NetworkAccess};
 use uxduck_core::domain::link::LinkStatus;
-use uxduck_core::domain::notification::{NotificationKind, NotificationState, Severity, Subject};
+use uxduck_core::domain::notification::{
+    Action, NotificationKind, NotificationState, Severity, Subject,
+};
 use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::Change;
@@ -57,6 +59,12 @@ const SCREENSHOT_US: u64 = 5 * 60 * 1_000_000;
 /// The largest screenshot kept, as base64.
 const SCREENSHOT_BYTES: usize = 6 * 1024 * 1024;
 
+/// A browser asking to connect: its menu row and the bubble's question.
+struct PairingQuestion {
+    row: TrayItem,
+    question: TrayQuestion,
+}
+
 /// Screenshots the tray took, by id, with when.
 #[derive(Default)]
 pub(crate) struct Screenshots(BTreeMap<String, (u64, Option<String>)>);
@@ -79,6 +87,7 @@ pub(crate) fn handle(
             engine.tray_watchers.insert(connection);
             let menu = engine.tray_menu();
             engine.last_tray_menu = Some(menu.clone());
+            engine.tray_joined_location(connection);
             to_value(&menu)
         }
         ClientRequest::TrayActivate(params) => {
@@ -175,6 +184,16 @@ fn activate(
                     return Ok(TrayAction::Done);
                 }
             }
+            for (prefix, allow, access) in [
+                ("allow-pairing:", true, None),
+                ("fly-pairing:", true, Some(NetworkAccess::Fly)),
+                ("deny-pairing:", false, None),
+            ] {
+                if let Some(code) = other.strip_prefix(prefix) {
+                    crate::rpc::handlers::answer(engine, code, allow, access)?;
+                    return Ok(TrayAction::Done);
+                }
+            }
             if let Some(id) = other.strip_prefix("stop-simulation:") {
                 stop_simulation(engine, connection, id, granted)?;
                 return Ok(TrayAction::Done);
@@ -253,7 +272,7 @@ fn stop_all_simulations(
         }
     }
     if !failures.is_empty() {
-        return Err(ApiError::new(ErrorKind::Internal, failures.join("; ")));
+        return Err(ApiError::new(ErrorKind::Internal, failures.join(". ")));
     }
     Ok(TrayAction::Done)
 }
@@ -360,7 +379,8 @@ impl Engine {
     #[must_use]
     pub fn tray_menu(&self) -> TrayMenu {
         let state = &self.state;
-        let waiting = state.approvals.len();
+        let pairing = self.pairing_questions();
+        let waiting = state.approvals.len() + pairing.len();
         let alarm = state
             .notifications
             .values()
@@ -419,11 +439,13 @@ impl Engine {
             choice
         })
         .collect();
-        let mut items = vec![
-            item("open", "Open window", false),
+        // Browsers asking to connect come first: someone waits at one.
+        let mut items: Vec<TrayItem> = pairing.iter().map(|q| q.row.clone()).collect();
+        items.extend([
+            item("open", "Open window", !items.is_empty()),
             item("open-browser", "Open in browser", false),
             launch,
-        ];
+        ]);
         items.extend(self.simulation_menu());
         if let Some(reminder) = &self.idle_simulations.reminder {
             let mut row = item("idle-simulations", &reminder.title, false);
@@ -453,7 +475,93 @@ impl Engine {
             tone,
             items,
             simulation_reminder: self.idle_simulations.reminder.clone(),
+            alert: self.unseen_alert(),
+            question: pairing.into_iter().last().map(|question| question.question),
         }
+    }
+
+    /// The newest vehicle warning or alarm raised while no window was
+    /// visible, still active: the system's notification for it.
+    fn unseen_alert(&self) -> Option<TrayAlert> {
+        let since = self.idle_simulations.unseen_since_us?;
+        self.state
+            .notifications
+            .values()
+            .filter(|n| {
+                n.state == NotificationState::Active
+                    && n.severity != Severity::Info
+                    && n.created_at_us >= since
+                    && matches!(n.subject, Subject::Vehicle { .. })
+            })
+            .max_by_key(|n| n.created_at_us)
+            .map(|n| TrayAlert {
+                id: n.id.clone(),
+                title: n.title.clone(),
+                message: n
+                    .body
+                    .clone()
+                    .filter(|body| !body.is_empty())
+                    .unwrap_or_else(|| "Open UXDuck to see it.".into()),
+            })
+    }
+
+    /// The browsers asking to connect, oldest first, from the questions
+    /// every operator's app shows (`pairing::question`), so the menu, the
+    /// bubble and the apps go away together once one is answered.
+    fn pairing_questions(&self) -> Vec<PairingQuestion> {
+        let mut asked: Vec<_> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| n.state != NotificationState::Resolved)
+            .filter_map(|n| {
+                let code = n.condition.as_deref()?.strip_prefix("pairing:")?;
+                Some((n.created_at_us, code.to_owned(), n))
+            })
+            .collect();
+        asked.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        asked
+            .into_iter()
+            .map(|(_, code, n)| {
+                let site = n.title.strip_suffix(" to UXDuck").unwrap_or(&n.title);
+                let spaced = format!(
+                    "{} {}",
+                    &code[..code.len().min(3)],
+                    &code[code.len().min(3)..]
+                );
+                let id = crate::pairing::condition(&code);
+                // As the notification offers them, the safest yes last: a
+                // phone on the network is asked "Watch only" by default.
+                let answers: Vec<TrayItem> = n
+                    .actions
+                    .iter()
+                    .rev()
+                    .filter_map(|a| match &a.action {
+                        Action::AnswerPairing { allow, access, .. } => {
+                            let prefix = match (allow, access) {
+                                (false, _) => "deny-pairing",
+                                (true, Some(NetworkAccess::Fly)) => "fly-pairing",
+                                (true, _) => "allow-pairing",
+                            };
+                            Some(item(&format!("{prefix}:{code}"), &a.label, false))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut row = item(&id, &format!("{site} · {spaced}"), false);
+                // Allow first in a menu; last, the default, in the bubble.
+                row.children = answers.iter().rev().cloned().collect();
+                PairingQuestion {
+                    row,
+                    question: TrayQuestion {
+                        id,
+                        title: n.title.clone(),
+                        message: n.body.clone().unwrap_or_default(),
+                        answers,
+                    },
+                }
+            })
+            .collect()
     }
 
     /// "Open at login" as a switch showing what the system has (S108); the
@@ -535,6 +643,13 @@ impl Engine {
             .any(|link| link.kind.is_simulator());
         items.push(stop_all);
         items
+    }
+
+    /// Whether a tray is showing the menu, so a browser asking to connect
+    /// can be told to answer at the duck.
+    #[must_use]
+    pub fn has_tray(&self) -> bool {
+        !self.tray_watchers.is_empty()
     }
 
     /// Sends the menu to the tray when it changed.

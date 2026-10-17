@@ -39,7 +39,7 @@ const AVAILABLE_MODES: u32 = 435;
 /// interval in µs), when it first hears it on a link it may write to.
 /// ArduPilot's Copter, Heli and Blimp stream nothing by default (every
 /// `SRn_` rate is 0), so whatever the app needs from them has to be here.
-pub const STREAM_RATES: [(u32, u32); 17] = [
+pub const STREAM_RATES: [(u32, u32); 18] = [
     (33, 200_000),    // GLOBAL_POSITION_INT, 5 Hz
     (30, 100_000),    // ATTITUDE, 10 Hz
     (1, 1_000_000),   // SYS_STATUS, 1 Hz
@@ -59,6 +59,8 @@ pub const STREAM_RATES: [(u32, u32); 17] = [
     // TERRAIN_REQUEST (S118): ArduPilot asks a ground station for terrain
     // only on a channel streaming this, and itself at most every 2 s.
     (133, 1_000_000),
+    // FENCE_STATUS, 1 Hz (S132): a breach, while the vehicle has a fence.
+    (162, 1_000_000),
 ];
 
 /// A terrain report older than this no longer gives the fused position an
@@ -235,10 +237,25 @@ pub enum Effect {
         vehicle_id: String,
         result: Result<Vec<crate::decode::MissionItemInt>, Failure>,
     },
+    /// A fence (1) or rally points (2) download ended (S128).
+    MissionPart {
+        vehicle_id: String,
+        kind: u8,
+        result: Result<Vec<crate::decode::MissionItemInt>, Failure>,
+    },
     /// A mission upload ended.
     MissionUploaded {
         order_id: String,
         result: Result<(), Failure>,
+    },
+    /// How far a transfer has come (S127): sent as it goes, and when it
+    /// asks again after a silence (`attempt` above 1).
+    Progress {
+        vehicle_id: String,
+        transfer: TransferKind,
+        done: u32,
+        total: Option<u32>,
+        attempt: u8,
     },
     /// Send these bytes to this peer on this link.
     Send {
@@ -268,6 +285,35 @@ pub enum Effect {
 
 /// A long message's parts: link, peer, system, component and message id.
 type TextKey = (String, String, u8, u8, u16);
+
+/// The end of a download of one kind: the mission, or a part (S128).
+fn part_effect(
+    vehicle_id: String,
+    kind: u8,
+    result: Result<Vec<crate::decode::MissionItemInt>, Failure>,
+) -> Effect {
+    if kind == 0 {
+        Effect::Mission { vehicle_id, result }
+    } else {
+        Effect::MissionPart {
+            vehicle_id,
+            kind,
+            result,
+        }
+    }
+}
+
+/// Which transfer a progress report or a cancel is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferKind {
+    Parameters,
+    MissionDownload,
+    MissionUpload,
+}
+
+fn as_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
 
 /// The receipt fence belongs to the operation, not its most recent retry.
 #[derive(Clone, Debug)]
@@ -467,8 +513,9 @@ const STREAM_BACKOFF_US: [u64; 3] = [5_000_000, 15_000_000, 60_000_000];
 /// needs an airspeed sensor or drag fusion), distances while a rangefinder
 /// or proximity sensor is fitted and reading. Their silence says nothing
 /// about the rate, so they are never asked for again on it. A terrain
-/// request comes only while terrain is missing (S118).
-const SENT_WHILE_SET: [u32; 5] = [87, 242, 168, 132, 133];
+/// request comes only while terrain is missing (S118), the fence's status
+/// only while there is a fence (S132).
+const SENT_WHILE_SET: [u32; 6] = [87, 242, 168, 132, 133, 162];
 
 #[derive(Clone, Debug)]
 struct PendingCommand {
@@ -978,38 +1025,36 @@ impl Session {
             }
             Message::MissionCount {
                 count,
-                mission_type: 0,
+                mission_type,
             } => {
                 let step = self
                     .downloading(key)
-                    .filter(|p| p.accepts(received_us))
+                    .filter(|p| p.accepts(received_us) && p.protocol.kind == mission_type)
                     .map(|p| p.protocol.count(count, processed_us));
                 self.download_step(key, step)
             }
-            Message::MissionItem(item) if item.mission_type == 0 => {
+            Message::MissionItem(item) => {
+                let kind = item.mission_type;
                 let step = self
                     .downloading(key)
-                    .filter(|p| p.accepts(received_us))
+                    .filter(|p| p.accepts(received_us) && p.protocol.kind == kind)
                     .map(|p| p.protocol.item(item, processed_us));
                 self.download_step(key, step)
             }
-            Message::MissionRequest {
-                seq,
-                mission_type: 0,
-            } => {
+            Message::MissionRequest { seq, mission_type } => {
                 let step = self
                     .uploading(key)
-                    .filter(|p| p.accepts(received_us))
+                    .filter(|p| p.accepts(received_us) && p.protocol.kind == mission_type)
                     .map(|p| p.protocol.request(seq, processed_us));
                 self.upload_step(key, step)
             }
             Message::MissionAck {
                 result,
-                mission_type: 0,
+                mission_type,
             } => {
                 let step = self
                     .uploading(key)
-                    .filter(|p| p.accepts(received_us))
+                    .filter(|p| p.accepts(received_us) && p.protocol.kind == mission_type)
                     .map(|p| p.protocol.ack(result));
                 self.upload_step(key, step)
             }
@@ -1609,20 +1654,20 @@ impl Session {
                         sequence,
                         crate::transfers::ftp::payload(&request),
                     ),
-                    Out::MissionRequestList => {
-                        crate::sim::mission_request_list_frame(gcs, system_id, component, sequence)
+                    Out::MissionRequestList(kind) => crate::sim::mission_request_list_frame(
+                        gcs, system_id, component, sequence, kind,
+                    ),
+                    Out::MissionCount(count, kind) => {
+                        crate::sim::mission_count_frame(route, sequence, count, kind)
                     }
-                    Out::MissionCount(count) => {
-                        crate::sim::mission_count_frame(route, sequence, count)
-                    }
-                    Out::MissionRequest(seq) => {
-                        crate::sim::mission_request_frame(route, sequence, seq)
+                    Out::MissionRequest(seq, kind) => {
+                        crate::sim::mission_request_frame(route, sequence, seq, kind)
                     }
                     Out::MissionItem(item) => {
                         crate::sim::mission_item_frame(route, sequence, &item)
                     }
-                    Out::MissionAck(result) => {
-                        crate::sim::mission_ack_frame(route, sequence, result)
+                    Out::MissionAck(result, kind) => {
+                        crate::sim::mission_ack_frame(route, sequence, result, kind)
                     }
                 };
                 Effect::Send {
@@ -1902,25 +1947,38 @@ impl Session {
 
     /// Starts downloading the mission.
     pub fn download_mission(&mut self, vehicle_id: &str, now_us: u64) -> Vec<Effect> {
+        self.download_mission_part(vehicle_id, 0, now_us)
+    }
+
+    /// Starts downloading one kind (S128): 0 the mission, 1 the fence, 2
+    /// rally points; ends in `Mission` or `MissionPart`.
+    pub fn download_mission_part(
+        &mut self,
+        vehicle_id: &str,
+        kind: u8,
+        now_us: u64,
+    ) -> Vec<Effect> {
         let Some(key) = self.find(vehicle_id) else {
-            return vec![Effect::Mission {
-                vehicle_id: vehicle_id.to_owned(),
-                result: Err(Failure::NotSent(
+            return vec![part_effect(
+                vehicle_id.to_owned(),
+                kind,
+                Err(Failure::NotSent(
                     "this vehicle has no address in this session".into(),
                 )),
-            }];
+            )];
         };
         let busy = self
             .vehicles
             .get(&key)
             .is_some_and(|v| v.mission_upload.is_some());
         if busy {
-            return vec![Effect::Mission {
-                vehicle_id: vehicle_id.to_owned(),
-                result: Err(Failure::NotSent("an upload is in progress".into())),
-            }];
+            return vec![part_effect(
+                vehicle_id.to_owned(),
+                kind,
+                Err(Failure::NotSent("an upload is in progress".into())),
+            )];
         }
-        let (download, outs) = MissionDownload::start(now_us);
+        let (download, outs) = MissionDownload::start_kind(now_us, kind);
         if let Some(vehicle) = self.vehicles.get_mut(&key) {
             vehicle.mission_download = Some(PendingTransfer::new(download, now_us));
         }
@@ -1933,6 +1991,19 @@ impl Session {
         order_id: &str,
         vehicle_id: &str,
         items: Vec<crate::decode::MissionItemInt>,
+        now_us: u64,
+    ) -> Vec<Effect> {
+        self.upload_mission_part(order_id, vehicle_id, items, 0, now_us)
+    }
+
+    /// Uploads one kind (S128): 0 the mission, 1 the fence, 2 rally points;
+    /// answered by `MissionUploaded`.
+    pub fn upload_mission_part(
+        &mut self,
+        order_id: &str,
+        vehicle_id: &str,
+        items: Vec<crate::decode::MissionItemInt>,
+        kind: u8,
         now_us: u64,
     ) -> Vec<Effect> {
         let not_sent = |why: &str| {
@@ -1951,11 +2022,60 @@ impl Session {
         if busy {
             return not_sent("another mission transfer is in progress");
         }
-        let (upload, outs) = MissionUpload::start(order_id.to_owned(), items, now_us);
+        let (upload, outs) = MissionUpload::start_kind(order_id.to_owned(), items, now_us, kind);
         if let Some(vehicle) = self.vehicles.get_mut(&key) {
             vehicle.mission_upload = Some(PendingTransfer::new(upload, now_us));
         }
         self.outgoing(&key, outs)
+    }
+
+    /// Stops a transfer (S127). A mission transfer is ended with the
+    /// protocol's cancel (`MAV_MISSION_OPERATION_CANCELLED`); a parameter
+    /// download stops asking and keeps nothing. Ends as the transfer
+    /// would, with a `Rejected("cancelled")`.
+    pub fn cancel_transfer(&mut self, vehicle_id: &str, transfer: TransferKind) -> Vec<Effect> {
+        const CANCELLED: u8 = 15;
+        let Some(key) = self.find(vehicle_id) else {
+            return Vec::new();
+        };
+        let Some(vehicle) = self.vehicles.get_mut(&key) else {
+            return Vec::new();
+        };
+        let cancelled = || Failure::Rejected("cancelled".into());
+        let vehicle_id = vehicle.observation.id.clone();
+        match transfer {
+            TransferKind::Parameters => {
+                if vehicle.params.take().is_none() {
+                    return Vec::new();
+                }
+                vec![Effect::Parameters {
+                    vehicle_id,
+                    result: Err(cancelled()),
+                    defaults: BTreeMap::new(),
+                }]
+            }
+            TransferKind::MissionDownload => {
+                let Some(download) = vehicle.mission_download.take() else {
+                    return Vec::new();
+                };
+                let kind = download.protocol.kind;
+                let mut effects = self.outgoing(&key, vec![Out::MissionAck(CANCELLED, kind)]);
+                effects.push(part_effect(vehicle_id, kind, Err(cancelled())));
+                effects
+            }
+            TransferKind::MissionUpload => {
+                let Some(upload) = vehicle.mission_upload.take() else {
+                    return Vec::new();
+                };
+                let kind = upload.protocol.kind;
+                let mut effects = self.outgoing(&key, vec![Out::MissionAck(CANCELLED, kind)]);
+                effects.push(Effect::MissionUploaded {
+                    order_id: upload.protocol.order_id,
+                    result: Err(cancelled()),
+                });
+                effects
+            }
+        }
     }
 
     /// Home's altitude above mean sea level, from where the vehicle is
@@ -2019,6 +2139,15 @@ impl Session {
                     result: Ok(all),
                     defaults: BTreeMap::new(),
                 });
+            } else if index != u16::MAX {
+                let (received, total) = download.protocol.progress();
+                effects.push(Effect::Progress {
+                    vehicle_id,
+                    transfer: TransferKind::Parameters,
+                    done: as_u32(received),
+                    total: total.map(u32::from),
+                    attempt: download.protocol.attempt(),
+                });
             }
             // Listed values wait for the end of the download; a single
             // one (a change) is reported now as well.
@@ -2061,22 +2190,39 @@ impl Session {
         };
         let vehicle_id = vehicle.observation.id.clone();
         match step {
-            Step::Send(outs) => self.outgoing(key, outs),
+            Step::Send(outs) => {
+                let progress = vehicle
+                    .mission_download
+                    .as_ref()
+                    .filter(|_| !outs.is_empty())
+                    .map(|download| download.protocol.progress());
+                let mut effects = self.outgoing(key, outs);
+                if let Some((received, total, attempt)) = progress {
+                    effects.push(Effect::Progress {
+                        vehicle_id,
+                        transfer: TransferKind::MissionDownload,
+                        done: as_u32(received),
+                        total: total.map(u32::from),
+                        attempt,
+                    });
+                }
+                effects
+            }
             Step::Done(items) => {
-                vehicle.mission_download = None;
-                let mut effects = self.outgoing(key, vec![Out::MissionAck(0)]);
-                effects.push(Effect::Mission {
-                    vehicle_id,
-                    result: Ok(items),
-                });
+                let kind = vehicle
+                    .mission_download
+                    .take()
+                    .map_or(0, |d| d.protocol.kind);
+                let mut effects = self.outgoing(key, vec![Out::MissionAck(0, kind)]);
+                effects.push(part_effect(vehicle_id, kind, Ok(items)));
                 effects
             }
             Step::Failed(failure) => {
-                vehicle.mission_download = None;
-                vec![Effect::Mission {
-                    vehicle_id,
-                    result: Err(failure),
-                }]
+                let kind = vehicle
+                    .mission_download
+                    .take()
+                    .map_or(0, |d| d.protocol.kind);
+                vec![part_effect(vehicle_id, kind, Err(failure))]
             }
         }
     }
@@ -2089,7 +2235,25 @@ impl Session {
             return Vec::new();
         };
         match step {
-            Step::Send(outs) => self.outgoing(key, outs),
+            Step::Send(outs) => {
+                let vehicle_id = vehicle.observation.id.clone();
+                let progress = vehicle
+                    .mission_upload
+                    .as_ref()
+                    .filter(|_| !outs.is_empty())
+                    .map(|upload| upload.protocol.progress());
+                let mut effects = self.outgoing(key, outs);
+                if let Some((sent, total, attempt)) = progress {
+                    effects.push(Effect::Progress {
+                        vehicle_id,
+                        transfer: TransferKind::MissionUpload,
+                        done: as_u32(sent),
+                        total: Some(as_u32(total)),
+                        attempt,
+                    });
+                }
+                effects
+            }
             Step::Done(()) | Step::Failed(_) => {
                 let result = match step {
                     Step::Failed(failure) => Err(failure),
@@ -2242,7 +2406,19 @@ impl Session {
             let batched = !vehicle.batch.is_empty();
             if let Some(download) = vehicle.params.as_mut() {
                 match download.protocol.tick(now_us, &timing) {
-                    Step::Send(more) => outs.extend(more),
+                    Step::Send(more) => {
+                        if !more.is_empty() {
+                            let (received, total) = download.protocol.progress();
+                            effects.push(Effect::Progress {
+                                vehicle_id: vehicle_id.clone(),
+                                transfer: TransferKind::Parameters,
+                                done: as_u32(received),
+                                total: total.map(u32::from),
+                                attempt: download.protocol.attempt(),
+                            });
+                        }
+                        outs.extend(more);
+                    }
                     Step::Done(_) => {}
                     Step::Failed(failure) => {
                         vehicle.params = None;
@@ -3220,7 +3396,7 @@ mod tests {
             rates(&first),
             [
                 33.0, 30.0, 1.0, 24.0, 74.0, 36.0, 42.0, 62.0, 193.0, 241.0, 147.0, 136.0, 87.0,
-                242.0, 168.0, 132.0, 133.0
+                242.0, 168.0, 132.0, 133.0, 162.0
             ],
             "the whole table once"
         );
@@ -4208,8 +4384,14 @@ mod tests {
             item(2, 16, 30.0),
             item(3, 20, 0.0),
         ];
+        // Progress as it goes (S127), apart from how each ends.
+        let split = |effects: Vec<Effect>| -> (Vec<Effect>, Vec<Effect>) {
+            effects
+                .into_iter()
+                .partition(|e| matches!(e, Effect::Progress { .. }))
+        };
         let sent = session.upload_mission("u1", &vid, plan.clone(), 10);
-        let done = converse(&mut session, &mut fake, sent, 10);
+        let (progress, done) = split(converse(&mut session, &mut fake, sent, 10));
         assert_eq!(
             done,
             [Effect::MissionUploaded {
@@ -4217,21 +4399,131 @@ mod tests {
                 result: Ok(())
             }]
         );
+        assert!(
+            matches!(
+                progress.last(),
+                Some(Effect::Progress {
+                    transfer: TransferKind::MissionUpload,
+                    done: 4,
+                    total: Some(4),
+                    attempt: 1,
+                    ..
+                })
+            ),
+            "{progress:?}"
+        );
         assert_eq!(fake.mission, plan);
         let sent = session.download_mission(&vid, 20);
-        let done = converse(&mut session, &mut fake, sent, 20);
+        let (progress, done) = split(converse(&mut session, &mut fake, sent, 20));
         assert!(
             matches!(done.as_slice(), [Effect::Mission { result: Ok(items), .. }] if *items == plan),
             "{done:?}"
         );
+        assert!(progress.iter().any(|e| matches!(
+            e,
+            Effect::Progress {
+                transfer: TransferKind::MissionDownload,
+                done: 3,
+                total: Some(4),
+                ..
+            }
+        )));
         fake.mission_capacity = 2;
         let sent = session.upload_mission("u2", &vid, plan, 30);
-        let done = converse(&mut session, &mut fake, sent, 30);
+        let (_, done) = split(converse(&mut session, &mut fake, sent, 30));
         assert!(matches!(
             done.as_slice(),
             [Effect::MissionUploaded { result: Err(Failure::Rejected(why)), .. }]
                 if why == "No space for that many items"
         ));
+    }
+
+    #[test]
+    fn a_fence_and_rally_points_go_up_and_come_back_as_their_own_kinds() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let corner = |seq: u16, x: i32, kind: u8, command: u16| crate::decode::MissionItemInt {
+            seq,
+            frame: 3,
+            command,
+            current: false,
+            autocontinue: false,
+            params: [3.0, 0.0, 0.0, 0.0],
+            x,
+            y: 1_491_652_300,
+            z: 0.0,
+            mission_type: kind,
+        };
+        let fence = vec![
+            corner(0, -353_600_000, 1, 5001),
+            corner(1, -353_700_000, 1, 5001),
+            corner(2, -353_650_000, 1, 5001),
+        ];
+        let sent = session.upload_mission_part("f1", &vid, fence.clone(), 1, 10);
+        let done: Vec<Effect> = converse(&mut session, &mut fake, sent, 10)
+            .into_iter()
+            .filter(|e| !matches!(e, Effect::Progress { .. }))
+            .collect();
+        assert_eq!(
+            done,
+            [Effect::MissionUploaded {
+                order_id: "f1".into(),
+                result: Ok(())
+            }]
+        );
+        assert_eq!(fake.fence, fence);
+        assert_eq!(fake.mission.len(), 1, "the mission is left as it was");
+        let rally = vec![corner(0, -353_610_000, 2, 5100)];
+        let sent = session.upload_mission_part("r1", &vid, rally.clone(), 2, 20);
+        let _ = converse(&mut session, &mut fake, sent, 20);
+        assert_eq!(fake.rally, rally);
+        let sent = session.download_mission_part(&vid, 1, 30);
+        let done: Vec<Effect> = converse(&mut session, &mut fake, sent, 30)
+            .into_iter()
+            .filter(|e| !matches!(e, Effect::Progress { .. }))
+            .collect();
+        assert!(
+            matches!(done.as_slice(), [Effect::MissionPart { kind: 1, result: Ok(items), .. }] if *items == fence),
+            "{done:?}"
+        );
+    }
+
+    #[test]
+    fn a_mission_transfer_is_cancelled_with_the_protocol_s_cancel() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let item = |seq: u16| crate::decode::MissionItemInt {
+            seq,
+            frame: 3,
+            command: 16,
+            current: false,
+            autocontinue: true,
+            params: [0.0; 4],
+            x: -353_632_610,
+            y: 1_491_652_300,
+            z: 30.0,
+            mission_type: 0,
+        };
+        // Started, but the vehicle has not answered yet.
+        let _ = session.upload_mission("u1", &vid, vec![item(0), item(1)], 10);
+        let cancelled = session.cancel_transfer(&vid, TransferKind::MissionUpload);
+        assert!(cancelled.iter().any(|e| matches!(e, Effect::Send { .. })));
+        assert!(cancelled.iter().any(|e| matches!(
+            e,
+            Effect::MissionUploaded { order_id, result: Err(Failure::Rejected(why)) }
+                if order_id == "u1" && why == "cancelled"
+        )));
+        // Nothing left to cancel; a download may start now.
+        assert!(
+            session
+                .cancel_transfer(&vid, TransferKind::MissionUpload)
+                .is_empty()
+        );
+        assert!(
+            session
+                .cancel_transfer(&vid, TransferKind::Parameters)
+                .is_empty()
+        );
     }
 
     #[test]

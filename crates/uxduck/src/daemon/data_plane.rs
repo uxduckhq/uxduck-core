@@ -80,6 +80,9 @@ impl LinkPort for LinkChannel {
     fn message(&mut self, order: uxduck_engine::runtime::MessageOrder) {
         let _ = self.0.send(Command::Message(order));
     }
+    fn controller_input(&mut self, event: InputEvent) {
+        let _ = self.0.send(Command::Input(event));
+    }
     fn route_controller(&mut self, controller_id: &str, route: Option<ControlRoute>) {
         let _ = self.0.send(Command::Route(controller_id.to_owned(), route));
     }
@@ -282,11 +285,7 @@ pub fn start(
                 Some(incoming) = received.recv() => plane.incoming(incoming).await,
                 _ = manual.tick(), if steering => {
                     crate::wakes::count("data plane: manual control (25 Hz)");
-                    let mut effects = Vec::new();
-                    for (vehicle_id, sticks, auxiliary, method) in plane.controls.pilot_outputs() {
-                        effects.extend(plane.session.pilot_control_with_method(&vehicle_id, sticks, &auxiliary, method));
-                    }
-                    plane.apply(effects).await;
+                    plane.send_pilot().await;
                 }
                 _ = ground.tick(), if vehicles => {
                     crate::wakes::count("data plane: ground heartbeat (1 Hz)");
@@ -673,6 +672,29 @@ impl Plane {
                     );
                 })
                 .await;
+        }
+    }
+
+    async fn send_pilot(&mut self) {
+        self.centre_stale_keyboards().await;
+        let mut effects = Vec::new();
+        for (vehicle_id, sticks, auxiliary, method) in self.controls.pilot_outputs() {
+            effects.extend(self.session.pilot_control_with_method(
+                &vehicle_id,
+                sticks,
+                &auxiliary,
+                method,
+            ));
+        }
+        self.apply(effects).await;
+    }
+
+    /// Keep keyboard control enabled while centring delayed steering input.
+    async fn centre_stale_keyboards(&mut self) {
+        for event in self.controls.stale_keyboard_inputs(SystemClock.now_us()) {
+            let reports = self.controls.input(event);
+            super::controllers::publish(self.controls.snapshot());
+            self.report_controls(reports).await;
         }
     }
 

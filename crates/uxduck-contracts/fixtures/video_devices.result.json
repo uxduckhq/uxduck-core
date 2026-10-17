@@ -1,0 +1,10 @@
+{
+  "devices": [
+    {
+      "id": "avfoundation:usb-A",
+      "name": "USB Video",
+      "persistent": true
+    }
+  ],
+  "scanning": false
+}

@@ -36,8 +36,8 @@ uxduck open --print
 ```
 
 `--print` prints the browser address without opening it. `uxduck daemon start`
-starts UXDuck in the background without a window; `uxduck mcp` does the same
-when an AI agent connects and UXDuck is not running.
+starts UXDuck in the background without a window. `uxduck mcp` only connects to
+an already running UXDuck; start it yourself before connecting an AI agent.
 
 ## Read one vehicle
 

@@ -1,0 +1,43 @@
+{
+  "id": "above-terrain",
+  "version": 1,
+  "title": "Above terrain",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Plan a flight above terrain and fly it, keeping at least 20 m over the ground.",
+  "start": { "heightM": 30 },
+  "features": [
+    {
+      "id": "far",
+      "label": "Fly to here",
+      "offset": { "bearingDeg": 0, "distanceM": 600 },
+      "radiusM": 40
+    }
+  ],
+  "steps": [
+    {
+      "text": "Plan a flight to the far ring and back at 30 m above terrain, then upload it.",
+      "hint": "Choose Above terrain for the plan. Try Above home first and look at the Profile tab: where the ground rises, the line comes close to it.",
+      "hintAfterS": 120,
+      "all": [{ "check": "missionFrame", "frame": 10 }]
+    },
+    {
+      "text": "Switch to Auto and fly it out to the far ring.",
+      "hintAfterS": 180,
+      "all": [{ "check": "within", "feature": "far", "mode": "AUTO" }]
+    },
+    {
+      "text": "Let it fly back and land.",
+      "hintAfterS": 240,
+      "all": [{ "check": "landed" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "clearanceBelow", "m": 20 }],
+      "says": "Failed. It came within 20 m of the ground. Above terrain keeps the height over the ground; check the profile before you fly."
+    }
+  ],
+  "passed": "Passed. It kept 20 m or more over the ground all the way.",
+  "measure": { "measure": "elapsed" }
+}

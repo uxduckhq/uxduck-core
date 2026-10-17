@@ -142,7 +142,7 @@ fn save(
         .map(|l| l.kind.clone())
     else {
         return Err(invalid(format!(
-            "{} is not a simulated vehicle; only those have snapshots",
+            "{} is not a simulated vehicle. Only those have snapshots",
             vehicle.name
         )));
     };
@@ -266,6 +266,8 @@ fn start(
             snapshot_id: Some(snapshot.id.clone()),
             binary: params.binary.map(|b| b.trim().to_owned()),
             wipe: false,
+            // A snapshot brings its own mission.
+            with_mission: false,
             instance: None,
         },
         policy: None,

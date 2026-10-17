@@ -102,6 +102,8 @@ pub(crate) fn handle(
             to_value(&engine.open_app(page.as_deref(), &[], target.map(Into::into))?)
         }
         ClientRequest::DaemonStopPreview(_) => to_value(&engine.stop_preview()),
+        // The computer's addresses are for the people at it (S97).
+        ClientRequest::NetworkStatus(_) => to_value(&engine.network()),
         _ => Err(ApiError::new(ErrorKind::Internal, "not an app method")),
     }
 }

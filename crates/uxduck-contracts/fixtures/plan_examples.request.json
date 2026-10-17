@@ -1,0 +1,7 @@
+{
+  "method": "plan/examples",
+  "params": {
+    "at": { "latitudeDeg": -35.363, "longitudeDeg": 149.165 },
+    "headingDeg": 90.5
+  }
+}

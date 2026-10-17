@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::conversation::{self, ToolResult};
 use crate::models;
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderRequest, Usage};
-use crate::tools::{Tool, tools};
+use crate::tools::{TOOL_CALL, Tool, find_deferred, model_tools, tools};
 
 /// Tool rounds allowed in one turn, so a confused model cannot loop forever.
 pub const MAX_ROUNDS: usize = 8;
@@ -29,13 +29,26 @@ read it with param_get (find it with param_search): describe it only as its defi
 name the set it comes from (describedBy), and say when that set is approximate or missing, or \
 when a parameter has no definition; never guess what an undescribed parameter does. Before \
 diagnosing a vehicle or advising a change, read its recent history (vehicle_history) and cite \
-what bears on it with its date. Write a note (vehicle_add_note) only when asked to note \
-something; never edit or delete one. To know what the vehicle itself said, such as why it \
+what bears on it with its date. When the person reports completed maintenance, repairs, \
+motor or propeller replacements, or other physical work, offer to record it in vehicle history. \
+After your own completed changes, offer a note only for useful context missing from automatic \
+history. Read recent history first to avoid duplicates; include reasons in parameter writes, \
+which UXDuck records automatically. Batch related work into one concise proposed note and \
+ask before calling vehicle_add_note; wait for the person's agreement. An explicit request to \
+record the work already gives consent, so do not ask again. Configuration permission alone \
+is not consent to add a note. Do not interrupt active flying or an unfinished task with an \
+offer, or repeat an offer the person declined. Record only completed work, attribute user \
+reports as reported rather than verified, and preserve supplied dates and details without \
+inventing any. Never edit or delete a note. To know what the vehicle itself said, such as why it \
 will not arm, read its messages (vehicle_messages) and quote them. When asked to show something, open its tab with layout_open, such as flight-display for the flight instruments (speed, altitude and heading, the horizon and what is wrong) or instruments for the classic, Mission Planner-style ones when asked for those, and only when asked. When someone asks for something UXDuck cannot do, do what you can, then offer once to suggest it to the UXDuck team; only when they say yes, write it up with feedback_suggest, which shows them a card to read, change and send, and sends nothing. Never offer while a vehicle is armed or in the middle of a task, and not again in a chat after they say no. For camera video, video_list says what is arriving, its codec \
 and its counters: explain a bad picture from them, and assign a camera to a vehicle \
 (video_assign) or add one (video_add) only when asked. When someone cannot connect a \
 vehicle, look with find_vehicles (scope nearby; network only when they agree) and explain \
-each reason it gives. To use an installed plugin, find its commands with tool_search, then \
+each reason it gives. More of UXDuck's tools load when asked for: plans and missions (checking, \
+uploading, examples, a vehicle's missions over time), simulations and snapshots, terrain, a \
+vehicle's files, parameter lists and history, and link diagnostics. Find one with tool_search \
+(its uxduckTools), then run it with tool_call, giving its name and params. To use an installed \
+plugin, find its commands with tool_search, then \
 run one with plugin_call, giving params its schema allows; say which plugin did it. When asked \
 for a value or a panel UXDuck lacks, write a plugin: draft one TypeScript file with plugin_draft, \
 test it with plugin_test against the vehicle's last minutes and say what it produced, and \
@@ -90,7 +103,9 @@ pub struct Turn {
 pub enum TurnError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
-    #[error("the model kept calling tools for {MAX_ROUNDS} rounds; stopped")]
+    #[error(
+        "The agent was stopped automatically because it reached the limit of {MAX_ROUNDS} tool rounds."
+    )]
     TooManyRounds,
 }
 
@@ -226,17 +241,44 @@ async fn run_tools(
     for (call_id, name, arguments) in calls {
         let params: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| json!({}));
         stats.tool_calls += 1;
+        // A deferred tool, run by name with `tool_call` (or called as itself).
+        let (name, params) = if name == TOOL_CALL {
+            (
+                params["name"].as_str().unwrap_or_default().to_owned(),
+                params.get("params").cloned().unwrap_or_else(|| json!({})),
+            )
+        } else {
+            (name, params)
+        };
         let (output, failed) = match Tool::method_for(tools, &name) {
             Some(method) => {
+                let query = params["query"].as_str().unwrap_or_default().to_owned();
+                let limit = params["limit"].as_u64().map_or(10, |n| n.clamp(1, 50));
                 let item = host.tool_start(method.clone(), params.clone()).await;
-                let outcome = host.call(method, params).await;
+                let mut outcome = host.call(method.clone(), params).await;
+                // UXDuck's own deferred tools, beside the plugins' commands.
+                if method == "tool/search"
+                    && let Ok(found) = &mut outcome
+                {
+                    #[allow(clippy::cast_possible_truncation, reason = "at most 50")]
+                    let own: Vec<Value> = find_deferred(&query, limit as usize)
+                        .into_iter()
+                        .map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters }))
+                        .collect();
+                    found["uxduckTools"] = json!(own);
+                }
                 host.tool_finish(item, outcome.clone()).await;
                 match outcome {
                     Ok(value) => (value.to_string(), false),
                     Err(value) => (value.to_string(), true),
                 }
             }
-            None => (format!(r#"{{"error":"no tool named {name}"}}"#), true),
+            None => (
+                format!(
+                    r#"{{"error":"No tool named {name}. Find UXDuck's tools and plugins' commands with tool_search"}}"#
+                ),
+                true,
+            ),
         };
         if failed {
             stats.tool_errors += 1;
@@ -254,7 +296,9 @@ async fn run_tools(
 pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> TurnOutcome {
     let wire = provider.wire();
     let settings = models::settings(&turn.model);
+    // Every tool may be run; the deferred ones are not sent (`model_tools`).
     let tools: Vec<Tool> = tools();
+    let sent: Vec<Tool> = model_tools();
     let started = host.now_ms();
     let mut stats = TurnStats::default();
     let mut conversation = turn.conversation;
@@ -263,7 +307,7 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
         model: turn.model.clone(),
         instructions: INSTRUCTIONS.into(),
         conversation: conversation.clone(),
-        tools: tools.clone(),
+        tools: sent.clone(),
         max_output_tokens: settings.max_output_tokens,
         effort: settings.effort,
         continues,
@@ -468,6 +512,48 @@ mod tests {
             outcome.conversation[2]["role"], "developer",
             "the context is sent again after a summary"
         );
+    }
+
+    #[test]
+    fn a_deferred_tool_runs_by_name_and_tool_search_finds_uxduck_s_own() {
+        let host = Recorder::default();
+        let mut stats = TurnStats::default();
+        let results = run_tools(
+            &host,
+            &tools(),
+            vec![
+                (
+                    "c1".into(),
+                    TOOL_CALL.into(),
+                    r#"{"name":"plan_upload","params":{"planId":"p1","vehicleId":"v1"}}"#.into(),
+                ),
+                (
+                    "c2".into(),
+                    "tool_search".into(),
+                    r#"{"query":"mission history"}"#.into(),
+                ),
+                (
+                    "c3".into(),
+                    TOOL_CALL.into(),
+                    r#"{"name":"no_such_tool"}"#.into(),
+                ),
+            ],
+            &mut stats,
+        )
+        .now_or_never()
+        .unwrap();
+        let log = host.0.lock().unwrap().clone();
+        assert!(log.contains(&"call plan/upload".to_owned()), "{log:?}");
+        assert!(log.contains(&"call tool/search".to_owned()), "{log:?}");
+        // Not sent each turn, yet found and named for tool_call.
+        assert!(!model_tools().iter().any(|t| t.name == "mission_history"));
+        let found: Value = serde_json::from_str(&results[1].output).unwrap();
+        assert_eq!(
+            found["uxduckTools"][0]["name"], "mission_history",
+            "{found}"
+        );
+        assert!(results[2].failed);
+        assert!(results[2].output.contains("tool_search"));
     }
 
     #[test]

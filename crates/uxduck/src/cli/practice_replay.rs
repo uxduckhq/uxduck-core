@@ -107,6 +107,13 @@ impl Replay {
                     _ => None,
                 };
             }
+            // The fence and the ground below (S132).
+            "FENCE_STATUS" => {
+                self.view.fence_breached = int(f, "breach_status").map(|b| b != 0);
+            }
+            "TERRAIN_REPORT" if int(f, "spacing").is_some_and(|s| s > 0) => {
+                self.view.clearance_m = float(f, "current_height");
+            }
             "HOME_POSITION" => {
                 if let (Some(lat), Some(lon)) = (degrees(f, "latitude"), degrees(f, "longitude")) {
                     self.home = Some((lat, lon));
@@ -121,6 +128,13 @@ impl Replay {
                     .map(|(_, (_, at))| *at)
                     .collect();
                 self.view.mission = Some(places);
+                self.view.mission_commands = Some(
+                    self.uploading
+                        .iter()
+                        .filter(|(seq, _)| **seq > 0)
+                        .filter_map(|(_, (command, _))| u16::try_from(*command).ok())
+                        .collect(),
+                );
                 self.uploading.clear();
             }
             _ => {}
@@ -234,6 +248,7 @@ impl Replay {
                 position,
                 height_m: self.view.height_m,
                 mode: self.view.mode.clone(),
+                clearance_m: self.view.clearance_m,
             });
         }
     }

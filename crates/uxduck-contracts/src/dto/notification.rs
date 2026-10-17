@@ -69,6 +69,9 @@ pub enum Action {
     OpenUrl { url: String },
     /// Opens a Video tab showing this source; nothing is called.
     OpenVideo { source_id: String },
+    /// Opens the Controllers tab, for a controller just plugged in; nothing
+    /// is called.
+    OpenControllers { controller_id: String },
     /// Opens the vehicle's Messages tab at this entry (S26); nothing is called.
     OpenMessages {
         vehicle_id: String,
@@ -83,8 +86,14 @@ pub enum Action {
         usb: Option<crate::dto::link::UsbId>,
     },
     /// Calls `pairing/approve`, or `pairing/deny` when `allow` is false, for
-    /// a browser asking to connect, such as UXDuck on the web.
-    AnswerPairing { code: String, allow: bool },
+    /// a browser asking to connect, such as UXDuck on the web. A phone or
+    /// tablet on the network is allowed with `access` (S97).
+    AnswerPairing {
+        code: String,
+        allow: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access: Option<crate::dto::pairing::NetworkAccess>,
+    },
     /// Calls `lease/release`: takes control of a vehicle back from someone
     /// away (S80).
     TakeBack { vehicle_id: String },

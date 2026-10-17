@@ -666,6 +666,23 @@ impl Producer for Health {
                 fixed,
             } => radio([rssi, remrssi, noise, remnoise], rxerrors, fixed, from, out),
             &Message::EkfStatus { flags, variances } => ekf(flags, variances, from, out),
+            // The fence (S132): outside it now, and breaches since boot.
+            &Message::FenceStatus { breached, count } => {
+                out.item(
+                    "fence.breached",
+                    "Fence breached",
+                    Unit::None,
+                    if breached { 1.0 } else { 0.0 },
+                    from,
+                );
+                out.item(
+                    "fence.breaches",
+                    "Fence breaches",
+                    Unit::Count,
+                    f64::from(count),
+                    from,
+                );
+            }
             &Message::Vibration { axes, clipping } => vibration(axes, clipping, from, out),
             &Message::BatteryStatus {
                 id,
@@ -1055,6 +1072,20 @@ mod tests {
         assert!(
             target(0b1111_1100_0111).is_empty(),
             "a velocity, not a place"
+        );
+    }
+
+    #[test]
+    fn the_fence_says_a_breach_and_counts_them() {
+        assert_eq!(
+            produced(&Message::FenceStatus {
+                breached: true,
+                count: 2
+            }),
+            [
+                ("fence.breached".to_owned(), 1.0),
+                ("fence.breaches".to_owned(), 2.0)
+            ]
         );
     }
 

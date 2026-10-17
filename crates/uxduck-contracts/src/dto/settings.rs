@@ -114,6 +114,10 @@ pub struct Settings {
     /// of the same account may send from away (S80). Empty is off.
     #[serde(default)]
     pub remote_control: Vec<crate::dto::command::CommandClass>,
+    /// "Phones and tablets on this network" (S97): the address of this
+    /// computer UXDuck also listens on. Absent is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_address: Option<String>,
     /// Seconds a vehicle may go unsupervised before UXDuck stops its ground
     /// station heartbeat to it, so its own failsafe acts (S81).
     #[serde(default = "grace")]
@@ -219,6 +223,11 @@ pub struct SettingsUpdateParams {
     /// Replaces the classes; only from this computer, never from away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_control: Option<Vec<crate::dto::command::CommandClass>>,
+    /// One of this computer's addresses to also listen on, for phones and
+    /// tablets on that network (S97); an empty string turns it off. Only
+    /// from this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_address: Option<String>,
     /// 5 to 120.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision_grace_s: Option<u32>,

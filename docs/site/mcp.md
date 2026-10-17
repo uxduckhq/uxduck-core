@@ -19,11 +19,36 @@ On Windows the file is `%APPDATA%\Claude\claude_desktop_config.json`; use `"comm
 
 ## Check the connection
 
-Reconnect or restart the agent's MCP connection after adding it. MCP starts
-UXDuck in the background if needed, without opening a window or browser. Closing
-the MCP connection leaves UXDuck and its work running. Ask: **“List the vehicles UXDuck can hear, and show the running version and link status.”** It should use `vehicle_list`, `daemon_about` and `link_list`.
+Start UXDuck yourself by opening the app or running `uxduck daemon start`, then
+connect or reconnect the agent's MCP connection. MCP never starts UXDuck
+automatically. If UXDuck is offline, MCP asks you to start it and reconnect.
+Closing the MCP connection leaves UXDuck and its work running. Ask: **“List the vehicles UXDuck can hear, and show the running version and link status.”** It should use `vehicle_list`, `daemon_about` and `link_list`.
 
 An empty vehicle list means the connection reached UXDuck but has no vehicle to inspect. Follow [Connect a vehicle](/docs/connect-a-vehicle) or [Troubleshooting](/docs/troubleshooting). A simulation running only inside a browser is separate from the installed UXDuck that `uxduck mcp` connects to.
+
+## Keep the agent's context small
+
+`uxduck mcp` offers two tools at connection time. `uxduck_search_tools` finds
+vehicle tools by name or words and returns their full argument schemas;
+`uxduck_call_tool` runs one with its name and arguments. The vehicle tools named
+below are found this way. The agent loads only the schemas it needs, even in a
+client that loads every advertised MCP tool at startup. All vehicle tools still
+come from the same API contracts.
+
+For example, search with `{"query":"vehicle_list"}`, then call with
+`{"name":"vehicle_list","arguments":{}}`. Exact names return one schema. Word
+searches return three matches by default, at most five; `nextOffset` continues the
+same query without returning the whole catalogue. Reuse a schema once found.
+Discovery reads no telemetry and performs no vehicle action. Calls keep the same
+permissions, approvals, results and structured errors as direct vehicle tools.
+
+For a client or integration that needs every tool listed individually, including
+client-side per-tool allow/deny rules, run `uxduck mcp --all-tools` instead.
+Existing direct tool names remain callable in
+both modes. Reconnect the MCP client after changing modes or updating UXDuck.
+Exact token savings depend on the client and model; discovered schemas and tool
+results also consume context. Use filters, bounded time windows and small page
+sizes when investigating a flight.
 
 ## What it may do
 

@@ -1,0 +1,11 @@
+{
+  "method": "plan/place",
+  "params": {
+    "id": "plan1a2b3c4d5e6f7a8b",
+    "name": "Canberra",
+    "at": {
+      "latitudeDeg": -35.36,
+      "longitudeDeg": 149.16
+    }
+  }
+}

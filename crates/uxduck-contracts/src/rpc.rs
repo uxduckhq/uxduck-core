@@ -13,7 +13,8 @@ use crate::dto::app::{
     AppOpenParams, ClientVisibilityParams, DesktopAppChooseParams, DesktopAppStatusParams,
 };
 use crate::dto::client::{
-    Approval, ApprovalResolveParams, CapabilitiesChanged, ClientSetCapabilitiesParams,
+    Approval, ApprovalResolveParams, CapabilitiesChanged, ClientForgetParams,
+    ClientSetCapabilitiesParams,
 };
 use crate::dto::command::{CommandSendParams, ModeListParams};
 use crate::dto::controller::{
@@ -32,6 +33,7 @@ use crate::dto::initialize::InitializeParams;
 use crate::dto::inspect::{MavlinkHistoryParams, MavlinkInspectParams};
 use crate::dto::journal::JournalImportParams;
 use crate::dto::link::{IdParams, LinkAddParams, LinkUpdateParams};
+use crate::dto::location::TrayLocationParams;
 use crate::dto::messages::{VehicleMessage, VehicleMessagesParams};
 use crate::dto::mission::MissionUploadParams;
 use crate::dto::operator::{
@@ -44,6 +46,10 @@ use crate::dto::param_definitions::{
     ParamGetParams, ParamListParams, ParamSearchParams,
 };
 use crate::dto::parameter::ParamSetParams;
+use crate::dto::plan::{
+    PlanCreateParams, PlanExportParams, PlanImportParams, PlanListParams, PlanPlaceParams,
+    PlanStepParams, PlanUpdateParams, PlanUploadParams,
+};
 use crate::dto::plugin::{
     PluginCommandParams, PluginDraftParams, PluginInstallParams, PluginLayer, PluginShareParams,
     PluginTestParams, PluginTokenParams, ToolSearchParams,
@@ -65,10 +71,13 @@ use crate::dto::thread::{
 };
 use crate::dto::trace::{RequestId, TraceFrame};
 use crate::dto::tray::{FeedbackScreenshotParams, TrayActivateParams, TrayMenu};
-use crate::dto::vehicle::{VehicleLabelParams, VehicleSaveParams, VehicleSizeParams};
+use crate::dto::vehicle::{
+    VehicleBookmarksParams, VehicleLabelParams, VehicleSaveParams, VehicleSizeParams,
+};
 use crate::dto::video::{
-    VideoAddParams, VideoAssignParams, VideoPlaybackParams, VideoRecordParams, VideoRemoveParams,
-    VideoRenameParams, VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoWatchParams,
+    VideoAddParams, VideoAssignParams, VideoCaptureEnableParams, VideoCaptureParams,
+    VideoPlaybackParams, VideoRecordParams, VideoRemoveParams, VideoRenameParams,
+    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -172,6 +181,11 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/size")]
     VehicleSize(VehicleSizeParams),
+    /// A vehicle's web pages, such as its radio's settings page, all of
+    /// them in order; an empty list removes them. Doesn't save it. Needs
+    /// `config`. Result: `Vehicle`.
+    #[serde(rename = "vehicle/bookmarks")]
+    VehicleBookmarks(VehicleBookmarksParams),
     /// Hides a vehicle until it is saved or the daemon restarts. Needs
     /// `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/dismiss")]
@@ -242,6 +256,10 @@ pub enum ClientRequest {
     /// Result: `ClientRecord`.
     #[serde(rename = "client/setCapabilities")]
     ClientSetCapabilities(ClientSetCapabilitiesParams),
+    /// Unpairs a phone or tablet paired on the network (S97); its open page
+    /// is disconnected and must pair again. Operators only. Result: `Empty`.
+    #[serde(rename = "client/forget")]
+    ClientForget(ClientForgetParams),
     /// Approvals still pending. Needs `approve`. Result: `ApprovalListResult`.
     #[serde(rename = "approval/list")]
     ApprovalList(Empty),
@@ -256,7 +274,9 @@ pub enum ClientRequest {
     ParamRefresh(IdParams),
     /// Sets a parameter and answers when the vehicle reports it back, or
     /// every retry has timed out. A compare-and-swap on `expectedValue`.
-    /// Needs `config`. Result: `ParamSetResult`.
+    /// Include the reason for a change: UXDuck records the value change,
+    /// author and reason automatically, so do not add a duplicate history
+    /// note. Needs `config`. Result: `ParamSetResult`.
     #[serde(rename = "param/set")]
     ParamSet(ParamSetParams),
     /// What a vehicle's parameters mean, from the definition set chosen for
@@ -309,7 +329,9 @@ pub enum ClientRequest {
     /// they did to it (repairs, changes, tests) and what UXDuck recorded
     /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
     /// category, text or time. Read it before diagnosing a vehicle or
-    /// advising a change, and cite the entry and its date. Needs `read`.
+    /// advising a change, and cite the entry and its date. Read it before
+    /// proposing a note too, so notes do not duplicate existing notes or
+    /// automatic events. Needs `read`.
     /// Result: `VehicleHistoryResult`.
     #[serde(rename = "vehicle/history")]
     VehicleHistory(VehicleHistoryParams),
@@ -318,9 +340,18 @@ pub enum ClientRequest {
     /// vehicle, or a download. Needs `read`. Result: `ParamHistoryResult`.
     #[serde(rename = "param/history")]
     ParamHistory(ParamHistoryParams),
-    /// Writes a note in a vehicle's history, dated now or earlier. Write one
-    /// only when the person asks you to note something. Needs `config`, so
-    /// an agent asks the operator first. Result: `HistoryEntry`.
+    /// Writes a note in a vehicle's history, dated now or earlier, for
+    /// completed physical maintenance or useful context from completed agent
+    /// changes. Read `vehicle_history` first; do not duplicate existing notes
+    /// or automatic events. Parameter writes already record their reason.
+    /// Batch related work into one concise proposed note and write only
+    /// after the person agrees; an explicit request to record it already
+    /// counts. Configuration permission alone is not note consent. Do not
+    /// interrupt active flying or an unfinished task with an offer, or repeat
+    /// a declined offer. Attribute user reports and preserve supplied dates
+    /// and details; never invent facts or record proposed work as completed.
+    /// Needs `config`; the daemon's capability approval still applies.
+    /// Result: `HistoryEntry`.
     #[serde(rename = "vehicle/addNote")]
     VehicleAddNote(AddNoteParams),
     /// Edits a note, keeping the earlier version. Events cannot be edited.
@@ -335,6 +366,16 @@ pub enum ClientRequest {
     /// downloading.
     #[serde(rename = "mission/refresh")]
     MissionRefresh(IdParams),
+    /// A vehicle's missions over time (S134): each different mission it
+    /// has held, newest first, with how it came and who. `id` is the
+    /// vehicle. Needs `read`. Result: `MissionHistoryResult`.
+    #[serde(rename = "mission/history")]
+    MissionHistory(IdParams),
+    /// Puts a mission from a vehicle's history back (S134), with its fence
+    /// and rally points, and answers once it is read back. Replaces what
+    /// the vehicle holds. Needs `control`. Result: `MissionRestoreResult`.
+    #[serde(rename = "mission/restore")]
+    MissionRestore(crate::dto::mission::MissionRestoreParams),
     /// Uploads a mission and answers when the vehicle has accepted or
     /// refused it. Refused with `version-conflict` if the mission changed
     /// since `expectedVersion`. Needs `control`. Result:
@@ -346,6 +387,17 @@ pub enum ClientRequest {
     /// drive the vehicle. Result: `Controller`.
     #[serde(rename = "controller/claim")]
     ControllerClaim(ControllerClaimParams),
+    /// Starts a pinned, simulation-only keyboard controller. Operator with control;
+    /// existing controller claim and neutral rules apply. Result: `Controller`.
+    #[serde(rename = "controller/keyboardStart")]
+    KeyboardStart(crate::dto::controller::KeyboardStartParams),
+    /// Refreshes this connection's keyboard input. Expires after 500 ms without
+    /// frames. Cannot start or resume a released controller. Result: `Empty`.
+    #[serde(rename = "controller/keyboardInput")]
+    KeyboardInput(crate::dto::controller::KeyboardInputParams),
+    /// Releases this connection's keyboard controller immediately. Result: `Empty`.
+    #[serde(rename = "controller/keyboardStop")]
+    KeyboardStop(Empty),
     /// Releases a controller: it stops driving at once, and the vehicle's
     /// own failsafe decides what happens. Operators only. Result: `Empty`.
     #[serde(rename = "controller/release")]
@@ -417,6 +469,11 @@ pub enum ClientRequest {
     /// `DesktopAppStatus`.
     #[serde(rename = "desktopApp/status")]
     DesktopAppStatus(DesktopAppStatusParams),
+    /// This computer's addresses on its networks, and where phones and
+    /// tablets open UXDuck while "Phones and tablets on this network" is on
+    /// (S97). Operators only. Result: `NetworkStatus`.
+    #[serde(rename = "network/status")]
+    NetworkStatus(Empty),
     /// Downloads the desktop app the release names for this computer,
     /// checks it and unpacks it; `desktopApp/status` shows how it goes.
     /// Nothing is downloaded before this is asked. Needs `config`. Result:
@@ -448,6 +505,76 @@ pub enum ClientRequest {
     /// Removes a saved place. Needs `config`. Result: `Empty`.
     #[serde(rename = "place/remove")]
     PlaceRemove(IdParams),
+    /// Lists saved plans (ADR-0029): missions kept in UXDuck for a vehicle
+    /// type, with a fence and rally points, that reach a vehicle only when
+    /// uploaded. Needs `read`. Result: `PlanListResult`.
+    #[serde(rename = "plan/list")]
+    PlanList(PlanListParams),
+    /// One plan with its items, fence and rally points. Needs `read`.
+    /// Result: `Plan`.
+    #[serde(rename = "plan/get")]
+    PlanGet(IdParams),
+    /// Makes a plan at once ("Untitled plan" unless named), for the given
+    /// vehicle type. It is not uploaded anywhere. Needs `config`. Result:
+    /// `Plan`.
+    #[serde(rename = "plan/create")]
+    PlanCreate(PlanCreateParams),
+    /// Replaces a plan's body as edited from `expectedVersion`; refused
+    /// with `version-conflict` if it changed meanwhile. Each update can be
+    /// undone. Needs `config`. Result: `Plan`.
+    #[serde(rename = "plan/update")]
+    PlanUpdate(PlanUpdateParams),
+    /// Undoes a plan's last change, or every change back to `toVersion`.
+    /// Needs `config`. Result: `Plan`.
+    #[serde(rename = "plan/undo")]
+    PlanUndo(PlanStepParams),
+    /// Redoes a plan's last undone change. Needs `config`. Result: `Plan`.
+    #[serde(rename = "plan/redo")]
+    PlanRedo(PlanStepParams),
+    /// Records the nearest place's name for a plan. Needs `config`.
+    /// Result: `Plan`.
+    #[serde(rename = "plan/place")]
+    PlanPlace(PlanPlaceParams),
+    /// Moves a plan to Deleted, kept 30 days. Needs `config`. Result:
+    /// `Plan`.
+    #[serde(rename = "plan/delete")]
+    PlanDelete(IdParams),
+    /// Brings a plan back from Deleted. Needs `config`. Result: `Plan`.
+    #[serde(rename = "plan/restore")]
+    PlanRestore(IdParams),
+    /// Reads files into one new plan: QGroundControl `.plan`, Mission
+    /// Planner's waypoint, fence and rally files, ArduPilot's fence text,
+    /// KML. What could not be read is listed. Needs `config`. Result:
+    /// `PlanImportResult`.
+    #[serde(rename = "plan/import")]
+    PlanImport(PlanImportParams),
+    /// A plan as files: one QGroundControl `.plan`, or Mission Planner's
+    /// waypoint, fence and rally files. Needs `read`. Result:
+    /// `PlanExportResult`.
+    #[serde(rename = "plan/export")]
+    PlanExport(PlanExportParams),
+    /// Uploads a plan to a vehicle as its mission (replacing what it
+    /// holds, which is kept in its history), reads it back and compares.
+    /// Answers when verified, refused, cancelled or failed. Needs
+    /// `control`. Result: `PlanUploadResult`.
+    #[serde(rename = "plan/upload")]
+    PlanUpload(PlanUploadParams),
+    /// A plan's problems: errors stop an upload, warnings do not. Heights
+    /// over the ground use the terrain the named vehicle would use; ground
+    /// not fetched yet is fetched and said to be missing. Needs `read`.
+    /// Result: `PlanCheckResult`.
+    #[serde(rename = "plan/check")]
+    PlanCheck(crate::dto::plan::PlanCheckParams),
+    /// The example plans, one per vehicle type, placed at `at` and turned
+    /// to `headingDeg` (ADR-0029 P12). Not in the library: `plan/create`
+    /// with one's body makes a plan of it. Needs `read`. Result:
+    /// `PlanExamplesResult`.
+    #[serde(rename = "plan/examples")]
+    PlanExamples(crate::dto::plan::PlanExamplesParams),
+    /// Stops a parameter download or a mission transfer on a vehicle.
+    /// Needs `control`. Result: `Empty`.
+    #[serde(rename = "transfer/cancel")]
+    TransferCancel(crate::dto::mission::TransferCancelParams),
     /// Changes the daemon's settings, edited from `expectedVersion`. Needs
     /// `config`. Result: `Settings`.
     #[serde(rename = "settings/update")]
@@ -582,6 +709,27 @@ pub enum ClientRequest {
     /// only. Result: `FeedbackScreenshot`.
     #[serde(rename = "feedback/screenshot")]
     FeedbackScreenshot(FeedbackScreenshotParams),
+    /// What the system said about this computer's location (S137,
+    /// ADR-0030 L2), from the tray, which asks it as UXDuck. Operators
+    /// only. Result: `Empty`.
+    #[serde(rename = "tray/location")]
+    TrayLocation(TrayLocationParams),
+    /// Where this computer is, as the system told UXDuck (S137, ADR-0030):
+    /// off until a person turns it on, then the latest fix. Changes follow
+    /// as `location/changed` to the connection that asked. Changes
+    /// nothing. Needs `location`: an agent without it asks the person
+    /// first, who may allow it once or always. Result: `LocationStatus`.
+    #[serde(rename = "location/status")]
+    LocationStatus(Empty),
+    /// Turns this computer's location on: the system asks the person the
+    /// first time, then fixes follow as `location/changed`. Operators only;
+    /// an agent cannot turn it on. Result: `LocationStatus`.
+    #[serde(rename = "location/start")]
+    LocationStart(Empty),
+    /// Turns this computer's location off and forgets the fix. Operators
+    /// only. Result: `LocationStatus`.
+    #[serde(rename = "location/stop")]
+    LocationStop(Empty),
     /// A vehicle's own messages (S26): every one, oldest first, a run of
     /// the same message with nothing between folded into one entry with a
     /// count; or with `raw` each as it came. With `subscribe`,
@@ -923,6 +1071,15 @@ pub enum ClientRequest {
     /// `busy`. Needs `config`. Result: `Empty`.
     #[serde(rename = "vehicle/delete")]
     VehicleDelete(IdParams),
+    /// Enumerates local camera identities asynchronously on the daemon computer. Needs `config`. Result: `VideoDevicesResult`.
+    #[serde(rename = "video/devices")]
+    VideoDevices(Empty),
+    /// Adds or configures a camera attached to the daemon's computer. Needs config.
+    #[serde(rename = "video/capture")]
+    VideoCapture(VideoCaptureParams),
+    /// Enables or pauses capture independently of UI sessions. Needs config.
+    #[serde(rename = "video/capture/enable")]
+    VideoCaptureEnable(VideoCaptureEnableParams),
     /// The camera streams arriving at UXDuck, with their codec, picture
     /// size, the vehicle each belongs to, and counters that say why a
     /// stream plays badly (lost packets, damaged pictures, malformed
@@ -1011,7 +1168,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 204] = [
+    pub const METHODS: [&'static str; 234] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1040,6 +1197,7 @@ impl ClientRequest {
         "vehicle/save",
         "vehicle/label",
         "vehicle/size",
+        "vehicle/bookmarks",
         "vehicle/dismiss",
         "link/add",
         "link/remove",
@@ -1056,6 +1214,7 @@ impl ClientRequest {
         "notification/dismiss",
         "client/list",
         "client/setCapabilities",
+        "client/forget",
         "approval/list",
         "approval/resolve",
         "param/refresh",
@@ -1073,8 +1232,13 @@ impl ClientRequest {
         "vehicle/editNote",
         "vehicle/deleteNote",
         "mission/refresh",
+        "mission/history",
+        "mission/restore",
         "mission/upload",
         "controller/claim",
+        "controller/keyboardStart",
+        "controller/keyboardInput",
+        "controller/keyboardStop",
         "controller/release",
         "controller/forget",
         "controller/setTarget",
@@ -1102,6 +1266,7 @@ impl ClientRequest {
         "app/focus",
         "app/open",
         "desktopApp/status",
+        "network/status",
         "desktopApp/download",
         "desktopApp/choose",
         "desktopApp/remove",
@@ -1109,6 +1274,21 @@ impl ClientRequest {
         "place/save",
         "place/update",
         "place/remove",
+        "plan/list",
+        "plan/get",
+        "plan/create",
+        "plan/update",
+        "plan/undo",
+        "plan/redo",
+        "plan/place",
+        "plan/delete",
+        "plan/restore",
+        "plan/import",
+        "plan/export",
+        "plan/upload",
+        "plan/check",
+        "plan/examples",
+        "transfer/cancel",
         "daemon/wakeups",
         "daemon/about",
         "analytics/track",
@@ -1174,6 +1354,9 @@ impl ClientRequest {
         "remote/watch",
         "account/deleteShared",
         "vehicle/delete",
+        "video/devices",
+        "video/capture",
+        "video/capture/enable",
         "video/list",
         "video/assign",
         "video/watch",
@@ -1197,6 +1380,10 @@ impl ClientRequest {
         "tray/menu",
         "tray/activate",
         "feedback/screenshot",
+        "tray/location",
+        "location/status",
+        "location/start",
+        "location/stop",
         "vehicle/messages",
         "layout/open",
         "feedback/suggest",
@@ -1295,6 +1482,16 @@ pub enum ServerNotification {
     /// macOS. To the connection that called `tray/menu`. Not journaled.
     #[serde(rename = "tray/reopened")]
     TrayReopened(Empty),
+    /// Whether the tray should ask the system where this computer is
+    /// (S137, ADR-0030 L2): on while a person has location on. To the
+    /// connection that called `tray/menu`. Not journaled.
+    #[serde(rename = "tray/locationWanted")]
+    TrayLocationWanted(crate::dto::location::TrayLocationWanted),
+    /// This computer's location changed (S137): to the connections that
+    /// called `location/status` or `location/start`, as they answer. Not
+    /// journaled.
+    #[serde(rename = "location/changed")]
+    LocationChanged(crate::dto::location::LocationStatus),
     /// Opening UXDuck again found this page open: it comes forward, or
     /// flashes its title where the browser will not let it (S107). Sent to
     /// one page. Not journaled.

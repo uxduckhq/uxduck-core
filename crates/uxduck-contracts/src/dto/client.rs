@@ -50,6 +50,14 @@ pub struct ClientSetCapabilitiesParams {
     pub capabilities: Vec<Capability>,
 }
 
+/// Unpairs a phone or tablet paired on the network (S97): its record and
+/// session go, and its open page must pair again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientForgetParams {
+    pub id: String,
+}
+
 /// What this connection may now do.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

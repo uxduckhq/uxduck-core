@@ -73,7 +73,7 @@ fn bounds(b: &TerrainBounds) -> Result<Bounds, ApiError> {
     if cover::chunks_in(bounds).len() > MAX_CHUNKS {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            "the area is too large to keep; keep a smaller one, a few degrees across at most",
+            "the area is too large to keep. Keep a smaller one, a few degrees across at most",
         ));
     }
     Ok(bounds)

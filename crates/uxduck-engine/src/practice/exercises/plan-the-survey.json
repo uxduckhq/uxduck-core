@@ -21,8 +21,8 @@
   ],
   "steps": [
     {
-      "text": "On the Mission tab, plan lines back and forth across the field at 40 m, then upload the mission.",
-      "hint": "Start with a take-off, then put waypoints at the ends of lines about 20 m apart across the field.",
+      "text": "Plan a take-off and a survey of the field at 40 m, then upload the plan.",
+      "hint": "In a plan, Add a pattern › Survey, click the field's corners and close it, then set the height to 40 m and the spacing to 20 m.",
       "hintAfterS": 120,
       "all": [{ "check": "missionUploaded", "items": 4 }]
     },

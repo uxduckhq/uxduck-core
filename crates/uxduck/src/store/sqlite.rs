@@ -200,6 +200,16 @@ pub fn save_session(
     Ok(())
 }
 
+/// # Errors
+/// When the row cannot be deleted.
+pub fn delete_session(db: &Connection, token_hash: &str) -> Result<(), SqliteError> {
+    db.execute(
+        "DELETE FROM sessions WHERE token_hash = ?1",
+        params![token_hash],
+    )?;
+    Ok(())
+}
+
 /// How far the projections have applied the log.
 ///
 /// # Errors
@@ -270,6 +280,7 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             change @ (Change::ReceiptUpserted { .. }
             | Change::NotificationUpserted { .. }
             | Change::ClientUpserted { .. }
+            | Change::ClientRemoved { .. }
             | Change::ApprovalUpserted { .. }) => {
                 project_commands(&tx, change, event.seq)?;
             }
@@ -316,7 +327,10 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::VideoRecordingUpserted { .. }
             | Change::PluginCalled { .. }
             | Change::PluginPublished { .. }
-            | Change::PluginDeclined { .. } => {}
+            | Change::PluginDeclined { .. }
+            | Change::PlanSaved { .. }
+            | Change::PlanRemoved { .. }
+            | Change::MissionRecorded { .. } => {}
         }
         last = event.seq;
     }
@@ -446,6 +460,9 @@ fn project_commands(
                     to_i64(seq)
                 ],
             )?;
+        }
+        Change::ClientRemoved { id } => {
+            tx.execute("DELETE FROM clients WHERE id = ?1", params![id])?;
         }
         Change::ApprovalUpserted { approval: a } => {
             tx.execute(

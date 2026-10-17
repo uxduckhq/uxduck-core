@@ -44,6 +44,9 @@ impl From<&core::HistoryEvent> for dto::HistoryEvent {
             core::HistoryEvent::SnapshotSaved { snapshot_id, name } => {
                 Self::SnapshotSaved { snapshot_id, name }
             }
+            core::HistoryEvent::MissionChanged { record_id, text } => {
+                Self::MissionChanged { record_id, text }
+            }
             core::HistoryEvent::ParameterChanged {
                 name,
                 from,

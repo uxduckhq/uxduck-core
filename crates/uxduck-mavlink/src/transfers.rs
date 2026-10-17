@@ -31,11 +31,12 @@ pub enum Out {
     ParamRequestList,
     ParamRequestRead(u16),
     ParamSet(Param),
-    MissionRequestList,
-    MissionCount(u16),
-    MissionRequest(u16),
+    /// Each with its `MAV_MISSION_TYPE`: 0 the mission, 1 the fence, 2 rally points.
+    MissionRequestList(u8),
+    MissionCount(u16, u8),
+    MissionRequest(u16, u8),
     MissionItem(MissionItemInt),
-    MissionAck(u8),
+    MissionAck(u8, u8),
     /// A MAVLink FTP request (`FILE_TRANSFER_PROTOCOL`'s payload).
     Ftp(FtpRequest),
 }
@@ -122,6 +123,12 @@ impl ParamDownload {
     #[must_use]
     pub fn progress(&self) -> (usize, Option<u16>) {
         (self.by_index.len(), self.count)
+    }
+
+    /// Which try this is: 1 until the vehicle goes quiet and it asks again.
+    #[must_use]
+    pub fn attempt(&self) -> u8 {
+        self.rounds.saturating_add(1)
     }
 
     /// A `PARAM_VALUE` from the vehicle. `Some` with the whole list once
@@ -603,17 +610,32 @@ impl Exchange {
 /// Downloading the mission: the count, then each item in turn.
 #[derive(Clone, Debug)]
 pub struct MissionDownload {
+    /// `MAV_MISSION_TYPE`.
+    pub kind: u8,
     count: Option<u16>,
     items: Vec<MissionItemInt>,
     exchange: Exchange,
 }
 
 impl MissionDownload {
+    /// How far along it is: `(received, count, attempt)`.
+    #[must_use]
+    pub fn progress(&self) -> (usize, Option<u16>, u8) {
+        (self.items.len(), self.count, self.exchange.attempts)
+    }
+
     #[must_use]
     pub fn start(now_us: u64) -> (Self, Vec<Out>) {
-        let out = vec![Out::MissionRequestList];
+        Self::start_kind(now_us, 0)
+    }
+
+    /// Downloads one kind: 0 the mission, 1 the fence, 2 rally points.
+    #[must_use]
+    pub fn start_kind(now_us: u64, kind: u8) -> (Self, Vec<Out>) {
+        let out = vec![Out::MissionRequestList(kind)];
         (
             Self {
+                kind,
                 count: None,
                 items: Vec::new(),
                 exchange: Exchange::new(out.clone(), now_us),
@@ -630,7 +652,7 @@ impl MissionDownload {
         if count == 0 {
             return Step::Done(Vec::new());
         }
-        let out = vec![Out::MissionRequest(0)];
+        let out = vec![Out::MissionRequest(0, self.kind)];
         self.exchange.sent(&out, now_us);
         Step::Send(out)
     }
@@ -647,7 +669,7 @@ impl MissionDownload {
             return Step::Done(std::mem::take(&mut self.items));
         }
         let next = u16::try_from(self.items.len()).unwrap_or(u16::MAX);
-        let out = vec![Out::MissionRequest(next)];
+        let out = vec![Out::MissionRequest(next, self.kind)];
         self.exchange.sent(&out, now_us);
         Step::Send(out)
     }
@@ -662,20 +684,43 @@ impl MissionDownload {
 #[derive(Clone, Debug)]
 pub struct MissionUpload {
     pub order_id: String,
+    /// `MAV_MISSION_TYPE`.
+    pub kind: u8,
     items: Vec<MissionItemInt>,
     exchange: Exchange,
+    /// Items the vehicle has asked for so far.
+    sent: usize,
 }
 
 impl MissionUpload {
+    /// How far along it is: `(sent, total, attempt)`.
+    #[must_use]
+    pub fn progress(&self) -> (usize, usize, u8) {
+        (self.sent, self.items.len(), self.exchange.attempts)
+    }
+
     #[must_use]
     pub fn start(order_id: String, items: Vec<MissionItemInt>, now_us: u64) -> (Self, Vec<Out>) {
+        Self::start_kind(order_id, items, now_us, 0)
+    }
+
+    /// Uploads one kind: 0 the mission, 1 the fence, 2 rally points.
+    #[must_use]
+    pub fn start_kind(
+        order_id: String,
+        items: Vec<MissionItemInt>,
+        now_us: u64,
+        kind: u8,
+    ) -> (Self, Vec<Out>) {
         let count = u16::try_from(items.len()).unwrap_or(u16::MAX);
-        let out = vec![Out::MissionCount(count)];
+        let out = vec![Out::MissionCount(count, kind)];
         (
             Self {
                 order_id,
+                kind,
                 items,
                 exchange: Exchange::new(out.clone(), now_us),
+                sent: 0,
             },
             out,
         )
@@ -687,6 +732,8 @@ impl MissionUpload {
         };
         let mut item = item.clone();
         item.seq = seq;
+        item.mission_type = self.kind;
+        self.sent = self.sent.max(usize::from(seq) + 1);
         let out = vec![Out::MissionItem(item)];
         self.exchange.sent(&out, now_us);
         Step::Send(out)
@@ -802,16 +849,19 @@ mod tests {
             mission_type: 0,
         };
         let (mut down, out) = MissionDownload::start(0);
-        assert_eq!(out, [Out::MissionRequestList]);
-        assert_eq!(down.count(2, 10), Step::Send(vec![Out::MissionRequest(0)]));
+        assert_eq!(out, [Out::MissionRequestList(0)]);
+        assert_eq!(
+            down.count(2, 10),
+            Step::Send(vec![Out::MissionRequest(0, 0)])
+        );
         assert_eq!(
             down.item(item(0), 20),
-            Step::Send(vec![Out::MissionRequest(1)])
+            Step::Send(vec![Out::MissionRequest(1, 0)])
         );
         // A timeout sends the last request again.
         assert_eq!(
             down.tick(2_000_000, &timing),
-            Step::Send(vec![Out::MissionRequest(1)])
+            Step::Send(vec![Out::MissionRequest(1, 0)])
         );
         assert_eq!(
             down.item(item(1), 2_000_010),
@@ -819,7 +869,7 @@ mod tests {
         );
 
         let (mut up, out) = MissionUpload::start("o1".into(), vec![item(9), item(9)], 0);
-        assert_eq!(out, [Out::MissionCount(2)]);
+        assert_eq!(out, [Out::MissionCount(2, 0)]);
         assert_eq!(
             up.request(1, 10),
             Step::Send(vec![Out::MissionItem(item(1))])

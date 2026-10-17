@@ -95,7 +95,7 @@ impl Engine {
         let allowed = &self.state.settings.remote_control;
         if allowed.is_empty() {
             return denied(
-                "remote control is off at this computer; it is turned on there, in Settings".into(),
+                "remote control is off at this computer. It is turned on there, in Settings".into(),
             );
         }
         let Some(command_id) = params.command_id.as_deref().filter(|id| !id.is_empty()) else {

@@ -91,13 +91,13 @@ pub(crate) fn handle(
             let requests = engine.sessions.pending_pairings(engine.clock.as_ref());
             to_value(&PairingListResult { requests })
         }
-        ClientRequest::PairingApprove(PairingAnswerParams { code }) => {
+        ClientRequest::PairingApprove(PairingAnswerParams { code, access }) => {
             require_operator()?;
-            answer(engine, &code, true)
+            answer(engine, &code, true, access.map(Into::into))
         }
-        ClientRequest::PairingDeny(PairingAnswerParams { code }) => {
+        ClientRequest::PairingDeny(PairingAnswerParams { code, .. }) => {
             require_operator()?;
-            answer(engine, &code, false)
+            answer(engine, &code, false, None)
         }
         ClientRequest::SessionCreateBootstrap(_) => {
             require_operator()?;
@@ -135,6 +135,7 @@ pub(crate) fn handle(
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
+        | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::LinkAdd(_)
@@ -151,6 +152,7 @@ pub(crate) fn handle(
         }
         request @ (ClientRequest::ClientList(_)
         | ClientRequest::ClientSetCapabilities(_)
+        | ClientRequest::ClientForget(_)
         | ClientRequest::ApprovalList(_)
         | ClientRequest::ApprovalResolve(_)) => {
             crate::approvals::handle(engine, connection, request, &granted, operator)
@@ -160,6 +162,22 @@ pub(crate) fn handle(
         | ClientRequest::PlaceUpdate(_)
         | ClientRequest::PlaceRemove(_)) => {
             crate::search::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::PlanList(_)
+        | ClientRequest::PlanGet(_)
+        | ClientRequest::PlanCreate(_)
+        | ClientRequest::PlanUpdate(_)
+        | ClientRequest::PlanUndo(_)
+        | ClientRequest::PlanRedo(_)
+        | ClientRequest::PlanPlace(_)
+        | ClientRequest::PlanDelete(_)
+        | ClientRequest::PlanRestore(_)
+        | ClientRequest::PlanImport(_)
+        | ClientRequest::PlanExport(_)
+        | ClientRequest::PlanUpload(_)
+        | ClientRequest::PlanCheck(_)
+        | ClientRequest::PlanExamples(_)) => {
+            crate::plans::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::PluginInstall(_)
         | ClientRequest::PluginRemove(_)
@@ -299,7 +317,10 @@ pub(crate) fn handle(
             require(uxduck_core::domain::client::Capability::Read)?;
             crate::remote_view::handle(engine, connection, request)
         }
-        request @ (ClientRequest::VideoList(_)
+        request @ (ClientRequest::VideoDevices(_)
+        | ClientRequest::VideoCapture(_)
+        | ClientRequest::VideoCaptureEnable(_)
+        | ClientRequest::VideoList(_)
         | ClientRequest::VideoAssign(_)
         | ClientRequest::VideoWatch(_)
         | ClientRequest::VideoUnwatch(_)
@@ -329,10 +350,17 @@ pub(crate) fn handle(
         | ClientRequest::AppFocus(_)
         | ClientRequest::AppOpen(_)
         | ClientRequest::DesktopAppStatus(_)
+        | ClientRequest::NetworkStatus(_)
         | ClientRequest::DesktopAppDownload(_)
         | ClientRequest::DesktopAppChoose(_)
         | ClientRequest::DesktopAppRemove(_)) => {
             crate::app::handle(engine, connection, &request, operator, &granted)
+        }
+        request @ (ClientRequest::LocationStatus(_)
+        | ClientRequest::LocationStart(_)
+        | ClientRequest::LocationStop(_)
+        | ClientRequest::TrayLocation(_)) => {
+            crate::location::handle(engine, connection, request, operator, &granted)
         }
         request @ (ClientRequest::InterfaceStatus(_) | ClientRequest::InterfaceCheck(_)) => {
             crate::interface::handle(engine, &request, &granted)
@@ -352,7 +380,10 @@ pub(crate) fn handle(
         | ClientRequest::MavlinkHistory(_)) => {
             crate::restart::handle(engine, connection, request, &granted, operator)
         }
-        request @ (ClientRequest::ControllerClaim(_)
+        request @ (ClientRequest::KeyboardStart(_)
+        | ClientRequest::KeyboardInput(_)
+        | ClientRequest::KeyboardStop(_)
+        | ClientRequest::ControllerClaim(_)
         | ClientRequest::ControllerRelease(_)
         | ClientRequest::ControllerForget(_)
         | ClientRequest::ControllerSetTarget(_)
@@ -365,6 +396,9 @@ pub(crate) fn handle(
         request @ (ClientRequest::ParamRefresh(_)
         | ClientRequest::ParamSet(_)
         | ClientRequest::MissionRefresh(_)
+        | ClientRequest::MissionHistory(_)
+        | ClientRequest::MissionRestore(_)
+        | ClientRequest::TransferCancel(_)
         | ClientRequest::MissionUpload(_)) => {
             crate::transfers::handle(engine, connection, request, &granted)
         }
@@ -486,6 +520,9 @@ fn subscribe(
         places: types
             .contains(&EntityType::Place)
             .then(|| engine.state.places.values().map(Into::into).collect()),
+        plans: types
+            .contains(&EntityType::Plan)
+            .then(|| engine.state.plans.values().map(Into::into).collect()),
         snapshots: types
             .contains(&EntityType::Snapshot)
             .then(|| engine.state.snapshots.values().map(Into::into).collect()),
@@ -849,20 +886,36 @@ fn initialize(
     if kind == uxduck_contracts::dto::initialize::ClientKind::Plugin {
         return Err(ApiError::new(
             ErrorKind::InvalidParams,
-            "plugins are run by the daemon; a connection cannot be one",
+            "plugins are run by the daemon. A connection cannot be one",
         ));
     }
     let default = admission::granted(kind.into(), &state.trust);
     let operator = default.len() == uxduck_core::domain::client::Capability::ALL.len();
     let client_id = state.client_id.clone();
     let executable = state.executable.clone();
-    let (record, core_granted) = engine.admit_record(
-        kind.into(),
-        &params.client_info.name,
-        executable.as_deref(),
-        operator,
-        default,
-    );
+    // A phone or tablet on the network has the record it paired with (S97).
+    let network = match &state.trust {
+        admission::Trust::NetworkBrowser { client, .. } => Some(client.clone()),
+        _ => None,
+    };
+    let (record, core_granted) = match network {
+        Some(client) => {
+            let Some(granted) = engine.admit_network(&client) else {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    "This device was forgotten on the computer running UXDuck. Reload to pair it again.",
+                ));
+            };
+            (client, granted)
+        }
+        None => engine.admit_record(
+            kind.into(),
+            &params.client_info.name,
+            executable.as_deref(),
+            operator,
+            default,
+        ),
+    };
     let granted: Vec<Capability> = core_granted.iter().copied().map(Into::into).collect();
     let window = matches!(
         kind,
@@ -884,6 +937,8 @@ fn initialize(
             approvals: params.capabilities.approvals,
         });
     }
+    // A reloaded window takes back the controllers it held.
+    engine.adopt_claims(connection);
     to_value(&InitializeResult {
         daemon_version: engine.config.daemon_version.clone(),
         protocol_version: PROTOCOL_VERSION,
@@ -895,10 +950,15 @@ fn initialize(
     })
 }
 
-fn answer(engine: &mut Engine, code: &str, approve: bool) -> Result<Value, ApiError> {
+pub(crate) fn answer(
+    engine: &mut Engine,
+    code: &str,
+    approve: bool,
+    access: Option<uxduck_core::domain::client::NetworkAccess>,
+) -> Result<Value, ApiError> {
     let answered = engine
         .sessions
-        .answer_pairing(code, approve, engine.clock.as_ref());
+        .answer_pairing(code, approve, access, engine.clock.as_ref());
     // A question for a browser that has gone is cleared, answered or not.
     engine.sync_pairing_questions();
     if answered {
@@ -906,7 +966,7 @@ fn answer(engine: &mut Engine, code: &str, approve: bool) -> Result<Value, ApiEr
     } else {
         Err(ApiError::new(
             ErrorKind::NotFound,
-            "that browser stopped waiting; reload it to ask again",
+            "that browser stopped waiting. Reload it to ask again",
         ))
     }
 }

@@ -3,8 +3,10 @@
 pub mod client;
 pub mod find;
 pub mod link_spec;
+pub mod mission;
 mod new_plugin;
 pub mod params;
+pub mod plan;
 pub mod practice;
 mod practice_replay;
 pub mod terrain;
@@ -49,8 +51,13 @@ pub enum Command {
     Forward(ForwardArgs),
     /// A Model Context Protocol server on stdio, for coding agents: add
     /// `uxduck mcp` to Claude Code or Codex. Reading vehicles needs nothing;
-    /// commands wait until an operator allows them.
-    Mcp,
+    /// commands wait until an operator allows them. Start UXDuck yourself
+    /// before connecting; MCP never starts it automatically.
+    Mcp {
+        /// Advertise every tool schema up front instead of finding tools on demand.
+        #[arg(long)]
+        all_tools: bool,
+    },
     /// Plugins: install one from a directory, list them, or test one
     /// against a recorded tlog without a daemon.
     Plugin {
@@ -120,6 +127,16 @@ pub enum Command {
     Practice {
         #[command(subcommand)]
         command: practice::PracticeCommand,
+    },
+    /// A vehicle's missions over time (S134): `uxduck mission history Alpha`.
+    Mission {
+        #[command(subcommand)]
+        command: mission::MissionCommand,
+    },
+    /// Saved plans (S125): `uxduck plan import mission.plan`.
+    Plan {
+        #[command(subcommand)]
+        command: plan::PlanCommand,
     },
     /// Terrain heights (S23): `uxduck terrain at --lat 53.07 --lon -4.08`.
     Terrain {
@@ -910,6 +927,7 @@ pub async fn run(cli: Cli) -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
 async fn run_command(cli: Cli) -> ExitCode {
     let data_dir = crate::paths::data_dir(cli.data_dir.as_deref(), cli.dev);
     let owned = cli.exit_on_stdin_close;
@@ -955,7 +973,7 @@ async fn run_command(cli: Cli) -> ExitCode {
                 }
             };
         }
-        Some(Command::Mcp) => crate::mcp::run(&data_dir, cli.dev).await,
+        Some(Command::Mcp { all_tools }) => crate::mcp::run(&data_dir, all_tools).await,
         Some(Command::Approvals { command }) => approvals(&data_dir, command).await,
         Some(Command::Plugin { command }) => plugin(&data_dir, command).await,
         Some(Command::Ports { command: None }) => ports_list(&data_dir).await,
@@ -984,6 +1002,8 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Params { command }) => params::run(&data_dir, command).await,
         Some(Command::Vehicle { command }) => vehicle::run(&data_dir, command).await,
         Some(Command::Practice { command }) => practice::run(&data_dir, command).await,
+        Some(Command::Plan { command }) => plan::run(&data_dir, command).await,
+        Some(Command::Mission { command }) => mission::run(&data_dir, command).await,
         Some(Command::Terrain { command }) => terrain::run(&data_dir, command).await,
         Some(Command::Video { command }) => video::run(&data_dir, command).await,
         Some(Command::Find {
@@ -1842,7 +1862,7 @@ pub(crate) async fn start_daemon(
     data_dir: &std::path::Path,
     dev: bool,
 ) -> Result<LocalClient, CliError> {
-    // Several MCP clients and the app may arrive together. Serialize startup,
+    // Several explicit app launches may arrive together. Serialize startup,
     // then check again: the daemon's lifetime lock alone only rejects a loser.
     std::fs::create_dir_all(data_dir)?;
     let lock = std::fs::OpenOptions::new()
@@ -2570,6 +2590,12 @@ async fn fake_vehicle(
         own.shift_m = terrain_shift;
         own
     });
+    if terrain {
+        // This fixture stores terrain as sent and applies no arming offset.
+        vehicle
+            .parameters
+            .push(("TERRAIN_OFS_MAX".into(), 0.0, uxduck_mavlink::sim::REAL32));
+    }
     vehicle.battery_from_pct = battery.clamp(0.0, 100.0);
     vehicle.gps_lost_from_s = gps_lost_from_s;
     eprintln!("fake vehicle {system_id} (uid {uid:x}) sending to {target}; Ctrl-C to stop");

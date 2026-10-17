@@ -15,6 +15,37 @@ use super::client::{CliError, LocalClient};
 
 #[derive(Debug, Subcommand)]
 pub enum VideoCommand {
+    /// Webcams, USB cameras and capture adapters attached to UXDuck's computer.
+    Devices {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture a local camera in the daemon, including with every window closed.
+    Capture {
+        /// Exact id from `uxduck video devices`, or an unambiguous camera name.
+        device: String,
+        #[arg(long, default_value = "auto", value_parser = ["auto", "pal", "ntsc"])]
+        standard: String,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        #[arg(long)]
+        frame_rate: Option<f64>,
+        /// Bob deinterlace each field (on automatically for PAL/NTSC).
+        #[arg(long)]
+        deinterlace: bool,
+    },
+    /// Pause a configured local camera, closing its device and recording segment.
+    Pause { source: String },
+    /// Resume a local camera, reconnecting when it is plugged in.
+    Resume { source: String },
+    /// Start recording a camera; it continues with every UI window closed.
+    Record {
+        source: String,
+        #[arg(long)]
+        stop: bool,
+    },
     /// The camera streams arriving at UXDuck, with their codec, picture and
     /// counters.
     List {
@@ -51,6 +82,44 @@ pub enum VideoCommand {
 
 pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError> {
     match command {
+        VideoCommand::Devices { json: as_json } => print_devices(data_dir, as_json).await,
+        VideoCommand::Capture {
+            device,
+            standard,
+            width,
+            height,
+            frame_rate,
+            deinterlace,
+        } => {
+            capture(
+                data_dir,
+                &device,
+                &standard,
+                width,
+                height,
+                frame_rate,
+                deinterlace,
+            )
+            .await
+        }
+        VideoCommand::Pause { source } => enable(data_dir, source, false).await,
+        VideoCommand::Resume { source } => enable(data_dir, source, true).await,
+        VideoCommand::Record { source, stop } => {
+            let mut client = LocalClient::connect(data_dir).await?;
+            client.initialize().await?;
+            client
+                .call("video/record", json!({ "sourceId": source, "on": !stop }))
+                .await?;
+            println!(
+                "Recording {}.",
+                if stop {
+                    "stopped"
+                } else {
+                    "started; closing the UI does not stop it"
+                }
+            );
+            Ok(())
+        }
         VideoCommand::List { json: as_json } => {
             let listed = list(data_dir).await?;
             if as_json {
@@ -78,43 +147,7 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
             }
             Ok(())
         }
-        VideoCommand::Recordings { json: as_json } => {
-            let mut client = LocalClient::connect(data_dir).await?;
-            client.initialize().await?;
-            let state = client
-                .call(
-                    "state/subscribe",
-                    json!({ "entities": ["video-recording"] }),
-                )
-                .await?;
-            let mut all = state["snapshot"]["videoRecordings"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            all.sort_by_key(|r| std::cmp::Reverse(r["startedAtUs"].as_u64().unwrap_or(0)));
-            if as_json {
-                println!("{}", serde_json::to_string_pretty(&all).unwrap_or_default());
-                return Ok(());
-            }
-            if all.is_empty() {
-                println!("No recordings yet.");
-            }
-            for r in &all {
-                let id = r["id"].as_str().unwrap_or("");
-                let seconds = r["durationUs"].as_u64().unwrap_or(0) / 1_000_000;
-                println!(
-                    "{id}  {}  {}:{:02}  {} MB  {}",
-                    r["state"].as_str().unwrap_or(""),
-                    seconds / 60,
-                    seconds % 60,
-                    r["bytes"].as_u64().unwrap_or(0) / 1_000_000,
-                    crate::paths::recordings_dir(data_dir)
-                        .join(format!("{id}.mp4"))
-                        .display()
-                );
-            }
-            Ok(())
-        }
+        VideoCommand::Recordings { json: as_json } => print_recordings(data_dir, as_json).await,
         VideoCommand::Remove { what } => {
             let params = match what
                 .strip_prefix("udp:")
@@ -313,4 +346,141 @@ fn print_status(sender: &str, s: &Status) {
         c.pes_length_max_excess,
         if s.klv { ", with KLV" } else { "" },
     );
+}
+
+async fn enable(data_dir: &Path, source: String, enabled: bool) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    client
+        .call(
+            "video/capture/enable",
+            json!({ "sourceId": source, "enabled": enabled }),
+        )
+        .await?;
+    println!("Capture {}.", if enabled { "resuming" } else { "paused" });
+    Ok(())
+}
+
+async fn devices(
+    client: &mut LocalClient,
+) -> Result<uxduck_contracts::dto::video::VideoDevicesResult, CliError> {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let result = client.call("video/devices", json!({})).await?;
+        let listed: uxduck_contracts::dto::video::VideoDevicesResult =
+            serde_json::from_value(result).map_err(|e| CliError::Usage(e.to_string()))?;
+        if !listed.scanning {
+            if let Some(error) = &listed.error {
+                return Err(CliError::Usage(error.clone()));
+            }
+            return Ok(listed);
+        }
+        if Instant::now() >= until {
+            return Err(CliError::Usage(
+                "Camera discovery timed out. Check the capture helper and device driver.".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn print_devices(data_dir: &Path, as_json: bool) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let devices = devices(&mut client).await?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&devices).unwrap_or_default()
+        );
+    } else if devices.devices.is_empty() {
+        println!("No local cameras found. Connect a camera and check its OS driver.");
+    } else {
+        for device in devices.devices {
+            println!(
+                "{}  {}{}",
+                device.id,
+                device.name,
+                if device.persistent {
+                    ""
+                } else {
+                    " (device number; verify after reconnecting)"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn capture(
+    data_dir: &Path,
+    device: &str,
+    standard: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    frame_rate: Option<f64>,
+    deinterlace: bool,
+) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let listed = devices(&mut client).await?;
+    let matches: Vec<_> = listed
+        .devices
+        .iter()
+        .filter(|d| d.id == device || d.name == device)
+        .collect();
+    if matches.len() != 1 {
+        return Err(CliError::Usage(
+            "Choose one exact device id from uxduck video devices.".into(),
+        ));
+    }
+    let selected = matches[0];
+    let source = client.call("video/capture", json!({ "input": {
+                "deviceId": selected.id, "name": selected.name, "enabled": true, "standard": standard,
+                "width": width, "height": height, "frameRate": frame_rate, "deinterlace": deinterlace || standard != "auto"
+            }})).await?;
+    println!(
+        "{}  {}",
+        source["id"].as_str().unwrap_or(""),
+        source["name"].as_str().unwrap_or("")
+    );
+    Ok(())
+}
+
+async fn print_recordings(data_dir: &Path, as_json: bool) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let state = client
+        .call(
+            "state/subscribe",
+            json!({ "entities": ["video-recording"] }),
+        )
+        .await?;
+    let mut all = state["snapshot"]["videoRecordings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    all.sort_by_key(|r| std::cmp::Reverse(r["startedAtUs"].as_u64().unwrap_or(0)));
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&all).unwrap_or_default());
+        return Ok(());
+    }
+    if all.is_empty() {
+        println!("No recordings yet.");
+    }
+    for r in &all {
+        let id = r["id"].as_str().unwrap_or("");
+        let seconds = r["durationUs"].as_u64().unwrap_or(0) / 1_000_000;
+        println!(
+            "{id}  {}  {}:{:02}  {} MB  {}",
+            r["state"].as_str().unwrap_or(""),
+            seconds / 60,
+            seconds % 60,
+            r["bytes"].as_u64().unwrap_or(0) / 1_000_000,
+            crate::paths::recordings_dir(data_dir)
+                .join(format!("{id}.mp4"))
+                .display()
+        );
+    }
+    Ok(())
 }

@@ -20,6 +20,7 @@ mod interface;
 mod live_video;
 mod logs;
 mod mcp;
+mod network;
 mod online;
 mod params;
 mod parent;

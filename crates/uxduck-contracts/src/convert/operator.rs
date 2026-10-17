@@ -156,6 +156,7 @@ fn tab_to_dto(kind: core::TabKind) -> dto::TabKind {
         core::TabKind::Places => dto::TabKind::Places,
         core::TabKind::Flights => dto::TabKind::Flights,
         core::TabKind::Missions => dto::TabKind::Missions,
+        core::TabKind::Profile => dto::TabKind::Profile,
         core::TabKind::Duck => dto::TabKind::Duck,
     }
 }
@@ -196,6 +197,7 @@ fn tab_from_dto(kind: dto::TabKind) -> core::TabKind {
         dto::TabKind::Places => core::TabKind::Places,
         dto::TabKind::Flights => core::TabKind::Flights,
         dto::TabKind::Missions => core::TabKind::Missions,
+        dto::TabKind::Profile => core::TabKind::Profile,
         dto::TabKind::Duck => core::TabKind::Duck,
     }
 }

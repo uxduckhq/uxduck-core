@@ -143,7 +143,7 @@ fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
         return Some("that place is not on the map".into());
     }
     if *latitude_deg == 0.0 && *longitude_deg == 0.0 {
-        return Some("0, 0 is where a missing position reads; choose the place again".into());
+        return Some("0, 0 is where a missing position reads. Choose the place again".into());
     }
     let from_ground = matches!(
         altitude_frame,
@@ -466,7 +466,7 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
                 .to_owned(),
         ),
         (Command::Arm, _) => Some(
-            "Starts the motors so it can take off; the propellers may spin".to_owned(),
+            "Arming enables the motors for takeoff. The propellers may spin.".to_owned(),
         ),
         (Command::Disarm, _) => {
             Some("Stops the motors. Only on the ground: in the air it falls".to_owned())
@@ -491,7 +491,7 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
                 .to_owned(),
         ),
         (Command::Reboot, _) => {
-            Some("Restarts the autopilot; only on the ground".to_owned())
+            Some("Restarts the autopilot. Available only while the vehicle is on the ground.".to_owned())
         }
         _ => None,
     }

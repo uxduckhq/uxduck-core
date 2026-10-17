@@ -46,6 +46,8 @@ pub trait Persistence: Send {
     /// Records a browser session by the SHA-256 of its token; the token
     /// itself is never stored.
     fn save_session(&mut self, token_hash: &str, session: &crate::pairing::Session);
+    /// Forgets a browser session, as when a phone is unpaired (S97).
+    fn delete_session(&mut self, _token_hash: &str) {}
 }
 
 /// Persistence that keeps nothing, for tests and for the browser simulator
@@ -162,6 +164,11 @@ pub trait LinkPort: Send {
     fn transfer(&mut self, order: TransferOrder) {
         let _ = order;
     }
+    /// Page-owned pilot input, through the same data plane as physical controllers.
+    fn controller_input(&mut self, event: crate::controller_input::InputEvent) {
+        let _ = event;
+    }
+
     /// What a controller drives now: `None` stops its `MANUAL_CONTROL` at
     /// once. The data plane reports inputs through the engine's
     /// `controller_*` methods.
@@ -217,6 +224,20 @@ pub enum TransferOrder {
         vehicle_id: String,
         items: Vec<uxduck_core::domain::mission::MissionItem>,
     },
+    /// A fence (1) or rally points (2) down from the vehicle (S128), ending
+    /// in `Engine::mission_part_downloaded`.
+    DownloadMissionPart {
+        vehicle_id: String,
+        kind: u8,
+    },
+    /// A fence (1) or rally points (2) up to the vehicle (S128), ending in
+    /// `Engine::mission_uploaded`.
+    UploadMissionPart {
+        order_id: String,
+        vehicle_id: String,
+        items: Vec<uxduck_core::domain::mission::MissionItem>,
+        kind: u8,
+    },
     /// A job on a vehicle's files over MAVLink FTP (S121), reported under
     /// `id` by `Engine::file_reported`.
     File {
@@ -228,6 +249,11 @@ pub enum TransferOrder {
     CancelFile {
         vehicle_id: String,
         id: String,
+    },
+    /// Stops a parameter download or a mission transfer (S127).
+    CancelTransfer {
+        vehicle_id: String,
+        kind: crate::transfers::ProgressKind,
     },
     /// Terrain answers for a block of a vehicle's grid (S118), sent at
     /// `per_second`. Answers queued for the block stay only if `mask`, the
@@ -420,6 +446,9 @@ pub trait System: Send {
     fn serial_ports(&self) -> Vec<SerialPortInfo>;
     /// Holds or releases the system wake lock.
     fn wake_lock(&mut self, hold: bool);
+    /// Keeps the display on, or lets it sleep again, while a vehicle is
+    /// armed, so the screen does not dim or lock in flight.
+    fn display_awake(&mut self, _hold: bool) {}
     /// How often each task has woken since `since_us`, by name (S24).
     fn wakeups(&self) -> (u64, Vec<(String, u64)>) {
         (0, Vec::new())
@@ -593,6 +622,7 @@ pub struct SerialPortInfo {
 #[derive(Debug, Default)]
 pub struct NoSystem {
     pub wake_lock: bool,
+    pub display_awake: bool,
     /// What `controller_inputs` answers.
     pub controller_inputs: uxduck_contracts::dto::controller::ControllerInputsResult,
 }
@@ -611,6 +641,9 @@ impl System for NoSystem {
     }
     fn wake_lock(&mut self, hold: bool) {
         self.wake_lock = hold;
+    }
+    fn display_awake(&mut self, hold: bool) {
+        self.display_awake = hold;
     }
     fn controller_inputs(&self) -> uxduck_contracts::dto::controller::ControllerInputsResult {
         self.controller_inputs.clone()

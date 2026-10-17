@@ -51,7 +51,7 @@
     {
       "name": "timer-add",
       "title": "Add a minute to the timer",
-      "description": "Adds minutes to the timer, one if not said; starts one if none is running.",
+      "description": "Adds the specified number of minutes to the timer, or one minute if unspecified. Starts a timer if none is running.",
       "parameters": {
         "type": "object",
         "properties": {

@@ -115,8 +115,84 @@ pub async fn preflight(headless: bool, enabled: bool) -> std::io::Result<Option<
     Ok(Some(Tray { binary }))
 }
 
+/// The name of the app a development tray runs from on macOS.
+#[cfg(target_os = "macos")]
+const DEV_APP: &str = "UXDuck Dev.app";
+
+/// macOS asks its permission questions, location among them, only of an
+/// app: `CoreLocationAgent` skips a bare executable ("client bundle is NULL"),
+/// and the request waits for ever. The installed tray is UXDuck.app's own
+/// executable; one built with cargo is bare, so it runs from a small app
+/// beside it, `UXDuck Dev.app`, refreshed from the built file whenever that
+/// changes and signed ad hoc (S137).
+#[cfg(target_os = "macos")]
+fn in_app(binary: &Path) -> std::io::Result<PathBuf> {
+    if binary
+        .components()
+        .any(|part| part.as_os_str().to_string_lossy().ends_with(".app"))
+    {
+        return Ok(binary.to_owned());
+    }
+    let dir = binary
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the menu-bar helper has no folder"))?;
+    let app = dir.join(DEV_APP);
+    let exe = app.join("Contents/MacOS/uxduck-tray");
+    let built = std::fs::metadata(binary)?;
+    let fresh = std::fs::metadata(&exe).is_ok_and(|copy| {
+        copy.len() == built.len()
+            && matches!((copy.modified(), built.modified()), (Ok(copy), Ok(built)) if copy >= built)
+    });
+    if fresh {
+        return Ok(exe);
+    }
+    std::fs::create_dir_all(exe.parent().unwrap_or(dir))?;
+    std::fs::copy(binary, &exe)?;
+    std::fs::write(app.join("Contents/Info.plist"), DEV_INFO)?;
+    let signed = std::process::Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&app)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !signed.success() {
+        return Err(std::io::Error::other(format!(
+            "Cannot sign the development menu-bar app {}: codesign failed ({signed}). Install Xcode's command line tools.",
+            app.display()
+        )));
+    }
+    tracing::info!(app = %app.display(), "the development menu-bar helper runs from an app");
+    Ok(exe)
+}
+
+/// `UXDuck Dev.app`'s Info.plist: a menu-bar app with UXDuck's location
+/// question, apart from the installed UXDuck.app.
+#[cfg(target_os = "macos")]
+const DEV_INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.uxduck.app.dev</string>
+  <key>CFBundleName</key><string>UXDuck Dev</string>
+  <key>CFBundleDisplayName</key><string>UXDuck Dev</string>
+  <key>CFBundleExecutable</key><string>uxduck-tray</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSLocationUsageDescription</key><string>UXDuck shows where you are on its maps, and its AI can use it when you ask.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>UXDuck shows where you are on its maps, and its AI can use it when you ask.</string>
+</dict>
+</plist>
+"#;
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps, reason = "macOS can fail here")]
+fn in_app(binary: &Path) -> std::io::Result<PathBuf> {
+    Ok(binary.to_owned())
+}
+
 fn spawn(binary: &Path, data_dir: &Path) -> std::io::Result<Child> {
-    Command::new(binary)
+    Command::new(in_app(binary)?)
         .arg("--data-dir")
         .arg(data_dir)
         // Its end of this pipe closes when the daemon goes, however it goes.
@@ -174,7 +250,7 @@ async fn supervise(mut path: Option<PathBuf>, data_dir: PathBuf, engine: EngineH
             }
             if failures == FAILURES {
                 tracing::error!(
-                    "UXDuck's menu-bar helper failed repeatedly; repair the installation and toggle Show UXDuck in the menu bar to retry"
+                    "UXDuck's menu-bar helper failed repeatedly. Repair the installation and toggle Show UXDuck in the menu bar to retry"
                 );
                 let _ = engine.run(|e| e.tray_failed("The menu-bar helper could not stay running after five attempts. Repair the installation, then turn Show UXDuck in the menu bar off and on to retry.")).await;
             }

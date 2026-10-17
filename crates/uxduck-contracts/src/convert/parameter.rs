@@ -55,7 +55,18 @@ impl From<&p::ParameterSet> for dto::ParameterSet {
             count: v.count,
             boot_instant_us: v.boot_instant_us,
             synced_at_us: v.synced_at_us,
+            progress: v.progress.map(progress),
         }
+    }
+}
+
+fn progress(v: p::TransferProgress) -> dto::TransferProgress {
+    dto::TransferProgress {
+        done: v.done,
+        total: v.total,
+        attempt: v.attempt,
+        at_us: v.at_us,
+        upload: v.upload,
     }
 }
 
@@ -103,6 +114,48 @@ impl From<&m::Mission> for dm::Mission {
             boot_instant_us: v.boot_instant_us,
             synced_at_us: v.synced_at_us,
             version: v.version,
+            progress: v.progress.map(progress),
+            fence: v.fence.iter().map(Into::into).collect(),
+            rally: v.rally.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&m::MissionOrigin> for dm::MissionOrigin {
+    fn from(v: &m::MissionOrigin) -> Self {
+        match v {
+            m::MissionOrigin::Found => Self::Found,
+            m::MissionOrigin::Uploaded {
+                plan_id,
+                plan_name,
+                verified,
+            } => Self::Uploaded {
+                plan_id: plan_id.clone(),
+                plan_name: plan_name.clone(),
+                verified: *verified,
+            },
+            m::MissionOrigin::Example => Self::Example,
+            m::MissionOrigin::ChangedElsewhere => Self::ChangedElsewhere,
+        }
+    }
+}
+
+impl From<&m::MissionRecord> for dm::MissionRecord {
+    fn from(v: &m::MissionRecord) -> Self {
+        Self {
+            id: v.id.clone(),
+            vehicle_id: v.vehicle_id.clone(),
+            items: v.items.iter().map(Into::into).collect(),
+            fence: v.fence.iter().map(Into::into).collect(),
+            rally: v.rally.iter().map(Into::into).collect(),
+            origin: (&v.origin).into(),
+            origin_text: v.origin_words(),
+            counts: v.counts(),
+            client_id: v.client_id.clone(),
+            operator_id: v.operator_id.clone(),
+            first_seen_us: v.first_seen_us,
+            last_seen_us: v.last_seen_us,
+            times: v.times,
         }
     }
 }

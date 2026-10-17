@@ -211,6 +211,9 @@ fn check_lines(answer: &Value) -> Vec<String> {
         Some("agrees") => format!("Agrees with {ours}"),
         Some("matchesOther") => format!("Matches {theirs}, not {ours} ({by:.0} m from {ours})"),
         Some("differs") => format!("Differs from {ours} by {by:.0} m"),
+        Some("offsetUncertain") => {
+            "May include ArduPilot's altitude adjustment; dataset unverified".to_owned()
+        }
         Some("noTerrain") => "The vehicle has no terrain there".to_owned(),
         Some("noReply") => "The vehicle did not answer".to_owned(),
         _ => format!("{ours} has no height there to compare with"),

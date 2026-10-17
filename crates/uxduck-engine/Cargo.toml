@@ -22,6 +22,8 @@ serde_json.workspace = true
 base64.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# KML polygons and lines read into plans (S125).
+quick-xml.workspace = true
 
 [dev-dependencies]
 # Signing a terrain manifest in tests (S23).

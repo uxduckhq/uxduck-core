@@ -11,8 +11,9 @@
 //!   operator's) and the switch confirmed;
 //!   meanwhile it stays on the old one and says so;
 //! - two controllers never drive one vehicle;
-//! - when the claiming client goes, or the controller is unplugged, it is
-//!   released and sends nothing, so the vehicle's own failsafe decides.
+//! - when the controller is unplugged, or the claiming client goes, it is
+//!   released and sends nothing, so the vehicle's own failsafe decides; a
+//!   window gets a moment first, so a reload takes its controllers back.
 
 use std::collections::BTreeMap;
 
@@ -27,14 +28,17 @@ use uxduck_contracts::dto::link::IdParams;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
-use uxduck_core::domain::client::Capability;
+use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{
     Claim, Controller, GamepadButton, InputMapping, NEUTRAL, PositionBinding, TargetMode,
 };
 use uxduck_core::domain::modes::Family;
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::notification::{
+    Action, NotificationAction, NotificationKind, Severity, Subject,
+};
 use uxduck_core::events::{Actor, Change};
+use uxduck_core::policy::admission::Trust;
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -44,6 +48,19 @@ use crate::{ConnectionId, Engine, upsert};
 /// How far below the middle a flying multicopter's throttle may be when a
 /// controller takes it over: -1 is idle, 0 the middle; -0.3 is 35% input.
 const HOLDING_THROTTLE: f64 = 0.3;
+
+/// How long a window's controllers keep flying after it goes, for the
+/// next window like it to take back: long enough for a reload.
+pub const CLAIM_GRACE_US: u64 = 15_000_000;
+
+/// A claim whose window went, kept for one like it to take back.
+#[derive(Debug)]
+struct Detached {
+    connection: ConnectionId,
+    record: String,
+    trust: Trust,
+    until_us: u64,
+}
 
 /// What the engine knows about controllers that is not journaled.
 #[derive(Debug, Default)]
@@ -55,6 +72,11 @@ pub(crate) struct Live {
     claimant: BTreeMap<String, ConnectionId>,
     /// Each connection's selected vehicle.
     selection: BTreeMap<ConnectionId, String>,
+    /// Claims whose window went moments ago: still routed, held by no
+    /// connection, until a window like it comes or the grace runs out.
+    detached: BTreeMap<String, Detached>,
+    /// Page-owned keyboards never inherit a physical controller's reload grace.
+    keyboards: BTreeMap<ConnectionId, String>,
 }
 
 fn daemon() -> Actor {
@@ -82,7 +104,20 @@ pub(crate) fn mappings(engine: &Engine) -> Vec<InputMapping> {
     all.into_values().collect()
 }
 
+fn keyboard_mapping() -> InputMapping {
+    InputMapping {
+        id: "sim-keyboard".into(),
+        name: "Simulation keyboard".into(),
+        deadzone: 0.0,
+        buttons: Vec::new(),
+        ..InputMapping::mode_2()
+    }
+}
+
 fn mapping(engine: &Engine, id: &str) -> Option<InputMapping> {
+    if id == "sim-keyboard" {
+        return Some(keyboard_mapping());
+    }
     mappings(engine).into_iter().find(|m| m.id == id)
 }
 
@@ -154,6 +189,12 @@ pub(crate) fn handle(
             if !granted.contains(&Capability::Config) {
                 return denied(&Capability::Config.denied_message());
             }
+            if params.id == "sim-keyboard" {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "The keyboard mapping is fixed",
+                ));
+            }
             update_mapping(engine, connection, params)
         }
         ClientRequest::ControllerForget(IdParams { id }) => {
@@ -164,6 +205,18 @@ pub(crate) fn handle(
         }
         _ if !operator || !granted.contains(&Capability::Control) => {
             denied("only an operator client may hold a controller")
+        }
+        ClientRequest::KeyboardStart(params) => keyboard_start(engine, connection, params),
+        ClientRequest::KeyboardInput(params) => keyboard_input(engine, connection, params.axes),
+        ClientRequest::KeyboardStop(_) => {
+            engine.stop_keyboard(connection);
+            Ok(json!({}))
+        }
+        ClientRequest::ControllerClaim(params) if params.id.starts_with("keyboard:") => {
+            denied("Start keyboard control from the simulation's Control tab")
+        }
+        ClientRequest::ControllerSetTarget(params) if params.id.starts_with("keyboard:") => {
+            denied("Release keyboard control before choosing another simulation")
         }
         ClientRequest::ControllerClaim(params) => claim(engine, connection, params),
         ClientRequest::ControllerRelease(IdParams { id }) => {
@@ -179,6 +232,132 @@ pub(crate) fn handle(
             "not a controller method",
         )),
     }
+}
+
+/// One page, one explicitly pinned simulator. Ordinary claims decide exclusivity.
+fn keyboard_start(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: uxduck_contracts::dto::controller::KeyboardStartParams,
+) -> Result<Value, ApiError> {
+    if engine.live.keyboards.contains_key(&connection) {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            "Release keyboard control first",
+        ));
+    }
+    let vehicle = engine
+        .vehicle(&params.vehicle_id)
+        .ok_or_else(|| not_found("vehicle"))?;
+    let simulated = engine.state.links.get(&vehicle.link_id).is_some_and(|l| {
+        matches!(
+            l.kind,
+            uxduck_core::domain::link::LinkKind::Simulator { .. }
+        )
+    });
+    if !simulated {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Keyboard control is for simulations only",
+        ));
+    }
+    if vehicle.presence != uxduck_core::domain::vehicle::Presence::Online {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "The simulation is offline",
+        ));
+    }
+    if !params.throttle.is_finite() || !(-1.0..=1.0).contains(&params.throttle) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Throttle must be between -1 and 1",
+        ));
+    }
+    let id = format!("keyboard:{}", connection.0);
+    engine.drivable(&id, Some(params.vehicle_id.clone()))?;
+    engine.controller_connected(&id, "Keyboard", true);
+    let controller = engine
+        .state
+        .controllers
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| not_found("keyboard controller"))?;
+    if let Err(error) =
+        engine.require_throttle_to_hold(&controller, Some(&params.vehicle_id), params.throttle)
+    {
+        engine.controller_disconnected(&id);
+        return Err(error);
+    }
+    engine.controller_neutral(&id, true);
+    // The start frame is neutral by construction, even if a preceding session's
+    // input snapshot is still in the data plane's asynchronous queue.
+    let now = engine.clock.now_us();
+    // Initial values reach the data plane BEFORE its route: never briefly send
+    // default or previous-session throttle while waiting for the first frame.
+    engine
+        .links
+        .controller_input(crate::controller_input::InputEvent::Keyboard {
+            id: id.clone(),
+            axes: [0.0, 0.0, 0.0, params.throttle],
+            at_us: now,
+        });
+    let result = claim(
+        engine,
+        connection,
+        ControllerClaimParams {
+            id: id.clone(),
+            mode: uxduck_contracts::dto::controller::TargetMode::Pinned,
+            vehicle_id: Some(params.vehicle_id),
+            mapping_id: Some("sim-keyboard".into()),
+        },
+    );
+    if result.is_ok() {
+        engine.live.keyboards.insert(connection, id);
+    } else {
+        engine.controller_disconnected(&id);
+        engine
+            .links
+            .controller_input(crate::controller_input::InputEvent::Disconnected { id });
+    }
+    result
+}
+
+fn keyboard_input(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    axes: [f64; 4],
+) -> Result<Value, ApiError> {
+    if axes
+        .iter()
+        .any(|v| !v.is_finite() || !(-1.0..=1.0).contains(v))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Keyboard axes must be between -1 and 1",
+        ));
+    }
+    let now = engine.clock.now_us();
+    let Some(id) = engine.live.keyboards.get(&connection).cloned() else {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Keyboard input was rejected because this page has no active keyboard control session.",
+        ));
+    };
+    if engine.live.claimant.get(&id) != Some(&connection) {
+        engine.stop_keyboard(connection);
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Keyboard control ended because this page no longer holds the controller.",
+        ));
+    }
+    engine
+        .links
+        .controller_input(crate::controller_input::InputEvent::Keyboard {
+            id,
+            axes,
+            at_us: now,
+        });
+    Ok(json!({}))
 }
 
 /// Forgets an unplugged, unheld controller. One that is plugged in would
@@ -219,9 +398,13 @@ fn claim(
         .cloned()
         .filter(|c| c.connected)
         .ok_or_else(|| not_found(&format!("connected controller {}", params.id)))?;
-    if let Some(holder) = engine.live.claimant.get(&controller.id)
-        && *holder != connection
-    {
+    let held_elsewhere = engine
+        .live
+        .claimant
+        .get(&controller.id)
+        .is_some_and(|holder| *holder != connection)
+        || engine.live.detached.contains_key(&controller.id);
+    if held_elsewhere {
         let name = controller
             .claim
             .as_ref()
@@ -480,6 +663,7 @@ fn update_mapping(
         yaw: params.yaw.into(),
         throttle: params.throttle.into(),
         throttle_range: params.throttle_range.into(),
+        stick_mode: params.stick_mode.map(Into::into).or(current.stick_mode),
         deadzone: params.deadzone,
         buttons: params.buttons.into_iter().map(Into::into).collect(),
         positions: params.positions.into_iter().map(Into::into).collect(),
@@ -658,6 +842,9 @@ impl Engine {
         controller: &Controller,
         target: Option<&str>,
     ) -> Result<(), ApiError> {
+        if controller.id.starts_with("keyboard:") {
+            return self.require_neutral(controller, "using it");
+        }
         let inputs = self.system.controller_inputs();
         let raw = inputs.controllers.iter().find(|c| c.id == controller.id);
         let (Some(raw), Some(mapping)) = (raw, mapping(self, &controller.mapping_id)) else {
@@ -791,6 +978,19 @@ impl Engine {
         let vehicle = self
             .vehicle(&vehicle_id)
             .ok_or_else(|| not_found(&format!("vehicle {vehicle_id}")))?;
+        if controller_id.starts_with("keyboard:")
+            && !self.state.links.get(&vehicle.link_id).is_some_and(|l| {
+                matches!(
+                    l.kind,
+                    uxduck_core::domain::link::LinkKind::Simulator { .. }
+                )
+            })
+        {
+            return Err(ApiError::new(
+                ErrorKind::CapabilityDenied,
+                "Keyboard control is for simulations only",
+            ));
+        }
         if let Some(other) = self.state.controllers.values().find(|c| {
             c.id != controller_id && c.claim.is_some() && c.target.as_deref() == Some(&vehicle.id)
         }) {
@@ -820,6 +1020,10 @@ impl Engine {
     }
 
     fn announce_target(&mut self, controller: &Controller) {
+        // The keyboard panel already shows which simulation it controls.
+        if controller.id.starts_with("keyboard:") {
+            return;
+        }
         let Some(target) = controller.target.as_deref() else {
             return;
         };
@@ -844,6 +1048,7 @@ impl Engine {
             return;
         };
         self.live.claimant.remove(id);
+        self.live.detached.remove(id);
         if controller.claim.is_none() {
             return;
         }
@@ -911,8 +1116,22 @@ impl Engine {
         }
     }
 
-    /// A connection closed: its controllers are released.
+    /// Page-owned input is disconnected immediately, with no reload grace.
+    fn stop_keyboard(&mut self, connection: ConnectionId) {
+        if let Some(id) = self.live.keyboards.remove(&connection) {
+            // Releasing a keyboard is not a physical device being unplugged.
+            self.release(&id, connection, None);
+            self.live.neutral.remove(&id);
+            self.controller_disconnected(&id);
+            self.links
+                .controller_input(crate::controller_input::InputEvent::Disconnected { id });
+        }
+    }
+
+    /// A connection closed: its controllers are released. A window's physical
+    /// controllers keep flying for `CLAIM_GRACE_US` in case it is reloading.
     pub(crate) fn release_claims_of(&mut self, connection: ConnectionId) {
+        self.stop_keyboard(connection);
         self.live.selection.remove(&connection);
         let held: Vec<String> = self
             .live
@@ -921,8 +1140,78 @@ impl Engine {
             .filter(|(_, c)| **c == connection)
             .map(|(id, _)| id.clone())
             .collect();
+        let window = self.window_identity(connection);
+        let until_us = self.clock.now_us() + CLAIM_GRACE_US;
         for id in held {
-            self.release(&id, connection, Some("its client disconnected"));
+            match &window {
+                Some((record, trust)) => {
+                    self.live.claimant.remove(&id);
+                    self.live.detached.insert(
+                        id,
+                        Detached {
+                            connection,
+                            record: record.clone(),
+                            trust: trust.clone(),
+                            until_us,
+                        },
+                    );
+                }
+                None => self.release(&id, connection, Some("its client disconnected")),
+            }
+        }
+    }
+
+    /// A window's client record and how it is trusted: the same for the
+    /// page again after a reload, different for a phone or another person.
+    fn window_identity(&self, connection: ConnectionId) -> Option<(String, Trust)> {
+        let state = self.connections.get(&connection)?;
+        let admitted = state
+            .admitted
+            .as_ref()
+            .filter(|a| matches!(a.kind, ClientKind::OperatorUi | ClientKind::Shell))?;
+        Some((admitted.record.clone(), state.trust.clone()))
+    }
+
+    /// A window was admitted: it takes back the controllers a window like
+    /// it left moments ago, as after a reload, still driving what they drove.
+    pub(crate) fn adopt_claims(&mut self, connection: ConnectionId) {
+        let Some((record, trust)) = self.window_identity(connection) else {
+            return;
+        };
+        let ids: Vec<String> = self
+            .live
+            .detached
+            .iter()
+            .filter(|(_, d)| d.record == record && d.trust == trust)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.live.detached.remove(&id);
+            let Some(mut controller) = self.state.controllers.get(&id).cloned() else {
+                continue;
+            };
+            let actor = self.actor(connection);
+            if let Some(claim) = controller.claim.as_mut() {
+                claim.client_id.clone_from(&actor.client_id);
+                claim.client_name = self.client_name(connection);
+            }
+            controller.version += 1;
+            self.live.claimant.insert(id, connection);
+            self.commit_as(actor, Change::ControllerUpserted { controller });
+        }
+    }
+
+    /// Releases the controllers no window took back in time.
+    pub fn expire_detached_claims(&mut self, now_us: u64) {
+        let gone: Vec<(String, ConnectionId)> = self
+            .live
+            .detached
+            .iter()
+            .filter(|(_, d)| d.until_us <= now_us)
+            .map(|(id, d)| (id.clone(), d.connection))
+            .collect();
+        for (id, connection) in gone {
+            self.release(&id, connection, Some("its window closed"));
         }
     }
 
@@ -942,13 +1231,14 @@ impl Engine {
                     kind: NotificationKind::Persistent,
                     subject: Subject::System,
                     title: format!(
-                        "{} stopped driving after the restart",
+                        "{} is off after the restart",
                         controller.name
                     ),
-                    body: Some(
-                        "Manual control doesn't come back by itself. Centre the sticks, then press Use in the Controllers tab."
-                            .into(),
-                    ),
+                    body: Some(if controller.id.starts_with("keyboard:") {
+                        "Open the simulation's Control tab and press Fly with keyboard to enable it again.".into()
+                    } else {
+                        "You have to re-enable it to fly with it again: centre the sticks, then press Use in the Controllers tab.".into()
+                    }),
                     actions: Vec::new(),
                     condition: Some(reclaim(&controller.id)),
                     report: None,
@@ -966,8 +1256,9 @@ impl Engine {
     /// The data plane found a controller. One whose layout the platform
     /// does not know, such as a radio in joystick mode, starts on the radio
     /// mapping, and leaves one that reads only gamepad stick names, which
-    /// read nothing of it.
+    /// read nothing of it. Plugging one in says so, with the way to its tab.
     pub fn controller_connected(&mut self, id: &str, name: &str, layout_known: bool) {
+        let plugged_in = self.state.controllers.get(id).is_none_or(|c| !c.connected);
         let fitting = if layout_known {
             InputMapping::mode_2().id
         } else {
@@ -1010,12 +1301,36 @@ impl Engine {
             },
         };
         self.commit_as(daemon(), Change::ControllerUpserted { controller });
+        if plugged_in && !id.starts_with("keyboard:") {
+            self.raise(Raise {
+                severity: Severity::Info,
+                kind: NotificationKind::Transient,
+                subject: Subject::System,
+                title: format!("{name} connected"),
+                body: None,
+                actions: vec![NotificationAction {
+                    label: "Open Controllers".into(),
+                    action: Action::OpenControllers {
+                        controller_id: id.to_owned(),
+                    },
+                }],
+                condition: None,
+                report: None,
+            });
+        }
     }
 
     /// A controller was unplugged: released, so the vehicle's own failsafe
     /// takes over.
     pub fn controller_disconnected(&mut self, id: &str) {
-        let Some(holder) = self.live.claimant.get(id).copied() else {
+        self.live.keyboards.retain(|_, keyboard| keyboard != id);
+        let holder = self.live.claimant.get(id).copied().or_else(|| {
+            self.live
+                .detached
+                .get(id)
+                .map(|detached| detached.connection)
+        });
+        let Some(holder) = holder else {
             if let Some(mut controller) = self
                 .state
                 .controllers
@@ -1035,7 +1350,11 @@ impl Engine {
             controller.version += 1;
             self.commit_as(daemon(), Change::ControllerUpserted { controller });
         }
-        self.release(id, holder, Some("it was unplugged"));
+        self.release(
+            id,
+            holder,
+            (!id.starts_with("keyboard:")).then_some("it was unplugged"),
+        );
     }
 
     /// Whether a controller's sticks are centred, as the data plane sees

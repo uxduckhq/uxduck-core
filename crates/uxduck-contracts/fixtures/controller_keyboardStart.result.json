@@ -1,0 +1,13 @@
+{
+  "id": "keyboard:1",
+  "name": "Keyboard",
+  "connected": true,
+  "claim": {
+    "clientId": "c1",
+    "clientName": "uxduck-web"
+  },
+  "mode": "pinned",
+  "target": "sim-1",
+  "mappingId": "sim-keyboard",
+  "version": 2
+}

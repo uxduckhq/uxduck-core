@@ -19,6 +19,7 @@ pub mod analytics;
 mod app;
 pub mod approvals;
 pub mod commands;
+pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
 pub mod edge;
@@ -34,11 +35,18 @@ pub mod interface;
 mod klv;
 mod launch;
 mod learning;
+pub mod location;
 pub mod mavlink_inspect;
 mod messages;
+pub mod mission_history;
 pub mod pairing;
 pub mod param_definitions;
+pub mod plan_checks;
+pub mod plan_examples;
+pub mod plan_files;
+pub mod plan_patterns;
 pub mod plane;
+mod plans;
 pub mod plugin_sync;
 pub mod plugins;
 pub mod practice;
@@ -240,6 +248,8 @@ pub struct Engine {
     system: Box<dyn runtime::System>,
     /// Whether the wake lock is held.
     awake: bool,
+    /// The display is held on: a vehicle is armed.
+    display_awake: bool,
     shutdown: Shutdown,
     /// Pages and windows, for opening UXDuck again and quitting (S107).
     opened: Opened,
@@ -269,6 +279,8 @@ pub struct Engine {
     finding: finds::Finding,
     /// The interface the daemon serves (S109).
     interface: interface::Interface,
+    /// Where this computer is, while a person has it on (S137).
+    location: location::Location,
     remote_viewing: remote_view::RemoteViewing,
     /// A client asked for a restart.
     restart: bool,
@@ -376,6 +388,9 @@ pub struct Engine {
     telemetry_subscribers: BTreeSet<ConnectionId>,
     subscribers: BTreeMap<ConnectionId, BTreeSet<EntityType>>,
     sessions: Sessions,
+    /// Phones and tablets on this network (S97): the addresses and where
+    /// UXDuck listens, as the host last said.
+    network: uxduck_contracts::dto::network::NetworkStatus,
     /// Links removed in this run, so a late report from the data plane
     /// about one brings no vehicle back. Link ids are not reused.
     pub(crate) removed_links: BTreeSet<String>,
@@ -417,6 +432,7 @@ impl Engine {
             links: ports.links,
             system: ports.system,
             awake: false,
+            display_awake: false,
             shutdown: Shutdown::default(),
             opened: Opened::default(),
             replying_to: None,
@@ -430,6 +446,7 @@ impl Engine {
             video: video::Video::default(),
             finding: finds::Finding::default(),
             interface: interface::Interface::default(),
+            location: location::Location::default(),
             remote_viewing: remote_view::RemoteViewing::default(),
             live: controllers::Live::default(),
             restart: false,
@@ -487,9 +504,17 @@ impl Engine {
             telemetry_subscribers: BTreeSet::new(),
             subscribers: BTreeMap::new(),
             sessions: Sessions::restored(loaded.sessions),
+            network: uxduck_contracts::dto::network::NetworkStatus::default(),
             removed_links: BTreeSet::new(),
         };
         engine.started_us = engine.clock.now_us();
+        // A phone forgotten just before a crash may have left its session
+        // behind (S97): without its record it is no longer paired.
+        let clients = engine.state.clients.clone();
+        engine.sessions.forget_orphaned_network_sessions(
+            |client| clients.contains_key(client),
+            engine.persistence.as_mut(),
+        );
         let interrupted: Vec<Item> = engine
             .state
             .items
@@ -606,6 +631,7 @@ impl Engine {
         self.drop_remote_watch(id);
         self.feature_watchers.remove(&id);
         self.item_watchers.remove(&id);
+        self.location_disconnected(id);
         self.tray_watchers.remove(&id);
         self.messages.forget(id);
         self.connections.remove(&id);
@@ -802,14 +828,36 @@ impl Engine {
         origin: &str,
         user_agent: Option<String>,
     ) -> (String, String) {
-        let (id, code) = self.sessions.request_pairing(
+        self.ask_pairing(origin, user_agent, None)
+            .unwrap_or_default()
+    }
+
+    /// A phone or tablet on the network asks to pair (S97), from `peer`.
+    /// None while too many of those wait for an answer already.
+    pub fn request_network_pairing(
+        &mut self,
+        origin: &str,
+        user_agent: Option<String>,
+        peer: String,
+    ) -> Option<(String, String)> {
+        self.ask_pairing(origin, user_agent, Some(peer))
+    }
+
+    fn ask_pairing(
+        &mut self,
+        origin: &str,
+        user_agent: Option<String>,
+        peer: Option<String>,
+    ) -> Option<(String, String)> {
+        let asked = self.sessions.request_pairing(
             origin,
             user_agent,
+            peer,
             self.clock.as_ref(),
             self.random.as_mut(),
         );
         self.sync_pairing_questions();
-        (id, code)
+        asked
     }
 
     /// Keeps the "asks to connect" notifications in step with the browsers
@@ -819,7 +867,7 @@ impl Engine {
         let questions = self.sessions.questions(self.clock.as_ref());
         let asked: Vec<String> = questions
             .iter()
-            .map(|(_, code)| pairing::condition(code))
+            .map(|question| pairing::condition(&question.code))
             .collect();
         let stale: Vec<String> = self
             .state
@@ -831,8 +879,8 @@ impl Engine {
         for condition in stale {
             self.resolve(&condition);
         }
-        for (origin, code) in questions {
-            self.raise(pairing::question(&origin, &code));
+        for question in questions {
+            self.raise(pairing::question(&question));
         }
     }
 
@@ -852,13 +900,127 @@ impl Engine {
         if first && matches!(state, PairingState::Approved { .. }) {
             self.track(uxduck_contracts::dto::analytics::DaemonEvent::DaemonPaired);
         }
+        if let PairingState::Approved {
+            session,
+            network: Some(network),
+        } = &state
+        {
+            self.network_client_paired(&pairing::network_client(session), network);
+        }
         self.sync_pairing_questions();
         state
+    }
+
+    /// A phone or tablet paired on the network gets its own client record
+    /// with what it was allowed (S97), listed and editable at the computer.
+    fn network_client_paired(&mut self, client: &str, network: &pairing::NetworkPairing) {
+        let record = uxduck_core::domain::client::ClientRecord {
+            id: client.to_owned(),
+            // Two phones of a kind told apart by where they paired from.
+            name: network.peer.as_ref().map_or_else(
+                || network.device.clone(),
+                |peer| format!("{} ({peer})", network.device),
+            ),
+            kind: uxduck_core::domain::client::ClientKind::NetworkUi,
+            executable: None,
+            capabilities: network.access.capabilities(),
+            created_at_us: self.clock.now_us(),
+            version: 1,
+        };
+        self.commit_as(
+            uxduck_core::events::Actor {
+                client_id: "daemon".into(),
+                operator_id: None,
+            },
+            uxduck_core::events::Change::ClientUpserted { client: record },
+        );
     }
 
     #[must_use]
     pub fn session(&self, token: &str) -> Option<Session> {
         self.sessions.session(token).cloned()
+    }
+
+    /// The host's word on this computer's addresses and the network
+    /// listener (S97), for `network/status`.
+    pub fn set_network(&mut self, status: uxduck_contracts::dto::network::NetworkStatus) {
+        self.network = status;
+    }
+
+    /// The host's word on the network, with the phones and tablets that
+    /// are connected now.
+    #[must_use]
+    pub fn network(&self) -> uxduck_contracts::dto::network::NetworkStatus {
+        let mut connected: Vec<String> = self
+            .connections
+            .values()
+            .filter(|c| matches!(c.trust, Trust::NetworkBrowser { .. }))
+            .filter_map(|c| c.admitted.as_ref().map(|a| a.record.clone()))
+            .collect();
+        connected.sort();
+        connected.dedup();
+        uxduck_contracts::dto::network::NetworkStatus {
+            connected,
+            ..self.network.clone()
+        }
+    }
+
+    /// Unpairs a phone or tablet (S97): its record and session go, and an
+    /// open page loses its connection and is asked to pair again.
+    pub(crate) fn forget_network_client(&mut self, id: &str) -> bool {
+        let known = self
+            .state
+            .clients
+            .get(id)
+            .is_some_and(|c| c.kind == uxduck_core::domain::client::ClientKind::NetworkUi);
+        if !known {
+            return false;
+        }
+        self.sessions
+            .forget_network_client(id, self.persistence.as_mut());
+        self.commit_as(
+            uxduck_core::events::Actor {
+                client_id: "daemon".into(),
+                operator_id: None,
+            },
+            uxduck_core::events::Change::ClientRemoved { id: id.to_owned() },
+        );
+        let open: Vec<ConnectionId> = self
+            .connections
+            .iter()
+            .filter(|(_, c)| c.admitted.as_ref().is_some_and(|a| a.record == id))
+            .map(|(connection, _)| *connection)
+            .collect();
+        // Dropping its outbox ends the socket (`serve_websocket`).
+        for connection in open {
+            self.disconnect(connection);
+        }
+        true
+    }
+
+    /// A phone or tablet on the network is admitted with its record (S97):
+    /// what it was allowed when it paired, as changed since. None when it
+    /// was forgotten: it must pair again.
+    pub(crate) fn admit_network(&mut self, client: &str) -> Option<Vec<Capability>> {
+        self.state
+            .clients
+            .get(client)
+            .map(|record| record.capabilities.clone())
+    }
+}
+
+/// A client record's delta: upserted, or forgotten (S97).
+fn client_change(change: &Change) -> Option<EntityChange> {
+    match change {
+        Change::ClientUpserted { client } => Some(EntityChange {
+            client: Some(uxduck_contracts::dto::client::ClientRecord::from(client)),
+            ..upsert(EntityType::Client, &client.id)
+        }),
+        Change::ClientRemoved { id } => Some(EntityChange {
+            op: ChangeOp::Remove,
+            ..upsert(EntityType::Client, id)
+        }),
+        _ => None,
     }
 }
 
@@ -886,6 +1048,7 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         settings: None,
         plugin: None,
         place: None,
+        plan: None,
         snapshot: None,
         param_definitions: None,
         history_entry: None,
@@ -940,10 +1103,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
             receipt: Some(uxduck_contracts::dto::command::Receipt::from(receipt)),
             ..upsert(EntityType::Receipt, &receipt.id)
         }],
-        Change::ClientUpserted { client } => vec![EntityChange {
-            client: Some(uxduck_contracts::dto::client::ClientRecord::from(client)),
-            ..upsert(EntityType::Client, &client.id)
-        }],
+        change @ (Change::ClientUpserted { .. } | Change::ClientRemoved { .. }) => {
+            client_change(change).into_iter().collect()
+        }
         Change::ApprovalUpserted { approval } => vec![approval_change(approval)],
         change @ (Change::ParameterSetUpserted { .. }
         | Change::ParametersReplaced { .. }
@@ -957,6 +1119,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         }
         change @ (Change::PlaceUpserted { .. } | Change::PlaceRemoved { .. }) => {
             search::entity_changes(change)
+        }
+        change @ (Change::PlanSaved { .. } | Change::PlanRemoved { .. }) => {
+            plans::entity_changes(change)
         }
         change @ (Change::SnapshotUpserted { .. } | Change::SnapshotRemoved { .. }) => {
             snapshots::entity_changes(change)
@@ -990,7 +1155,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::LibraryUpserted { .. }
         | Change::PluginCalled { .. }
         | Change::PluginPublished { .. }
-        | Change::PluginDeclined { .. } => Vec::new(),
+        | Change::PluginDeclined { .. }
+        // Read with `mission/history` (S134).
+        | Change::MissionRecorded { .. } => Vec::new(),
         Change::NotificationUpserted { notification } => vec![notification_change(notification)],
     }
 }

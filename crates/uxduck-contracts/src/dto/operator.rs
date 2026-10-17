@@ -119,6 +119,8 @@ pub enum TabKind {
     /// The Missions page as a tab: every mission, not the focused
     /// vehicle's (`Mission`). Follows no vehicle.
     Missions,
+    /// The ground under a plan or a mission, with heights (ADR-0029 P9).
+    Profile,
     /// A rubber duck, turning: found only by typing "duck" in the command
     /// palette. Follows no vehicle.
     Duck,

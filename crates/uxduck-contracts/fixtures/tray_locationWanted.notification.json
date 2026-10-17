@@ -1,0 +1,6 @@
+{
+  "method": "tray/locationWanted",
+  "params": {
+    "on": true
+  }
+}

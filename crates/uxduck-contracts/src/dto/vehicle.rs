@@ -68,6 +68,10 @@ pub struct Vehicle {
     /// meaning nothing to UXDuck. Absent when it has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Web pages kept with it, such as its radio's settings page, set
+    /// with `vehicle/bookmarks`. Absent when it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<VehicleBookmark>,
     /// Its length, or wingspan, in centimetres, set with `vehicle/size` for
     /// the 3D map. Absent, the map draws it the size of the one its
     /// autopilot's simulator flies.
@@ -121,4 +125,25 @@ pub struct VehicleLabelParams {
     /// Labels to take off each, in any case.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
+}
+
+/// A web page kept with a vehicle, such as the settings page its radio
+/// serves on the local network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleBookmark {
+    /// 1 to 40 characters, such as "Radio".
+    pub name: String,
+    /// An `http` or `https` address, such as `http://192.168.1.20`.
+    pub url: String,
+}
+
+/// `vehicle/bookmarks`: a vehicle's web pages, all of them, in order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleBookmarksParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// Any number; an empty list removes them all.
+    pub bookmarks: Vec<VehicleBookmark>,
 }

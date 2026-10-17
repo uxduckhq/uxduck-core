@@ -62,6 +62,7 @@ fn words(capability: Capability) -> &'static str {
         Capability::Control => "command vehicles",
         Capability::Config => "change links and settings",
         Capability::Approve => "answer approvals",
+        Capability::Location => "see where this computer is",
     }
 }
 
@@ -72,6 +73,7 @@ fn name(capability: Capability) -> &'static str {
         Capability::Control => "control",
         Capability::Config => "config",
         Capability::Approve => "approve",
+        Capability::Location => "location",
     }
 }
 
@@ -281,7 +283,7 @@ impl Engine {
                     subject: Subject::System,
                     title: format!("The {} plugin is waiting for you", plugin.name),
                     body: Some(format!(
-                        "It came from another of your computers. For now it can only read. It also wants to {}; you can allow that on the Plugins page.",
+                        "It came from another of your computers. For now it can only read. It also wants to {}. You can allow that on the Plugins page.",
                         wants.join(" and ")
                     )),
                     actions: Vec::new(),

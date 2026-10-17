@@ -762,7 +762,7 @@ impl Running {
         let text = serde_json::to_string(&next).map_err(|e| e.to_string())?;
         if text.len() > STORE_BYTES {
             return Err(format!(
-                "it asked to keep {} bytes; a plugin keeps at most {STORE_BYTES}",
+                "The plugin requested {} bytes of storage. A plugin can store at most {STORE_BYTES} bytes.",
                 text.len()
             ));
         }

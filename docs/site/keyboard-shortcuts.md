@@ -15,10 +15,11 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 
 | Action                   | macOS | Windows and Linux |
 | ------------------------ | ----- | ----------------- |
-| Focus the input          | ⌘K    | Ctrl+K            |
+| Open the command palette | ⌘K    | Ctrl+K            |
+| Open Settings            | ⌘,    | Ctrl+,            |
 | Show or hide the sidebar | ⌘B    | Ctrl+B            |
 | Show or hide Home        | ⌥H    | Alt+H             |
-| Show or hide Vehicles    | ⌥V    | Alt+V             |
+| Show or hide Vehicles    | ⌥⇧V   | Alt+Shift+V       |
 | Show or hide Places      | ⌥P    | Alt+P             |
 | Send feedback            | ⌥B    | Alt+B             |
 | Open the Map tab         | ⌥M    | Alt+M             |
@@ -26,7 +27,20 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 | Back                     | ⌘[    | Alt+←             |
 | Forward                  | ⌘]    | Alt+→             |
 
-Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever character it types. They do not run while you type in other fields, except ⌘K. There are none on touch screens; use `>` in the input instead.
+Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever character it types. Most actions leave text fields alone; Settings, the command palette, the sidebar, Home, Vehicles and Places also work while typing. There are none on touch screens; use `>` in the input instead.
+
+## Desktop window shortcuts
+
+| Action       | macOS | Windows and Linux |
+| ------------ | ----- | ----------------- |
+| New Window   | ⇧⌘N   | Ctrl+Shift+N      |
+| Close window | ⌘W    | Ctrl+W            |
+| Quit UXDuck  | ⌘Q    | Ctrl+Q            |
+| Full screen  | ⌃⌘F   | F11               |
+
+Settings is also in the **UXDuck** menu on macOS and **File** on Windows and Linux. Opening Settings keeps your workspace behind it; pressing its shortcut again leaves Settings open. Its native menu follows changes you make to the shortcut. **File › New Window** opens another view of the same UXDuck. Closing a window leaves UXDuck running; the quit shortcut asks before stopping it.
+
+The desktop app's Edit, View and Window menus provide the standard editing, zoom and window controls for your platform.
 
 ## Change a shortcut
 

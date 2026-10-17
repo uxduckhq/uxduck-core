@@ -167,6 +167,12 @@ pub struct Settings {
     /// away. Empty, as it starts, is off; set only at this computer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_control: Vec<crate::domain::command::CommandClass>,
+    /// "Phones and tablets on this network" (S97): the address of this
+    /// computer that UXDuck also listens on, so a phone on the same network
+    /// can open it and pair. Unset, as it starts, nothing listens beyond
+    /// this computer; set only at this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_address: Option<String>,
     /// How long a vehicle may go unsupervised before UXDuck stops its
     /// ground station heartbeat to it (S81, ADR-0003 C16), in seconds.
     #[serde(default = "grace")]
@@ -272,6 +278,7 @@ impl Default for Settings {
             connect_to_account: true,
             watch_from_account: true,
             remote_control: Vec::new(),
+            network_address: None,
             supervision_grace_s: 10,
             gcs_system_id: 255,
             store_flights: true,

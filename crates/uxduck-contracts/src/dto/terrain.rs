@@ -91,6 +91,9 @@ pub enum TerrainVerdict {
     Differs,
     /// Off from its dataset, but within 2 m of the other one.
     MatchesOther,
+    /// A uniform difference could be ArduPilot's arming reference offset.
+    /// Reports contain corrected heights, so this does not verify the files.
+    OffsetUncertain,
     /// The vehicle has no terrain at the points checked.
     NoTerrain,
     /// The vehicle did not answer.

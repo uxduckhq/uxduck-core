@@ -16,7 +16,7 @@ pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/parameters/catalogu
 
 /// Missing public trust configuration is separate from a publisher's
 /// secret signing key. A person's own definitions do not need either.
-pub const NO_CATALOGUE_KEY: &str = "this build has no trusted public verification key for the parameter catalogue; add descriptions from a matching firmware checkout or use a build with the publisher's public key";
+pub const NO_CATALOGUE_KEY: &str = "This build has no trusted public verification key for the parameter catalogue. Add descriptions from a matching firmware checkout or use a build with the publisher's public key.";
 
 /// A set is a few hundred kilobytes gzipped; anything far larger is not one.
 pub const MAX_SET_BYTES: u64 = 16 * 1024 * 1024;
@@ -52,7 +52,7 @@ pub fn verify(bytes: &[u8], signature: &str, key: &str) -> Result<DefinitionCata
 }
 
 /// The sets a host may fetch: a plain file name, not too large, over HTTPS
-/// (or plain HTTP to this machine, for tests).
+/// (or, in a development build, plain HTTP to this machine, for tests).
 #[must_use]
 pub fn usable(catalogue: DefinitionCatalogue) -> Vec<CatalogueSet> {
     catalogue
@@ -69,8 +69,9 @@ pub fn usable(catalogue: DefinitionCatalogue) -> Vec<CatalogueSet> {
             plain
                 && s.file.size <= MAX_SET_BYTES
                 && (url.starts_with("https://")
-                    || url.starts_with("http://127.0.0.1")
-                    || url.starts_with("http://localhost"))
+                    || cfg!(debug_assertions)
+                        && (url.starts_with("http://127.0.0.1")
+                            || url.starts_with("http://localhost")))
         })
         .collect()
 }

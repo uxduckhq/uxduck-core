@@ -9,11 +9,14 @@ use crate::ports;
 
 /// The wake lock is a child process that holds the platform's own
 /// assertion and exits with the daemon: `caffeinate -i -w <pid>` on macOS,
-/// `systemd-inhibit` around `tail --pid` on Linux. Windows has no such tool
-/// without an API call, so it is not held there yet.
+/// `systemd-inhibit` around `tail --pid` on Linux; on Windows a thread holds
+/// `SetThreadExecutionState`. The display is held the same way while a
+/// vehicle is armed: `caffeinate -d` on macOS, `ES_DISPLAY_REQUIRED` on
+/// Windows; Linux desktops keep their own screen lock.
 #[derive(Debug)]
 pub struct Host {
-    wake: Option<Child>,
+    wake: Option<Hold>,
+    display: Option<Hold>,
     data_dir: std::path::PathBuf,
     simulators: std::sync::Arc<crate::sim::Simulators>,
     catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
@@ -30,6 +33,7 @@ impl Host {
     ) -> Self {
         Self {
             wake: None,
+            display: None,
             data_dir: data_dir.to_owned(),
             simulators,
             catalogue,
@@ -40,7 +44,87 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
+        self.display_awake(false);
         self.wake_lock(false);
+    }
+}
+
+/// An assertion held until released.
+#[derive(Debug)]
+enum Hold {
+    Child(Child),
+    /// The thread that holds the execution state; dropping the sender ends it.
+    #[cfg(windows)]
+    Thread(std::sync::mpsc::Sender<()>),
+}
+
+impl Hold {
+    fn release(self) {
+        match self {
+            Self::Child(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(windows)]
+            Self::Thread(stop) => drop(stop),
+        }
+    }
+}
+
+/// Holds `flags` on a thread of its own until the returned sender drops:
+/// `SetThreadExecutionState` lasts while its thread does.
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "SetThreadExecutionState is a plain Win32 call")]
+fn hold_execution_state(flags: u32) -> Hold {
+    use windows_sys::Win32::System::Power::{ES_CONTINUOUS, SetThreadExecutionState};
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // SAFETY: sets and clears this thread's own execution state.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS | flags) };
+        let _ = stopped.recv();
+        // SAFETY: as above.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    });
+    Hold::Thread(stop)
+}
+
+/// Starts `command` as a hold, quietly.
+fn spawn_hold(mut command: Command) -> std::io::Result<Hold> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(Hold::Child)
+}
+
+/// The wake lock: the system stays awake, the display may sleep.
+fn wake_hold() -> Option<std::io::Result<Hold>> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::ES_SYSTEM_REQUIRED;
+        return Some(Ok(hold_execution_state(ES_SYSTEM_REQUIRED)));
+    }
+    #[allow(unreachable_code, reason = "Windows returns above")]
+    wake_command().map(spawn_hold)
+}
+
+/// The display stays on.
+fn display_hold() -> Option<std::io::Result<Hold>> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Power::{ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+        return Some(Ok(hold_execution_state(
+            ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED,
+        )));
+    }
+    #[allow(unreachable_code, reason = "Windows returns above")]
+    if cfg!(target_os = "macos") {
+        let mut command = Command::new("caffeinate");
+        command.args(["-d", "-w", &std::process::id().to_string()]);
+        Some(spawn_hold(command))
+    } else {
+        None
     }
 }
 
@@ -186,23 +270,33 @@ impl System for Host {
 
     fn wake_lock(&mut self, hold: bool) {
         if hold && self.wake.is_none() {
-            match wake_command().map(|mut c| {
-                c.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-            }) {
-                Some(Ok(child)) => {
+            match wake_hold() {
+                Some(Ok(assertion)) => {
                     tracing::info!("holding the wake lock while a vehicle is online");
-                    self.wake = Some(child);
+                    self.wake = Some(assertion);
                 }
                 Some(Err(error)) => tracing::warn!(%error, "cannot hold the wake lock"),
                 None => tracing::debug!("no wake lock on this platform yet"),
             }
-        } else if !hold && let Some(mut child) = self.wake.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        } else if !hold && let Some(assertion) = self.wake.take() {
+            assertion.release();
             tracing::info!("released the wake lock");
+        }
+    }
+
+    fn display_awake(&mut self, hold: bool) {
+        if hold && self.display.is_none() {
+            match display_hold() {
+                Some(Ok(assertion)) => {
+                    tracing::info!("keeping the display on while a vehicle is armed");
+                    self.display = Some(assertion);
+                }
+                Some(Err(error)) => tracing::warn!(%error, "cannot keep the display on"),
+                None => tracing::debug!("the desktop keeps its own screen lock here"),
+            }
+        } else if !hold && let Some(assertion) = self.display.take() {
+            assertion.release();
+            tracing::info!("let the display sleep again");
         }
     }
 

@@ -398,7 +398,7 @@ pub fn inspect(
                 result.complete = output.status.success()
                     || (output.status.code() == Some(1) && output.stderr.is_empty());
                 if !result.complete {
-                    result.notes.push("Socket enumeration was incomplete; permissions or lsof errors may hide endpoints.".into());
+                    result.notes.push("Socket enumeration was incomplete. Permissions or lsof errors may hide endpoints.".into());
                 }
                 if let Some(host) = &params.host {
                     result.owners.retain(|o| {
@@ -429,7 +429,7 @@ pub fn inspect(
                 remote_address: None,
             });
         }
-        result.notes.push("This platform returns one visible local port owner; full endpoint enumeration is unavailable. An empty result does not establish that the port is unused.".into());
+        result.notes.push("This platform returns one visible local port owner. Full endpoint enumeration is unavailable. An empty result does not establish that the port is unused.".into());
     }
     if result.owners.len() > 200 {
         result.owners.truncate(200);

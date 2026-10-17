@@ -8,8 +8,8 @@ use uxduck_contracts::dto::link::{
     SerialPort,
 };
 use uxduck_contracts::dto::vehicle::{
-    Vehicle as VehicleDto, VehicleLabelParams, VehicleListResult, VehicleSaveParams,
-    VehicleSizeParams,
+    Vehicle as VehicleDto, VehicleBookmarksParams, VehicleLabelParams, VehicleListResult,
+    VehicleSaveParams, VehicleSizeParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -74,16 +74,7 @@ pub fn handle(
         }
         ClientRequest::TelemetryGet(IdParams { id }) => {
             require(Capability::Read)?;
-            let vehicle = found(engine, &id)?;
-            let telemetry = engine.telemetry(&vehicle.id).cloned().unwrap_or_else(|| {
-                uxduck_core::domain::telemetry::VehicleTelemetry {
-                    vehicle_id: vehicle.id.clone(),
-                    ..Default::default()
-                }
-            });
-            to_value(&uxduck_contracts::dto::telemetry::VehicleTelemetry::from(
-                &telemetry,
-            ))
+            telemetry_of(engine, &id)
         }
         ClientRequest::TelemetryWindow(params) => {
             require(Capability::Read)?;
@@ -104,6 +95,10 @@ pub fn handle(
         ClientRequest::VehicleSize(params) => {
             require(Capability::Config)?;
             size_vehicle(engine, connection, params)
+        }
+        ClientRequest::VehicleBookmarks(params) => {
+            require(Capability::Config)?;
+            bookmark_vehicle(engine, connection, params)
         }
         ClientRequest::VehicleDismiss(IdParams { id }) => {
             require(Capability::Config)?;
@@ -164,6 +159,20 @@ pub fn links(engine: &Engine) -> Vec<LinkDto> {
     let mut links: Vec<LinkDto> = engine.state.links.values().map(LinkDto::from).collect();
     links.sort_by_key(|link| link.created_at_us);
     links
+}
+
+/// A vehicle's telemetry, empty until it has sent any.
+fn telemetry_of(engine: &Engine, id: &str) -> Result<Value, ApiError> {
+    let vehicle = found(engine, id)?;
+    let telemetry = engine.telemetry(&vehicle.id).cloned().unwrap_or_else(|| {
+        uxduck_core::domain::telemetry::VehicleTelemetry {
+            vehicle_id: vehicle.id.clone(),
+            ..Default::default()
+        }
+    });
+    to_value(&uxduck_contracts::dto::telemetry::VehicleTelemetry::from(
+        &telemetry,
+    ))
 }
 
 fn found<'e>(
@@ -297,7 +306,7 @@ pub(crate) fn check_kind(
 ) -> Result<String, ApiError> {
     if engine.config.capabilities.runs_in == RunsIn::Browser && !kind.is_simulator() {
         return Err(invalid(
-            "UXDuck Web runs only simulated vehicles; real ones connect through UXDuck Desktop",
+            "UXDuck Web runs only simulated vehicles. Real ones connect through UXDuck Desktop",
         ));
     }
     let links: Vec<&Link> = engine
@@ -329,7 +338,7 @@ pub(crate) fn check_kind(
             });
             if sent_here {
                 return Err(invalid(format!(
-                    "another link already sends to port {port} on this machine; listening there would loop"
+                    "another link already sends to port {port} on this machine. Listening there would loop"
                 )));
             }
             engine
@@ -376,7 +385,7 @@ pub(crate) fn check_kind(
             // Never forward into our own listener: every frame would loop.
             if listens_on(*port) && engine.system.is_local_address(host) {
                 return Err(invalid(format!(
-                    "{host}:{port} is one of this daemon's own listeners; forwarding there would loop"
+                    "{host}:{port} is one of this daemon's own listeners. Forwarding there would loop"
                 )));
             }
             Ok(default_name(kind).unwrap_or_default())
@@ -425,7 +434,7 @@ fn check_udp_client(
     }
     if listened_on && engine.system.is_local_address(host) {
         return Err(invalid(format!(
-            "{host}:{port} is one of this daemon's own listeners; connecting there would loop"
+            "{host}:{port} is one of this daemon's own listeners. Connecting there would loop"
         )));
     }
     let duplicate = links.iter().any(
@@ -511,7 +520,7 @@ fn update_link(
         || params.keep_alive.is_some();
     if before.kind.is_simulator() && more_than_name {
         return Err(invalid(
-            "a simulated vehicle's link takes only a new name; how it runs is set when the simulation starts",
+            "a simulated vehicle's link takes only a new name. How it runs is set when the simulation starts",
         ));
     }
     let mut link = before.clone();
@@ -519,7 +528,7 @@ fn update_link(
         let kind: LinkKind = kind.into();
         if kind.is_simulator() {
             return Err(invalid(
-                "a link cannot become a simulated vehicle; start one instead",
+                "a link cannot become a simulated vehicle. Start one instead",
             ));
         }
         if before.from_link.is_some() && !kind.is_forward() {
@@ -844,6 +853,73 @@ fn size_vehicle(
         );
     }
     to_value(&VehicleDto::from(&vehicle))
+}
+
+/// The longest name for a vehicle's web page, and the longest address. As
+/// many pages as the person likes.
+const MAX_BOOKMARK_NAME_CHARS: usize = 40;
+const MAX_BOOKMARK_URL_CHARS: usize = 2048;
+
+/// `vehicle/bookmarks`: the web pages kept with a vehicle, such as its
+/// radio's settings page (maintainer, 2026-10-15), all of them in order.
+/// Only `http` and `https` addresses, so a page in the interface never
+/// opens a `javascript:` or `file:` one. Like its size, it neither saves the
+/// vehicle nor goes in its history.
+fn bookmark_vehicle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    VehicleBookmarksParams { id, bookmarks }: VehicleBookmarksParams,
+) -> Result<Value, ApiError> {
+    let invalid = |message: String| ApiError::new(ErrorKind::InvalidValue, message);
+    let bookmarks = bookmarks
+        .iter()
+        .map(|b| {
+            let name = b.name.trim();
+            if name.is_empty() || name.chars().count() > MAX_BOOKMARK_NAME_CHARS {
+                return Err(invalid(format!(
+                    "a bookmark's name has 1 to {MAX_BOOKMARK_NAME_CHARS} characters"
+                )));
+            }
+            let url = b.url.trim();
+            if !web_address(url) {
+                return Err(invalid(format!(
+                    "{url:?} isn't a web address. Start it with http:// or https://"
+                )));
+            }
+            Ok(uxduck_core::domain::vehicle::Bookmark {
+                name: name.to_owned(),
+                url: url.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut vehicle = found(engine, &id)?.clone();
+    if vehicle.bookmarks != bookmarks {
+        vehicle.bookmarks = bookmarks;
+        vehicle.version += 1;
+        engine.commit(
+            connection,
+            Change::VehicleUpserted {
+                vehicle: vehicle.clone(),
+            },
+        );
+    }
+    to_value(&VehicleDto::from(&vehicle))
+}
+
+/// An `http` or `https` address with a host, without spaces or control
+/// characters, short enough to keep.
+fn web_address(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    !host.is_empty()
+        && url.chars().count() <= MAX_BOOKMARK_URL_CHARS
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// `link/remove`: any link but a simulation's, which has one way to end so

@@ -14,8 +14,12 @@ use uxduck_agent::tools::{Tool, tools};
 
 use crate::cli::client::{CliError, LocalClient};
 
+mod catalogue;
+
 /// The MCP revision this server speaks.
 pub const PROTOCOL: &str = "2025-06-18";
+
+const INSTRUCTIONS: &str = "UXDuck vehicle tools. Read a vehicle's vehicle_history before diagnosis or advice; cite dated entries. Read param_get before parameter advice and report describedBy; do not guess undescribed parameters. Reading is allowed; commands and configuration still require UXDuck's capabilities and operator approvals. Include reasons in parameter writes, which are recorded automatically. For reported physical work, offer one concise history note; ask before vehicle_add_note unless explicitly asked to record it. Record only completed work, attribute user reports, preserve dates, read history to avoid duplicates, and never edit or delete notes. Configuration permission is not consent to add notes. Offer notes after your changes only for useful context missing from automatic history; do not interrupt active flying or unfinished work, or repeat declined offers. For telemetry_window report coverage, missing signals and historyTruncated; for packet, routing and log evidence report coverage and missing provenance. Empty or incomplete results do not prove nothing happened. vehicle_messages is a snapshot; poll again for newer messages.";
 
 fn reply(id: &Value, result: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -29,7 +33,7 @@ fn failure(id: &Value, code: i64, message: &str) -> Value {
 ///
 /// # Errors
 /// When stdin or stdout fail.
-pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
+pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     let catalogue = tools();
@@ -50,7 +54,7 @@ pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or("MCP client")
                     .to_owned();
-                match connect(data_dir, dev, &name).await {
+                match connect(data_dir, &name).await {
                     Ok(client) => {
                         daemon = Some(client);
                         reply(
@@ -59,7 +63,11 @@ pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
                                 "protocolVersion": PROTOCOL,
                                 "capabilities": { "tools": { "listChanged": false } },
                                 "serverInfo": { "name": "uxduck", "version": env!("CARGO_PKG_VERSION") },
-                                "instructions": "Tools for the vehicles this UXDuck daemon hears. Reading is always allowed; commands and parameter changes wait until an operator allows them in UXDuck. Read a parameter with param_get before advising on it, and say which set its description is from (describedBy). Read a vehicle's history (vehicle_history) before diagnosing it, and write a note (vehicle_add_note) only when asked. For telemetry over time, use telemetry_window and report coverage, missing signals and historyTruncated; mavlink_inspect provides current message rates; mavlink_history with linkId and fromUs/toUs provides exact packet evidence, including sequence and fingerprints. Use router_events for routing/drop decisions and preserved loop incidents, link_diagnose to resolve connection IDs or names, socket_inspect for local process ownership, and daemon_logs for bounded redacted logs. Report coverage and missing provenance; an empty or incomplete result is not proof that nothing happened. vehicle_messages returns a snapshot, not a subscription. link_list and daemon_about diagnose the connection and build. For camera video, video_list says what is arriving and why it plays badly. find_vehicles looks for vehicles nearby and says why anything found is not one."
+                                "instructions": if all_tools {
+                                    INSTRUCTIONS.to_owned()
+                                } else {
+                                    format!("Find tool names and input schemas with uxduck_search_tools, then run them with uxduck_call_tool. Search exact names to fetch just one schema; reuse it instead of searching again. Use limits and filters for large results. {INSTRUCTIONS}")
+                                }
                             }),
                         )
                     }
@@ -67,28 +75,26 @@ pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
                 }
             }
             "ping" => reply(&id, &json!({})),
-            "tools/list" => reply(
-                &id,
-                &json!({
-                    "tools": catalogue.iter().map(|t| json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "inputSchema": t.parameters,
-                    })).collect::<Vec<_>>()
-                }),
-            ),
+            "tools/list" => reply(&id, &catalogue::list(&catalogue, all_tools)),
             "tools/call" => match (daemon.as_mut(), params["name"].as_str()) {
                 (None, _) => failure(&id, -32002, "call initialize first"),
                 (_, None) => failure(&id, -32602, "tools/call needs a name"),
+                (Some(_), Some(catalogue::SEARCH)) => {
+                    let result = catalogue::search(&catalogue, arguments(&params))
+                        .map_or_else(|error| invalid_arguments(&error), tool_result);
+                    reply(&id, &result)
+                }
+                (Some(client), Some(catalogue::CALL)) => {
+                    let result = match catalogue::invocation(&catalogue, arguments(&params)) {
+                        Ok((method, arguments)) => call(client, &method, arguments).await,
+                        Err(error) => invalid_arguments(&error),
+                    };
+                    reply(&id, &result)
+                }
+                // Keep direct names callable for existing clients and scripts.
                 (Some(client), Some(name)) => match Tool::method_for(&catalogue, name) {
                     None => failure(&id, -32602, &format!("no tool named {name}")),
-                    Some(method) => {
-                        let arguments = match params.get("arguments") {
-                            Some(Value::Object(object)) => Value::Object(object.clone()),
-                            _ => json!({}),
-                        };
-                        reply(&id, &call(client, &method, arguments).await)
-                    }
+                    Some(method) => reply(&id, &call(client, &method, arguments(&params)).await),
                 },
             },
             other => failure(&id, -32601, &format!("unknown method {other}")),
@@ -101,12 +107,38 @@ pub async fn run(data_dir: &Path, dev: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn connect(data_dir: &Path, dev: bool, name: &str) -> Result<LocalClient, CliError> {
-    let mut client = match LocalClient::connect(data_dir).await {
-        Ok(client) => client,
-        Err(CliError::NoDaemon(_)) => crate::cli::start_daemon(data_dir, dev).await?,
-        Err(error) => return Err(error),
-    };
+fn arguments(params: &Value) -> Value {
+    params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn invalid_arguments(message: &str) -> Value {
+    api_error(&json!({ "code": -32602, "message": message }))
+}
+
+/// MCP clients may consume either representation. Compact JSON saves tokens
+/// in text-only clients without dropping fields, schemas or coverage evidence.
+fn tool_result(result: Value) -> Value {
+    let mut content = json!({
+        "content": [{ "type": "text", "text": result.to_string() }],
+        "isError": false
+    });
+    if result.is_object() {
+        content["structuredContent"] = result;
+    }
+    content
+}
+
+// An agent connecting must never start UXDuck or its vehicle links implicitly.
+async fn connect(data_dir: &Path, name: &str) -> Result<LocalClient, CliError> {
+    let mut client = LocalClient::connect(data_dir).await.map_err(|error| match error {
+        CliError::NoDaemon(directory) => CliError::Usage(format!(
+            "UXDuck is not running for {directory}. Start UXDuck yourself with `uxduck daemon start`, using the same --dev or --data-dir options, then reconnect MCP."
+        )),
+        error => error,
+    })?;
     client.initialize_as(name, "agent", false).await?;
     Ok(client)
 }
@@ -122,15 +154,7 @@ async fn call(client: &mut LocalClient, method: &str, arguments: Value) -> Value
         }));
     }
     match client.call(method, arguments).await {
-        Ok(result) => {
-            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-            let mut content =
-                json!({ "content": [{ "type": "text", "text": text }], "isError": false });
-            if result.is_object() {
-                content["structuredContent"] = result;
-            }
-            content
-        }
+        Ok(result) => tool_result(result),
         Err(CliError::Api(error)) => api_error(&error),
         Err(error) => json!({
             "content": [{ "type": "text", "text": error.to_string() }],
@@ -144,7 +168,7 @@ async fn call(client: &mut LocalClient, method: &str, arguments: Value) -> Value
 /// the original object without parsing the explanation.
 fn api_error(error: &Value) -> Value {
     json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(error).unwrap_or_else(|_| error.to_string()) }],
+        "content": [{ "type": "text", "text": error.to_string() }],
         "structuredContent": { "error": error },
         "isError": true
     })
@@ -155,6 +179,17 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
 
     use super::*;
+
+    #[test]
+    fn startup_instructions_and_text_results_stay_compact_without_losing_data() {
+        assert!(INSTRUCTIONS.len() < 1_200);
+        let value = json!({ "coverage": { "truncated": true, "notes": ["missing packets"] }, "position": { "lat": 51.5, "lon": -0.1 }, "message": "line one\nline two" });
+        let result = tool_result(value.clone());
+        assert_eq!(result["structuredContent"], value);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, value.to_string());
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), value);
+    }
 
     #[test]
     fn api_errors_keep_their_codes_and_details_for_every_mcp_client() {

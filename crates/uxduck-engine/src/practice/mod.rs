@@ -613,6 +613,7 @@ impl Engine {
     }
 
     /// What the judge reads of a vehicle now (X5).
+    #[allow(clippy::too_many_lines, reason = "one field of the view after another")]
     pub(crate) fn practice_view(&self, attempt: &Attempt) -> View {
         let id = &attempt.vehicle_id;
         let vehicle = self.state.vehicles.get(id);
@@ -621,14 +622,21 @@ impl Engine {
         let position = telemetry
             .and_then(|t| t.positions.iter().find(|p| p.source == "fused"))
             .map(|p| (p.latitude_deg, p.longitude_deg));
-        let height_m = telemetry
-            .and_then(|t| t.positions.iter().find(|p| p.source == "fused"))
-            .and_then(|p| {
-                p.altitudes
-                    .iter()
-                    .find(|a| a.frame == AltitudeFrame::AboveHome)
-            })
-            .map(|a| a.meters);
+        let altitude = |frame: AltitudeFrame| {
+            telemetry
+                .and_then(|t| t.positions.iter().find(|p| p.source == "fused"))
+                .and_then(|p| p.altitudes.iter().find(|a| a.frame == frame))
+                .map(|a| a.meters)
+        };
+        let height_m = altitude(AltitudeFrame::AboveHome);
+        // The operator's upload since the attempt began (S132): the
+        // vehicle's mission as last read, with its fence and rally points.
+        let uploaded = self
+            .practice
+            .uploads
+            .get(id)
+            .filter(|&&at| at >= attempt.started_at_us)
+            .and_then(|_| self.state.missions.get(id));
         let on_ground = item("flight.state")
             .and_then(|i| i.text.as_deref())
             .map(|text| text == "On the ground");
@@ -678,22 +686,38 @@ impl Engine {
             commands,
             parameters_set,
             controller: self.controller_drives(id),
-            mission: self
-                .practice
-                .uploads
-                .get(id)
-                .filter(|&&at| at >= attempt.started_at_us)
-                .and_then(|_| self.state.missions.get(id))
+            mission_commands: uploaded.map(|m| m.items.iter().skip(1).map(|i| i.command).collect()),
+            mission_frames: uploaded.map(|m| {
+                m.items
+                    .iter()
+                    .skip(1)
+                    .filter(|i| WAYPOINTS.contains(&i.command))
+                    .map(|i| i.frame)
+                    .collect()
+            }),
+            fence_uploaded: uploaded.is_some_and(|m| !m.fence.is_empty()),
+            rally: uploaded
                 .map(|m| {
-                    // Its waypoints: item 0 is home on ArduPilot, and a
-                    // take-off or a landing is not a place on the survey.
-                    m.items
+                    m.rally
                         .iter()
-                        .skip(1)
-                        .filter(|i| WAYPOINTS.contains(&i.command))
-                        .map(|i| (i.latitude_deg, i.longitude_deg))
+                        .map(|r| (r.latitude_deg, r.longitude_deg))
                         .collect()
-                }),
+                })
+                .unwrap_or_default(),
+            fence_breached: item("fence.breached")
+                .and_then(|i| i.value)
+                .map(|v| v > 0.5),
+            clearance_m: altitude(AltitudeFrame::AboveGround),
+            mission: uploaded.map(|m| {
+                // Its waypoints: item 0 is home on ArduPilot, and a
+                // take-off or a landing is not a place on the survey.
+                m.items
+                    .iter()
+                    .skip(1)
+                    .filter(|i| WAYPOINTS.contains(&i.command))
+                    .map(|i| (i.latitude_deg, i.longitude_deg))
+                    .collect()
+            }),
             track: self
                 .practice
                 .tracks
@@ -716,7 +740,8 @@ impl Engine {
             .is_none_or(|c| c.kind.is_operator())
     }
 
-    /// A mission upload succeeded: an operator's counts for "Plan the survey".
+    /// A mission upload succeeded: an operator's counts for "Plan the survey"
+    /// (`operator_client` leaves out a simulated vehicle's example, P12).
     pub(crate) fn practice_mission_uploaded(&mut self, vehicle_id: &str, client_id: &str) {
         if self.operator_client(client_id) {
             self.practice
@@ -792,6 +817,7 @@ impl Engine {
             position,
             height_m: view.height_m,
             mode: view.mode.clone(),
+            clearance_m: view.clearance_m,
         };
         let track = self
             .practice

@@ -20,13 +20,17 @@ work="$root/target/wasm-sitl"
 out="$sim_cache/wasm"
 
 ap="$work/ardupilot"
-if [ ! -d "$ap/.git" ]; then
+# Its own repository, not one git cannot read: a CI cache can restore a
+# partial .git, and git would then fall through to an enclosing checkout.
+if [ "$(git -C "$ap" rev-parse --git-dir 2>/dev/null)" != .git ]; then
+  rm -rf "$ap"
   git clone --filter=blob:none --no-checkout https://github.com/ArduPilot/ardupilot.git "$ap"
 fi
 # A commit or a tag, such as Copter-4.7.1 for the catalogue (S18).
 git -C "$ap" fetch --quiet origin "$ARDUPILOT_COMMIT"
-git -C "$ap" checkout --quiet FETCH_HEAD
-git -C "$ap" submodule update --init --recursive --depth 1 --jobs 8 \
+# Forced: a checkout restored without its files (a CI cache) gets them back.
+git -C "$ap" checkout --quiet --force FETCH_HEAD
+git -C "$ap" submodule update --init --recursive --force --depth 1 --jobs 8 \
   modules/waf modules/mavlink modules/DroneCAN/DSDL modules/DroneCAN/dronecan_dsdlc \
   modules/DroneCAN/libcanard modules/DroneCAN/pydronecan modules/lwip modules/littlefs
 

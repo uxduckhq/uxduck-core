@@ -1,0 +1,89 @@
+{
+  "id": "fence-breach",
+  "version": 1,
+  "title": "Fence breach",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Put a fence with a ceiling round the field, fly a waypoint above it, and see the fence bring the vehicle back.",
+  "start": {
+    "heightM": 30
+  },
+  "features": [
+    {
+      "id": "field",
+      "label": "Field",
+      "outline": [
+        {
+          "bearingDeg": 45,
+          "distanceM": 85
+        },
+        {
+          "bearingDeg": 135,
+          "distanceM": 85
+        },
+        {
+          "bearingDeg": 225,
+          "distanceM": 85
+        },
+        {
+          "bearingDeg": 315,
+          "distanceM": 85
+        }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "text": "Plan a fence round the field with a 40 m ceiling, and a waypoint in the field at 60 m. Upload the plan.",
+      "hint": "Fence \u203a Area: click each corner, then the first again; set the ceiling under Fence settings. The plan warns that the waypoint is above the ceiling: that is the point.",
+      "hintAfterS": 150,
+      "all": [
+        {
+          "check": "fenceUploaded"
+        }
+      ]
+    },
+    {
+      "text": "Switch to Auto. It climbs towards the waypoint, through the ceiling.",
+      "hint": "Auto flies the plan from its first item. Fly to refuses a place outside a fence; a mission does not.",
+      "hintAfterS": 90,
+      "all": [
+        {
+          "check": "fenceBreached"
+        }
+      ]
+    },
+    {
+      "text": "Let the fence's action bring it back under the ceiling, inside the field.",
+      "hint": "The breach action takes over: Return to launch unless you chose another.",
+      "hintAfterS": 120,
+      "all": [
+        {
+          "check": "fenceClear"
+        },
+        {
+          "check": "within",
+          "feature": "field"
+        }
+      ]
+    }
+  ],
+  "fails": [
+    {
+      "all": [
+        {
+          "check": "landed"
+        },
+        {
+          "check": "outside",
+          "feature": "field"
+        }
+      ],
+      "says": "Failed. It landed outside the field."
+    }
+  ],
+  "passed": "Passed. The fence brought it back in {elapsed}.",
+  "measure": {
+    "measure": "elapsed"
+  }
+}

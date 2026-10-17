@@ -135,7 +135,7 @@ fn environment_action(action: &AccountAction) -> Option<Result<Value, ApiError>>
 fn unreachable() -> ApiError {
     ApiError::new(
         ErrorKind::InvalidValue,
-        "UXDuck cannot reach its server; check the internet connection",
+        "UXDuck cannot reach its server. Check the internet connection",
     )
 }
 
@@ -896,7 +896,7 @@ impl Sessions {
             .send()
             .await
             .map_err(|_| {
-                "UXDuck cannot reach its server; check the internet connection.".to_owned()
+                "UXDuck cannot reach its server. Check the internet connection.".to_owned()
             })?;
         if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err("Sign in to UXDuck again in Settings > Account to use the agent.".into());

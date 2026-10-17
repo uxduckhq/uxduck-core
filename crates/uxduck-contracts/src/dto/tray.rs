@@ -64,6 +64,37 @@ pub struct TrayMenu {
     /// An unattended-simulation reminder, also delivered while no UI is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulation_reminder: Option<SimulationReminder>,
+    /// A vehicle's warning or alarm raised while no UXDuck window is
+    /// visible, shown as the system's notification; the newest when there
+    /// are more. Clicking it opens UXDuck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<TrayAlert>,
+    /// A question shown under the duck until it is answered or goes away,
+    /// such as a browser asking to connect; the newest when there are more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<TrayQuestion>,
+}
+
+/// A question under the duck. Its answers are items: choosing one sends
+/// `tray/activate` with its id, as the menu does.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayQuestion {
+    /// Stays the same while the question does; a new id is a new question.
+    pub id: String,
+    pub title: String,
+    pub message: String,
+    /// The buttons, the last one the default.
+    pub answers: Vec<TrayItem>,
+}
+
+/// A vehicle's warning for the system's notifications, by its notification's id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayAlert {
+    pub id: String,
+    pub title: String,
+    pub message: String,
 }
 
 /// A native notification whose opaque token limits its actions to one snapshot.

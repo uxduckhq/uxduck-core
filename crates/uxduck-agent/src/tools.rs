@@ -26,6 +26,25 @@ pub const AGENT_METHODS: &[&str] = &[
     "command/list",
     "command/send",
     "search/query",
+    // Where this computer is, once a person has turned it on (S137,
+    // ADR-0030 L4); the agent cannot turn it on.
+    "location/status",
+    // Saved plans (ADR-0029): drafting and changing one touches no vehicle;
+    // making or changing one asks first unless the agent has `config`.
+    // Checking one is free; uploading one, or putting back a mission from a
+    // vehicle's history, asks the operator first.
+    "plan/list",
+    "plan/get",
+    "plan/create",
+    "plan/update",
+    "plan/check",
+    "plan/examples",
+    "plan/import",
+    "plan/export",
+    "plan/upload",
+    "mission/refresh",
+    "mission/history",
+    "mission/restore",
     // Simulated vehicles (S17): starting and stopping one asks the operator
     // first, unless the agent was given the configuration capability.
     "sim/binaries",
@@ -52,8 +71,8 @@ pub const AGENT_METHODS: &[&str] = &[
     "param/list",
     "param/diff",
     "param/set",
-    // A vehicle's history (S69, ADR-0022): reading it freely; a note only
-    // when asked, and it asks the operator first.
+    // A vehicle's history (S69, ADR-0022): reading it freely; offer useful
+    // notes for completed work, write only with consent and config permission.
     "vehicle/history",
     "vehicle/addNote",
     // Labels (S106): putting them on and off asks the operator first.
@@ -88,6 +107,10 @@ pub const AGENT_METHODS: &[&str] = &[
     // Camera video (S38, ADR-0017 V15): what is arriving and why it plays
     // badly; assigning or naming a camera asks the operator first.
     "video/list",
+    "video/devices",
+    "video/capture",
+    "video/capture/enable",
+    "video/record",
     "video/assign",
     "video/add",
     "video/rename",
@@ -104,6 +127,67 @@ pub const AGENT_METHODS: &[&str] = &[
     "plugin/drafts",
     "plugin/install",
 ];
+
+/// Methods the model is not sent each turn (maintainer, 2026-10-16: the
+/// tools were 65 KB with every request): it finds them with `tool_search`
+/// and runs them with `tool_call`. Every tool the instructions name stays
+/// loaded. MCP discovery searches the full generated catalogue separately.
+pub const DEFERRED_METHODS: &[&str] = &[
+    "video/devices",
+    "video/capture",
+    "video/capture/enable",
+    "video/record",
+    "location/status",
+    "daemon/about",
+    "mavlink/inspect",
+    "mavlink/history",
+    "router/events",
+    "link/diagnose",
+    "socket/inspect",
+    "daemon/logs",
+    "telemetry/window",
+    "link/list",
+    "plan/list",
+    "plan/get",
+    "plan/create",
+    "plan/update",
+    "plan/check",
+    "plan/examples",
+    "plan/import",
+    "plan/export",
+    "plan/upload",
+    "mission/refresh",
+    "mission/history",
+    "mission/restore",
+    "sim/binaries",
+    "sim/start",
+    "sim/stop",
+    "sim/restart",
+    "sim/snapshot",
+    "snapshot/list",
+    "snapshot/start",
+    "practice/guide",
+    "param/list",
+    "param/diff",
+    "param/history",
+    "vehicle/label",
+    "vehicle/size",
+    "terrain/at",
+    "terrain/check",
+    "terrain/status",
+    "terrain/areas",
+    "terrain/areaSize",
+    "terrain/keepArea",
+    "files/list",
+    "files/read",
+    "files/upload",
+    "files/remove",
+    "video/rename",
+    "plugin/drafts",
+];
+
+/// The tool that runs a deferred one by name.
+pub const TOOL_CALL: &str = "tool_call";
 
 /// A method's provider-facing name: `/` as `_` and camelCase as snake
 /// case, as providers want lowercase (`vehicle/addNote` is
@@ -148,6 +232,74 @@ impl Tool {
             .find(|tool| tool.name == name)
             .map(|tool| tool.method.clone())
     }
+}
+
+/// What the model is sent each turn: the tools not deferred, and
+/// `tool_call` to run a deferred one that `tool_search` found.
+#[must_use]
+pub fn model_tools() -> Vec<Tool> {
+    let mut sent: Vec<Tool> = tools()
+        .into_iter()
+        .filter(|tool| !DEFERRED_METHODS.contains(&tool.method.as_str()))
+        .collect();
+    if let Some(search) = sent.iter_mut().find(|tool| tool.method == "tool/search") {
+        search.description.push_str(
+            " Also finds UXDuck's own tools that are not loaded until needed \
+             (plans and missions, simulations, terrain, files, parameter lists and \
+             history, link diagnostics) in uxduckTools; run those with tool_call.",
+        );
+    }
+    sent.push(Tool {
+        name: TOOL_CALL.into(),
+        method: String::new(),
+        description: "Runs one of UXDuck's own tools that tool_search found (plans and \
+            missions, simulations, terrain, a vehicle's files, parameter lists and history, link \
+            diagnostics), by its name with params its schema allows. It asks the operator first \
+            where the tool itself would."
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "The tool's name, as tool_search gave it." },
+                "params": { "type": "object", "description": "Its params, as its schema says." }
+            },
+            "required": ["name"]
+        }),
+    });
+    sent
+}
+
+/// The deferred tools matching words, best first: each word in a tool's
+/// name counts three times one in its description.
+#[must_use]
+pub fn find_deferred(query: &str, limit: usize) -> Vec<Tool> {
+    let words: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1)
+        .map(str::to_lowercase)
+        .collect();
+    let mut scored: Vec<(usize, Tool)> = tools()
+        .into_iter()
+        .filter(|tool| DEFERRED_METHODS.contains(&tool.method.as_str()))
+        .filter_map(|tool| {
+            let name = tool.name.to_lowercase();
+            let about = tool.description.to_lowercase();
+            let score: usize = words
+                .iter()
+                .map(|w| {
+                    3 * usize::from(name.contains(w.as_str()))
+                        + usize::from(about.contains(w.as_str()))
+                })
+                .sum();
+            (score > 0).then_some((score, tool))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, tool)| tool)
+        .collect()
 }
 
 /// Every agent tool, from `ClientRequest`'s schema.
@@ -198,6 +350,11 @@ pub fn tools() -> Vec<Tool> {
                     "A bounded snapshot; call again for newer messages. Subscriptions are not supported by agent tools.",
                 );
             }
+            if *method == "tool/search" {
+                // Only the in-app model_tools catalogue adds the turn loop's
+                // uxduckTools/tool_call instructions; MCP has its own discovery.
+                description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
             Some(Tool {
                 name: tool_name(method),
                 method: (*method).to_owned(),
@@ -224,7 +381,7 @@ mod tests {
     /// underscores, in 128 KB (`apps/api/src/features/model/modelApp.ts`).
     #[test]
     fn the_hosted_model_takes_every_tool() {
-        let tools = tools();
+        let tools = model_tools();
         assert!(tools.len() <= 64, "{} tools", tools.len());
         for tool in &tools {
             let mut chars = tool.name.chars();
@@ -241,6 +398,8 @@ mod tests {
         )
         .map_or(usize::MAX, |json| json.len());
         assert!(size < 128 * 1024, "{size} bytes of tools");
+        // Sent with every request: kept well under the 65 KB they were.
+        assert!(size < 40 * 1024, "{size} bytes of tools sent each turn");
     }
 
     #[test]
@@ -306,5 +465,44 @@ mod tests {
         ] {
             assert!(history.parameters["properties"].get(property).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use super::*;
+
+    #[test]
+    fn deferred_tools_are_agent_tools_found_by_words_and_never_named_in_the_instructions() {
+        let all: Vec<String> = tools().into_iter().map(|t| t.method).collect();
+        for method in DEFERRED_METHODS {
+            assert!(
+                all.contains(&(*method).to_owned()),
+                "{method} is not an agent tool"
+            );
+            assert!(
+                !crate::turn::INSTRUCTIONS.contains(&tool_name(method)),
+                "{method} is named in the instructions but not sent"
+            );
+        }
+        let sent = model_tools();
+        assert!(
+            sent.iter()
+                .all(|t| !DEFERRED_METHODS.contains(&t.method.as_str()))
+        );
+        assert!(sent.iter().any(|t| t.name == TOOL_CALL));
+        let found: Vec<String> = find_deferred("upload a plan", 5)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            found.first().map(String::as_str),
+            Some("plan_upload"),
+            "{found:?}"
+        );
+        let history = find_deferred("mission history", 3);
+        assert_eq!(history[0].name, "mission_history");
     }
 }

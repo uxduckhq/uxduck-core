@@ -10,7 +10,7 @@
 //! not sent, and a notification names the vehicle and the place.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uxduck_contracts::dto::terrain::{
     TerrainAtParams, TerrainAtResult, TerrainDataset, TerrainMissing,
 };
@@ -25,7 +25,7 @@ use uxduck_mavlink::terrain::{Block, Group};
 use uxduck_terrain::grid;
 use uxduck_terrain::lookup::Ground;
 use uxduck_terrain::lookup::nearest_metre;
-use uxduck_terrain::{Answer, Arrived, Dataset, Order, Terrain, Unavailable};
+use uxduck_terrain::{Answer, Arrived, Dataset, Order, Problem, Terrain, Unavailable};
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -47,11 +47,22 @@ pub(crate) struct TerrainState {
     /// Vehicles' requests still being answered: the latest mask of each
     /// block, by vehicle (S118).
     blocks: BTreeMap<(String, Block), u64>,
+    /// Cache faults and affected blocks share one availability notice.
+    problems: BTreeMap<String, Problem>,
+    missing: BTreeMap<(String, Block), MissingTerrain>,
     /// Checks of vehicles' own terrain (S119).
     pub(crate) checks: crate::terrain_check::Checks,
     /// Areas kept offline and missions' terrain (S120).
     pub(crate) keeping: crate::terrain_keep::Keeping,
 }
+
+struct MissingTerrain {
+    why: String,
+    latitude_deg: f64,
+    longitude_deg: f64,
+}
+
+const TERRAIN_NOTICE: &str = "terrain:availability";
 
 /// Answers a second on a network link (QGroundControl's pace) and on a
 /// serial radio, which a telemetry radio's 57600 baud shares with
@@ -198,6 +209,7 @@ impl Engine {
         let key = (vehicle_id.to_owned(), block);
         if mask == 0 {
             self.terrain.blocks.remove(&key);
+            self.terrain.missing.remove(&key);
         } else {
             self.terrain.blocks.insert(key.clone(), mask);
         }
@@ -280,6 +292,7 @@ impl Engine {
                 if let Some(why) = why {
                     // Never a guessed height: the vehicle asks again.
                     missing.get_or_insert(why);
+                    left |= 1 << gridbit;
                 } else if waiting {
                     left |= 1 << gridbit;
                 } else {
@@ -301,30 +314,20 @@ impl Engine {
                     per_second: self.terrain_pace(vehicle_id),
                 });
             }
-            let condition = format!("terrain:vehicle:{vehicle_id}");
             match missing {
                 Some((why, (lat, lon))) => {
-                    let name = self
-                        .state
-                        .vehicles
-                        .get(vehicle_id)
-                        .map_or_else(|| vehicle_id.clone(), |v| v.name.clone());
-                    self.raise(Raise {
-                        severity: Severity::Warning,
-                        kind: NotificationKind::Persistent,
-                        subject: Subject::Vehicle {
-                            id: vehicle_id.clone(),
+                    self.terrain.missing.insert(
+                        key.clone(),
+                        MissingTerrain {
+                            why,
+                            latitude_deg: lat,
+                            longitude_deg: lon,
                         },
-                        title: format!("No terrain for {name} near {lat:.4}, {lon:.4}"),
-                        body: Some(format!(
-                            "UXDuck sent {name} no terrain there: {why}. It will not fly terrain-relative there until it has it."
-                        )),
-                        actions: Vec::new(),
-                        condition: Some(condition),
-                        report: None,
-                    });
+                    );
                 }
-                None if answered && left == 0 => self.resolve(&condition),
+                None if answered && left == 0 => {
+                    self.terrain.missing.remove(&key);
+                }
                 None => {}
             }
         }
@@ -359,7 +362,11 @@ impl Engine {
     }
 
     /// The ground at a point, or `None` while its data is on its way.
-    fn terrain_answer(&mut self, dataset: Dataset, params: &TerrainAtParams) -> Option<Answer> {
+    pub(crate) fn terrain_answer(
+        &mut self,
+        dataset: Dataset,
+        params: &TerrainAtParams,
+    ) -> Option<Answer> {
         let now = self.clock.now_us();
         let Some(cache) = &mut self.terrain.cache else {
             return Some(Answer {
@@ -378,22 +385,103 @@ impl Engine {
         };
         let orders = cache.take_orders();
         let problems = cache.take_problems();
+        for condition in cache.take_resolved_problems() {
+            self.terrain.problems.remove(&condition);
+        }
         if let Some(port) = &mut self.terrain.port {
             for order in orders {
                 port.order(order);
             }
         }
         for problem in problems {
-            self.raise(Raise {
-                severity: Severity::Warning,
-                kind: NotificationKind::Persistent,
-                subject: Subject::System,
-                title: problem.title,
-                body: Some(problem.body),
-                actions: Vec::new(),
-                condition: Some(problem.condition),
-                report: Some("terrain".into()),
-            });
+            self.terrain
+                .problems
+                .insert(problem.condition.clone(), problem);
         }
+        self.terrain_notice();
+    }
+
+    /// A cache fault and the vehicles affected by it are one warning, updated
+    /// in place and resolved once verified data answers the outstanding blocks.
+    fn terrain_notice(&mut self) {
+        if self.terrain.problems.is_empty() && self.terrain.missing.is_empty() {
+            self.resolve(TERRAIN_NOTICE);
+            return;
+        }
+        // Retire the old separate system/per-vehicle notices when upgrading.
+        let legacy: BTreeSet<_> = self
+            .state
+            .notifications
+            .values()
+            .filter_map(|n| {
+                n.condition
+                    .as_ref()
+                    .filter(|c| {
+                        *c == "terrain:manifest"
+                            || c.starts_with("terrain:file:")
+                            || c.starts_with("terrain:vehicle:")
+                    })
+                    .cloned()
+            })
+            .collect();
+        for condition in legacy {
+            self.resolve(&condition);
+        }
+        let mut details: Vec<String> = self
+            .terrain
+            .problems
+            .values()
+            .map(|p| p.body.clone())
+            .collect();
+        let reasons: BTreeSet<_> = self
+            .terrain
+            .missing
+            .values()
+            .map(|m| &m.why)
+            .filter(|why| !details.iter().any(|body| body.contains(why.as_str())))
+            .cloned()
+            .collect();
+        details.extend(reasons);
+        let mut affected: BTreeMap<&str, Vec<&MissingTerrain>> = BTreeMap::new();
+        for ((vehicle, _), missing) in &self.terrain.missing {
+            affected.entry(vehicle).or_default().push(missing);
+        }
+        let mut places = Vec::new();
+        for (id, missing) in &affected {
+            let name = self
+                .state
+                .vehicles
+                .get(*id)
+                .map_or_else(|| (*id).to_owned(), |vehicle| vehicle.name.clone());
+            let first = missing[0];
+            let more = if missing.len() > 1 {
+                format!(" and {} other places", missing.len() - 1)
+            } else {
+                String::new()
+            };
+            places.push(format!(
+                "{name} near {:.4}, {:.4}{more}",
+                first.latitude_deg, first.longitude_deg
+            ));
+        }
+        if !places.is_empty() {
+            details.push(format!("No terrain sent to:\n{}\nThese vehicles cannot fly terrain-relative there until it is available.", places.join("\n")));
+        }
+        let subject = affected
+            .first_key_value()
+            .filter(|_| affected.len() == 1)
+            .map_or(Subject::System, |(id, _)| Subject::Vehicle {
+                id: (*id).to_owned(),
+            });
+        self.raise_or_update(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Persistent,
+            subject,
+            title: "Terrain data is unavailable".into(),
+            body: Some(details.join("\n\n")),
+            actions: Vec::new(),
+            condition: Some(TERRAIN_NOTICE.into()),
+            report: (!self.terrain.problems.is_empty()).then(|| "terrain".into()),
+        });
     }
 }

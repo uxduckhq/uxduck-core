@@ -34,9 +34,9 @@ impl Source {
     /// For the development daemon with terrain on and no key, which would
     /// answer no heights: it says how to get the key.
     pub fn from_env(dev: bool) -> Result<Option<Self>, String> {
-        let base_url = match std::env::var("UXDUCK_TERRAIN_URL") {
-            Ok(url) if url == "none" => return Ok(None),
-            Ok(url) if !url.trim().is_empty() => url,
+        let base_url = match crate::update::url_override("UXDUCK_TERRAIN_URL") {
+            Some(url) if url == "none" => return Ok(None),
+            Some(url) if !url.trim().is_empty() => url,
             _ => DEFAULT_BASE_URL.to_owned(),
         };
         let key = std::env::var("UXDUCK_TERRAIN_KEY")

@@ -138,7 +138,7 @@ pub(crate) fn handle(
     if engine.state.sync.device_id == computer {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            "that is this computer; its vehicles are here already",
+            "that is this computer. Its vehicles are here already",
         ));
     }
     engine

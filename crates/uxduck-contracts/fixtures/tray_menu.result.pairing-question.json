@@ -1,0 +1,24 @@
+{
+  "status": "Waiting for your answer: 1 request",
+  "tone": "waiting",
+  "items": [
+    {
+      "id": "pairing:482913",
+      "label": "localhost:8793 asks to connect · 482 913",
+      "children": [
+        { "id": "allow-pairing:482913", "label": "Allow" },
+        { "id": "deny-pairing:482913", "label": "Deny" }
+      ]
+    },
+    { "id": "open", "label": "Open window", "separatorBefore": true }
+  ],
+  "question": {
+    "id": "pairing:482913",
+    "title": "localhost:8793 asks to connect to UXDuck",
+    "message": "Allow it only if you asked to connect just now and the page shows 482 913.",
+    "answers": [
+      { "id": "deny-pairing:482913", "label": "Deny" },
+      { "id": "allow-pairing:482913", "label": "Allow" }
+    ]
+  }
+}

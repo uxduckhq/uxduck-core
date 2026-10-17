@@ -2,7 +2,9 @@
 //! the vehicle for its own height at a few points, and each answer is
 //! compared with what the vehicle's dataset gives there on the vehicle's
 //! own grid, interpolated as `AP_Terrain` interpolates. The same dataset
-//! agrees within a metre after rounding, so 2 m apart is a difference.
+//! agrees within a metre after rounding. ArduPilot reports heights with
+//! its arming reference offset applied: a permitted uniform difference
+//! cannot establish that the stored data differs.
 //!
 //! Checks run by themselves when a vehicle's terrain has loaded (once per
 //! connection) and after a mission upload, at most once a minute, at home,
@@ -59,6 +61,9 @@ struct Check {
     /// map menu).
     warn: bool,
     spacing: u16,
+    /// ArduPilot's correction limit; unknown until its parameter arrives.
+    /// Zero for autopilots without ArduPilot's terrain reference offset.
+    offset_max: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -260,12 +265,25 @@ impl Engine {
             });
         }
         let spacing = self.terrain_spacing(vehicle_id);
+        let offset_max = if self
+            .vehicle(vehicle_id)
+            .is_some_and(|v| v.autopilot == "Ardupilotmega")
+        {
+            self.state
+                .parameters
+                .get(&parameter_id(vehicle_id, "TERRAIN_OFS_MAX"))
+                .map(|p| p.value)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        } else {
+            Some(0.0)
+        };
         self.terrain.checks.running.push(Check {
             vehicle_id: vehicle_id.to_owned(),
             points,
             reply,
             warn,
             spacing,
+            offset_max,
         });
         self.settle_terrain_checks();
     }
@@ -429,6 +447,7 @@ impl Engine {
             }
             let vehicle_id = check.vehicle_id.clone();
             let spacing = check.spacing;
+            let offset_max = check.offset_max;
             let wanted: Vec<(i32, i32, Option<f32>, bool)> = check
                 .points
                 .iter()
@@ -458,7 +477,13 @@ impl Engine {
             if !waiting {
                 done.push((
                     index,
-                    verdict(&vehicle_id, wire(dataset), points, self.clock.now_us()),
+                    verdict(
+                        &vehicle_id,
+                        wire(dataset),
+                        points,
+                        offset_max,
+                        self.clock.now_us(),
+                    ),
                 ));
             }
         }
@@ -494,7 +519,7 @@ impl Engine {
             .map_or_else(|| vehicle_id.to_owned(), |v| v.name.clone());
         let ours = crate::terrain::dataset(result.dataset);
         match result.verdict {
-            TerrainVerdict::Agrees => self.resolve(&condition),
+            TerrainVerdict::Agrees | TerrainVerdict::OffsetUncertain => self.resolve(&condition),
             TerrainVerdict::MatchesOther => {
                 let theirs = other(ours);
                 self.raise(Raise {
@@ -536,7 +561,7 @@ impl Engine {
                         result.difference_m.unwrap_or_default()
                     ),
                     body: Some(format!(
-                        "It may be old or from another source. To replace it, delete the APM/TERRAIN folder in {name}'s Files tab (or on its SD card) and restart {name}: it then asks UXDuck for terrain again."
+                        "The checked heights cannot be explained by one altitude adjustment. Check {name}'s terrain dataset and altitude reference before replacing any terrain files."
                     )),
                     actions: Vec::new(),
                     condition: Some(condition),
@@ -553,6 +578,7 @@ fn verdict(
     vehicle_id: &str,
     dataset: uxduck_contracts::dto::terrain::TerrainDataset,
     points: Vec<TerrainCheckPoint>,
+    offset_max: Option<f64>,
     now_us: u64,
 ) -> TerrainCheckResult {
     let compared: Vec<&TerrainCheckPoint> = points
@@ -568,6 +594,23 @@ fn verdict(
             })
     };
     let difference = largest(|p| p.expected_m);
+    // TERRAIN_REPORT does not carry the reference offset. Find whether
+    // one permitted offset could explain ALL compared points within 2 m.
+    // This is deliberately inconclusive, not proof of a matching dataset:
+    // constant errors and nearby datasets can have the same signature.
+    // Never derive the offset from today's home or vehicle altitude: the
+    // reference was captured at arming and survives flight and landing.
+    let could_be_offset = |of: fn(&TerrainCheckPoint) -> Option<f64>| {
+        if offset_max == Some(0.0) || compared.iter().any(|p| of(p).is_none()) {
+            return false;
+        }
+        let limit = offset_max.unwrap_or(f64::INFINITY);
+        let (low, high) = compared.iter().fold((-limit, limit), |(low, high), p| {
+            let delta = p.vehicle_m.unwrap_or_default() - of(p).unwrap_or_default();
+            (low.max(delta - THRESHOLD_M), high.min(delta + THRESHOLD_M))
+        });
+        low <= high
+    };
     let verdict = if points.iter().all(|p| !p.answered) {
         TerrainVerdict::NoReply
     } else if points.iter().all(|p| p.answered && p.vehicle_m.is_none()) {
@@ -576,10 +619,14 @@ fn verdict(
         TerrainVerdict::Unknown
     } else if difference.is_some_and(|d| d <= THRESHOLD_M) {
         TerrainVerdict::Agrees
+    } else if could_be_offset(|p| p.expected_m) {
+        TerrainVerdict::OffsetUncertain
     } else if compared.iter().all(|p| p.other_m.is_some())
         && largest(|p| p.other_m).is_some_and(|d| d <= THRESHOLD_M)
     {
         TerrainVerdict::MatchesOther
+    } else if could_be_offset(|p| p.other_m) {
+        TerrainVerdict::OffsetUncertain
     } else {
         TerrainVerdict::Differs
     };
@@ -590,5 +637,90 @@ fn verdict(
         difference_m: difference.map(|d| (d * 10.0).round() / 10.0),
         points,
         checked_at_us: now_us,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uxduck_contracts::dto::terrain::TerrainDataset;
+
+    fn checked(deltas: &[f64], limit: Option<f64>, other: Option<f64>) -> TerrainVerdict {
+        let points = deltas
+            .iter()
+            .enumerate()
+            .map(|(i, delta)| {
+                let expected = 100.0 + f64::from(u32::try_from(i).unwrap_or_default()) * 10.0;
+                TerrainCheckPoint {
+                    latitude_deg: 1.0,
+                    longitude_deg: 1.0,
+                    vehicle_m: Some(expected + delta),
+                    expected_m: Some(expected),
+                    other_m: other.map(|d| expected + d),
+                    answered: true,
+                }
+            })
+            .collect();
+        verdict("v", TerrainDataset::Alos, points, limit, 0).verdict
+    }
+
+    #[test]
+    fn uniform_positive_negative_and_clamped_offsets_are_not_bad_files() {
+        for deltas in [
+            vec![-30.0; 5],
+            vec![20.0; 3],
+            vec![-30.0, -29.9999, -30.0001],
+        ] {
+            assert_eq!(
+                checked(&deltas, Some(30.0), None),
+                TerrainVerdict::OffsetUncertain
+            );
+        }
+        // One point cannot establish the dataset's identity either.
+        assert_eq!(
+            checked(&[20.0], Some(30.0), None),
+            TerrainVerdict::OffsetUncertain
+        );
+        assert_eq!(
+            checked(&[-75.0; 3], None, None),
+            TerrainVerdict::OffsetUncertain
+        );
+    }
+
+    #[test]
+    fn correction_cannot_hide_varying_or_out_of_bounds_errors() {
+        assert_eq!(
+            checked(&[-30.0, -20.0, -30.0], Some(30.0), None),
+            TerrainVerdict::Differs
+        );
+        assert_eq!(
+            checked(&[40.0; 3], Some(30.0), None),
+            TerrainVerdict::Differs
+        );
+        assert_eq!(
+            checked(&[20.0; 3], Some(0.0), None),
+            TerrainVerdict::Differs
+        );
+        assert_eq!(
+            checked(&[0.5, -0.5], Some(30.0), None),
+            TerrainVerdict::Agrees
+        );
+    }
+
+    #[test]
+    fn an_offset_is_not_evidence_to_switch_datasets() {
+        assert_eq!(
+            checked(&[4.0; 3], Some(30.0), Some(4.0)),
+            TerrainVerdict::OffsetUncertain
+        );
+        assert_eq!(
+            checked(&[4.0; 3], Some(0.0), Some(4.0)),
+            TerrainVerdict::MatchesOther
+        );
+        // A correction can be applied to the other dataset too.
+        assert_eq!(
+            checked(&[65.0; 3], Some(30.0), Some(50.0)),
+            TerrainVerdict::OffsetUncertain
+        );
     }
 }

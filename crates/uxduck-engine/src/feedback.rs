@@ -596,8 +596,8 @@ impl Engine {
         let count = self.state.vehicles.len();
         parts.push(match count {
             0 => "no vehicle".to_owned(),
-            1 => format!("1 vehicle ({})", vehicles.join("; ")),
-            n => format!("{n} vehicles ({})", vehicles.join("; ")),
+            1 => format!("1 vehicle ({})", vehicles.join(", ")),
+            n => format!("{n} vehicles ({})", vehicles.join(", ")),
         });
         parts.push("not signed in".to_owned());
         let line = parts.join(" · ");

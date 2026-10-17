@@ -18,6 +18,9 @@ pub enum ClientKind {
     RemoteOperator,
     /// A plugin the daemon runs (ADR-0006), never a socket client.
     Plugin,
+    /// UXDuck's page on a phone or tablet on this computer's network (S97),
+    /// as the daemon records it; a page declares `operator-ui`.
+    NetworkUi,
 }
 
 /// What a client may do.
@@ -28,6 +31,8 @@ pub enum Capability {
     Control,
     Config,
     Approve,
+    /// Reading where this computer is (S137): an agent asks first.
+    Location,
 }
 
 /// Who is connecting.

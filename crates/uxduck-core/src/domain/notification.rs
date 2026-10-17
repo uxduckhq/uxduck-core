@@ -77,6 +77,10 @@ pub enum Action {
     OpenVideo {
         source_id: String,
     },
+    /// The Controllers tab, for a controller just plugged in.
+    OpenControllers {
+        controller_id: String,
+    },
     /// The vehicle's Messages tab at an entry (S26).
     OpenMessages {
         vehicle_id: String,
@@ -91,6 +95,9 @@ pub enum Action {
     AnswerPairing {
         code: String,
         allow: bool,
+        /// For a phone or tablet on the network: what it may do (S97).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access: Option<crate::domain::client::NetworkAccess>,
     },
     /// `lease/release` at the computer: takes control of a vehicle back
     /// from someone away (S80).

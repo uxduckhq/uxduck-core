@@ -221,6 +221,21 @@ impl ThrottleRange {
     }
 }
 
+/// Which stick carries which control, as pilots number the layouts:
+/// Mode 2 has throttle and yaw on the left, Mode 1 throttle and roll on
+/// the right; Modes 3 and 4 swap Mode 1's and Mode 2's sticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StickMode {
+    #[serde(rename = "mode-1")]
+    Mode1,
+    #[serde(rename = "mode-2")]
+    Mode2,
+    #[serde(rename = "mode-3")]
+    Mode3,
+    #[serde(rename = "mode-4")]
+    Mode4,
+}
+
 /// Controller inputs to the four pilot axes, additional ArduPilot RC
 /// channels, and buttons and axis positions to commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -234,6 +249,10 @@ pub struct InputMapping {
     pub throttle: AxisBinding,
     #[serde(default, skip_serializing_if = "ThrottleRange::is_full_travel")]
     pub throttle_range: ThrottleRange,
+    /// The stick layout its pilot chose in setup: where the app draws each
+    /// control and which stick setup asks for. It changes nothing sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stick_mode: Option<StickMode>,
     /// Around the centre, as a fraction of full travel, read as zero.
     pub deadzone: f64,
     pub buttons: Vec<ButtonBinding>,
@@ -272,6 +291,7 @@ impl InputMapping {
             yaw: bind(GamepadAxis::LeftStickX),
             throttle: bind(GamepadAxis::LeftStickY),
             throttle_range: ThrottleRange::FullTravel,
+            stick_mode: Some(StickMode::Mode2),
             deadzone: 0.05,
             buttons: vec![
                 ButtonBinding {
@@ -310,6 +330,7 @@ impl InputMapping {
             pitch: bind(GamepadAxis::LeftStickY),
             yaw: bind(GamepadAxis::LeftStickX),
             throttle: bind(GamepadAxis::RightStickY),
+            stick_mode: Some(StickMode::Mode1),
             ..Self::mode_2()
         }
     }
@@ -334,6 +355,8 @@ impl InputMapping {
             throttle: bind(GamepadAxis::RightStickX, HID_X + 2),
             yaw: bind(GamepadAxis::RightStickY, HID_X + 3),
             buttons: Vec::new(),
+            // A radio's own setting says which stick is which.
+            stick_mode: None,
             ..Self::mode_2()
         }
     }

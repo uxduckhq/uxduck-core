@@ -11,6 +11,7 @@ mod operator;
 mod param_definitions;
 mod parameter;
 mod place;
+mod plan;
 mod plugin;
 mod practice;
 pub mod settings;
@@ -35,6 +36,7 @@ impl From<dto::ClientKind> for core::ClientKind {
             dto::ClientKind::Exporter => Self::Exporter,
             dto::ClientKind::RemoteOperator => Self::RemoteOperator,
             dto::ClientKind::Plugin => Self::Plugin,
+            dto::ClientKind::NetworkUi => Self::NetworkUi,
         }
     }
 }
@@ -50,6 +52,25 @@ impl From<core::ClientKind> for dto::ClientKind {
             core::ClientKind::Exporter => Self::Exporter,
             core::ClientKind::RemoteOperator => Self::RemoteOperator,
             core::ClientKind::Plugin => Self::Plugin,
+            core::ClientKind::NetworkUi => Self::NetworkUi,
+        }
+    }
+}
+
+impl From<crate::dto::pairing::NetworkAccess> for core::NetworkAccess {
+    fn from(access: crate::dto::pairing::NetworkAccess) -> Self {
+        match access {
+            crate::dto::pairing::NetworkAccess::Watch => Self::Watch,
+            crate::dto::pairing::NetworkAccess::Fly => Self::Fly,
+        }
+    }
+}
+
+impl From<core::NetworkAccess> for crate::dto::pairing::NetworkAccess {
+    fn from(access: core::NetworkAccess) -> Self {
+        match access {
+            core::NetworkAccess::Watch => Self::Watch,
+            core::NetworkAccess::Fly => Self::Fly,
         }
     }
 }
@@ -61,6 +82,7 @@ impl From<core::Capability> for dto::Capability {
             core::Capability::Control => Self::Control,
             core::Capability::Config => Self::Config,
             core::Capability::Approve => Self::Approve,
+            core::Capability::Location => Self::Location,
         }
     }
 }
@@ -72,6 +94,7 @@ impl From<dto::Capability> for core::Capability {
             dto::Capability::Control => Self::Control,
             dto::Capability::Config => Self::Config,
             dto::Capability::Approve => Self::Approve,
+            dto::Capability::Location => Self::Location,
         }
     }
 }

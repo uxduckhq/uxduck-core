@@ -16,6 +16,7 @@ use crate::domain::operator::Operator;
 use crate::domain::param_definitions::{OwnSet, VehicleDefinitions};
 use crate::domain::parameter::{Parameter, ParameterSet};
 use crate::domain::place::SavedPlace;
+use crate::domain::plan::{Plan, PlanRevision};
 use crate::domain::plugin::{Plugin, PublishedPlugin};
 use crate::domain::settings::Settings;
 use crate::domain::snapshot::Snapshot;
@@ -75,6 +76,10 @@ pub enum Change {
     /// A client identity was first seen, or its capabilities were edited.
     ClientUpserted {
         client: ClientRecord,
+    },
+    /// A client forgotten at the computer: a phone or tablet unpaired (S97).
+    ClientRemoved {
+        id: String,
     },
     ApprovalUpserted {
         approval: Approval,
@@ -143,6 +148,20 @@ pub enum Change {
     },
     PlaceRemoved {
         id: String,
+    },
+    /// A saved plan made or changed (ADR-0029), with how its undo history
+    /// moves.
+    PlanSaved {
+        plan: Plan,
+        revision: PlanRevision,
+    },
+    /// A plan deleted more than 30 days ago, gone for good.
+    PlanRemoved {
+        id: String,
+    },
+    /// A mission a vehicle holds, new to it or held again (S134).
+    MissionRecorded {
+        record: crate::domain::mission::MissionRecord,
     },
     /// A simulation snapshot saved or renamed (S34).
     SnapshotUpserted {

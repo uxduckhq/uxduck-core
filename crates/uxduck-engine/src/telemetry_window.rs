@@ -302,7 +302,7 @@ fn bounds(params: &TelemetryWindowParams, now_us: u64) -> Result<(u64, u64, usiz
             .any(|s| s.is_empty() || s.len() > 256)
     {
         return Err(invalid(
-            "select 1–32 keys and/or 1–8 positionSources; names must be 1–256 bytes",
+            "select 1–32 keys and/or 1–8 positionSources. Names must be 1–256 bytes",
         ));
     }
     if params.start_time_us.is_some() && params.duration_ms.is_some() {

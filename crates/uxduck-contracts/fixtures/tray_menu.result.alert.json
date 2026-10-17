@@ -1,0 +1,20 @@
+{
+  "status": "Alpha is offline",
+  "tone": "broken",
+  "items": [
+    {
+      "id": "open",
+      "label": "Open UXDuck"
+    },
+    {
+      "id": "quit",
+      "label": "Quit UXDuck",
+      "separatorBefore": true
+    }
+  ],
+  "alert": {
+    "id": "n0123456789abcdef",
+    "title": "Alpha is offline",
+    "message": "UXDuck hasn't heard from it for a while. Commands that work offline still go to its last known address."
+  }
+}

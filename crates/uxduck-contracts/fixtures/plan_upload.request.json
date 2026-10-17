@@ -1,0 +1,7 @@
+{
+  "method": "plan/upload",
+  "params": {
+    "planId": "plan1a2b3c4d5e6f7a8b",
+    "vehicleId": "v1a2b3c"
+  }
+}

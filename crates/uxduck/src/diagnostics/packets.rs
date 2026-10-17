@@ -96,7 +96,7 @@ pub fn history(
     let unknown_peer = messages.iter().any(|m| m.peer.is_none());
     let mut notes = page.notes;
     if unknown_peer {
-        notes.push("Historical tlogs do not store peer addresses; peer is only filled when the exact packet is still captured in this daemon run.".into());
+        notes.push("Historical tlogs do not store peer addresses. The peer is shown only when the exact packet remains in this daemon’s capture buffer.".into());
     }
     if messages.is_empty() {
         notes.push(

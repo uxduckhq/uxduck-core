@@ -150,6 +150,9 @@ impl From<&n::Notification> for nd::Notification {
                         },
                         n::Action::OpenUrl { url } => nd::Action::OpenUrl { url },
                         n::Action::OpenVideo { source_id } => nd::Action::OpenVideo { source_id },
+                        n::Action::OpenControllers { controller_id } => {
+                            nd::Action::OpenControllers { controller_id }
+                        }
                         n::Action::OpenMessages {
                             vehicle_id,
                             message_id,
@@ -161,9 +164,15 @@ impl From<&n::Notification> for nd::Notification {
                             device,
                             usb: usb.as_ref().map(Into::into),
                         },
-                        n::Action::AnswerPairing { code, allow } => {
-                            nd::Action::AnswerPairing { code, allow }
-                        }
+                        n::Action::AnswerPairing {
+                            code,
+                            allow,
+                            access,
+                        } => nd::Action::AnswerPairing {
+                            code,
+                            allow,
+                            access: access.map(Into::into),
+                        },
                         n::Action::TakeBack { vehicle_id } => nd::Action::TakeBack { vehicle_id },
                         n::Action::RestartSimulation { link_id } => {
                             nd::Action::RestartSimulation { link_id }

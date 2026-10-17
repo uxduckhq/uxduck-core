@@ -389,10 +389,17 @@ impl DesktopApp {
             self.lock().failed = Some(why.clone());
             return Err(why);
         }
-        let child = Command::new(path)
+        let mut command = Command::new(path);
+        command
             .arg("--quit-with-uxduck")
             .args(args)
-            .env("UXDUCK_DATA_DIR", &self.data_dir)
+            .env("UXDUCK_DATA_DIR", &self.data_dir);
+        // A development UXDuck's window keeps Reload and the developer tools
+        // even when `pnpm desktop:local` packaged it.
+        if cfg!(debug_assertions) {
+            command.env("UXDUCK_DEVELOPMENT", "1");
+        }
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

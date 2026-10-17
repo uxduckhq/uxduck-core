@@ -18,6 +18,7 @@ use uxduck_contracts::dto::link::{SimAutopilot as SimAutopilotDto, SimVehicle as
 use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary};
 use uxduck_core::domain::link::{Link, LinkKind, SimAutopilot, SimVehicle};
 
+#[cfg(debug_assertions)]
 mod cache;
 pub mod catalogue;
 mod profiles;
@@ -120,14 +121,17 @@ impl Simulators {
         self.data_dir.join("simulators").join("catalogue")
     }
 
-    /// Where builds are found, in order: `UXDUCK_SITL_DIR`, the data
-    /// directory's `simulators/bin/`, the catalogue's installed builds
-    /// (S18), and in a development build `.cache/simulators/native/`
-    /// (or `UXDUCK_SIM_CACHE_DIR`), with legacy `target/sitl/bin/` as fallback.
-    /// The first build of a program in the plain
-    /// folders is used; every catalogue build is listed.
+    /// Where builds are found, in order: in a development build
+    /// `UXDUCK_SITL_DIR`, then the data directory's `simulators/bin/`, the
+    /// catalogue's installed builds (S18), and in a development build
+    /// `.cache/simulators/native/` (or `UXDUCK_SIM_CACHE_DIR`), with legacy
+    /// `target/sitl/bin/` as fallback. A release reads nothing from the
+    /// checkout: it downloads its builds as everyone's does. The first build
+    /// of a program in the plain folders is used; every catalogue build is
+    /// listed.
     fn directories(&self) -> Vec<(PathBuf, bool)> {
         let mut directories: Vec<(PathBuf, bool)> = std::env::var_os("UXDUCK_SITL_DIR")
+            .filter(|_| cfg!(debug_assertions))
             .map(|dirs| std::env::split_paths(&dirs).map(|d| (d, false)).collect())
             .unwrap_or_default();
         directories.push((self.data_dir.join("simulators").join("bin"), false));
@@ -141,9 +145,8 @@ impl Simulators {
         // Newest first, so the default for a vehicle is its newest version.
         installed.sort_by(|a, b| b.cmp(a));
         directories.extend(installed.into_iter().map(|d| (d, true)));
-        if cfg!(debug_assertions) {
-            directories.extend(cache::directories().into_iter().map(|d| (d, false)));
-        }
+        #[cfg(debug_assertions)]
+        directories.extend(cache::directories().into_iter().map(|d| (d, false)));
         directories
     }
 
@@ -234,6 +237,8 @@ impl Simulators {
             // The take-off is the engine's, over MAVLink (S33).
             in_air_m: _,
             snapshot_id: _,
+            // The example mission is the engine's too, once it is up (S131).
+            with_mission: _,
         } = link.kind
         else {
             return Err("not a simulated vehicle".into());
@@ -331,17 +336,21 @@ impl Simulators {
         }
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("cannot make {}: {e}", directory.display()))?;
+        let root = px4_root(&directory, &link.id)?;
         let args = vec![
             // No interactive shell: nothing reads its stdin.
             "-d".to_owned(),
             "-i".into(),
             instance.to_string(),
             "-w".into(),
-            directory.display().to_string(),
+            root.display().to_string(),
             etc.display().to_string(),
         ];
         let mut env = vec![
-            ("PX4_SIMULATOR".to_owned(), "sihsim".to_owned()),
+            // PX4's scripts take their root from `pwd`, which gives PWD
+            // when it names the working directory (POSIX).
+            ("PWD".to_owned(), root.display().to_string()),
+            ("PX4_SIMULATOR".into(), "sihsim".to_owned()),
             ("PX4_SIM_MODEL".into(), format!("sihsim_{frame}")),
             ("PX4_HOME_LAT".into(), latitude_deg.to_string()),
             ("PX4_HOME_LON".into(), longitude_deg.to_string()),
@@ -354,6 +363,40 @@ impl Simulators {
         let port = PX4_GCS_PORT + u16::from(instance);
         tracing::info!(link = %link.id, program = PX4, %frame, port, "started a simulated vehicle");
         Ok((running, Endpoint::Udp(port)))
+    }
+}
+
+/// The path PX4 runs in. Its start-up scripts use their root unquoted
+/// (`. ${R}etc/init.d/rc.vtol_defaults`), so a space in it, as in macOS's
+/// `Application Support`, fails every start. Such a directory is reached
+/// through a link in the temporary directory instead.
+fn px4_root(directory: &Path, link_id: &str) -> Result<PathBuf, String> {
+    let spaced = |path: &Path| path.to_string_lossy().contains(char::is_whitespace);
+    if !spaced(directory) {
+        return Ok(directory.to_owned());
+    }
+    #[cfg(not(unix))]
+    return Err(format!(
+        "PX4 runs on macOS and Linux only, not for {link_id}"
+    ));
+    #[cfg(unix)]
+    {
+        let root = std::env::temp_dir().join(format!("uxduck-px4-{link_id}"));
+        if spaced(&root) {
+            return Err(format!(
+                "PX4 cannot run in {}: its start-up scripts fail on a path with a space, and so does the temporary directory",
+                directory.display()
+            ));
+        }
+        let _ = std::fs::remove_file(&root);
+        std::os::unix::fs::symlink(directory, &root).map_err(|e| {
+            format!(
+                "cannot link {} to {}: {e}",
+                root.display(),
+                directory.display()
+            )
+        })?;
+        Ok(root)
     }
 }
 

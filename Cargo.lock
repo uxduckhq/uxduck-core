@@ -1676,6 +1676,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1759,15 +1769,6 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -2955,7 +2956,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4034,7 +4035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4530,7 +4531,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4543,6 +4544,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "gilrs",
+ "if-addrs",
  "md-5",
  "minisign",
  "minisign-verify",
@@ -4573,12 +4575,13 @@ dependencies = [
  "uxduck-media",
  "uxduck-terrain",
  "wasmtime",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
 [[package]]
 name = "uxduck-agent"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "eventsource-stream",
@@ -4594,7 +4597,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-contracts"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "quick-xml",
  "schemars",
@@ -4605,7 +4608,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4613,13 +4616,14 @@ dependencies = [
 
 [[package]]
 name = "uxduck-engine"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
  "futures",
  "minisign",
  "minisign-verify",
+ "quick-xml",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4632,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-mavlink"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "mavinspect",
  "mavio",
@@ -4647,11 +4651,11 @@ dependencies = [
 
 [[package]]
 name = "uxduck-media"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "uxduck-sdk"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "extism-pdk",
@@ -4665,7 +4669,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-terrain"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "minisign",
@@ -4677,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-web"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "futures",

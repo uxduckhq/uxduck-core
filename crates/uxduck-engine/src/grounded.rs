@@ -121,8 +121,16 @@ impl Engine {
             )
         };
         self.raise_or_update(Raise {
-            severity: Severity::Warning,
-            kind: NotificationKind::Persistent,
+            severity: if crashed {
+                Severity::Warning
+            } else {
+                Severity::Info
+            },
+            kind: if crashed {
+                NotificationKind::Persistent
+            } else {
+                NotificationKind::Transient
+            },
             subject: Subject::Vehicle {
                 id: vehicle.id.clone(),
             },

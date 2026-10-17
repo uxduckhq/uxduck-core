@@ -11,6 +11,10 @@ pub enum Trust {
     /// A browser holding a session from a bootstrap token or an approved
     /// pairing.
     PairedBrowser { origin: String },
+    /// A browser on another device, through the network listener (S97):
+    /// never an operator. `client` is the record made when it paired, which
+    /// holds what it may do.
+    NetworkBrowser { origin: String, client: String },
     /// A person away, through the account's relay (S80, ADR-0003 C9): one
     /// connection per cloud user, opened by the daemon's edge task once the
     /// cloud's signed grant naming them checks out.
@@ -21,7 +25,7 @@ pub enum Trust {
 /// and escalates on first need (S10). A browser can only be an operator UI.
 /// Someone away gets `read` and `control`; what they may send is then
 /// decided by "Allow remote control from my account" (S80), never by an
-/// approval for more.
+/// approval for more. A phone on the network is never an operator (S97).
 #[must_use]
 pub fn granted(kind: ClientKind, trust: &Trust) -> Vec<Capability> {
     let operator = match trust {
@@ -30,7 +34,7 @@ pub fn granted(kind: ClientKind, trust: &Trust) -> Vec<Capability> {
         Trust::Relay { .. } if kind == ClientKind::RemoteOperator => {
             return vec![Capability::Read, Capability::Control];
         }
-        Trust::Relay { .. } => false,
+        Trust::Relay { .. } | Trust::NetworkBrowser { .. } => false,
     };
     if operator {
         Capability::ALL.to_vec()
@@ -80,5 +84,14 @@ mod tests {
             [Capability::Read]
         );
         assert_eq!(granted(ClientKind::Shell, &browser()), [Capability::Read]);
+    }
+
+    #[test]
+    fn a_page_on_the_network_is_never_an_operator() {
+        let phone = Trust::NetworkBrowser {
+            origin: "http://192.168.1.20:45000".into(),
+            client: "clnet0".into(),
+        };
+        assert_eq!(granted(ClientKind::OperatorUi, &phone), [Capability::Read]);
     }
 }

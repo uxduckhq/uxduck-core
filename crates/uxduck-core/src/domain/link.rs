@@ -75,6 +75,10 @@ pub enum LinkKind {
         /// Forgets the vehicle's stored parameters each time it starts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wipe: bool,
+        /// Sends it its type's example as its mission once it is up (S131),
+        /// ready to fly. Off unless asked for: Quick start asks.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        with_mission: bool,
         /// Which instance it is, for its ports and system id. The daemon
         /// assigns it.
         #[serde(default, skip_serializing_if = "Option::is_none")]

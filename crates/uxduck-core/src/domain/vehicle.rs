@@ -63,12 +63,27 @@ pub struct Vehicle {
     /// number, meaning nothing to UXDuck, sorted without regard to case.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Web pages the person keeps with it, such as its radio's settings
+    /// page, opened from its menu: in their order, meaning nothing to
+    /// UXDuck.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<Bookmark>,
     /// Its length, or wingspan, in centimetres, as the person gave it, so
     /// the 3D map draws it that size; absent, the map uses the size of the
     /// one its autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
     pub version: u64,
+}
+
+/// A web page kept with a vehicle, such as the settings page its radio
+/// serves on the local network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bookmark {
+    pub name: String,
+    /// An `http` or `https` address.
+    pub url: String,
 }
 
 /// What the data plane saw of a vehicle; the engine merges it into the

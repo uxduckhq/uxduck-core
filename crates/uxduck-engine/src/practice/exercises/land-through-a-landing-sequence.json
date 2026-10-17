@@ -1,0 +1,59 @@
+{
+  "id": "land-through-a-landing-sequence",
+  "version": 1,
+  "title": "Land through a landing sequence",
+  "audience": "basics",
+  "vehicles": ["plane"],
+  "goal": "Plan a landing, fly away, and let Return to launch bring it in through the landing sequence.",
+  "start": {
+    "heightM": 80,
+    "parameters": [{ "name": "RTL_AUTOLAND", "value": 2 }]
+  },
+  "features": [
+    { "id": "ring", "label": "Land here", "radiusM": 80 },
+    {
+      "id": "away",
+      "label": "Fly out to here",
+      "offset": { "bearingDeg": 90, "distanceM": 1000 },
+      "radiusM": 150
+    }
+  ],
+  "steps": [
+    {
+      "text": "Plan a landing into the ring with Add a pattern › Landing, then upload the plan.",
+      "hint": "Click the ring to touch down, then where the approach starts, about 600 m away into the wind.",
+      "hintAfterS": 120,
+      "all": [{ "check": "missionHas", "command": 189 }]
+    },
+    {
+      "text": "Fly out to the far ring, then press Return to launch.",
+      "hint": "Use Fly to on the far ring. Return to launch then flies to the landing sequence, not home.",
+      "hintAfterS": 120,
+      "all": [
+        { "check": "within", "feature": "away" },
+        { "check": "commandSent", "command": "rtl" }
+      ]
+    },
+    {
+      "text": "Watch it join the landing sequence and land in the ring.",
+      "hint": "It flies to where the approach starts, then down the approach to the touchdown.",
+      "hintAfterS": 240,
+      "all": [{ "check": "landed" }, { "check": "within", "feature": "ring" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [
+        { "check": "commandSent", "command": "rtl" },
+        { "check": "missionLacks", "command": 189 }
+      ],
+      "says": "Failed. Return to launch had no landing sequence to join, so it went home to circle. Plan a landing first."
+    },
+    {
+      "all": [{ "check": "landed" }, { "check": "outside", "feature": "ring" }],
+      "says": "Failed. Landed {distance:ring} m from the ring."
+    }
+  ],
+  "passed": "Passed. Landed {distance:ring} m from the middle of the ring.",
+  "measure": { "measure": "distanceTo", "feature": "ring" }
+}

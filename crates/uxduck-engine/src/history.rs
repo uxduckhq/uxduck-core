@@ -43,7 +43,7 @@ fn uxduck() -> Author {
     }
 }
 
-fn actor() -> Actor {
+pub(crate) fn actor() -> Actor {
     Actor {
         client_id: "history".into(),
         operator_id: None,
@@ -315,7 +315,7 @@ impl Engine {
             return Err(ApiError::new(
                 ErrorKind::VersionConflict,
                 format!(
-                    "the note changed since version {expected}; it is at {}",
+                    "the note changed since version {expected}. It is at {}",
                     entry.version
                 ),
             ));

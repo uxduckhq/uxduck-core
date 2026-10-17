@@ -54,7 +54,7 @@ pub fn record_routing(
         reason: if routed.looped {
             "An exact-wire fingerprint returned through a different source."
         } else {
-            "The router selected these destinations; network delivery is not acknowledged."
+            "The router selected these destinations. Network delivery is not acknowledged."
         }
         .into(),
         matched_packet,
@@ -195,7 +195,7 @@ pub fn events(params: &RouterEventsParams, now: u64) -> Result<RouterEventsResul
     } else {
         None
     };
-    let mut notes = vec!["Normal decisions are kept in a bounded memory ring; loop incidents survive daemon restart.".into()];
+    let mut notes = vec!["Normal decisions are kept in a bounded memory ring. Loop incidents survive daemon restart.".into()];
     if let Some(error) = &data.persistence_error {
         notes.push(format!("Incident persistence failed: {error}"));
     }

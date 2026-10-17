@@ -138,6 +138,7 @@ pub struct Terrain {
     next_job: u64,
     orders: Vec<Order>,
     problems: Vec<Problem>,
+    resolved_problems: Vec<String>,
 }
 
 impl Terrain {
@@ -163,6 +164,7 @@ impl Terrain {
             next_job: 0,
             orders: Vec::new(),
             problems: Vec::new(),
+            resolved_problems: Vec::new(),
         }
     }
 
@@ -222,6 +224,11 @@ impl Terrain {
     /// Problems to show once each.
     pub fn take_problems(&mut self) -> Vec<Problem> {
         std::mem::take(&mut self.problems)
+    }
+
+    /// Previously reported conditions whose data has now verified.
+    pub fn take_resolved_problems(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.resolved_problems)
     }
 
     /// When the bucket's manifest last verified, in the host clock's
@@ -324,7 +331,7 @@ impl Terrain {
                     && fresh.published_at < seen.published_at
                 {
                     let why = format!(
-                        "the terrain manifest was published at {}, before one already seen ({}); it is ignored",
+                        "the terrain manifest was published at {}, before one already seen ({}). It is ignored",
                         fresh.published_at, seen.published_at
                     );
                     self.refuse_manifest(why);
@@ -340,6 +347,7 @@ impl Terrain {
                 });
                 self.checked_at_us = Some(now_us);
                 self.manifest_error = None;
+                self.resolved_problems.push("terrain:manifest".into());
                 self.adopt(fresh);
             }
             Err(Unavailable::Offline) => {
@@ -356,7 +364,7 @@ impl Terrain {
             condition: "terrain:manifest".into(),
             title: "UXDuck could not check its terrain data".into(),
             body: format!(
-                "{why}. Heights already kept still answer; new places have no terrain until this is fixed."
+                "{why}. Saved terrain heights remain available. Terrain for new places is unavailable until this is fixed."
             ),
         });
         self.manifest_error = Some(Unavailable::Failed(why));
@@ -424,6 +432,7 @@ impl Terrain {
                 };
                 match outcome {
                     Ok(()) => {
+                        self.resolved_problems.push(format!("terrain:file:{key}"));
                         self.orders.push(Order::Write {
                             key: key.into(),
                             bytes,

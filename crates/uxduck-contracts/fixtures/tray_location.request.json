@@ -1,0 +1,9 @@
+{
+  "method": "tray/location",
+  "params": {
+    "state": "on",
+    "latitudeDeg": 37.7936,
+    "longitudeDeg": -122.4836,
+    "accuracyM": 35.0
+  }
+}

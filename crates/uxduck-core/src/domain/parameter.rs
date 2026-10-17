@@ -118,6 +118,26 @@ pub struct ParameterSet {
     pub boot_instant_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_at_us: Option<u64>,
+    /// How far a download has come while it runs (S127).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TransferProgress>,
+}
+
+/// How far a transfer has come (S127, ADR-0029 P8): what is done of the
+/// total, which try this is (above 1 when the vehicle went quiet and it
+/// asked again), and when it last moved, so a stall shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferProgress {
+    pub done: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+    pub attempt: u8,
+    /// When it last moved on, in the daemon's clock.
+    pub at_us: u64,
+    /// Up to the vehicle, rather than down from it.
+    #[serde(default)]
+    pub upload: bool,
 }
 
 /// Two parameter values are the same if they round to the same `f32`, the

@@ -689,18 +689,21 @@ const PX4_NAMES: &[(u32, &str)] = &[
 const COPTER_WORDS: &[(&str, &str)] = &[
     (
         "STABILIZE",
-        "Keeps itself level; you steer and set the throttle",
+        "The sticks control roll and pitch. Releasing the sticks levels the vehicle. You control throttle.",
     ),
-    ("ACRO", "No levelling; the sticks set how fast it rotates"),
+    (
+        "ACRO",
+        "The sticks control rotation rates. Releasing the sticks does not level the vehicle.",
+    ),
     (
         "ALT_HOLD",
-        "Holds its height but drifts with the wind; no GPS needed",
+        "The vehicle holds altitude but can drift with the wind. GPS is not required.",
     ),
     ("AUTO", "Flies the mission"),
     ("GUIDED", "Goes where UXDuck or the agent sends it"),
     (
         "LOITER",
-        "Holds its position and height by GPS; the sticks move it smoothly",
+        "The vehicle holds position and altitude using GPS. The sticks control horizontal movement.",
     ),
     ("RTL", "Climbs, flies straight home and lands"),
     ("CIRCLE", "Circles a point, facing it"),
@@ -708,25 +711,25 @@ const COPTER_WORDS: &[(&str, &str)] = &[
     ("DRIFT", "Steers like a plane, banking into turns"),
     (
         "SPORT",
-        "Holds its height; the sticks turn and climb it fast",
+        "The vehicle holds altitude. The sticks control turns, climb and descent.",
     ),
     ("FLIP", "Flips over once, then carries on"),
     ("AUTOTUNE", "Tunes its own controls while it flies"),
     (
         "POSHOLD",
-        "Like Loiter, but the sticks tilt it directly; let go and it brakes",
+        "The sticks control the vehicle’s tilt directly. Releasing the sticks brakes the vehicle and holds its position.",
     ),
     ("BRAKE", "Stops as fast as it can and hovers there"),
     ("THROW", "Starts its motors when thrown"),
     ("AVOID_ADSB", "Steers clear of aircraft it hears"),
     (
         "GUIDED_NOGPS",
-        "Takes tilt and climb commands from a computer; no GPS needed",
+        "The vehicle follows attitude and climb commands from a computer. GPS is not required.",
     ),
     ("SMART_RTL", "Flies home the way it came, then lands"),
     (
         "FLOWHOLD",
-        "Holds its position with an optical flow sensor; no GPS needed",
+        "The vehicle holds position using an optical flow sensor. GPS is not required.",
     ),
     ("FOLLOW", "Follows another vehicle"),
     ("ZIGZAG", "Flies back and forth between two points"),
@@ -737,11 +740,17 @@ const COPTER_WORDS: &[(&str, &str)] = &[
 ];
 
 const PLANE_WORDS: &[(&str, &str)] = &[
-    ("MANUAL", "The sticks move the control surfaces; no help"),
-    ("CIRCLE", "Banks gently in a circle; no GPS needed"),
+    (
+        "MANUAL",
+        "The sticks control the vehicle’s control surfaces directly, without stabilization.",
+    ),
+    (
+        "CIRCLE",
+        "The vehicle maintains a gentle bank to fly in a circle. GPS is not required.",
+    ),
     (
         "STABILIZE",
-        "Levels itself when you let go; no limits on how far it banks",
+        "Releasing the sticks levels the vehicle. Roll angle is not limited.",
     ),
     (
         "TRAINING",
@@ -753,11 +762,11 @@ const PLANE_WORDS: &[(&str, &str)] = &[
     ),
     (
         "FBWA",
-        "The sticks set its bank and pitch, within limits; let go and it levels",
+        "Moving the sticks changes the vehicle’s roll and pitch angles within the configured limits. Releasing the sticks returns the vehicle to level.",
     ),
     (
         "FBWB",
-        "Like FBWA, and it holds its height; the pitch stick climbs or descends",
+        "The vehicle limits roll and pitch angles as in FBWA and holds altitude. The pitch stick controls climb and descent.",
     ),
     ("CRUISE", "Like FBWB, and it holds its course by GPS"),
     ("AUTOTUNE", "You fly as in FBWA while it tunes its controls"),
@@ -771,10 +780,13 @@ const PLANE_WORDS: &[(&str, &str)] = &[
         "Flies to where UXDuck or the agent sends it, and circles",
     ),
     ("INITIALISING", "Starting up"),
-    ("QSTABILIZE", "Hovers level; you steer and set the throttle"),
+    (
+        "QSTABILIZE",
+        "The vehicle stabilizes roll and pitch while hovering. You control steering and throttle.",
+    ),
     (
         "QHOVER",
-        "Hovers at a steady height but drifts with the wind; no GPS needed",
+        "The vehicle holds altitude while hovering but can drift with the wind. GPS is not required.",
     ),
     (
         "QLOITER",
@@ -785,7 +797,7 @@ const PLANE_WORDS: &[(&str, &str)] = &[
     ("QAUTOTUNE", "Tunes its hover controls"),
     (
         "QACRO",
-        "Hovers with no levelling; the sticks set how fast it rotates",
+        "The sticks control rotation rates while hovering. Releasing the sticks does not level the vehicle.",
     ),
     ("THERMAL", "Circles in rising air to gain height"),
     ("LOITER_ALT_QLAND", "Circles down, then lands straight down"),
@@ -793,9 +805,18 @@ const PLANE_WORDS: &[(&str, &str)] = &[
 ];
 
 const ROVER_WORDS: &[(&str, &str)] = &[
-    ("MANUAL", "You drive; no help"),
-    ("ACRO", "You drive; it holds the turn rate you set"),
-    ("STEERING", "You drive; it holds the speed and turn you set"),
+    (
+        "MANUAL",
+        "You control steering and throttle directly, without assistance.",
+    ),
+    (
+        "ACRO",
+        "The vehicle maintains the turn rate commanded by the steering stick.",
+    ),
+    (
+        "STEERING",
+        "The vehicle maintains the speed and turn rate commanded by the sticks.",
+    ),
     ("HOLD", "Stops and stays stopped"),
     (
         "LOITER",
@@ -813,31 +834,40 @@ const ROVER_WORDS: &[(&str, &str)] = &[
 ];
 
 const SUB_WORDS: &[(&str, &str)] = &[
-    ("STABILIZE", "You pilot; it keeps itself level"),
-    ("ACRO", "You pilot; it holds the rotation you give it"),
+    (
+        "STABILIZE",
+        "You control the vehicle’s movement. The vehicle stabilizes roll and pitch.",
+    ),
+    (
+        "ACRO",
+        "The sticks control rotation rates. The vehicle does not level automatically.",
+    ),
     (
         "ALT_HOLD",
-        "Holds its depth but drifts with the current; you steer",
+        "The vehicle holds depth but can drift with the current. You control horizontal movement.",
     ),
     ("AUTO", "Runs the mission"),
     ("GUIDED", "Goes where UXDuck or the agent sends it"),
     ("CIRCLE", "Circles a point"),
     ("SURFACE", "Comes up to the surface"),
     ("POSHOLD", "Holds its position and depth"),
-    ("MANUAL", "You pilot; no help"),
+    (
+        "MANUAL",
+        "You control the thrusters directly, without stabilization.",
+    ),
     ("MOTOR_DETECT", "Works out which way its motors push"),
     ("SURFTRAK", "Holds its height above the seabed"),
 ];
 
 const PX4_WORDS: &[(&str, &str)] = &[
-    ("Manual", "You fly; no help"),
+    ("Manual", "You control the vehicle directly."),
     (
         "Altitude",
-        "Holds its height but drifts with the wind; no GPS needed",
+        "The vehicle holds altitude but can drift with the wind. GPS is not required.",
     ),
     (
         "Position",
-        "Holds its position and height by GPS; the sticks move it",
+        "The vehicle holds position and altitude using GPS. The sticks control movement.",
     ),
     ("Orbit", "Circles a point"),
     ("Position Slow", "Like Position, with slower sticks"),
@@ -850,11 +880,14 @@ const PX4_WORDS: &[(&str, &str)] = &[
     ("Follow Me", "Follows the person with the controller"),
     ("Precision Land", "Lands on a marker it can see"),
     ("VTOL Takeoff", "Takes off straight up, then flies forward"),
-    ("Acro", "No levelling; the sticks set how fast it rotates"),
+    (
+        "Acro",
+        "The sticks control rotation rates. Releasing the sticks does not level the vehicle.",
+    ),
     ("Offboard", "Flies as a companion computer tells it"),
     (
         "Stabilized",
-        "Keeps itself level; you steer and set the throttle",
+        "The sticks control roll and pitch. Releasing the sticks levels the vehicle. You control throttle.",
     ),
 ];
 

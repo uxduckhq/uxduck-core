@@ -151,6 +151,27 @@ pub enum Check {
     MissionUploaded { items: u32 },
     /// A place of that mission outside an area by more than `by_m`.
     MissionOutside { feature: String, by_m: f64 },
+    /// That mission has a command, such as a landing sequence start (189)
+    /// (S132).
+    MissionHas { command: u16 },
+    /// It has not: no mission uploaded since the attempt began, or one
+    /// without the command.
+    MissionLacks { command: u16 },
+    /// Every waypoint of that mission in a `MAV_FRAME` (or its `_INT`
+    /// twin): 10 above terrain, 3 above home.
+    MissionFrame { frame: u8 },
+    /// A fence uploaded by the operator since the attempt began.
+    FenceUploaded,
+    /// A rally point uploaded by the operator since the attempt began,
+    /// inside a feature.
+    RallyWithin { feature: String },
+    /// The vehicle says it is outside its fence (`FENCE_STATUS`).
+    FenceBreached,
+    /// It says it is inside its fence.
+    FenceClear,
+    /// Its height over the ground, by the autopilot's terrain, under `m`
+    /// at some point since the step began.
+    ClearanceBelow { m: f64 },
     /// The track flown in Auto covers at least `fraction` of an area,
     /// counted as [`Coverage`] says.
     MissionCovers { feature: String, fraction: f64 },

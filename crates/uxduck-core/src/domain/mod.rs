@@ -16,6 +16,7 @@ pub mod operator;
 pub mod param_definitions;
 pub mod parameter;
 pub mod place;
+pub mod plan;
 pub mod plugin;
 pub mod practice;
 pub mod settings;

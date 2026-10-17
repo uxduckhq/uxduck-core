@@ -1,0 +1,4 @@
+{
+  "method": "network/status",
+  "params": {}
+}

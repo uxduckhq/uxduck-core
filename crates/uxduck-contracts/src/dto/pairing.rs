@@ -15,6 +15,10 @@ pub struct PairingRequest {
     pub origin: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// From a phone or tablet on the network (S97): its address there.
+    /// Approving it says what it may do with `access`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_peer: Option<String>,
     /// Microseconds since the Unix epoch.
     #[schemars(schema_with = "crate::safe::integer")]
     pub requested_at_us: u64,
@@ -31,6 +35,22 @@ pub struct PairingListResult {
 #[serde(rename_all = "camelCase")]
 pub struct PairingAnswerParams {
     pub code: String,
+    /// For a phone or tablet on the network (S97): watching, or watching
+    /// and flying. Watching when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<NetworkAccess>,
+}
+
+/// What a phone or tablet on the network may do (S97). Either can be
+/// changed later, and anything else it tries asks at the computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkAccess {
+    /// Read only.
+    #[default]
+    Watch,
+    /// Read and control.
+    Fly,
 }
 
 /// Result of `session/createBootstrap`: a one-time token that a page served

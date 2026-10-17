@@ -17,6 +17,7 @@ use uxduck_core::domain::operator::Operator;
 use uxduck_core::domain::param_definitions::{OwnSet, VehicleDefinitions};
 use uxduck_core::domain::parameter::{Parameter, ParameterSet, parameter_id};
 use uxduck_core::domain::place::SavedPlace;
+use uxduck_core::domain::plan::{Plan, PlanRevisions};
 use uxduck_core::domain::plugin::{Plugin, PublishedPlugin};
 use uxduck_core::domain::settings::Settings;
 use uxduck_core::domain::snapshot::Snapshot;
@@ -85,6 +86,15 @@ pub struct State {
     /// Saved places, by id.
     #[serde(default)]
     pub places: BTreeMap<String, SavedPlace>,
+    /// Saved plans, by id (ADR-0029).
+    #[serde(default)]
+    pub plans: BTreeMap<String, Plan>,
+    /// Every mission each vehicle has held, by record id (S134).
+    #[serde(default)]
+    pub mission_records: BTreeMap<String, uxduck_core::domain::mission::MissionRecord>,
+    /// Each plan's undo and redo, by plan id.
+    #[serde(default)]
+    pub plan_revisions: BTreeMap<String, PlanRevisions>,
     /// Simulation snapshots, by id (S34).
     #[serde(default)]
     pub snapshots: BTreeMap<String, Snapshot>,
@@ -184,6 +194,9 @@ impl State {
             Change::ClientUpserted { client } => {
                 self.clients.insert(client.id.clone(), client.clone());
             }
+            Change::ClientRemoved { id } => {
+                self.clients.remove(id);
+            }
             Change::ApprovalUpserted { approval } => {
                 if approval.state == ApprovalState::Pending {
                     self.approvals.insert(approval.id.clone(), approval.clone());
@@ -249,6 +262,26 @@ impl State {
             }
             Change::PlaceRemoved { id } => {
                 self.places.remove(id);
+            }
+            Change::PlanSaved { plan, revision } => {
+                let current = self
+                    .plans
+                    .get(&plan.id)
+                    .map_or(&plan.body, |p| &p.body)
+                    .clone();
+                self.plan_revisions
+                    .entry(plan.id.clone())
+                    .or_default()
+                    .apply(&current, revision);
+                self.plans.insert(plan.id.clone(), plan.clone());
+            }
+            Change::PlanRemoved { id } => {
+                self.plans.remove(id);
+                self.plan_revisions.remove(id);
+            }
+            Change::MissionRecorded { record } => {
+                self.mission_records
+                    .insert(record.id.clone(), record.clone());
             }
             Change::SnapshotUpserted { snapshot } => {
                 self.snapshots.insert(snapshot.id.clone(), snapshot.clone());

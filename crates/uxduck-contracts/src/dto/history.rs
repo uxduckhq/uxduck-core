@@ -47,6 +47,11 @@ pub enum HistoryEvent {
         snapshot_id: String,
         name: String,
     },
+    /// Its mission changed (S134): `mission/history` has the record.
+    MissionChanged {
+        record_id: String,
+        text: String,
+    },
     /// A parameter's value changed (S74). Changes of one parameter in one
     /// sitting fold into one entry: `from` is the value before the first,
     /// `to` the value after the last.

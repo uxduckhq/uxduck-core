@@ -1,0 +1,6 @@
+{
+  "method": "mission/history",
+  "params": {
+    "id": "v1a2b3c"
+  }
+}

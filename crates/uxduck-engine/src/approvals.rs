@@ -63,12 +63,18 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
     match request {
         ClientRequest::CommandSend(_)
         | ClientRequest::MissionUpload(_)
+        | ClientRequest::PlanUpload(_)
+        | ClientRequest::MissionRestore(_)
+        | ClientRequest::TransferCancel(_)
         | ClientRequest::PluginCommand(_)
         | ClientRequest::PracticeGuide(_) => Some(Capability::Control),
         ClientRequest::ParamSet(_)
         | ClientRequest::PluginInstall(_)
         | ClientRequest::VehicleAddNote(_)
         | ClientRequest::VideoAssign(_)
+        | ClientRequest::VideoDevices(_)
+        | ClientRequest::VideoCapture(_)
+        | ClientRequest::VideoCaptureEnable(_)
         | ClientRequest::VideoAdd(_)
         | ClientRequest::VideoRemove(_)
         | ClientRequest::VideoRecord(_)
@@ -79,6 +85,14 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::PlaceSave(_)
         | ClientRequest::PlaceUpdate(_)
         | ClientRequest::PlaceRemove(_)
+        | ClientRequest::PlanCreate(_)
+        | ClientRequest::PlanUpdate(_)
+        | ClientRequest::PlanUndo(_)
+        | ClientRequest::PlanRedo(_)
+        | ClientRequest::PlanPlace(_)
+        | ClientRequest::PlanDelete(_)
+        | ClientRequest::PlanRestore(_)
+        | ClientRequest::PlanImport(_)
         | ClientRequest::LinkAdd(_)
         | ClientRequest::LinkRemove(_)
         | ClientRequest::LinkEnable(_)
@@ -88,6 +102,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
+        | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::OperatorCreate(_)
@@ -105,6 +120,9 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::FilesRemove(_)
         | ClientRequest::FilesMkdir(_)
         | ClientRequest::FilesRename(_) => Some(Capability::Config),
+        // Where this computer is (ADR-0030 L4): an agent asks first, and
+        // "Always allow" remembers it for that agent.
+        ClientRequest::LocationStatus(_) => Some(Capability::Location),
         // Searching the network asks first; looking nearby does not (F10).
         request @ (ClientRequest::FindStart(_) | ClientRequest::FindVehicles(_)) => {
             crate::finds::needed(request).filter(|c| *c == Capability::Config)
@@ -353,6 +371,15 @@ impl Engine {
                     params.source_id
                 ),
             },
+            ClientRequest::VideoDevices(_) => "list cameras attached to this computer".into(),
+            ClientRequest::VideoCapture(params) => {
+                format!("capture video from {}", params.input.name)
+            }
+            ClientRequest::VideoCaptureEnable(params) => format!(
+                "{} camera capture {}",
+                if params.enabled { "enable" } else { "pause" },
+                params.source_id
+            ),
             ClientRequest::VideoAdd(params) => format!(
                 "add the camera {}",
                 uxduck_core::domain::video::redact(&params.url)
@@ -428,12 +455,16 @@ impl Engine {
             }
             ClientRequest::VehicleEditNote(_) => "edit a note in a vehicle's history".into(),
             request @ (ClientRequest::VideoAssign(_)
+            | ClientRequest::VideoDevices(_)
+            | ClientRequest::VideoCapture(_)
+            | ClientRequest::VideoCaptureEnable(_)
             | ClientRequest::VideoAdd(_)
             | ClientRequest::VideoRemove(_)
             | ClientRequest::VideoRecord(_)
             | ClientRequest::FindStart(_)
             | ClientRequest::FindVehicles(_)) => self.video_summary(request),
             ClientRequest::VehicleDeleteNote(_) => "delete a note from a vehicle's history".into(),
+            ClientRequest::LocationStatus(_) => "see where this computer is".into(),
             // The file and the vehicle, named (ADR-0027 F6).
             ClientRequest::FilesUpload(params) => format!(
                 "send {} to {}",
@@ -461,6 +492,16 @@ impl Engine {
                     .vehicle(&params.vehicle_id)
                     .map_or_else(|| params.vehicle_id.clone(), |v| v.name.clone());
                 format!("upload a mission of {} items to {name}", params.items.len())
+            }
+            ClientRequest::MissionRestore(params) => {
+                let held = self
+                    .state
+                    .mission_records
+                    .get(&params.record_id)
+                    .map(|r| r.vehicle_id.clone());
+                let id = params.vehicle_id.clone().or(held).unwrap_or_default();
+                let name = self.vehicle(&id).map_or(id, |v| v.name.clone());
+                format!("put an earlier mission back on {name}")
             }
             ClientRequest::LinkAdd(_) => "add a link".into(),
             ClientRequest::LinkRemove(_) => "remove a link".into(),
@@ -717,9 +758,19 @@ pub(crate) fn handle(
         ClientRequest::ClientSetCapabilities(params) if operator => {
             set_capabilities(engine, params)
         }
-        ClientRequest::ClientList(_) | ClientRequest::ClientSetCapabilities(_) => {
-            Err(denied("only an operator client may do this"))
+        ClientRequest::ClientForget(params) if operator => {
+            if engine.forget_network_client(&params.id) {
+                Ok(json!({}))
+            } else {
+                Err(ApiError::new(
+                    ErrorKind::NotFound,
+                    format!("no phone or tablet {}", params.id),
+                ))
+            }
         }
+        ClientRequest::ClientList(_)
+        | ClientRequest::ClientSetCapabilities(_)
+        | ClientRequest::ClientForget(_) => Err(denied("only an operator client may do this")),
         ClientRequest::ApprovalList(_) | ClientRequest::ApprovalResolve(_)
             if !granted.contains(&Capability::Approve) =>
         {
@@ -818,7 +869,7 @@ fn resolve_approval(
     let Some(mut done) = engine.state.approvals.get(&id).cloned() else {
         return Err(ApiError::new(
             ErrorKind::NotFound,
-            format!("no pending approval {id}; it may have been answered already"),
+            format!("no pending approval {id}. It may have been answered already"),
         ));
     };
     let own = engine

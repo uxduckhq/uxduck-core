@@ -1,0 +1,23 @@
+{
+  "status": "verified",
+  "notes": ["item 2 keeps parameter 1 as 2 (sent 2.5)"],
+  "mission": {
+    "vehicleId": "v1a2b3c",
+    "items": [
+      {
+        "command": 16,
+        "frame": 0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.363261,
+        "longitudeDeg": 149.16523,
+        "altitudeM": 584.0,
+        "autocontinue": true
+      }
+    ],
+    "status": "synced",
+    "version": 4
+  }
+}

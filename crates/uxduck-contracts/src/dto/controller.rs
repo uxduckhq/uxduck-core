@@ -161,6 +161,21 @@ impl ThrottleRange {
     }
 }
 
+/// Which stick carries which control, as pilots number the layouts:
+/// Mode 2 has throttle and yaw on the left, Mode 1 throttle and roll on
+/// the right; Modes 3 and 4 swap Mode 1's and Mode 2's sticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum StickMode {
+    #[serde(rename = "mode-1")]
+    Mode1,
+    #[serde(rename = "mode-2")]
+    Mode2,
+    #[serde(rename = "mode-3")]
+    Mode3,
+    #[serde(rename = "mode-4")]
+    Mode4,
+}
+
 /// Controller axes to the four sticks, and buttons to commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +188,10 @@ pub struct InputMapping {
     pub throttle: AxisBinding,
     #[serde(default, skip_serializing_if = "ThrottleRange::is_full_travel")]
     pub throttle_range: ThrottleRange,
+    /// The stick layout its pilot chose in setup: where the app draws each
+    /// control and which stick setup asks for. It changes nothing sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stick_mode: Option<StickMode>,
     /// Around the centre, as a fraction of full travel, read as zero.
     pub deadzone: f64,
     pub buttons: Vec<ButtonBinding>,
@@ -232,6 +251,9 @@ pub struct MappingUpdateParams {
     pub throttle: AxisBinding,
     #[serde(default, skip_serializing_if = "ThrottleRange::is_full_travel")]
     pub throttle_range: ThrottleRange,
+    /// The stick layout chosen in setup; absent keeps the mapping's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stick_mode: Option<StickMode>,
     pub deadzone: f64,
     pub buttons: Vec<ButtonBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -315,4 +337,20 @@ pub struct ControllerInputs {
 #[serde(rename_all = "camelCase")]
 pub struct ControllerInputsResult {
     pub controllers: Vec<ControllerInputs>,
+}
+
+/// Explicitly starts keyboard piloting of one simulation, with neutral steering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardStartParams {
+    pub vehicle_id: String,
+    /// Initial throttle input, -1 (idle) to 1 (full); 0 is the middle.
+    pub throttle: f64,
+}
+
+/// A complete keyboard input frame. Never starts or reclaims a controller.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct KeyboardInputParams {
+    /// Roll, pitch, yaw and throttle, each -1 to 1.
+    pub axes: [f64; 4],
 }

@@ -1,0 +1,7 @@
+{
+  "method": "controller/keyboardStart",
+  "params": {
+    "vehicleId": "sim-1",
+    "throttle": 0.0
+  }
+}

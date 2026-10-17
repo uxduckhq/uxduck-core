@@ -122,7 +122,7 @@ fn hex_id(usb: &UsbId) -> String {
 
 /// This computer's address on its usual route, found without sending
 /// anything: a UDP socket "connected" to a documentation address.
-fn local_ipv4() -> Option<Ipv4Addr> {
+pub(crate) fn local_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
     match socket.local_addr().ok()?.ip() {

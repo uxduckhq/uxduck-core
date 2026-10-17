@@ -105,6 +105,7 @@ impl Engine {
             state: RecordingState::Recording,
             detail: None,
             trigger,
+            capture: source.capture.clone(),
             version: 1,
         };
         self.video
@@ -268,7 +269,7 @@ impl Engine {
                 Some((bytes, duration_us)) if duration_us > 0 => {
                     recording.state = RecordingState::Recovered;
                     recording.detail = Some(
-                        "UXDuck stopped while recording; it ends at the last whole second or two"
+                        "UXDuck stopped while recording. It ends at the last whole second or two"
                             .into(),
                     );
                     recording.bytes = bytes;
@@ -306,7 +307,7 @@ impl Engine {
         if params.on && source.state != VideoState::Receiving {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
-                "the camera is not sending; nothing to record",
+                "the camera is not sending. Nothing to record",
             ));
         }
         self.video
@@ -333,7 +334,7 @@ impl Engine {
         if recording.state == RecordingState::Failed {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
-                "this recording failed; there is nothing to play",
+                "this recording failed. There is nothing to play",
             ));
         }
         let token = format!("vp{}", &self.random.token()[..32]);

@@ -42,6 +42,20 @@ pub fn development_key() -> Option<String> {
     })
 }
 
+/// A `UXDUCK_*_URL` override of where signed data comes from: `none` turns
+/// it off in any build; another address only a development build takes, so
+/// a release downloads its simulators, terrain, definitions and interface
+/// from production as everyone's does.
+#[must_use]
+pub fn url_override(name: &str) -> Option<String> {
+    let url = std::env::var(name).ok()?;
+    if url == "none" || cfg!(debug_assertions) {
+        return Some(url);
+    }
+    tracing::warn!("{name} is for development builds; this release ignores it");
+    None
+}
+
 pub const TARGET: &str = env!("UXDUCK_TARGET");
 
 #[derive(Debug, thiserror::Error)]
@@ -139,25 +153,28 @@ fn markers(seen: Option<&Seen>, today: &str) -> (bool, bool) {
     (first, !checked_today)
 }
 
-/// The artifact for this platform: the universal macOS build on any Mac,
-/// otherwise this target's, preferring an installer.
+/// The artifact for this platform: this target's, preferring an installer.
+/// Releases before 0.1.1 had one universal macOS build, which any Mac takes.
 #[must_use]
 pub fn artifact_for(manifest: &ReleaseManifest, target: &str) -> Option<ReleaseArtifact> {
-    let wanted = if target.ends_with("apple-darwin") {
-        "universal-apple-darwin"
-    } else {
-        target
-    };
     let rank = |kind: &str| match kind {
         "pkg" | "msi" | "deb" => 0,
         _ => 1,
     };
-    manifest
-        .artifacts
-        .iter()
-        .filter(|a| a.target == wanted)
-        .min_by_key(|a| rank(&a.kind))
-        .cloned()
+    let best = |wanted: &str| {
+        manifest
+            .artifacts
+            .iter()
+            .filter(|a| a.target == wanted)
+            .min_by_key(|a| rank(&a.kind))
+            .cloned()
+    };
+    best(target).or_else(|| {
+        target
+            .ends_with("apple-darwin")
+            .then(|| best("universal-apple-darwin"))
+            .flatten()
+    })
 }
 
 /// Whether `bytes` carry a good minisign `signature` by `public_key` (the
@@ -400,5 +417,39 @@ mod tests {
         let windows = compare("0.1.0", manifest("0.2.0", false), "x86_64-pc-windows-msvc").unwrap();
         assert_eq!(windows.verdict, Verdict::Available(None));
         assert!(windows.to_string().contains("no build for"));
+    }
+
+    #[test]
+    fn a_mac_takes_its_own_architecture_or_an_older_universal_build() {
+        let mut split = manifest("0.2.0", false);
+        for (artifact, target) in split
+            .artifacts
+            .iter_mut()
+            .zip(["aarch64-apple-darwin", "x86_64-apple-darwin"])
+        {
+            artifact.target = target.into();
+            artifact.kind = "pkg".into();
+            artifact.file = format!("uxduck-0.2.0-{target}.pkg");
+        }
+        for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            let found = artifact_for(&split, target).unwrap();
+            assert_eq!(found.target, target);
+        }
+        let universal = manifest("0.2.0", false);
+        assert_eq!(
+            artifact_for(&universal, "x86_64-apple-darwin")
+                .unwrap()
+                .target,
+            "universal-apple-darwin"
+        );
+        let arm_only = ReleaseManifest {
+            artifacts: split.artifacts[..1].to_vec(),
+            ..split
+        };
+        assert_eq!(
+            artifact_for(&arm_only, "x86_64-apple-darwin"),
+            None,
+            "never the other architecture"
+        );
     }
 }

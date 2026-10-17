@@ -15,6 +15,10 @@ pub enum ClientKind {
     RemoteOperator,
     /// A plugin the daemon runs (ADR-0006), never a socket client.
     Plugin,
+    /// UXDuck's page on a phone or tablet on this computer's network (S97).
+    /// Never declared: the daemon gives a page on its network listener this
+    /// kind, with what it was allowed when it paired.
+    NetworkUi,
 }
 
 impl ClientKind {
@@ -26,6 +30,27 @@ impl ClientKind {
     }
 }
 
+/// What a phone or tablet on the network was allowed when it paired (S97):
+/// watching, or watching and flying. Either can be changed later, and
+/// anything else it tries asks at the computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkAccess {
+    #[default]
+    Watch,
+    Fly,
+}
+
+impl NetworkAccess {
+    #[must_use]
+    pub fn capabilities(self) -> Vec<Capability> {
+        match self {
+            Self::Watch => vec![Capability::Read],
+            Self::Fly => vec![Capability::Read, Capability::Control],
+        }
+    }
+}
+
 /// What a client may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -34,10 +59,18 @@ pub enum Capability {
     Control,
     Config,
     Approve,
+    /// Reading where this computer is (ADR-0030 L4): an agent asks first.
+    Location,
 }
 
 impl Capability {
-    pub const ALL: [Self; 4] = [Self::Read, Self::Control, Self::Config, Self::Approve];
+    pub const ALL: [Self; 5] = [
+        Self::Read,
+        Self::Control,
+        Self::Config,
+        Self::Approve,
+        Self::Location,
+    ];
 
     /// The error a connection gets when it lacks this capability, in the
     /// words the app shows.
@@ -48,6 +81,7 @@ impl Capability {
             Self::Control => "control vehicles",
             Self::Config => "change settings",
             Self::Approve => "answer requests from other connections",
+            Self::Location => "see where this computer is",
         };
         format!("This connection isn't allowed to {verb}.")
     }
@@ -81,5 +115,15 @@ mod tests {
         assert!(ClientKind::Shell.is_operator());
         assert!(!ClientKind::Agent.is_operator());
         assert!(!ClientKind::RemoteOperator.is_operator());
+        assert!(!ClientKind::NetworkUi.is_operator());
+    }
+
+    #[test]
+    fn watching_never_includes_control() {
+        assert_eq!(NetworkAccess::Watch.capabilities(), [Capability::Read]);
+        assert_eq!(
+            NetworkAccess::Fly.capabilities(),
+            [Capability::Read, Capability::Control]
+        );
     }
 }

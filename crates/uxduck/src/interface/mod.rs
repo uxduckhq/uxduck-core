@@ -67,10 +67,10 @@ impl Config {
     /// for tests.
     #[must_use]
     pub fn from_env(dev: Option<String>) -> Self {
-        let url = match std::env::var("UXDUCK_INTERFACE_URL") {
-            Ok(url) if url == "none" => None,
-            Ok(url) => Some(url),
-            Err(_) => Some(DEFAULT_URL.to_owned()),
+        let url = match crate::update::url_override("UXDUCK_INTERFACE_URL") {
+            Some(url) if url == "none" => None,
+            Some(url) => Some(url),
+            None => Some(DEFAULT_URL.to_owned()),
         };
         let debug_env = |name: &str| std::env::var(name).ok().filter(|_| cfg!(debug_assertions));
         let ms = |name: &str| {
@@ -161,6 +161,12 @@ fn rfc3339_now() -> String {
 }
 
 impl Interfaces {
+    /// `--dev`: the Vite origin that serves the interface.
+    #[must_use]
+    pub fn dev_origin(&self) -> Option<&str> {
+        self.config.dev.as_deref()
+    }
+
     /// Opens the store in `<data dir>/interface/` (none in `--dev`) and
     /// chooses what to serve from what is on disk.
     ///

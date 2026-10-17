@@ -1,0 +1,15 @@
+{
+  "checks": [
+    {
+      "severity": "error",
+      "code": "below-ground",
+      "item": 3,
+      "message": "12 m below the ground at item 3"
+    },
+    {
+      "severity": "warning",
+      "code": "no-end",
+      "message": "it ends without a landing or a return: the vehicle waits at the last point"
+    }
+  ]
+}

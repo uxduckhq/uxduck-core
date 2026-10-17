@@ -251,7 +251,7 @@ async fn run(
         let (problem, wait) = match ended {
             Ended::Unwanted => continue,
             Ended::Refused => (
-                "UXDuck's server did not accept this sign-in; sign in again.".to_owned(),
+                "UXDuck's server did not accept this sign-in. Sign in again.".to_owned(),
                 Duration::from_secs(60),
             ),
             Ended::Dropped(why) => (why, backoff(attempt, unit())),

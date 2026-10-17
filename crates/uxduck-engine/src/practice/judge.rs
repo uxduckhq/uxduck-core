@@ -36,6 +36,18 @@ pub struct View {
     /// The places of a mission the operator uploaded since the attempt
     /// began, in order.
     pub mission: Option<Vec<(f64, f64)>>,
+    /// That mission's commands, in order (S132).
+    pub mission_commands: Option<Vec<u16>>,
+    /// The `MAV_FRAME` of each of its waypoints.
+    pub mission_frames: Option<Vec<u8>>,
+    /// The operator uploaded a fence since the attempt began.
+    pub fence_uploaded: bool,
+    /// Rally points the operator uploaded since the attempt began.
+    pub rally: Vec<(f64, f64)>,
+    /// Whether the vehicle says it is outside its fence, when it says.
+    pub fence_breached: Option<bool>,
+    /// Its height over the ground now, by the autopilot's terrain.
+    pub clearance_m: Option<f64>,
 }
 
 /// One point of an attempt's track.
@@ -45,6 +57,8 @@ pub struct Sample {
     pub position: (f64, f64),
     pub height_m: Option<f64>,
     pub mode: Option<String>,
+    /// Over the ground, by the autopilot's terrain, when it knows.
+    pub clearance_m: Option<f64>,
 }
 
 /// Metres east and north of `origin`, near enough flat for a field.
@@ -93,6 +107,7 @@ fn kept_s(view: &View, keep: impl Fn(&Sample) -> bool) -> Option<f64> {
         position: view.position?,
         height_m: view.height_m,
         mode: view.mode.clone(),
+        clearance_m: view.clearance_m,
     };
     if !keep(&now) {
         return None;
@@ -259,6 +274,7 @@ fn gate_crossed(attempt: &Attempt, view: &View, id: &str, band: (f64, f64)) -> b
         position,
         height_m: view.height_m,
         mode: view.mode.clone(),
+        clearance_m: view.clearance_m,
     });
     let track: Vec<&Sample> = view
         .track
@@ -407,6 +423,35 @@ fn holds(check: &Check, exercise: &Exercise, attempt: &Attempt, view: &View) -> 
         Check::MissionOutside { feature: id, by_m } => feature(attempt, id)
             .zip(view.mission.as_ref())
             .is_some_and(|(f, m)| m.iter().any(|&at| outside_by(f, at) > *by_m)),
+        Check::MissionHas { command } => view
+            .mission_commands
+            .as_ref()
+            .is_some_and(|c| c.contains(command)),
+        Check::MissionLacks { command } => !view
+            .mission_commands
+            .as_ref()
+            .is_some_and(|c| c.contains(command)),
+        Check::MissionFrame { frame } => view.mission_frames.as_ref().is_some_and(|frames| {
+            // `_INT` frames (5, 6, 11) are their plain twins (0, 3, 10).
+            let plain = |f: u8| match f {
+                5 => 0,
+                6 => 3,
+                11 => 10,
+                other => other,
+            };
+            !frames.is_empty() && frames.iter().all(|&f| plain(f) == plain(*frame))
+        }),
+        Check::FenceUploaded => view.fence_uploaded,
+        Check::RallyWithin { feature: id } => {
+            feature(attempt, id).is_some_and(|f| view.rally.iter().any(|&r| contains(f, r)))
+        }
+        Check::FenceBreached => view.fence_breached == Some(true),
+        Check::FenceClear => view.fence_breached == Some(false),
+        Check::ClearanceBelow { m } => view
+            .track
+            .iter()
+            .filter(|s| s.at_us >= attempt.step_started_at_us)
+            .any(|s| s.clearance_m.is_some_and(|c| c < *m)),
         Check::MissionCovers { feature, fraction } => {
             coverage(attempt, view, feature).is_some_and(|c| c >= *fraction)
         }
@@ -606,6 +651,7 @@ mod tests {
             track: Vec::new(),
             controller: false,
             mission: None,
+            ..View::default()
         }
     }
 
@@ -632,6 +678,7 @@ mod tests {
                     position,
                     height_m: view.height_m,
                     mode: view.mode.clone(),
+                    clearance_m: view.clearance_m,
                 });
             }
             let view = &View {
@@ -1178,6 +1225,165 @@ mod tests {
         );
         assert!(
             matches!(verdict, Verdict::Failed { ref line, .. } if line == "Failed. A waypoint is more than 20 m outside the field."),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_landing_sequence_planned_is_joined_by_return_to_launch_and_landed_through() {
+        let planned = |view: View| View {
+            mission_commands: Some(vec![22, 16, 16, 189, 16, 21]),
+            ..view
+        };
+        let away = from_home(1000.0, 0.0);
+        let rtl = vec![(31 * S, Command::Rtl)];
+        let views = [
+            planned(at(20, flying(HOME, 80.0, "LOITER"))),
+            planned(at(30, flying(away, 80.0, "GUIDED"))),
+            planned(View {
+                commands: rtl.clone(),
+                ..at(31, flying(away, 80.0, "RTL"))
+            }),
+            planned(View {
+                commands: rtl,
+                ..at(200, landed_at(from_home(20.0, 0.0)))
+            }),
+        ];
+        let (_, verdict) = run("land-through-a-landing-sequence", &views);
+        assert!(
+            matches!(verdict, Verdict::Passed { ref line, .. } if line == "Passed. Landed 20 m from the middle of the ring."),
+            "{verdict:?}"
+        );
+
+        // Return to launch with no landing sequence planned: failed, and why.
+        let (_, verdict) = run(
+            "land-through-a-landing-sequence",
+            &[View {
+                commands: vec![(20 * S, Command::Rtl)],
+                ..at(20, flying(HOME, 80.0, "RTL"))
+            }],
+        );
+        assert!(
+            matches!(verdict, Verdict::Failed { ref line, .. } if line.contains("no landing sequence to join")),
+            "{verdict:?}"
+        );
+        // A mission without one does not start it.
+        let (attempt, _) = run(
+            "land-through-a-landing-sequence",
+            &[View {
+                mission_commands: Some(vec![22, 16, 20]),
+                ..at(20, flying(HOME, 80.0, "LOITER"))
+            }],
+        );
+        assert_eq!(attempt.step, 0);
+    }
+
+    #[test]
+    fn a_fence_uploaded_is_breached_and_brings_the_vehicle_back() {
+        let fenced = |view: View| View {
+            fence_uploaded: true,
+            ..view
+        };
+        let views = [
+            fenced(at(20, flying(HOME, 30.0, "LOITER"))),
+            fenced(View {
+                fence_breached: Some(true),
+                ..at(30, flying(from_home(110.0, 0.0), 30.0, "GUIDED"))
+            }),
+            fenced(View {
+                fence_breached: Some(false),
+                ..at(45, flying(from_home(30.0, 0.0), 30.0, "RTL"))
+            }),
+        ];
+        let (_, verdict) = run("fence-breach", &views);
+        assert!(matches!(verdict, Verdict::Passed { .. }), "{verdict:?}");
+        // No fence: never past the first step.
+        let (attempt, _) = run("fence-breach", &[at(20, flying(HOME, 30.0, "LOITER"))]);
+        assert_eq!(attempt.step, 0);
+        // Landed outside the field: failed.
+        let (_, verdict) = run("fence-breach", &[at(20, landed_at(from_home(200.0, 0.0)))]);
+        assert!(matches!(verdict, Verdict::Failed { .. }), "{verdict:?}");
+    }
+
+    #[test]
+    fn return_to_launch_goes_to_the_rally_point_rather_than_home() {
+        let spot = from_home(-200.0, 0.0);
+        let far = from_home(-450.0, 0.0);
+        let rallied = |view: View| View {
+            rally: vec![spot],
+            ..view
+        };
+        let rtl = vec![(31 * S, Command::Rtl)];
+        let views = [
+            rallied(at(20, flying(HOME, 30.0, "LOITER"))),
+            rallied(View {
+                commands: rtl.clone(),
+                ..at(31, flying(far, 30.0, "RTL"))
+            }),
+            rallied(View {
+                commands: rtl.clone(),
+                ..at(120, landed_at(spot))
+            }),
+        ];
+        let (_, verdict) = run("rally-home", &views);
+        assert!(
+            matches!(verdict, Verdict::Passed { ref line, .. } if line == "Passed. Landed 0 m from the rally point."),
+            "{verdict:?}"
+        );
+        // Home instead: failed, with how far.
+        let home = [
+            rallied(at(20, flying(HOME, 30.0, "LOITER"))),
+            rallied(View {
+                commands: rtl.clone(),
+                ..at(31, flying(far, 30.0, "RTL"))
+            }),
+            rallied(View {
+                commands: rtl,
+                ..at(120, landed_at(HOME))
+            }),
+        ];
+        let (_, verdict) = run("rally-home", &home);
+        assert!(
+            matches!(verdict, Verdict::Failed { ref line, .. } if line == "Failed. Landed 200 m from the rally point."),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn above_terrain_needs_the_terrain_frame_and_twenty_metres_over_the_ground() {
+        let far = from_home(0.0, 600.0);
+        let planned = |view: View| View {
+            mission_frames: Some(vec![10, 11]),
+            clearance_m: Some(30.0),
+            ..view
+        };
+        let views = [
+            planned(at(20, flying(HOME, 30.0, "LOITER"))),
+            planned(at(60, flying(far, 30.0, "AUTO"))),
+            planned(at(120, landed_at(HOME))),
+        ];
+        let (_, verdict) = run("above-terrain", &views);
+        assert!(matches!(verdict, Verdict::Passed { .. }), "{verdict:?}");
+        // Above home does not start it.
+        let (attempt, _) = run(
+            "above-terrain",
+            &[View {
+                mission_frames: Some(vec![3, 3]),
+                ..at(20, flying(HOME, 30.0, "LOITER"))
+            }],
+        );
+        assert_eq!(attempt.step, 0);
+        // Down to 12 m over a ridge: failed.
+        let low = [
+            planned(at(20, flying(HOME, 30.0, "LOITER"))),
+            View {
+                clearance_m: Some(12.0),
+                ..planned(at(40, flying(from_home(0.0, 300.0), 30.0, "AUTO")))
+            },
+        ];
+        let (_, verdict) = run("above-terrain", &low);
+        assert!(
+            matches!(verdict, Verdict::Failed { ref line, .. } if line.starts_with("Failed. It came within 20 m")),
             "{verdict:?}"
         );
     }

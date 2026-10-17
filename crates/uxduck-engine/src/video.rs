@@ -9,8 +9,9 @@ use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::dto::video::{
-    VideoAddParams, VideoAddResult, VideoAssignParams, VideoListResult, VideoPortStatus,
-    VideoRemoveParams, VideoRenameParams, VideoRevealParams, VideoRevealResult, VideoSocket,
+    VideoAddParams, VideoAddResult, VideoAssignParams, VideoCaptureEnableParams,
+    VideoCaptureParams, VideoDevicesResult, VideoListResult, VideoPortStatus, VideoRemoveParams,
+    VideoRenameParams, VideoRevealParams, VideoRevealResult, VideoSocket,
     VideoSource as VideoSourceDto, VideoTrackParams, VideoUnwatchParams, VideoWatchParams,
     VideoWatchResult,
 };
@@ -21,7 +22,7 @@ use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
 use uxduck_core::domain::video::{
-    VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name,
+    CaptureInput, VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name,
 };
 use uxduck_core::events::{Actor, Change};
 
@@ -59,6 +60,22 @@ pub trait VideoPort: Send + std::fmt::Debug {
     /// Connects to an RTSP source and keeps reconnecting until closed.
     fn open_rtsp(&mut self, _source_id: &str, _url: &str) {}
     fn close_rtsp(&mut self, _source_id: &str) {}
+    /// Cached enumeration; the host refreshes outside the engine thread.
+    fn devices(&mut self) -> VideoDevicesResult {
+        VideoDevicesResult {
+            error: Some("Local cameras need UXDuck running on this computer.".into()),
+            ..VideoDevicesResult::default()
+        }
+    }
+    /// Validate dependencies and a known device without blocking the engine.
+    ///
+    /// # Errors
+    /// Missing capture runtime, failed discovery, or an unknown device.
+    fn check_capture(&self, _input: &CaptureInput) -> Result<(), String> {
+        Err("Local camera capture is not available on this host.".into())
+    }
+    fn open_capture(&mut self, _source_id: &str, _input: &CaptureInput, _epoch: u64) {}
+    fn close_capture(&mut self, _source_id: &str) {}
     /// Starts writing a camera's pictures to a recording (S40).
     fn start_recording(&mut self, _recording_id: &str, _source_id: &str) {}
     /// Finishes a recording; the daemon reports its size when it has.
@@ -170,10 +187,15 @@ pub(crate) struct Video {
     announced_ports: BTreeMap<u16, String>,
     /// Of those, the ports listened on only because a camera named them.
     announced_listens: std::collections::BTreeSet<u16>,
+    /// Ports listened on only while someone watches a source there, such
+    /// as one remembered from a daemon that listened on another port.
+    watched_listens: std::collections::BTreeSet<u16>,
     /// Announced RTSP sources fetched this session.
     opened: std::collections::BTreeSet<String>,
     /// The recording in progress for each camera (S40).
     pub(crate) recording: BTreeMap<String, String>,
+    /// Each configured capture run, independent of updates to its source counters.
+    capture_epochs: BTreeMap<String, u64>,
     /// Record or not by hand, for each camera, until it stops.
     pub(crate) by_hand: BTreeMap<String, bool>,
     /// When each recording's progress was last journaled.
@@ -192,6 +214,9 @@ fn actor() -> Actor {
 
 /// What a source is called until someone renames it: where it comes from.
 fn default_name(source: &VideoSource) -> String {
+    if let Some(input) = &source.capture {
+        return input.name.clone();
+    }
     source
         .url
         .as_deref()
@@ -215,6 +240,33 @@ fn same_machine(a: &str, b: &str) -> bool {
     a == b && !local(a)
 }
 
+fn validate_capture(input: &CaptureInput) -> Result<(), ApiError> {
+    let invalid = |why: &str| ApiError::new(ErrorKind::InvalidValue, why);
+    if input.device_id.is_empty()
+        || input.device_id.len() > 1024
+        || input.name.trim().is_empty()
+        || input.name.len() > 256
+    {
+        return Err(invalid("Choose a camera from this computer's device list."));
+    }
+    if input.width.is_some() != input.height.is_some()
+        || input
+            .width
+            .is_some_and(|n| !(16..=4096).contains(&n) || n % 2 != 0)
+        || input
+            .height
+            .is_some_and(|n| !(16..=4096).contains(&n) || n % 2 != 0)
+        || input
+            .frame_rate
+            .is_some_and(|n| !n.is_finite() || !(1.0..=120.0).contains(&n))
+    {
+        return Err(invalid(
+            "Choose an even picture size from 16 to 4096 and a frame rate from 1 to 120.",
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
     /// The composition root's `/video` hub. Sources that were receiving
     /// when the daemon last stopped are stopped now.
@@ -226,7 +278,7 @@ impl Engine {
             .state
             .video_sources
             .values()
-            .filter(|s| s.added_by_hand)
+            .filter(|s| s.added_by_hand && s.capture.is_none())
             .filter_map(|s| s.url.clone().map(|url| (s.id.clone(), url)))
             .collect();
         if let Some(port) = self.video.port.as_mut() {
@@ -284,6 +336,16 @@ impl Engine {
             self.commit_as(actor(), Change::VideoSourceUpserted { source });
         }
         self.recover_recordings();
+        let captures: Vec<_> = self
+            .state
+            .video_sources
+            .values()
+            .filter(|s| s.capture.as_ref().is_some_and(|c| c.enabled))
+            .cloned()
+            .collect();
+        for source in captures {
+            self.start_capture(&source);
+        }
     }
 
     /// Whether the listener holds its port, and if not, why not (V3): a
@@ -357,10 +419,7 @@ impl Engine {
             self.video
                 .announced_ports
                 .insert(port, vehicle_id.to_owned());
-            let listened = self.video.listening == Some(port)
-                || self.state.settings.video_ports.contains(&port)
-                || self.video.announced_listens.contains(&port);
-            if !listened
+            if !self.listened(port)
                 && let Some(video) = self.video.port.as_mut()
                 && video.listen(port).is_ok()
             {
@@ -370,7 +429,12 @@ impl Engine {
                 .state
                 .video_sources
                 .values()
-                .filter(|s| s.port == port && s.url.is_none() && s.vehicle_id.is_none())
+                .filter(|s| {
+                    s.port == port
+                        && s.url.is_none()
+                        && s.capture.is_none()
+                        && s.vehicle_id.is_none()
+                })
                 .cloned()
                 .collect();
             for mut source in unclaimed {
@@ -412,6 +476,7 @@ impl Engine {
                 klv: false,
                 url: Some(uri.to_owned()),
                 added_by_hand: false,
+                capture: None,
                 tracks: Vec::new(),
                 counters: uxduck_core::domain::video::VideoCounters::default(),
                 first_seen_us: now,
@@ -455,6 +520,7 @@ impl Engine {
             klv: false,
             url: None,
             added_by_hand: false,
+            capture: None,
             tracks: Vec::new(),
             counters: report.counters.clone(),
             first_seen_us: now,
@@ -487,7 +553,7 @@ impl Engine {
         source.klv |= report.klv;
         // A source with an address of its own (RTSP) keeps the vehicle it
         // was added or announced for.
-        if !source.assigned_by_hand && source.url.is_none() {
+        if !source.assigned_by_hand && source.url.is_none() && source.capture.is_none() {
             // The address, then a camera's announcement, then what its KLV
             // named (kept from before).
             source.vehicle_id = self
@@ -583,13 +649,91 @@ impl Engine {
             .insert(source.id.clone(), self.clock.now_us());
         self.commit_as(actor(), Change::VideoSourceUpserted { source });
         // A camera that stops ends its recording and what was asked by hand.
-        self.video.by_hand.remove(source_id);
+        if self
+            .state
+            .video_sources
+            .get(source_id)
+            .is_none_or(|s| s.capture.is_none())
+        {
+            self.video.by_hand.remove(source_id);
+        }
         self.review_recordings();
     }
 
     /// A `/video` socket closed: its watch is over.
     pub fn video_socket_closed(&mut self, token: &str) {
         self.video.watches.remove(token);
+        self.release_watched_ports();
+    }
+
+    /// Whether a listener holds `port`, whoever asked for it.
+    fn listened(&self, port: u16) -> bool {
+        self.video.listening == Some(port)
+            || self.state.settings.video_ports.contains(&port)
+            || self.video.announced_listens.contains(&port)
+            || self.video.watched_listens.contains(&port)
+    }
+
+    /// A UDP source is watched on a port nothing listens on: listen there
+    /// while it is watched, or say on the source why that can't be.
+    fn listen_for_watch(&mut self, source_id: &str) {
+        let Some(source) = self.state.video_sources.get(source_id) else {
+            return;
+        };
+        if source.capture.is_some() || source.url.is_some() || self.listened(source.port) {
+            return;
+        }
+        let (port, stopped) = (source.port, source.state == VideoState::Stopped);
+        let Some(video) = self.video.port.as_mut() else {
+            return;
+        };
+        match video.listen(port) {
+            Ok(()) => {
+                self.video.watched_listens.insert(port);
+                if stopped {
+                    self.video_stopped_because(source_id, None);
+                }
+            }
+            Err(error) if stopped => {
+                self.video_stopped_because(
+                    source_id,
+                    Some(format!("Can't receive this camera: {error}")),
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Stops listening on the ports opened for watches that have all ended.
+    fn release_watched_ports(&mut self) {
+        let watched: std::collections::BTreeSet<u16> = self
+            .video
+            .watches
+            .values()
+            .filter_map(|(_, id)| self.state.video_sources.get(id))
+            .map(|s| s.port)
+            .collect();
+        let idle: Vec<u16> = self
+            .video
+            .watched_listens
+            .iter()
+            .filter(|p| !watched.contains(p))
+            .copied()
+            .collect();
+        for p in idle {
+            self.video.watched_listens.remove(&p);
+            // Added by hand or named by a camera since: theirs now.
+            if self.state.settings.video_ports.contains(&p) {
+                continue;
+            }
+            if self.video.announced_ports.contains_key(&p) {
+                self.video.announced_listens.insert(p);
+                continue;
+            }
+            if let Some(video) = self.video.port.as_mut() {
+                video.unlisten(p);
+            }
+        }
     }
 
     /// Ends a connection's watches when it goes.
@@ -607,6 +751,7 @@ impl Engine {
                 port.revoke(&token);
             }
         }
+        self.release_watched_ports();
     }
 
     fn video_sources(&self) -> Vec<VideoSourceDto> {
@@ -665,7 +810,11 @@ impl Engine {
             .get(&params.source_id)
             .cloned()
             .ok_or_else(|| not_found(&params.source_id))?;
-        let Some(url) = source.url.clone().filter(|_| source.added_by_hand) else {
+        let Some(url) = source
+            .url
+            .clone()
+            .filter(|_| source.added_by_hand && source.capture.is_none())
+        else {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
                 "Only RTSP cameras you added can play another track.",
@@ -772,6 +921,208 @@ impl Engine {
             .map_err(|why| ApiError::new(ErrorKind::Internal, why))
     }
 
+    /// A capture report can only update its still-enabled configuration. Late
+    /// subprocess output after removal, pause or reconfiguration is discarded.
+    pub fn capture_observed(&mut self, epoch: u64, input: &CaptureInput, report: VideoReport) {
+        let id = report.source_id();
+        if self.video.capture_epochs.get(&id) == Some(&epoch)
+            && self
+                .state
+                .video_sources
+                .get(&id)
+                .and_then(|s| s.capture.as_ref())
+                == Some(input)
+            && input.enabled
+        {
+            self.video_observed(report);
+        }
+    }
+
+    pub fn capture_stopped(
+        &mut self,
+        source_id: &str,
+        input: &CaptureInput,
+        epoch: u64,
+        why: String,
+    ) {
+        if self.video.capture_epochs.get(source_id) == Some(&epoch)
+            && self
+                .state
+                .video_sources
+                .get(source_id)
+                .and_then(|s| s.capture.as_ref())
+                == Some(input)
+            && input.enabled
+        {
+            self.video_stopped_because(source_id, Some(why));
+        }
+    }
+
+    fn start_capture(&mut self, source: &VideoSource) {
+        self.video.capture_epochs.remove(&source.id);
+        if let Some(input) = source.capture.as_ref().filter(|c| c.enabled) {
+            self.video
+                .capture_epochs
+                .insert(source.id.clone(), source.version);
+            if let Some(port) = self.video.port.as_mut() {
+                port.open_capture(&source.id, input, source.version);
+            }
+        }
+    }
+
+    fn video_devices(&mut self) -> VideoDevicesResult {
+        self.video.port.as_mut().map_or_else(
+            || VideoDevicesResult {
+                error: Some("Local cameras need UXDuck running on this computer.".into()),
+                ..VideoDevicesResult::default()
+            },
+            |p| p.devices(),
+        )
+    }
+
+    fn video_capture(&mut self, params: VideoCaptureParams) -> Result<VideoSource, ApiError> {
+        let input: CaptureInput = params.input.into();
+        let invalid = |why: &str| ApiError::new(ErrorKind::InvalidValue, why);
+        validate_capture(&input)?;
+        let port = self
+            .video
+            .port
+            .as_ref()
+            .ok_or_else(|| invalid("Local cameras need UXDuck running on this computer."))?;
+        port.check_capture(&input)
+            .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+        let previous = self
+            .state
+            .video_sources
+            .values()
+            .find(|s| {
+                s.capture
+                    .as_ref()
+                    .is_some_and(|c| c.device_id == input.device_id)
+            })
+            .cloned();
+        if let Some(same) = &previous
+            && same.capture.as_ref() == Some(&input)
+        {
+            return Ok(same.clone());
+        }
+        if previous.is_none()
+            && self
+                .state
+                .video_sources
+                .values()
+                .filter(|s| s.capture.is_some())
+                .count()
+                >= 8
+        {
+            return Err(invalid(
+                "UXDuck supports at most eight configured local cameras.",
+            ));
+        }
+        let now = self.clock.now_us();
+        let mut source = previous.unwrap_or_else(|| VideoSource {
+            id: format!("vs{}", &self.random.token()[..16]),
+            name: input.name.clone(),
+            named_by_hand: false,
+            port: 0,
+            sender: "local capture".into(),
+            container: uxduck_core::domain::video::VideoContainer::Ts,
+            codec: None,
+            width: None,
+            height: None,
+            frame_rate: None,
+            state: VideoState::Stopped,
+            state_detail: None,
+            vehicle_id: None,
+            assigned_by_hand: false,
+            klv: false,
+            url: None,
+            added_by_hand: true,
+            capture: None,
+            tracks: Vec::new(),
+            counters: uxduck_core::domain::video::VideoCounters::default(),
+            first_seen_us: now,
+            changed_at_us: now,
+            version: 0,
+        });
+        if let Some(port) = self.video.port.as_mut() {
+            port.close_capture(&source.id);
+        }
+        self.video_stopped_because(&source.id, Some("Changing capture settings".into()));
+        if !source.named_by_hand {
+            source.name.clone_from(&input.name);
+        }
+        source.capture = Some(input.clone());
+        source.state = VideoState::Stopped;
+        source.state_detail = Some(
+            if input.enabled {
+                "Starting camera capture"
+            } else {
+                "Camera capture paused"
+            }
+            .into(),
+        );
+        source.changed_at_us = now;
+        source.version = self
+            .state
+            .video_sources
+            .get(&source.id)
+            .map_or(source.version, |s| s.version)
+            + 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.start_capture(&source);
+        Ok(source)
+    }
+
+    fn video_capture_enable(
+        &mut self,
+        params: &VideoCaptureEnableParams,
+    ) -> Result<VideoSource, ApiError> {
+        let mut source = self
+            .state
+            .video_sources
+            .get(&params.source_id)
+            .cloned()
+            .ok_or_else(|| not_found(&params.source_id))?;
+        let input = source
+            .capture
+            .as_mut()
+            .ok_or_else(|| ApiError::new(ErrorKind::InvalidValue, "This is not a local camera."))?;
+        if input.enabled == params.enabled {
+            return Ok(source);
+        }
+        input.enabled = params.enabled;
+        let input = input.clone();
+        if let Some(port) = self.video.port.as_mut() {
+            port.close_capture(&source.id);
+        }
+        source.state = VideoState::Stopped;
+        source.state_detail = Some(
+            if input.enabled {
+                "Starting camera capture"
+            } else {
+                "Camera capture paused"
+            }
+            .into(),
+        );
+        source.changed_at_us = self.clock.now_us();
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.review_recordings();
+        self.start_capture(&source);
+        Ok(source)
+    }
+
     fn video_add(&mut self, url: &str) -> Result<VideoAddResult, ApiError> {
         match input(url)? {
             Input::Udp(port) => {
@@ -841,6 +1192,7 @@ impl Engine {
                     klv: false,
                     url: Some(url.clone()),
                     added_by_hand: true,
+                    capture: None,
                     tracks: Vec::new(),
                     counters: uxduck_core::domain::video::VideoCounters::default(),
                     first_seen_us: now,
@@ -894,8 +1246,14 @@ impl Engine {
             }
             if let Some(port) = self.video.port.as_mut() {
                 port.close_rtsp(id);
+                port.close_capture(id);
+                if let Some(recording) = self.video.recording.remove(id) {
+                    port.stop_recording(&recording);
+                }
             }
+            self.video.capture_epochs.remove(id);
             self.video.live.remove(id);
+            self.video.by_hand.remove(id);
             self.commit_as(actor(), Change::VideoSourceRemoved { id: id.clone() });
         }
         Ok(())
@@ -920,6 +1278,7 @@ impl Engine {
         self.video
             .watches
             .insert(token.clone(), (connection, params.source_id.clone()));
+        self.listen_for_watch(&params.source_id);
         Ok(VideoWatchResult {
             path: format!("/video?token={token}"),
             token,
@@ -937,6 +1296,7 @@ impl Engine {
             if let Some(port) = self.video.port.as_mut() {
                 port.revoke(token);
             }
+            self.release_watched_ports();
         }
     }
 }
@@ -958,6 +1318,20 @@ pub(crate) fn handle(
         }
     };
     match request {
+        ClientRequest::VideoDevices(_) => {
+            require(Capability::Config)?;
+            to_value(&engine.video_devices())
+        }
+        ClientRequest::VideoCapture(params) => {
+            require(Capability::Config)?;
+            to_value(&VideoSourceDto::from(&engine.video_capture(params)?))
+        }
+        ClientRequest::VideoCaptureEnable(params) => {
+            require(Capability::Config)?;
+            to_value(&VideoSourceDto::from(
+                &engine.video_capture_enable(&params)?,
+            ))
+        }
         ClientRequest::VideoList(Empty {}) => {
             require(Capability::Read)?;
             to_value(&VideoListResult {

@@ -10,7 +10,7 @@
 //!
 //! - a message at the operator's threshold or more severe (warning by
 //!   default), when it is new or comes back after the window, whatever
-//!   came between;
+//!   came between; an unresolved notice is updated, including after a gap;
 //! - but warnings in the first seconds after a (re)boot are one
 //!   notification, "Copter 1 started with 3 warnings";
 //! - and pre-arm failures are state: one notification per vehicle listing
@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::messages::{
     VehicleMessage, VehicleMessagesParams, VehicleMessagesResult,
 };
@@ -97,6 +98,14 @@ fn severity_of(level: u8) -> Severity {
         0..=2 => Severity::Alarm,
         3 | 4 => Severity::Warning,
         _ => Severity::Info,
+    }
+}
+
+fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Info => 0,
+        Severity::Warning => 1,
+        Severity::Alarm => 2,
     }
 }
 
@@ -286,20 +295,81 @@ impl Engine {
                     report: None,
                 });
             } else {
-                self.raise(Raise {
-                    severity: severity_of(severity),
-                    kind: NotificationKind::Persistent,
-                    subject: Subject::Vehicle {
-                        id: vehicle.id.clone(),
-                    },
-                    title: format!("{}: {text}", vehicle.name),
-                    body: None,
-                    actions: vec![show_in_messages(&vehicle.id, shown.id)],
-                    condition: None,
-                    report: None,
-                });
+                self.message_notice(&vehicle, component_id, severity, text, shown.id);
             }
         }
+    }
+
+    /// The same unresolved warning keeps its notice, its acknowledgment and
+    /// a link to the latest occurrence. A higher severity alerts anew.
+    fn message_notice(
+        &mut self,
+        vehicle: &Vehicle,
+        component_id: u8,
+        level: u8,
+        text: &str,
+        message_id: u64,
+    ) {
+        let condition = format!(
+            "vehicle-message:{}:{component_id}:{:x}",
+            vehicle.id,
+            Sha256::digest(text.as_bytes())
+        );
+        let title = format!("{}: {text}", vehicle.name);
+        let subject = Subject::Vehicle {
+            id: vehicle.id.clone(),
+        };
+        // Notices stored by older versions had no condition. Adopt one and
+        // retire its duplicates rather than adding another on the next repeat.
+        let mut previous: Vec<_> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| {
+                n.condition.as_deref() == Some(&condition)
+                    || (n.condition.is_none() && n.subject == subject && n.title == title)
+            })
+            .cloned()
+            .collect();
+        previous.sort_by_key(|n| (n.state != NotificationState::Acknowledged, n.created_at_us));
+        let severity = previous
+            .iter()
+            .map(|n| n.severity)
+            .chain([severity_of(level)])
+            .max_by_key(|s| severity_rank(*s))
+            .unwrap_or_else(|| severity_of(level));
+        if let Some((kept, duplicates)) = previous.split_first_mut() {
+            if kept.condition.as_deref() != Some(&condition) {
+                kept.condition = Some(condition.clone());
+                kept.version += 1;
+                self.commit_as(
+                    crate::plugins::daemon(),
+                    Change::NotificationUpserted {
+                        notification: kept.clone(),
+                    },
+                );
+            }
+            for duplicate in duplicates {
+                duplicate.state = NotificationState::Resolved;
+                duplicate.version += 1;
+                self.commit_as(
+                    crate::plugins::daemon(),
+                    Change::NotificationUpserted {
+                        notification: duplicate.clone(),
+                    },
+                );
+            }
+        }
+        self.raise_or_update(Raise {
+            severity,
+            kind: NotificationKind::Persistent,
+            subject,
+            title,
+            body: None,
+            actions: vec![show_in_messages(&vehicle.id, message_id)],
+            condition: Some(condition),
+            report: None,
+        });
     }
 
     /// A simulated vehicle's messages stay in its log (maintainer,
@@ -406,13 +476,35 @@ impl Engine {
             self.raise(raise);
             return;
         };
-        if notification.title == raise.title && notification.body == raise.body {
+        if severity_rank(raise.severity) > severity_rank(notification.severity)
+            || (notification.kind == NotificationKind::Transient
+                && raise.kind == NotificationKind::Persistent)
+        {
+            if let Some(condition) = &raise.condition {
+                self.resolve(condition);
+            }
+            self.raise(raise);
+            return;
+        }
+        if severity_rank(raise.severity) < severity_rank(notification.severity) {
+            return;
+        }
+        if notification.title == raise.title
+            && notification.body == raise.body
+            && notification.actions == raise.actions
+            && notification.severity == raise.severity
+            && notification.kind == raise.kind
+            && notification.subject == raise.subject
+            && notification.report == raise.report
+        {
             return;
         }
         notification.title = raise.title;
         notification.body = raise.body;
         notification.actions = raise.actions;
         notification.severity = raise.severity;
+        notification.kind = raise.kind;
+        notification.subject = raise.subject;
         notification.report = raise.report;
         notification.version += 1;
         self.commit_as(

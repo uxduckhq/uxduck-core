@@ -36,6 +36,14 @@ impl From<&core::Vehicle> for dto::Vehicle {
             dismissed: v.dismissed,
             local_only: v.local_only,
             labels: v.labels.clone(),
+            bookmarks: v
+                .bookmarks
+                .iter()
+                .map(|b| dto::VehicleBookmark {
+                    name: b.name.clone(),
+                    url: b.url.clone(),
+                })
+                .collect(),
             size_cm: v.size_cm,
             version: v.version,
         }
@@ -88,6 +96,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 snapshot_id,
                 binary,
                 wipe,
+                with_mission,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -102,6 +111,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 snapshot_id,
                 binary,
                 wipe,
+                with_mission,
                 instance,
             },
         }
@@ -134,6 +144,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 snapshot_id,
                 binary,
                 wipe,
+                with_mission,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -148,6 +159,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 snapshot_id,
                 binary,
                 wipe,
+                with_mission,
                 instance,
             },
         }

@@ -133,6 +133,9 @@ pub enum TabKind {
     /// The Missions page as a tab: every mission, where `Mission` is the
     /// focused vehicle's.
     Missions,
+    /// The ground under a plan, or the selected vehicle's mission, with its
+    /// heights and clearance (ADR-0029 P9). Opened below the map.
+    Profile,
     /// A rubber duck, turning as the new simulation form's vehicles do:
     /// found only by typing "duck" in the command palette (maintainer,
     /// 2026-10-12). It follows no vehicle.
@@ -176,18 +179,19 @@ impl TabKind {
             Self::Places => "places",
             Self::Flights => "flights",
             Self::Missions => "missions",
+            Self::Profile => "profile",
             Self::Duck => "duck",
         }
     }
 
     /// The kind whose group a new tab of this kind opens in, when there is
-    /// one: the inspector beside Messages, and the camera with the 3D map
-    /// (maintainer, 2026-10-05). The web's `JOINS`.
+    /// one: the inspector beside Messages, and the camera below the maps
+    /// with Parameters (maintainer, 2026-10-16). The web's `JOINS`.
     #[must_use]
     pub const fn joins(self) -> Option<Self> {
         match self {
             Self::Inspector => Some(Self::Messages),
-            Self::Camera => Some(Self::Map3d),
+            Self::Camera => Some(Self::Parameters),
             _ => None,
         }
     }
@@ -494,7 +498,8 @@ pub struct LayoutPreset {
 /// Increment when a shipped view's default arrangement changes.
 /// 2 (2026-10-12): Advanced ends its Messages group with the MAVLink
 /// inspector and a Chart.
-pub const LAYOUT_PRESET_VERSION: u32 = 2;
+/// 3 (2026-10-15): Simple stacks the map above Telemetry, Control and History.
+pub const LAYOUT_PRESET_VERSION: u32 = 3;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -916,31 +921,19 @@ impl Layout {
         }
     }
 
-    /// A 2D map beside Control above Telemetry. Other tools open on request.
+    /// A 2D map above one group of Telemetry, Control and History tabs.
     #[must_use]
     pub fn simple_dock() -> DockNode {
         DockNode::Split {
-            direction: Direction::Row,
+            direction: Direction::Column,
             children: vec![
                 DockChild {
-                    size: 700,
+                    size: 560,
                     node: DockNode::of(&[TabKind::Map]),
                 },
                 DockChild {
-                    size: 300,
-                    node: DockNode::Split {
-                        direction: Direction::Column,
-                        children: vec![
-                            DockChild {
-                                size: 400,
-                                node: DockNode::of(&[TabKind::Control]),
-                            },
-                            DockChild {
-                                size: 600,
-                                node: DockNode::of(&[TabKind::Telemetry]),
-                            },
-                        ],
-                    },
+                    size: 440,
+                    node: DockNode::of(&[TabKind::Telemetry, TabKind::Control, TabKind::History]),
                 },
             ],
         }
@@ -1052,7 +1045,7 @@ impl Layout {
 
     /// Shows a tab of this kind, as "+" does: the first one there is, an
     /// unpinned one first, shown again if hidden; else a new one in the
-    /// group of the kind it joins (the inspector beside Messages, the camera with the 3D map), the
+    /// group of the kind it joins (the inspector beside Messages, the camera with Parameters), the
     /// first group without the chat, or beside everything. Opens the pane.
     pub fn open(&mut self, kind: TabKind) {
         if kind == TabKind::Chat {
@@ -2143,22 +2136,20 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_opens_with_the_3d_map() {
-        // In the flight layout the camera joins the 3D map's group, so the
-        // top row stays the map and the group beside it.
+    fn the_camera_opens_with_parameters() {
+        // In the flight layout the camera joins Parameters' group below the
+        // maps, so the top row stays the two maps.
         let mut layout = Layout {
             pane_open: true,
             dock: Layout::flight_dock(),
             ..Layout::initial()
         };
         layout.open(TabKind::Camera);
-        assert!(
-            layout
-                .dock
-                .shape()
-                .contains("[map-3d:map-3d:,camera:camera:]")
-        );
-        // Without a 3D map, the first group without the chat, as any tab.
+        assert!(layout.dock.shape().contains(
+            "[messages:messages:,parameters:parameters:,controllers:controllers:,inspector:inspector:,chart:chart:,camera:camera:]"
+        ));
+        assert!(layout.dock.shape().contains("[map-3d:map-3d:]"));
+        // Without Parameters, the first group without the chat, as any tab.
         let mut flat = Layout {
             pane_open: true,
             dock: DockNode::Split {

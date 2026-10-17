@@ -37,6 +37,8 @@ enum Command {
     Append(Box<Event>),
     Checkpoint(Box<State>),
     Session(String, Session),
+    /// A session forgotten, by its token's hash (S97).
+    ForgetSession(String),
     /// Sync everything and end the thread.
     Stop,
 }
@@ -60,6 +62,11 @@ impl Persistence for StoreHandle {
         let _ = self
             .commands
             .send(Command::Session(token_hash.to_owned(), session.clone()));
+    }
+    fn delete_session(&mut self, token_hash: &str) {
+        let _ = self
+            .commands
+            .send(Command::ForgetSession(token_hash.to_owned()));
     }
 }
 
@@ -198,6 +205,9 @@ fn run(inbox: &mpsc::Receiver<Command>, log: &mut EventLog, db: &mut rusqlite::C
                     sqlite::save_session(db, &hash, &session),
                     "saving a session",
                 ),
+                Command::ForgetSession(hash) => {
+                    report_sqlite(sqlite::delete_session(db, &hash), "forgetting a session");
+                }
                 Command::Stop => stop = true,
             }
         }

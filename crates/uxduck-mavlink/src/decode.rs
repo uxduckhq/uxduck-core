@@ -211,6 +211,12 @@ pub enum Message {
         pending: u16,
         loaded: u16,
     },
+    /// `FENCE_STATUS` (S132): whether the vehicle is outside its fence now,
+    /// and how many breaches since it booted.
+    FenceStatus {
+        breached: bool,
+        count: u16,
+    },
     /// `EXTENDED_SYS_STATE` (S103): `MAV_LANDED_STATE`, 0 when the
     /// autopilot does not know, then on the ground, in the air, taking off,
     /// landing.
@@ -598,6 +604,10 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
             current_height: m.current_height,
             pending: m.pending,
             loaded: m.loaded,
+        },
+        Ardupilotmega::FenceStatus(m) => Message::FenceStatus {
+            breached: m.breach_status != 0,
+            count: m.breach_count,
         },
         Ardupilotmega::ExtendedSysState(m) => Message::ExtendedSysState {
             landed_state: m.landed_state as u8,

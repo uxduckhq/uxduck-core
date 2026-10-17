@@ -2,6 +2,7 @@
 //! that relays pictures to `/video` sockets, and the socket itself. The
 //! daemon parses and relays; it never decodes a picture (V1).
 
+pub mod capture;
 pub mod hub;
 pub mod listener;
 pub mod recorder;
@@ -25,6 +26,8 @@ pub struct VideoHost {
     /// Ports added by hand, each with its listener's stop flag.
     listeners: HashMap<u16, Arc<AtomicBool>>,
     rtsp: HashMap<String, tokio::task::JoinHandle<()>>,
+    captures: HashMap<String, tokio::task::JoinHandle<()>>,
+    devices: Arc<capture::Devices>,
 }
 
 impl uxduck_engine::video::VideoPort for VideoHost {
@@ -72,6 +75,41 @@ impl uxduck_engine::video::VideoPort for VideoHost {
 
     fn close_rtsp(&mut self, source_id: &str) {
         if let Some(task) = self.rtsp.remove(source_id) {
+            task.abort();
+        }
+    }
+
+    fn devices(&mut self) -> uxduck_contracts::dto::video::VideoDevicesResult {
+        self.devices.list(&self.runtime)
+    }
+
+    fn check_capture(
+        &self,
+        input: &uxduck_core::domain::video::CaptureInput,
+    ) -> Result<(), String> {
+        self.devices.check(input)
+    }
+
+    fn open_capture(
+        &mut self,
+        source_id: &str,
+        input: &uxduck_core::domain::video::CaptureInput,
+        epoch: u64,
+    ) {
+        self.close_capture(source_id);
+        let task = capture::spawn(
+            &self.runtime,
+            source_id.to_owned(),
+            input.clone(),
+            epoch,
+            self.hub.clone(),
+            self.engine.clone(),
+        );
+        self.captures.insert(source_id.to_owned(), task);
+    }
+
+    fn close_capture(&mut self, source_id: &str) {
+        if let Some(task) = self.captures.remove(source_id) {
             task.abort();
         }
     }
@@ -135,6 +173,8 @@ pub async fn start(
         runtime: tokio::runtime::Handle::current(),
         listeners: HashMap::new(),
         rtsp: HashMap::new(),
+        captures: HashMap::new(),
+        devices: Arc::new(capture::Devices::default()),
     };
     let _ = engine.run(move |e| e.set_video(Box::new(host))).await;
     if let Some(port) = port {
@@ -157,4 +197,18 @@ pub async fn start(
             .await;
     }
     hub
+}
+
+impl Drop for VideoHost {
+    fn drop(&mut self) {
+        for task in self.captures.values() {
+            task.abort();
+        }
+        for task in self.rtsp.values() {
+            task.abort();
+        }
+        for stop in self.listeners.values() {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
 }

@@ -517,6 +517,7 @@ impl Engine {
                 dismissed: false,
                 local_only: false,
                 labels: Vec::new(),
+                bookmarks: Vec::new(),
                 size_cm: entry.size_cm,
                 version: 1,
             },

@@ -1,0 +1,7 @@
+{
+  "method": "plan/create",
+  "params": {
+    "vehicleType": "vtol",
+    "autopilot": "ardupilot"
+  }
+}

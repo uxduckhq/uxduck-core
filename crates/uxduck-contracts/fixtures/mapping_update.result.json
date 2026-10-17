@@ -17,6 +17,7 @@
     "axis": "left-stick-y",
     "inverted": false
   },
+  "stickMode": "mode-2",
   "deadzone": 0.05,
   "buttons": [
     {

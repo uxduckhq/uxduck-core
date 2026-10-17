@@ -517,6 +517,12 @@ fn mission_type() -> mavio::dialects::ardupilotmega::enums::MavMissionType {
     mavio::dialects::ardupilotmega::enums::MavMissionType::Mission
 }
 
+/// `MAV_MISSION_TYPE`: 0 the mission, 1 the fence, 2 rally points.
+fn mission_type_of(kind: u8) -> mavio::dialects::ardupilotmega::enums::MavMissionType {
+    mavio::dialects::ardupilotmega::enums::MavMissionType::try_from(kind)
+        .unwrap_or_else(|_| mission_type())
+}
+
 /// `PARAM_REQUEST_LIST` from the daemon.
 #[must_use]
 pub fn param_request_list_frame(
@@ -619,12 +625,13 @@ pub fn mission_request_list_frame(
     target_system: u8,
     target_component: u8,
     sequence: u8,
+    kind: u8,
 ) -> Vec<u8> {
     use mavio::dialects::ardupilotmega::messages::MissionRequestList;
     let request = MissionRequestList {
         target_system,
         target_component,
-        mission_type: mission_type(),
+        mission_type: mission_type_of(kind),
     };
     frame(gcs, crate::GCS_COMPONENT_ID, sequence, &request)
 }
@@ -661,13 +668,13 @@ impl Route {
 /// `MISSION_COUNT`: the daemon starting an upload, or a vehicle answering a
 /// request for its list.
 #[must_use]
-pub fn mission_count_frame(route: Route, sequence: u8, count: u16) -> Vec<u8> {
+pub fn mission_count_frame(route: Route, sequence: u8, count: u16, kind: u8) -> Vec<u8> {
     use mavio::dialects::ardupilotmega::messages::MissionCount;
     let message = MissionCount {
         target_system: route.to.0,
         target_component: route.to.1,
         count,
-        mission_type: mission_type(),
+        mission_type: mission_type_of(kind),
         opaque_id: 0,
     };
     frame(route.from.0, route.from.1, sequence, &message)
@@ -675,13 +682,13 @@ pub fn mission_count_frame(route: Route, sequence: u8, count: u16) -> Vec<u8> {
 
 /// `MISSION_REQUEST_INT` for item `seq`.
 #[must_use]
-pub fn mission_request_frame(route: Route, sequence: u8, seq: u16) -> Vec<u8> {
+pub fn mission_request_frame(route: Route, sequence: u8, seq: u16, kind: u8) -> Vec<u8> {
     use mavio::dialects::ardupilotmega::messages::MissionRequestInt;
     let message = MissionRequestInt {
         target_system: route.to.0,
         target_component: route.to.1,
         seq,
-        mission_type: mission_type(),
+        mission_type: mission_type_of(kind),
     };
     frame(route.from.0, route.from.1, sequence, &message)
 }
@@ -710,21 +717,21 @@ pub fn mission_item_frame(
         x: item.x,
         y: item.y,
         z: item.z,
-        mission_type: mission_type(),
+        mission_type: mission_type_of(item.mission_type),
     };
     frame(route.from.0, route.from.1, sequence, &message)
 }
 
 /// `MISSION_ACK` with `MAV_MISSION_RESULT`.
 #[must_use]
-pub fn mission_ack_frame(route: Route, sequence: u8, result: u8) -> Vec<u8> {
+pub fn mission_ack_frame(route: Route, sequence: u8, result: u8, kind: u8) -> Vec<u8> {
     use mavio::dialects::ardupilotmega::enums::MavMissionResult;
     use mavio::dialects::ardupilotmega::messages::MissionAck;
     let message = MissionAck {
         target_system: route.to.0,
         target_component: route.to.1,
         type_: MavMissionResult::try_from(result).unwrap_or(MavMissionResult::MavMissionError),
-        mission_type: mission_type(),
+        mission_type: mission_type_of(kind),
         opaque_id: 0,
     };
     frame(route.from.0, route.from.1, sequence, &message)
@@ -889,8 +896,11 @@ pub struct FakeVehicle {
     pub mission: Vec<crate::decode::MissionItemInt>,
     /// Items it can store; more is refused with `MAV_MISSION_NO_SPACE`.
     pub mission_capacity: u16,
-    /// An upload in progress: the items so far, and how many are coming.
-    upload: Option<(u16, Vec<crate::decode::MissionItemInt>)>,
+    /// Its fence and rally points (S128), as the mission protocol keeps them.
+    pub fence: Vec<crate::decode::MissionItemInt>,
+    pub rally: Vec<crate::decode::MissionItemInt>,
+    /// An upload in progress: its kind, how many are coming, the items so far.
+    upload: Option<(u8, u16, Vec<crate::decode::MissionItemInt>)>,
     /// Seconds into the run when it last booted; `time_boot_ms` counts
     /// from here.
     booted_at_s: f64,
@@ -1070,6 +1080,8 @@ impl FakeVehicle {
             drops_every: None,
             mission: vec![home_item()],
             mission_capacity: 100,
+            fence: Vec::new(),
+            rally: Vec::new(),
             upload: None,
             booted_at_s: 0.0,
             last_t_s: 0.0,
@@ -1318,10 +1330,15 @@ impl FakeVehicle {
                     replies.extend(self.param_frame(self.parameters.len() - 1));
                 }
             }
-            Decoded::MissionRequestList { .. } => {
+            Decoded::MissionRequestList { mission_type } => {
                 let sequence = self.next();
-                let count = u16::try_from(self.mission.len()).unwrap_or(u16::MAX);
-                replies.push(mission_count_frame(self.to_gcs(), sequence, count));
+                let count = u16::try_from(self.stored(mission_type).len()).unwrap_or(u16::MAX);
+                replies.push(mission_count_frame(
+                    self.to_gcs(),
+                    sequence,
+                    count,
+                    mission_type,
+                ));
             }
             Decoded::RcChannelsOverride { target, channels } => self.rc_input(target, channels),
             Decoded::ManualControl { sticks, .. } => {
@@ -1329,43 +1346,62 @@ impl FakeVehicle {
                 self.manual_at_s = Some(self.last_t_s);
             }
             // During an upload, requests are ours to make.
-            Decoded::MissionRequest { seq, .. } if self.upload.is_none() => {
-                if let Some(item) = self.mission.get(usize::from(seq)).cloned() {
+            Decoded::MissionRequest { seq, mission_type } if self.upload.is_none() => {
+                if let Some(mut item) = self.stored(mission_type).get(usize::from(seq)).cloned() {
+                    item.mission_type = mission_type;
                     let sequence = self.next();
                     replies.push(mission_item_frame(self.to_gcs(), sequence, &item));
                 }
             }
-            Decoded::MissionCount { count, .. } => {
+            Decoded::MissionCount {
+                count,
+                mission_type,
+            } => {
                 let sequence = self.next();
                 if count > self.mission_capacity {
-                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 4));
+                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 4, mission_type));
                 } else if count == 0 {
-                    self.mission.clear();
-                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 0));
+                    self.store(mission_type, Vec::new());
+                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 0, mission_type));
                 } else {
-                    self.upload = Some((count, Vec::new()));
-                    replies.push(mission_request_frame(self.to_gcs(), sequence, 0));
+                    self.upload = Some((mission_type, count, Vec::new()));
+                    replies.push(mission_request_frame(
+                        self.to_gcs(),
+                        sequence,
+                        0,
+                        mission_type,
+                    ));
                 }
             }
             Decoded::MissionItem(item) => {
-                let Some((count, mut received)) = self.upload.take() else {
+                let Some((kind, count, mut received)) = self.upload.take() else {
                     return replies;
                 };
                 let sequence = self.next();
                 let expected = u16::try_from(received.len()).unwrap_or(u16::MAX);
-                if item.seq != expected {
+                if item.seq != expected || item.mission_type != kind {
                     // Out of order: ask again for the one it needs.
-                    replies.push(mission_request_frame(self.to_gcs(), sequence, expected));
-                    self.upload = Some((count, received));
+                    replies.push(mission_request_frame(
+                        self.to_gcs(),
+                        sequence,
+                        expected,
+                        kind,
+                    ));
+                    self.upload = Some((kind, count, received));
                     return replies;
                 }
                 received.push(item);
                 if received.len() == usize::from(count) {
-                    self.mission = received;
-                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 0));
+                    self.store(kind, received);
+                    replies.push(mission_ack_frame(self.to_gcs(), sequence, 0, kind));
                 } else {
-                    replies.push(mission_request_frame(self.to_gcs(), sequence, expected + 1));
-                    self.upload = Some((count, received));
+                    replies.push(mission_request_frame(
+                        self.to_gcs(),
+                        sequence,
+                        expected + 1,
+                        kind,
+                    ));
+                    self.upload = Some((kind, count, received));
                 }
             }
             _ => {}
@@ -1376,6 +1412,23 @@ impl FakeVehicle {
     fn next(&mut self) -> u8 {
         self.sequence = self.sequence.wrapping_add(1);
         self.sequence
+    }
+
+    /// What it keeps of one kind: the mission, the fence or rally points.
+    fn stored(&self, kind: u8) -> &[crate::decode::MissionItemInt] {
+        match kind {
+            1 => &self.fence,
+            2 => &self.rally,
+            _ => &self.mission,
+        }
+    }
+
+    fn store(&mut self, kind: u8, items: Vec<crate::decode::MissionItemInt>) {
+        match kind {
+            1 => self.fence = items,
+            2 => self.rally = items,
+            _ => self.mission = items,
+        }
     }
 
     /// A take-off's climb since the last telemetry, at 5 m/s.

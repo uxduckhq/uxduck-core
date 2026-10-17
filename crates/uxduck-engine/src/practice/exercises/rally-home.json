@@ -1,0 +1,53 @@
+{
+  "id": "rally-home",
+  "version": 1,
+  "title": "Rally home",
+  "audience": "basics",
+  "vehicles": ["multicopter"],
+  "goal": "Add a rally point, fly away, and see Return to launch go to the rally point instead of home.",
+  "start": { "heightM": 30 },
+  "features": [
+    {
+      "id": "rally-spot",
+      "label": "Rally point here",
+      "offset": { "bearingDeg": 270, "distanceM": 200 },
+      "radiusM": 25
+    },
+    {
+      "id": "far",
+      "label": "Fly out to here",
+      "offset": { "bearingDeg": 270, "distanceM": 450 },
+      "radiusM": 40
+    }
+  ],
+  "steps": [
+    {
+      "text": "On the plan's Rally tab, add a rally point in the ring, then upload the plan.",
+      "hint": "Rally: click inside the ring. Upload sends the rally points with the mission.",
+      "hintAfterS": 120,
+      "all": [{ "check": "rallyWithin", "feature": "rally-spot" }]
+    },
+    {
+      "text": "Fly out to the far ring, then press Return to launch.",
+      "hint": "Use Fly to on the far ring.",
+      "hintAfterS": 120,
+      "all": [
+        { "check": "within", "feature": "far" },
+        { "check": "commandSent", "command": "rtl" }
+      ]
+    },
+    {
+      "text": "Watch it go to the rally point, nearer than home, and land there.",
+      "hintAfterS": 180,
+      "all": [{ "check": "landed" }, { "check": "within", "feature": "rally-spot" }]
+    }
+  ],
+  "fails": [
+    {
+      "all": [{ "check": "landed" }, { "check": "outside", "feature": "rally-spot" }],
+      "says": "Failed. Landed {distance:rally-spot} m from the rally point."
+    }
+  ],
+  "passed": "Passed. Landed {distance:rally-spot} m from the rally point.",
+  "measure": { "measure": "distanceTo", "feature": "rally-spot" }
+}

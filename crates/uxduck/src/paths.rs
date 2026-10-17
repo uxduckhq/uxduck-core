@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The data directory: `--data-dir`, then `UXDUCK_DATA_DIR`, then the
-/// platform's local data directory. `--dev` uses a `dev` directory inside it,
-/// so development never touches the real configuration.
+/// platform's local data directory: `UXDuck` for a release, and
+/// `UXDuck-dev` beside it for `--dev` and for every development build, so
+/// development never touches the real configuration and a release on the
+/// same computer starts as a new user's does (maintainer, 2026-10-16).
 #[must_use]
 pub fn data_dir(explicit: Option<&Path>, dev: bool) -> PathBuf {
     if let Some(dir) = explicit {
@@ -15,14 +17,104 @@ pub fn data_dir(explicit: Option<&Path>, dev: bool) -> PathBuf {
     if let Some(dir) = std::env::var_os("UXDUCK_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    let base = platform_data_dir();
-    if dev { base.join("dev") } else { base }
+    if dev || cfg!(debug_assertions) {
+        dev_data_dir()
+    } else {
+        platform_data_dir()
+    }
+}
+
+/// The development data directory. Before 2026-10-16 it was `dev` inside
+/// the release's; that one is moved here once no daemon runs from it, and
+/// used where it is until then.
+fn dev_data_dir() -> PathBuf {
+    let old = platform_data_dir().join("dev");
+    let new = platform_dev_data_dir();
+    move_old_dev_dir(&old, &new).unwrap_or(new)
+}
+
+/// Moves `old` to `new` when `new` is not there yet. Gives `old` while a
+/// daemon holds its lock, so that daemon and its clients keep finding each
+/// other; nothing when there is nothing to move or it moved.
+fn move_old_dev_dir(old: &Path, new: &Path) -> Option<PathBuf> {
+    if new.exists() || !old.is_dir() {
+        return None;
+    }
+    let in_use =
+        std::fs::File::open(old.join("daemon.lock")).is_ok_and(|lock| lock.try_lock().is_err());
+    if in_use {
+        return Some(old.to_owned());
+    }
+    if let Some(parent) = new.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(old, new) {
+        Ok(()) => {
+            tracing::info!(from = %old.display(), to = %new.display(), "development data moved");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, from = %old.display(), "development data could not move");
+            Some(old.to_owned())
+        }
+    }
+}
+
+/// How a terminal reaches a development daemon: `uxduck` on the path is the
+/// installed release with its own data directory, so this names the
+/// daemon's own executable and directory instead.
+#[derive(Clone, Debug)]
+pub struct DevCli {
+    exe: String,
+    dir: String,
+}
+
+impl DevCli {
+    #[must_use]
+    pub fn new(data_dir: &Path) -> Self {
+        let exe = std::env::current_exe()
+            .map_or_else(|_| "uxduck".into(), |p| shell_word(&p.to_string_lossy()));
+        let dir = if data_dir == dev_data_dir() {
+            "--dev".into()
+        } else {
+            format!("--data-dir {}", shell_word(&data_dir.to_string_lossy()))
+        };
+        Self { exe, dir }
+    }
+
+    /// `uxduck rpc call <method> --json '<params>'` for this daemon.
+    #[must_use]
+    pub fn rpc_call(&self, method: &str, params: &serde_json::Value) -> String {
+        let json = shell_word(&params.to_string());
+        format!("{} rpc call {method} --json {json} {}", self.exe, self.dir)
+    }
+}
+
+/// Quotes `text` for a POSIX shell when it needs it.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@,=".contains(c))
+    {
+        return text.to_owned();
+    }
+    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 /// The platform's local data directory for UXDuck.
 fn platform_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("com", "uxduck", "UXDuck").map_or_else(
-        || std::env::temp_dir().join("uxduck"),
+    project_dir("UXDuck", "uxduck")
+}
+
+/// Its development twin: `com.uxduck.UXDuck-dev` beside it on a Mac.
+fn platform_dev_data_dir() -> PathBuf {
+    project_dir("UXDuck-dev", "uxduck-dev")
+}
+
+fn project_dir(application: &str, temporary: &str) -> PathBuf {
+    directories::ProjectDirs::from("com", "uxduck", application).map_or_else(
+        || std::env::temp_dir().join(temporary),
         |dirs| dirs.data_local_dir().to_path_buf(),
     )
 }
@@ -34,10 +126,9 @@ fn platform_data_dir() -> PathBuf {
 /// platform with no videos folder.
 #[must_use]
 pub fn recordings_dir(data_dir: &Path) -> PathBuf {
-    let platform = platform_data_dir();
-    let name = if data_dir == platform {
+    let name = if data_dir == platform_data_dir() {
         "UXDuck"
-    } else if data_dir == platform.join("dev") {
+    } else if data_dir == dev_data_dir() {
         "UXDuck (dev)"
     } else {
         return data_dir.join("video");
@@ -185,6 +276,59 @@ mod tests {
         );
         assert_eq!(socket, socket_path(&long));
         assert_ne!(socket, socket_path(&long.join("dev")));
+    }
+
+    #[test]
+    fn a_dev_command_names_this_daemon_and_quotes_for_a_shell() {
+        assert_eq!(
+            shell_word("/a/target/debug/uxduck"),
+            "/a/target/debug/uxduck"
+        );
+        assert_eq!(shell_word("/My Data/it's"), r"'/My Data/it'\''s'");
+        let dev = DevCli::new(&dev_data_dir());
+        let command = dev.rpc_call("pairing/approve", &serde_json::json!({ "code": "123456" }));
+        assert!(
+            command.ends_with(r#" rpc call pairing/approve --json '{"code":"123456"}' --dev"#),
+            "{command}"
+        );
+        let other = DevCli::new(Path::new("/tmp/snap shot"));
+        assert!(
+            other
+                .rpc_call("pairing/list", &serde_json::json!({}))
+                .ends_with(" --data-dir '/tmp/snap shot'")
+        );
+    }
+}
+
+#[cfg(test)]
+mod dev_dir_tests {
+    use super::*;
+
+    #[test]
+    fn development_has_a_folder_of_its_own_beside_the_releases() {
+        let (release, dev) = (platform_data_dir(), platform_dev_data_dir());
+        assert_ne!(release, dev);
+        assert!(!dev.starts_with(&release), "{}", dev.display());
+        assert!(dev.to_string_lossy().to_lowercase().contains("uxduck-dev"));
+    }
+
+    #[test]
+    fn the_old_dev_folder_moves_once_and_stays_while_a_daemon_runs_from_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = (tmp.path().join("UXDuck/dev"), tmp.path().join("UXDuck-dev"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("uxduck.db"), b"db").unwrap();
+        let lock = std::fs::File::create(old.join("daemon.lock")).unwrap();
+        lock.lock().unwrap();
+        assert_eq!(move_old_dev_dir(&old, &new), Some(old.clone()));
+        assert!(!new.exists());
+        drop(lock);
+        assert_eq!(move_old_dev_dir(&old, &new), None);
+        assert_eq!(std::fs::read(new.join("uxduck.db")).unwrap(), b"db");
+        assert!(!old.exists());
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(move_old_dev_dir(&old, &new), None, "never over the new one");
+        assert!(old.exists());
     }
 }
 

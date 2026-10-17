@@ -14,7 +14,7 @@ use uxduck_mavlink::transfers::{Failure as Lost, Param};
 use crate::Engine;
 use crate::commands::Outcome;
 use crate::runtime::{CommandOrder, FileOp, TransferOrder};
-use crate::transfers::{Failure, Reported};
+use crate::transfers::{Failure, ProgressKind, Reported};
 use crate::vehicle_files::FileReport;
 use uxduck_mavlink::files;
 
@@ -124,6 +124,26 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
         TransferOrder::DownloadMission { vehicle_id } => {
             session.download_mission(&vehicle_id, now_us)
         }
+        TransferOrder::DownloadMissionPart { vehicle_id, kind } => {
+            session.download_mission_part(&vehicle_id, kind, now_us)
+        }
+        TransferOrder::UploadMissionPart {
+            order_id,
+            vehicle_id,
+            items,
+            kind,
+        } => {
+            let items = items
+                .iter()
+                .enumerate()
+                .map(|(seq, item)| {
+                    let mut item = to_mavlink((seq, item));
+                    item.mission_type = kind;
+                    item
+                })
+                .collect();
+            session.upload_mission_part(&order_id, &vehicle_id, items, kind, now_us)
+        }
         TransferOrder::UploadMission {
             order_id,
             vehicle_id,
@@ -147,6 +167,14 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
         TransferOrder::CancelFile { vehicle_id, id } => {
             session.cancel_file(&vehicle_id, &id, now_us)
         }
+        TransferOrder::CancelTransfer { vehicle_id, kind } => session.cancel_transfer(
+            &vehicle_id,
+            match kind {
+                ProgressKind::Parameters => session::TransferKind::Parameters,
+                ProgressKind::MissionDownload => session::TransferKind::MissionDownload,
+                ProgressKind::MissionUpload => session::TransferKind::MissionUpload,
+            },
+        ),
         TransferOrder::TerrainData {
             vehicle_id,
             block,
@@ -183,6 +211,7 @@ fn file_report(event: files::Event) -> Option<FileReport> {
 }
 
 /// What to tell the engine about a transfer effect, if it is one.
+#[allow(clippy::too_many_lines)]
 fn transfer_report(effect: Effect) -> Option<Report> {
     Some(match effect {
         Effect::Booted {
@@ -226,9 +255,33 @@ fn transfer_report(effect: Effect) -> Option<Report> {
                 .map_err(failure);
             Box::new(move |e| e.mission_downloaded(&vehicle_id, result))
         }
+        Effect::MissionPart {
+            vehicle_id,
+            kind,
+            result,
+        } => {
+            let result = result
+                .map(|items| items.iter().map(from_mavlink).collect())
+                .map_err(failure);
+            Box::new(move |e| e.mission_part_downloaded(&vehicle_id, kind, result))
+        }
         Effect::MissionUploaded { order_id, result } => {
             let result = result.map_err(failure);
             Box::new(move |e| e.mission_uploaded(&order_id, result))
+        }
+        Effect::Progress {
+            vehicle_id,
+            transfer,
+            done,
+            total,
+            attempt,
+        } => {
+            let kind = match transfer {
+                session::TransferKind::Parameters => ProgressKind::Parameters,
+                session::TransferKind::MissionDownload => ProgressKind::MissionDownload,
+                session::TransferKind::MissionUpload => ProgressKind::MissionUpload,
+            };
+            Box::new(move |e| e.transfer_progress(&vehicle_id, kind, done, total, attempt))
         }
         Effect::StatusText {
             vehicle_id,

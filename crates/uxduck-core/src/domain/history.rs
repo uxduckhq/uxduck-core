@@ -53,6 +53,13 @@ pub enum HistoryEvent {
         snapshot_id: String,
         name: String,
     },
+    /// Its mission changed (S134): the record in its missions over time,
+    /// and what happened in words ("Mission uploaded from Ridge survey: 38
+    /// items, a fence").
+    MissionChanged {
+        record_id: String,
+        text: String,
+    },
     /// A parameter's value changed (S74), with who or what changed it and,
     /// when they gave one, why. Changes of one parameter in one sitting
     /// fold into one entry (H3): `from` is the value before the first,
@@ -149,6 +156,7 @@ impl HistoryEvent {
             },
             Self::TypeChanged { from, to } => format!("Type changed from {from} to {to}"),
             Self::SnapshotSaved { name, .. } => format!("Snapshot “{name}” saved"),
+            Self::MissionChanged { text, .. } => text.clone(),
             Self::ParameterChanged {
                 name,
                 from,

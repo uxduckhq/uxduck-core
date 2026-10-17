@@ -1,0 +1,7 @@
+{
+  "method": "tray/location",
+  "params": {
+    "state": "denied",
+    "reason": "Location is off for UXDuck. Turn it on in System Settings › Privacy & Security › Location Services."
+  }
+}

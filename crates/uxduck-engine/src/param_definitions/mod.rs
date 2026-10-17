@@ -264,7 +264,7 @@ impl Engine {
         );
         let detail = match matched {
             Match::Approximate => Some(format!(
-                "Descriptions are from {title}; this vehicle runs {}.",
+                "Descriptions are from {title}. This vehicle runs {}.",
                 vehicle
                     .firmware
                     .as_deref()
@@ -296,7 +296,7 @@ impl Engine {
             Catalogue::Failed(why) => (
                 DefinitionsStatus::Missing,
                 Some(format!(
-                    "No descriptions: {why}. Names and values only; add your own in Settings > Parameters."
+                    "No descriptions: {why}. Names and values only. Add your own in Settings > Parameters."
                 )),
             ),
             Catalogue::Ready(_) => (
@@ -512,7 +512,7 @@ impl Engine {
         let firmware = given
             .firmware
             .or(from_file)
-            .ok_or_else(|| invalid("the file does not say which firmware it documents; give it"))?;
+            .ok_or_else(|| invalid("the file does not say which firmware it documents. Give it"))?;
         if let Some(given) = given.version.clone().filter(|v| !v.trim().is_empty()) {
             version = Some(given.trim().to_owned());
         }

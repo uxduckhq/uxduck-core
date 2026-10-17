@@ -1,0 +1,12 @@
+{
+  "method": "video/capture",
+  "params": {
+    "input": {
+      "deviceId": "avfoundation:usb-A",
+      "name": "USB Video",
+      "enabled": true,
+      "standard": "pal",
+      "deinterlace": true
+    }
+  }
+}
