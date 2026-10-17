@@ -2625,7 +2625,13 @@ async fn fake_vehicle(
                 }
             }
             received = socket.recv_from(&mut buffer) => {
-                let (len, from) = received?;
+                let (len, from) = match received {
+                    Ok(received) => received,
+                    // Windows reports an earlier datagram's port unreachable
+                    // here when nothing listens at --to yet; keep sending.
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 for reply in vehicle.answer(&buffer[..len]) {
                     socket.send_to(&reply, from).await?;
                 }
