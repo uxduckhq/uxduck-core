@@ -383,7 +383,8 @@ mod tests {
     #[test]
     fn the_table_matches_mavios_definitions() {
         assert!(
-            generate() == include_str!("dialect/ardupilotmega.rs"),
+            // A Windows checkout may have CRLF line endings.
+            generate() == include_str!("dialect/ardupilotmega.rs").replace("\r\n", "\n"),
             "the dialect table is out of date: run `cargo xtask mavlink-dialect`"
         );
     }

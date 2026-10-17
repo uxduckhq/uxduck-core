@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "c5e3d7947e237628aded1791b2660dfede72e9e6",
+  "sourceCommit": "f88dfae25001d1a8b4e51e6c4543cbe4c25ae7b6",
   "licenseReady": true,
   "files": [
     {
@@ -4076,7 +4076,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/dialect.rs",
-      "sha256": "636594f7dd5b4500a0addc27f6fc64112997434a7dcce7161f074f2959187d4a",
+      "sha256": "f177bb0e5370d43b8b87a58bb8170481a3c5a3e42510a242c1b872a6e0464f0b",
       "executable": false
     },
     {
