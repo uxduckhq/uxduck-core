@@ -14,7 +14,7 @@
   "features": [{ "id": "home", "label": "Home", "radiusM": 20 }],
   "steps": [
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home and lands it by itself.",
       "hintAfterS": 60,
       "all": [{ "check": "commandSent", "command": "rtl" }]

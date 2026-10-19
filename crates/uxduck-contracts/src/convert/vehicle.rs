@@ -176,6 +176,7 @@ impl From<core_link::SimVehicle> for link::SimVehicle {
             core_link::SimVehicle::Boat => Self::Boat,
             core_link::SimVehicle::Submarine => Self::Submarine,
             core_link::SimVehicle::Airship => Self::Airship,
+            core_link::SimVehicle::Jet => Self::Jet,
         }
     }
 }
@@ -190,6 +191,7 @@ impl From<link::SimVehicle> for core_link::SimVehicle {
             link::SimVehicle::Boat => Self::Boat,
             link::SimVehicle::Submarine => Self::Submarine,
             link::SimVehicle::Airship => Self::Airship,
+            link::SimVehicle::Jet => Self::Jet,
         }
     }
 }

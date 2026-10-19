@@ -7,7 +7,12 @@
 //! The parameter sets go in `avcC` or `hvcC` from the first keyframe, and
 //! stay in the pictures too, so a camera that changes them mid-recording
 //! still plays in Chromium.
+//!
+//! A camera's sound, when it has one, is a second track (S147): AAC as
+//! `mp4a` with its `esds`, or Opus with its `dOps` (S149), counted at its
+//! own rate, its frames in each fragment's `mdat` after the pictures.
 
+use crate::audio::AudioConfig;
 use crate::bits::unescape_rbsp;
 use crate::nal::{Codec, h264, h265, parse_header, split_annex_b};
 
@@ -158,8 +163,134 @@ fn sample_entry(codec: Codec, sets: &ParameterSets, width: u16, height: u16) -> 
 
 /// `ftyp` and `moov` for one video track.
 #[must_use]
-#[allow(clippy::similar_names, reason = "the names are the boxes' own")]
 pub fn init_segment(codec: Codec, sets: &ParameterSets, width: u16, height: u16) -> Vec<u8> {
+    init_segment_with_sound(codec, sets, width, height, None)
+}
+
+/// An MPEG-4 descriptor: its tag, a one-byte length and its body.
+fn descriptor(tag: u8, body: &[u8]) -> Vec<u8> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "these descriptors are short"
+    )]
+    let mut out = vec![tag, body.len() as u8];
+    out.extend_from_slice(body);
+    out
+}
+
+/// The sound's sample entry: `mp4a` with its `esds` (AAC, its
+/// `AudioSpecificConfig`), or `Opus` with its `dOps`, each with its rate
+/// and channels.
+fn sound_entry(sound: AudioConfig) -> Vec<u8> {
+    let mut b = vec![0u8; 6];
+    b.extend_from_slice(&1u16.to_be_bytes());
+    b.extend_from_slice(&[0u8; 8]);
+    b.extend_from_slice(&u16::from(sound.channels()).to_be_bytes());
+    b.extend_from_slice(&16u16.to_be_bytes());
+    b.extend_from_slice(&[0u8; 4]);
+    // 16.16; a rate above 65535 Hz says 0 here, and the esds says it.
+    let rate = if sound.sample_rate() <= 0xFFFF {
+        sound.sample_rate()
+    } else {
+        0
+    };
+    b.extend_from_slice(&(rate << 16).to_be_bytes());
+    let sound = match sound {
+        AudioConfig::Aac(aac) => aac,
+        AudioConfig::Opus(opus) => {
+            b.extend(mp4_box(*b"dOps", &opus.dops()));
+            return mp4_box(*b"Opus", &b);
+        }
+    };
+    let specific = descriptor(0x05, &sound.audio_specific_config());
+    // MPEG-4 audio (0x40), an audio stream (5) going up, no buffer or rates given.
+    let mut config = vec![0x40, (0x05 << 2) | 1, 0, 0, 0];
+    config.extend_from_slice(&[0u8; 8]);
+    config.extend(specific);
+    let mut es = 2u16.to_be_bytes().to_vec();
+    es.push(0);
+    es.extend(descriptor(0x04, &config));
+    es.extend(descriptor(0x06, &[0x02]));
+    b.extend(full_box(*b"esds", 0, 0, &descriptor(0x03, &es)));
+    mp4_box(*b"mp4a", &b)
+}
+
+/// The sound's `trak`: track 2, at its sampling rate.
+#[allow(clippy::similar_names, reason = "the names are the boxes' own")]
+fn sound_track(sound: AudioConfig) -> Vec<u8> {
+    let mut tkhd = vec![0u8; 8];
+    tkhd.extend_from_slice(&2u32.to_be_bytes());
+    tkhd.extend_from_slice(&[0u8; 4]);
+    tkhd.extend_from_slice(&0u32.to_be_bytes());
+    tkhd.extend_from_slice(&[0u8; 8]);
+    // Layer 0, alternate group 1, full volume.
+    tkhd.extend_from_slice(&[0, 0, 0, 1, 0x01, 0x00, 0, 0]);
+    tkhd.extend(matrix());
+    tkhd.extend_from_slice(&[0u8; 8]);
+    let tkhd = full_box(*b"tkhd", 0, 3, &tkhd);
+    let mut mdhd = vec![0u8; 8];
+    mdhd.extend_from_slice(&sound.sample_rate().to_be_bytes());
+    mdhd.extend_from_slice(&0u32.to_be_bytes());
+    mdhd.extend_from_slice(&0x55c4u16.to_be_bytes());
+    mdhd.extend_from_slice(&0u16.to_be_bytes());
+    let mdhd = full_box(*b"mdhd", 0, 0, &mdhd);
+    let hdlr = full_box(
+        *b"hdlr",
+        0,
+        0,
+        b"\0\0\0\0soun\0\0\0\0\0\0\0\0\0\0\0\0UXDuck sound\0",
+    );
+    let smhd = full_box(*b"smhd", 0, 0, &[0u8; 4]);
+    let dref = full_box(
+        *b"dref",
+        0,
+        0,
+        &[&1u32.to_be_bytes()[..], &full_box(*b"url ", 0, 1, &[])].concat(),
+    );
+    let dinf = mp4_box(*b"dinf", &dref);
+    let stsd = full_box(
+        *b"stsd",
+        0,
+        0,
+        &[&1u32.to_be_bytes()[..], &sound_entry(sound)].concat(),
+    );
+    let empty = |kind: [u8; 4]| full_box(kind, 0, 0, &0u32.to_be_bytes());
+    let stsz = full_box(*b"stsz", 0, 0, &[0u8; 8]);
+    let stbl = mp4_box(
+        *b"stbl",
+        &[
+            stsd,
+            empty(*b"stts"),
+            empty(*b"stsc"),
+            stsz,
+            empty(*b"stco"),
+        ]
+        .concat(),
+    );
+    let minf = mp4_box(*b"minf", &[smhd, dinf, stbl].concat());
+    let mdia = mp4_box(*b"mdia", &[mdhd, hdlr, minf].concat());
+    mp4_box(*b"trak", &[tkhd, mdia].concat())
+}
+
+/// A `trex` for a track: sample description 1, nothing else by default.
+fn trex(track: u32) -> Vec<u8> {
+    let mut b = track.to_be_bytes().to_vec();
+    b.extend_from_slice(&1u32.to_be_bytes());
+    b.extend_from_slice(&[0u8; 12]);
+    full_box(*b"trex", 0, 0, &b)
+}
+
+/// `ftyp` and `moov` for the video track and, with `sound`, the camera's
+/// sound as track 2 (S147, S149).
+#[must_use]
+#[allow(clippy::similar_names, reason = "the names are the boxes' own")]
+pub fn init_segment_with_sound(
+    codec: Codec,
+    sets: &ParameterSets,
+    width: u16,
+    height: u16,
+    sound: Option<&AudioConfig>,
+) -> Vec<u8> {
     let ftyp = mp4_box(*b"ftyp", b"iso6\0\0\x02\0iso6mp41");
     let mut mvhd = vec![0u8; 8];
     mvhd.extend_from_slice(&1000u32.to_be_bytes());
@@ -169,7 +300,8 @@ pub fn init_segment(codec: Codec, sets: &ParameterSets, width: u16, height: u16)
     mvhd.extend_from_slice(&[0u8; 10]);
     mvhd.extend(matrix());
     mvhd.extend_from_slice(&[0u8; 24]);
-    mvhd.extend_from_slice(&2u32.to_be_bytes());
+    // The next track's id.
+    mvhd.extend_from_slice(&(if sound.is_some() { 3u32 } else { 2 }).to_be_bytes());
     let mvhd = full_box(*b"mvhd", 0, 0, &mvhd);
 
     let mut tkhd = vec![0u8; 8];
@@ -229,12 +361,23 @@ pub fn init_segment(codec: Codec, sets: &ParameterSets, width: u16, height: u16)
     let minf = mp4_box(*b"minf", &[vmhd, dinf, stbl].concat());
     let mdia = mp4_box(*b"mdia", &[mdhd, hdlr, minf].concat());
     let trak = mp4_box(*b"trak", &[tkhd, mdia].concat());
-    let mut trex = 1u32.to_be_bytes().to_vec();
-    trex.extend_from_slice(&1u32.to_be_bytes());
-    trex.extend_from_slice(&[0u8; 12]);
-    let mvex = mp4_box(*b"mvex", &full_box(*b"trex", 0, 0, &trex));
-    let moov = mp4_box(*b"moov", &[mvhd, trak, mvex].concat());
+    let (sound_trak, sound_trex) = sound.map_or_else(
+        || (Vec::new(), Vec::new()),
+        |sound| (sound_track(*sound), trex(2)),
+    );
+    let mvex = mp4_box(*b"mvex", &[trex(1), sound_trex].concat());
+    let moov = mp4_box(*b"moov", &[mvhd, trak, sound_trak, mvex].concat());
     [ftyp, moov].concat()
+}
+
+/// A fragment's sound (S147): frames from `decode_time`, counted at the
+/// track's rate, each as long as `durations` says (1024 for AAC; an Opus
+/// packet's own, S149).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundRun<'a> {
+    pub decode_time: u64,
+    pub frames: &'a [&'a [u8]],
+    pub durations: &'a [u32],
 }
 
 /// One picture for a fragment.
@@ -251,6 +394,18 @@ pub struct Sample<'a> {
 /// [`TIMESCALE`] units since the recording began).
 #[must_use]
 pub fn fragment(sequence: u32, decode_time: u64, samples: &[Sample<'_>]) -> Vec<u8> {
+    fragment_with_sound(sequence, decode_time, samples, None)
+}
+
+/// The same with the sound that plays alongside, as track 2's `traf`, its
+/// frames after the pictures in the `mdat` (S147).
+#[must_use]
+pub fn fragment_with_sound(
+    sequence: u32,
+    decode_time: u64,
+    samples: &[Sample<'_>],
+    sound: Option<SoundRun<'_>>,
+) -> Vec<u8> {
     let mut mdat_body = Vec::new();
     let mut entries = Vec::new();
     for sample in samples {
@@ -282,14 +437,52 @@ pub fn fragment(sequence: u32, decode_time: u64, samples: &[Sample<'_>]) -> Vec<
         // Data offset, and each sample's duration, size and flags.
         full_box(*b"trun", 0, 0x0701, &b)
     };
-    let moof_len = 8 + mfhd.len() + 8 + tfhd.len() + tfdt.len() + trun_for(0).len();
+    let video_bytes = mdat_body.len();
+    // The sound's traf: its frames' sizes, each a frame long.
+    let sound_traf_for = |run: &SoundRun<'_>, offset: u32| {
+        let tfhd = full_box(*b"tfhd", 0, 0x02_0000, &2u32.to_be_bytes());
+        let tfdt = full_box(*b"tfdt", 1, 0, &run.decode_time.to_be_bytes());
+        #[allow(clippy::cast_possible_truncation, reason = "a fragment's frames")]
+        let mut b = (run.frames.len() as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(&offset.to_be_bytes());
+        for (frame, duration) in run.frames.iter().zip(run.durations) {
+            b.extend_from_slice(&duration.to_be_bytes());
+            #[allow(clippy::cast_possible_truncation, reason = "a frame of sound is small")]
+            b.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        }
+        // Data offset, and each frame's duration and size.
+        mp4_box(
+            *b"traf",
+            &[tfhd, tfdt, full_box(*b"trun", 0, 0x0301, &b)].concat(),
+        )
+    };
+    let sound = sound.filter(|run| !run.frames.is_empty());
+    let sound_len = sound.as_ref().map_or(0, |run| sound_traf_for(run, 0).len());
+    let moof_len = 8 + mfhd.len() + 8 + tfhd.len() + tfdt.len() + trun_for(0).len() + sound_len;
     #[allow(clippy::cast_possible_truncation, reason = "a moof is small")]
     let traf = mp4_box(
         *b"traf",
         &[tfhd, tfdt, trun_for((moof_len + 8) as u32)].concat(),
     );
-    let moof = mp4_box(*b"moof", &[mfhd, traf].concat());
+    let mut trafs = vec![mfhd, traf];
+    if let Some(run) = &sound {
+        #[allow(clippy::cast_possible_truncation, reason = "a fragment is below 4 GB")]
+        trafs.push(sound_traf_for(run, (moof_len + 8 + video_bytes) as u32));
+        for frame in run.frames {
+            mdat_body.extend_from_slice(frame);
+        }
+    }
+    let moof = mp4_box(*b"moof", &trafs.concat());
     [moof, mp4_box(*b"mdat", &mdat_body)].concat()
+}
+
+/// Whether a `traf` is the video's: track 1, as its `tfhd` says.
+fn is_video(traf: &[u8]) -> bool {
+    children(traf)
+        .iter()
+        .find(|(kind, _)| *kind == b"tfhd")
+        .and_then(|(_, body)| body.get(4..8))
+        .is_none_or(|id| id == 1u32.to_be_bytes())
 }
 
 /// How much of a recording is whole: the init segment and every fragment
@@ -343,8 +536,9 @@ pub fn duration_us(file: &[u8]) -> u64 {
         if kind != b"moof" {
             continue;
         }
+        // The video's time; the sound's counts at another rate.
         for (kind, traf) in children(moof) {
-            if kind != b"traf" {
+            if kind != b"traf" || !is_video(traf) {
                 continue;
             }
             for (kind, trun) in children(traf) {
@@ -416,7 +610,7 @@ pub fn layout_from<R: std::io::Read + std::io::Seek>(
                 };
                 let (mut base, mut ticks) = (0u64, 0u64);
                 for (kind, traf) in children(&moof) {
-                    if kind != b"traf" {
+                    if kind != b"traf" || !is_video(traf) {
                         continue;
                     }
                     for (kind, body) in children(traf) {

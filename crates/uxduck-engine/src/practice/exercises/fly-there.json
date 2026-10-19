@@ -28,7 +28,7 @@
   ],
   "steps": [
     {
-      "text": "Press Go to in the Control tab, then click ring 1 on the map.",
+      "text": "Press Go to in the Cockpit tab, then click ring 1 on the map.",
       "hint": "Go to sends it to the place you clicked and holds it there.",
       "hintAfterS": 60,
       "all": [

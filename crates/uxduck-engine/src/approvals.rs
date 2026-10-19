@@ -78,6 +78,10 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VideoAdd(_)
         | ClientRequest::VideoRemove(_)
         | ClientRequest::VideoRecord(_)
+        | ClientRequest::VideoRecordAll(_)
+        | ClientRequest::VideoRecordWithOthers(_)
+        | ClientRequest::VideoPhoto(_)
+        | ClientRequest::VideoVehicleCamera(_)
         | ClientRequest::VehicleEditNote(_)
         | ClientRequest::VehicleDeleteNote(_)
         | ClientRequest::MappingUpdate(_)
@@ -394,6 +398,25 @@ impl Engine {
                 if params.on { "start" } else { "stop" },
                 params.source_id
             ),
+            ClientRequest::VideoPhoto(params) => {
+                format!("keep a photo from the camera {}", params.source_id)
+            }
+            ClientRequest::VideoRecordAll(params) => if params.on {
+                "start recording every camera that records with the others"
+            } else {
+                "stop recording every camera"
+            }
+            .into(),
+            ClientRequest::VideoRecordWithOthers(params) => format!(
+                "{} the camera {} when the others record",
+                if params.on { "include" } else { "leave out" },
+                params.source_id
+            ),
+            ClientRequest::VideoVehicleCamera(params) => format!(
+                "{} the vehicle's own camera along with the camera {}",
+                if params.on { "use" } else { "stop using" },
+                params.source_id
+            ),
             ClientRequest::FindStart(_) | ClientRequest::FindVehicles(_) => {
                 let subnets = self.finding_subnets().join(", ");
                 if subnets.is_empty() {
@@ -461,6 +484,10 @@ impl Engine {
             | ClientRequest::VideoAdd(_)
             | ClientRequest::VideoRemove(_)
             | ClientRequest::VideoRecord(_)
+            | ClientRequest::VideoRecordAll(_)
+            | ClientRequest::VideoRecordWithOthers(_)
+            | ClientRequest::VideoPhoto(_)
+            | ClientRequest::VideoVehicleCamera(_)
             | ClientRequest::FindStart(_)
             | ClientRequest::FindVehicles(_)) => self.video_summary(request),
             ClientRequest::VehicleDeleteNote(_) => "delete a note from a vehicle's history".into(),
@@ -515,6 +542,7 @@ impl Engine {
                     uxduck_contracts::dto::link::SimVehicle::Boat => "boat",
                     uxduck_contracts::dto::link::SimVehicle::Submarine => "submarine",
                     uxduck_contracts::dto::link::SimVehicle::Airship => "blimp",
+                    uxduck_contracts::dto::link::SimVehicle::Jet => "jet",
                 }
             ),
             ClientRequest::SimStop(_) => "stop a simulated vehicle".into(),

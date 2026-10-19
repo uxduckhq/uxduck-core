@@ -10,8 +10,8 @@ use crate::dto::command::Command;
 pub enum TargetMode {
     /// One vehicle; the client's selection never moves it.
     Pinned,
-    /// The claiming client's selected vehicle, switched only with the
-    /// sticks centred and the change confirmed.
+    /// The claiming client's selected vehicle, switched automatically with
+    /// the sticks centred.
     FollowsSelection,
 }
 
@@ -37,11 +37,14 @@ pub struct Controller {
     /// The vehicle it drives while claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// Where the selection moved; the switch waits for neutral sticks and
-    /// `controller/setTarget`.
+    /// Where the selection moved; the switch waits for neutral sticks or
+    /// another target admission check. `controller/setTarget` retries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_target: Option<String>,
     pub mapping_id: String,
+    /// Why input is paused; the controller remains claimed and assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_pause: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -219,7 +222,7 @@ pub struct ControllerClaimParams {
 
 /// Changes what a claimed controller drives: the mode, and for `pinned`
 /// the vehicle. Moving to another vehicle needs the sticks centred; this is
-/// also how a pending switch is confirmed.
+/// also how a pending switch can be retried explicitly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerSetTargetParams {
@@ -339,7 +342,7 @@ pub struct ControllerInputsResult {
     pub controllers: Vec<ControllerInputs>,
 }
 
-/// Explicitly starts keyboard piloting of one simulation, with neutral steering.
+/// Explicitly starts keyboard piloting of one vehicle, with neutral steering.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardStartParams {

@@ -33,7 +33,7 @@ pub(crate) struct IdleSimulations {
 }
 
 impl Engine {
-    fn has_visible_ui(&self) -> bool {
+    pub(crate) fn has_visible_ui(&self) -> bool {
         self.connections.values().any(|connection| {
             connection.visible
                 && connection.admitted.as_ref().is_some_and(|admitted| {

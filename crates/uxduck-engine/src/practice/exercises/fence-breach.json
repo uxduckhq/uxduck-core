@@ -45,7 +45,7 @@
     },
     {
       "text": "Switch to Auto. It climbs towards the waypoint, through the ceiling.",
-      "hint": "Auto flies the plan from its first item. Fly to refuses a place outside a fence; a mission does not.",
+      "hint": "Auto flies the plan from its first item. Go to refuses a place outside a fence; a mission does not.",
       "hintAfterS": 90,
       "all": [
         {

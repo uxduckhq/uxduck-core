@@ -18,6 +18,8 @@ use crate::{ConnectionId, Engine};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountAction {
     Get,
+    /// Recorded flight-log summaries; a read-only `AccountFlights`.
+    Flights,
     Environment,
     SetEnvironment {
         environment: Option<AccountEnvironment>,
@@ -140,6 +142,7 @@ pub(crate) fn handle(
 ) -> Result<Value, ApiError> {
     let action = match request {
         ClientRequest::AccountGet(_) => AccountAction::Get,
+        ClientRequest::AccountFlights(_) => AccountAction::Flights,
         ClientRequest::AccountEnvironment(_) => AccountAction::Environment,
         ClientRequest::AccountSetEnvironment(p) => {
             allow_environment_change(engine)?;
@@ -181,6 +184,7 @@ pub(crate) fn handle(
     let needed = if matches!(
         action,
         AccountAction::Get
+            | AccountAction::Flights
             | AccountAction::Environment
             | AccountAction::Shared
             | AccountAction::Computers

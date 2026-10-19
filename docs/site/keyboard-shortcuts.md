@@ -19,7 +19,7 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 | Open Settings            | ⌘,    | Ctrl+,            |
 | Show or hide the sidebar | ⌘B    | Ctrl+B            |
 | Show or hide Home        | ⌥H    | Alt+H             |
-| Show or hide Vehicles    | ⌥⇧V   | Alt+Shift+V       |
+| Show or hide Fleet       | ⌥⇧V   | Alt+Shift+V       |
 | Show or hide Places      | ⌥P    | Alt+P             |
 | Send feedback            | ⌥B    | Alt+B             |
 | Open the Map tab         | ⌥M    | Alt+M             |
@@ -27,7 +27,7 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 | Back                     | ⌘[    | Alt+←             |
 | Forward                  | ⌘]    | Alt+→             |
 
-Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever character it types. Most actions leave text fields alone; Settings, the command palette, the sidebar, Home, Vehicles and Places also work while typing. There are none on touch screens; use `>` in the input instead.
+Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever character it types. Most actions leave text fields alone; Settings, the command palette, the sidebar, Home, Fleet and Places also work while typing. There are none on touch screens; use `>` in the input instead.
 
 ## Desktop window shortcuts
 

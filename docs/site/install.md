@@ -24,6 +24,8 @@ sudo apt install ./uxduck-*.deb
 systemctl --user start uxduck
 ```
 
+The desktop window needs no graphics card, so it works in a virtual machine too. To start it with other Chromium switches, such as `--ozone-platform=wayland`, put them in `~/.config/uxduck-flags.conf`, then open UXDuck again.
+
 ## Open the app
 
 Open **UXDuck** from Applications, Spotlight or the Start menu. It starts UXDuck
@@ -50,3 +52,11 @@ uxduck status
 While UXDuck runs, its icon is in the menu bar on a Mac, the notification area on Windows and the tray on Linux. From its menu you can check UXDuck is running, open UXDuck or these docs, send feedback with a screenshot, or quit. On GNOME the icon needs the AppIndicator extension. **Show UXDuck in the menu bar** in **Settings › UXDuck on this computer** turns it off.
 
 **Start UXDuck at login** in **Settings › UXDuck on this computer**, or `uxduck service install`, starts UXDuck when you log in, without a window. `uxduck service uninstall` turns it off.
+
+## Updates
+
+UXDuck downloads new app versions in the background, including with its window closed. It asks before installing. Open **About › App updates** to check, install, or see what is waiting. Installing restarts UXDuck and may ask for your computer's administrator permission.
+
+Choose **Install when idle** to wait for UXDuck’s windows and browser tabs to close and for vehicles, recordings, simulations and other work to finish. UXDuck also waits for a disconnected real vehicle last seen armed to reconnect and confirm it is disarmed. You can cancel the scheduled update; quitting UXDuck cancels it too. Updates never stop that work or restart your computer.
+
+macOS uses its signed installer, Windows uses Windows Installer, and Debian/Ubuntu Linux uses its `.deb` package and polkit. A headless Linux computer can download updates but needs a manual package installation when no desktop authorization agent is available. Interface updates continue separately: **Reload** applies them to an open page.

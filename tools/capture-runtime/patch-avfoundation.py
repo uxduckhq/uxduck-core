@@ -33,8 +33,25 @@ replace('    if (ctx->video_device_index >= 0) {', '''    if (ctx->video_device_
             goto fail;
         }
     } else if (ctx->video_device_index >= 0) {''')
+# The same for a camera's sound input (S148): an exact unique ID, never a
+# name prefix.
+replace('    char            *audio_filename;', '    char            *audio_filename;\n    char            *audio_device_id;')
+replace('    // get audio device\n    if (ctx->audio_device_index >= 0) {', '''    // get audio device
+    if (ctx->audio_device_id) {
+        NSArray *devices = getDevicesWithMediaType(AVMediaTypeAudio);
+        for (AVCaptureDevice *device in devices) {
+            if (!strcmp(ctx->audio_device_id, [[device uniqueID] UTF8String])) {
+                audio_device = device;
+                break;
+            }
+        }
+        if (!audio_device) {
+            av_log(ctx, AV_LOG_ERROR, "The selected sound input is not connected\\n");
+            goto fail;
+        }
+    } else if (ctx->audio_device_index >= 0) {''')
 needle='static const AVOption options[] = {'
-replace(needle, needle+'\n    { "video_device_id", "select the exact AVFoundation unique ID", offsetof(AVFContext, video_device_id), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },')
+replace(needle, needle+'\n    { "video_device_id", "select the exact AVFoundation unique ID", offsetof(AVFContext, video_device_id), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },\n    { "audio_device_id", "select the exact AVFoundation unique ID of a sound input", offsetof(AVFContext, audio_device_id), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },')
 # A zero frame rate means preserve the camera's active mode. FFmpeg's
 # default 29.97fps rejects the many webcams that support exactly 30fps.
 # VIDEO_RATE rejects zero before configure_video_device runs. RATIONAL keeps

@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -35,6 +36,19 @@ const BATCH: usize = 20;
 const MIN_FREE_BYTES: u64 = 2 << 30;
 /// How often the account's storage used is asked for.
 const USAGE_EVERY: Duration = Duration::from_secs(300);
+/// After rounds that failed in a row, the next waits up to this many
+/// rounds: a server with no storage yet is asked about every 5 minutes.
+const MAX_REST_ROUNDS: u32 = 32;
+
+/// Whether this round may cut and upload.
+enum Gate {
+    /// Flights are not stored at all: signed out, no server, or the
+    /// setting off. Nothing is cut, and what waits is let go.
+    Off(String),
+    /// Stored, but not now (a vehicle is armed): nothing is cut yet.
+    Wait(String),
+    Ready,
+}
 
 pub fn start(data_dir: &Path, credentials: FileCredentials, engine: EngineHandle) {
     let spool = match Spool::open(data_dir, data_dir.join("tlogs")) {
@@ -45,9 +59,9 @@ pub fn start(data_dir: &Path, credentials: FileCredentials, engine: EngineHandle
         }
     };
     let api = crate::feedback::api_url();
-    let video = crate::paths::recordings_dir(data_dir);
+    let video = crate::paths::media_dir(data_dir);
     tokio::spawn(run(
-        std::sync::Mutex::new(spool),
+        Arc::new(Mutex::new(spool)),
         video,
         api,
         credentials,
@@ -59,13 +73,34 @@ fn now_us() -> u64 {
     crate::edge::now_ms() * 1000
 }
 
-/// The spool, locked only between awaits: SQLite's connection is not `Sync`.
-type Shared = std::sync::Mutex<Spool>;
+/// The spool, locked only on a blocking thread: SQLite's connection is not `Sync`.
+type Shared = Arc<Mutex<Spool>>;
 
-fn lock(spool: &Shared) -> std::sync::MutexGuard<'_, Spool> {
-    spool
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// The spool's work, on a blocking thread. Its cuts read tlogs and its
+/// queries scan the chunks; on a runtime worker they held up the daemon's
+/// other tasks, and every vehicle's telemetry with them, for seconds each
+/// round.
+async fn on_spool<T: Send + 'static>(
+    spool: &Shared,
+    work: impl FnOnce(&mut Spool) -> T + Send + 'static,
+) -> T {
+    let spool = Arc::clone(spool);
+    let done = tokio::task::spawn_blocking(move || {
+        work(
+            &mut spool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    })
+    .await;
+    match done {
+        Ok(value) => value,
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            // Cancelled only as the runtime shuts down, with this task.
+            Err(_) => std::future::pending().await,
+        },
+    }
 }
 
 async fn run(
@@ -84,53 +119,80 @@ async fn run(
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut usage_asked: Option<std::time::Instant> = None;
     let mut stored_bytes: Option<u64> = None;
+    let mut problem: Option<String> = None;
+    // Rounds that failed in a row, and when the next may try.
+    let mut failed: u32 = 0;
+    let mut rest_until: Option<tokio::time::Instant> = None;
     loop {
         every.tick().await;
         crate::wakes::count("flights: spool and upload");
-        let cut = lock(&spool).cut_every(
-            now_us(),
-            IDLE_US,
-            fast.map_or(crate::spool::CUT_EVERY_US, |ms| ms * 1000),
-        );
-        if let Err(error) = cut {
-            tracing::warn!(%error, "the flight spool could not cut a chunk");
-        }
-        if recordings(&spool, &video, &engine).await.is_err() {
-            return;
-        }
         let token = credentials
             .get(crate::account::TOKEN)
             .filter(|t| !t.is_empty());
-        let problem = match (&api, &client, token) {
-            (None, _, _) | (_, None, _) => Some("This UXDuck has no account server".to_owned()),
-            (_, _, None) => Some("Sign in to store flights in your account".to_owned()),
-            (Some(api), Some(client), Some(token)) => {
-                match engine.run(|e| e.upload_wanted()).await {
-                    Err(_) => return,
-                    Ok(Err(why)) => Some(why),
-                    Ok(Ok(())) => round(&spool, api, client, &token, &engine).await.err(),
+        let Some(gate) = gate(api.as_ref(), client.as_ref(), token.as_ref(), &engine).await else {
+            return;
+        };
+        if matches!(gate, Gate::Off(_))
+            && let Err(error) = on_spool(&spool, Spool::release).await
+        {
+            tracing::warn!(%error, "the flight spool could not let go of its chunks");
+        }
+        let resting = rest_until.is_some_and(|at| tokio::time::Instant::now() < at);
+        let ready = matches!(gate, Gate::Ready) && !resting;
+        // Cut only what a round can send: a backlog the account is not
+        // taking grows no further, and no round reads much.
+        let (waiting, _) = on_spool(&spool, |s| s.backlog()).await.unwrap_or((0, 0));
+        let room = if ready {
+            BATCH.saturating_sub(usize::try_from(waiting).unwrap_or(usize::MAX))
+        } else {
+            0
+        };
+        if room > 0 {
+            let every_us = fast.map_or(crate::spool::CUT_EVERY_US, |ms| ms * 1000);
+            let cut = on_spool(&spool, move |s| {
+                s.cut_every(now_us(), IDLE_US, every_us, room)
+            })
+            .await;
+            if let Err(error) = cut {
+                tracing::warn!(%error, "the flight spool could not cut a chunk");
+            }
+        }
+        if recordings(&spool, &video, &engine, room > 0).await.is_err() {
+            return;
+        }
+        problem = match (gate, &api, &client, &token) {
+            (Gate::Off(why) | Gate::Wait(why), ..) => Some(why),
+            (Gate::Ready, ..) if resting => problem,
+            (Gate::Ready, Some(api), Some(client), Some(token)) => {
+                match round(&spool, api, client, token, &engine).await {
+                    Ok(()) => {
+                        failed = 0;
+                        rest_until = None;
+                        None
+                    }
+                    Err(why) => {
+                        failed = failed.saturating_add(1);
+                        let rounds = 2u32.saturating_pow(failed).min(MAX_REST_ROUNDS);
+                        rest_until = Some(tokio::time::Instant::now() + every.period() * rounds);
+                        Some(why)
+                    }
                 }
             }
+            (Gate::Ready, ..) => problem,
         };
         if problem.is_none()
             && usage_asked.is_none_or(|at: std::time::Instant| at.elapsed() >= USAGE_EVERY)
         {
             usage_asked = Some(std::time::Instant::now());
-            if let (Some(api), Some(client), Some(token)) = (
-                &api,
-                &client,
-                credentials
-                    .get(crate::account::TOKEN)
-                    .filter(|t| !t.is_empty()),
-            ) {
-                stored_bytes = usage(api, client, &token).await.or(stored_bytes);
+            if let (Some(api), Some(client), Some(token)) = (&api, &client, &token) {
+                stored_bytes = usage(api, client, token).await.or(stored_bytes);
             }
         }
-        let (chunks, bytes) = lock(&spool).backlog().unwrap_or((0, 0));
+        let (chunks, bytes) = on_spool(&spool, |s| s.backlog()).await.unwrap_or((0, 0));
         let status = UploadStatus {
             chunks,
             bytes,
-            problem: problem.filter(|_| chunks > 0),
+            problem: problem.clone().filter(|_| chunks > 0),
             stored_bytes,
         };
         if engine
@@ -143,23 +205,89 @@ async fn run(
     }
 }
 
+/// What this round may do; `None` once the engine stopped.
+async fn gate(
+    api: Option<&String>,
+    client: Option<&reqwest::Client>,
+    token: Option<&String>,
+    engine: &EngineHandle,
+) -> Option<Gate> {
+    Some(match (api, client, token) {
+        (None, _, _) | (_, None, _) => Gate::Off("This UXDuck has no account server".into()),
+        (_, _, None) => Gate::Off("Sign in to store flights in your account".into()),
+        _ => match engine
+            .run(|e| (e.stores_flights(), e.upload_wanted()))
+            .await
+            .ok()?
+        {
+            (false, _) => Gate::Off("Storing flights in the account is off".into()),
+            (true, Err(why)) => Gate::Wait(why),
+            (true, Ok(())) => Gate::Ready,
+        },
+    })
+}
+
 /// Recordings into the spool, and what went before it was stored: deleted
 /// by hand or by Settings › Storage, or to make room. `Err` once the engine
 /// stopped.
-async fn recordings(spool: &Shared, video: &Path, engine: &EngineHandle) -> Result<(), ()> {
+/// Their segments are cut only when `cut`, as the tlogs' chunks are.
+async fn recordings(
+    spool: &Shared,
+    video: &Path,
+    engine: &EngineHandle,
+    cut: bool,
+) -> Result<(), ()> {
     let wanted = engine.run(|e| e.video_for_spool()).await.map_err(|_| ())?;
-    let as_spooled = |v: &uxduck_engine::SpoolVideo| crate::spool::Recording {
-        id: v.id.clone(),
-        path: crate::video::recorder::mp4_path(video, &v.id),
-        started_at_us: v.started_at_us,
-        ended: v.ended_at_us.is_some(),
+    let cache = crate::video::playback::cache_dir(video);
+    let kept_as_ts = |v: &uxduck_engine::SpoolVideo| {
+        Path::new(&v.file_name)
+            .extension()
+            .is_some_and(|e| e == "ts")
     };
-    let to_cut: Vec<_> = wanted.iter().filter(|v| v.cut).map(as_spooled).collect();
-    if let Err(error) = lock(spool).cut_video(&to_cut, now_us()) {
+    // A recording kept as MPEG-TS goes to the account as its playback MP4,
+    // so the account's format is unchanged (S151).
+    let as_spooled = |v: &uxduck_engine::SpoolVideo| {
+        let file = video.join(&v.file_name);
+        let ts = kept_as_ts(v);
+        crate::spool::Recording {
+            id: v.id.clone(),
+            path: if ts {
+                crate::video::playback::cached(&cache, &v.id)
+            } else {
+                file.clone()
+            },
+            original: ts.then_some(file),
+            started_at_us: v.started_at_us,
+            ended: v.ended_at_us.is_some(),
+        }
+    };
+    // One kept as MPEG-TS is cut only once it has ended and has its copy.
+    let to_cut: Vec<_> = wanted
+        .iter()
+        .filter(|v| cut && v.cut && (!kept_as_ts(v) || v.ended_at_us.is_some()))
+        .map(as_spooled)
+        .collect();
+    for r in &to_cut {
+        if let Some(original) = r.original.clone()
+            && !r.path.exists()
+        {
+            let to = r.path.clone();
+            let made = tokio::task::spawn_blocking(move || {
+                crate::video::playback::convert(&original, &to)
+            })
+            .await;
+            if !matches!(made, Ok(Ok(()))) {
+                tracing::warn!(recording = %r.id, "a recording could not be prepared for the account");
+            }
+        }
+    }
+    if !to_cut.is_empty()
+        && let Err(error) = on_spool(spool, move |s| s.cut_video(&to_cut, now_us())).await
+    {
         tracing::warn!(%error, "the spool could not cut a recording's segment");
     }
-    let mut lost: Vec<(crate::spool::Lost, bool)> = lock(spool)
-        .find_lost()
+    let mut lost: Vec<(crate::spool::Lost, bool)> = on_spool(spool, Spool::find_lost)
+        .await
         .unwrap_or_default()
         .into_iter()
         .map(|l| (l, false))
@@ -170,7 +298,7 @@ async fn recordings(spool: &Shared, video: &Path, engine: &EngineHandle) -> Resu
             .iter()
             .filter_map(|v| v.ended_at_us.map(|at| (as_spooled(v), at)))
             .collect();
-        match lock(spool).evict(&ended, need) {
+        match on_spool(spool, move |s| s.evict(&ended, need)).await {
             Ok(evicted) => lost.extend(evicted.into_iter().map(|l| (l, true))),
             Err(error) => tracing::warn!(%error, "recordings could not make room"),
         }
@@ -226,7 +354,9 @@ async fn round(
     token: &str,
     engine: &EngineHandle,
 ) -> Result<(), String> {
-    let waiting = lock(spool).waiting(BATCH).map_err(|e| e.to_string())?;
+    let waiting = on_spool(spool, |s| s.waiting(BATCH))
+        .await
+        .map_err(|e| e.to_string())?;
     if waiting.is_empty() {
         return Ok(());
     }
@@ -280,7 +410,10 @@ async fn put_new(
             else {
                 continue;
             };
-            let bytes = lock(spool).bytes(chunk).map_err(|e| e.to_string())?;
+            let wanted = chunk.clone();
+            let bytes = on_spool(spool, move |s| s.bytes(&wanted))
+                .await
+                .map_err(|e| e.to_string())?;
             let put = client
                 .put(url)
                 .header(reqwest::header::CONTENT_LENGTH, bytes.len())
@@ -291,8 +424,9 @@ async fn put_new(
             if !put.status().is_success() {
                 return Err(format!("storage refused a chunk ({})", put.status()));
             }
-            lock(spool)
-                .mark(&chunk.name, State::Uploaded)
+            let name = chunk.name.clone();
+            on_spool(spool, move |s| s.mark(&name, State::Uploaded))
+                .await
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -309,8 +443,8 @@ async fn complete(
     engine: &EngineHandle,
 ) -> Result<(), String> {
     // Everything put, here or in an earlier round: does the account keep it?
-    let put: Vec<_> = lock(spool)
-        .waiting(BATCH)
+    let put: Vec<_> = on_spool(spool, |s| s.waiting(BATCH))
+        .await
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|(_, state)| *state == State::Uploaded)
@@ -340,8 +474,9 @@ async fn complete(
         let Some(chunk) = put.iter().find(|c| *name == c.name.as_str()) else {
             continue;
         };
-        lock(spool)
-            .mark(&chunk.name, State::Acknowledged)
+        let name = chunk.name.clone();
+        on_spool(spool, move |s| s.mark(&name, State::Acknowledged))
+            .await
             .map_err(|e| e.to_string())?;
         let entry = stored.entry(chunk.recording.clone()).or_default();
         entry.0 += 1;
@@ -350,8 +485,9 @@ async fn complete(
     // A chunk the account did not find is put again.
     for name in completed["missing"].as_array().into_iter().flatten() {
         if let Some(name) = name.as_str() {
-            lock(spool)
-                .mark(name, State::Written)
+            let name = name.to_owned();
+            on_spool(spool, move |s| s.mark(&name, State::Written))
+                .await
                 .map_err(|e| e.to_string())?;
         }
     }

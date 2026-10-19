@@ -9,13 +9,13 @@
   "start": {},
   "steps": [
     {
-      "text": "Press and hold Arm in the Control tab.",
+      "text": "Press and hold Arm in the Cockpit tab.",
       "hint": "Armed, its motors answer commands. Disarmed, it drifts.",
       "hintAfterS": 45,
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Choose HOLD in the Mode menu in the Control tab.",
+      "text": "Choose HOLD in the Mode menu in the Cockpit tab.",
       "hint": "HOLD stops it moving.",
       "hintAfterS": 45,
       "all": [
@@ -24,7 +24,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch brings it back to where it started.",
       "hintAfterS": 45,
       "all": [
@@ -33,7 +33,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab.",
+      "text": "Press Land in the Cockpit tab.",
       "hint": "Land brings it down where it is.",
       "hintAfterS": 45,
       "all": [

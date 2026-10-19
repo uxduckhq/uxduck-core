@@ -9,13 +9,13 @@
   "start": {},
   "steps": [
     {
-      "text": "Press and hold Arm in the Control tab.",
+      "text": "Press and hold Arm in the Cockpit tab.",
       "hint": "Armed, it answers commands. Disarmed, it stays where it is.",
       "hintAfterS": 45,
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
       "hint": "Go to takes it to the place you clicked and holds it there.",
       "hintAfterS": 45,
       "all": [
@@ -24,7 +24,7 @@
       ]
     },
     {
-      "text": "Choose POSHOLD in the Mode menu in the Control tab.",
+      "text": "Choose POSHOLD in the Mode menu in the Cockpit tab.",
       "hint": "Position hold keeps it where it is, at its depth.",
       "hintAfterS": 45,
       "all": [
@@ -33,7 +33,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab to bring it up.",
+      "text": "Press Land in the Cockpit tab to bring it up.",
       "hint": "On a submarine, Land comes up to the surface.",
       "hintAfterS": 45,
       "all": [

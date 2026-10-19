@@ -14,6 +14,8 @@ uxduck-contracts.workspace = true
 uxduck-mavlink.workspace = true
 # Terrain heights (S23): the cache, lookup and grid maths.
 uxduck-terrain.workspace = true
+# Photos' JPEG header and EXIF (S144); no I/O, never decodes.
+uxduck-media.workspace = true
 flate2.workspace = true
 futures = { workspace = true }
 minisign-verify.workspace = true

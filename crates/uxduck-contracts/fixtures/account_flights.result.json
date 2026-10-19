@@ -1,0 +1,13 @@
+{
+  "flights": [
+    {
+      "deviceId": "dv0000000000000001",
+      "computer": "Field laptop",
+      "id": "survey",
+      "firstUs": 1792252800000000,
+      "lastUs": 1792253400000000,
+      "chunks": 3,
+      "bytes": 120000
+    }
+  ]
+}

@@ -23,7 +23,7 @@ use crate::domain::snapshot::Snapshot;
 use crate::domain::sync::{LibraryVehicle, SyncState};
 use crate::domain::thread::{Folder, Item, Thread};
 use crate::domain::vehicle::Vehicle;
-use crate::domain::video::{VideoRecording, VideoSource};
+use crate::domain::video::{VideoPhoto, VideoRecording, VideoSource};
 
 /// Who caused a change: the connection and the operator it was acting as.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +265,19 @@ pub enum Change {
     /// A recording started, grew, ended or was recovered (S40).
     VideoRecordingUpserted {
         recording: VideoRecording,
+    },
+    /// A photo from the video was kept (S144).
+    VideoPhotoUpserted {
+        photo: VideoPhoto,
+    },
+    /// A recording's file was deleted or moved out of the media folder
+    /// outside UXDuck, also while it was being written (S151).
+    VideoRecordingRemoved {
+        id: String,
+    },
+    /// A photo's file was deleted or moved out of the media folder (S151).
+    VideoPhotoRemoved {
+        id: String,
     },
 }
 

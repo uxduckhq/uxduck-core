@@ -27,7 +27,7 @@
     },
     {
       "text": "Fly out to the far ring, then press Return to launch.",
-      "hint": "Use Fly to on the far ring. Return to launch then flies to the landing sequence, not home.",
+      "hint": "Use Go to on the far ring. Return to launch then flies to the landing sequence, not home.",
       "hintAfterS": 120,
       "all": [
         { "check": "within", "feature": "away" },

@@ -499,7 +499,13 @@ pub struct LayoutPreset {
 /// 2 (2026-10-12): Advanced ends its Messages group with the MAVLink
 /// inspector and a Chart.
 /// 3 (2026-10-15): Simple stacks the map above Telemetry, Control and History.
-pub const LAYOUT_PRESET_VERSION: u32 = 3;
+/// 4 (2026-10-17): Simple includes Controllers beside Vehicle Control.
+/// 5 (2026-10-17): Simple puts Control and Telemetry side by side.
+/// 6 (2026-10-18): Simple shows the 3D map beside the map.
+/// 7 (2026-10-18): Simple keeps four panes and gains Advanced's Messages,
+/// Flight display, Instruments and Parameters as tabs.
+/// 8 (2026-10-18): Built-in layouts migrate automatically; named copies stay.
+pub const LAYOUT_PRESET_VERSION: u32 = 8;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -921,7 +927,10 @@ impl Layout {
         }
     }
 
-    /// A 2D map above one group of Telemetry, Control and History tabs.
+    /// The map and the 3D map (always, maintainer 2026-10-18) above
+    /// Control (with Controllers, History and Parameters) beside Telemetry
+    /// (with Messages, Flight display and Instruments): four panes, with
+    /// Advanced's everyday tools as tabs (maintainer, 2026-10-18).
     #[must_use]
     pub fn simple_dock() -> DockNode {
         DockNode::Split {
@@ -929,11 +938,45 @@ impl Layout {
             children: vec![
                 DockChild {
                     size: 560,
-                    node: DockNode::of(&[TabKind::Map]),
+                    node: DockNode::Split {
+                        direction: Direction::Row,
+                        children: vec![
+                            DockChild {
+                                size: 500,
+                                node: DockNode::of(&[TabKind::Map]),
+                            },
+                            DockChild {
+                                size: 500,
+                                node: DockNode::of(&[TabKind::Map3d]),
+                            },
+                        ],
+                    },
                 },
                 DockChild {
                     size: 440,
-                    node: DockNode::of(&[TabKind::Telemetry, TabKind::Control, TabKind::History]),
+                    node: DockNode::Split {
+                        direction: Direction::Row,
+                        children: vec![
+                            DockChild {
+                                size: 500,
+                                node: DockNode::of(&[
+                                    TabKind::Control,
+                                    TabKind::Controllers,
+                                    TabKind::History,
+                                    TabKind::Parameters,
+                                ]),
+                            },
+                            DockChild {
+                                size: 500,
+                                node: DockNode::of(&[
+                                    TabKind::Telemetry,
+                                    TabKind::Messages,
+                                    TabKind::FlightDisplay,
+                                    TabKind::Instruments,
+                                ]),
+                            },
+                        ],
+                    },
                 },
             ],
         }
@@ -1094,6 +1137,25 @@ impl Layout {
     /// always renders.
     #[must_use]
     pub fn normalised(mut self) -> Self {
+        // Saved names are user-owned; built-ins follow each shipped revision.
+        for saved in &mut self.saved {
+            if let Some(preset) = &mut saved.preset
+                && preset.version > 0
+                && preset.version < LAYOUT_PRESET_VERSION
+            {
+                let dock = match preset.kind {
+                    LayoutPresetKind::Simple => Self::simple_dock(),
+                    LayoutPresetKind::Advanced => Self::flight_dock(),
+                };
+                saved.dock = dock.clone();
+                preset.base = dock.clone();
+                preset.version = LAYOUT_PRESET_VERSION;
+                if self.current.as_ref() == Some(&saved.id) {
+                    self.dock = dock;
+                    self.pane_open = true;
+                }
+            }
+        }
         self.dock = normalised_dock(self.dock);
         let mut ids: Vec<String> = Vec::new();
         let mut presets: Vec<LayoutPresetKind> = Vec::new();
@@ -1933,7 +1995,10 @@ mod tests {
         );
         assert!(layout.pane_open);
         assert_eq!(layout.current.as_deref(), Some("preset-simple"));
-        assert!(!layout.dock.contains(TabKind::Map3d));
+        assert!(
+            layout.dock.contains(TabKind::Map3d),
+            "the 3D map always shows"
+        );
         assert!(!layout.dock.contains(TabKind::Inspector));
         assert!(
             !layout.dock.contains(TabKind::Home),
@@ -1946,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn an_adopted_view_round_trips_without_updating_or_losing_its_baseline() {
+    fn an_older_view_migrates_to_the_shipped_baseline() {
         let mut layout = Layout::initial();
         layout.dock = DockNode::of(&[TabKind::Map, TabKind::Camera]);
         layout.saved[0].dock = layout.dock.clone();
@@ -1954,8 +2019,12 @@ mod tests {
         preset.version = 3;
         preset.base = Layout::flight_dock();
         let back: Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
-        assert_eq!(back, layout);
-        assert_eq!(back.saved[0].preset.as_ref().unwrap().version, 3);
+        assert_eq!(back.dock, Layout::simple_dock());
+        assert_eq!(back.saved[0].dock, Layout::simple_dock());
+        assert_eq!(
+            back.saved[0].preset.as_ref().unwrap().version,
+            LAYOUT_PRESET_VERSION
+        );
     }
 
     #[test]

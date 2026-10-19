@@ -1,0 +1,1 @@
+{ "reports": [{ "vehicle_kind": "simulated", "armed_ms": 30000, "airborne_ms": 18000 }] }

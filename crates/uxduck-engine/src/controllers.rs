@@ -8,14 +8,16 @@
 //!   centred;
 //! - a controller that follows the selection moves to a newly selected
 //!   vehicle only with roll, pitch and yaw centred (throttle is the
-//!   operator's) and the switch confirmed;
+//!   operator's), without another confirmation;
 //!   meanwhile it stays on the old one and says so;
 //! - two controllers never drive one vehicle;
 //! - when the controller is unplugged, or the claiming client goes, it is
 //!   released and sends nothing, so the vehicle's own failsafe decides; a
 //!   window gets a moment first, so a reload takes its controllers back.
+//! - the same operator's other window on this computer may take a held
+//!   controller over, still flying what it flew.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::command::CommandSendParams;
@@ -31,11 +33,11 @@ use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{
-    Claim, Controller, GamepadButton, InputMapping, NEUTRAL, PositionBinding, TargetMode,
+    Claim, Controller, GamepadButton, InputMapping, NEUTRAL, PositionBinding, Sticks, TargetMode,
 };
 use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::notification::{
-    Action, NotificationAction, NotificationKind, Severity, Subject,
+    Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
 };
 use uxduck_core::events::{Actor, Change};
 use uxduck_core::policy::admission::Trust;
@@ -77,6 +79,8 @@ pub(crate) struct Live {
     detached: BTreeMap<String, Detached>,
     /// Page-owned keyboards never inherit a physical controller's reload grace.
     keyboards: BTreeMap<ConnectionId, String>,
+    /// Simulator links whose controller routes need a safe restart handover.
+    restarting: BTreeSet<String>,
 }
 
 fn daemon() -> Actor {
@@ -107,7 +111,7 @@ pub(crate) fn mappings(engine: &Engine) -> Vec<InputMapping> {
 fn keyboard_mapping() -> InputMapping {
     InputMapping {
         id: "sim-keyboard".into(),
-        name: "Simulation keyboard".into(),
+        name: "Keyboard".into(),
         deadzone: 0.0,
         buttons: Vec::new(),
         ..InputMapping::mode_2()
@@ -213,12 +217,16 @@ pub(crate) fn handle(
             Ok(json!({}))
         }
         ClientRequest::ControllerClaim(params) if params.id.starts_with("keyboard:") => {
-            denied("Start keyboard control from the simulation's Control tab")
+            denied("Start keyboard control from the vehicle's Cockpit tab")
         }
         ClientRequest::ControllerSetTarget(params) if params.id.starts_with("keyboard:") => {
-            denied("Release keyboard control before choosing another simulation")
+            denied("Release keyboard control before choosing another vehicle")
+        }
+        ClientRequest::ControllerTakeOver(IdParams { id }) if id.starts_with("keyboard:") => {
+            denied("Keyboard control stays with the page that started it")
         }
         ClientRequest::ControllerClaim(params) => claim(engine, connection, params),
+        ClientRequest::ControllerTakeOver(IdParams { id }) => take_over(engine, connection, &id),
         ClientRequest::ControllerRelease(IdParams { id }) => {
             if !engine.state.controllers.contains_key(&id) {
                 return Err(not_found(&format!("controller {id}")));
@@ -234,7 +242,7 @@ pub(crate) fn handle(
     }
 }
 
-/// One page, one explicitly pinned simulator. Ordinary claims decide exclusivity.
+/// One page, one explicitly pinned vehicle. Ordinary claims decide exclusivity.
 fn keyboard_start(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -249,22 +257,10 @@ fn keyboard_start(
     let vehicle = engine
         .vehicle(&params.vehicle_id)
         .ok_or_else(|| not_found("vehicle"))?;
-    let simulated = engine.state.links.get(&vehicle.link_id).is_some_and(|l| {
-        matches!(
-            l.kind,
-            uxduck_core::domain::link::LinkKind::Simulator { .. }
-        )
-    });
-    if !simulated {
-        return Err(ApiError::new(
-            ErrorKind::CapabilityDenied,
-            "Keyboard control is for simulations only",
-        ));
-    }
     if vehicle.presence != uxduck_core::domain::vehicle::Presence::Online {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            "The simulation is offline",
+            "The vehicle is offline",
         ));
     }
     if !params.throttle.is_finite() || !(-1.0..=1.0).contains(&params.throttle) {
@@ -428,7 +424,7 @@ fn claim(
             .or_else(|| engine.live.selection.get(&connection).cloned()),
     };
     // Following a selection that is not there yet holds the controller and
-    // drives nothing: the first vehicle selected is a switch to confirm.
+    // drives nothing until the first vehicle is selected at neutral.
     let target = match (mode, target) {
         (TargetMode::FollowsSelection, None) => None,
         (_, target) => Some(engine.drivable(&controller.id, target)?),
@@ -460,7 +456,72 @@ fn claim(
     );
     engine.route(&controller.id);
     engine.announce_target(&controller);
-    to_value(&ControllerDto::from(&controller))
+    to_value(&ControllerDto::from(
+        &engine.state.controllers[&controller.id],
+    ))
+}
+
+/// On this computer: not a phone on the network or a person through the
+/// relay.
+fn on_this_computer(trust: &Trust) -> bool {
+    matches!(trust, Trust::LocalUser | Trust::PairedBrowser { .. })
+}
+
+/// Moves a held controller to this window, for the same operator on this
+/// computer: the window holding it may be left open somewhere, or closed
+/// moments ago. It keeps flying what it flew with the same mapping, so
+/// nothing is checked about its sticks; only who answers for it changes.
+fn take_over(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Value, ApiError> {
+    let mut controller = engine
+        .state
+        .controllers
+        .get(id)
+        .cloned()
+        .ok_or_else(|| not_found(&format!("controller {id}")))?;
+    let holder_trust = match (engine.live.claimant.get(id), engine.live.detached.get(id)) {
+        (Some(holder), _) if *holder == connection => {
+            return to_value(&ControllerDto::from(&controller));
+        }
+        // Windows only: agents and the CLI keep what they hold.
+        (Some(holder), _) => engine.window_identity(*holder).map(|(_, trust)| trust),
+        (None, Some(detached)) => Some(detached.trust.clone()),
+        (None, None) => None,
+    };
+    let Some(claim) = controller.claim.as_mut() else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!("{} isn't in use. Use it instead.", controller.name),
+        ));
+    };
+    let actor = engine.actor(connection);
+    let mine = engine
+        .window_identity(connection)
+        .is_some_and(|(_, trust)| on_this_computer(&trust));
+    if !mine
+        || !holder_trust.as_ref().is_some_and(on_this_computer)
+        || claim.operator_id != actor.operator_id
+    {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!(
+                "{} is held by {}. Only the same operator on this computer can take it over.",
+                controller.name, claim.client_name
+            ),
+        ));
+    }
+    claim.client_id.clone_from(&actor.client_id);
+    claim.client_name = engine.client_name(connection);
+    controller.pending_target = None;
+    controller.version += 1;
+    engine.live.detached.remove(id);
+    engine.live.claimant.insert(id.to_owned(), connection);
+    engine.commit_as(
+        actor,
+        Change::ControllerUpserted {
+            controller: controller.clone(),
+        },
+    );
+    to_value(&ControllerDto::from(&engine.state.controllers[id]))
 }
 
 fn set_target(
@@ -515,7 +576,9 @@ fn set_target(
         engine.route(&controller.id);
         engine.announce_target(&controller);
     }
-    to_value(&ControllerDto::from(&controller))
+    to_value(&ControllerDto::from(
+        &engine.state.controllers[&controller.id],
+    ))
 }
 
 fn create_mapping(
@@ -700,7 +763,7 @@ impl Engine {
 
     fn target_name(&self, vehicle_id: &str) -> String {
         self.vehicle(vehicle_id)
-            .map_or_else(|| vehicle_id.to_owned(), |v| v.name.clone())
+            .map_or_else(|| "an unavailable vehicle".to_owned(), |v| v.name.clone())
     }
 
     pub(crate) fn pilot_input_method(
@@ -950,13 +1013,19 @@ impl Engine {
     }
 
     fn require_neutral(&self, controller: &Controller, doing: &str) -> Result<(), ApiError> {
-        if self
-            .live
-            .neutral
-            .get(&controller.id)
-            .copied()
-            .unwrap_or(false)
-        {
+        // With its route removed the data plane uses its default mapping;
+        // a paused Mode 1/radio must still be judged through its own mapping.
+        let neutral = if controller.input_pause.is_some() {
+            self.mapped_controller_input(controller)
+                .is_some_and(|(sticks, _)| sticks.neutral())
+        } else {
+            self.live
+                .neutral
+                .get(&controller.id)
+                .copied()
+                .unwrap_or(false)
+        };
+        if neutral {
             Ok(())
         } else {
             Err(not_neutral(controller, doing))
@@ -978,19 +1047,6 @@ impl Engine {
         let vehicle = self
             .vehicle(&vehicle_id)
             .ok_or_else(|| not_found(&format!("vehicle {vehicle_id}")))?;
-        if controller_id.starts_with("keyboard:")
-            && !self.state.links.get(&vehicle.link_id).is_some_and(|l| {
-                matches!(
-                    l.kind,
-                    uxduck_core::domain::link::LinkKind::Simulator { .. }
-                )
-            })
-        {
-            return Err(ApiError::new(
-                ErrorKind::CapabilityDenied,
-                "Keyboard control is for simulations only",
-            ));
-        }
         if let Some(other) = self.state.controllers.values().find(|c| {
             c.id != controller_id && c.claim.is_some() && c.target.as_deref() == Some(&vehicle.id)
         }) {
@@ -1002,13 +1058,182 @@ impl Engine {
         Ok(vehicle.id.clone())
     }
 
+    /// Remove pilot input before closing the old simulator, retaining its claim.
+    pub(crate) fn pause_controllers_for_restart(&mut self, link_id: &str) {
+        self.live.restarting.insert(link_id.to_owned());
+        let ids: Vec<String> = self
+            .state
+            .controllers
+            .values()
+            .filter(|c| {
+                c.claim.is_some()
+                    && c.target
+                        .as_deref()
+                        .and_then(|id| self.vehicle(id))
+                        .is_some_and(|v| v.link_id == link_id)
+            })
+            .map(|c| c.id.clone())
+            .collect();
+        for id in ids {
+            self.set_controller_pause(
+                &id,
+                Some("Controller paused while the simulation restarts.".into()),
+            );
+            self.links.route_controller(&id, None);
+        }
+    }
+
+    fn set_controller_pause(&mut self, id: &str, pause: Option<String>) {
+        let Some(mut controller) = self.state.controllers.get(id).cloned() else {
+            return;
+        };
+        if controller.input_pause == pause {
+            return;
+        }
+        controller.input_pause = pause;
+        controller.version += 1;
+        self.commit_as(daemon(), Change::ControllerUpserted { controller });
+    }
+
+    /// Restart handover is stricter than an ordinary target switch. Read the
+    /// actual mapping (including throttle range), never a cached neutral bit.
+    fn controller_restart_pause(&self, id: &str) -> Option<String> {
+        use uxduck_core::domain::{
+            link::{LaunchStage, LinkStatus},
+            vehicle::Presence,
+        };
+        let controller = self.state.controllers.get(id)?;
+        controller.claim.as_ref()?;
+        let Some(vehicle) = controller.target.as_deref().and_then(|id| self.vehicle(id)) else {
+            return controller
+                .input_pause
+                .as_ref()
+                .map(|_| "Controller paused: the simulation is unavailable.".into());
+        };
+        if !self.live.restarting.contains(&vehicle.link_id) {
+            return None;
+        }
+        let Some(link) = self.state.links.get(&vehicle.link_id) else {
+            return Some("Controller paused: the simulation is unavailable.".into());
+        };
+        if link
+            .launch
+            .as_ref()
+            .is_some_and(|l| l.stage == LaunchStage::Failed)
+        {
+            return Some("Controller paused: startup failed. Start again to retry, or release the controller.".into());
+        }
+        if self.is_launching(&vehicle.link_id)
+            || vehicle.presence != Presence::Online
+            || link.status != LinkStatus::Up
+        {
+            return Some("Controller paused while the simulation restarts.".into());
+        }
+        let Some((sticks, buttons_held)) = self.mapped_controller_input(controller) else {
+            return Some("Controller paused: waiting for every mapped stick input.".into());
+        };
+        let airborne = vehicle.armed
+            && (self.off_the_ground(&vehicle.id, true)
+                || link
+                    .launch
+                    .as_ref()
+                    .is_some_and(|l| l.stage == LaunchStage::Flying));
+        let throttle_safe = if airborne {
+            sticks.throttle.abs() < 0.15
+        } else {
+            sticks.throttle <= -0.9
+        };
+        if !sticks.neutral() || !throttle_safe {
+            return Some(if airborne {
+                "Controller paused: centre roll, pitch and yaw, and set throttle near 50% to resume."
+            } else {
+                "Controller paused: centre roll, pitch and yaw, and lower throttle to idle to resume."
+            }.into());
+        }
+        if buttons_held {
+            return Some("Controller paused: release the buttons to resume.".into());
+        }
+        None
+    }
+
+    /// No missing/non-finite input may become a neutral fallback during handover.
+    fn mapped_controller_input(&self, controller: &Controller) -> Option<(Sticks, bool)> {
+        let inputs = self.system.controller_inputs();
+        let raw = inputs.controllers.iter().find(|c| c.id == controller.id)?;
+        let mapping = mapping(self, &controller.mapping_id)?;
+        let read = |binding: &uxduck_core::domain::controller::AxisBinding| {
+            raw.axes
+                .iter()
+                .find(|a| match binding.code {
+                    Some(code) => a.code == Some(code),
+                    None => a.axis == Some(binding.axis.into()),
+                })
+                .map(|a| a.value)
+                .filter(|v| v.is_finite())
+        };
+        if [mapping.roll, mapping.pitch, mapping.yaw, mapping.throttle]
+            .iter()
+            .chain(mapping.rc_channels.iter().map(|b| &b.input))
+            .any(|b| read(b).is_none())
+        {
+            return None;
+        }
+        Some((
+            mapping.sticks(|b| read(b).unwrap_or(0.0)),
+            raw.buttons.iter().any(|b| b.pressed),
+        ))
+    }
+
+    /// Called by both hosts' expiry beat. Throttle-only movements do not
+    /// generate neutral reports, so handover must also be retried here.
+    fn resume_restart_controllers(&mut self) {
+        let ids: Vec<String> = self
+            .state
+            .controllers
+            .values()
+            .filter(|c| c.claim.is_some() && c.input_pause.is_some())
+            .map(|c| c.id.clone())
+            .collect();
+        for id in ids {
+            let pause = self.controller_restart_pause(&id);
+            if self
+                .state
+                .controllers
+                .get(&id)
+                .is_some_and(|c| c.input_pause != pause)
+            {
+                self.set_controller_pause(&id, pause);
+                if self.state.controllers[&id].input_pause.is_none() {
+                    self.route(&id);
+                }
+            }
+        }
+        self.live
+            .restarting
+            .retain(|id| self.state.links.contains_key(id));
+    }
+
     /// Tells the data plane what a controller drives now, if anything.
     fn route(&mut self, controller_id: &str) {
+        // New claims and target changes cannot bypass an automatic launch.
+        if let Some(link) = self
+            .state
+            .controllers
+            .get(controller_id)
+            .and_then(|c| c.target.as_deref())
+            .and_then(|id| self.vehicle(id))
+            .map(|v| v.link_id.clone())
+            && self.is_launching(&link)
+        {
+            self.live.restarting.insert(link);
+        }
+        let pause = self.controller_restart_pause(controller_id);
+        self.set_controller_pause(controller_id, pause);
         let route = self
             .state
             .controllers
             .get(controller_id)
-            .filter(|c| c.connected && c.claim.is_some())
+            .filter(|c| c.connected && c.claim.is_some() && c.input_pause.is_none())
             .and_then(|c| {
                 Some(ControlRoute {
                     vehicle_id: c.target.clone()?,
@@ -1020,7 +1245,7 @@ impl Engine {
     }
 
     fn announce_target(&mut self, controller: &Controller) {
-        // The keyboard panel already shows which simulation it controls.
+        // The keyboard panel already shows which vehicle it controls.
         if controller.id.starts_with("keyboard:") {
             return;
         }
@@ -1054,6 +1279,7 @@ impl Engine {
         }
         let target = controller.target.take();
         controller.claim = None;
+        controller.input_pause = None;
         controller.pending_target = None;
         controller.version += 1;
         let actor = if why.is_some() {
@@ -1085,9 +1311,8 @@ impl Engine {
         }
     }
 
-    /// A connection's selected vehicle. Its controllers that follow the
-    /// selection do not move: they wait for neutral sticks and a
-    /// confirmation (`controller/setTarget`).
+    /// A connection's selected vehicle. Following controllers switch now
+    /// at neutral, or when their sticks next return to neutral.
     fn select(&mut self, connection: ConnectionId, vehicle_id: Option<String>) {
         let vehicle_id = vehicle_id.and_then(|id| self.vehicle(&id).map(|v| v.id.clone()));
         match &vehicle_id {
@@ -1105,15 +1330,45 @@ impl Engine {
             .cloned()
             .collect();
         for mut controller in held {
-            let pending = vehicle_id
-                .clone()
-                .filter(|id| controller.target.as_ref() != Some(id));
+            let current = controller
+                .target
+                .as_deref()
+                .and_then(|id| self.vehicle(id))
+                .map(|v| &v.id);
+            let pending = vehicle_id.clone().filter(|id| current != Some(id));
+            let id = controller.id.clone();
             if pending != controller.pending_target {
                 controller.pending_target = pending;
                 controller.version += 1;
                 self.commit(connection, Change::ControllerUpserted { controller });
             }
+            self.follow_selection(&id);
         }
+    }
+
+    fn follow_selection(&mut self, id: &str) {
+        let Some(controller) = self.state.controllers.get(id) else {
+            return;
+        };
+        if controller.mode != TargetMode::FollowsSelection || controller.pending_target.is_none() {
+            return;
+        }
+        let Some(connection) = self.live.claimant.get(id).copied() else {
+            return;
+        };
+        // Use the explicit switch's checks and routing, including exclusive
+        // targets, RC mappings and the throttle gate for a first vehicle.
+        // A refused switch stays pending; the UI offers an explicit retry
+        // which reports the reason, and future neutral input retries it.
+        let _ = set_target(
+            self,
+            connection,
+            ControllerSetTargetParams {
+                id: id.to_owned(),
+                mode: uxduck_contracts::dto::controller::TargetMode::FollowsSelection,
+                vehicle_id: None,
+            },
+        );
     }
 
     /// Page-owned input is disconnected immediately, with no reload grace.
@@ -1203,6 +1458,7 @@ impl Engine {
 
     /// Releases the controllers no window took back in time.
     pub fn expire_detached_claims(&mut self, now_us: u64) {
+        self.resume_restart_controllers();
         let gone: Vec<(String, ConnectionId)> = self
             .live
             .detached
@@ -1235,7 +1491,7 @@ impl Engine {
                         controller.name
                     ),
                     body: Some(if controller.id.starts_with("keyboard:") {
-                        "Open the simulation's Control tab and press Fly with keyboard to enable it again.".into()
+                        "Open the vehicle's Cockpit tab and press Fly with keyboard to enable it again.".into()
                     } else {
                         "You have to re-enable it to fly with it again: centre the sticks, then press Use in the Controllers tab.".into()
                     }),
@@ -1246,6 +1502,7 @@ impl Engine {
             }
             controller.connected = false;
             controller.claim = None;
+            controller.input_pause = None;
             controller.target = None;
             controller.pending_target = None;
             controller.version += 1;
@@ -1295,6 +1552,7 @@ impl Engine {
                 claim: None,
                 mode: TargetMode::FollowsSelection,
                 target: None,
+                input_pause: None,
                 pending_target: None,
                 mapping_id: fitting,
                 version: 1,
@@ -1302,19 +1560,86 @@ impl Engine {
         };
         self.commit_as(daemon(), Change::ControllerUpserted { controller });
         if plugged_in && !id.starts_with("keyboard:") {
+            self.controller_presence(id, name, true);
+        }
+    }
+
+    /// Reconnects update one notice per device, including old notices without a condition.
+    fn controller_presence(&mut self, id: &str, name: &str, connected: bool) {
+        let condition = format!("controller-presence:{id}");
+        let title = if connected {
+            format!("{name} connected")
+        } else if id.starts_with("web-") {
+            format!("{name} input interrupted")
+        } else {
+            format!("{name} disconnected")
+        };
+        let body = (!connected).then(|| {
+            if id.starts_with("web-") {
+                "The browser stopped reporting this controller. Check the connection and keep this tab visible. A busy browser can interrupt input.".to_owned()
+            } else {
+                "Check its USB or wireless connection. Reconnect it before using it again.".to_owned()
+            }
+        });
+        let severity = if connected {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+        let actions = vec![NotificationAction {
+            label: "Open Controllers".into(),
+            action: Action::OpenControllers {
+                controller_id: id.to_owned(),
+            },
+        }];
+        let mut previous: Vec<_> = self.state.notifications.values().filter(|notice| {
+            notice.condition.as_ref() == Some(&condition) || notice.actions.iter().any(|action| {
+                matches!(&action.action, Action::OpenControllers { controller_id } if controller_id == id)
+            })
+        }).cloned().collect();
+        if let Some(mut notice) = previous.pop() {
+            let interrupted = connected && notice.severity == Severity::Warning;
+            notice.title = title;
+            notice.body = body;
+            notice.severity = severity;
+            if interrupted {
+                notice.title = format!("{name} reconnected");
+                notice.body = Some(
+                    "Input was interrupted. Check its connection before using it again.".to_owned(),
+                );
+                notice.severity = Severity::Warning;
+            }
+            notice.actions = actions;
+            notice.condition = Some(condition);
+            notice.state = NotificationState::Active;
+            notice.created_at_us = self.clock.now_us();
+            notice.version += 1;
+            self.commit_as(
+                daemon(),
+                Change::NotificationUpserted {
+                    notification: notice,
+                },
+            );
+            for mut duplicate in previous {
+                duplicate.state = NotificationState::Resolved;
+                duplicate.actions.clear();
+                duplicate.version += 1;
+                self.commit_as(
+                    daemon(),
+                    Change::NotificationUpserted {
+                        notification: duplicate,
+                    },
+                );
+            }
+        } else {
             self.raise(Raise {
-                severity: Severity::Info,
+                severity,
                 kind: NotificationKind::Transient,
                 subject: Subject::System,
-                title: format!("{name} connected"),
-                body: None,
-                actions: vec![NotificationAction {
-                    label: "Open Controllers".into(),
-                    action: Action::OpenControllers {
-                        controller_id: id.to_owned(),
-                    },
-                }],
-                condition: None,
+                title,
+                body,
+                actions,
+                condition: Some(condition),
                 report: None,
             });
         }
@@ -1323,6 +1648,14 @@ impl Engine {
     /// A controller was unplugged: released, so the vehicle's own failsafe
     /// takes over.
     pub fn controller_disconnected(&mut self, id: &str) {
+        let previous = self.state.controllers.get(id).cloned();
+        if let Some(controller) = previous
+            .as_ref()
+            .filter(|c| c.connected && !id.starts_with("keyboard:"))
+            && (controller.claim.is_none() || controller.target.is_none())
+        {
+            self.controller_presence(id, &controller.name, false);
+        }
         self.live.keyboards.retain(|_, keyboard| keyboard != id);
         let holder = self.live.claimant.get(id).copied().or_else(|| {
             self.live
@@ -1353,7 +1686,11 @@ impl Engine {
         self.release(
             id,
             holder,
-            (!id.starts_with("keyboard:")).then_some("it was unplugged"),
+            (!id.starts_with("keyboard:")).then_some(if id.starts_with("web-") {
+                "browser input stopped"
+            } else {
+                "it was unplugged"
+            }),
         );
     }
 
@@ -1361,6 +1698,9 @@ impl Engine {
     /// them through its mapping.
     pub fn controller_neutral(&mut self, id: &str, neutral: bool) {
         self.live.neutral.insert(id.to_owned(), neutral);
+        if neutral {
+            self.follow_selection(id);
+        }
     }
 
     /// A button went down: its command goes to the target, as the claiming
@@ -1374,6 +1714,9 @@ impl Engine {
         let Some(controller) = self.state.controllers.get(id).cloned() else {
             return;
         };
+        if controller.input_pause.is_some() {
+            return;
+        }
         let (Some(connection), Some(target)) =
             (self.live.claimant.get(id).copied(), controller.target)
         else {
@@ -1397,6 +1740,9 @@ impl Engine {
         let Some(controller) = self.state.controllers.get(id).cloned() else {
             return;
         };
+        if controller.input_pause.is_some() {
+            return;
+        }
         let (Some(connection), Some(target)) =
             (self.live.claimant.get(id).copied(), controller.target)
         else {

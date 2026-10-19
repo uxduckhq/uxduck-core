@@ -50,10 +50,15 @@ enum Command {
 /// What a client asked of the daemon itself, watched by the composition
 /// root instead of polled (S24).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent requests watched by the composition root"
+)]
 pub struct Requested {
     pub restart: bool,
     pub stop: bool,
     pub panic: bool,
+    pub app_update: bool,
 }
 
 /// A cheap, cloneable way to reach the engine task.
@@ -112,12 +117,16 @@ impl EngineHandle {
                         engine.checkpoint();
                         let _ = reply.send(());
                     }
-                    Command::Run(work) => work(&mut engine),
+                    Command::Run(work) if !engine.app_update_installing() => work(&mut engine),
+                    // After the final update gate, delayed host callbacks must
+                    // not start work either. Checkpoint remains available above.
+                    Command::Run(_) => {}
                 }
                 let now = Requested {
                     restart: engine.restart_requested(),
                     stop: engine.stop_requested(),
                     panic: engine.panic_requested(),
+                    app_update: engine.app_update_pending(),
                 };
                 requests.send_if_modified(|was| {
                     let changed = *was != now;

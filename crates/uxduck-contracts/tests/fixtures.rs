@@ -154,8 +154,17 @@ fn check(name: &str) {
         ("result", "layout_open") => {
             round_trip::<uxduck_contracts::dto::operator::LayoutOpenResult>(name, &json);
         }
+        ("result", "analytics_takeFlightTime") => {
+            round_trip::<uxduck_contracts::dto::analytics::FlightTimeUsage>(name, &json);
+        }
+        ("result", "analytics_takeEngagement") => {
+            round_trip::<uxduck_contracts::dto::analytics::EngagementUsage>(name, &json);
+        }
         ("result", "vehicle_messages") => {
             round_trip::<uxduck_contracts::dto::messages::VehicleMessagesResult>(name, &json);
+        }
+        ("result", "update_status" | "update_check" | "update_install" | "update_later") => {
+            round_trip::<uxduck_contracts::dto::update::AppUpdateStatus>(name, &json);
         }
         ("result", "tray_menu") => {
             round_trip::<uxduck_contracts::dto::tray::TrayMenu>(name, &json);
@@ -235,10 +244,16 @@ fn check(name: &str) {
         ("result", "daemon_about") => {
             round_trip::<uxduck_contracts::dto::settings::DaemonAbout>(name, &json);
         }
-        ("result", "storage_usage") => {
+        ("result", "storage_usage" | "storage_clearSimulatorLogs") => {
             round_trip::<uxduck_contracts::dto::settings::StorageUsage>(name, &json);
         }
-        ("result", "controller_claim" | "controller_setTarget" | "controller_keyboardStart") => {
+        (
+            "result",
+            "controller_claim"
+            | "controller_setTarget"
+            | "controller_takeOver"
+            | "controller_keyboardStart",
+        ) => {
             round_trip::<uxduck_contracts::dto::controller::Controller>(name, &json);
         }
         ("result", "controller_inputs") => {
@@ -281,17 +296,22 @@ fn check(name: &str) {
             | "video_rename"
             | "video_track"
             | "video_capture"
-            | "video_capture_enable",
+            | "video_capture_enable"
+            | "video_vehicleCamera"
+            | "video_recordWithOthers",
         ) => {
             round_trip::<uxduck_contracts::dto::video::VideoSource>(name, &json);
         }
         ("result", "find_start" | "find_vehicles") => {
             round_trip::<uxduck_contracts::dto::find::FindResult>(name, &json);
         }
-        ("result", "video_playback") => {
+        ("result", "video_photo") => {
+            round_trip::<uxduck_contracts::dto::video::VideoPhoto>(name, &json);
+        }
+        ("result", "video_playback" | "video_photo_show") => {
             round_trip::<uxduck_contracts::dto::video::VideoPlaybackResult>(name, &json);
         }
-        ("result", "video_reveal") => {
+        ("result", "video_reveal" | "storage_reveal") => {
             round_trip::<uxduck_contracts::dto::video::VideoRevealResult>(name, &json);
         }
         ("result", "video_add") => {
@@ -299,6 +319,9 @@ fn check(name: &str) {
         }
         ("result", "video_watch") => {
             round_trip::<uxduck_contracts::dto::video::VideoWatchResult>(name, &json);
+        }
+        ("result", "video_metadata_watch") => {
+            round_trip::<uxduck_contracts::dto::video::VideoMetadataWatchResult>(name, &json);
         }
         ("result", "param_search") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamSearchResult>(name, &json);
@@ -338,6 +361,12 @@ fn check(name: &str) {
         }
         ("result", "mission_upload") => {
             round_trip::<uxduck_contracts::dto::mission::MissionUploadResult>(name, &json);
+        }
+        ("result", "client_displayList") => {
+            round_trip::<uxduck_contracts::dto::client::DisplayClientsResult>(name, &json);
+        }
+        ("result", "client_displayPull") => {
+            round_trip::<uxduck_contracts::dto::client::DisplaySnapshot>(name, &json);
         }
         ("result", "client_list") => {
             round_trip::<uxduck_contracts::dto::client::ClientListResult>(name, &json);
@@ -384,6 +413,9 @@ fn check(name: &str) {
         }
         ("result", "account_sessions") => {
             round_trip::<uxduck_contracts::dto::account::AccountSessions>(name, &json);
+        }
+        ("result", "account_flights") => {
+            round_trip::<uxduck_contracts::dto::account::AccountFlights>(name, &json);
         }
         ("result", "account_environment" | "account_setEnvironment") => {
             round_trip::<uxduck_contracts::dto::account::AccountEnvironmentState>(name, &json);
@@ -469,6 +501,8 @@ fn check(name: &str) {
         (
             "result",
             "trace_subscribe"
+            | "client_displayRegister"
+            | "client_displayReply"
             | "pairing_approve"
             | "pairing_deny"
             | "operator_remove"
@@ -491,9 +525,13 @@ fn check(name: &str) {
             | "plugin_remove"
             | "plugin_command"
             | "client_select"
+            | "client_forget"
             | "notification_acknowledge"
             | "notification_dismiss"
             | "analytics_track"
+            | "analytics_feedback"
+            | "analytics_activeTime"
+            | "analytics_performance"
             | "analytics_alias"
             | "debug_panic"
             | "sim_stop"
@@ -507,6 +545,7 @@ fn check(name: &str) {
             | "video_unwatch"
             | "video_remove"
             | "video_record"
+            | "video_recordAll"
             | "find_stop"
             | "plugin_unshare"
             | "watchLink_revoke"
@@ -518,8 +557,7 @@ fn check(name: &str) {
             | "files_rename"
             | "files_cancel"
             | "terrain_removeArea"
-            | "tray_location"
-            | "client_forget",
+            | "tray_location",
         ) => {
             round_trip::<Empty>(name, &json);
         }

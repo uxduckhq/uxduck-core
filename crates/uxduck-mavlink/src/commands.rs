@@ -278,6 +278,19 @@ mod tests {
     }
 
     #[test]
+    fn plane_native_height_sends_the_height_and_reference_without_coordinates() {
+        for frame in [0.0, 3.0, 10.0] {
+            let command = Command::Long {
+                command: 186,
+                params: vec![40.0, frame],
+            };
+            let (number, params) = long(&command, Some(Family::Plane), false).unwrap();
+            assert_eq!(number, 186);
+            assert_eq!(params, [40.0, frame, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
     fn a_place_goes_as_a_command_int_with_its_degrees_times_1e7() {
         let go_to = Command::GoTo {
             latitude_deg: -35.363_261,

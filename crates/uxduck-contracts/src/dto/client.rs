@@ -123,3 +123,53 @@ pub struct ApprovalResolveParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember: Option<Remember>,
 }
+
+/// A connected UI that can provide its current local display settings on request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayClient {
+    /// Connection-scoped; a reconnect gets a new identity.
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayClientsResult {
+    pub clients: Vec<DisplayClient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayRegisterParams {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayPullParams {
+    pub id: String,
+}
+
+/// Sent only to the selected source client; no display state is published.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayRequested {
+    pub request_id: String,
+}
+
+/// An opaque, versioned display-settings document, validated by the receiving UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplaySnapshot {
+    pub settings: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayReplyParams {
+    pub request_id: String,
+    pub settings: String,
+}

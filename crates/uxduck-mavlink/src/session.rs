@@ -39,7 +39,7 @@ const AVAILABLE_MODES: u32 = 435;
 /// interval in µs), when it first hears it on a link it may write to.
 /// ArduPilot's Copter, Heli and Blimp stream nothing by default (every
 /// `SRn_` rate is 0), so whatever the app needs from them has to be here.
-pub const STREAM_RATES: [(u32, u32); 18] = [
+pub const STREAM_RATES: [(u32, u32); 19] = [
     (33, 200_000),    // GLOBAL_POSITION_INT, 5 Hz
     (30, 100_000),    // ATTITUDE, 10 Hz
     (1, 1_000_000),   // SYS_STATUS, 1 Hz
@@ -61,6 +61,10 @@ pub const STREAM_RATES: [(u32, u32); 18] = [
     (133, 1_000_000),
     // FENCE_STATUS, 1 Hz (S132): a breach, while the vehicle has a fence.
     (162, 1_000_000),
+    // GIMBAL_DEVICE_ATTITUDE_STATUS, 1 Hz: where its camera points, for the
+    // 3D map's Drone camera, while it has a gimbal (2026-10-18; 1 Hz to
+    // spare a telemetry radio, maintainer).
+    (285, 1_000_000),
 ];
 
 /// A terrain report older than this no longer gives the fused position an
@@ -514,8 +518,9 @@ const STREAM_BACKOFF_US: [u64; 3] = [5_000_000, 15_000_000, 60_000_000];
 /// or proximity sensor is fitted and reading. Their silence says nothing
 /// about the rate, so they are never asked for again on it. A terrain
 /// request comes only while terrain is missing (S118), the fence's status
-/// only while there is a fence (S132).
-const SENT_WHILE_SET: [u32; 6] = [87, 242, 168, 132, 133, 162];
+/// only while there is a fence (S132), a gimbal's attitude only while it has
+/// one.
+const SENT_WHILE_SET: [u32; 7] = [87, 242, 168, 132, 133, 162, 285];
 
 #[derive(Clone, Debug)]
 struct PendingCommand {
@@ -653,6 +658,18 @@ impl Session {
                 continue;
             };
             let key = (link_id.to_owned(), peer.to_owned(), decoded.system_id);
+            if let Some((system, component)) = decoded.mission_target
+                && ((system != 0 && system != self.config.gcs_system_id)
+                    || (component != 0 && component != crate::GCS_COMPONENT_ID)
+                    || self
+                        .vehicles
+                        .get(&key)
+                        .is_none_or(|vehicle| vehicle.autopilot_component != decoded.component_id))
+            {
+                // A shared link may carry another ground station's transfer,
+                // or mission traffic from a different on-board component.
+                continue;
+            }
             if let (Some(vehicle), Some(header)) =
                 (self.vehicles.get_mut(&key), crate::framing::header(frame))
                 && let Some(stream) = vehicle.streams.get_mut(&header.message_id)
@@ -1052,11 +1069,40 @@ impl Session {
                 result,
                 mission_type,
             } => {
+                // ArduPilot NACKs a duplicate item with INVALID_SEQUENCE
+                // while continuing to request the next one. Aborting here
+                // leaves a partial mission on the vehicle. Keep the existing
+                // retry deadline: no next request still fails by timeout.
+                if result == 13
+                    && self.vehicles.get(key).is_some_and(|vehicle| {
+                        vehicle.mission_upload.is_some()
+                            && vehicle
+                                .observation
+                                .autopilot
+                                .eq_ignore_ascii_case("ardupilotmega")
+                    })
+                {
+                    return Vec::new();
+                }
                 let step = self
                     .uploading(key)
                     .filter(|p| p.accepts(received_us) && p.protocol.kind == mission_type)
                     .map(|p| p.protocol.ack(result));
-                self.upload_step(key, step)
+                if step.is_some() {
+                    self.upload_step(key, step)
+                } else {
+                    let step = self
+                        .downloading(key)
+                        .filter(|p| {
+                            result != 0 && p.accepts(received_us) && p.protocol.kind == mission_type
+                        })
+                        .map(|_| {
+                            Step::Failed(Failure::Rejected(
+                                crate::transfers::mission_result_text(result).to_owned(),
+                            ))
+                        });
+                    self.download_step(key, step)
+                }
             }
             _ => Vec::new(),
         }
@@ -3396,7 +3442,7 @@ mod tests {
             rates(&first),
             [
                 33.0, 30.0, 1.0, 24.0, 74.0, 36.0, 42.0, 62.0, 193.0, 241.0, 147.0, 136.0, 87.0,
-                242.0, 168.0, 132.0, 133.0, 162.0
+                242.0, 168.0, 132.0, 133.0, 162.0, 285.0
             ],
             "the whole table once"
         );

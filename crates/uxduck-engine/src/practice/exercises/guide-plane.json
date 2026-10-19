@@ -10,7 +10,7 @@
   "features": [{ "id": "home", "label": "Home", "radiusM": 150 }],
   "steps": [
     {
-      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
       "hint": "Go to sends it to the place you clicked. A plane can't stop in the air, so it circles there.",
       "hintAfterS": 45,
       "all": [
@@ -19,7 +19,7 @@
       ]
     },
     {
-      "text": "Choose LOITER in the Mode menu in the Control tab.",
+      "text": "Choose LOITER in the Mode menu in the Cockpit tab.",
       "hint": "Loiter circles where it is.",
       "hintAfterS": 45,
       "all": [
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home, where it circles.",
       "hintAfterS": 45,
       "all": [

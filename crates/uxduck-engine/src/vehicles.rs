@@ -264,8 +264,12 @@ impl Engine {
         presence_changed: bool,
     ) {
         self.record_vehicle_change(before, after);
+        self.observe_flight_usage(&after.id);
         self.hold_when_identified(before, after);
         if before.is_none_or(|b| b.armed != after.armed) {
+            if after.armed {
+                self.video_vehicle_arming(&after.id);
+            }
             self.review_recordings();
             self.review_prearm(&after.id);
             if after.armed {

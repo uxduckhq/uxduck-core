@@ -18,6 +18,8 @@ pub async fn serve(
     hub: Arc<Hub>,
     engine: EngineHandle,
 ) {
+    let opened = token.clone();
+    engine.post(move |e| e.video_socket_opened(&opened));
     let (mut sink, mut stream) = socket.split();
     let writer = {
         let watcher = watcher.clone();
@@ -50,6 +52,8 @@ pub async fn serve(
                         codec: None,
                         payload: data,
                     }),
+                    // The hub keeps sound for recordings (S147).
+                    Item::Audio(_) | Item::Ts(_) => continue,
                 };
                 sequence = sequence.wrapping_add(1);
                 if sink.send(Message::Binary(bytes.into())).await.is_err() {

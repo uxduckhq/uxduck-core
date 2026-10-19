@@ -1,0 +1,15 @@
+{
+  "method": "analytics/performance",
+  "params": {
+    "window_ms": 30000,
+    "long_tasks": 2,
+    "blocking_ms": 80,
+    "max_task_ms": 100,
+    "max_input_delay_ms": 12,
+    "controller_gaps": 1,
+    "max_controller_gap_ms": 600,
+    "heap_mb": 128,
+    "surface": "browser",
+    "daemon": "none"
+  }
+}

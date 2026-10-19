@@ -18,6 +18,13 @@ pub enum StreamKind {
     H264,
     H265,
     Klv,
+    /// AAC in ADTS, the sound UXDuck records (S147).
+    Aac,
+    /// Opus as the Opus-in-MPEG-TS mapping carries it, with its channels:
+    /// how UXDuck writes an RTSP camera's Opus into a recording (S149).
+    Opus(u8),
+    /// Sound of another kind, by its stream type: named, not recorded.
+    OtherAudio(u8),
     Other,
 }
 
@@ -72,6 +79,11 @@ pub fn kind_of_stream_type(stream_type: u8, descriptors: &[u8]) -> StreamKind {
         // is asynchronous KLV when a registration descriptor says "KLVA".
         0x15 => StreamKind::Klv,
         0x06 if has_klva_registration(descriptors) => StreamKind::Klv,
+        0x06 if registration(descriptors) == Some(*b"Opus") => {
+            StreamKind::Opus(opus_channels(descriptors).unwrap_or(2))
+        }
+        0x0f => StreamKind::Aac,
+        t if crate::aac::other_audio_name(t).is_some() => StreamKind::OtherAudio(t),
         _ => StreamKind::Other,
     }
 }
@@ -87,6 +99,35 @@ fn has_klva_registration(descriptors: &[u8]) -> bool {
         i += 2 + length;
     }
     false
+}
+
+/// Each descriptor's tag and body.
+fn descriptors(mut bytes: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut out = Vec::new();
+    while let [tag, length, rest @ ..] = bytes {
+        let length = usize::from(*length).min(rest.len());
+        out.push((*tag, &rest[..length]));
+        bytes = &rest[length..];
+    }
+    out
+}
+
+/// The format a registration descriptor names.
+fn registration(bytes: &[u8]) -> Option<[u8; 4]> {
+    descriptors(bytes)
+        .into_iter()
+        .find_map(|(tag, body)| (tag == 0x05).then(|| body.get(..4)?.try_into().ok())?)
+}
+
+/// Opus's channels from its extension descriptor (tag 0x7F, extension
+/// 0x80): 1 or 2 for mono or stereo, as UXDuck writes them.
+fn opus_channels(bytes: &[u8]) -> Option<u8> {
+    descriptors(bytes)
+        .into_iter()
+        .find_map(|(tag, body)| match body {
+            [0x80, code, ..] if tag == 0x7F && (1..=2).contains(code) => Some(*code),
+            _ => None,
+        })
 }
 
 /// A 33-bit PTS or DTS at `at`.

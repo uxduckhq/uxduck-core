@@ -6,7 +6,12 @@
       "name": "USB Video",
       "enabled": true,
       "standard": "pal",
-      "deinterlace": true
+      "deinterlace": true,
+      "recordSound": true,
+      "soundInput": {
+        "deviceId": "avfoundation:mic-A",
+        "name": "USB Microphone"
+      }
     }
   }
 }

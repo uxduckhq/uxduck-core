@@ -41,6 +41,7 @@ pub mod terrain;
 pub mod thread;
 pub mod trace;
 pub mod tray;
+pub mod update;
 pub mod vehicle;
 pub mod video;
 

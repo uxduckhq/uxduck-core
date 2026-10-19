@@ -1,0 +1,9 @@
+{
+  "method": "analytics/feedback",
+  "params": {
+    "event": "feedback_submitted",
+    "surface": "desktop",
+    "kind": "idea",
+    "status": "queued"
+  }
+}

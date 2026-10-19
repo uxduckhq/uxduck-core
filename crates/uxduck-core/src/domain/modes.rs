@@ -762,13 +762,16 @@ const PLANE_WORDS: &[(&str, &str)] = &[
     ),
     (
         "FBWA",
-        "Moving the sticks changes the vehicle’s roll and pitch angles within the configured limits. Releasing the sticks returns the vehicle to level.",
+        "The roll and pitch sticks request angles within configured limits. Centering them returns to wings level and trimmed pitch, which does not hold altitude. You control throttle.",
     ),
     (
         "FBWB",
-        "The vehicle limits roll and pitch angles as in FBWA and holds altitude. The pitch stick controls climb and descent.",
+        "The roll stick sets bank angle. The pitch stick requests a climb or descent rate; centered, it holds altitude. The autopilot controls pitch and motor power. With an airspeed sensor, throttle normally selects airspeed: minimum stick requests minimum airspeed, not motor off. Without one, mid-stick and below use cruise throttle, and above mid-stick raises it. Flight options can change this behavior.",
     ),
-    ("CRUISE", "Like FBWB, and it holds its course by GPS"),
+    (
+        "CRUISE",
+        "Uses FBWB’s height and speed controls, and holds a GPS ground track when you release the roll and rudder sticks.",
+    ),
     ("AUTOTUNE", "You fly as in FBWA while it tunes its controls"),
     ("AUTO", "Flies the mission"),
     ("RTL", "Flies home and circles there"),

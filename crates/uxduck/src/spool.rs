@@ -26,6 +26,9 @@ use sha2::{Digest, Sha256};
 pub const CUT_EVERY_US: u64 = 30_000_000;
 /// Or once this much is waiting.
 pub const CUT_BYTES: u64 = 1 << 20;
+/// A tlog far behind its cursor, as after uploads were waiting, is caught
+/// up a chunk of about this much at a time, not read whole.
+const READ_AT_MOST: u64 = CUT_BYTES;
 /// A recording's segments last about this long (ADR-0003 C14).
 pub const SEGMENT_US: u64 = 10_000_000;
 /// Segments cut per recording per round, so one recording of hours does
@@ -75,7 +78,12 @@ pub struct Chunk {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recording {
     pub id: String,
+    /// The MP4 its segments are cut from: the recording itself, or for one
+    /// kept as MPEG-TS, its playback copy (S151).
     pub path: PathBuf,
+    /// The MPEG-TS original, for one kept as MPEG-TS: what making room
+    /// removes, with its playback copy.
+    pub original: Option<PathBuf>,
     pub started_at_us: u64,
     pub ended: bool,
 }
@@ -148,6 +156,16 @@ impl Spool {
         if !has_source {
             db.execute_batch("alter table chunk add column source text")?;
         }
+        // Every round asks for what is waiting, oldest first, and for the
+        // segments among it; acknowledged chunks pile up for good, and a
+        // spool that cannot upload keeps every chunk waiting.
+        db.execute_batch(
+            "create index if not exists chunk_recording on chunk (recording, seq);
+            create index if not exists chunk_waiting on chunk (first_us, seq)
+                where state not in ('acknowledged', 'lost');
+            create index if not exists chunk_waiting_segment on chunk (name)
+                where source is not null and state not in ('acknowledged', 'lost');",
+        )?;
         let mut spool = Self { db, tlogs, dir };
         spool.reconcile()?;
         Ok(spool)
@@ -155,6 +173,54 @@ impl Spool {
 
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// While flights are not stored in the account (signed out, no
+    /// server, or the setting off): the tlogs' chunks waiting here go, and
+    /// each tlog goes back to where its first one began, to be cut again
+    /// once they are. The tlogs are the record; the chunks were only copies.
+    /// Returns how many went.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn release(&mut self) -> rusqlite::Result<usize> {
+        let first: Vec<(String, u32, i64)> = {
+            let mut query = self.db.prepare(
+                "select recording, min(seq), min(start_offset) from chunk
+                 where state not in ('acknowledged', 'lost') and source is null
+                 group by recording",
+            )?;
+            query
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if first.is_empty() {
+            return Ok(0);
+        }
+        let names: Vec<String> = {
+            let mut query = self.db.prepare(
+                "select name from chunk where state not in ('acknowledged', 'lost') and source is null",
+            )?;
+            query
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let tx = self.db.transaction()?;
+        for (recording, seq, start) in &first {
+            tx.execute(
+                "delete from chunk where recording = ?1 and seq >= ?2 and state not in ('acknowledged', 'lost')",
+                params![recording, seq],
+            )?;
+            tx.execute(
+                "update cursor set offset = min(offset, ?2), seq = min(seq, ?3 - 1) where recording = ?1",
+                params![recording, start, seq],
+            )?;
+        }
+        tx.commit()?;
+        for name in &names {
+            let _ = std::fs::remove_file(self.path(name));
+        }
+        Ok(names.len())
     }
 
     /// After a crash: files with no row go; rows that are waiting but whose
@@ -208,7 +274,8 @@ impl Spool {
 
     /// Cuts the chunks that are due: from every tlog, what was written since
     /// the last cut, once it is `every_us` old (30 s, `CUT_EVERY_US`), 1 MB,
-    /// or its tlog stopped growing.
+    /// or its tlog stopped growing; at most `limit` of them, so a round's
+    /// work stays small however many tlogs are behind.
     /// Returns how many were cut.
     ///
     /// # Errors
@@ -218,6 +285,7 @@ impl Spool {
         now_us: u64,
         idle_us: u64,
         every_us: u64,
+        limit: usize,
     ) -> std::io::Result<usize> {
         let mut cut = 0;
         let tlogs: Vec<PathBuf> = std::fs::read_dir(&self.tlogs)
@@ -228,46 +296,33 @@ impl Spool {
             .filter(|p| p.extension().is_some_and(|e| e == "tlog"))
             .collect();
         for tlog in tlogs {
+            if cut >= limit {
+                break;
+            }
             let Some(recording) = tlog.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
                 continue;
             };
-            let (offset, cut_at, seq): (u64, u64, u32) = self
-                .db
-                .query_row(
-                    "select offset, cut_at_us, seq from cursor where recording = ?1",
-                    [&recording],
-                    |r| Ok((u(r.get(0)?), u(r.get(1)?), r.get(2)?)),
-                )
-                .optional()
-                .map_err(std::io::Error::other)?
-                .map_or_else(
-                    || {
-                        // First seen: its 30 s start now.
-                        self.db
-                            .execute(
-                                "insert into cursor values (?1, 0, ?2, 0)",
-                                params![recording, i(now_us)],
-                            )
-                            .map(|_| (0, now_us, 0))
-                    },
-                    Ok,
-                )
-                .map_err(std::io::Error::other)?;
-            let bytes = std::fs::read(&tlog)?;
-            let Some(fresh) = bytes.get(usize::try_from(offset).unwrap_or(usize::MAX)..) else {
+            let (offset, cut_at, seq) = self.cursor(&recording, now_us)?;
+            // Only what was written since the last cut is read: the
+            // tlogs of every run stay here, gigabytes of them.
+            let metadata = std::fs::metadata(&tlog)?;
+            if metadata.len() <= offset {
                 continue;
-            };
-            let records = uxduck_mavlink::tlog::read(fresh);
+            }
+            let behind = metadata.len() - offset;
+            let fresh = read_range(&tlog, offset, behind.min(READ_AT_MOST))?;
+            let records = uxduck_mavlink::tlog::read(&fresh);
             let consumed: usize = records.iter().map(|(_, frame)| 8 + frame.len()).sum();
             if consumed == 0 {
                 continue;
             }
-            let modified_us = std::fs::metadata(&tlog)
-                .and_then(|m| m.modified())
+            let modified_us = metadata
+                .modified()
                 .ok()
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(now_us, |d| u64::try_from(d.as_micros()).unwrap_or(now_us));
             let due = consumed as u64 >= CUT_BYTES
+                || behind > READ_AT_MOST
                 || now_us.saturating_sub(cut_at) >= every_us
                 || now_us.saturating_sub(modified_us) >= idle_us;
             if !due {
@@ -317,6 +372,31 @@ impl Spool {
             cut += 1;
         }
         Ok(cut)
+    }
+
+    /// A tlog's cursor: how far it was cut, when, and its last chunk;
+    /// first seen, its 30 s start now.
+    fn cursor(&self, recording: &str, now_us: u64) -> std::io::Result<(u64, u64, u32)> {
+        self.db
+            .query_row(
+                "select offset, cut_at_us, seq from cursor where recording = ?1",
+                [recording],
+                |r| Ok((u(r.get(0)?), u(r.get(1)?), r.get(2)?)),
+            )
+            .optional()
+            .map_err(std::io::Error::other)?
+            .map_or_else(
+                || {
+                    self.db
+                        .execute(
+                            "insert into cursor values (?1, 0, ?2, 0)",
+                            params![recording, i(now_us)],
+                        )
+                        .map(|_| (0, now_us, 0))
+                },
+                Ok,
+            )
+            .map_err(std::io::Error::other)
     }
 
     /// Cuts the segments that are due from `recordings` (S83): the init
@@ -505,7 +585,12 @@ impl Spool {
     pub fn evict(&mut self, ended: &[(Recording, u64)], need: u64) -> rusqlite::Result<Vec<Lost>> {
         let mut order: Vec<(Option<(u64, u64)>, &Recording)> = Vec::new();
         for (recording, ended_at_us) in ended {
-            if recording.path.exists() {
+            if recording
+                .original
+                .as_ref()
+                .unwrap_or(&recording.path)
+                .exists()
+            {
                 order.push((self.unstored(recording, *ended_at_us)?, recording));
             }
         }
@@ -516,12 +601,20 @@ impl Spool {
             if freed >= need {
                 break;
             }
-            let size = std::fs::metadata(&recording.path).map_or(0, |m| m.len());
-            if std::fs::remove_file(&recording.path).is_err() {
+            let main = recording.original.as_ref().unwrap_or(&recording.path);
+            let size = std::fs::metadata(main).map_or(0, |m| m.len());
+            if std::fs::remove_file(main).is_err() {
                 continue;
             }
-            let _ = std::fs::remove_file(recording.path.with_extension("klv"));
+            let _ = std::fs::remove_file(main.with_extension("klv"));
+            let _ = std::fs::remove_file(main.with_extension("idx"));
             freed += size;
+            if recording.original.is_some() {
+                let copy = std::fs::metadata(&recording.path).map_or(0, |m| m.len());
+                if std::fs::remove_file(&recording.path).is_ok() {
+                    freed += copy;
+                }
+            }
             self.db.execute(
                 "update chunk set state = 'lost'
                  where recording = ?1 and state not in ('acknowledged', 'lost')",
@@ -675,13 +768,15 @@ mod tests {
         let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
         // Not due: fresh, small and still growing.
         assert_eq!(
-            spool.cut_every(2_000_000, u64::MAX, CUT_EVERY_US).unwrap(),
+            spool
+                .cut_every(2_000_000, u64::MAX, CUT_EVERY_US, usize::MAX)
+                .unwrap(),
             0
         );
         // 30 s on: cut.
         assert_eq!(
             spool
-                .cut_every(2_000_000 + CUT_EVERY_US, u64::MAX, CUT_EVERY_US)
+                .cut_every(2_000_000 + CUT_EVERY_US, u64::MAX, CUT_EVERY_US, usize::MAX)
                 .unwrap(),
             1
         );
@@ -689,7 +784,7 @@ mod tests {
         // It stopped growing: cut what is left.
         assert_eq!(
             spool
-                .cut_every(3_000_000 + CUT_EVERY_US, 0, CUT_EVERY_US)
+                .cut_every(3_000_000 + CUT_EVERY_US, 0, CUT_EVERY_US, usize::MAX)
                 .unwrap(),
             1
         );
@@ -720,7 +815,7 @@ mod tests {
         let tlogs = data.path().join("tlogs");
         tlog_with(&tlogs, "udp-1", 4, 1_000_000);
         let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
-        spool.cut_every(1, 0, CUT_EVERY_US).unwrap();
+        spool.cut_every(1, 0, CUT_EVERY_US, usize::MAX).unwrap();
         let first = spool.waiting(1).unwrap()[0].0.clone();
         // A file with no row, as a crash before the commit leaves.
         let stray = data.path().join("spool/udp-1/000002-dead.tlog.zst");
@@ -732,10 +827,61 @@ mod tests {
         assert!(!stray.exists(), "a file with no row goes");
         assert_eq!(spool.backlog().unwrap().0, 0, "the row with no file goes");
         // And the tlog is cut again from where that chunk began.
-        spool.cut_every(2, 0, CUT_EVERY_US).unwrap();
+        spool.cut_every(2, 0, CUT_EVERY_US, usize::MAX).unwrap();
         let again = spool.waiting(1).unwrap()[0].0.clone();
         assert_eq!((again.seq, again.first_us), (1, first.first_us));
         assert_eq!(again.sha256, first.sha256, "the same bytes, the same name");
+    }
+
+    #[test]
+    fn a_tlog_far_behind_is_caught_up_a_chunk_at_a_time_and_a_round_cuts_at_most_its_limit() {
+        let data = tempfile::tempdir().unwrap();
+        let tlogs = data.path().join("tlogs");
+        // About 2.5 MB of one tlog, and a small second one.
+        tlog_with(&tlogs, "udp-1", 90_000, 1_000_000);
+        tlog_with(&tlogs, "udp-2", 10, 1_000_000);
+        let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
+        assert_eq!(spool.cut_every(1, 0, CUT_EVERY_US, 1).unwrap(), 1);
+        let mut rounds = 1;
+        while spool
+            .cut_every(1 + rounds, 0, CUT_EVERY_US, usize::MAX)
+            .unwrap()
+            > 0
+        {
+            rounds += 1;
+            assert!(rounds < 10, "caught up in a few rounds");
+        }
+        let waiting = spool.waiting(100).unwrap();
+        let mut joined = Vec::new();
+        for (chunk, _) in waiting.iter().filter(|(c, _)| c.recording == "udp-1") {
+            let bytes = zstd::bulk::decompress(&spool.bytes(chunk).unwrap(), 1 << 24).unwrap();
+            assert!(bytes.len() as u64 <= READ_AT_MOST, "no chunk is read whole");
+            joined.extend(bytes);
+        }
+        assert!(
+            waiting.len() >= 4,
+            "udp-1 in pieces of about 1 MB, and udp-2"
+        );
+        assert_eq!(joined, std::fs::read(tlogs.join("udp-1.tlog")).unwrap());
+    }
+
+    #[test]
+    fn released_chunks_go_and_are_cut_again_the_same_once_flights_are_stored() {
+        let data = tempfile::tempdir().unwrap();
+        let tlogs = data.path().join("tlogs");
+        tlog_with(&tlogs, "udp-1", 4, 1_000_000);
+        let mut spool = Spool::open(data.path(), tlogs).unwrap();
+        spool.cut_every(1, 0, CUT_EVERY_US, usize::MAX).unwrap();
+        let first = spool.waiting(1).unwrap()[0].0.clone();
+        let file = data.path().join("spool").join(&first.name);
+        assert!(file.exists());
+        assert_eq!(spool.release().unwrap(), 1);
+        assert!(!file.exists(), "its file goes");
+        assert_eq!(spool.backlog().unwrap().0, 0);
+        assert_eq!(spool.release().unwrap(), 0, "nothing more to let go");
+        spool.cut_every(2, 0, CUT_EVERY_US, usize::MAX).unwrap();
+        let again = spool.waiting(1).unwrap()[0].0.clone();
+        assert_eq!((again.seq, &again.sha256), (1, &first.sha256));
     }
 
     /// A recording as the recorder writes it: the init segment, then a
@@ -781,6 +927,7 @@ mod tests {
         let mut recording = Recording {
             id: "vr1".into(),
             path: path.clone(),
+            original: None,
             started_at_us: 1_000_000_000,
             ended: false,
         };
@@ -834,6 +981,7 @@ mod tests {
             recordings.push(Recording {
                 id: format!("vr{n}"),
                 path,
+                original: None,
                 started_at_us: start,
                 ended: true,
             });

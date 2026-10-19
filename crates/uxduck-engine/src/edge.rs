@@ -95,6 +95,13 @@ impl Engine {
         Ok(())
     }
 
+    /// "Store flights and recordings in my account" (C17): off, the spool
+    /// cuts nothing and lets go of what waits.
+    #[must_use]
+    pub const fn stores_flights(&self) -> bool {
+        self.state.settings.store_flights
+    }
+
     /// The uploader's report: what is waiting.
     pub fn upload_reported(&mut self, status: uxduck_contracts::dto::settings::UploadStatus) {
         self.upload_status = Some(status);

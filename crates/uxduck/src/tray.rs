@@ -46,7 +46,8 @@ pub fn binary() -> Option<PathBuf> {
     }
     // macOS reports the path it was started by, which may be the link.
     let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    // Never a `\\?\` path on Windows: the tray passes it on to `uxduck open`.
+    let exe = dunce::canonicalize(&exe).unwrap_or(exe);
     let dir = exe.parent()?;
     let name = if cfg!(windows) {
         "uxduck-tray.exe"

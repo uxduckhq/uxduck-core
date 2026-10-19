@@ -43,6 +43,7 @@ fn daemon() -> Actor {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per request")]
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -105,7 +106,27 @@ pub(crate) fn handle(
             if !granted.contains(&Capability::Read) {
                 return denied(&Capability::Read.denied_message());
             }
-            to_value(&engine.storage_usage())
+            to_value(&engine.storage_usage()?)
+        }
+        ClientRequest::StorageReveal(_) => {
+            if !granted.contains(&Capability::Read) {
+                return denied(&Capability::Read.denied_message());
+            }
+            let folder = engine
+                .system
+                .reveal_data_dir()
+                .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
+            to_value(&uxduck_contracts::dto::video::VideoRevealResult { folder })
+        }
+        ClientRequest::StorageClearSimulatorLogs(_) => {
+            if !granted.contains(&Capability::Config) {
+                return denied(&Capability::Config.denied_message());
+            }
+            engine
+                .system
+                .clear_simulator_logs()
+                .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
+            to_value(&engine.storage_usage()?)
         }
         ClientRequest::DaemonWakeups(_) => {
             if !granted.contains(&Capability::Read) {
@@ -331,8 +352,7 @@ fn remote_control(
     Ok(())
 }
 
-/// "Phones and tablets on this network" (S97): one of this computer's
-/// IPv4 addresses, or off. Only at this computer: not from a phone on the
+/// "Phones and tablets on this network" (S97): selected IPv4 addresses, or off. Only at this computer: not from a phone on the
 /// network, nor from away, so nobody lets themselves in.
 fn network_address(
     engine: &Engine,
@@ -340,9 +360,9 @@ fn network_address(
     params: &SettingsUpdateParams,
     settings: &mut uxduck_core::domain::settings::Settings,
 ) -> Result<(), ApiError> {
-    let Some(address) = &params.network_address else {
+    if params.network_address.is_none() && params.network_addresses.is_none() {
         return Ok(());
-    };
+    }
     let here = engine
         .connections
         .get(&connection)
@@ -353,21 +373,47 @@ fn network_address(
             "Phones and tablets can only be let in at the computer itself.",
         ));
     }
-    let address = address.trim();
-    if address.is_empty() {
-        settings.network_address = None;
-        return Ok(());
-    }
-    match address.parse::<std::net::Ipv4Addr>() {
-        Ok(ip) if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() => {
-            settings.network_address = Some(ip.to_string());
-            Ok(())
-        }
-        _ => Err(ApiError::new(
+    if params.network_address.is_some() && params.network_addresses.is_some() {
+        return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!("{address} isn't one of this computer's addresses on a network."),
-        )),
+            "Use networkAddresses or networkAddress, not both.",
+        ));
     }
+    let requested = params.network_addresses.clone().unwrap_or_else(|| {
+        params
+            .network_address
+            .iter()
+            .filter(|a| !a.trim().is_empty())
+            .cloned()
+            .collect()
+    });
+    let mut addresses = Vec::new();
+    for address in requested {
+        let address = address.trim();
+        let ip = address
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .filter(|ip| {
+                !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_multicast()
+                    && !ip.is_link_local()
+                    && !ip.is_broadcast()
+            })
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorKind::InvalidValue,
+                    format!("{address} isn't one of this computer's addresses on a network."),
+                )
+            })?;
+        let address = ip.to_string();
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    settings.network_address = addresses.first().cloned();
+    settings.network_addresses = addresses;
+    Ok(())
 }
 
 /// A new ground station system id goes to the data plane, and to a search
@@ -426,6 +472,28 @@ fn auto_delete_days(
     Ok(days)
 }
 
+/// Apply independent age and size policies without changing unrelated settings.
+fn storage_policies(
+    settings: &mut Settings,
+    params: &SettingsUpdateParams,
+) -> Result<(), ApiError> {
+    if let Some(list) = &params.auto_delete {
+        let mut days = auto_delete_days(list.clone())?;
+        settings.simulator_log_retention_days = days.remove(&StorageCategory::SimulatorLogs);
+        settings.auto_delete_days = days;
+    }
+    if let Some(bytes) = params.simulator_log_max_bytes {
+        if bytes != 0 && bytes < 1_000_000 {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Choose at least 1 MB, or no size limit.",
+            ));
+        }
+        settings.simulator_log_max_bytes = bytes;
+    }
+    Ok(())
+}
+
 fn update_settings(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -443,6 +511,7 @@ fn update_settings(
         error.data.current_version = Some(settings.version);
         return Err(error);
     }
+    storage_policies(&mut settings, &params)?;
     if let Some(input) = &params.pilot_input {
         engine.configure_pilot_input(&mut settings, input)?;
     }
@@ -507,9 +576,6 @@ fn update_settings(
     if let Some(ports) = params.video_ports {
         settings.video_ports = video_ports(ports)?;
     }
-    if let Some(list) = params.auto_delete {
-        settings.auto_delete_days = auto_delete_days(list)?;
-    }
     settings.version += 1;
     let before = engine.state.settings.clone();
     engine.commit(
@@ -529,6 +595,9 @@ fn update_settings(
     }
     if let Some(choice) = &params.vehicle_terrain {
         engine.terrain_dataset_chosen(&choice.vehicle_id);
+    }
+    if before.simulator_log_max_bytes != settings.simulator_log_max_bytes {
+        engine.check_storage();
     }
     to_value(&engine.settings_dto(&settings))
 }
@@ -615,10 +684,29 @@ impl Engine {
         }
     }
 
-    fn storage_usage(&self) -> StorageUsage {
+    fn storage_usage(&self) -> Result<StorageUsage, ApiError> {
         let report = self.system.storage();
-        StorageUsage {
+        let mut simulator_logs = self
+            .system
+            .simulator_logs()
+            .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
+        for sim in &mut simulator_logs {
+            sim.name = self
+                .state
+                .links
+                .get(&sim.simulation_id)
+                .map(|link| link.name.clone())
+                .or_else(|| {
+                    self.state
+                        .vehicles
+                        .values()
+                        .find(|v| v.link_id == sim.simulation_id)
+                        .map(|v| v.name.clone())
+                });
+        }
+        Ok(StorageUsage {
             data_dir: report.data_dir,
+            simulator_logs,
             categories: StorageCategory::ALL
                 .iter()
                 .map(|category| {
@@ -638,7 +726,7 @@ impl Engine {
             free_bytes: report.free_bytes,
             total_bytes: report.total_bytes,
             upload: self.upload_status.clone(),
-        }
+        })
     }
 
     /// Checks free space, and applies the auto-delete policy. The host
@@ -650,6 +738,12 @@ impl Engine {
             .auto_delete_days
             .iter()
             .map(|(c, d)| (*c, *d))
+            .chain(
+                self.state
+                    .settings
+                    .simulator_log_retention_days
+                    .map(|days| (StorageCategory::SimulatorLogs, days)),
+            )
             .collect();
         let now = self.clock.now_us();
         let (mut files, mut bytes) = (0, 0);
@@ -660,14 +754,19 @@ impl Engine {
             files += deleted.files;
             bytes += deleted.bytes;
         }
+        let limited = self
+            .system
+            .limit_simulator_logs(self.state.settings.simulator_log_max_bytes);
+        files += limited.files;
+        bytes += limited.bytes;
         if files > 0 {
             self.raise(Raise {
                 severity: Severity::Info,
                 kind: NotificationKind::Transient,
                 subject: Subject::System,
-                title: format!("Deleted {files} old files ({})", megabytes(bytes)),
+                title: format!("Deleted {files} files ({})", megabytes(bytes)),
                 body: Some(
-                    "Your storage settings remove old files. You can change that in Settings."
+                    "Your storage settings remove files by age or size. You can change that in Settings."
                         .into(),
                 ),
                 actions: Vec::new(),

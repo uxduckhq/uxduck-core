@@ -1438,7 +1438,7 @@ mod tests {
             .iter()
             .filter(|e| e.guide)
             .collect();
-        assert_eq!(guides.len(), 7);
+        assert_eq!(guides.len(), 8);
         for guide in guides {
             let mut attempt = attempt(&guide.id);
             assert!(attempt.guide);

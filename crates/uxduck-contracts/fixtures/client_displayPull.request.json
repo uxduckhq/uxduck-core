@@ -1,0 +1,6 @@
+{
+  "method": "client/displayPull",
+  "params": {
+    "id": "display-2"
+  }
+}

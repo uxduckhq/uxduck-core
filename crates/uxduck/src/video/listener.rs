@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use uxduck_core::domain::video::{
-    CameraMetadata, VideoContainer, VideoCounters, VideoReport, source_id, split_source_id,
+    CameraMetadata, VideoAudio, VideoContainer, VideoCounters, VideoReport, source_id,
+    split_source_id,
 };
 use uxduck_media::source::{Output, Source, Status};
 use uxduck_media::udp::Container;
@@ -37,6 +38,7 @@ struct Sender {
     address: SocketAddr,
     heard: Instant,
     stopped: bool,
+    processing: bool,
     /// At the last report: when, bytes and pictures, for the rates.
     reported: (Instant, u64, u64),
     /// When its KLV last went to the engine.
@@ -91,6 +93,7 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
                 address: from,
                 heard: now,
                 stopped: false,
+                processing: false,
                 reported: (now, 0, 0),
                 klv_posted: None,
             });
@@ -102,6 +105,34 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
             }
             sender.heard = now;
             sender.address = from;
+            let needed = hub.needed(&id);
+            if !needed {
+                if sender.processing {
+                    // Drop demux/depacketizer state and accumulated picture buffers.
+                    sender.source = Source::new();
+                    sender.processing = false;
+                }
+                if sender.reported.1 == 0 {
+                    // Discovery only: inspect the datagram envelope, never its pictures.
+                    if let Ok(packet) = uxduck_media::udp::classify(&buffer[..len]) {
+                        let mut observed = report(port, &from, &sender.source.status(), 1.0, 0, 0);
+                        observed.id = Some(id.clone());
+                        observed.container = match packet {
+                            uxduck_media::udp::Packet::Ts {
+                                container: Container::RtpTs,
+                                ..
+                            } => VideoContainer::RtpTs,
+                            uxduck_media::udp::Packet::Ts { .. } => VideoContainer::Ts,
+                            uxduck_media::udp::Packet::Rtp { .. } => VideoContainer::Rtp,
+                        };
+                        sender.reported.1 = 1;
+                        engine.post(move |e| e.video_observed(observed));
+                    }
+                }
+                continue;
+            }
+            sender.processing = true;
+            hub.publish_ts(&id, &buffer[..len]);
             for output in sender.source.push(&buffer[..len]) {
                 if let Some(metadata) = metadata_due(&output, &mut sender.klv_posted) {
                     let id = id.clone();
@@ -206,6 +237,7 @@ pub(super) fn item(output: Output) -> Item {
             timestamp_us,
             data: data.into(),
         },
+        Output::Audio(audio) => Item::Audio(audio),
     }
 }
 
@@ -219,6 +251,9 @@ fn tick(senders: &mut HashMap<String, Sender>, port: u16, engine: &EngineHandle)
             sender.stopped = true;
             let id = id.clone();
             engine.post(move |e| e.video_stopped(&id));
+            continue;
+        }
+        if !sender.processing {
             continue;
         }
         let status = sender.source.status();
@@ -267,6 +302,10 @@ pub(super) fn report(
         frame_rate: (rate > 0.0).then(|| (rate * 10.0).round() / 10.0),
         unsupported: status.unsupported.clone(),
         klv: status.klv,
+        audio: status.audio.as_ref().map(|sound| VideoAudio {
+            name: sound.name.clone(),
+            recorded: sound.recorded,
+        }),
         id: None,
         note: None,
         counters: VideoCounters {
@@ -282,5 +321,97 @@ pub(super) fn report(
             klv: c.klv,
             klv_bad: c.klv_bad,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uxduck_media::tsrecord::TsRecorder;
+
+    /// Two seconds of H.264 and AAC in MPEG-TS, as UXDuck's own writer
+    /// makes it: the fixtures are private validation files, not part of
+    /// the exported source.
+    fn pictures_and_sound() -> Vec<u8> {
+        use uxduck_media::aac::AacConfig;
+        use uxduck_media::audio::AudioUnit;
+        use uxduck_media::nal::Codec;
+        use uxduck_media::tsmux::TsWriter;
+        let sps = [
+            0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40, 0x50, 0x05, 0xbb, 0x01, 0x10,
+        ];
+        let key = [
+            &[0, 0, 0, 1][..],
+            &sps,
+            &[0, 0, 0, 1, 0x68, 0xeb, 0xe3],
+            &[0, 0, 0, 1, 0x65],
+            &[7u8; 900],
+        ]
+        .concat();
+        let delta = [&[0, 0, 0, 1, 0x41][..], &[3u8; 300]].concat();
+        let aac = AacConfig::from_audio_specific_config(&[0x11, 0x90]).unwrap();
+        let mut writer = TsWriter::new(Codec::H264, false);
+        let mut out = Vec::new();
+        let mut frames = 0u64;
+        for n in 0..=50u64 {
+            let key_frame = n % 25 == 0;
+            let picture_us = 1_000_000 + n * 40_000;
+            out.extend(writer.picture(
+                if key_frame { &key } else { &delta },
+                picture_us * 9 / 100,
+                key_frame,
+            ));
+            while 1_000_000 + frames * 64_000 / 3 < picture_us + 40_000 {
+                let at = 1_000_000 + frames * 64_000 / 3;
+                let unit = AudioUnit::aac(vec![0x21, 0x10, 0x05, 0x40], at, aac);
+                out.extend(writer.audio(&unit, at * 9 / 100));
+                frames += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn ts_sound_reaches_recordings_and_the_source_report() {
+        let fixture = pictures_and_sound();
+        let hub = Hub::default();
+        let (to, from) = std::sync::mpsc::channel();
+        hub.record("recording", "camera", to);
+        let mut source = Source::new();
+        for datagram in fixture.chunks(188 * 7) {
+            hub.publish_ts("camera", datagram);
+            for output in source.push(datagram) {
+                hub.publish("camera", &item(output));
+            }
+        }
+        hub.stop_recording("recording");
+
+        // The recording keeps the camera's bytes, sound and all (S151).
+        let mut recorder = TsRecorder::new();
+        let mut file = Vec::new();
+        for item in from {
+            file.extend(match item {
+                Item::Ts(bytes) => recorder.push_ts(bytes).bytes,
+                Item::Unit(unit) => recorder.push_unit(&unit).bytes,
+                Item::Audio(unit) => recorder.push_audio(&unit).bytes,
+                Item::Klv { .. } => Vec::new(),
+            });
+        }
+        assert!(recorder.sound);
+        assert!(recorder.duration_us > 0);
+        assert_eq!(file.len() % 188, 0);
+        assert!(fixture.ends_with(&file[188 * 2..]), "the rest as received");
+
+        let report = report(
+            5600,
+            &SocketAddr::from(([127, 0, 0, 1], 1234)),
+            &source.status(),
+            1.0,
+            0,
+            0,
+        );
+        let audio = report.audio.expect("the source reports its sound");
+        assert!(audio.name.starts_with("AAC,"), "{}", audio.name);
+        assert!(audio.recorded);
     }
 }

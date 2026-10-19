@@ -109,6 +109,42 @@ mod tests {
         }
     }
 
+    /// The jet (S143) cruises at 50 m/s, against the plane's 22, on
+    /// `ArduPlane`'s jet limits with roll and height tuning that does not
+    /// wobble (upstream's rate gains oscillated), and a circle, navigation
+    /// period and TECS pitch damping that hold height at true airspeeds up
+    /// to about 80 m/s, high up, and `ArduPlane`'s default throttle slew rate,
+    /// so a long take-off roll from a high field does not hold full throttle
+    /// after lift-off; the plane keeps its own.
+    #[test]
+    fn the_jet_profile_is_faster_than_the_plane_and_the_plane_keeps_upstream() {
+        let jet = defaults("arduplane", "plane-jet")
+            .expect("a valid profile")
+            .expect("a jet profile");
+        for line in [
+            "AIRSPEED_CRUISE 50\n",
+            "AIRSPEED_MAX 80\n",
+            "AIRSPEED_MIN 25\n",
+            "THR_MAX 100\n",
+            "THR_SLEWRATE 100\n",
+            "ROLL_LIMIT_DEG 55\n",
+            "LEVEL_ROLL_LIMIT 0\n",
+            "RLL_RATE_P 0.08\n",
+            "TECS_SINK_MIN 2\n",
+            "TECS_TIME_CONST 7\n",
+            "TECS_PTCH_DAMP 0.8\n",
+            "TECS_VERT_ACC 15\n",
+            "PTCH_LIM_MAX_DEG 20\n",
+            "PTCH_LIM_MIN_DEG -25\n",
+            "NAVL1_PERIOD 25\n",
+            "WP_LOITER_RAD 400\n",
+        ] {
+            assert!(jet.contains(line), "{line}");
+        }
+        assert_eq!(defaults("arduplane", "plane"), Ok(None));
+        assert_eq!(defaults("arduplane", "quadplane"), Ok(None));
+    }
+
     #[test]
     fn profile_files_follow_upstream_defaults_and_fail_if_the_directory_is_missing() {
         let directory = tempfile::tempdir().expect("profile directory");

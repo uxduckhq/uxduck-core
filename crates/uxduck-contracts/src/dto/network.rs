@@ -13,6 +13,9 @@ pub struct NetworkAddress {
     pub address: String,
     /// The network interface, for example `en0`.
     pub interface: String,
+    /// Readable system label, for example Wi-Fi, Ethernet or Tailscale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The one the computer's usual route goes out of: the best guess.
     #[serde(default)]
     pub usual: bool,
@@ -28,6 +31,9 @@ pub struct NetworkStatus {
     /// `http://192.168.1.20:45000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Every active listener, in the order selected. `url` is the first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
     /// Turned on but not listening, and why, in words for the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,

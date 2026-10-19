@@ -24,7 +24,7 @@ use crate::dto::settings::Settings;
 use crate::dto::sim::SimSnapshot;
 use crate::dto::thread::{Folder, Item, Thread};
 use crate::dto::vehicle::Vehicle;
-use crate::dto::video::{VideoRecording, VideoSource};
+use crate::dto::video::{VideoPhoto, VideoRecording, VideoSource};
 
 /// The entity types a client can subscribe to.
 #[derive(
@@ -68,6 +68,8 @@ pub enum EntityType {
     VideoSource,
     /// A camera's recorded original (S40).
     VideoRecording,
+    /// A photo from the video (S144).
+    VideoPhoto,
     /// A vehicle's latest practice attempt, keyed by vehicle id (S100).
     PracticeAttempt,
     /// A download from a vehicle or an upload to it (S121).
@@ -140,6 +142,8 @@ pub struct Snapshot {
     pub video_sources: Option<Vec<VideoSource>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_recordings: Option<Vec<VideoRecording>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_photos: Option<Vec<VideoPhoto>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub practice_attempts: Option<Vec<PracticeAttempt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,6 +223,8 @@ pub struct EntityChange {
     pub video_source: Option<VideoSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_recording: Option<VideoRecording>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_photo: Option<VideoPhoto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub practice_attempt: Option<PracticeAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

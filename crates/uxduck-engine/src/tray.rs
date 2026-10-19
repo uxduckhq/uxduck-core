@@ -149,6 +149,7 @@ fn activate(
             });
             TrayAction::Done
         }
+        "updates" => open_page(engine, "/about#updates")?,
         "simulations" => open_page(engine, "/vehicles#simulated")?,
         "stop-simulations" => stop_all_simulations(engine, connection, granted)?,
         "docs" => TrayAction::OpenUrl { url: docs_url() },
@@ -377,6 +378,7 @@ impl Engine {
     }
     /// The menu as it stands.
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "one ordered native menu")]
     pub fn tray_menu(&self) -> TrayMenu {
         let state = &self.state;
         let pairing = self.pairing_questions();
@@ -463,6 +465,7 @@ impl Engine {
             ];
             items.push(row);
         }
+        items.extend(self.update_menu_item());
         items.push(item("show-files", "Show files", true));
         items.extend(self.login_menu());
         items.extend([
@@ -476,8 +479,17 @@ impl Engine {
             items,
             simulation_reminder: self.idle_simulations.reminder.clone(),
             alert: self.unseen_alert(),
+            app_update: self.app_update_notice().map(Box::new),
             question: pairing.into_iter().last().map(|question| question.question),
         }
+    }
+
+    fn update_menu_item(&self) -> Option<TrayItem> {
+        self.app_update
+            .status
+            .version
+            .as_ref()
+            .map(|_| item("updates", "UXDuck update…", true))
     }
 
     /// The newest vehicle warning or alarm raised while no window was
@@ -557,6 +569,7 @@ impl Engine {
                         id,
                         title: n.title.clone(),
                         message: n.body.clone().unwrap_or_default(),
+                        pairing_code: Some(spaced),
                         answers,
                     },
                 }

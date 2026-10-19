@@ -6,5 +6,12 @@
       "persistent": true
     }
   ],
-  "scanning": false
+  "scanning": false,
+  "soundInputs": [
+    {
+      "id": "avfoundation:mic-A",
+      "name": "USB Microphone",
+      "persistent": true
+    }
+  ]
 }

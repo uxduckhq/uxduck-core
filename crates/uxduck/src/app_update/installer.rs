@@ -1,0 +1,117 @@
+//! Platform update mechanisms. Arguments stay separate; no shell interpolation.
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Validate helpers and, on macOS, Gatekeeper acceptance before shutting down.
+pub(super) fn preflight(package: &Path) -> Result<(), String> {
+    if !package.is_file() {
+        return Err("The downloaded installer is missing. Check for updates again.".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::check_destination(Path::new("/Applications/UXDuck.app"))?;
+        let result = Command::new("/usr/sbin/spctl")
+            .args(["--assess", "--type", "install"])
+            .arg(package)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !result.status.success() {
+            return Err(format!(
+                "macOS did not accept the signed installer: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        return Err("Installing an update needs a desktop authorization agent. On a headless computer, install the downloaded .deb manually with your package manager.".into());
+    }
+    #[cfg(target_os = "linux")]
+    for binary in ["/usr/bin/pkexec", "/usr/bin/dpkg"] {
+        if !Path::new(binary).is_file() {
+            return Err(format!(
+                "Installing UXDuck needs {binary}. Install it with your package manager, or install the downloaded .deb manually."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Mac updates run as the user; native Windows/Linux installers own elevation.
+/// Never reboot a computer.
+pub(super) fn install(package: &Path, kind: &str, version: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if kind == "pkg" {
+        return macos::install(package, Path::new("/Applications/UXDuck.app"), version);
+    }
+    let _ = version;
+    let (program, args) = command(std::env::consts::OS, kind)?;
+    let status = Command::new(program)
+        .args(args)
+        .arg(package)
+        // The worker's stdout is a one-line readiness pipe whose reader exits
+        // before installation. Installer output must not hit that closed pipe.
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("Couldn't start the installer: {e}"))?;
+    // Windows Installer's 3010 is success with a reboot requested. /norestart
+    // prevents that request from restarting the machine under the user.
+    if status.success() || (cfg!(windows) && status.code() == Some(3010)) {
+        Ok(())
+    } else {
+        Err(format!("The installer was cancelled or failed ({status})."))
+    }
+}
+
+fn command(os: &str, kind: &str) -> Result<(&'static str, Vec<&'static str>), String> {
+    match (os, kind) {
+        ("windows", "msi") => Ok(("msiexec.exe", vec!["/passive", "/norestart", "/i"])),
+        ("linux", "deb") => Ok(("/usr/bin/pkexec", vec!["/usr/bin/dpkg", "--install"])),
+        _ => Err(
+            "This platform needs a different installer. Download UXDuck for this computer.".into(),
+        ),
+    }
+}
+
+/// The full installer owns the product's standard location, including when the
+/// running executable came from a portable archive. On failure the old path is
+/// retained for recovery instead of launching a stale archive after success.
+pub(super) fn installed_executable() -> Result<PathBuf, String> {
+    match std::env::consts::OS {
+        "macos" => Ok(PathBuf::from(
+            "/Applications/UXDuck.app/Contents/MacOS/uxduck",
+        )),
+        "linux" => Ok(PathBuf::from("/usr/bin/uxduck")),
+        "windows" => std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join("UXDuck/uxduck.exe"))
+            .ok_or_else(|| {
+                "Windows did not provide its Program Files folder. Install UXDuck manually.".into()
+            }),
+        _ => Err("No installer is supported on this platform.".into()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test assertions")]
+mod tests {
+    use super::*;
+    #[test]
+    fn each_platform_uses_its_native_installer_and_never_reboots() {
+        // macOS never falls back to an elevated shell or the system installer.
+        assert!(command("macos", "pkg").is_err());
+        assert_eq!(
+            command("windows", "msi").unwrap(),
+            ("msiexec.exe", vec!["/passive", "/norestart", "/i"])
+        );
+        assert_eq!(
+            command("linux", "deb").unwrap(),
+            ("/usr/bin/pkexec", vec!["/usr/bin/dpkg", "--install"])
+        );
+        assert!(command("linux", "tar.gz").is_err());
+        assert!(command("windows", "pkg").is_err());
+    }
+}

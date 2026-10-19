@@ -14,6 +14,8 @@ use crate::{ConnectionId, Engine, rpc};
 impl Engine {
     /// Merges what the data plane produced and tells subscribers.
     pub fn telemetry_observed(&mut self, update: VehicleTelemetry) {
+        let source_observation =
+            !update.positions.is_empty() || update.items.iter().any(|i| i.source != "flight");
         self.telemetry_history.observe(self.clock.now_us(), &update);
         let vehicle_id = update.vehicle_id.clone();
         let frame = rpc::router::notification(&ServerNotification::TelemetryUpdate(
@@ -26,6 +28,9 @@ impl Engine {
             }
         }
         let subscribers: Vec<ConnectionId> = self.telemetry_subscribers.iter().copied().collect();
+        if source_observation {
+            self.observe_flight_usage(&vehicle_id);
+        }
         for id in subscribers {
             self.send(id, &frame);
         }

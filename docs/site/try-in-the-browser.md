@@ -9,9 +9,9 @@ Try a simulated vehicle before connecting hardware.
 
 1. Open [app.uxduck.com](https://app.uxduck.com) in Chrome and choose **Try a simulation**. Nothing to install. If UXDuck was connected but stopped, the button is **Start simulation**.
 2. A simulated VTOL plane starts in flight over Y Combinator's parking lot in Dogpatch, San Francisco. If a simulation is already running, UXDuck keeps it instead of starting another.
-3. Read [Telemetry, Control and Messages](/docs/telemetry-and-control), then use **Control** to try a command and see its receipt. Use **Stop simulation** there to finish.
+3. Read [Telemetry, Cockpit and Messages](/docs/telemetry-and-control), then use **Cockpit** to try a command and see its receipt. Use **Stop simulation** there to finish.
 
-Choose **Simulated vehicle** under **Vehicles** to select another type and starting place. The simulation runs in this browser; keep its page open while using it.
+Choose **Simulated vehicle** under **Fleet** to select another type and starting place. The simulation runs in this browser; keep its page open while using it.
 
 ## Connect the browser to this computer
 

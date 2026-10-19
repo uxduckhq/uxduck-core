@@ -1,13 +1,9 @@
-//! "Phones and tablets on this network" (S97, ADR-0001 D4): while the
-//! setting names one of this computer's addresses, a second listener on that
-//! address and the daemon's port serves the page, pairing and `/rpc` to
-//! devices on the same network (`api::listeners::http::network_router`).
-//!
-//! It never listens on every address (`0.0.0.0`), only on the one chosen, so
-//! a network the computer joins later is not let in by itself. When that
-//! address goes, the listener stops, its sockets close, and `network/status`
-//! says so until the person chooses again. Plain HTTP for now: on a network
-//! the person trusts, and without what browsers keep for secure pages.
+//! Explicit network listeners for phones and tablets (S97, ADR-0001 D4).
+//! Each selected IPv4 address gets its own listener, host/origin checks and
+//! shutdown signal. Removing or losing one address leaves the others running.
+//! Newly joined networks are never selected automatically.
+
+mod names;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -55,56 +51,74 @@ impl Drop for Listening {
 }
 
 async fn supervise(engine: EngineHandle, port: u16, served: Served) {
-    let mut listening: Option<Listening> = None;
+    let mut listening: Vec<Listening> = Vec::new();
     let mut said: Option<String> = None;
+    let mut names = names::Names::default();
     loop {
         let Ok(wanted) = engine
-            .run(|e| e.state().settings.network_address.clone())
+            .run(|e| {
+                let settings = &e.state().settings;
+                if settings.network_addresses.is_empty() {
+                    settings.network_address.iter().cloned().collect::<Vec<_>>()
+                } else {
+                    settings.network_addresses.clone()
+                }
+            })
             .await
         else {
             return;
         };
-        let wanted: Option<Ipv4Addr> = wanted.and_then(|address| address.parse().ok());
-        let addresses = addresses();
+        let wanted: Vec<Ipv4Addr> = wanted
+            .iter()
+            .filter_map(|address| address.parse().ok())
+            .collect();
+        let mut addresses = addresses();
+        names.apply(&mut addresses).await;
         let present = |ip: Ipv4Addr| addresses.iter().any(|a| a.address == ip.to_string());
-        if listening
-            .as_ref()
-            .is_some_and(|l| Some(l.address) != wanted || !present(l.address))
-        {
-            let address = listening.take().map(|l| l.address);
-            tracing::info!(?address, "stopped listening on the network");
-        }
-        let mut problem = None;
-        if let Some(ip) = wanted
-            && listening.is_none()
-        {
-            if present(ip) {
-                match listen(&engine, ip, port, &served).await {
+        listening.retain(|l| {
+            let keep = wanted.contains(&l.address) && present(l.address) && !l.task.is_finished();
+            if !keep {
+                tracing::info!(address = %l.address, "stopped listening on the network");
+            }
+            keep
+        });
+        let mut problems = Vec::new();
+        for ip in &wanted {
+            if listening.iter().any(|l| l.address == *ip) {
+                continue;
+            }
+            if present(*ip) {
+                match listen(&engine, *ip, port, &served).await {
                     Ok(started) => {
                         tracing::info!(%ip, port, "listening for phones and tablets on the network");
-                        listening = Some(started);
+                        listening.push(started);
                     }
                     Err(error) => {
-                        problem = Some(format!("UXDuck couldn't listen at {ip}:{port}: {error}"));
+                        problems.push(format!("UXDuck couldn't listen at {ip}:{port}: {error}"));
                     }
                 }
             } else {
-                problem = Some(format!(
+                problems.push(format!(
                     "This computer isn't at {ip} now. Choose its address on the network you're on."
                 ));
             }
         }
+        let problem = (!problems.is_empty()).then(|| problems.join("\n"));
         if problem != said {
             if let Some(problem) = &problem {
                 tracing::warn!(code = "network-listener", "{problem}");
             }
             said.clone_from(&problem);
         }
+        let urls: Vec<String> = wanted
+            .iter()
+            .filter(|ip| listening.iter().any(|l| l.address == **ip))
+            .map(|ip| format!("http://{ip}:{port}"))
+            .collect();
         let status = NetworkStatus {
             addresses,
-            url: listening
-                .as_ref()
-                .map(|l| format!("http://{}:{port}", l.address)),
+            url: urls.first().cloned(),
+            urls,
             problem,
             // The engine adds who is connected when asked.
             connected: Vec::new(),
@@ -158,6 +172,7 @@ fn addresses() -> Vec<NetworkAddress> {
                     address: ip.to_string(),
                     usual: usual == Some(ip),
                     interface: interface.name,
+                    label: None,
                 })
             }
             _ => None,

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use uxduck_core::domain::practice::Exercise;
 
-const SOURCES: [&str; 26] = [
+const SOURCES: [&str; 27] = [
     include_str!("exercises/read-the-panel.json"),
     include_str!("exercises/read-the-panel-vtol.json"),
     include_str!("exercises/bring-it-home.json"),
@@ -33,6 +33,7 @@ const SOURCES: [&str; 26] = [
     include_str!("exercises/guide-multicopter.json"),
     include_str!("exercises/guide-vtol.json"),
     include_str!("exercises/guide-plane.json"),
+    include_str!("exercises/guide-jet.json"),
     include_str!("exercises/guide-rover.json"),
     include_str!("exercises/guide-boat.json"),
     include_str!("exercises/guide-submarine.json"),
@@ -96,6 +97,7 @@ mod tests {
                 "guide-multicopter",
                 "guide-vtol",
                 "guide-plane",
+                "guide-jet",
                 "guide-rover",
                 "guide-boat",
                 "guide-submarine",
@@ -167,6 +169,7 @@ mod tests {
             SimVehicle::Boat,
             SimVehicle::Submarine,
             SimVehicle::Airship,
+            SimVehicle::Jet,
         ] {
             let guides: Vec<&Exercise> = all()
                 .iter()

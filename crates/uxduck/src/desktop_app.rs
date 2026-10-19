@@ -78,7 +78,7 @@ impl DesktopApp {
         let key = std::env::var("UXDUCK_DESKTOP_APP_KEY")
             .ok()
             .filter(|_| cfg!(debug_assertions))
-            .or_else(|| crate::update::PUBLIC_KEY.map(str::to_owned));
+            .or_else(|| crate::update::APP_UPDATE_PUBLIC_KEY.map(str::to_owned));
         Arc::new(Self {
             url,
             key,
@@ -389,7 +389,9 @@ impl DesktopApp {
             self.lock().failed = Some(why.clone());
             return Err(why);
         }
-        let mut command = Command::new(path);
+        // Chromium started from a `\\?\` path on Windows fails to load
+        // UXDuck's address (ERR_FAILED), so it is always given a plain one.
+        let mut command = Command::new(dunce::simplified(path));
         command
             .arg("--quit-with-uxduck")
             .args(args)
@@ -438,9 +440,12 @@ impl DesktopApp {
     }
 }
 
-/// Installers and portable archives use the same runtime folder name.
+/// Installers and portable archives use the same runtime folder name. A
+/// UXDuck started from a `\\?\` path on Windows still finds a plain one.
 fn bundled_directory(daemon: &Path) -> PathBuf {
-    let parent = daemon.parent().unwrap_or_else(|| Path::new("."));
+    let parent = dunce::simplified(daemon)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
     if cfg!(target_os = "macos") && parent.ends_with("Contents/MacOS") {
         return parent.join("../Resources/desktop-app");
     }
@@ -804,6 +809,15 @@ mod tests {
         let (version, _) = offered(&manifest, "test").unwrap();
         assert_eq!(Some(version), app.installed().map(|(v, _)| v));
         assert!(offered(&manifest, "other-target").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_uxduck_path_finds_a_plain_bundled_runtime() {
+        assert_eq!(
+            bundled_directory(Path::new(r"\\?\C:\Program Files\UXDuck\uxduck.exe")),
+            PathBuf::from(r"C:\Program Files\UXDuck\desktop-app")
+        );
     }
 
     #[test]

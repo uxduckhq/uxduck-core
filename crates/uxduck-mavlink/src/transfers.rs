@@ -662,7 +662,10 @@ impl MissionDownload {
             return Step::Send(Vec::new());
         };
         if usize::from(item.seq) != self.items.len() {
-            return Step::Send(Vec::new());
+            // Recover immediately from a duplicate or reordered item. It is
+            // not progress, so leave the existing retry deadline in place.
+            let next = u16::try_from(self.items.len()).unwrap_or(u16::MAX);
+            return Step::Send(vec![Out::MissionRequest(next, self.kind)]);
         }
         self.items.push(item);
         if self.items.len() == usize::from(count) {
@@ -688,8 +691,9 @@ pub struct MissionUpload {
     pub kind: u8,
     items: Vec<MissionItemInt>,
     exchange: Exchange,
-    /// Items the vehicle has asked for so far.
+    /// Distinct items the vehicle has asked for so far.
     sent: usize,
+    requested: Vec<bool>,
 }
 
 impl MissionUpload {
@@ -713,6 +717,7 @@ impl MissionUpload {
         kind: u8,
     ) -> (Self, Vec<Out>) {
         let count = u16::try_from(items.len()).unwrap_or(u16::MAX);
+        let requested = vec![false; items.len()];
         let out = vec![Out::MissionCount(count, kind)];
         (
             Self {
@@ -721,6 +726,7 @@ impl MissionUpload {
                 items,
                 exchange: Exchange::new(out.clone(), now_us),
                 sent: 0,
+                requested,
             },
             out,
         )
@@ -733,16 +739,22 @@ impl MissionUpload {
         let mut item = item.clone();
         item.seq = seq;
         item.mission_type = self.kind;
-        self.sent = self.sent.max(usize::from(seq) + 1);
         let out = vec![Out::MissionItem(item)];
-        self.exchange.sent(&out, now_us);
+        if !self.requested[usize::from(seq)] {
+            self.requested[usize::from(seq)] = true;
+            self.sent += 1;
+            self.exchange.sent(&out, now_us);
+        }
         Step::Send(out)
     }
 
     #[must_use]
     pub fn ack(&self, result: u8) -> Step<()> {
-        if result == 0 {
+        if result == 0 && self.sent == self.items.len() {
             Step::Done(())
+        } else if result == 0 {
+            // A delayed ACK cannot accept a transfer with missing items.
+            Step::Send(Vec::new())
         } else {
             Step::Failed(Failure::Rejected(mission_result_text(result).to_owned()))
         }
@@ -873,6 +885,11 @@ mod tests {
         assert_eq!(
             up.request(1, 10),
             Step::Send(vec![Out::MissionItem(item(1))])
+        );
+        assert_eq!(up.ack(0), Step::Send(Vec::new()));
+        assert_eq!(
+            up.request(0, 20),
+            Step::Send(vec![Out::MissionItem(item(0))])
         );
         assert_eq!(up.ack(0), Step::Done(()));
         assert_eq!(

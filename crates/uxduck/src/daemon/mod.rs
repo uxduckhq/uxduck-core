@@ -23,6 +23,7 @@ use crate::adapters::credentials::FileCredentials;
 use crate::adapters::system::{OsRandom, SystemClock};
 use crate::api::listeners::{http, local};
 use crate::paths::{self, DaemonInfo};
+use crate::sim::catalogue::Catalogue;
 use crate::store;
 use engine_task::EngineHandle;
 
@@ -144,6 +145,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         source,
     })?;
 
+    crate::app_update::check_startup(data_dir).map_err(|source| DaemonError::DataDir {
+        path: data_dir.display().to_string(),
+        source,
+    })?;
     let tcp = bind_port(options.port).await?;
     let port = tcp
         .local_addr()
@@ -173,9 +178,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     let (store, loaded, tray) = open_store_with_tray(&options).await?;
     let engine = start_engine(&options, &ui_url, port, &store, loaded);
     start_analytics(&engine, &options, fresh).await;
-    // Recordings are the person's footage, in their videos folder: moved
-    // there from the data directory before anything reads them.
-    let recordings = crate::paths::move_recordings(data_dir);
+    // Photos and recordings live in the app folder's `media` (S150):
+    // recordings kept elsewhere before move there before anything reads them.
+    let media = crate::paths::move_recordings(data_dir);
     start_online(&engine, data_dir, terrain).await;
 
     let (socket, accept_local) = local::bind(data_dir, engine.clone()).await?;
@@ -185,8 +190,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
 
     start_finding(&engine, &options).await;
     start_remote_view(&engine, data_dir).await;
-    // Recordings are the Video storage category (ADR-0007).
-    let video = crate::video::start(options.video_port, &engine, recordings).await;
+    // Photos and recordings, together in `media`: the Video storage
+    // category (ADR-0007, S150).
+    let video = crate::video::start(options.video_port, &engine, media).await;
     // Copies of vehicles' files (S121): the Vehicle files category.
     let vehicle_files = crate::vehicle_files::Store::new(data_dir);
     let port_files = vehicle_files.clone();
@@ -251,11 +257,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         }
     }
 
-    if options.update_check
-        && let Some(key) = crate::update::PUBLIC_KEY
-    {
-        tokio::spawn(check_for_updates(key, data_dir.clone()));
-    }
+    crate::app_update::start(engine.clone(), data_dir.clone(), port, options.update_check);
     watch(&engine, options.headless);
     let stop = run_until_stopped(&engine, &options, parent_closed).await;
     tracing::info!("shutting down");
@@ -395,11 +397,9 @@ fn start_engine(
         let simulators = simulators.clone();
         std::thread::spawn(move || simulators.probe_all());
     }
-    // Prebuilt builds to download (S18), fetched when first asked for.
-    let catalogue = crate::sim::catalogue::Catalogue::new(
-        simulators.clone(),
-        tokio::runtime::Handle::current(),
-    );
+    // Prebuilt builds to download (S18): Start flying's at once, others when asked.
+    let catalogue = Catalogue::new(simulators.clone(), tokio::runtime::Handle::current());
+    catalogue.prefetch("arduplane");
     #[cfg(feature = "plugins")]
     let (plugin_port, plugin_feed, plugin_host) = {
         let (port, frames, host) =
@@ -704,30 +704,6 @@ async fn check_storage(engine: EngineHandle) {
     }
 }
 
-/// Checks the release channel shortly after start, then just after each
-/// UTC midnight, and logs what it finds (ADR-0008). Never downloads
-/// anything.
-async fn check_for_updates(key: &'static str, data_dir: PathBuf) {
-    use uxduck_engine::runtime::Clock;
-    let url =
-        std::env::var("UXDUCK_UPDATE_URL").unwrap_or_else(|_| crate::update::DEFAULT_URL.into());
-    // Spread over the first hour of the day, the same for this run.
-    let spread = {
-        let mut byte = [0u8; 2];
-        let _ = getrandom::fill(&mut byte);
-        std::time::Duration::from_secs(u64::from(u16::from_le_bytes(byte)) % 3600)
-    };
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    loop {
-        match crate::update::check(&url, Some(key), &data_dir).await {
-            Ok(report) => tracing::info!("{report}"),
-            Err(error) => tracing::debug!(%error, "update check"),
-        }
-        let wait = crate::update::until_next_day(SystemClock.now_us(), spread);
-        tokio::time::sleep(wait).await;
-    }
-}
-
 /// Applies the safe default to approvals nobody answered in time.
 async fn expire_approvals(engine: EngineHandle) {
     use uxduck_engine::runtime::Clock;
@@ -740,6 +716,8 @@ async fn expire_approvals(engine: EngineHandle) {
         if engine
             .run(move |e| {
                 e.expire_approvals(now);
+                e.expire_display_pulls(now);
+                e.expire_video_watches(now);
                 e.expire_pairings();
                 // Controllers no reloaded window took back.
                 e.expire_detached_claims(now);
@@ -747,6 +725,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 // Downloads waiting for a vehicle that is back (S121).
                 e.resume_waiting_files(now);
                 e.review_idle_simulations();
+                // Take-offs whose simulator has gone quiet.
+                e.drive_launches();
             })
             .await
             .is_err()

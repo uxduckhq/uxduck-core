@@ -1,0 +1,8 @@
+{
+  "phase": "ready",
+  "current": "0.1.1",
+  "version": "0.2.0",
+  "blockers": ["Alpha was last seen armed. Reconnect and confirm it is disarmed"],
+  "installWhenIdle": true,
+  "dismissed": false
+}

@@ -12,35 +12,95 @@
           {
             "size": 560,
             "node": {
-              "type": "group",
-              "tabs": [
+              "type": "split",
+              "direction": "row",
+              "children": [
                 {
-                  "id": "map",
-                  "kind": "map"
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map",
+                        "kind": "map"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map-3d",
+                        "kind": "map-3d"
+                      }
+                    ],
+                    "active": 0
+                  }
                 }
-              ],
-              "active": 0
+              ]
             }
           },
           {
             "size": 440,
             "node": {
-              "type": "group",
-              "tabs": [
+              "type": "split",
+              "direction": "row",
+              "children": [
                 {
-                  "id": "telemetry",
-                  "kind": "telemetry"
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "control",
+                        "kind": "control"
+                      },
+                      {
+                        "id": "controllers",
+                        "kind": "controllers"
+                      },
+                      {
+                        "id": "history",
+                        "kind": "history"
+                      },
+                      {
+                        "id": "parameters",
+                        "kind": "parameters"
+                      }
+                    ],
+                    "active": 0
+                  }
                 },
                 {
-                  "id": "control",
-                  "kind": "control"
-                },
-                {
-                  "id": "history",
-                  "kind": "history"
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "telemetry",
+                        "kind": "telemetry"
+                      },
+                      {
+                        "id": "messages",
+                        "kind": "messages"
+                      },
+                      {
+                        "id": "flight-display",
+                        "kind": "flight-display"
+                      },
+                      {
+                        "id": "instruments",
+                        "kind": "instruments"
+                      }
+                    ],
+                    "active": 0
+                  }
                 }
-              ],
-              "active": 0
+              ]
             }
           }
         ]
@@ -56,42 +116,102 @@
               {
                 "size": 560,
                 "node": {
-                  "type": "group",
-                  "tabs": [
+                  "type": "split",
+                  "direction": "row",
+                  "children": [
                     {
-                      "id": "map",
-                      "kind": "map"
+                      "size": 500,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "map",
+                            "kind": "map"
+                          }
+                        ],
+                        "active": 0
+                      }
+                    },
+                    {
+                      "size": 500,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "map-3d",
+                            "kind": "map-3d"
+                          }
+                        ],
+                        "active": 0
+                      }
                     }
-                  ],
-                  "active": 0
+                  ]
                 }
               },
               {
                 "size": 440,
                 "node": {
-                  "type": "group",
-                  "tabs": [
+                  "type": "split",
+                  "direction": "row",
+                  "children": [
                     {
-                      "id": "telemetry",
-                      "kind": "telemetry"
+                      "size": 500,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "control",
+                            "kind": "control"
+                          },
+                          {
+                            "id": "controllers",
+                            "kind": "controllers"
+                          },
+                          {
+                            "id": "history",
+                            "kind": "history"
+                          },
+                          {
+                            "id": "parameters",
+                            "kind": "parameters"
+                          }
+                        ],
+                        "active": 0
+                      }
                     },
                     {
-                      "id": "control",
-                      "kind": "control"
-                    },
-                    {
-                      "id": "history",
-                      "kind": "history"
+                      "size": 500,
+                      "node": {
+                        "type": "group",
+                        "tabs": [
+                          {
+                            "id": "telemetry",
+                            "kind": "telemetry"
+                          },
+                          {
+                            "id": "messages",
+                            "kind": "messages"
+                          },
+                          {
+                            "id": "flight-display",
+                            "kind": "flight-display"
+                          },
+                          {
+                            "id": "instruments",
+                            "kind": "instruments"
+                          }
+                        ],
+                        "active": 0
+                      }
                     }
-                  ],
-                  "active": 0
+                  ]
                 }
               }
             ]
           },
           "preset": {
             "kind": "simple",
-            "version": 3,
+            "version": 8,
             "base": {
               "type": "split",
               "direction": "column",
@@ -99,35 +219,95 @@
                 {
                   "size": 560,
                   "node": {
-                    "type": "group",
-                    "tabs": [
+                    "type": "split",
+                    "direction": "row",
+                    "children": [
                       {
-                        "id": "map",
-                        "kind": "map"
+                        "size": 500,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "map",
+                              "kind": "map"
+                            }
+                          ],
+                          "active": 0
+                        }
+                      },
+                      {
+                        "size": 500,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "map-3d",
+                              "kind": "map-3d"
+                            }
+                          ],
+                          "active": 0
+                        }
                       }
-                    ],
-                    "active": 0
+                    ]
                   }
                 },
                 {
                   "size": 440,
                   "node": {
-                    "type": "group",
-                    "tabs": [
+                    "type": "split",
+                    "direction": "row",
+                    "children": [
                       {
-                        "id": "telemetry",
-                        "kind": "telemetry"
+                        "size": 500,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "control",
+                              "kind": "control"
+                            },
+                            {
+                              "id": "controllers",
+                              "kind": "controllers"
+                            },
+                            {
+                              "id": "history",
+                              "kind": "history"
+                            },
+                            {
+                              "id": "parameters",
+                              "kind": "parameters"
+                            }
+                          ],
+                          "active": 0
+                        }
                       },
                       {
-                        "id": "control",
-                        "kind": "control"
-                      },
-                      {
-                        "id": "history",
-                        "kind": "history"
+                        "size": 500,
+                        "node": {
+                          "type": "group",
+                          "tabs": [
+                            {
+                              "id": "telemetry",
+                              "kind": "telemetry"
+                            },
+                            {
+                              "id": "messages",
+                              "kind": "messages"
+                            },
+                            {
+                              "id": "flight-display",
+                              "kind": "flight-display"
+                            },
+                            {
+                              "id": "instruments",
+                              "kind": "instruments"
+                            }
+                          ],
+                          "active": 0
+                        }
                       }
-                    ],
-                    "active": 0
+                    ]
                   }
                 }
               ]

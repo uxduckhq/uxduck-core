@@ -12,7 +12,7 @@
   "features": [{ "id": "home", "label": "Home", "radiusM": 150 }],
   "steps": [
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home like a plane. Over home it circles.",
       "hintAfterS": 60,
       "all": [
@@ -30,7 +30,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab.",
+      "text": "Press Land in the Cockpit tab.",
       "hint": "Land slows it to a hover and brings it straight down where it is. This step ticks once it's on the ground.",
       "hintAfterS": 60,
       "all": [{ "check": "landed" }, { "check": "within", "feature": "home" }]

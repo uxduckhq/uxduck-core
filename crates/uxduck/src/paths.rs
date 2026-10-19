@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The data directory: `--data-dir`, then `UXDUCK_DATA_DIR`, then the
-/// platform's local data directory: `UXDuck` for a release, and
-/// `UXDuck-dev` beside it for `--dev` and for every development build, so
-/// development never touches the real configuration and a release on the
-/// same computer starts as a new user's does (maintainer, 2026-10-16).
+/// The data directory, UXDuck's app folder: `--data-dir`, then
+/// `UXDUCK_DATA_DIR`, then `~/.uxduck` on a Mac (the platform's local data
+/// directory elsewhere) for a release, and `~/.uxduck-dev` for `--dev` and
+/// every development build, so development never touches the real
+/// configuration and a release on the same computer starts as a new
+/// user's does (maintainer, 2026-10-16; the app folder, 2026-10-18).
 #[must_use]
 pub fn data_dir(explicit: Option<&Path>, dev: bool) -> PathBuf {
     if let Some(dir) = explicit {
@@ -20,24 +21,39 @@ pub fn data_dir(explicit: Option<&Path>, dev: bool) -> PathBuf {
     if dev || cfg!(debug_assertions) {
         dev_data_dir()
     } else {
-        platform_data_dir()
+        release_data_dir()
     }
 }
 
+/// The release's data directory, moved from `~/Library/Application
+/// Support/com.uxduck.UXDuck` on a Mac (2026-10-18) once no daemon runs
+/// from there, and used where it is until then.
+fn release_data_dir() -> PathBuf {
+    let new = platform_data_dir();
+    move_old_dir(&project_dir("UXDuck", "uxduck"), &new).unwrap_or(new)
+}
+
 /// The development data directory. Before 2026-10-16 it was `dev` inside
-/// the release's; that one is moved here once no daemon runs from it, and
-/// used where it is until then.
+/// the release's; until 2026-10-18 it was in `~/Library/Application
+/// Support` on a Mac. Either is moved here once no daemon runs from it,
+/// and used where it is until then.
 fn dev_data_dir() -> PathBuf {
-    let old = platform_data_dir().join("dev");
     let new = platform_dev_data_dir();
-    move_old_dev_dir(&old, &new).unwrap_or(new)
+    let old = [
+        project_dir("UXDuck-dev", "uxduck-dev"),
+        project_dir("UXDuck", "uxduck").join("dev"),
+        platform_data_dir().join("dev"),
+    ];
+    old.iter()
+        .find_map(|old| move_old_dir(old, &new))
+        .unwrap_or(new)
 }
 
 /// Moves `old` to `new` when `new` is not there yet. Gives `old` while a
 /// daemon holds its lock, so that daemon and its clients keep finding each
 /// other; nothing when there is nothing to move or it moved.
-fn move_old_dev_dir(old: &Path, new: &Path) -> Option<PathBuf> {
-    if new.exists() || !old.is_dir() {
+fn move_old_dir(old: &Path, new: &Path) -> Option<PathBuf> {
+    if old == new || new.exists() || !old.is_dir() {
         return None;
     }
     let in_use =
@@ -50,11 +66,11 @@ fn move_old_dev_dir(old: &Path, new: &Path) -> Option<PathBuf> {
     }
     match std::fs::rename(old, new) {
         Ok(()) => {
-            tracing::info!(from = %old.display(), to = %new.display(), "development data moved");
+            tracing::info!(from = %old.display(), to = %new.display(), "data moved");
             None
         }
         Err(error) => {
-            tracing::warn!(%error, from = %old.display(), "development data could not move");
+            tracing::warn!(%error, from = %old.display(), "data could not move");
             Some(old.to_owned())
         }
     }
@@ -102,14 +118,24 @@ fn shell_word(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// The platform's local data directory for UXDuck.
+/// UXDuck's app folder: `~/.uxduck` on a Mac; the platform's local data
+/// directory elsewhere, where an app's files are expected.
 fn platform_data_dir() -> PathBuf {
-    project_dir("UXDuck", "uxduck")
+    home_dir(".uxduck").unwrap_or_else(|| project_dir("UXDuck", "uxduck"))
 }
 
-/// Its development twin: `com.uxduck.UXDuck-dev` beside it on a Mac.
+/// Its development twin: `~/.uxduck-dev` on a Mac, `uxduck-dev` beside it
+/// elsewhere.
 fn platform_dev_data_dir() -> PathBuf {
-    project_dir("UXDuck-dev", "uxduck-dev")
+    home_dir(".uxduck-dev").unwrap_or_else(|| project_dir("UXDuck-dev", "uxduck-dev"))
+}
+
+/// A folder in the home folder, on a Mac only.
+fn home_dir(name: &str) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(name))
 }
 
 fn project_dir(application: &str, temporary: &str) -> PathBuf {
@@ -119,31 +145,32 @@ fn project_dir(application: &str, temporary: &str) -> PathBuf {
     )
 }
 
-/// Where camera recordings are kept (S40; moved 2026-10-05): they are the
-/// person's footage, so the platform's videos folder, `~/Movies/UXDuck` on a
-/// Mac, and `UXDuck (dev)` beside it for `--dev`. A data directory given
-/// some other way (tests, a second daemon) keeps them inside it, as does a
-/// platform with no videos folder.
+/// Where photos and recordings are kept (S150, ADR-0017 V21 revised): the
+/// app folder's `media`, together, beside the tlogs.
 #[must_use]
-pub fn recordings_dir(data_dir: &Path) -> PathBuf {
-    let name = if data_dir == platform_data_dir() {
-        "UXDuck"
-    } else if data_dir == dev_data_dir() {
-        "UXDuck (dev)"
-    } else {
-        return data_dir.join("video");
-    };
-    directories::UserDirs::new()
-        .and_then(|dirs| dirs.video_dir().map(|d| d.join(name)))
-        .unwrap_or_else(|| data_dir.join("video"))
+pub fn media_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("media")
 }
 
-/// Moves recordings kept in the data directory before 2026-10-05 to
-/// [`recordings_dir`], and gives that directory. A file already there is
-/// left where it was.
+/// Moves recordings kept elsewhere before to [`media_dir`], and gives that
+/// directory: from the data directory's `video` (before 2026-10-05) and
+/// from the platform's videos folder, `~/Movies/UXDuck` or `UXDuck (dev)`
+/// (before 2026-10-18). A file already there is left where it was.
 pub fn move_recordings(data_dir: &Path) -> PathBuf {
-    let to = recordings_dir(data_dir);
+    let to = media_dir(data_dir);
     move_files(&data_dir.join("video"), &to);
+    let videos = if data_dir == dev_data_dir() {
+        Some("UXDuck (dev)")
+    } else if data_dir == platform_data_dir() || data_dir == project_dir("UXDuck", "uxduck") {
+        Some("UXDuck")
+    } else {
+        None
+    };
+    if let Some(from) = videos.and_then(|name| {
+        directories::UserDirs::new().and_then(|dirs| dirs.video_dir().map(|d| d.join(name)))
+    }) {
+        move_files(&from, &to);
+    }
     to
 }
 
@@ -313,6 +340,25 @@ mod dev_dir_tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn on_a_mac_the_app_folders_are_in_the_home_folder() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(platform_data_dir(), home.join(".uxduck"));
+        assert_eq!(platform_dev_data_dir(), home.join(".uxduck-dev"));
+        assert!(project_dir("UXDuck", "uxduck").starts_with(home.join("Library")));
+    }
+
+    #[test]
+    fn a_folder_moves_onto_itself_never() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(move_old_dir(tmp.path(), tmp.path()), None);
+        assert!(tmp.path().exists());
+    }
+
+    #[test]
     fn the_old_dev_folder_moves_once_and_stays_while_a_daemon_runs_from_it() {
         let tmp = tempfile::tempdir().unwrap();
         let (old, new) = (tmp.path().join("UXDuck/dev"), tmp.path().join("UXDuck-dev"));
@@ -320,14 +366,17 @@ mod dev_dir_tests {
         std::fs::write(old.join("uxduck.db"), b"db").unwrap();
         let lock = std::fs::File::create(old.join("daemon.lock")).unwrap();
         lock.lock().unwrap();
-        assert_eq!(move_old_dev_dir(&old, &new), Some(old.clone()));
+        assert_eq!(move_old_dir(&old, &new), Some(old.clone()));
         assert!(!new.exists());
+        // Unlocked, not only closed: a process another test forks meanwhile
+        // shares the open file until it starts its program.
+        lock.unlock().unwrap();
         drop(lock);
-        assert_eq!(move_old_dev_dir(&old, &new), None);
+        assert_eq!(move_old_dir(&old, &new), None);
         assert_eq!(std::fs::read(new.join("uxduck.db")).unwrap(), b"db");
         assert!(!old.exists());
         std::fs::create_dir_all(&old).unwrap();
-        assert_eq!(move_old_dev_dir(&old, &new), None, "never over the new one");
+        assert_eq!(move_old_dir(&old, &new), None, "never over the new one");
         assert!(old.exists());
     }
 }
@@ -337,9 +386,20 @@ mod recordings_tests {
     use super::*;
 
     #[test]
-    fn a_data_directory_given_by_hand_keeps_its_recordings() {
+    fn photos_and_recordings_are_together_in_the_app_folder() {
         let dir = Path::new("/tmp/some-uxduck");
-        assert_eq!(recordings_dir(dir), dir.join("video"));
+        assert_eq!(media_dir(dir), dir.join("media"));
+    }
+
+    #[test]
+    fn recordings_from_before_move_into_media() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("video")).unwrap();
+        std::fs::write(tmp.path().join("video/vr1.mp4"), b"one").unwrap();
+        let media = move_recordings(tmp.path());
+        assert_eq!(media, tmp.path().join("media"));
+        assert_eq!(std::fs::read(media.join("vr1.mp4")).unwrap(), b"one");
+        assert!(!tmp.path().join("video").exists());
     }
 
     #[test]

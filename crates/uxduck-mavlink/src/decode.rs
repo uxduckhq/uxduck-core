@@ -11,6 +11,8 @@ use mavio::{Frame, Receiver};
 pub struct Decoded {
     pub system_id: u8,
     pub component_id: u8,
+    /// Destination of a mission transfer packet; zero means broadcast.
+    pub mission_target: Option<(u8, u8)>,
     pub message: Message,
 }
 
@@ -365,6 +367,19 @@ pub enum Message {
         uri: String,
         name: String,
     },
+    /// Where a gimbal points (`GIMBAL_DEVICE_ATTITUDE_STATUS`): its
+    /// attitude as a quaternion, w x y z (NaN when it has none), and
+    /// `GIMBAL_DEVICE_FLAGS`, which say whether the yaw in it is from the
+    /// vehicle's nose or from north.
+    GimbalAttitude {
+        flags: u16,
+        q: [f32; 4],
+    },
+    /// The older `MOUNT_STATUS`: pitch and yaw from the nose, centidegrees.
+    MountStatus {
+        pitch_cdeg: i32,
+        yaw_cdeg: i32,
+    },
     Other {
         message_id: u32,
     },
@@ -423,7 +438,16 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
     if frame.validate_checksum::<Ardupilotmega>().is_err() {
         return None;
     }
-    let message = match frame.decode::<Ardupilotmega>() {
+    let packet = frame.decode::<Ardupilotmega>();
+    let mission_target = packet.as_ref().ok().and_then(|packet| match packet {
+        Ardupilotmega::MissionCount(m) => Some((m.target_system, m.target_component)),
+        Ardupilotmega::MissionItemInt(m) => Some((m.target_system, m.target_component)),
+        Ardupilotmega::MissionRequest(m) => Some((m.target_system, m.target_component)),
+        Ardupilotmega::MissionRequestInt(m) => Some((m.target_system, m.target_component)),
+        Ardupilotmega::MissionAck(m) => Some((m.target_system, m.target_component)),
+        _ => None,
+    });
+    let message = match packet {
         Ok(Ardupilotmega::Heartbeat(m)) => Message::Heartbeat {
             mav_type: format!("{:?}", m.type_),
             autopilot: format!("{:?}", m.autopilot),
@@ -463,6 +487,14 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             lon: m.lon,
             grid_spacing: m.grid_spacing,
             mask: m.mask,
+        },
+        Ok(Ardupilotmega::GimbalDeviceAttitudeStatus(m)) => Message::GimbalAttitude {
+            flags: m.flags.bits(),
+            q: m.q,
+        },
+        Ok(Ardupilotmega::MountStatus(m)) => Message::MountStatus {
+            pitch_cdeg: m.pointing_a,
+            yaw_cdeg: m.pointing_c,
         },
         Ok(Ardupilotmega::VideoStreamInformation(m)) => Message::VideoStream {
             stream_id: m.stream_id,
@@ -528,6 +560,7 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
     Some(Decoded {
         system_id,
         component_id,
+        mission_target,
         message,
     })
 }

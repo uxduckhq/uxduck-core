@@ -1,0 +1,8 @@
+{
+  "method": "analytics/activeTime",
+  "params": {
+    "active_ms": 30000,
+    "surface": "browser",
+    "daemon": "installed"
+  }
+}

@@ -248,6 +248,7 @@ const fn words(vehicle: SimVehicle) -> &'static str {
         SimVehicle::Boat => "boat",
         SimVehicle::Submarine => "submarine",
         SimVehicle::Airship => "blimp",
+        SimVehicle::Jet => "jet",
     }
 }
 
@@ -879,7 +880,7 @@ impl Engine {
                 return;
             }
             let near = match self.simulated_kind(&vehicle.id) {
-                Ok(SimVehicle::Plane | SimVehicle::Vtol) => AT_START_CIRCLING_M,
+                Ok(SimVehicle::Plane | SimVehicle::Vtol | SimVehicle::Jet) => AT_START_CIRCLING_M,
                 _ => AT_START_M,
             };
             if view
@@ -1025,6 +1026,13 @@ impl Engine {
     }
 
     fn track_practice_ended(&mut self, attempt: &Attempt) {
+        if attempt.state == AttemptState::Passed {
+            self.track_task(
+                &attempt.vehicle_id,
+                uxduck_contracts::dto::analytics::EngagementTask::PracticePassed,
+                true,
+            );
+        }
         let result = match attempt.state {
             AttemptState::Passed => "passed",
             AttemptState::Failed => "failed",

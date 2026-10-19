@@ -1,0 +1,31 @@
+{
+  "dataDir": "/data",
+  "categories": [
+    {
+      "category": "simulators",
+      "bytes": 100,
+      "files": 1,
+      "deletable": false
+    },
+    {
+      "category": "simulator-logs",
+      "bytes": 20,
+      "files": 1,
+      "deletable": true
+    },
+    {
+      "category": "simulator-data",
+      "bytes": 4,
+      "files": 1,
+      "deletable": false
+    }
+  ],
+  "simulatorLogs": [
+    {
+      "simulationId": "running",
+      "bytes": 20,
+      "files": 1,
+      "running": true
+    }
+  ]
+}

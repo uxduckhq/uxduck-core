@@ -12,6 +12,10 @@ The script downloads FFmpeg 8.1.2 and x264 commit
 `31e19f92f00c7003fa115047ce50978bc98c3a0d`, validates their pinned SHA-256 hashes,
 applies the small AVFoundation identity/default-mode patch, builds a static
 standalone executable and checks the required capture input and H.264 encoders.
+For a camera's sound (S148) it also has FFmpeg's AAC encoder, PCM decoders and
+resampling, selects an AVFoundation sound input by its exact unique ID
+(`audio_device_id`, checked with a nonexistent ID as for cameras), and on Linux
+reads ALSA, which needs libasound's headers (`libasound2-dev`) to build.
 On macOS it also checks that Camera default's zero frame rate reaches exact
 device lookup, using a nonexistent ID so no physical camera is opened.
 Camera default holds the device configuration lock until the capture session

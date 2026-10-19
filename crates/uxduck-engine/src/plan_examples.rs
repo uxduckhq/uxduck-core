@@ -156,7 +156,7 @@ pub fn example(
 fn plan_type(vehicle: SimVehicle) -> Option<PlanVehicleType> {
     match vehicle {
         SimVehicle::Multicopter => Some(PlanVehicleType::Multicopter),
-        SimVehicle::Plane => Some(PlanVehicleType::Plane),
+        SimVehicle::Plane | SimVehicle::Jet => Some(PlanVehicleType::Plane),
         SimVehicle::Vtol => Some(PlanVehicleType::Vtol),
         SimVehicle::Rover => Some(PlanVehicleType::Rover),
         SimVehicle::Boat => Some(PlanVehicleType::Boat),

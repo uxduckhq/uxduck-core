@@ -2,7 +2,54 @@
   "schemaVersion": 1,
   "programs": {
     "arducopter": { "frames": {} },
-    "arduplane": { "frames": {} },
+    "arduplane": {
+      "frames": {
+        "plane-jet": {
+          "AIRSPEED_CRUISE": 50,
+          "AIRSPEED_MAX": 80,
+          "AIRSPEED_MIN": 25,
+          "TRIM_THROTTLE": 45,
+          "THR_MAX": 100,
+          "THR_SLEWRATE": 100,
+          "TKOFF_THR_MAX": 100,
+          "TKOFF_ROTATE_SPD": 20,
+          "TKOFF_DIST": 1500,
+          "TKOFF_LVL_ALT": 3,
+          "TKOFF_OPTIONS": 1,
+          "PTCH_LIM_MAX_DEG": 20,
+          "PTCH_LIM_MIN_DEG": -25,
+          "ROLL_LIMIT_DEG": 55,
+          "LEVEL_ROLL_LIMIT": 0,
+          "SCALING_SPEED": 40,
+          "NAVL1_PERIOD": 25,
+          "WP_LOITER_RAD": 400,
+          "WP_RADIUS": 220,
+          "RTL_ALTITUDE": 200,
+          "FBWB_CLIMB_RATE": 5,
+          "TECS_CLMB_MAX": 15,
+          "TECS_SINK_MAX": 8.5,
+          "TECS_SINK_MIN": 2,
+          "TECS_RLL2THR": 5,
+          "TECS_TIME_CONST": 7,
+          "TECS_PTCH_DAMP": 0.8,
+          "TECS_VERT_ACC": 15,
+          "TECS_LAND_ARSPD": 30,
+          "LAND_FLARE_SEC": 2,
+          "PTCH2SRV_RLL": 1.04,
+          "PTCH_RATE_P": 0.09,
+          "PTCH_RATE_I": 0.5,
+          "PTCH_RATE_D": 0,
+          "PTCH_RATE_FF": 0.69,
+          "PTCH_RATE_IMAX": 0.666667,
+          "RLL2SRV_RMAX": 70,
+          "RLL_RATE_P": 0.08,
+          "RLL_RATE_I": 0.15,
+          "RLL_RATE_D": 0.004,
+          "RLL_RATE_FF": 0.345,
+          "RLL_RATE_IMAX": 0.666667
+        }
+      }
+    },
     "ardurover": {
       "frames": {
         "rover": {

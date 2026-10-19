@@ -17,7 +17,20 @@ use serde::{Deserialize, Serialize};
 use uxduck_contracts::dto::release::{MANIFEST_SCHEMA, ReleaseArtifact, ReleaseManifest};
 
 /// Where channels are published: the production app's static site.
-pub const DEFAULT_URL: &str = "https://app.uxduck.com/releases/stable.json";
+pub const DEFAULT_URL: &str = match option_env!("UXDUCK_UPDATE_TEST_URL") {
+    Some(url) => url,
+    None => "https://app.uxduck.com/releases/stable.json",
+};
+
+/// Isolated installer tests bake their feed and a separate signing key into
+/// both versions. The full-app updater in ordinary releases ignores runtime
+/// feed changes.
+pub const APP_UPDATE_PUBLIC_KEY: Option<&str> = match option_env!("UXDUCK_UPDATE_TEST_KEY") {
+    Some(key) => Some(key),
+    None => PUBLIC_KEY,
+};
+
+pub const IS_UPDATE_TEST: bool = option_env!("UXDUCK_UPDATE_TEST_URL").is_some();
 
 /// The release public key (the base64 line of `minisign.pub`), set by the
 /// release workflow at build time. Development builds have none and do not
@@ -88,6 +101,9 @@ pub struct Report {
     pub current: String,
     pub manifest: ReleaseManifest,
     pub verdict: Verdict,
+    /// Exact signed bytes retained for the installer worker to verify again.
+    pub signed_bytes: Vec<u8>,
+    pub signature: String,
 }
 
 impl std::fmt::Display for Report {
@@ -241,6 +257,8 @@ pub fn compare(
         current: current.to_owned(),
         manifest,
         verdict,
+        signed_bytes: Vec::new(),
+        signature: String::new(),
     })
 }
 
@@ -249,7 +267,7 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, UpdateErr
         url: url.to_owned(),
         reason,
     };
-    let response = client
+    let mut response = client
         .get(url)
         .send()
         .await
@@ -257,11 +275,14 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, UpdateErr
     if !response.status().is_success() {
         return Err(failed(response.status().to_string()));
     }
-    Ok(response
-        .bytes()
-        .await
-        .map_err(|e| failed(e.to_string()))?
-        .to_vec())
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| failed(e.to_string()))? {
+        if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+            return Err(failed("The signed release metadata is too large".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Fetches, verifies and compares, remembering what it saw in `data_dir`.
@@ -305,7 +326,10 @@ pub async fn check(
     }
     seen.published_at.clone_from(&manifest.published_at);
     let _ = std::fs::write(&seen_path, serde_json::to_vec(&seen).unwrap_or_default());
-    compare(env!("CARGO_PKG_VERSION"), manifest, TARGET)
+    let mut report = compare(env!("CARGO_PKG_VERSION"), manifest, TARGET)?;
+    report.signed_bytes = bytes;
+    report.signature = String::from_utf8_lossy(&signature).into_owned();
+    Ok(report)
 }
 
 fn now_us() -> u64 {

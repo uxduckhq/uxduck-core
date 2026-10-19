@@ -3,6 +3,11 @@
 //! keepalive, and reconnecting with backoff until the source is removed.
 //! Basic and Digest authentication from the address's user and password.
 //! The pictures go through a `Source` to the hub, as from the UDP listener.
+//!
+//! A sound track (S149) is set up on channels 4 and 5 beside the video and
+//! any KLV, its frames lined up with the pictures by PLAY's `RTP-Info` and
+//! the two tracks' RTCP sender reports. Sound UXDuck does not record is
+//! named and not set up.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -15,9 +20,12 @@ use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uxduck_core::domain::video::{VideoTrack, redact};
+use uxduck_media::audio::AudioUnit;
 use uxduck_media::nal::Codec;
+use uxduck_media::rtcp::{AudioSync, sender_report};
+use uxduck_media::rtp_audio::{AudioDepacketizer, Format};
 use uxduck_media::rtp_klv::KlvDepacketizer;
-use uxduck_media::source::Source;
+use uxduck_media::source::{Sound, Source};
 
 use super::hub::Hub;
 use super::listener::{item, metadata_due, report};
@@ -32,7 +40,11 @@ const BACKOFF: [Duration; 4] = [
 ];
 /// Nothing at all from the camera for this long: the connection is dead.
 const SILENT_FOR: Duration = Duration::from_secs(5);
+const OFFLINE_LOG_EVERY: Duration = Duration::from_mins(5);
 const REPORT_EVERY: Duration = Duration::from_secs(1);
+/// Sound with neither `RTP-Info` nor sender reports for this long is lined
+/// up by when it arrives (S149).
+const ALIGN_BY_ARRIVAL_AFTER: Duration = Duration::from_secs(3);
 const USER_AGENT: &str = concat!("UXDuck/", env!("CARGO_PKG_VERSION"));
 
 /// An RTSP address, taken apart.
@@ -238,6 +250,112 @@ pub fn klv_track(sdp: &str, base: &str) -> Option<KlvTrack> {
             control: resolve(control, base),
             clock_rate,
         })
+    })
+}
+
+/// A sound track (S149): `m=audio`, the first with a payload type UXDuck
+/// can name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoundTrack {
+    pub control: String,
+    /// Its RTP clock, from the `a=rtpmap`.
+    pub clock_rate: u32,
+    /// How it is carried, or what to call sound UXDuck does not record.
+    pub format: Result<Format, String>,
+}
+
+impl SoundTrack {
+    /// What the source says before the first frame: what it is, and
+    /// whether it is recorded.
+    fn sound(&self) -> Sound {
+        match &self.format {
+            Ok(format) => Sound {
+                name: AudioDepacketizer::new(*format, self.clock_rate)
+                    .config()
+                    .map_or_else(|| "AAC".to_owned(), |c| c.describe()),
+                recorded: true,
+            },
+            Err(name) => Sound {
+                name: name.clone(),
+                recorded: false,
+            },
+        }
+    }
+}
+
+/// The first sound track of an SDP, if it has one.
+pub fn sound_track(sdp: &str, base: &str) -> Option<SoundTrack> {
+    sections(sdp).iter().find_map(|lines| {
+        let media = lines.first()?.strip_prefix("m=")?;
+        if !media.starts_with("audio ") {
+            return None;
+        }
+        let payload_type = media.split_whitespace().nth(3)?;
+        let rtpmap = lines[1..].iter().find_map(|line| {
+            let (pt, encoding) = line.strip_prefix("a=rtpmap:")?.split_once(' ')?;
+            (pt == payload_type).then_some(encoding.trim())
+        });
+        let fmtp = lines[1..]
+            .iter()
+            .find_map(|line| {
+                let (pt, params) = line.strip_prefix("a=fmtp:")?.split_once(' ')?;
+                (pt == payload_type).then_some(params)
+            })
+            .unwrap_or("");
+        // Static payload types need no `a=rtpmap` (RFC 3551).
+        let (encoding, clock_rate) = match rtpmap {
+            Some(map) => {
+                let mut parts = map.split('/');
+                let name = parts.next().unwrap_or("");
+                (
+                    name,
+                    parts.next().and_then(|r| r.parse().ok()).unwrap_or(8000),
+                )
+            }
+            None => match payload_type {
+                "0" => ("PCMU", 8000),
+                "8" => ("PCMA", 8000),
+                "9" => ("G722", 8000),
+                "14" => ("MPA", 90_000),
+                _ => return None,
+            },
+        };
+        let control = lines[1..]
+            .iter()
+            .find_map(|line| line.strip_prefix("a=control:"));
+        Some(SoundTrack {
+            control: resolve(control, base),
+            clock_rate,
+            format: uxduck_media::rtp_audio::format(encoding, fmtp),
+        })
+    })
+}
+
+/// Each track's `rtptime` from PLAY's `RTP-Info`, by its `url`.
+fn rtp_info(header: &str) -> Vec<(String, u32)> {
+    header
+        .split(',')
+        .filter_map(|entry| {
+            let mut url = None;
+            let mut rtptime = None;
+            for field in entry.split(';').map(str::trim) {
+                if let Some(u) = field.strip_prefix("url=") {
+                    url = Some(u.trim_matches('"').to_owned());
+                } else if let Some(t) = field.strip_prefix("rtptime=") {
+                    rtptime = t.parse().ok();
+                }
+            }
+            Some((url?, rtptime?))
+        })
+        .collect()
+}
+
+/// The `rtptime` `RTP-Info` gave a track, matching its control whole or
+/// by its end, as cameras write either.
+fn rtptime_of(info: &[(String, u32)], control: &str) -> Option<u32> {
+    info.iter().find_map(|(url, time)| {
+        (url == control || control.ends_with(url.as_str()) || url.ends_with(control))
+            .then_some(*time)
     })
 }
 
@@ -632,11 +750,117 @@ struct Playing {
     base: String,
     video: Video,
     klv: Option<(KlvDepacketizer, KlvClock)>,
+    /// The sound track, when it is set up (S149).
+    sound: Option<SoundPlaying>,
+    /// What the source says about the sound, set up or not.
+    sound_description: Option<Sound>,
     note: Option<String>,
     keepalive: Duration,
 }
 
-/// DESCRIBE, SETUP of the chosen track and any KLV track, and PLAY.
+/// An RTSP camera's sound track while it plays (S149).
+struct SoundPlaying {
+    depacketizer: AudioDepacketizer,
+    sync: AudioSync,
+    /// When the first sound came, for lining it up by arrival.
+    first: Option<Instant>,
+}
+
+impl SoundPlaying {
+    /// A packet's frames on the pictures' clock. Sound not yet lined up,
+    /// or before any picture, is left out.
+    fn push(&mut self, packet: &[u8], source: &Source) -> Vec<AudioUnit> {
+        let Some((header, payload)) = uxduck_media::rtp::parse(packet) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for frame in self.depacketizer.push(&header, payload) {
+            let first = *self.first.get_or_insert_with(Instant::now);
+            if self.sync.alignment().is_none()
+                && first.elapsed() >= ALIGN_BY_ARRIVAL_AFTER
+                && let Some(video_rtp) = source.video_rtp()
+            {
+                self.sync.arrival(video_rtp, frame.timestamp);
+            }
+            let (Some(config), Some(at)) = (
+                self.depacketizer.config(),
+                self.sync
+                    .video_timestamp(frame.timestamp)
+                    .and_then(|t| source.video_us_at(t)),
+            ) else {
+                continue;
+            };
+            out.push(AudioUnit {
+                data: frame.data,
+                timestamp_us: at,
+                config,
+                samples: frame.samples,
+            });
+        }
+        out
+    }
+}
+
+/// SETUP of a sound track on channels 4 and 5, unless UXDuck does not
+/// record its sound: the track playing, with its control for `RTP-Info`,
+/// and what the source says about it. A camera that refuses it still
+/// plays its video, and `note` says so.
+async fn set_up_sound(
+    s: &mut Session,
+    source_id: &str,
+    track: SoundTrack,
+    note: &mut Option<String>,
+) -> (Option<(SoundPlaying, String)>, Option<Sound>) {
+    let description = track.sound();
+    let Ok(format) = track.format else {
+        return (None, Some(description));
+    };
+    let transport = [("Transport", "RTP/AVP/TCP;unicast;interleaved=4-5".into())];
+    match s.ask("SETUP", &track.control, &transport).await {
+        Ok(_) => {
+            let playing = SoundPlaying {
+                depacketizer: AudioDepacketizer::new(format, track.clock_rate),
+                sync: AudioSync::new(track.clock_rate),
+                first: None,
+            };
+            (Some((playing, track.control)), Some(description))
+        }
+        Err(error) => {
+            tracing::info!(source = %source_id, %error, "an RTSP camera refused its sound track");
+            let refused = "The camera refused its sound track, so recordings have no sound.";
+            *note = Some(match note.take() {
+                Some(klv) => format!("{refused} {klv}"),
+                None => format!("{refused} The video plays."),
+            });
+            (None, None)
+        }
+    }
+}
+
+/// PLAY, and the sound lined up by PLAY's `RTP-Info` when the camera gives
+/// each track's start there (S149).
+async fn start_playing(
+    s: &mut Session,
+    base: &str,
+    video: &str,
+    sound: Option<(SoundPlaying, String)>,
+) -> Result<Option<SoundPlaying>, String> {
+    let (headers, _) = s
+        .ask("PLAY", base, &[("Range", "npt=0.000-".into())])
+        .await?;
+    let info = headers
+        .get("rtp-info")
+        .map(|h| rtp_info(h))
+        .unwrap_or_default();
+    Ok(sound.map(|(mut playing, control)| {
+        if let (Some(v), Some(a)) = (rtptime_of(&info, video), rtptime_of(&info, &control)) {
+            playing.sync.rtp_info(v, a);
+        }
+        playing
+    }))
+}
+
+/// DESCRIBE, SETUP of the chosen track and any KLV and sound tracks, and PLAY.
 async fn set_up(
     source_id: &str,
     address: &Address,
@@ -701,7 +925,11 @@ async fn set_up(
             )
             .await
         {
-            Ok(_) => klv = Some((KlvDepacketizer::new(), KlvClock::new(track.clock_rate))),
+            Ok(_) => {
+                klv = Some((KlvDepacketizer::new(), KlvClock::new(track.clock_rate)));
+                let id = source_id.to_owned();
+                engine.post(move |e| e.video_metadata_announced(&id));
+            }
             Err(error) => {
                 tracing::info!(source = %source_id, %error, "an RTSP camera refused its KLV track");
                 note = Some(
@@ -711,26 +939,90 @@ async fn set_up(
             }
         }
     }
-    s.ask("PLAY", &base, &[("Range", "npt=0.000-".into())])
-        .await?;
+    // Sound in a track of its own (S149); MPEG-TS carries its own.
+    let (sound, sound_description) = match sound_track(&sdp, &base) {
+        Some(track) if video.payload != Payload::Ts => {
+            set_up_sound(&mut s, source_id, track, &mut note).await
+        }
+        _ => (None, None),
+    };
+    let sound = start_playing(&mut s, &base, &video.control, sound).await?;
     Ok(Playing {
         session: s,
         base,
         video,
         klv,
+        sound,
+        sound_description,
         note,
         keepalive: Duration::from_secs((timeout / 2).clamp(5, 25)),
     })
 }
 
+/// Log an outage once, then occasional reminders until pictures return.
+#[derive(Default)]
+struct ConnectionLog {
+    offline: Option<Offline>,
+}
+
+struct Offline {
+    since: Instant,
+    last_logged: Instant,
+    failures: u64,
+}
+
+impl ConnectionLog {
+    fn failed(&mut self, source_id: &str, error: &str, now: Instant) {
+        let Some(offline) = self.offline.as_mut() else {
+            self.offline = Some(Offline {
+                since: now,
+                last_logged: now,
+                failures: 1,
+            });
+            tracing::info!(source = %source_id, %error, "an RTSP camera stopped");
+            return;
+        };
+        offline.failures = offline.failures.saturating_add(1);
+        if now.duration_since(offline.last_logged) >= OFFLINE_LOG_EVERY {
+            offline.last_logged = now;
+            tracing::info!(
+                source = %source_id,
+                %error,
+                failures = offline.failures,
+                offline_seconds = now.duration_since(offline.since).as_secs(),
+                "an RTSP camera is still offline; retrying"
+            );
+        }
+    }
+
+    fn receiving(&mut self, source_id: &str, now: Instant) {
+        if let Some(offline) = self.offline.take() {
+            tracing::info!(
+                source = %source_id,
+                failures = offline.failures,
+                offline_seconds = now.duration_since(offline.since).as_secs(),
+                "an RTSP camera recovered"
+            );
+        }
+    }
+}
+
 /// Connects, plays and relays until the connection fails.
-async fn play(source_id: &str, url: &str, hub: &Hub, engine: &EngineHandle) -> Result<(), String> {
+async fn play(
+    source_id: &str,
+    url: &str,
+    hub: &Hub,
+    engine: &EngineHandle,
+    connection_log: &mut ConnectionLog,
+) -> Result<(), String> {
     let address = address(url)?;
     let Playing {
         session: mut s,
         base,
         video,
         mut klv,
+        mut sound,
+        sound_description,
         note,
         keepalive,
     } = set_up(source_id, &address, engine).await?;
@@ -742,6 +1034,9 @@ async fn play(source_id: &str, url: &str, hub: &Hub, engine: &EngineHandle) -> R
         // As from the UDP listener: the demuxer finds the video and KLV.
         Payload::Ts => Source::new(),
     };
+    if let Some(description) = sound_description {
+        source.sound_track(description);
+    }
     let mut last_keepalive = Instant::now();
     let mut reported = (Instant::now(), 0u64, 0u64);
     let mut klv_posted = None;
@@ -756,9 +1051,12 @@ async fn play(source_id: &str, url: &str, hub: &Hub, engine: &EngineHandle) -> R
     loop {
         match s.frame().await? {
             Frame::Interleaved { channel: 0, data } => {
+                // MPEG-TS over RTSP is kept as received; RTP video is not TS.
+                hub.publish_ts(source_id, &data);
                 for output in source.push(&data) {
                     if let uxduck_media::source::Output::Unit(unit) = &output {
                         video_us = unit.timestamp_us;
+                        connection_log.receiving(source_id, Instant::now());
                     }
                     relay(output, &mut klv_posted);
                 }
@@ -772,7 +1070,25 @@ async fn play(source_id: &str, url: &str, hub: &Hub, engine: &EngineHandle) -> R
                     relay(source.klv_unit(at, unit.data), &mut klv_posted);
                 }
             }
-            // RTCP and keepalive answers.
+            Frame::Interleaved { channel: 4, data } => {
+                if let Some(sound) = sound.as_mut() {
+                    for unit in sound.push(&data, &source) {
+                        relay(source.audio_unit(unit), &mut klv_posted);
+                    }
+                }
+            }
+            // The video's and the sound's sender reports line them up (S149).
+            Frame::Interleaved { channel: 1, data } => {
+                if let (Some(sound), Some(report)) = (sound.as_mut(), sender_report(&data)) {
+                    sound.sync.video_report(report);
+                }
+            }
+            Frame::Interleaved { channel: 5, data } => {
+                if let (Some(sound), Some(report)) = (sound.as_mut(), sender_report(&data)) {
+                    sound.sync.audio_report(report);
+                }
+            }
+            // KLV's RTCP and keepalive answers.
             Frame::Interleaved { .. } | Frame::Response { .. } => {}
         }
         if reported.0.elapsed() >= REPORT_EVERY {
@@ -793,7 +1109,7 @@ async fn play(source_id: &str, url: &str, hub: &Hub, engine: &EngineHandle) -> R
                 status.counters.bytes,
                 status.counters.pictures,
             );
-            engine.post(move |e| e.video_observed(observed));
+            engine.post(move |e| e.rtsp_observed(observed));
         }
         if last_keepalive.elapsed() >= keepalive {
             last_keepalive = Instant::now();
@@ -812,9 +1128,10 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
         let mut failures = 0usize;
+        let mut connection_log = ConnectionLog::default();
         loop {
             let started = Instant::now();
-            let error = play(&source_id, &url, &hub, &engine)
+            let error = play(&source_id, &url, &hub, &engine, &mut connection_log)
                 .await
                 .err()
                 .unwrap_or_default();
@@ -823,11 +1140,11 @@ pub fn spawn(
                 failures = 0;
             }
             let why = format!("Can't reach {}: {error}", redact(&url));
-            tracing::info!(source = %source_id, %error, "an RTSP camera stopped");
+            connection_log.failed(&source_id, &error, Instant::now());
             let id = source_id.clone();
-            engine.post(move |e| e.video_stopped_because(&id, Some(why)));
+            engine.post(move |e| e.rtsp_stopped(&id, why));
             tokio::time::sleep(BACKOFF[failures.min(BACKOFF.len() - 1)]).await;
-            failures += 1;
+            failures = failures.saturating_add(1);
         }
     })
 }
@@ -835,6 +1152,94 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn logs(run: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn outage_logs_are_throttled_until_video_returns_and_reset_for_each_outage() {
+        let output = logs(|| {
+            let now = Instant::now();
+            let mut camera = ConnectionLog::default();
+            // An initial healthy connection is not a recovery.
+            camera.receiving("camera", now);
+            for seconds in [0, 1, 2, 299, 300, 301, 599, 600] {
+                // Changing errors must not bypass the throttle.
+                let error = if seconds % 2 == 0 {
+                    "no answer"
+                } else {
+                    "closed"
+                };
+                camera.failed("camera", error, now + Duration::from_secs(seconds));
+            }
+            camera.receiving("camera", now + Duration::from_secs(603));
+            camera.receiving("camera", now + Duration::from_secs(604));
+            camera.failed("camera", "closed", now + Duration::from_secs(604));
+            camera.receiving("camera", now + Duration::from_secs(605));
+            // Each source has its own throttle.
+            let mut other = ConnectionLog::default();
+            other.failed("other", "no answer", now + Duration::from_secs(605));
+        });
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 7, "{output}");
+        assert!(lines[0].contains("an RTSP camera stopped"), "{output}");
+        for (line, seconds) in [(lines[1], 300), (lines[2], 600)] {
+            assert!(line.contains("is still offline; retrying"), "{output}");
+            assert!(
+                line.contains(&format!("offline_seconds={seconds}")),
+                "{output}"
+            );
+        }
+        assert!(lines[3].contains("an RTSP camera recovered"), "{output}");
+        assert!(
+            lines[3].contains("failures=8 offline_seconds=603"),
+            "{output}"
+        );
+        assert!(lines[4].contains("an RTSP camera stopped"), "{output}");
+        assert!(lines[5].contains("an RTSP camera recovered"), "{output}");
+        assert!(
+            lines[5].contains("failures=1 offline_seconds=1"),
+            "{output}"
+        );
+        assert!(lines[6].contains("source=other"), "{output}");
+    }
+
+    #[test]
+    fn an_overnight_outage_logs_at_most_one_reminder_every_five_minutes() {
+        let output = logs(|| {
+            let now = Instant::now();
+            let mut camera = ConnectionLog::default();
+            for seconds in (0..=8 * 60 * 60).step_by(15) {
+                camera.failed("camera", "no answer", now + Duration::from_secs(seconds));
+            }
+        });
+        assert_eq!(output.matches("an RTSP camera stopped").count(), 1);
+        assert_eq!(output.matches("is still offline; retrying").count(), 96);
+        assert!(!output.contains("recovered"));
+    }
 
     fn video(sdp: &str, base: &str) -> Result<Video, String> {
         tracks(sdp, base).map(|mut all| all.swap_remove(0))
@@ -939,6 +1344,81 @@ mod tests {
         assert_eq!(clock.at_us(u32::MAX - 49, 5_000_000), 5_000_000);
         assert_eq!(clock.at_us(50, 9_000_000), 5_100_000);
         assert_eq!(clock.at_us(150, 0), 5_200_000);
+    }
+
+    #[test]
+    fn a_sound_track_is_found_with_its_format_or_named_when_not_recorded() {
+        let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:trackID=1\r\n\
+                   m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/2\r\n\
+                   a=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1190\r\n\
+                   a=control:trackID=2\r\n";
+        let track = sound_track(sdp, "rtsp://cam/live/").unwrap();
+        assert_eq!(track.control, "rtsp://cam/live/trackID=2");
+        assert_eq!(track.clock_rate, 48_000);
+        assert!(matches!(track.format, Ok(Format::Mpeg4Generic { .. })));
+        assert_eq!(
+            track.sound(),
+            Sound {
+                name: "AAC, 48 kHz, stereo".into(),
+                recorded: true
+            }
+        );
+        // The sound track is never offered as video.
+        assert_eq!(tracks(sdp, "rtsp://cam/live/").unwrap().len(), 1);
+
+        let latm =
+            "m=audio 0 RTP/AVP 98\r\na=rtpmap:98 MP4A-LATM/44100/2\r\na=fmtp:98 cpresent=1\r\n";
+        let track = sound_track(latm, "rtsp://cam/").unwrap();
+        assert_eq!(track.control, "rtsp://cam/");
+        assert_eq!(
+            track.sound().name,
+            "AAC",
+            "until the stream gives its configuration"
+        );
+
+        let opus = "m=audio 0 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=control:audio\r\n";
+        assert_eq!(
+            sound_track(opus, "rtsp://cam/").unwrap().sound().name,
+            "Opus, 48 kHz, mono"
+        );
+
+        // G.711 by its static type, with no rtpmap: named, not recorded.
+        let g711 = "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\nm=audio 0 RTP/AVP 0\r\na=control:trackID=2\r\n";
+        assert_eq!(
+            sound_track(g711, "rtsp://cam/").unwrap().sound(),
+            Sound {
+                name: "G.711 µ-law".into(),
+                recorded: false
+            }
+        );
+        assert_eq!(sound_track(RTSP_VIDEO_ONLY, "rtsp://cam/"), None);
+    }
+
+    const RTSP_VIDEO_ONLY: &str = "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+
+    #[test]
+    fn rtp_info_gives_each_tracks_start_by_its_address() {
+        let info = rtp_info(
+            "url=rtsp://cam/live/trackID=1;seq=1000;rtptime=3000000, url=trackID=2;seq=7;rtptime=160000",
+        );
+        assert_eq!(
+            info,
+            [
+                ("rtsp://cam/live/trackID=1".to_owned(), 3_000_000),
+                ("trackID=2".to_owned(), 160_000)
+            ]
+        );
+        assert_eq!(
+            rtptime_of(&info, "rtsp://cam/live/trackID=1"),
+            Some(3_000_000)
+        );
+        assert_eq!(
+            rtptime_of(&info, "rtsp://cam/live/trackID=2"),
+            Some(160_000)
+        );
+        assert_eq!(rtptime_of(&info, "rtsp://cam/live/trackID=3"), None);
+        // An entry without its rtptime says nothing.
+        assert!(rtp_info("url=rtsp://cam/a;seq=1").is_empty());
     }
 
     #[test]

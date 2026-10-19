@@ -8,8 +8,8 @@
   "start": { "heightM": 50 },
   "steps": [
     {
-      "text": "Choose Loiter in the Control tab.",
-      "hint": "The Control tab lists the modes; Loiter holds it where it is.",
+      "text": "Choose Loiter in the Cockpit tab.",
+      "hint": "The Cockpit tab lists the modes; Loiter holds it where it is.",
       "hintAfterS": 60,
       "all": [
         { "check": "commandSent", "command": "setMode", "mode": "LOITER" },
@@ -26,7 +26,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home by itself.",
       "hintAfterS": 60,
       "all": [
@@ -35,7 +35,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab.",
+      "text": "Press Land in the Cockpit tab.",
       "hint": "Land brings it down where it is.",
       "hintAfterS": 60,
       "all": [

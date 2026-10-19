@@ -2,7 +2,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const native =
@@ -69,9 +69,9 @@ try {
     if (canRun) execFileSync(executable, ["-hide_banner", "-version"], { stdio: "ignore" });
     else
       execFileSync("lipo", [
+        executable,
         "-verify_arch",
         target.startsWith("aarch64") ? "arm64" : "x86_64",
-        executable,
       ]);
     console.log(`Capture runtime ready: ${runtime}`);
   } else {
@@ -91,9 +91,13 @@ try {
         throw new Error(`Capture source hash mismatch: remove ${archive} and rebuild.`);
       const dir = join(work, source.dir);
       mkdirSync(dir);
-      execFileSync("tar", ["-xf", archive, "--strip-components=1", "-C", dir], {
-        stdio: "inherit",
-      });
+      // From inside the folder, with a relative POSIX path: MSYS2's GNU tar,
+      // which builds this on Windows, misreads `C:` and backslashes.
+      execFileSync(
+        "tar",
+        ["-xf", relative(dir, archive).replaceAll("\\", "/"), "--strip-components=1"],
+        { cwd: dir, stdio: "inherit" },
+      );
       copyFileSync(archive, join(runtime, "sources", source.name));
     }
     execFileSync(
@@ -129,6 +133,8 @@ try {
       });
       if (!encoders.includes("libx264"))
         throw new Error("The capture helper is missing its required H.264 encoder.");
+      if (!/^ A\S* aac /m.test(encoders))
+        throw new Error("The capture helper is missing its AAC encoder for a camera's sound.");
 
       if (process.platform === "darwin") {
         execFileSync("python3", [join(root, recipes[2]!), join(work, "ffmpeg")], {
@@ -169,6 +175,38 @@ try {
           throw new Error(
             `The capture helper cannot select a camera in Camera default mode: ${missingCamera.error?.message ?? missingCamera.stderr}`,
           );
+        // A sound input is chosen by its exact identity too (S148).
+        const missingInput = spawnSync(
+          executable,
+          [
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-f",
+            "avfoundation",
+            "-audio_device_id",
+            "uxduck-build-check-missing-input",
+            "-i",
+            "none:none",
+            "-t",
+            "0.1",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            "pipe:1",
+          ],
+          { encoding: "utf8", timeout: 15_000 },
+        );
+        if (
+          missingInput.error ||
+          missingInput.status === 0 ||
+          !missingInput.stderr.includes("The selected sound input is not connected")
+        )
+          throw new Error(
+            `The capture helper cannot select a sound input by its identity: ${missingInput.error?.message ?? missingInput.stderr}`,
+          );
       }
 
       const sample = execFileSync(executable, [
@@ -194,11 +232,30 @@ try {
       ]);
       if (sample.length < 188)
         throw new Error("The capture helper could not encode a test picture.");
+      // Sound as a camera's: PCM in, resampled, AAC out in MPEG-TS (S148).
+      const sound = execFileSync(executable, [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=0.5",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-f",
+        "mpegts",
+        "pipe:1",
+      ]);
+      if (sound.length < 188) throw new Error("The capture helper could not encode test sound.");
     } else {
       execFileSync("lipo", [
+        executable,
         "-verify_arch",
         target.startsWith("aarch64") ? "arm64" : "x86_64",
-        executable,
       ]);
       const components = readFileSync(join(work, "ffmpeg/config_components.h"), "utf8");
       for (const required of [
@@ -206,6 +263,8 @@ try {
         "LIBX264_ENCODER",
         "MPEGTS_MUXER",
         "BWDIF_FILTER",
+        "AAC_ENCODER",
+        "ARESAMPLE_FILTER",
       ]) {
         if (!components.includes(`#define CONFIG_${required} 1`))
           throw new Error(`The cross-built capture helper is missing ${required}.`);

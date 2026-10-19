@@ -1,5 +1,5 @@
 ---
-title: Telemetry, Control and Messages
+title: Telemetry, Cockpit and Messages
 order: 12
 group: Use your vehicle
 summary: Read telemetry, control receipts and vehicle messages.
@@ -7,7 +7,7 @@ summary: Read telemetry, control receipts and vehicle messages.
 
 These tabs show what the vehicle is doing and let you act on it.
 
-When the first vehicle connects, the flight layout replaces **Home**, once: the map and the 3D map on top, **Instruments** and **Messages** below them, and **Control** above **Telemetry** on the right. **Camera** opens beside the 3D map when the vehicle's video arrives. In development and staging builds, **Ask AI** opens the chat. The in-app AI chat is currently hidden in production. **Layouts** › **Reset layout** brings this arrangement back, and the list of tabs in **Layouts** shows or hides each one in its place.
+When the first vehicle connects, the flight layout replaces **Home**, once: the map and the 3D map on top, **Instruments** and **Messages** below them, and **Cockpit** above **Telemetry** on the right. **Camera** opens beside the 3D map when the vehicle's video arrives. In development and staging builds, **Ask AI** opens the chat. The in-app AI chat is currently hidden in production. **Layouts** › **Reset layout** brings this arrangement back, and the list of tabs in **Layouts** shows or hides each one in its place.
 
 **Layouts** › **Save layout…** keeps an arrangement under a name, such as Survey. The title bar shows the layout you last chose or saved. Once you move something, it adds "· changed". **Save to Survey** keeps the change, and **Undo changes to Survey** undoes it.
 
@@ -21,7 +21,7 @@ Altitude is three tiles: **Altitude above home** in every flying type's defaults
 
 **Edit layout…** changes them, their order and their colour rules; editing UXDuck's default saves it as your own. Layouts follow you to your other computers with sync.
 
-## Control
+## Cockpit
 
 Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Save snapshot** and **Stop simulation**. The **…** beside its name is the same menu as in the sidebar.
 

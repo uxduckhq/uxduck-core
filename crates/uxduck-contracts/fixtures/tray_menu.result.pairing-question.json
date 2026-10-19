@@ -16,6 +16,7 @@
     "id": "pairing:482913",
     "title": "localhost:8793 asks to connect to UXDuck",
     "message": "Allow it only if you asked to connect just now and the page shows 482 913.",
+    "pairingCode": "482 913",
     "answers": [
       { "id": "deny-pairing:482913", "label": "Deny" },
       { "id": "allow-pairing:482913", "label": "Allow" }

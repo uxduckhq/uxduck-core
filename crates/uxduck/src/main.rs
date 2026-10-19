@@ -4,6 +4,7 @@ mod account;
 mod adapters;
 mod analytics;
 mod api;
+mod app_update;
 mod build;
 mod cli;
 mod daemon;
@@ -52,6 +53,20 @@ use clap::Parser;
 fn main() -> ExitCode {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    // The copied updater is a short-lived installer worker, not another daemon.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__install-update")) {
+        let Some(dir) = std::env::args_os().nth(2) else {
+            eprintln!("UXDuck update: missing staged update directory");
+            return ExitCode::from(2);
+        };
+        return match app_update::worker(std::path::Path::new(&dir)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("UXDuck update: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let (console, _console_guard) = match logs::Tee::new(std::io::stderr()) {
         Ok(console) => console,
         Err(error) => {

@@ -58,6 +58,14 @@ const TRIES: u8 = 8;
 /// rather than left holding.
 const ON_THE_GROUND_M: f64 = 2.0;
 
+/// A plane is handed over in LOITER once this high (or at 90% of its height
+/// when that is lower), then climbs on to its height there. `ArduPlane`'s
+/// TAKEOFF climbs at full throttle with its pitch on speed alone: a jet
+/// left in it to 90 m overshot to 115 m and sank back to 75 m in LOITER,
+/// while LOITER climbs at `TECS_CLMB_MAX` and stops at its height (S143,
+/// 2026-10-19). Lower, the circle's bank starts just above the runway.
+const LIFT_OFF_M: f64 = 30.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     /// Until the vehicle on the link is heard.
@@ -78,10 +86,14 @@ enum Step {
     Arm,
     /// `MAV_CMD_NAV_TAKEOFF`, for a multicopter or a VTOL in `GUIDED`.
     TakeOff,
+    /// Until a plane is clear of the ground (`LIFT_OFF_M`).
+    LiftOff,
     /// Until it is near the height.
     Climb,
     /// The holding mode it is handed over in.
     Hold,
+    /// A plane's height, sent once it holds (`MAV_CMD_DO_CHANGE_ALTITUDE`).
+    Height,
     /// A snapshot's mission item, before its mode is AUTO again.
     MissionItem,
     /// A snapshot's mode.
@@ -128,8 +140,8 @@ fn follows_throttle(vehicle: SimVehicle, mode: &str) -> bool {
 /// from a snapshot.
 fn plan(vehicle: SimVehicle, in_air: bool, snapshot: Option<&Snapshot>) -> Vec<Step> {
     use Step::{
-        Arm, Climb, Heard, Hold, Mission, MissionItem, Mode, Parameters, Ready, SlowDown, SpeedUp,
-        TakeOff, TakeOffHeight, TakeOffMode,
+        Arm, Climb, Heard, Height, Hold, LiftOff, Mission, MissionItem, Mode, Parameters, Ready,
+        SlowDown, SpeedUp, TakeOff, TakeOffHeight, TakeOffMode,
     };
     let mut steps = vec![Heard, SpeedUp];
     if let Some(snapshot) = snapshot {
@@ -144,9 +156,18 @@ fn plan(vehicle: SimVehicle, in_air: bool, snapshot: Option<&Snapshot>) -> Vec<S
         steps.extend_from_slice(match vehicle {
             // GUIDED, arm, take off, and hold there in GUIDED.
             SimVehicle::Multicopter | SimVehicle::Vtol => &[TakeOffMode, Arm, TakeOff, Climb, Hold],
-            // ArduPlane's TAKEOFF mode climbs to TKOFF_ALT along its heading
-            // and circles there; LOITER keeps circling where it is.
-            SimVehicle::Plane => &[TakeOffHeight, TakeOffMode, Arm, Climb, Hold],
+            // ArduPlane's TAKEOFF mode runs down the runway and lifts off
+            // along its heading; LOITER circles where it is and climbs on to
+            // the height.
+            SimVehicle::Plane | SimVehicle::Jet => &[
+                TakeOffHeight,
+                TakeOffMode,
+                Arm,
+                LiftOff,
+                Hold,
+                Height,
+                Climb,
+            ],
             // Never in the air: they start ready where they are (S37).
             SimVehicle::Rover | SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship => {
                 &[]
@@ -183,7 +204,7 @@ fn plan_px4(vehicle: SimVehicle, in_air: bool, snapshot: Option<&Snapshot>) -> V
     }
     let flies = matches!(
         vehicle,
-        SimVehicle::Multicopter | SimVehicle::Vtol | SimVehicle::Plane
+        SimVehicle::Multicopter | SimVehicle::Vtol | SimVehicle::Plane | SimVehicle::Jet
     );
     if in_air && flies {
         steps.extend_from_slice(&[Ready, Arm, TakeOff, Climb]);
@@ -208,14 +229,14 @@ fn hold_mode_of(vehicle: &Vehicle, kind: SimVehicle) -> &'static str {
 fn changes_mode(step: Step) -> bool {
     matches!(
         step,
-        Step::Climb | Step::Hold | Step::MissionItem | Step::Mode
+        Step::LiftOff | Step::Climb | Step::Hold | Step::Height | Step::MissionItem | Step::Mode
     )
 }
 
 fn take_off_mode(vehicle: SimVehicle) -> &'static str {
     match vehicle {
         SimVehicle::Multicopter | SimVehicle::Vtol => "GUIDED",
-        SimVehicle::Plane => "TAKEOFF",
+        SimVehicle::Plane | SimVehicle::Jet => "TAKEOFF",
         SimVehicle::Rover | SimVehicle::Boat => "HOLD",
         SimVehicle::Submarine => "ALT_HOLD",
         SimVehicle::Airship => "MANUAL",
@@ -224,7 +245,7 @@ fn take_off_mode(vehicle: SimVehicle) -> &'static str {
 
 fn hold_mode(vehicle: SimVehicle) -> &'static str {
     match vehicle {
-        SimVehicle::Plane | SimVehicle::Airship => "LOITER",
+        SimVehicle::Plane | SimVehicle::Jet | SimVehicle::Airship => "LOITER",
         // Hold where the take-off ends: LOITER and QLOITER follow the
         // throttle stick (`follows_throttle`).
         SimVehicle::Multicopter | SimVehicle::Vtol => "GUIDED",
@@ -562,6 +583,17 @@ impl Engine {
         }
     }
 
+    /// Moves every take-off on, once a second: its deadlines pass also when
+    /// the simulator says nothing, so one that never speaks (`jsbsim`
+    /// without `JSBSim`) fails as never connected instead of climbing for
+    /// ever.
+    pub fn drive_launches(&mut self) {
+        let links: Vec<String> = self.launches.running.keys().cloned().collect();
+        for link_id in links {
+            self.drive_launch(&link_id);
+        }
+    }
+
     pub(crate) fn drive_launch_of_vehicle(&mut self, vehicle_id: &str) {
         let Some(link_id) = self.vehicle(vehicle_id).map(|v| v.link_id.clone()) else {
             return;
@@ -680,22 +712,22 @@ impl Engine {
                 );
                 false
             }
-            Step::Climb => {
-                let reached = self
-                    .height_above_home_since(&vehicle.id, at.started_us)
-                    .is_some_and(|h| h >= 0.9 * height_m);
-                if reached {
-                    self.next_step(link_id);
-                    return true;
-                }
-                if waited > CLIMB_US {
-                    self.fail_launch(link_id, format!("it did not climb to {height_m:.0} m"));
-                }
-                false
-            }
+            Step::LiftOff => self.climbed_to(link_id, vehicle, at, LIFT_OFF_M.min(0.9 * height_m)),
+            Step::Climb => self.climbed_to(link_id, vehicle, at, 0.9 * height_m),
             Step::Hold => {
                 let mode = hold_mode_of(vehicle, kind).into();
                 self.launch_command(link_id, vehicle, Command::SetMode { mode });
+                false
+            }
+            Step::Height => {
+                #[allow(clippy::cast_possible_truncation, reason = "a height in metres")]
+                // param 1 the height, param 2 its frame: 3 is above home.
+                let params = vec![height_m as f32, 3.0];
+                let command = Command::Long {
+                    command: 186,
+                    params,
+                };
+                self.launch_command(link_id, vehicle, command);
                 false
             }
             Step::SlowDown => {
@@ -709,6 +741,22 @@ impl Engine {
                 false
             }
         }
+    }
+
+    /// Whether it is this high, moving on if so. True when it is.
+    fn climbed_to(&mut self, link_id: &str, vehicle: &Vehicle, at: &At, to_m: f64) -> bool {
+        let reached = self
+            .height_above_home_since(&vehicle.id, at.started_us)
+            .is_some_and(|h| h >= to_m);
+        if reached {
+            self.next_step(link_id);
+            return true;
+        }
+        if at.waited > CLIMB_US {
+            let height_m = at.height_m;
+            self.fail_launch(link_id, format!("it did not climb to {height_m:.0} m"));
+        }
+        false
     }
 
     fn wait_until_ready(&mut self, link_id: &str, vehicle: &Vehicle, started_us: u64) -> bool {
@@ -1056,6 +1104,44 @@ mod tests {
                 Step::SlowDown
             ]
         );
+    }
+
+    /// A jet (S143) takes off and holds as a plane does: `ArduPlane`'s
+    /// TAKEOFF mode to its height, then LOITER.
+    #[test]
+    fn a_jet_takes_off_as_a_plane() {
+        assert_eq!(
+            plan(SimVehicle::Jet, true, None),
+            plan(SimVehicle::Plane, true, None)
+        );
+        assert_eq!(take_off_mode(SimVehicle::Jet), "TAKEOFF");
+        assert_eq!(hold_mode(SimVehicle::Jet), "LOITER");
+        assert_eq!(plan_px4(SimVehicle::Jet, true, None).len(), 5);
+    }
+
+    /// A plane holds once clear of the ground and climbs on in LOITER, so
+    /// TAKEOFF's full-throttle climb never overshoots (S143, 2026-10-19).
+    /// Someone taking over skips the hold, the height and the climb alike.
+    #[test]
+    fn a_plane_holds_once_off_the_ground_and_climbs_on_to_its_height() {
+        use Step::{Arm, Climb, Height, Hold, LiftOff, TakeOffHeight, TakeOffMode};
+        assert_eq!(
+            plan(SimVehicle::Plane, true, None),
+            [
+                Step::Heard,
+                Step::SpeedUp,
+                Step::Ready,
+                TakeOffHeight,
+                TakeOffMode,
+                Arm,
+                LiftOff,
+                Hold,
+                Height,
+                Climb,
+                Step::SlowDown
+            ]
+        );
+        assert!([LiftOff, Hold, Height, Climb].into_iter().all(changes_mode));
     }
 
     /// No simulated vehicle is left in a mode that climbs or sinks with the

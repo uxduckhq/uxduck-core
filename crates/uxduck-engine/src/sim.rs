@@ -10,7 +10,7 @@ use uxduck_contracts::dto::sim::{SimBinariesResult, SimBuildParams, SimForward, 
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
-use uxduck_core::domain::link::{Link, LinkKind, LinkStatus, SimAutopilot, SimVehicle};
+use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, LinkStatus, SimAutopilot, SimVehicle};
 use uxduck_core::events::Change;
 
 use crate::rpc::handlers::to_value;
@@ -28,8 +28,38 @@ pub const MAX_IN_BROWSER: usize = 2;
 pub const MIN_IN_AIR_M: f64 = 10.0;
 pub const MAX_IN_AIR_M: f64 = 500.0;
 
+/// `ArduPlane` frames the take-off cannot fly (docs/simulation-frames.md): a
+/// glider has no motor, the stratospheric blimp floats, and a petrol
+/// engine waits to be started. Each stays on the ground until 2 minutes
+/// later "it did not climb" (2026-10-18).
+pub const GROUND_ONLY: [&str; 3] = ["glider", "stratoblimp", "plane-ice"];
+
 fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
+}
+
+/// Whether a vehicle can start in the air at a height: one that flies, on a
+/// frame the take-off can fly.
+fn check_in_air(vehicle: SimVehicle, frame: Option<&str>, height_m: f64) -> Result<(), ApiError> {
+    if matches!(
+        vehicle,
+        SimVehicle::Rover | SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship
+    ) {
+        return Err(invalid(
+            "this vehicle starts at its selected location. Automatic take-off is unavailable",
+        ));
+    }
+    if let Some(frame) = frame.filter(|f| GROUND_ONLY.contains(f)) {
+        return Err(invalid(format!(
+            "{frame} cannot take off by itself. Start it on the ground"
+        )));
+    }
+    if !(MIN_IN_AIR_M..=MAX_IN_AIR_M).contains(&height_m) {
+        return Err(invalid(format!(
+            "a vehicle starts in the air at {MIN_IN_AIR_M} to {MAX_IN_AIR_M} m"
+        )));
+    }
+    Ok(())
 }
 
 /// Checks a new simulator link against the host and the others. Returns
@@ -65,20 +95,8 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
     if speedup.is_some_and(|s| !(1..=10).contains(&s)) {
         return Err(invalid("the speed-up is from 1 to 10 times real time"));
     }
-    if in_air_m.is_some()
-        && matches!(
-            vehicle,
-            SimVehicle::Rover | SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship
-        )
-    {
-        return Err(invalid(
-            "this vehicle starts at its selected location. Automatic take-off is unavailable",
-        ));
-    }
-    if in_air_m.is_some_and(|h| !(MIN_IN_AIR_M..=MAX_IN_AIR_M).contains(&h)) {
-        return Err(invalid(format!(
-            "a vehicle starts in the air at {MIN_IN_AIR_M} to {MAX_IN_AIR_M} m"
-        )));
+    if let Some(height_m) = in_air_m {
+        check_in_air(*vehicle, frame.as_deref(), *height_m)?;
     }
     if *autopilot == SimAutopilot::Px4 {
         if capabilities.runs_in == RunsIn::Browser {
@@ -88,12 +106,17 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         }
         if matches!(
             vehicle,
-            SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship
+            SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship | SimVehicle::Jet
         ) {
             return Err(invalid(
-                "PX4 flies a multicopter, plane, VTOL or rover here: not a boat, submarine or blimp",
+                "PX4 flies a multicopter, plane, VTOL or rover here: not a boat, submarine, blimp or jet",
             ));
         }
+    }
+    // The jet is ArduPlane's jet frame and its tuning (S143): another
+    // frame would fly as something else under the jet's name and model.
+    if *vehicle == SimVehicle::Jet && frame.as_deref().is_some_and(|f| f != JET_FRAME) {
+        return Err(invalid(format!("a jet flies the {JET_FRAME} frame")));
     }
     // Frame names are the build's own, such as `+`, `octa-quad` or
     // `X:@ROMFS/models/Callisto.json`: short, with no spaces.
@@ -133,6 +156,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         SimVehicle::Boat => "Simulated boat",
         SimVehicle::Submarine => "Simulated submarine",
         SimVehicle::Airship => "Simulated blimp",
+        SimVehicle::Jet => "Simulated jet",
     }
     .to_owned())
 }
@@ -338,6 +362,7 @@ pub(crate) fn restart(
     }
     // "Start again" gives up an attempt at practice on it (S100).
     engine.give_up_practice_on(id, connection);
+    engine.pause_controllers_for_restart(id);
     engine.links.close(id);
     engine.drop_launch(id);
     crate::rpc::vehicles::vehicles_offline(engine, connection, id);

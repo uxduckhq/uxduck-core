@@ -391,6 +391,9 @@ impl Plane {
             let _ = tokio::task::spawn_blocking(move || previous.stop()).await;
         }
         if link.kind.is_simulator() {
+            self.reaped(&link.id).await;
+        }
+        if link.kind.is_simulator() {
             self.session.simulated(&link.id);
         }
         let (events, mut received) = links::event_channel();
@@ -471,6 +474,16 @@ impl Plane {
                 relay.abort();
                 self.report(&link.id, status, Some(detail)).await;
             }
+        }
+    }
+
+    /// A build closed before its link opens again (`sim/restart` closes,
+    /// then opens) is reaped off this task, and holds its link until it
+    /// has exited; waited for here, up to 10 s.
+    async fn reaped(&self, link_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.simulators.is_active(link_id) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

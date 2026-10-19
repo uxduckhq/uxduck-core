@@ -8,13 +8,16 @@ use crate::dto::account::{
     AccountEnvironmentParams, AccountSessionParams, AccountSignInParams, AccountUpdatesParams,
     AccountUsernameParams, AccountVerifyParams,
 };
-use crate::dto::analytics::{AnalyticsAliasParams, AppEvent};
+use crate::dto::analytics::{
+    AnalyticsActiveTimeParams, AnalyticsAliasParams, AnalyticsPerformanceParams, AppEvent,
+};
 use crate::dto::app::{
     AppOpenParams, ClientVisibilityParams, DesktopAppChooseParams, DesktopAppStatusParams,
 };
 use crate::dto::client::{
     Approval, ApprovalResolveParams, CapabilitiesChanged, ClientForgetParams,
-    ClientSetCapabilitiesParams,
+    ClientSetCapabilitiesParams, DisplayPullParams, DisplayRegisterParams, DisplayReplyParams,
+    DisplayRequested,
 };
 use crate::dto::command::{CommandSendParams, ModeListParams};
 use crate::dto::controller::{
@@ -71,13 +74,16 @@ use crate::dto::thread::{
 };
 use crate::dto::trace::{RequestId, TraceFrame};
 use crate::dto::tray::{FeedbackScreenshotParams, TrayActivateParams, TrayMenu};
+use crate::dto::update::AppUpdateInstallParams;
 use crate::dto::vehicle::{
     VehicleBookmarksParams, VehicleLabelParams, VehicleSaveParams, VehicleSizeParams,
 };
 use crate::dto::video::{
     VideoAddParams, VideoAssignParams, VideoCaptureEnableParams, VideoCaptureParams,
-    VideoPlaybackParams, VideoRecordParams, VideoRemoveParams, VideoRenameParams,
-    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoWatchParams,
+    VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams,
+    VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams,
+    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams,
+    VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -252,6 +258,18 @@ pub enum ClientRequest {
     /// connections. Operators only. Result: `ClientListResult`.
     #[serde(rename = "client/list")]
     ClientList(Empty),
+    /// Announces a UI that can answer a display-settings pull. Needs `read`. Result: `Empty`.
+    #[serde(rename = "client/displayRegister")]
+    ClientDisplayRegister(DisplayRegisterParams),
+    /// Other connected UIs offering display settings. Needs `read`. Result: `DisplayClientsResult`.
+    #[serde(rename = "client/displayList")]
+    ClientDisplayList(Empty),
+    /// Pulls a live snapshot from one UI; never changes that UI. Needs `read`. Result: `DisplaySnapshot`.
+    #[serde(rename = "client/displayPull")]
+    ClientDisplayPull(DisplayPullParams),
+    /// Answers a pending pull, only from its selected source. Needs `read`. Result: `Empty`.
+    #[serde(rename = "client/displayReply")]
+    ClientDisplayReply(DisplayReplyParams),
     /// Replaces a non-operator client's capabilities, live. Operators only.
     /// Result: `ClientRecord`.
     #[serde(rename = "client/setCapabilities")]
@@ -402,6 +420,12 @@ pub enum ClientRequest {
     /// own failsafe decides what happens. Operators only. Result: `Empty`.
     #[serde(rename = "controller/release")]
     ControllerRelease(IdParams),
+    /// Moves a held controller to this window, still flying what it flew
+    /// with the same mapping. Only for the operator holding it, from a
+    /// window on the same computer; the holding window may be open or have
+    /// closed moments ago. Result: `Controller`.
+    #[serde(rename = "controller/takeOver")]
+    ControllerTakeOver(IdParams),
     /// Forgets a known controller: it leaves the list until it is plugged
     /// in again. Refused while it is plugged in or held. Operators only,
     /// needs `config`. Result: `Empty`.
@@ -441,6 +465,18 @@ pub enum ClientRequest {
     /// Operators only. Result: `Empty`.
     #[serde(rename = "daemon/stop")]
     DaemonStop(Empty),
+    /// Full product update status and current restart blockers. Needs read.
+    #[serde(rename = "update/status")]
+    UpdateStatus(Empty),
+    /// Check and download a signed full app update. Local operators only.
+    #[serde(rename = "update/check")]
+    UpdateCheck(Empty),
+    /// Approve this version now or when idle. No safety override. Local operators only.
+    #[serde(rename = "update/install")]
+    UpdateInstall(AppUpdateInstallParams),
+    /// Cancel queued consent and silence this version's prompt. Local operators only.
+    #[serde(rename = "update/later")]
+    UpdateLater(Empty),
     /// What would stop if UXDuck quit now: simulations, forward links,
     /// connected vehicles and recordings, with the words for the question
     /// (S107, ADR-0025 D1). Changes nothing. Operators only. Result:
@@ -583,6 +619,15 @@ pub enum ClientRequest {
     /// `StorageUsage`.
     #[serde(rename = "storage/usage")]
     StorageUsage(Empty),
+    /// Clears logs of stopped native simulations, preserving builds and state.
+    /// Needs `config`. Result: `StorageUsage`.
+    #[serde(rename = "storage/clearSimulatorLogs")]
+    StorageClearSimulatorLogs(Empty),
+    /// Shows UXDuck's app folder (`~/.uxduck` on a Mac) in the computer's
+    /// file manager (S150). Only on the computer UXDuck runs on. Needs
+    /// `read`. Result: `VideoRevealResult`.
+    #[serde(rename = "storage/reveal")]
+    StorageReveal(Empty),
     /// How often each of the daemon's tasks has woken since it started.
     /// Needs `read`. Result: `Wakeups`.
     #[serde(rename = "daemon/wakeups")]
@@ -770,6 +815,25 @@ pub enum ClientRequest {
     /// (ADR-0016 O1). Operators only. Result: `Empty`.
     #[serde(rename = "analytics/track")]
     AnalyticsTrack(AppEvent),
+    /// Feedback funnel events, through an optional method so older daemons
+    /// can answer method-not-found. Same usage switch. Result: `Empty`.
+    #[serde(rename = "analytics/feedback")]
+    AnalyticsFeedback(AppEvent),
+    /// Foreground active-time delta. Optional for older daemons; probe by
+    /// method-not-found. Same analytics switch as analytics/track. Result: `Empty`.
+    #[serde(rename = "analytics/activeTime")]
+    AnalyticsActiveTime(AnalyticsActiveTimeParams),
+    /// Consumes coarse browser-daemon flight-time totals once across tabs.
+    /// Installed daemons send them directly. Operators only. Result: `FlightTimeUsage`.
+    #[serde(rename = "analytics/takeFlightTime")]
+    AnalyticsTakeFlightTime(Empty),
+    /// Atomically consumes confirmed browser-daemon task outcomes. Optional
+    /// for older daemons. Operators only. Result: `EngagementUsage`.
+    #[serde(rename = "analytics/takeEngagement")]
+    AnalyticsTakeEngagement(Empty),
+    /// Optional aggregate performance report. Result: `Empty`.
+    #[serde(rename = "analytics/performance")]
+    AnalyticsPerformance(AnalyticsPerformanceParams),
     /// Joins a browser's earlier events to this install (ADR-0016 O4), when
     /// usage analytics are on. Operators only. Result: `Empty`.
     #[serde(rename = "analytics/alias")]
@@ -852,6 +916,10 @@ pub enum ClientRequest {
     /// (ADR-0013 P9). Result: `AccountState`.
     #[serde(rename = "account/get")]
     AccountGet(Empty),
+    /// Recorded telemetry logs in this computer's account. Needs `read`.
+    /// Result: `AccountFlights`. Tokens stay with the daemon.
+    #[serde(rename = "account/flights")]
+    AccountFlights(Empty),
     /// Development daemon's server choice. Result: `AccountEnvironmentState`.
     #[serde(rename = "account/environment")]
     AccountEnvironment(Empty),
@@ -1096,6 +1164,10 @@ pub enum ClientRequest {
     /// path returned. Needs `read`. Result: `VideoWatchResult`.
     #[serde(rename = "video/watch")]
     VideoWatch(VideoWatchParams),
+    /// Keeps a camera's live metadata flowing for a visible map, without
+    /// granting a video socket. Needs `read`. Result: `VideoMetadataWatchResult`.
+    #[serde(rename = "video/metadata/watch")]
+    VideoMetadataWatch(VideoWatchParams),
     /// Stops a watch and closes its socket. Needs `read`. Result: `Empty`.
     #[serde(rename = "video/unwatch")]
     VideoUnwatch(VideoUnwatchParams),
@@ -1110,10 +1182,23 @@ pub enum ClientRequest {
     #[serde(rename = "video/remove")]
     VideoRemove(VideoRemoveParams),
     /// Starts or stops recording a camera by hand, whatever the recording
-    /// setting says, until the camera stops. Needs `config`. Result:
+    /// setting says, until explicitly stopped or the daemon restarts. Needs `config`. Result:
     /// `Empty`.
     #[serde(rename = "video/record")]
     VideoRecord(VideoRecordParams),
+    /// Record all and Stop all (S153): `on` asks every camera that records
+    /// with the others and isn't paused or unplayable to record, as
+    /// `video/record` would, and stops none; off stops every camera recording or asked to, as
+    /// `video/record` off would, until it is recorded again or its vehicle
+    /// next arms. Needs `config`. Result: `Empty`.
+    #[serde(rename = "video/recordAll")]
+    VideoRecordAll(VideoRecordAllParams),
+    /// Whether a camera records with the others (S153): off, neither the
+    /// recording setting nor `video/recordAll` starts it, only
+    /// `video/record`. Kept with the camera; on by default. Needs `config`.
+    /// Result: `VideoSource`.
+    #[serde(rename = "video/recordWithOthers")]
+    VideoRecordWithOthers(VideoRecordWithOthersParams),
     /// A recording to play: an MP4 path on the daemon's origin, good for an
     /// hour. Needs `read`. Result: `VideoPlaybackResult`.
     #[serde(rename = "video/playback")]
@@ -1133,6 +1218,23 @@ pub enum ClientRequest {
     /// `VideoRevealResult`.
     #[serde(rename = "video/reveal")]
     VideoReveal(VideoRevealParams),
+    /// Keeps a photo from the video (S144): a JPEG of the picture a Camera
+    /// tab shows, written to the platform's pictures folder with EXIF (the
+    /// time, the camera, and where its vehicle was). Needs `config`.
+    /// Result: `VideoPhoto`.
+    #[serde(rename = "video/photo")]
+    VideoPhoto(VideoPhotoParams),
+    /// A photo to show: a JPEG path on the daemon's origin, good for an
+    /// hour. Needs `read`. Result: `VideoPlaybackResult`.
+    #[serde(rename = "video/photo/show")]
+    VideoPhotoShow(VideoPhotoShowParams),
+    /// Whether a camera's vehicle takes its own camera's photo and records
+    /// along with UXDuck's (S145, ADR-0017 V20): `IMAGE_START_CAPTURE` with
+    /// each photo, `VIDEO_START_CAPTURE` and `VIDEO_STOP_CAPTURE` with each
+    /// recording. Kept with the camera. Needs `config`. Result:
+    /// `VideoSource`.
+    #[serde(rename = "video/vehicleCamera")]
+    VideoVehicleCamera(VideoVehicleCameraParams),
     /// Starts looking for vehicles for this client: plugged in, on this
     /// computer and its gateway, or, with `network`, on the local network
     /// too. Finds arrive as `find/changed` until `find/stop` or the
@@ -1168,7 +1270,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 234] = [
+    pub const METHODS: [&'static str; 257] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1213,6 +1315,10 @@ impl ClientRequest {
         "notification/acknowledge",
         "notification/dismiss",
         "client/list",
+        "client/displayRegister",
+        "client/displayList",
+        "client/displayPull",
+        "client/displayReply",
         "client/setCapabilities",
         "client/forget",
         "approval/list",
@@ -1240,6 +1346,7 @@ impl ClientRequest {
         "controller/keyboardInput",
         "controller/keyboardStop",
         "controller/release",
+        "controller/takeOver",
         "controller/forget",
         "controller/setTarget",
         "controller/inputs",
@@ -1249,6 +1356,8 @@ impl ClientRequest {
         "daemon/restart",
         "settings/update",
         "storage/usage",
+        "storage/clearSimulatorLogs",
+        "storage/reveal",
         "plugin/install",
         "plugin/remove",
         "plugin/command",
@@ -1262,6 +1371,10 @@ impl ClientRequest {
         "plugin/drafts",
         "daemon/stop",
         "daemon/stopPreview",
+        "update/status",
+        "update/check",
+        "update/install",
+        "update/later",
         "client/visibility",
         "app/focus",
         "app/open",
@@ -1292,6 +1405,11 @@ impl ClientRequest {
         "daemon/wakeups",
         "daemon/about",
         "analytics/track",
+        "analytics/feedback",
+        "analytics/activeTime",
+        "analytics/takeFlightTime",
+        "analytics/takeEngagement",
+        "analytics/performance",
         "analytics/alias",
         "feedback/send",
         "debug/panic",
@@ -1309,6 +1427,7 @@ impl ClientRequest {
         "sim/download",
         "sim/delete",
         "account/get",
+        "account/flights",
         "account/environment",
         "account/setEnvironment",
         "account/signIn",
@@ -1360,14 +1479,20 @@ impl ClientRequest {
         "video/list",
         "video/assign",
         "video/watch",
+        "video/metadata/watch",
         "video/unwatch",
         "video/add",
         "video/remove",
         "video/record",
+        "video/recordAll",
+        "video/recordWithOthers",
         "video/playback",
         "video/rename",
         "video/track",
         "video/reveal",
+        "video/photo",
+        "video/photo/show",
+        "video/vehicleCamera",
         "find/start",
         "find/stop",
         "find/vehicles",
@@ -1430,6 +1555,9 @@ pub struct CancelParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params")]
 pub enum ServerNotification {
+    /// One requester explicitly wants this connection's current display settings.
+    #[serde(rename = "client/displayRequested")]
+    ClientDisplayRequested(DisplayRequested),
     /// One frame from the inspector tap, after `trace/subscribe`.
     #[serde(rename = "trace/frame")]
     TraceFrame(TraceFrame),

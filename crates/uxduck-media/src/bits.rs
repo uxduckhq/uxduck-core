@@ -55,6 +55,23 @@ impl<'a> BitReader<'a> {
         self.bit += bits;
     }
 
+    /// Where the next bit is, counted from the start of the data.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.bit
+    }
+
+    /// Bits not yet read.
+    #[must_use]
+    pub const fn left(&self) -> usize {
+        (self.data.len() * 8).saturating_sub(self.bit)
+    }
+
+    /// On to the next byte's first bit.
+    pub const fn align(&mut self) {
+        self.bit = self.bit.next_multiple_of(8);
+    }
+
     /// An unsigned Exp-Golomb code.
     ///
     /// # Errors

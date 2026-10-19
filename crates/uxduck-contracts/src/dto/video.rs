@@ -88,6 +88,24 @@ pub struct CaptureInput {
     /// Bob deinterlacing preserves each field's time for analog FPV.
     #[serde(default)]
     pub deinterlace: bool,
+    /// Record the sound input's sound with the pictures (S148); off unless
+    /// turned on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_sound: bool,
+    /// The sound input chosen with the camera, kept while sound is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_input: Option<SoundInput>,
+}
+
+/// A sound input chosen with a local camera (S148): a microphone, or a
+/// capture adapter's audio.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundInput {
+    /// Opaque platform identity from `video/devices`' sound inputs.
+    pub device_id: String,
+    /// Its name when chosen; kept while unplugged.
+    pub name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +125,9 @@ pub enum CaptureStandard {
     reason = "independent facts about a camera, each said by hand or not"
 )]
 pub struct VideoSource {
+    /// Recording intent, including while reconnecting. Record can stop it then too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recording_requested: bool,
     pub id: String,
     /// Its address, such as `udp://127.0.0.1:5600` or an RTSP address
     /// without its password, until someone renames it.
@@ -136,6 +157,16 @@ pub struct VideoSource {
     pub vehicle_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub assigned_by_hand: bool,
+    /// Its vehicle's own camera takes a photo and records along with
+    /// UXDuck (S145): on for a stream the vehicle's camera announced, else
+    /// off, until set by hand (`video/vehicleCamera`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_camera: bool,
+    /// "Record with the others" is off (S153): neither the recording
+    /// setting nor `video/recordAll` starts it, only `video/record`
+    /// (`video/recordWithOthers`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_alone: bool,
     /// It carries KLV metadata.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub klv: bool,
@@ -152,6 +183,10 @@ pub struct VideoSource {
     /// empty until it answers, and for UDP. `video/track` chooses another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<VideoTrack>,
+    /// Its sound, once its stream is known, and whether UXDuck records it
+    /// (S147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<VideoAudio>,
     pub counters: VideoCounters,
     #[schemars(schema_with = "crate::safe::integer")]
     pub first_seen_us: u64,
@@ -250,13 +285,89 @@ pub struct VideoRevealParams {
     /// A recording to select; absent opens the folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_id: Option<String>,
+    /// A photo to select instead, in the pictures folder (S144).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoRevealResult {
-    /// The folder recordings are kept in.
+    /// The folder shown: recordings', or photos' for a photo.
     pub folder: String,
+}
+
+/// A camera's sound (S147).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAudio {
+    /// "AAC, 48 kHz, stereo", or the kind of sound UXDuck does not record,
+    /// such as "MPEG audio".
+    pub name: String,
+    pub recorded: bool,
+}
+
+/// The largest photo `video/photo` takes, in bytes.
+pub const PHOTO_MAX: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhotoParams {
+    /// The camera the picture is from.
+    pub source_id: String,
+    /// The picture as a JPEG, base64, up to 8 MB.
+    pub jpeg_base64: String,
+    /// The person's offset from UTC, in minutes (+60 for UTC+1), for the
+    /// file's name and its EXIF time.
+    #[serde(default)]
+    pub utc_offset_minutes: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoVehicleCameraParams {
+    pub source_id: String,
+    /// Whether the vehicle's own camera takes photos and records along.
+    pub on: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhotoShowParams {
+    pub photo_id: String,
+}
+
+/// A photo from the video (S144, ADR-0017 V19), kept in the platform's
+/// pictures folder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhoto {
+    pub id: String,
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub taken_at_us: u64,
+    /// Its name in the pictures folder, such as `2026-10-18 10.42.03 Alpha.jpg`.
+    pub file_name: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude_deg: Option<f64>,
+    /// Above mean sea level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_deg: Option<f64>,
+    /// The receipt of the vehicle's camera told to take one too (S145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_receipt_id: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -295,6 +406,14 @@ pub struct VideoAssignParams {
 #[serde(rename_all = "camelCase")]
 pub struct VideoWatchParams {
     pub source_id: String,
+}
+
+/// A map needs live metadata, without a media socket or decoder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoMetadataWatchResult {
+    /// Release with `video/unwatch`; disconnecting also releases it.
+    pub token: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -374,8 +493,36 @@ pub struct VideoRecording {
     /// Capture settings at the start; these pictures were encoded by UXDuck's helper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    /// The receipt of the vehicle's camera told to record too (S145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_receipt_id: Option<String>,
+    /// It has the camera's sound as a second track (S147).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sound: bool,
+    /// Its file in the media folder, such as `2026-10-18 10.42.03
+    /// Alpha.mp4` (S150); none for one made before, named `<id>.mp4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoRecordAllParams {
+    /// Start every camera that records with the others and isn't paused
+    /// or unplayable (`true`), or stop every camera recording (`false`),
+    /// whatever the policy says.
+    pub on: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoRecordWithOthersParams {
+    pub source_id: String,
+    /// Whether the recording setting and Record all start this camera; its
+    /// own Record does either way.
+    pub on: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -383,7 +530,7 @@ pub struct VideoRecording {
 pub struct VideoRecordParams {
     pub source_id: String,
     /// Start (`true`) or stop (`false`), whatever the policy says, until the
-    /// camera stops.
+    /// request is explicitly stopped or the daemon restarts.
     pub on: bool,
 }
 
@@ -398,9 +545,13 @@ pub struct VideoPlaybackParams {
 pub struct VideoPlaybackResult {
     /// An MP4 on the daemon's origin, good for an hour, for a `<video>`.
     pub path: String,
+    /// The recording's original MPEG-TS on the daemon's origin, for Save…,
+    /// when it is kept as one (S151).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
 }
 
-/// A video device visible to the daemon's operating system.
+/// A video device, or a sound input, visible to the daemon's operating system.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureDevice {
@@ -414,6 +565,9 @@ pub struct CaptureDevice {
 #[serde(rename_all = "camelCase")]
 pub struct VideoDevicesResult {
     pub devices: Vec<CaptureDevice>,
+    /// Microphones and capture adapters' audio, for a camera's sound (S148).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sound_inputs: Vec<CaptureDevice>,
     pub scanning: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

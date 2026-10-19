@@ -1,7 +1,8 @@
 //! Controllers and input mappings (ADR-0005 controllers and multi-vehicle
 //! safety). A controller is an input device the daemon owns. It drives a
 //! vehicle only while an operator client has claimed it, and it changes
-//! target only with roll, pitch and yaw centred and the change confirmed.
+//! target only with roll, pitch and yaw centred. Following the selection
+//! switches automatically at neutral; pinned targets change explicitly.
 //! Throttle is left where the operator holds it: hover, idle or full are all
 //! theirs to choose, so it never blocks a claim or a switch.
 
@@ -15,8 +16,7 @@ use crate::domain::command::Command;
 pub enum TargetMode {
     /// One vehicle; the client's selection never moves it.
     Pinned,
-    /// The claiming client's selected vehicle, switched only at neutral and
-    /// with confirmation.
+    /// The claiming client's selected vehicle, switched automatically at neutral.
     FollowsSelection,
 }
 
@@ -44,10 +44,13 @@ pub struct Controller {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     /// The selection moved here, but the switch waits for neutral sticks
-    /// and a confirmation.
+    /// or another target admission check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_target: Option<String>,
     pub mapping_id: String,
+    /// Why input is paused while a simulation restarts or awaits safe sticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_pause: Option<String>,
     pub version: u64,
 }
 

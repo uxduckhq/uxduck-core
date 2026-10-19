@@ -106,7 +106,14 @@ pub enum SimVehicle {
     Submarine,
     /// ArduPilot Blimp: a lighter-than-air vehicle.
     Airship,
+    /// A fast jet drone (S143): `ArduPlane`'s `plane-jet` frame with
+    /// UXDuck's faster tuning, drawn as the jet model.
+    Jet,
 }
+
+/// `ArduPlane`'s frame a jet flies (S143): its own physics, a 22 kg jet
+/// with a level top speed near 100 m/s.
+pub const JET_FRAME: &str = "plane-jet";
 
 /// The autopilot a simulated vehicle runs (S17): ArduPilot, or PX4 with
 /// its SIH physics on an installed UXDuck.

@@ -176,6 +176,7 @@ impl From<&c::Controller> for dto::Controller {
             target: v.target.clone(),
             pending_target: v.pending_target.clone(),
             mapping_id: v.mapping_id.clone(),
+            input_pause: v.input_pause.clone(),
             version: v.version,
         }
     }

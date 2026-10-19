@@ -509,6 +509,33 @@ pub trait System: Send {
         let _ = (category, cutoff_us);
         Deleted::default()
     }
+    /// Removes the oldest stopped simulator logs until total log usage is
+    /// within the budget, keeping active logs even when they exceed it.
+    fn limit_simulator_logs(&mut self, max_bytes: u64) -> Deleted {
+        let _ = max_bytes;
+        Deleted::default()
+    }
+    /// Per-simulation log sizes. Native hosts protect active processes.
+    /// # Errors
+    /// When the host cannot read the log directories.
+    fn simulator_logs(
+        &self,
+    ) -> Result<Vec<uxduck_contracts::dto::settings::SimulatorLogUsage>, String> {
+        Ok(Vec::new())
+    }
+    /// Shows the data folder in the computer's file manager (S150): the
+    /// folder.
+    /// # Errors
+    /// When there is no file manager to open, or no folder.
+    fn reveal_data_dir(&mut self) -> Result<String, String> {
+        Err("This UXDuck keeps no files to show.".into())
+    }
+    /// Clears stopped simulations' logs, preserving builds and working state.
+    /// # Errors
+    /// When unsupported or any log could not be deleted.
+    fn clear_simulator_logs(&mut self) -> Result<(), String> {
+        Err("Simulator log cleanup is not available on this host.".into())
+    }
     /// Whether a SITL instance's ports can be opened on this computer now
     /// (S71): another UXDuck's simulator, or another ground station's,
     /// may hold them. Free by default.

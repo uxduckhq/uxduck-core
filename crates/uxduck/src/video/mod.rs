@@ -3,8 +3,10 @@
 //! daemon parses and relays; it never decodes a picture (V1).
 
 pub mod capture;
+pub mod folder;
 pub mod hub;
 pub mod listener;
+pub mod playback;
 pub mod recorder;
 pub mod rtsp;
 pub mod socket;
@@ -31,6 +33,10 @@ pub struct VideoHost {
 }
 
 impl uxduck_engine::video::VideoPort for VideoHost {
+    fn demand(&mut self, source_id: &str, needed: bool) {
+        self.hub.demand(source_id, needed);
+    }
+
     fn allow(&mut self, token: &str, source_id: &str) {
         self.hub.allow(token, source_id);
     }
@@ -114,39 +120,113 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         }
     }
 
-    fn start_recording(&mut self, recording_id: &str, source_id: &str) {
+    fn start_recording(
+        &mut self,
+        recording_id: &str,
+        source_id: &str,
+        // MPEG-TS keeps a camera's sound as it came (S151).
+        _sound: bool,
+        stem: &str,
+    ) -> String {
         let (to, from) = std::sync::mpsc::channel();
         self.hub.record(recording_id, source_id, to);
+        let dir = self.hub.dir().to_owned();
+        // The name is taken now, so the engine keeps the one on disk.
+        let file = recorder::reserve(&dir, stem);
+        let name = file
+            .as_ref()
+            .map_or_else(|_| format!("{stem}.ts"), |(name, _)| name.clone());
         recorder::spawn(
-            self.hub.dir().to_owned(),
+            dir.clone(),
+            playback::cache_dir(&dir),
             recording_id.to_owned(),
+            file,
             from,
             self.engine.clone(),
         );
+        name
+    }
+
+    fn utc_offset_minutes(&self, at_us: u64) -> i32 {
+        utc_offset_minutes(at_us)
     }
 
     fn stop_recording(&mut self, recording_id: &str) {
         self.hub.stop_recording(recording_id);
     }
 
-    fn recover_recording(&mut self, recording_id: &str) -> Option<(u64, u64)> {
-        recorder::recover(self.hub.dir(), recording_id)
+    fn recover_recording(&mut self, file: &str) -> Option<(u64, u64)> {
+        recorder::recover(self.hub.dir(), file)
     }
 
-    fn allow_playback(&mut self, token: &str, recording_id: &str) {
-        self.hub.allow_playback(token, recording_id);
+    fn allow_playback(&mut self, token: &str, recording_id: &str, file: &str) {
+        self.hub.allow_playback(token, recording_id, file);
     }
 
-    fn reveal(&mut self, recording_id: Option<&str>) -> Result<String, String> {
+    fn reveal(&mut self, file: Option<&str>) -> Result<String, String> {
         let dir = self.hub.dir();
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let file = recording_id
-            .map(|id| recorder::mp4_path(dir, id))
-            .filter(|path| path.exists());
+        let file = file.map(|name| dir.join(name)).filter(|path| path.exists());
         crate::adapters::browser::reveal(dir, file.as_deref())
             .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
         Ok(dir.display().to_string())
     }
+
+    fn save_photo(&mut self, stem: &str, jpeg: &[u8]) -> Result<String, String> {
+        save_photo(self.hub.dir(), stem, jpeg)
+    }
+
+    fn allow_photo(&mut self, token: &str, photo_id: &str, file_name: &str) {
+        self.hub.allow_photo(token, photo_id, file_name);
+    }
+
+    fn reveal_photo(&mut self, file_name: &str) -> Result<String, String> {
+        let dir = self.hub.dir();
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let file = Some(dir.join(file_name)).filter(|path| path.exists());
+        crate::adapters::browser::reveal(dir, file.as_deref())
+            .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
+        Ok(dir.display().to_string())
+    }
+}
+
+/// The computer's offset from UTC at `at_us`, in minutes, from its time
+/// zone; 0 when it has none to read (S150).
+fn utc_offset_minutes(at_us: u64) -> i32 {
+    let at = i64::try_from(at_us).unwrap_or(i64::MAX);
+    jiff::Timestamp::from_microsecond(at).map_or(0, |t| {
+        jiff::tz::TimeZone::system().to_offset(t).seconds() / 60
+    })
+}
+
+/// Writes `<stem>.jpg` into `dir`, or `<stem> 2.jpg` and on when a file
+/// has that name, never replacing one: the name it got.
+fn save_photo(dir: &std::path::Path, stem: &str, jpeg: &[u8]) -> Result<String, String> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for n in 1..1000 {
+        let name = if n == 1 {
+            format!("{stem}.jpg")
+        } else {
+            format!("{stem} {n}.jpg")
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&name))
+        {
+            Ok(mut file) => {
+                return file
+                    .write_all(jpeg)
+                    .and_then(|()| file.sync_all())
+                    .map(|()| name)
+                    .map_err(|e| format!("UXDuck couldn't save the photo: {e}"));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("UXDuck couldn't save the photo: {e}")),
+        }
+    }
+    Err("UXDuck couldn't find a free name for the photo.".into())
 }
 
 /// The daemon's one hub, for the live publisher (S84), which starts with
@@ -167,6 +247,14 @@ pub async fn start(
 ) -> Arc<hub::Hub> {
     let hub = Arc::new(hub::Hub::new(dir));
     let _ = HUB.set(hub.clone());
+    // Playback copies unused for two weeks go (S151).
+    let cache = playback::cache_dir(hub.dir());
+    tokio::task::spawn_blocking(move || {
+        let freed = playback::clean(&cache, playback::UNUSED_FOR);
+        if freed > 0 {
+            tracing::info!(freed, "old playback copies removed");
+        }
+    });
     let host = VideoHost {
         hub: hub.clone(),
         engine: engine.clone(),
@@ -177,6 +265,12 @@ pub async fn start(
         devices: Arc::new(capture::Devices::default()),
     };
     let _ = engine.run(move |e| e.set_video(Box::new(host))).await;
+    // Files deleted in Finder leave the list (S151).
+    folder::watch(
+        hub.dir().to_owned(),
+        playback::cache_dir(hub.dir()),
+        engine.clone(),
+    );
     if let Some(port) = port {
         let (listening, error) = match listener::bind(port) {
             Ok(socket) => {
@@ -210,5 +304,26 @@ impl Drop for VideoHost {
         for stop in self.listeners.values() {
             stop.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_photo_never_replaces_another() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let at = dir.path().join("UXDuck");
+        assert_eq!(
+            super::save_photo(&at, "2026-10-18 10.42.03 Alpha", b"one").unwrap(),
+            "2026-10-18 10.42.03 Alpha.jpg"
+        );
+        assert_eq!(
+            super::save_photo(&at, "2026-10-18 10.42.03 Alpha", b"two").unwrap(),
+            "2026-10-18 10.42.03 Alpha 2.jpg"
+        );
+        assert_eq!(
+            std::fs::read(at.join("2026-10-18 10.42.03 Alpha.jpg")).unwrap(),
+            b"one"
+        );
     }
 }

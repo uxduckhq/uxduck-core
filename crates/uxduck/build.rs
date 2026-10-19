@@ -8,6 +8,22 @@ use std::path::Path;
 fn main() {
     stamp();
     println!("cargo:rerun-if-env-changed=UXDUCK_RELEASE_PUBLIC_KEY");
+    println!("cargo:rerun-if-env-changed=UXDUCK_UPDATE_TEST_URL");
+    println!("cargo:rerun-if-env-changed=UXDUCK_UPDATE_TEST_KEY");
+    match (
+        std::env::var("UXDUCK_UPDATE_TEST_URL").ok(),
+        std::env::var("UXDUCK_UPDATE_TEST_KEY").ok(),
+    ) {
+        (None, None) => {}
+        (Some(url), Some(key))
+            if !key.trim().is_empty()
+                && (url.starts_with("https://") || url.starts_with("http://127.0.0.1:")) => {}
+        _ => panic!(
+            "isolated updater tests require both UXDUCK_UPDATE_TEST_URL \
+             (HTTPS or loopback HTTP) and UXDUCK_UPDATE_TEST_KEY; \
+             leave both unset for a production build"
+        ),
+    }
     if std::env::var_os("CARGO_FEATURE_PLUGINS").is_some() {
         script_host();
     }

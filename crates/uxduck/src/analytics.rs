@@ -496,6 +496,8 @@ fn event_body(
         .or_insert_with(|| json!(surface));
     properties.insert("platform".into(), json!(platform()));
     properties.insert("arch".into(), json!(arch()));
+    properties.insert("identity_scope".into(), json!("installation"));
+    properties.insert("engagement_schema".into(), json!(1));
     json!({
         "event": name,
         "properties": properties,

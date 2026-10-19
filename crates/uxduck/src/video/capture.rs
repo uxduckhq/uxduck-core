@@ -2,6 +2,9 @@
 //! The separately packaged `FFmpeg` runtime owns capture, decoding and encoding.
 //! Only MPEG-TS comes back over a pipe; no raw pictures or GPU handles enter
 //! the process that owns vehicle links. The runtime is built from pinned source.
+//!
+//! A camera can record a sound input chosen with it (S148): the helper
+//! encodes it to AAC into the same MPEG-TS, which S147 records.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,15 +50,15 @@ impl Devices {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.0 = match result {
-                    Ok(devices) => VideoDevicesResult {
-                        devices,
+                    Ok(found) => VideoDevicesResult {
+                        devices: found.cameras,
+                        sound_inputs: found.sound_inputs,
                         scanning: false,
                         error: None,
                     },
                     Err(error) => VideoDevicesResult {
-                        devices: Vec::new(),
-                        scanning: false,
                         error: Some(error),
+                        ..VideoDevicesResult::default()
                     },
                 };
                 state.1 = Some(Instant::now());
@@ -78,6 +81,14 @@ impl Devices {
         if !state.0.devices.iter().any(|d| d.id == input.device_id) {
             return Err(
                 "This camera is not in the device list. Refresh the list and choose it again."
+                    .into(),
+            );
+        }
+        if let Some(sound) = input.sound_input.as_ref().filter(|_| input.record_sound)
+            && !state.0.sound_inputs.iter().any(|d| d.id == sound.device_id)
+        {
+            return Err(
+                "This sound input is not in the device list. Refresh the list and choose it again."
                     .into(),
             );
         }
@@ -191,24 +202,35 @@ async fn output(program: &Path, args: &[&str]) -> Result<String, String> {
     Ok(format!("{out}\n{err}"))
 }
 
-/// Deliberately omit screens, microphones and numeric enumeration indices.
-fn mac_devices(text: &str) -> Result<Vec<CaptureDevice>, String> {
+/// What discovery found: cameras, and sound inputs for them (S148).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Discovered {
+    pub cameras: Vec<CaptureDevice>,
+    pub sound_inputs: Vec<CaptureDevice>,
+}
+
+/// Deliberately omit screens and numeric enumeration indices; cameras and
+/// sound inputs by their exact unique IDs.
+fn mac_devices(text: &str) -> Result<Discovered, String> {
     let mut in_video = false;
+    let mut in_audio = false;
     let mut legacy = false;
     let mut found = BTreeMap::new();
+    let mut sound = BTreeMap::new();
     for line in text.lines() {
         if line.contains("AVFoundation video devices:") {
             in_video = true;
             continue;
         }
         if line.contains("AVFoundation audio devices:") {
-            break;
+            in_audio = true;
+            continue;
         }
         if !in_video {
             continue;
         }
         let Some((name, uid)) = line.rsplit_once("  [uid:") else {
-            legacy |= line.contains("] [") && !line.contains("Capture screen");
+            legacy |= !in_audio && line.contains("] [") && !line.contains("Capture screen");
             continue;
         };
         let Some(uid) = uid.strip_suffix(']') else {
@@ -218,14 +240,16 @@ fn mac_devices(text: &str) -> Result<Vec<CaptureDevice>, String> {
             continue;
         };
         let id = format!("avfoundation:{uid}");
-        found.insert(
-            id.clone(),
-            CaptureDevice {
-                id,
-                name: name.trim().into(),
-                persistent: true,
-            },
-        );
+        let device = CaptureDevice {
+            id: id.clone(),
+            name: name.trim().into(),
+            persistent: true,
+        };
+        if in_audio {
+            sound.insert(id, device);
+        } else {
+            found.insert(id, device);
+        }
     }
     if !in_video {
         return Err(problem(
@@ -236,32 +260,44 @@ fn mac_devices(text: &str) -> Result<Vec<CaptureDevice>, String> {
     if found.is_empty() && legacy {
         return Err("This FFmpeg cannot identify cameras safely. Use UXDuck's bundled capture helper, or run pnpm capture:build.".into());
     }
-    Ok(found.into_values().collect())
+    Ok(Discovered {
+        cameras: found.into_values().collect(),
+        sound_inputs: sound.into_values().collect(),
+    })
 }
 
-fn windows_devices(text: &str) -> Result<Vec<CaptureDevice>, String> {
-    let mut name = None;
+fn windows_devices(text: &str) -> Result<Discovered, String> {
+    // The device being read: its name, and whether it is a sound input.
+    let mut named: Option<(String, bool)> = None;
     let mut devices = Vec::new();
+    let mut sound_inputs = Vec::new();
     for line in text.lines() {
         let line = line.split_once("] ").map_or(line, |(_, rest)| rest).trim();
-        if let Some(named) = line
+        if let Some(name) = line
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix("\" (video)"))
         {
-            name = Some(named.to_owned());
+            named = Some((name.to_owned(), false));
+        } else if let Some(name) = line
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix("\" (audio)"))
+        {
+            named = Some((name.to_owned(), true));
         } else if let Some(id) = line
             .strip_prefix("Alternative name \"")
             .and_then(|s| s.strip_suffix('"'))
+            && let Some((name, sound)) = named.take()
         {
-            if let Some(name) = name.take() {
-                devices.push(CaptureDevice {
-                    id: format!("dshow:{id}"),
-                    name,
-                    persistent: true,
-                });
+            let device = CaptureDevice {
+                id: format!("dshow:{id}"),
+                name,
+                persistent: true,
+            };
+            if sound {
+                sound_inputs.push(device);
+            } else {
+                devices.push(device);
             }
-        } else if line.ends_with("(audio)") {
-            name = None;
         }
     }
     if devices.is_empty()
@@ -273,7 +309,10 @@ fn windows_devices(text: &str) -> Result<Vec<CaptureDevice>, String> {
             "UXDuck could not list this computer's cameras",
         ));
     }
-    Ok(devices)
+    Ok(Discovered {
+        cameras: devices,
+        sound_inputs,
+    })
 }
 
 fn linux_devices(text: &str, aliases: &BTreeMap<PathBuf, PathBuf>) -> Vec<CaptureDevice> {
@@ -293,7 +332,24 @@ fn linux_devices(text: &str, aliases: &BTreeMap<PathBuf, PathBuf>) -> Vec<Captur
         .collect()
 }
 
-async fn discover() -> Result<Vec<CaptureDevice>, String> {
+/// ALSA capture devices by card name, which survives replugging, through
+/// `plughw` so ALSA converts to the rate and channels asked for (S148).
+fn alsa_devices(text: &str) -> Vec<CaptureDevice> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_start_matches('*').trim();
+            let rest = line.strip_prefix("hw:CARD=")?;
+            let (card, name) = rest.split_once(" [").unwrap_or((rest, ""));
+            Some(CaptureDevice {
+                id: format!("alsa:plughw:CARD={card}"),
+                name: name.trim_end_matches(']').trim().to_owned(),
+                persistent: true,
+            })
+        })
+        .collect()
+}
+
+async fn discover() -> Result<Discovered, String> {
     let program = program()?;
     if cfg!(target_os = "macos") {
         mac_devices(
@@ -348,7 +404,14 @@ async fn discover() -> Result<Vec<CaptureDevice>, String> {
                 }
             }
         }
-        Ok(linux_devices(&text, &aliases))
+        // A computer without ALSA's devices still has its cameras.
+        let sound = output(&program, &["-hide_banner", "-sources", "alsa"])
+            .await
+            .unwrap_or_default();
+        Ok(Discovered {
+            cameras: linux_devices(&text, &aliases),
+            sound_inputs: alsa_devices(&sound),
+        })
     }
 }
 
@@ -380,18 +443,57 @@ fn problem(text: &str, fallback: &str) -> String {
     )
 }
 
-fn args(input: &CaptureInput, device: &CaptureDevice) -> Result<Vec<String>, String> {
+/// When the helper fails with a sound input, what to say about it, if it
+/// was the sound input's fault (S148).
+fn sound_problem(text: &str, sound: &CaptureDevice) -> Option<String> {
+    let lower = text.to_lowercase();
+    if lower.contains("sound input is not connected") {
+        return Some(format!(
+            "The sound input {} is not connected. Reconnect it, or turn off Record sound.",
+            sound.name
+        ));
+    }
+    let about = lower.contains("audio") || lower.contains(&sound.name.to_lowercase());
+    let refused = [
+        "permission",
+        "not authorized",
+        "denied",
+        "failed to create",
+        "cannot use",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    (about && refused).then(|| {
+        format!(
+            "UXDuck couldn't open the sound input {}. Allow UXDuck in your system's microphone privacy settings (on Linux, check the device's permissions), or turn off Record sound.",
+            sound.name
+        )
+    })
+}
+
+/// The helper's arguments: the camera, and with `sound` its sound input,
+/// encoded to AAC beside the pictures (S148).
+fn args(
+    input: &CaptureInput,
+    device: &CaptureDevice,
+    sound: Option<&CaptureDevice>,
+) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = [
         "-hide_banner",
         "-loglevel",
         "warning",
         "-nostats",
         "-nostdin",
-        "-thread_queue_size",
-        "2",
     ]
     .map(Into::into)
     .to_vec();
+    // Two pictures at most wait for the encoder; sound's small packets
+    // share the queue, so it is a little longer with them.
+    let queue = if sound.is_some() { "8" } else { "2" };
+    args.extend(["-thread_queue_size".into(), queue.into()]);
+    let sound_id = sound
+        .map(|s| s.id.split_once(':').ok_or("Invalid sound input identity"))
+        .transpose()?;
     let (size, rate) = match input.standard {
         CaptureStandard::Pal => (Some((720, 576)), Some("25".into())),
         CaptureStandard::Ntsc => (Some((720, 480)), Some("30000/1001".into())),
@@ -414,16 +516,31 @@ fn args(input: &CaptureInput, device: &CaptureDevice) -> Result<Vec<String>, Str
     {
         args.extend(["-framerate".into(), "0".into()]);
     }
+    let other = || Err("This sound input belongs to another operating system.".to_owned());
     match backend {
-        "avfoundation" => args.extend([
-            "-video_device_id".into(),
-            id.into(),
-            "-pixel_format".into(),
-            "nv12".into(),
-            "-i".into(),
-            "none:none".into(),
-        ]),
-        "dshow" => args.extend(["-i".into(), format!("video={id}")]),
+        "avfoundation" => {
+            args.extend(["-video_device_id".into(), id.into()]);
+            match sound_id {
+                Some(("avfoundation", sound)) => {
+                    args.extend(["-audio_device_id".into(), sound.into()]);
+                }
+                Some(_) => return other(),
+                None => {}
+            }
+            args.extend([
+                "-pixel_format".into(),
+                "nv12".into(),
+                "-i".into(),
+                "none:none".into(),
+            ]);
+        }
+        "dshow" => match sound_id {
+            Some(("dshow", sound)) => {
+                args.extend(["-i".into(), format!("video={id}:audio={sound}")]);
+            }
+            Some(_) => return other(),
+            None => args.extend(["-i".into(), format!("video={id}")]),
+        },
         "v4l2" => {
             if input.standard != CaptureStandard::Auto {
                 args.extend([
@@ -437,10 +554,32 @@ fn args(input: &CaptureInput, device: &CaptureDevice) -> Result<Vec<String>, Str
                 ]);
             }
             args.extend(["-i".into(), id.into()]);
+            // ALSA's sound is a second input, with a longer queue of its own.
+            match sound_id {
+                Some(("alsa", sound)) => args.extend(
+                    ["-thread_queue_size", "64", "-f", "alsa", "-i", sound].map(Into::into),
+                ),
+                Some(_) => return other(),
+                None => {}
+            }
         }
         _ => return Err("This camera belongs to another operating system.".into()),
     }
-    args.extend(["-map", "0:v:0", "-an", "-sn", "-dn"].map(Into::into));
+    args.extend(outputs(input, sound_id.map(|(backend, _)| backend)));
+    args.extend(encoding_args());
+    Ok(args)
+}
+
+/// What goes out: the picture, mapped and filtered, and the sound, from
+/// the input its backend puts it in, as AAC (S148), or none.
+fn outputs(input: &CaptureInput, sound: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-map".into(), "0:v:0".into()];
+    match sound {
+        Some("alsa") => args.extend(["-map".into(), "1:a:0".into()]),
+        Some(_) => args.extend(["-map".into(), "0:a:0".into()]),
+        None => args.push("-an".into()),
+    }
+    args.extend(["-sn", "-dn"].map(Into::into));
     let mut filters = Vec::new();
     if input.deinterlace {
         filters.push("bwdif=mode=send_field:parity=auto:deint=all");
@@ -451,8 +590,11 @@ fn args(input: &CaptureInput, device: &CaptureDevice) -> Result<Vec<String>, Str
         CaptureStandard::Auto => filters.push("scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1"),
     }
     args.extend(["-vf".into(), filters.join(",")]);
-    args.extend(encoding_args());
-    Ok(args)
+    if sound.is_some() {
+        // AAC in the MPEG-TS, at 48 kHz, with the input's own channels.
+        args.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000"].map(Into::into));
+    }
+    args
 }
 
 fn encoding_args() -> Vec<String> {
@@ -527,9 +669,17 @@ async fn run(
 ) -> String {
     let result = async {
         let program = program()?;
-        let devices = discover().await?;
-        let device = devices.into_iter().find(|d| d.id == input.device_id).ok_or("Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically.")?;
-        let mut child = command(&program).args(args(input, &device)?).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("The camera capture helper could not start: {e}"))?;
+        let found = discover().await?;
+        let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or("Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically.")?;
+        // A sound input that is missing leaves the pictures playing, and says so.
+        let (sound, note) = match input.sound_input.as_ref().filter(|_| input.record_sound) {
+            None => (None, None),
+            Some(chosen) => match found.sound_inputs.into_iter().find(|d| d.id == chosen.device_id) {
+                Some(device) => (Some(device), None),
+                None => (None, Some(format!("The sound input {} is not connected, so recordings have no sound. The video plays.", chosen.name))),
+            },
+        };
+        let mut child = command(&program).args(args(input, &device, sound.as_ref())?).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("The camera capture helper could not start: {e}"))?;
         let mut stdout = child.stdout.take().ok_or("The capture helper has no output pipe")?;
         let stderr = child.stderr.take().ok_or("The capture helper has no diagnostic pipe")?;
         let diagnostics = tokio::spawn(tail(stderr));
@@ -553,6 +703,7 @@ async fn run(
             pending.extend_from_slice(&buffer[..n]);
             let whole = pending.len() / 188 * 188;
             if whole == 0 { continue; }
+            hub.publish_ts(id, &pending[..whole]);
             for output in source.push(&pending[..whole]) { hub.publish(id, &listener::item(output)); }
             pending.drain(..whole);
             let status = source.status();
@@ -564,6 +715,7 @@ async fn run(
                 let mut report = listener::report(0, &std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &status, reported.elapsed().as_secs_f64().max(0.001), before.0, before.1);
                 report.id = Some(id.to_owned());
                 report.sender = "local capture".into();
+                report.note.clone_from(&note);
                 before = (status.counters.bytes, status.counters.pictures);
                 reported = Instant::now();
                 startup = false;
@@ -574,7 +726,12 @@ async fn run(
         let _ = child.kill().await;
         let _ = child.wait().await;
         let diagnostics = diagnostics.await.unwrap_or_default();
-        Err::<(), String>(problem(&diagnostics, failure))
+        Err::<(), String>(
+            sound
+                .as_ref()
+                .and_then(|s| sound_problem(&diagnostics, s))
+                .unwrap_or_else(|| problem(&diagnostics, failure)),
+        )
     }.await;
     result
         .err()
@@ -588,14 +745,22 @@ mod tests {
     #[test]
     fn identity_ignores_indices_names_screens_and_audio() {
         let text = "[AVFoundation indev @ a] AVFoundation video devices:\n[AVFoundation indev @ a] [0] USB Video  [uid:usb-A]\n[AVFoundation indev @ a] [1] USB Video  [uid:usb-B]\n[AVFoundation indev @ a] [2] Capture screen 0\n[AVFoundation indev @ a] AVFoundation audio devices:\n[AVFoundation indev @ a] [0] Microphone  [uid:mic]";
-        let devices = mac_devices(text).unwrap();
+        let found = mac_devices(text).unwrap();
+        let devices = &found.cameras;
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].id, "avfoundation:usb-A");
         assert_eq!(devices[0].name, devices[1].name);
+        // Microphones are sound inputs, never cameras (S148).
+        assert_eq!(found.sound_inputs.len(), 1);
+        assert_eq!(found.sound_inputs[0].id, "avfoundation:mic");
+        assert_eq!(found.sound_inputs[0].name, "Microphone");
         assert!(mac_devices("[AVFoundation indev @ a] AVFoundation video devices:\n[AVFoundation indev @ a] [0] Old name-only camera\n[AVFoundation indev @ a] AVFoundation audio devices:").is_err());
         let win = windows_devices("[dshow @ a] \"USB Video\" (video)\n[dshow @ a]   Alternative name \"@device_pnp_camera-A\"\n[dshow @ a] \"USB Audio\" (audio)\n[dshow @ a]   Alternative name \"@device_audio\"").unwrap();
-        assert_eq!(win.len(), 1);
-        assert_eq!(win[0].id, "dshow:@device_pnp_camera-A");
+        assert_eq!(win.cameras.len(), 1);
+        assert_eq!(win.cameras[0].id, "dshow:@device_pnp_camera-A");
+        assert_eq!(win.sound_inputs.len(), 1);
+        assert_eq!(win.sound_inputs[0].id, "dshow:@device_audio");
+        assert_eq!(win.sound_inputs[0].name, "USB Audio");
     }
 
     #[test]
@@ -625,13 +790,15 @@ mod tests {
             height: None,
             frame_rate: None,
             deinterlace: true,
+            record_sound: false,
+            sound_input: None,
         };
         let device = CaptureDevice {
             id: input.device_id.clone(),
             name: input.name.clone(),
             persistent: true,
         };
-        let line = args(&input, &device).unwrap().join(" ");
+        let line = args(&input, &device, None).unwrap().join(" ");
         assert!(line.contains("-video_device_id usb-A"));
         assert!(line.contains("-video_size 720x576 -framerate 25"));
         assert!(
@@ -641,9 +808,118 @@ mod tests {
         assert!(line.contains("-bf 0"));
         assert!(line.ends_with("-f mpegts pipe:1"));
         input.standard = CaptureStandard::Ntsc;
-        let line = args(&input, &device).unwrap().join(" ");
+        let line = args(&input, &device, None).unwrap().join(" ");
         assert!(line.contains("720x480 -framerate 30000/1001"));
         assert!(line.contains("scale=640:480,setsar=1"));
+    }
+
+    #[test]
+    fn alsa_inputs_are_named_by_card_through_plughw() {
+        let text = "Auto-detected sources for alsa:\n* default [Default ALSA Output]\n  hw:CARD=C920,DEV=0 [HD Pro Webcam C920, USB Audio]\n  sysdefault:CARD=C920 [HD Pro Webcam C920]\n  hw:CARD=PCH,DEV=0 [HDA Intel PCH, ALC3246 Analog]";
+        let inputs = alsa_devices(text);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].id, "alsa:plughw:CARD=C920,DEV=0");
+        assert_eq!(inputs[0].name, "HD Pro Webcam C920, USB Audio");
+        assert!(inputs.iter().all(|i| i.persistent));
+    }
+
+    #[test]
+    fn a_sound_input_is_captured_with_its_camera_on_each_platform() {
+        let input = CaptureInput {
+            device_id: "avfoundation:usb-A".into(),
+            name: "USB Video".into(),
+            enabled: true,
+            standard: CaptureStandard::Auto,
+            width: None,
+            height: None,
+            frame_rate: None,
+            deinterlace: false,
+            record_sound: true,
+            sound_input: None,
+        };
+        let device = |id: &str| CaptureDevice {
+            id: id.into(),
+            name: "Device".into(),
+            persistent: true,
+        };
+        // macOS: one AVFoundation input with both exact identities.
+        let mac = args(
+            &input,
+            &device("avfoundation:usb-A"),
+            Some(&device("avfoundation:mic-1")),
+        )
+        .unwrap()
+        .join(" ");
+        assert!(mac.contains("-thread_queue_size 8"));
+        assert!(mac.contains("-video_device_id usb-A -audio_device_id mic-1"));
+        assert!(mac.contains("-i none:none"));
+        assert!(mac.contains("-map 0:v:0 -map 0:a:0"));
+        assert!(!mac.contains("-an"));
+        assert!(mac.contains("-c:a aac -b:a 128k -ar 48000"));
+        assert!(mac.ends_with("-f mpegts pipe:1"));
+        // Windows: video and audio in one DirectShow input.
+        let win = args(
+            &input,
+            &device("dshow:@device_pnp_cam"),
+            Some(&device("dshow:@device_cm_mic")),
+        )
+        .unwrap()
+        .join(" ");
+        assert!(win.contains("-i video=@device_pnp_cam:audio=@device_cm_mic"));
+        assert!(win.contains("-map 0:a:0"));
+        // Linux: ALSA as a second input.
+        let linux = args(
+            &input,
+            &device("v4l2:/dev/v4l/by-id/usb-cam"),
+            Some(&device("alsa:plughw:CARD=C920,DEV=0")),
+        )
+        .unwrap()
+        .join(" ");
+        assert!(linux.contains(
+            "-i /dev/v4l/by-id/usb-cam -thread_queue_size 64 -f alsa -i plughw:CARD=C920,DEV=0"
+        ));
+        assert!(linux.contains("-map 0:v:0 -map 1:a:0"));
+        // A sound input from another system is refused; none means no sound.
+        assert!(
+            args(
+                &input,
+                &device("v4l2:/dev/video0"),
+                Some(&device("avfoundation:mic"))
+            )
+            .is_err()
+        );
+        let silent = args(&input, &device("avfoundation:usb-A"), None)
+            .unwrap()
+            .join(" ");
+        assert!(silent.contains("-thread_queue_size 2") && silent.contains("-an"));
+        assert!(!silent.contains("aac"));
+    }
+
+    #[test]
+    fn a_sound_input_that_fails_says_so_in_words() {
+        let mic = CaptureDevice {
+            id: "avfoundation:mic".into(),
+            name: "USB Microphone".into(),
+            persistent: true,
+        };
+        let refused = sound_problem(
+            "[AVFoundation indev @ x] Failed to create AV capture input device: Cannot use USB Microphone",
+            &mic,
+        )
+        .unwrap();
+        assert!(refused.contains("microphone privacy settings"), "{refused}");
+        assert!(refused.contains("turn off Record sound"));
+        let gone = sound_problem(
+            "[AVFoundation indev @ x] The selected sound input is not connected",
+            &mic,
+        )
+        .unwrap();
+        assert!(gone.starts_with("The sound input USB Microphone is not connected"));
+        // A camera's own failure is not the sound input's.
+        assert_eq!(
+            sound_problem("Permission denied opening camera", &mic),
+            None
+        );
     }
 
     #[tokio::test]

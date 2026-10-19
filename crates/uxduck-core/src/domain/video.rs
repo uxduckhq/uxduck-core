@@ -27,6 +27,24 @@ pub struct CaptureInput {
     /// Bob deinterlacing preserves each field's time for analog FPV.
     #[serde(default)]
     pub deinterlace: bool,
+    /// Record the sound input's sound with the pictures (S148); off unless
+    /// turned on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_sound: bool,
+    /// The sound input chosen with the camera, kept while sound is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound_input: Option<SoundInput>,
+}
+
+/// A sound input chosen with a local camera (S148): a microphone, or a
+/// capture adapter's audio.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundInput {
+    /// Opaque platform identity from `video/devices`' sound inputs.
+    pub device_id: String,
+    /// Its name when chosen; kept while unplugged.
+    pub name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +82,15 @@ pub enum VideoState {
     Unsupported,
 }
 
+/// A camera's sound (S147): what it is, and whether UXDuck records it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAudio {
+    /// "AAC, 48 kHz, stereo", or the kind of sound UXDuck does not record.
+    pub name: String,
+    pub recorded: bool,
+}
+
 /// Counted since the source was first seen, except the bitrate.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +124,10 @@ pub struct VideoCounters {
     reason = "independent facts about a camera, each said by hand or not"
 )]
 pub struct VideoSource {
+    /// Recording is requested, including while waiting for the camera to return.
+    /// Recomputed from policy and session intent when the daemon starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recording_requested: bool,
     /// `udp-<port>-<sender address>`, so a sender that comes back is the
     /// same source.
     pub id: String,
@@ -128,6 +159,18 @@ pub struct VideoSource {
     /// Someone chose the vehicle; the sender's address no longer decides.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub assigned_by_hand: bool,
+    /// Its vehicle's own camera takes a photo and records along with
+    /// UXDuck (S145, ADR-0017 V20): on for a stream the vehicle's camera
+    /// announced, off for others, until set by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_camera: bool,
+    /// Someone set `vehicle_camera`; announcements no longer do.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vehicle_camera_by_hand: bool,
+    /// "Record with the others" is off (S153, ADR-0017 V24): neither the
+    /// recording setting nor Record all starts it, only its own Record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_alone: bool,
     /// It carries KLV metadata.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub klv: bool,
@@ -145,6 +188,9 @@ pub struct VideoSource {
     /// (S90); empty until it answers, and for UDP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<VideoTrack>,
+    /// Its sound, once its stream is known (S147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<VideoAudio>,
     pub counters: VideoCounters,
     pub first_seen_us: u64,
     /// When it last started or stopped receiving.
@@ -190,6 +236,8 @@ pub struct VideoReport {
     /// Something to say while it plays, such as a KLV track the camera
     /// refused (S91); its `state_detail`.
     pub note: Option<String>,
+    /// Its sound, once its stream is known (S147).
+    pub audio: Option<VideoAudio>,
 }
 
 impl VideoReport {
@@ -307,6 +355,58 @@ pub struct VideoRecording {
     /// Capture settings at the start; these pictures were encoded by UXDuck's helper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    /// The receipt of the vehicle's camera told to record too (S145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_receipt_id: Option<String>,
+    /// It has the camera's sound as a second track (S147).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sound: bool,
+    /// Its file in the media folder, named by the local time and the
+    /// vehicle (S150); none for one made before, which is `<id>.mp4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    pub version: u64,
+}
+
+impl VideoRecording {
+    /// Its file in the media folder: its name, or `<id>.mp4` for one made
+    /// before recordings had names.
+    #[must_use]
+    pub fn file(&self) -> String {
+        self.file_name
+            .clone()
+            .unwrap_or_else(|| format!("{}.mp4", self.id))
+    }
+}
+
+/// A photo from the video (ADR-0017 V19, S144): the picture a Camera tab
+/// showed, kept as a JPEG in the platform's pictures folder, with where
+/// the camera's vehicle was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPhoto {
+    pub id: String,
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    pub taken_at_us: u64,
+    /// Its name in the pictures folder.
+    pub file_name: String,
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude_deg: Option<f64>,
+    /// Above mean sea level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_deg: Option<f64>,
+    /// The receipt of the vehicle's camera told to take one too (S145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_receipt_id: Option<String>,
     pub version: u64,
 }
 

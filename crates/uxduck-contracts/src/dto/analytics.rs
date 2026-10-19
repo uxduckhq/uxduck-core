@@ -27,6 +27,79 @@ pub enum DaemonPresence {
     Installed,
 }
 
+/// Provenance for aggregate usage, not the safety classification of a vehicle.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyticsVehicleKind {
+    Real,
+    Simulated,
+    Unknown,
+}
+
+/// Confirmed work, never a button click or an automatic demo action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EngagementTask {
+    ParameterWritten,
+    MissionUploaded,
+    PlanVerified,
+    PracticePassed,
+    VehicleCommand,
+}
+
+/// Engine-confirmed outcomes, consumed once across browser windows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EngagementUsage {
+    pub events: Vec<AppEvent>,
+}
+
+/// Observed vehicle-time deltas, with no vehicle identity or flight content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FlightTimeDelta {
+    pub vehicle_kind: AnalyticsVehicleKind,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub armed_ms: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub airborne_ms: u64,
+}
+
+/// Atomically consumes the browser daemon's aggregate counters across tabs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FlightTimeUsage {
+    pub reports: Vec<FlightTimeDelta>,
+}
+
+/// Active time has its own optional RPC so older installed daemons can
+/// refuse it with method-not-found without changing analytics/track's wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnalyticsActiveTimeParams {
+    pub active_ms: u32,
+    pub surface: Surface,
+    pub daemon: DaemonPresence,
+}
+
+/// One bounded, aggregate renderer-performance window; no device or flight data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnalyticsPerformanceParams {
+    pub window_ms: u32,
+    pub long_tasks: u32,
+    pub blocking_ms: u32,
+    pub max_task_ms: u32,
+    pub max_input_delay_ms: u32,
+    pub controller_gaps: u32,
+    pub max_controller_gap_ms: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heap_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_memory_mb: Option<u32>,
+    pub surface: Surface,
+    pub daemon: DaemonPresence,
+}
+
 /// A download's platform, as the website's `/download/<platform>` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -149,13 +222,60 @@ pub struct ErrorFrame {
     rename_all_fields = "snake_case"
 )]
 pub enum AppEvent {
+    /// Starts an observable engagement cohort under the sender's current identity.
+    EngagementStarted {
+        surface: Surface,
+        daemon: DaemonPresence,
+    },
+    /// A confirmed outcome of a person/client's request, not internal setup.
+    TaskCompleted {
+        task_type: EngagementTask,
+        vehicle_kind: AnalyticsVehicleKind,
+    },
+    /// The corresponding request ended unsuccessfully; no error text or values.
+    TaskFailed {
+        task_type: EngagementTask,
+        vehicle_kind: AnalyticsVehicleKind,
+    },
+    /// Browser-daemon durations, drained once across all of its pages.
+    VehicleFlightTime {
+        #[serde(flatten)]
+        delta: FlightTimeDelta,
+    },
     /// A page load, once the app knows whether UXDuck is installed.
     AppOpened {
         surface: Surface,
         daemon: DaemonPresence,
     },
+    /// Foreground time since the last report, with input in the last minute.
+    /// A delta, never a cumulative counter or a visit identifier.
+    AppActiveTime {
+        active_ms: u32,
+        surface: Surface,
+        daemon: DaemonPresence,
+    },
+    /// Aggregate responsiveness and memory, only when usage analytics is allowed.
+    AppPerformance {
+        #[serde(flatten)]
+        sample: AnalyticsPerformanceParams,
+    },
     /// Live telemetry was on screen, once per page load.
     TelemetryShown,
+    /// The once-only feedback invitation actually appeared on screen.
+    FeedbackPromptShown {
+        surface: Surface,
+    },
+    /// A feedback form became available, including opening its address directly.
+    FeedbackOpened {
+        surface: Surface,
+    },
+    /// A report was accepted by the API or durably queued by the installed daemon.
+    /// No report identifier, text or attachments enter analytics.
+    FeedbackSubmitted {
+        surface: Surface,
+        kind: crate::dto::feedback::FeedbackKind,
+        status: crate::dto::feedback::FeedbackStatus,
+    },
     FeatureUsed {
         feature: Feature,
     },
@@ -276,6 +396,11 @@ pub enum CommandOutcome {
     rename_all_fields = "snake_case"
 )]
 pub enum DaemonEvent {
+    /// Observed vehicle time; no vehicle IDs, positions or flight logs.
+    VehicleFlightTime {
+        #[serde(flatten)]
+        delta: FlightTimeDelta,
+    },
     /// The first start with a new data directory (ADR-0016 O6).
     InstallCompleted {
         /// `macos`, `windows` or `linux`.

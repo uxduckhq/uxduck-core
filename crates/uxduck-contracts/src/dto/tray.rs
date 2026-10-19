@@ -69,6 +69,9 @@ pub struct TrayMenu {
     /// are more. Clicking it opens UXDuck.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<TrayAlert>,
+    /// A downloaded product update. Clicking opens details, never installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_update: Option<Box<TrayAlert>>,
     /// A question shown under the duck until it is answered or goes away,
     /// such as a browser asking to connect; the newest when there are more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +87,9 @@ pub struct TrayQuestion {
     pub id: String,
     pub title: String,
     pub message: String,
+    /// The grouped pairing code, displayed prominently for comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_code: Option<String>,
     /// The buttons, the last one the default.
     pub answers: Vec<TrayItem>,
 }

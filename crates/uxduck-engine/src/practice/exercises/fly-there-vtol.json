@@ -30,7 +30,7 @@
   ],
   "steps": [
     {
-      "text": "Press Go to in the Control tab, then click ring 1 on the map.",
+      "text": "Press Go to in the Cockpit tab, then click ring 1 on the map.",
       "hint": "Go to flies it to the place you clicked like a plane, then circles there.",
       "hintAfterS": 60,
       "all": [

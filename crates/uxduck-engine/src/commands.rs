@@ -127,6 +127,21 @@ fn flies(vehicle: &Vehicle) -> bool {
 /// measured from (a rover, boat or submarine keeps its own height, which
 /// may be 0 or below). None when it may go.
 fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
+    // ArduPlane's native height command uses param1 and a MAV_FRAME in
+    // param2. Apply the same ground guard as Go to, for every caller.
+    if let Command::Long {
+        command: 186,
+        params,
+    } = command
+    {
+        let height = params.first().copied().unwrap_or(f32::NAN);
+        let frame = params.get(1).copied().unwrap_or(f32::NAN);
+        if !height.is_finite() || ![0.0, 3.0, 5.0, 6.0, 10.0, 11.0].contains(&frame) {
+            return Some("a height needs a supported altitude reference".into());
+        }
+        return (flies && [3.0, 6.0, 10.0, 11.0].contains(&frame) && height <= 0.0)
+            .then(|| format!("a height of {height} m would put it on or under the ground"));
+    }
     let Command::GoTo {
         latitude_deg,
         longitude_deg,
@@ -402,6 +417,14 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             altitude_frame: AltitudeFrame::AboveHome,
         });
     }
+    // Plane preserves next_WP_loc's horizontal destination itself. Copter
+    // does not implement DO_CHANGE_ALTITUDE and needs a full Go to instead.
+    if family == Some(Family::Plane) {
+        commands.push(Command::Long {
+            command: 186,
+            params: vec![0.0, 3.0],
+        });
+    }
     commands.push(Command::Rtl);
     if matches!(
         family,
@@ -454,6 +477,9 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
         (Command::GoTo { .. }, _) => {
             Some("Goes to a place chosen on the map and holds there".to_owned())
         }
+        (Command::Long { command: 186, .. }, Some(Family::Plane)) => Some(
+            "Changes the height while keeping the current horizontal destination".to_owned(),
+        ),
         (Command::Long { command: 22, .. }, Some(Family::Plane)) => Some(
             "Lifts off straight up and hovers. Choose GUIDED and arm it first."
                 .to_owned(),
@@ -552,6 +578,7 @@ impl Engine {
         let Some(mut receipt) = self.state.receipts.get(receipt_id).cloned() else {
             return;
         };
+        let was_pending = receipt.status == ReceiptStatus::Sent;
         let (status, detail) = match outcome {
             Outcome::Accepted => (ReceiptStatus::Accepted, None),
             Outcome::Rejected(why) => (ReceiptStatus::Rejected, Some(why)),
@@ -567,6 +594,16 @@ impl Engine {
         receipt.completed_at_us = Some(self.clock.now_us());
         receipt.version += 1;
         self.track_command(&receipt.command, status);
+        if was_pending
+            && self.awaiting.contains_key(receipt_id)
+            && !self.is_launch_order(receipt_id)
+        {
+            self.track_task(
+                &receipt.vehicle_id,
+                uxduck_contracts::dto::analytics::EngagementTask::VehicleCommand,
+                status == ReceiptStatus::Accepted,
+            );
+        }
         let result = ReceiptDto::from(&receipt);
         self.commit_as(
             daemon(),
@@ -719,6 +756,32 @@ mod unsafe_place_tests {
             altitude_m,
             altitude_frame: frame,
         }
+    }
+
+    #[test]
+    fn native_height_changes_have_the_same_ground_guard_as_go_to() {
+        let height = |alt, frame| Command::Long {
+            command: 186,
+            params: vec![alt, frame],
+        };
+        for frame in [3.0, 6.0, 10.0, 11.0] {
+            assert!(unsafe_place(&height(0.0, frame), true).is_some());
+            assert!(unsafe_place(&height(-1.0, frame), true).is_some());
+            assert_eq!(unsafe_place(&height(40.0, frame), true), None);
+        }
+        assert_eq!(unsafe_place(&height(-1.0, 0.0), true), None);
+        assert!(unsafe_place(&height(f32::NAN, 3.0), true).is_some());
+        assert!(unsafe_place(&height(40.0, 2.0), true).is_some());
+        assert!(
+            unsafe_place(
+                &Command::Long {
+                    command: 186,
+                    params: vec![]
+                },
+                true
+            )
+            .is_some()
+        );
     }
 
     #[test]

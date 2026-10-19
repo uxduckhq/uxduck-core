@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use uxduck_contracts::dto::account::AccountState;
+use uxduck_contracts::dto::account::{AccountFlights, AccountState};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_engine::account::{AccountAction, AccountOrder, AccountPort};
 use uxduck_engine::runtime::Credentials as _;
@@ -42,6 +42,8 @@ struct Account {
     api: Option<String>,
     client: Option<reqwest::Client>,
     credentials: FileCredentials,
+    /// Serializes token changes with accepting a response for that token.
+    session_change: Mutex<()>,
     /// What `/v1/me` said last, for answers while offline.
     last: Mutex<AccountState>,
     /// Where plugins installed from links are unpacked (S59).
@@ -78,6 +80,7 @@ pub fn start(
         api: crate::feedback::api_url(),
         client: crate::online::client(Duration::from_secs(20)),
         credentials,
+        session_change: Mutex::new(()),
         last: Mutex::new(AccountState::default()),
         shared_dir: data_dir.join("plugins").join("shared"),
     });
@@ -148,6 +151,7 @@ impl Account {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm per account action")]
     async fn act(&self, action: AccountAction) -> Result<Value, ApiError> {
         if let Some(result) = environment_action(&action) {
             return result;
@@ -202,10 +206,16 @@ impl Account {
                         "the server signed in but gave no token",
                     )
                 })?;
-                let mut credentials = self.credentials.clone();
-                credentials
-                    .set(TOKEN, &token)
-                    .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
+                {
+                    let _change = self
+                        .session_change
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let mut credentials = self.credentials.clone();
+                    credentials
+                        .set(TOKEN, &token)
+                        .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
+                }
                 // The account lists this session by the computer's name.
                 let _ = client
                     .put(format!("{api}/v1/me/sessions/current"))
@@ -223,6 +233,32 @@ impl Account {
                     created,
                     ..self.get(api, client).await
                 })
+            }
+            AccountAction::Flights => {
+                let token = self.signed_in()?;
+                let answer = client
+                    .get(format!("{api}/v1/flights"))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let listed = refused_or(answer)
+                    .await?
+                    .json::<AccountFlights>()
+                    .await
+                    .map_err(|_| {
+                        ApiError::new(
+                            ErrorKind::Internal,
+                            "UXDuck couldn't read the flight list. Try again, or update UXDuck.",
+                        )
+                    })?;
+                if self.token().as_deref() != Some(token.as_str()) {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "The signed-in account changed. Refresh the flight list.",
+                    ));
+                }
+                to_json(&listed)
             }
             action @ (AccountAction::Sessions
             | AccountAction::SignOutSession { .. }
@@ -439,7 +475,8 @@ impl Account {
         client: &reqwest::Client,
         device: Option<String>,
     ) -> Result<Value, ApiError> {
-        if let Some(token) = self.token() {
+        let token = self.token();
+        if let Some(token) = &token {
             // This computer's watch links end with the session (S95, W9).
             if let Some(device) = device {
                 let _ = client
@@ -447,17 +484,24 @@ impl Account {
                         "{api}/v1/watch-links?device={}",
                         path_part(&device)
                     ))
-                    .bearer_auth(&token)
+                    .bearer_auth(token)
                     .send()
                     .await;
             }
             // Best effort: the token is forgotten here whatever the server says.
             let _ = client
                 .post(format!("{api}/v1/auth/sign-out"))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .json(&json!({}))
                 .send()
                 .await;
+        }
+        let _change = self
+            .session_change
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.token() != token {
+            return Ok(json!({}));
         }
         let mut credentials = self.credentials.clone();
         credentials
@@ -732,38 +776,54 @@ impl Account {
     /// The account from `/v1/me`, or what was known last when offline. A
     /// token the server no longer takes is forgotten.
     async fn get(&self, api: &str, client: &reqwest::Client) -> AccountState {
-        let Some(token) = self.token() else {
-            return AccountState::default();
-        };
-        let answer = client
-            .get(format!("{api}/v1/me"))
-            .bearer_auth(&token)
-            .send()
-            .await;
-        let state = match answer {
-            Ok(answer) if answer.status() == reqwest::StatusCode::UNAUTHORIZED => {
+        loop {
+            let Some(token) = self.token() else {
+                return AccountState::default();
+            };
+            let answer = client
+                .get(format!("{api}/v1/me"))
+                .bearer_auth(&token)
+                .send()
+                .await;
+            let unauthorized = answer
+                .as_ref()
+                .is_ok_and(|answer| answer.status() == reqwest::StatusCode::UNAUTHORIZED);
+            let state = match answer {
+                Ok(answer) if answer.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                    AccountState::default()
+                }
+                Ok(answer) if answer.status().is_success() => match answer.json::<Me>().await {
+                    Ok(me) => AccountState {
+                        signed_in: true,
+                        email: Some(me.user.email),
+                        name: Some(me.user.name).filter(|n| !n.is_empty()),
+                        username: me.user.username,
+                        product_updates: Some(me.product_updates),
+                        offline: false,
+                        created: false,
+                    },
+                    Err(_) => self.offline(),
+                },
+                _ => self.offline(),
+            };
+            let _change = self
+                .session_change
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Sign-in and sign-out run concurrently with account reads. Retry
+            // against the current token instead of accepting an old reply.
+            if self.token().as_deref() != Some(token.as_str()) {
+                continue;
+            }
+            if unauthorized {
                 let mut credentials = self.credentials.clone();
                 let _ = credentials.set(TOKEN, "");
-                AccountState::default()
             }
-            Ok(answer) if answer.status().is_success() => match answer.json::<Me>().await {
-                Ok(me) => AccountState {
-                    signed_in: true,
-                    email: Some(me.user.email),
-                    name: Some(me.user.name).filter(|n| !n.is_empty()),
-                    username: me.user.username,
-                    product_updates: Some(me.product_updates),
-                    offline: false,
-                    created: false,
-                },
-                Err(_) => self.offline(),
-            },
-            _ => self.offline(),
-        };
-        if !state.offline {
-            self.remember(&state);
+            if !state.offline {
+                self.remember(&state);
+            }
+            return state;
         }
-        state
     }
 
     fn offline(&self) -> AccountState {
@@ -947,7 +1007,7 @@ async fn refusal(answer: reqwest::Response) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
 }
 
-fn to_json(state: &AccountState) -> Result<Value, ApiError> {
+fn to_json(state: &impl serde::Serialize) -> Result<Value, ApiError> {
     serde_json::to_value(state).map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))
 }
 
@@ -965,6 +1025,9 @@ fn app_origin(api: &str) -> String {
         _ => "https://app.uxduck.com".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 mod watch_tests {

@@ -59,7 +59,7 @@ impl Timer {
 }
 
 /// Whether vehicles of this `MAV_TYPE` fly.
-fn flies(vehicle_type: &str) -> bool {
+pub(crate) fn flies(vehicle_type: &str) -> bool {
     vehicle_type == "Airship"
         || matches!(
             VehicleClass::of(vehicle_type),

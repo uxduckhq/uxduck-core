@@ -24,7 +24,7 @@ use uxduck_core::domain::snapshot::Snapshot;
 use uxduck_core::domain::sync::{LibraryVehicle, SyncState};
 use uxduck_core::domain::thread::{Folder, Item, Thread};
 use uxduck_core::domain::vehicle::Vehicle;
-use uxduck_core::domain::video::{VideoRecording, VideoSource};
+use uxduck_core::domain::video::{VideoPhoto, VideoRecording, VideoSource};
 use uxduck_core::events::{Change, Event};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -121,6 +121,9 @@ pub struct State {
     /// Cameras' recordings, by id (S40).
     #[serde(default)]
     pub video_recordings: BTreeMap<String, VideoRecording>,
+    /// Photos from the video (S144).
+    #[serde(default)]
+    pub video_photos: BTreeMap<String, VideoPhoto>,
     /// Definition sets people added, by id (S67).
     #[serde(default)]
     pub own_sets: BTreeMap<String, OwnSet>,
@@ -320,6 +323,15 @@ impl State {
                 self.video_recordings
                     .insert(recording.id.clone(), recording.clone());
             }
+            Change::VideoPhotoUpserted { photo } => {
+                self.video_photos.insert(photo.id.clone(), photo.clone());
+            }
+            Change::VideoRecordingRemoved { id } => {
+                self.video_recordings.remove(id);
+            }
+            Change::VideoPhotoRemoved { id } => {
+                self.video_photos.remove(id);
+            }
             Change::OwnSetUpserted { set } => {
                 self.own_sets.insert(set.id.clone(), set.clone());
             }
@@ -449,6 +461,18 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn a_checkpoint_from_before_newer_fields_parses() {
+        let old: State = serde_json::from_str(r#"{"seq":7,"operators":{}}"#).unwrap();
+        assert_eq!(
+            old,
+            State {
+                seq: 7,
+                ..State::default()
+            }
+        );
     }
 
     #[test]

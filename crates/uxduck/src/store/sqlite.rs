@@ -325,6 +325,9 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::VideoSourceUpserted { .. }
             | Change::VideoSourceRemoved { .. }
             | Change::VideoRecordingUpserted { .. }
+            | Change::VideoPhotoUpserted { .. }
+            | Change::VideoRecordingRemoved { .. }
+            | Change::VideoPhotoRemoved { .. }
             | Change::PluginCalled { .. }
             | Change::PluginPublished { .. }
             | Change::PluginDeclined { .. }
@@ -938,6 +941,7 @@ mod tests {
             claim: None,
             mode: TargetMode::FollowsSelection,
             target: None,
+            input_pause: None,
             pending_target: None,
             mapping_id: "mode-2".into(),
             version: 1,

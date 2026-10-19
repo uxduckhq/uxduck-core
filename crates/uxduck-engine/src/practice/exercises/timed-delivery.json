@@ -18,7 +18,7 @@
   "steps": [
     {
       "text": "Take off, then use Go to on the drop point and keep it there for 20 seconds.",
-      "hint": "Arm and Take off in the Control tab, then press Go to and click the drop point. It holds there by itself.",
+      "hint": "Arm and Take off in the Cockpit tab, then press Go to and click the drop point. It holds there by itself.",
       "hintAfterS": 60,
       "all": [{ "check": "within", "feature": "drop", "forS": 20 }]
     },

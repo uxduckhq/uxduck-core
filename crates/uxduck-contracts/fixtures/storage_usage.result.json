@@ -42,8 +42,27 @@
       "bytes": 0,
       "files": 0,
       "deletable": true
+    },
+    {
+      "category": "simulators",
+      "bytes": 100000000,
+      "files": 2,
+      "deletable": false
+    },
+    {
+      "category": "simulator-logs",
+      "bytes": 12000000,
+      "files": 3,
+      "deletable": true
+    },
+    {
+      "category": "simulator-data",
+      "bytes": 16000,
+      "files": 1,
+      "deletable": false
     }
   ],
   "freeBytes": 120000000000,
-  "totalBytes": 494000000000
+  "totalBytes": 494000000000,
+  "simulatorLogs": []
 }

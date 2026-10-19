@@ -19,7 +19,7 @@
   ],
   "steps": [
     {
-      "text": "Fly it over the ring, then press Land in the Control tab.",
+      "text": "Fly it over the ring, then press Land in the Cockpit tab.",
       "hint": "Use Go to on the ring and wait for it to hover over it, then press Land.",
       "hintAfterS": 90,
       "all": [{ "check": "landed" }, { "check": "within", "feature": "ring" }]

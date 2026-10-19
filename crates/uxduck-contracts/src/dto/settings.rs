@@ -32,8 +32,10 @@ pub enum StorageCategory {
     Logs,
     Plugins,
     Video,
-    /// Simulated vehicles' builds and working folders (S17, S18).
+    /// Downloaded simulator builds (S17, S18).
     Simulators,
+    SimulatorLogs,
+    SimulatorData,
     /// Parameter definition sets, downloaded and added (S67).
     Parameters,
     /// Copies of vehicles' files, by vehicle (S121).
@@ -78,8 +80,13 @@ pub struct Settings {
     /// Whether `closePolicy` was set here (otherwise it is the command
     /// line's).
     pub close_policy_set: bool,
-    /// Nothing is deleted unless its category is listed.
+    /// Age-based deletion policies; the simulator-log size budget is independent.
     pub auto_delete: Vec<AutoDelete>,
+    /// Total simulator log budget in bytes; zero disables it. Absent on older hosts.
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulator_log_max_bytes: Option<u64>,
+
     /// The desktop shell that registered itself; `uxduck open` starts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_path: Option<String>,
@@ -114,10 +121,12 @@ pub struct Settings {
     /// of the same account may send from away (S80). Empty is off.
     #[serde(default)]
     pub remote_control: Vec<crate::dto::command::CommandClass>,
-    /// "Phones and tablets on this network" (S97): the address of this
-    /// computer UXDuck also listens on. Absent is off.
+    /// Legacy first selected network address (S97). Absent is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_address: Option<String>,
+    /// All selected network addresses. Empty is off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_addresses: Vec<String>,
     /// Seconds a vehicle may go unsupervised before UXDuck stops its ground
     /// station heartbeat to it, so its own failsafe acts (S81).
     #[serde(default = "grace")]
@@ -200,6 +209,11 @@ pub struct SettingsUpdateParams {
     /// Replaces the whole list when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_delete: Option<Vec<AutoDelete>>,
+    /// Total simulator log budget in bytes; zero disables it. Absent on older hosts.
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulator_log_max_bytes: Option<u64>,
+
     /// The desktop shell registering itself; an empty string forgets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_path: Option<String>,
@@ -228,6 +242,10 @@ pub struct SettingsUpdateParams {
     /// from this computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_address: Option<String>,
+    /// Replaces the selected addresses; empty turns off all network listeners.
+    /// Only from this computer. Cannot be combined with networkAddress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_addresses: Option<Vec<String>>,
     /// 5 to 120.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision_grace_s: Option<u32>,
@@ -271,6 +289,9 @@ pub struct CategoryUsage {
 pub struct StorageUsage {
     pub data_dir: String,
     pub categories: Vec<CategoryUsage>,
+    /// Native simulator logs, by simulation; absent on older hosts.
+    #[serde(default)]
+    pub simulator_logs: Vec<SimulatorLogUsage>,
     /// Free and total space on the data directory's disk, where known.
     #[schemars(schema_with = "crate::safe::optional_integer")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,4 +407,18 @@ pub enum LoginItemState {
     NeedsApproval,
     /// Not on this computer, such as a build not installed as an app.
     Unavailable,
+}
+
+/// Logs of one native simulation. Running simulations cannot be cleared.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulatorLogUsage {
+    pub simulation_id: String,
+    /// Its vehicle's name when still known to UXDuck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    pub files: u32,
+    pub running: bool,
 }

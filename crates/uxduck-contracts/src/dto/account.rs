@@ -55,6 +55,31 @@ pub struct AccountState {
     pub created: bool,
 }
 
+/// Recorded telemetry logs stored in this account, without session credentials.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFlights {
+    pub flights: Vec<AccountFlight>,
+}
+
+/// A log's recorded coverage, not an arm-to-disarm flight duration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFlight {
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub first_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub chunks: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+}
+
 /// Emails a one-time code to sign in with; an account is made on the first
 /// sign-in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

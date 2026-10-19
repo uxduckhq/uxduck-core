@@ -26,7 +26,7 @@
     },
     {
       "text": "Now use Go to on the ring.",
-      "hint": "Press Go to in the Control tab, then click the ring on the map.",
+      "hint": "Press Go to in the Cockpit tab, then click the ring on the map.",
       "hintAfterS": 45,
       "all": [
         { "check": "commandSent", "command": "goTo" },

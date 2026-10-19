@@ -42,6 +42,13 @@ pub struct FeedbackUi {
     pub actions: Vec<String>,
     pub app_version: String,
     pub locale: String,
+    /// The browser and its major version, such as `Chrome 141`; absent in
+    /// UXDuck Desktop's own window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+    /// The window's size in CSS pixels, such as `1512×945`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
     /// The desktop app's version and capabilities, inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellInfo>,

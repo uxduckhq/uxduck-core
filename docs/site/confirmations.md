@@ -14,13 +14,13 @@ UXDuck never stops you with a question. Commands that could hurt someone or the 
 
 From a shortcut or the action list, a command you hold opens on its own with its button ready: hold **Space** until it fills, or press **Esc** to cancel.
 
-When a vehicle refuses to arm or disarm, the Control tab says why and shows **Force arm** or **Force disarm** to hold.
+When a vehicle refuses to arm or disarm, the Cockpit tab says why and shows **Force arm** or **Force disarm** to hold.
 
-When a vehicle is offline, the Control tab says so once. Commands still go to its last known address and may arrive late.
+When a vehicle is offline, the Cockpit tab says so once. Commands still go to its last known address and may arrive late.
 
 ## Send it to a place
 
-On the Control tab, press **Go to** (or **G**), set the height, then click the map: the vehicle goes there. Each click sends it again, until you press **G**, **Esc** or **Stop**. You can also type a latitude and longitude and press Enter.
+On the Cockpit tab, press **Go to** (or **G**), set the height, then click the map: the vehicle goes there. Each click sends it again, until you press **G**, **Esc** or **Stop**. You can also type a latitude and longitude and press Enter.
 
 ## Approvals
 

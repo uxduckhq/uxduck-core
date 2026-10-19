@@ -10,13 +10,13 @@
   "features": [{ "id": "home", "label": "Home", "radiusM": 15 }],
   "steps": [
     {
-      "text": "Press and hold Arm in the Control tab.",
+      "text": "Press and hold Arm in the Cockpit tab.",
       "hint": "Armed, it answers commands. Disarmed, it stays where it is.",
       "hintAfterS": 45,
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
       "hint": "Go to takes it to the place you clicked and keeps it there.",
       "hintAfterS": 45,
       "all": [
@@ -25,7 +25,7 @@
       ]
     },
     {
-      "text": "Choose HOLD in the Mode menu in the Control tab.",
+      "text": "Choose HOLD in the Mode menu in the Cockpit tab.",
       "hint": "HOLD stops its motors; on the water it may drift a little.",
       "hintAfterS": 45,
       "all": [
@@ -34,7 +34,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch takes it back to where it started.",
       "hintAfterS": 45,
       "all": [

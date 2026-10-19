@@ -161,8 +161,8 @@ impl CommandClass {
 /// `IMAGE_STOP_CAPTURE`, `VIDEO_START_CAPTURE`, `VIDEO_STOP_CAPTURE`.
 const PAYLOAD_COMMANDS: [u16; 9] = [203, 205, 531, 532, 1000, 2000, 2001, 2500, 2501];
 /// `MAV_CMD`s that send a vehicle somewhere now: `NAV_WAYPOINT`,
-/// `DO_REPOSITION`. They go stale fastest.
-const TARGET_COMMANDS: [u16; 2] = [16, 192];
+/// `DO_CHANGE_ALTITUDE`, `DO_REPOSITION`. They go stale fastest.
+const TARGET_COMMANDS: [u16; 3] = [16, 186, 192];
 /// `MISSION_START`.
 const MAV_CMD_MISSION_START: u16 = 300;
 
@@ -300,6 +300,11 @@ impl Command {
                 command: MAV_CMD_DO_FLIGHTTERMINATION,
                 ..
             } => "Terminate the flight".into(),
+            Self::Long { command: 186, .. } => "Change height".into(),
+            // The camera protocol, as the Camera tab sends it (S145).
+            Self::Long { command: 2000, .. } => "Take a photo".into(),
+            Self::Long { command: 2500, .. } => "Start recording".into(),
+            Self::Long { command: 2501, .. } => "Stop recording".into(),
             Self::Long { command, .. } => format!("Command {command}"),
         }
     }
@@ -420,6 +425,15 @@ mod tests {
         assert_eq!(go_to.max_age_ms(), 2_000);
         assert_eq!(go_to.offline_behaviour(), OfflineBehaviour::Warn);
         assert_eq!(go_to.label(), "Go to");
+        let height = Command::Long {
+            command: 186,
+            params: vec![40.0, 3.0],
+        };
+        assert_eq!(level(&height, true, false), Risk::Confirm);
+        assert_eq!(height.class(), CommandClass::Mission);
+        assert_eq!(height.max_age_ms(), 2_000);
+        assert_eq!(height.offline_behaviour(), OfflineBehaviour::Warn);
+        assert_eq!(height.label(), "Change height");
         // The dangerous ones, each with its reason.
         for (command, flying, forced) in [
             (Command::Arm, false, true),

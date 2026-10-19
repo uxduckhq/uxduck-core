@@ -7,6 +7,7 @@
 //! pipe closes, so a stopped or killed daemon leaves no process behind.
 //! The data plane then connects to it: ArduPilot over TCP, PX4 over UDP.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -16,7 +17,7 @@ use std::time::Duration;
 use serde_json::Value;
 use uxduck_contracts::dto::link::{SimAutopilot as SimAutopilotDto, SimVehicle as SimVehicleDto};
 use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary};
-use uxduck_core::domain::link::{Link, LinkKind, SimAutopilot, SimVehicle};
+use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle};
 
 #[cfg(debug_assertions)]
 mod cache;
@@ -75,7 +76,15 @@ pub enum Endpoint {
 /// The programs the manager runs, and what they fly.
 const PROGRAMS: [(&str, &[SimVehicleDto]); 5] = [
     ("arducopter", &[SimVehicleDto::Multicopter]),
-    ("arduplane", &[SimVehicleDto::Plane, SimVehicleDto::Vtol]),
+    // S143: the jet is ArduPlane's `plane-jet` frame.
+    (
+        "arduplane",
+        &[
+            SimVehicleDto::Plane,
+            SimVehicleDto::Vtol,
+            SimVehicleDto::Jet,
+        ],
+    ),
     // S37: a rover and a boat are ArduRover's frames, a submarine ArduSub.
     ("ardurover", &[SimVehicleDto::Rover, SimVehicleDto::Boat]),
     ("ardusub", &[SimVehicleDto::Submarine]),
@@ -95,6 +104,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub struct Simulators {
     data_dir: PathBuf,
+    /// Held across launches and log cleanup; released only after the guard exits.
+    active: Arc<Mutex<HashSet<String>>>,
     binaries: Mutex<Vec<SimBinary>>,
     /// Set once the builds have been probed; a link reopened as the daemon
     /// starts waits for it.
@@ -109,6 +120,7 @@ impl Simulators {
     pub fn new(data_dir: &Path) -> Arc<Self> {
         Arc::new(Self {
             data_dir: data_dir.to_owned(),
+            active: Arc::default(),
             binaries: Mutex::new(Vec::new()),
             probed: std::sync::OnceLock::new(),
             scanning: Mutex::new(()),
@@ -222,6 +234,31 @@ impl Simulators {
     /// Why it cannot start, for the link's status: no build for the
     /// vehicle, a build that is not SITL, or a failed start.
     pub fn launch(&self, link: &Link) -> Result<(Running, Endpoint), String> {
+        let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        if active.contains(&link.id) {
+            return Err("This simulation is still stopping. Try again once it has stopped.".into());
+        }
+        let (mut running, endpoint) = self.launch_inner(link)?;
+        active.insert(link.id.clone());
+        running.active = Some(ActiveSimulation {
+            active: Arc::clone(&self.active),
+            id: link.id.clone(),
+        });
+        Ok((running, endpoint))
+    }
+
+    /// Whether a build of this link's is still running or not yet reaped.
+    pub fn is_active(&self, id: &str) -> bool {
+        self.with_active(|active| active.contains(id))
+    }
+
+    /// Runs a storage operation while preventing a simulator from starting.
+    pub fn with_active<T>(&self, operation: impl FnOnce(&HashSet<String>) -> T) -> T {
+        let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        operation(&active)
+    }
+
+    fn launch_inner(&self, link: &Link) -> Result<(Running, Endpoint), String> {
         let LinkKind::Simulator {
             vehicle,
             autopilot,
@@ -270,6 +307,19 @@ impl Simulators {
         let launcher = launcher_base(&build, &frame);
         if !build.frames.contains(&frame) && !frame.contains(':') && launcher.is_none() {
             return Err(format!("{} has no frame {frame}", build.program));
+        }
+        // A model file of the user's own is whatever it is. A jet is
+        // ArduPlane's jet frame, which flies as a plane (S143).
+        let flies_as = if wanted == SimVehicleDto::Jet {
+            SimVehicleDto::Plane
+        } else {
+            wanted
+        };
+        if !frame.contains(':')
+            && ardupilot_vehicle(&build.program, launcher.unwrap_or(&frame))
+                .is_some_and(|flies| flies != flies_as)
+        {
+            return Err(format!("{frame} is not a {} frame", vehicle_name(vehicle)));
         }
         let port = BASE_PORT + 10 * u16::from(instance);
         let directory = self.data_dir.join("simulators").join(&link.id);
@@ -406,12 +456,25 @@ fn missing(autopilot: SimAutopilot, vehicle: SimVehicle) -> String {
     }
     let program = match vehicle {
         SimVehicle::Multicopter => "arducopter",
-        SimVehicle::Plane | SimVehicle::Vtol => "arduplane",
+        SimVehicle::Plane | SimVehicle::Vtol | SimVehicle::Jet => "arduplane",
         SimVehicle::Rover | SimVehicle::Boat => "ardurover",
         SimVehicle::Submarine => "ardusub",
         SimVehicle::Airship => "blimp",
     };
     format!("no {program} build: put one in the simulators folder, or choose your own build")
+}
+
+fn vehicle_name(vehicle: SimVehicle) -> &'static str {
+    match vehicle {
+        SimVehicle::Multicopter => "multicopter",
+        SimVehicle::Plane => "plane",
+        SimVehicle::Vtol => "VTOL",
+        SimVehicle::Rover => "rover",
+        SimVehicle::Boat => "boat",
+        SimVehicle::Submarine => "submarine",
+        SimVehicle::Airship => "blimp",
+        SimVehicle::Jet => "jet",
+    }
 }
 
 fn dto_autopilot(autopilot: SimAutopilot) -> SimAutopilotDto {
@@ -430,6 +493,7 @@ fn dto_vehicle(vehicle: SimVehicle) -> SimVehicleDto {
         SimVehicle::Boat => SimVehicleDto::Boat,
         SimVehicle::Submarine => SimVehicleDto::Submarine,
         SimVehicle::Airship => SimVehicleDto::Airship,
+        SimVehicle::Jet => SimVehicleDto::Jet,
     }
 }
 
@@ -438,7 +502,7 @@ fn dto_vehicle(vehicle: SimVehicle) -> SimVehicleDto {
 const PX4_DEFAULTS: [&str; 4] = ["quadx", "airplane", "standard_vtol", "rover_ackermann"];
 
 /// The vehicle's frame when none is chosen: the build's own default, a
-/// quadplane for a VTOL, a motorboat for a boat; for PX4, its usual
+/// quadplane for a VTOL, a motorboat for a boat, the jet frame for a jet; for PX4, its usual
 /// airframe for the vehicle, or else its first.
 fn default_frame(vehicle: SimVehicle, build: &SimBinary) -> String {
     if build.program == PX4 {
@@ -458,6 +522,7 @@ fn default_frame(vehicle: SimVehicle, build: &SimBinary) -> String {
     match vehicle {
         SimVehicle::Vtol => "quadplane".into(),
         SimVehicle::Boat => "motorboat".into(),
+        SimVehicle::Jet => JET_FRAME.into(),
         SimVehicle::Multicopter
         | SimVehicle::Plane
         | SimVehicle::Rover
@@ -669,6 +734,60 @@ fn px4_vehicle(frame: &str) -> Option<SimVehicleDto> {
     }
 }
 
+/// What an `ArduPlane` or `ArduRover` frame flies, from its name, for the
+/// two vehicles each build carries: a quadplane, `FireFly6` or tailsitter
+/// is a VTOL, the rest of `ArduPlane`'s a plane; a motorboat or sailboat is
+/// a boat, the rest of `ArduRover`'s a rover. A frame without lift motors
+/// refuses a VTOL take-off. None for any other build.
+pub fn ardupilot_vehicle(program: &str, frame: &str) -> Option<SimVehicleDto> {
+    match program {
+        "arduplane" => Some(
+            if frame.starts_with("quadplane") || frame == "firefly" || frame.contains("tailsitter")
+            {
+                SimVehicleDto::Vtol
+            } else {
+                SimVehicleDto::Plane
+            },
+        ),
+        "ardurover" => Some(
+            if frame.starts_with("motorboat") || frame.starts_with("sailboat") {
+                SimVehicleDto::Boat
+            } else {
+                SimVehicleDto::Rover
+            },
+        ),
+        _ => None,
+    }
+}
+
+/// Frames SITL cannot fly on its own, never offered: another simulator
+/// (Gazebo, `JSBSim`, `CRRCSim`, `last_letter`, SCRIMMAGE, `AirSim`, ROS), a
+/// peripheral process on its CAN bus or PPP link, or a Lua motor mixer in
+/// its scripts folder (docs/simulation-frames.md, "Needs"). Started anyway,
+/// `jsbsim` panics and never speaks.
+const NEEDS_MORE: [&str; 20] = [
+    "dotriaconta_octaquad_x",
+    "hexadeca-octa",
+    "hexadeca-octa-cwx",
+    "IrisRos",
+    "gazebo-iris",
+    "airsim-copter",
+    "scrimmage-copter",
+    "quad-can",
+    "copter-PPP",
+    "copter-periph-compass",
+    "quadplane-can",
+    "quadplane-PPP",
+    "gazebo-zephyr",
+    "last_letter",
+    "CRRCSim",
+    "jsbsim",
+    "scrimmage-plane",
+    "gazebo-rover",
+    "airsim-rover",
+    "gazebo-bluerov2",
+];
+
 /// The frames whose build is `program`, and its default, from SITL's
 /// `--list-models` (ArduPilot's `vehicleinfo.json`).
 fn frames(list: &str, program: &str) -> Option<(Vec<String>, String)> {
@@ -682,7 +801,9 @@ fn frames(list: &str, program: &str) -> Option<(Vec<String>, String)> {
         };
         let before = frames.len();
         for (name, frame) in all {
-            if frame.get("waf_target").and_then(Value::as_str) == Some(target.as_str()) {
+            if frame.get("waf_target").and_then(Value::as_str) == Some(target.as_str())
+                && !NEEDS_MORE.contains(&name.as_str())
+            {
                 frames.push(name.clone());
             }
         }
@@ -826,10 +947,27 @@ fn command(path: &Path) -> Command {
 /// stdin, and the guard stops the build.
 #[derive(Debug)]
 pub struct Running {
+    active: Option<ActiveSimulation>,
     guard: Option<Child>,
     stdin: Option<ChildStdin>,
     /// The build's output, for a line on why it stopped.
     log: PathBuf,
+}
+
+/// Keeps cleanup away from a process until it has actually exited.
+#[derive(Debug)]
+struct ActiveSimulation {
+    active: Arc<Mutex<HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for ActiveSimulation {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 
 impl Running {
@@ -870,6 +1008,7 @@ impl Running {
             .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
         let stdin = guard.stdin.take();
         Ok(Self {
+            active: None,
             guard: Some(guard),
             stdin,
             log,
@@ -977,7 +1116,11 @@ impl Drop for Running {
         // is reaped off the data plane's task.
         drop(self.stdin.take());
         if let Some(mut guard) = self.guard.take() {
-            std::thread::spawn(move || guard.wait());
+            let active = self.active.take();
+            std::thread::spawn(move || {
+                let _ = guard.wait();
+                drop(active);
+            });
         }
     }
 }
@@ -1172,6 +1315,29 @@ mod tests {
     }
 
     #[test]
+    fn a_vtol_flies_only_frames_with_lift_motors() {
+        let plane = |frame| ardupilot_vehicle("arduplane", frame);
+        for frame in [
+            "quadplane",
+            "quadplane-tilt",
+            "quadplane-copter_tailsitter",
+            "plane-tailsitter",
+            "firefly",
+        ] {
+            assert_eq!(plane(frame), Some(SimVehicleDto::Vtol), "{frame}");
+        }
+        // A jet has no lift motors: its VTOL take-off is refused (2026-10-18).
+        for frame in ["plane", "plane-jet", "plane-3d", "glider"] {
+            assert_eq!(plane(frame), Some(SimVehicleDto::Plane), "{frame}");
+        }
+        let rover = |frame| ardupilot_vehicle("ardurover", frame);
+        assert_eq!(rover("motorboat-skid"), Some(SimVehicleDto::Boat));
+        assert_eq!(rover("sailboat"), Some(SimVehicleDto::Boat));
+        assert_eq!(rover("balancebot"), Some(SimVehicleDto::Rover));
+        assert_eq!(ardupilot_vehicle("arducopter", "X"), None);
+    }
+
+    #[test]
     fn px4_defaults_to_its_first_frame_for_the_vehicle() {
         let build = SimBinary {
             path: "px4/bin/px4".into(),
@@ -1191,6 +1357,31 @@ mod tests {
         assert_eq!(default_frame(SimVehicle::Multicopter, &build), "quadx");
         assert_eq!(default_frame(SimVehicle::Plane, &build), "airplane");
         assert_eq!(default_frame(SimVehicle::Vtol, &build), "standard_vtol");
+    }
+
+    /// A jet (S143) is `ArduPlane`'s jet frame, whatever the build's own
+    /// default frame is.
+    #[test]
+    fn a_jet_defaults_to_arduplanes_jet_frame() {
+        let plane = SimBinary {
+            path: "arduplane".into(),
+            autopilot: SimAutopilotDto::Ardupilot,
+            program: "arduplane".into(),
+            vehicles: vec![
+                SimVehicleDto::Plane,
+                SimVehicleDto::Vtol,
+                SimVehicleDto::Jet,
+            ],
+            frames: vec!["plane".into(), "plane-jet".into(), "quadplane".into()],
+            default_frame: "plane".into(),
+            version: None,
+            catalogue_id: None,
+        };
+        assert_eq!(default_frame(SimVehicle::Jet, &plane), "plane-jet");
+        assert_eq!(default_frame(SimVehicle::Plane, &plane), "plane");
+        let arduplane = PROGRAMS.iter().find(|(name, _)| *name == "arduplane");
+        assert!(arduplane.is_some_and(|(_, flies)| flies.contains(&SimVehicleDto::Jet)));
+        assert!(missing(SimAutopilot::Ardupilot, SimVehicle::Jet).contains("arduplane"));
     }
 
     #[test]
@@ -1273,16 +1464,57 @@ mod tests {
             } },
             "ArduPlane": { "default_frame": "plane", "frames": {
                 "plane": { "waf_target": "bin/arduplane" },
-                "quadplane": { "waf_target": "bin/arduplane" }
+                "quadplane": { "waf_target": "bin/arduplane" },
+                "jsbsim": { "waf_target": "bin/arduplane" },
+                "quadplane-can": { "waf_target": "bin/arduplane" }
             } }
         }"#;
         let (copter, default) = frames(list, "arducopter").unwrap_or_default();
         assert_eq!(copter, ["+", "hexax", "quad"]);
         assert_eq!(default, "quad");
         let (plane, default) = frames(list, "arduplane").unwrap_or_default();
+        // Not those that need another simulator or process.
         assert_eq!(plane, ["plane", "quadplane"]);
         assert_eq!(default, "plane");
         assert!(frames(list, "ardusub").is_none());
         assert!(frames("not json", "arducopter").is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod active_storage_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_simulator_stays_protected_until_its_process_exits() {
+        let active = Arc::new(Mutex::new(HashSet::from(["simulation".into()])));
+        let mut guard = Command::new("sh")
+            .args(["-c", "cat >/dev/null; sleep 0.2"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = guard.stdin.take();
+        let running = Running {
+            guard: Some(guard),
+            stdin,
+            log: PathBuf::new(),
+            active: Some(ActiveSimulation {
+                active: Arc::clone(&active),
+                id: "simulation".into(),
+            }),
+        };
+        drop(running);
+        assert!(
+            active.lock().unwrap().contains("simulation"),
+            "closing stdin does not mean the process has exited"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while active.lock().unwrap().contains("simulation") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process exit must release log protection"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

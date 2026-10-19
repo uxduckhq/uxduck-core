@@ -1,0 +1,12 @@
+{
+  "dataDir": "/data",
+  "categories": [
+    { "category": "simulators", "bytes": 100, "files": 1, "deletable": false },
+    { "category": "simulator-logs", "bytes": 30, "files": 2, "deletable": true },
+    { "category": "simulator-data", "bytes": 4, "files": 1, "deletable": false }
+  ],
+  "simulatorLogs": [
+    { "simulationId": "stopped", "bytes": 10, "files": 1, "running": false },
+    { "simulationId": "running", "bytes": 20, "files": 1, "running": true }
+  ]
+}

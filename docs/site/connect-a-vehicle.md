@@ -53,7 +53,7 @@ uxduck forward --in serial:/dev/ttyAMA0@57600 --out udp:192.168.1.20:15010
 
 ## Change or turn off a link
 
-On **Vehicles**, each link has a switch and a pencil. The switch turns a link off or on without removing it. The pencil opens the link's settings in place: change its port, device, access or name and choose **Save**. **Remove** is in the settings.
+On **Fleet**, each link has a switch and a pencil. The switch turns a link off or on without removing it. The pencil opens the link's settings in place: change its port, device, access or name and choose **Save**. **Remove** is in the settings.
 
 From a terminal:
 

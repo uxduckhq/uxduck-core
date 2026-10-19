@@ -9,14 +9,14 @@ Practice gives you short exercises on a simulated vehicle, so you get used to th
 
 ## Get started
 
-**Get started** in the sidebar, above Vehicles, is a checklist. Its first item is a first flight with your simulated vehicle, with the steps under it: send it somewhere, change its mode, bring it back. Each ticks once the vehicle has done it. After that come a practice flight, another kind of vehicle and more. The sidebar shows the one to do now; **See all** opens the whole list on Home. To hide it, choose **Hide Get started** from its **⋯** menu, or **Hide from the sidebar** on Home. **Show in the sidebar** on Home, **Get started in the sidebar** in Settings › General, or **Show Get started** in the command palette brings it back.
+**Get started** in the sidebar, above Fleet, is a checklist. Its first item is a first flight with your simulated vehicle, with the steps under it: send it somewhere, change its mode, bring it back. Each ticks once the vehicle has done it. After that come a practice flight, another kind of vehicle and more. The sidebar shows the one to do now; **See all** opens the whole list on Home. To hide it, choose **Hide Get started** from its **⋯** menu, or **Hide from the sidebar** on Home. **Show in the sidebar** on Home, **Get started in the sidebar** in Settings › General, or **Show Get started** in the command palette brings it back.
 
 ## Try one
 
 1. Start a simulated VTOL plane with **Start flying**, or a multicopter with **New simulation**. The tab lists the exercises that fit the vehicle.
 2. Open **Practice** from **+** in any tab bar.
 3. Choose an exercise and press **Start**. The vehicle starts again where the exercise needs it, then the exercise begins.
-4. Do what each step says, in the Control tab and on the map beside it. A hint appears if a step takes a while.
+4. Do what each step says, in the Cockpit tab and on the map beside it. A hint appears if a step takes a while.
 
 You see one result at the end, such as "Passed. Home with 31% left.", and your best result is kept. **Give up** ends an exercise; the vehicle stays where it is.
 

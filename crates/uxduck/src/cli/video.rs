@@ -35,14 +35,23 @@ pub enum VideoCommand {
         /// Bob deinterlace each field (on automatically for PAL/NTSC).
         #[arg(long)]
         deinterlace: bool,
+        /// Record sound from this input, an exact id or unambiguous name from
+        /// `uxduck video devices`' sound inputs (S148).
+        #[arg(long)]
+        sound: Option<String>,
     },
     /// Pause a configured local camera, closing its device and recording segment.
     Pause { source: String },
     /// Resume a local camera, reconnecting when it is plugged in.
     Resume { source: String },
     /// Start recording a camera; it continues with every UI window closed.
+    /// With `--all`, every camera that records with the others;
+    /// `--all --stop` stops every camera recording.
     Record {
-        source: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        source: Option<String>,
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         stop: bool,
     },
@@ -90,36 +99,25 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
             height,
             frame_rate,
             deinterlace,
+            sound,
         } => {
             capture(
                 data_dir,
-                &device,
-                &standard,
-                width,
-                height,
-                frame_rate,
-                deinterlace,
+                &Capture {
+                    device: &device,
+                    standard: &standard,
+                    width,
+                    height,
+                    frame_rate,
+                    deinterlace,
+                    sound: sound.as_deref(),
+                },
             )
             .await
         }
         VideoCommand::Pause { source } => enable(data_dir, source, false).await,
         VideoCommand::Resume { source } => enable(data_dir, source, true).await,
-        VideoCommand::Record { source, stop } => {
-            let mut client = LocalClient::connect(data_dir).await?;
-            client.initialize().await?;
-            client
-                .call("video/record", json!({ "sourceId": source, "on": !stop }))
-                .await?;
-            println!(
-                "Recording {}.",
-                if stop {
-                    "stopped"
-                } else {
-                    "started; closing the UI does not stop it"
-                }
-            );
-            Ok(())
-        }
+        VideoCommand::Record { source, all, stop } => record(data_dir, source, all, stop).await,
         VideoCommand::List { json: as_json } => {
             let listed = list(data_dir).await?;
             if as_json {
@@ -167,6 +165,39 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
             Ok(())
         }
     }
+}
+
+/// Records or stops one camera, or with `all` every camera that records
+/// with the others (S153).
+async fn record(
+    data_dir: &Path,
+    source: Option<String>,
+    all: bool,
+    stop: bool,
+) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    match source {
+        Some(source) if !all => {
+            client
+                .call("video/record", json!({ "sourceId": source, "on": !stop }))
+                .await?;
+        }
+        _ => {
+            client
+                .call("video/recordAll", json!({ "on": !stop }))
+                .await?;
+        }
+    }
+    println!(
+        "Recording {}.",
+        if stop {
+            "stopped"
+        } else {
+            "started; closing the UI does not stop it"
+        }
+    );
+    Ok(())
 }
 
 async fn list(data_dir: &Path) -> Result<Value, CliError> {
@@ -408,36 +439,54 @@ async fn print_devices(data_dir: &Path, as_json: bool) -> Result<(), CliError> {
                 }
             );
         }
+        if !devices.sound_inputs.is_empty() {
+            println!("\nSound inputs, for --sound:");
+            for input in devices.sound_inputs {
+                println!("{}  {}", input.id, input.name);
+            }
+        }
     }
     Ok(())
 }
 
-async fn capture(
-    data_dir: &Path,
-    device: &str,
-    standard: &str,
+/// `uxduck video capture`'s choices.
+struct Capture<'a> {
+    device: &'a str,
+    standard: &'a str,
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: Option<f64>,
     deinterlace: bool,
-) -> Result<(), CliError> {
+    sound: Option<&'a str>,
+}
+
+async fn capture(data_dir: &Path, c: &Capture<'_>) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
     let listed = devices(&mut client).await?;
-    let matches: Vec<_> = listed
-        .devices
-        .iter()
-        .filter(|d| d.id == device || d.name == device)
-        .collect();
-    if matches.len() != 1 {
-        return Err(CliError::Usage(
-            "Choose one exact device id from uxduck video devices.".into(),
-        ));
-    }
-    let selected = matches[0];
+    let one = |list: &[uxduck_contracts::dto::video::CaptureDevice], wanted: &str, what: &str| {
+        let matches: Vec<_> = list
+            .iter()
+            .filter(|d| d.id == wanted || d.name == wanted)
+            .collect();
+        match matches[..] {
+            [only] => Ok(only.clone()),
+            _ => Err(CliError::Usage(format!(
+                "Choose one exact {what} id from uxduck video devices."
+            ))),
+        }
+    };
+    let selected = one(&listed.devices, c.device, "device")?;
+    let sound = c
+        .sound
+        .map(|s| one(&listed.sound_inputs, s, "sound input"))
+        .transpose()?;
     let source = client.call("video/capture", json!({ "input": {
-                "deviceId": selected.id, "name": selected.name, "enabled": true, "standard": standard,
-                "width": width, "height": height, "frameRate": frame_rate, "deinterlace": deinterlace || standard != "auto"
+                "deviceId": selected.id, "name": selected.name, "enabled": true, "standard": c.standard,
+                "width": c.width, "height": c.height, "frameRate": c.frame_rate,
+                "deinterlace": c.deinterlace || c.standard != "auto",
+                "recordSound": sound.is_some(),
+                "soundInput": sound.map(|s| json!({ "deviceId": s.id, "name": s.name })),
             }})).await?;
     println!(
         "{}  {}",
@@ -477,8 +526,12 @@ async fn print_recordings(data_dir: &Path, as_json: bool) -> Result<(), CliError
             seconds / 60,
             seconds % 60,
             r["bytes"].as_u64().unwrap_or(0) / 1_000_000,
-            crate::paths::recordings_dir(data_dir)
-                .join(format!("{id}.mp4"))
+            crate::paths::media_dir(data_dir)
+                .join(
+                    r["fileName"]
+                        .as_str()
+                        .map_or_else(|| format!("{id}.mp4"), str::to_owned)
+                )
                 .display()
         );
     }

@@ -67,8 +67,12 @@ pub enum StorageCategory {
     Logs,
     Plugins,
     Video,
-    /// Simulated vehicles' builds and working folders (S17, S18).
+    /// Downloaded simulator builds (S17, S18).
     Simulators,
+    /// Flight and process logs, separate from builds and saved state.
+    SimulatorLogs,
+    /// Saved parameters, missions and other simulator working files.
+    SimulatorData,
     /// Parameter definition sets, downloaded and added (S67).
     Parameters,
     /// Copies of vehicles' files, by vehicle (S121, ADR-0027 F5).
@@ -76,7 +80,7 @@ pub enum StorageCategory {
 }
 
 impl StorageCategory {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Tlogs,
         Self::EventLog,
         Self::Database,
@@ -87,13 +91,18 @@ impl StorageCategory {
         Self::Simulators,
         Self::Parameters,
         Self::VehicleFiles,
+        Self::SimulatorLogs,
+        Self::SimulatorData,
     ];
 
     /// Whether old files may be deleted by a policy. The event log and the
     /// database are the record itself and never are.
     #[must_use]
     pub const fn deletable(self) -> bool {
-        matches!(self, Self::Tlogs | Self::Backups | Self::Logs | Self::Video)
+        matches!(
+            self,
+            Self::Tlogs | Self::Backups | Self::Logs | Self::Video | Self::SimulatorLogs
+        )
     }
 }
 
@@ -107,11 +116,18 @@ pub struct Settings {
     /// Unset: the command line's choice (`--on-last-client-closed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_policy: Option<ClosePolicy>,
-    /// Delete files of these categories older than this many days. Nothing
-    /// is deleted unless a category is here (ADR-0007: storage is the user's
-    /// decision).
+    /// Optional age policies for ordinary storage categories (ADR-0007).
+    /// Simulator log retention is separate so legacy settings and an
+    /// explicit no-age-limit choice remain distinguishable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub auto_delete_days: BTreeMap<StorageCategory, u32>,
+    /// Missing in older checkpoints means seven days; null explicitly keeps logs.
+    /// Projected through autoDelete on the wire, so Keep survives restarts.
+    #[serde(default = "simulator_log_retention")]
+    pub simulator_log_retention_days: Option<u32>,
+    /// A total log budget; zero explicitly disables the size limit.
+    #[serde(default = "simulator_log_budget")]
+    pub simulator_log_max_bytes: u64,
     /// The desktop shell, once it has registered: `uxduck open` starts it
     /// instead of a browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,12 +183,13 @@ pub struct Settings {
     /// away. Empty, as it starts, is off; set only at this computer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_control: Vec<crate::domain::command::CommandClass>,
-    /// "Phones and tablets on this network" (S97): the address of this
-    /// computer that UXDuck also listens on, so a phone on the same network
-    /// can open it and pair. Unset, as it starts, nothing listens beyond
-    /// this computer; set only at this computer.
+    /// Legacy first network address (S97), retained for old settings and clients.
+    /// Set only at this computer, alongside `network_addresses`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_address: Option<String>,
+    /// Explicitly selected network addresses; empty uses the legacy address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_addresses: Vec<String>,
     /// How long a vehicle may go unsupervised before UXDuck stops its
     /// ground station heartbeat to it (S81, ADR-0003 C16), in seconds.
     #[serde(default = "grace")]
@@ -264,6 +281,8 @@ impl Default for Settings {
         Self {
             close_policy: None,
             auto_delete_days: BTreeMap::new(),
+            simulator_log_retention_days: simulator_log_retention(),
+            simulator_log_max_bytes: simulator_log_budget(),
             shell_path: None,
             launch_action: LaunchAction::default(),
             usage_analytics: true,
@@ -279,6 +298,7 @@ impl Default for Settings {
             watch_from_account: true,
             remote_control: Vec::new(),
             network_address: None,
+            network_addresses: Vec::new(),
             supervision_grace_s: 10,
             gcs_system_id: 255,
             store_flights: true,
@@ -291,5 +311,45 @@ impl Default for Settings {
             terrain_areas: Vec::new(),
             version: 0,
         }
+    }
+}
+
+const fn simulator_log_budget() -> u64 {
+    5_000_000_000
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Serde needs Some(7) for an absent field, while explicit null means no age limit"
+)]
+const fn simulator_log_retention() -> Option<u32> {
+    Some(7)
+}
+
+#[cfg(test)]
+mod simulator_retention_tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_default_to_seven_days_and_explicit_keep_survives_serialization() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("simulatorLogRetentionDays");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("simulatorLogMaxBytes");
+        let old: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(old.simulator_log_retention_days, Some(7));
+        assert_eq!(old.simulator_log_max_bytes, 5_000_000_000);
+        let mut keep = old;
+        keep.simulator_log_retention_days = None;
+        keep.simulator_log_max_bytes = 0;
+        let reloaded: Settings =
+            serde_json::from_value(serde_json::to_value(keep).unwrap()).unwrap();
+        assert_eq!(reloaded.simulator_log_retention_days, None);
+        assert_eq!(reloaded.simulator_log_max_bytes, 0);
     }
 }

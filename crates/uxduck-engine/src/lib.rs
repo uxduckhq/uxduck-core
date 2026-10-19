@@ -17,15 +17,18 @@ pub mod account;
 pub mod agent;
 pub mod analytics;
 mod app;
+mod app_update;
 pub mod approvals;
 pub mod commands;
 pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
+mod display;
 pub mod edge;
 pub mod feedback;
 pub mod finds;
 mod flight_time;
+mod flight_usage;
 mod forwarding;
 mod grounded;
 mod history;
@@ -41,6 +44,7 @@ mod messages;
 pub mod mission_history;
 pub mod pairing;
 pub mod param_definitions;
+mod photos;
 pub mod plan_checks;
 pub mod plan_examples;
 pub mod plan_files;
@@ -284,6 +288,7 @@ pub struct Engine {
     remote_viewing: remote_view::RemoteViewing,
     /// A client asked for a restart.
     restart: bool,
+    app_update: app_update::Updates,
     /// A client asked the daemon to stop.
     stop: bool,
     /// A client asked a development build to panic (S32).
@@ -291,6 +296,8 @@ pub struct Engine {
     plugin_host: Box<dyn runtime::PluginPort>,
     /// Product analytics; nothing until the composition root sets it.
     analytics: Box<dyn runtime::AnalyticsPort>,
+    /// Bounded, transient browser task outcomes, drained once across windows.
+    engagement: Vec<uxduck_contracts::dto::analytics::AppEvent>,
     /// Feedback reports; nothing until the composition root sets it.
     feedback: Box<dyn feedback::FeedbackPort>,
     /// Feedback requests answered when the root reports back, by report id.
@@ -367,6 +374,7 @@ pub struct Engine {
     flights: grounded::Flights,
     /// Each vehicle's time armed and in the air (S103).
     flight_times: flight_time::FlightTimes,
+    flight_usage: flight_usage::FlightUsage,
     state: State,
     since_checkpoint: u64,
     /// Threads with a turn in progress, and that turn's id.
@@ -381,6 +389,7 @@ pub struct Engine {
     streaming: HashMap<String, String>,
     next_connection: u64,
     connections: BTreeMap<ConnectionId, Connection>,
+    display: display::DisplayRelay,
     tracers: BTreeSet<ConnectionId>,
     /// Live telemetry by vehicle id; not journaled.
     telemetry: BTreeMap<String, uxduck_core::domain::telemetry::VehicleTelemetry>,
@@ -450,6 +459,7 @@ impl Engine {
             remote_viewing: remote_view::RemoteViewing::default(),
             live: controllers::Live::default(),
             restart: false,
+            app_update: app_update::Updates::default(),
             stop: false,
             panic: false,
             plugin_host: ports.plugins,
@@ -489,6 +499,8 @@ impl Engine {
             messages: messages::Messages::default(),
             flights: grounded::Flights::default(),
             flight_times: flight_time::FlightTimes::default(),
+            flight_usage: flight_usage::FlightUsage::default(),
+            engagement: Vec::new(),
             state: loaded.state,
             since_checkpoint: 0,
             turns: BTreeMap::new(),
@@ -498,6 +510,7 @@ impl Engine {
             streaming: HashMap::new(),
             next_connection: 0,
             connections: BTreeMap::new(),
+            display: display::DisplayRelay::default(),
             tracers: BTreeSet::new(),
             telemetry: BTreeMap::new(),
             telemetry_history: telemetry_window::Window::default(),
@@ -607,6 +620,11 @@ impl Engine {
     /// window has been open, so starting at login keeps running.
     #[must_use]
     pub fn should_quit(&self) -> bool {
+        // A deliberate queued update is background work even with the menu
+        // bar hidden. Explicit Quit still cancels it through daemon/stop.
+        if self.app_update_pending() {
+            return false;
+        }
         let window_open = self.connections.values().any(|c| {
             c.admitted
                 .as_ref()
@@ -623,6 +641,7 @@ impl Engine {
     }
 
     pub fn disconnect(&mut self, id: ConnectionId) {
+        self.disconnect_display(id);
         self.abandon_approvals(id);
         self.release_claims_of(id);
         self.release_leases_of(id);
@@ -649,6 +668,7 @@ impl Engine {
     /// One frame from a connection: tap it, dispatch it, reply.
     pub fn receive(&mut self, id: ConnectionId, text: &str) {
         let now = self.clock.now_us();
+        self.expire_display_pulls(now);
         let parsed = trace::parse(text);
         if parsed.kind == FrameKind::Request
             && let (Some(request_id), Some(connection)) =
@@ -1054,12 +1074,14 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         history_entry: None,
         video_source: None,
         video_recording: None,
+        video_photo: None,
         practice_attempt: None,
         file_transfer: None,
     }
 }
 
 /// The wire form of one journal change.
+#[allow(clippy::too_many_lines, reason = "one arm per kind of change")]
 fn entity_changes(change: &Change) -> Vec<EntityChange> {
     match change {
         Change::OperatorUpserted { operator } => vec![EntityChange {
@@ -1142,7 +1164,12 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         change @ (Change::VideoSourceUpserted { .. } | Change::VideoSourceRemoved { .. }) => {
             video::entity_changes(change)
         }
-        change @ Change::VideoRecordingUpserted { .. } => recordings::entity_changes(change),
+        change @ (Change::VideoRecordingUpserted { .. } | Change::VideoRecordingRemoved { .. }) => {
+            recordings::entity_changes(change)
+        }
+        change @ (Change::VideoPhotoUpserted { .. } | Change::VideoPhotoRemoved { .. }) => {
+            photos::entity_changes(change)
+        }
         // Settings need the engine's default close policy, so `broadcast`
         // builds them; sync is read with `sync/get`, not pushed (S16).
         Change::SettingsChanged { .. }

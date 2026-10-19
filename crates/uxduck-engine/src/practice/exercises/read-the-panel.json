@@ -32,7 +32,7 @@
     },
     {
       "text": "Find its mode and answer.",
-      "hint": "The mode is at the top of the Control tab, and in Telemetry.",
+      "hint": "The mode is at the top of the Cockpit tab, and in Telemetry.",
       "hintAfterS": 60,
       "all": [{ "check": "answered", "question": "mode" }]
     },

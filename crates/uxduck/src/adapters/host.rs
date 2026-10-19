@@ -304,12 +304,58 @@ impl System for Host {
         super::storage::report(&self.data_dir)
     }
 
+    fn reveal_data_dir(&mut self) -> Result<String, String> {
+        super::browser::reveal(&self.data_dir, None)
+            .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
+        Ok(self.data_dir.display().to_string())
+    }
+
     fn delete_older_than(
         &mut self,
         category: uxduck_core::domain::settings::StorageCategory,
         cutoff_us: u64,
     ) -> uxduck_engine::runtime::Deleted {
+        if category == uxduck_core::domain::settings::StorageCategory::SimulatorLogs {
+            return self.simulators.with_active(
+                |active| match super::storage::delete_simulator_logs(
+                    &self.data_dir,
+                    active,
+                    Some(cutoff_us),
+                ) {
+                    Ok(deleted) => deleted,
+                    Err(error) => {
+                        tracing::error!(%error, "simulator log retention failed");
+                        uxduck_engine::runtime::Deleted::default()
+                    }
+                },
+            );
+        }
         super::storage::delete_older(&self.data_dir, category, cutoff_us)
+    }
+
+    fn simulator_logs(
+        &self,
+    ) -> Result<Vec<uxduck_contracts::dto::settings::SimulatorLogUsage>, String> {
+        self.simulators
+            .with_active(|active| super::storage::simulator_logs(&self.data_dir, active))
+    }
+
+    fn limit_simulator_logs(&mut self, max_bytes: u64) -> uxduck_engine::runtime::Deleted {
+        self.simulators.with_active(|active| {
+            match super::storage::limit_simulator_logs(&self.data_dir, active, max_bytes) {
+                Ok(deleted) => deleted,
+                Err(error) => {
+                    tracing::error!(%error, "simulator log size cleanup failed");
+                    uxduck_engine::runtime::Deleted::default()
+                }
+            }
+        })
+    }
+
+    fn clear_simulator_logs(&mut self) -> Result<(), String> {
+        self.simulators.with_active(|active| {
+            super::storage::delete_simulator_logs(&self.data_dir, active, None).map(|_| ())
+        })
     }
 
     fn sim_binaries(&self) -> Vec<uxduck_contracts::dto::sim::SimBinary> {

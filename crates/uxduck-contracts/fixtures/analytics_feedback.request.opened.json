@@ -1,0 +1,4 @@
+{
+  "method": "analytics/feedback",
+  "params": { "event": "feedback_opened", "surface": "desktop" }
+}

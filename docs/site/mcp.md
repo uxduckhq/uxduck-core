@@ -87,7 +87,7 @@ The result includes coverage, missing keys and `historyTruncated`. Returned samp
 
 ## Diagnose forwarding and loops
 
-In the app, open a vehicle’s **Details → Forwarding → View evidence** for the same recorded routing and loop evidence. Local port owners and the last loop’s time appear beside the destination; expand packet details, socket details or daemon logs for technical evidence. The forwarding rows on Vehicles have the same controls.
+In the app, open a vehicle’s **Details → Forwarding → View evidence** for the same recorded routing and loop evidence. Local port owners and the last loop’s time appear beside the destination; expand packet details, socket details or daemon logs for technical evidence. The forwarding rows on Fleet have the same controls.
 
 Ask: **“Explain why forwarding stopped for this vehicle. Resolve the connection in the warning, show the packets that triggered the decision, and identify the local program at the destination.”**
 

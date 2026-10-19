@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "event": "task_completed", "task_type": "parameter_written", "vehicle_kind": "simulated" },
+    { "event": "task_failed", "task_type": "mission_uploaded", "vehicle_kind": "unknown" }
+  ]
+}

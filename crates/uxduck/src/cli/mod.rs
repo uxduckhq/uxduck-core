@@ -612,10 +612,12 @@ pub enum SimCommand {
     /// Starts a simulated vehicle and prints its link. It appears as a
     /// vehicle once it has started.
     Start {
-        /// `multicopter`, `plane`, `vtol`, `rover`, `boat`, `submarine` or `airship`.
+        /// `multicopter`, `plane`, `vtol`, `rover`, `boat`, `submarine`, `airship`
+        /// or `jet`.
         #[arg(long, default_value = "multicopter")]
         vehicle: String,
-        /// `ardupilot` or `px4` (macOS and Linux; not a boat, submarine or blimp).
+        /// `ardupilot` or `px4` (macOS and Linux; not a boat, submarine, blimp or
+        /// jet).
         #[arg(long, default_value = "ardupilot")]
         autopilot: String,
         /// Where it starts: `latitude,longitude`, with ground level and
@@ -961,7 +963,9 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Update {
             command: UpdateCommand::Check { url, public_key },
         }) => {
-            let key = public_key.as_deref().or(crate::update::PUBLIC_KEY);
+            let key = public_key
+                .as_deref()
+                .or(crate::update::APP_UPDATE_PUBLIC_KEY);
             return match crate::update::check(&url, key, &data_dir).await {
                 Ok(report) => {
                     println!("{report}");

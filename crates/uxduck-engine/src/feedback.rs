@@ -565,17 +565,27 @@ impl Engine {
         }
     }
 
-    /// "UXDuck 0.4.1 · desktop · Fly, map and vehicle open · 1 vehicle
-    /// (ArduPilot Copter, udp-listen)". The root puts the platform first.
+    /// "UXDuck 0.4.1 · Chrome 141 tab on UXDuck Desktop · window 1512×945 ·
+    /// map open · 1 vehicle (ArduPilot Copter, udp-listen)". The root puts
+    /// the platform first.
     fn context(&self, params: &FeedbackSendParams) -> String {
-        let surface = match params.surface {
-            Surface::Browser => "browser",
-            Surface::Desktop => "desktop",
+        // The page's own words: kept short, they are not checked.
+        let short = |s: &str| s.chars().take(40).collect::<String>();
+        let ui = &params.ui;
+        let surface = match (params.surface, &ui.shell, &ui.browser) {
+            (Surface::Desktop, Some(shell), _) => {
+                format!("UXDuck Desktop {} window", short(&shell.version))
+            }
+            (Surface::Desktop, None, _) => "UXDuck Desktop window".to_owned(),
+            (Surface::Browser, _, Some(browser)) => {
+                format!("{} tab on UXDuck Desktop", short(browser))
+            }
+            (Surface::Browser, _, None) => "browser tab on UXDuck Desktop".to_owned(),
         };
-        let mut parts = vec![
-            format!("UXDuck {}", params.ui.app_version),
-            surface.to_owned(),
-        ];
+        let mut parts = vec![format!("UXDuck {}", ui.app_version), surface];
+        if let Some(window) = &ui.window {
+            parts.push(format!("window {}", short(window)));
+        }
         if !params.ui.panes.is_empty() {
             parts.push(format!("{} open", params.ui.panes.join(", ")));
         }

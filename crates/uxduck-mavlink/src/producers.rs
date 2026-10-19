@@ -71,6 +71,7 @@ pub fn core_producers() -> Vec<Box<dyn Producer>> {
         Box::new(Servos),
         Box::new(Health),
         Box::new(Terrain),
+        Box::new(Gimbal),
     ]
 }
 
@@ -853,6 +854,83 @@ fn vibration(axes: [f32; 3], clipping: [u32; 3], from: (&str, u8, u64), out: &mu
     );
 }
 
+/// Where the vehicle's gimbal points (maintainer, 2026-10-18), so the 3D
+/// map's Drone camera can look that way without KLV: its pitch, up
+/// positive, and its yaw, from the nose and right positive, or from north
+/// when that is what the gimbal says.
+#[derive(Debug)]
+pub struct Gimbal;
+
+/// `GIMBAL_DEVICE_FLAGS`: yaw held to north, and which frame the yaw is in.
+const GIMBAL_YAW_LOCK: u16 = 16;
+const GIMBAL_YAW_IN_VEHICLE_FRAME: u16 = 128;
+const GIMBAL_YAW_IN_EARTH_FRAME: u16 = 256;
+
+impl Producer for Gimbal {
+    fn id(&self) -> &'static str {
+        "gimbal"
+    }
+
+    fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let from = (self.id(), component_id, now_us);
+        match *message {
+            Message::GimbalAttitude { flags, q } => {
+                if q.iter().any(|c| !c.is_finite()) {
+                    return;
+                }
+                let [w, x, y, z] = q.map(f64::from);
+                let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees();
+                let yaw = (2.0 * (w * z + x * y))
+                    .atan2(1.0 - 2.0 * (y * y + z * z))
+                    .to_degrees();
+                out.item(
+                    "gimbal.pitch_deg",
+                    "Gimbal pitch",
+                    Unit::Degree,
+                    pitch,
+                    from,
+                );
+                // Neither frame said (before MAVLink had the flags): north
+                // only while it holds its yaw there.
+                let north = flags & GIMBAL_YAW_IN_EARTH_FRAME != 0
+                    || (flags & GIMBAL_YAW_IN_VEHICLE_FRAME == 0 && flags & GIMBAL_YAW_LOCK != 0);
+                if north {
+                    out.item(
+                        "gimbal.heading_deg",
+                        "Gimbal heading",
+                        Unit::Degree,
+                        yaw.rem_euclid(360.0),
+                        from,
+                    );
+                } else {
+                    out.item("gimbal.yaw_deg", "Gimbal yaw", Unit::Degree, yaw, from);
+                }
+            }
+            Message::MountStatus {
+                pitch_cdeg,
+                yaw_cdeg,
+            } => {
+                let degrees = |cdeg: i32| f64::from(cdeg) / 100.0;
+                out.item(
+                    "gimbal.pitch_deg",
+                    "Gimbal pitch",
+                    Unit::Degree,
+                    degrees(pitch_cdeg),
+                    from,
+                );
+                out.item(
+                    "gimbal.yaw_deg",
+                    "Gimbal yaw",
+                    Unit::Degree,
+                    degrees(yaw_cdeg),
+                    from,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn rangefinder(metres: f64, from: (&str, u8, u64), out: &mut Produced) {
     out.item(
         "rangefinder.distance_m",
@@ -952,6 +1030,59 @@ mod tests {
             .into_iter()
             .map(|i| (i.key, i.value.unwrap_or(f64::NAN)))
             .collect()
+    }
+
+    #[test]
+    fn a_gimbal_says_where_it_points_from_the_nose_or_from_north() {
+        // Tilted 30° down and turned 45° right: yaw 45°, then pitch -30°.
+        let (half_yaw, half_pitch) = (45f64.to_radians() / 2.0, -30f64.to_radians() / 2.0);
+        #[allow(clippy::cast_possible_truncation, reason = "a test quaternion")]
+        let q = [
+            (half_yaw.cos() * half_pitch.cos()) as f32,
+            (-half_yaw.sin() * half_pitch.sin()) as f32,
+            (half_yaw.cos() * half_pitch.sin()) as f32,
+            (half_yaw.sin() * half_pitch.cos()) as f32,
+        ];
+        let near = |items: &[(String, f64)], key: &str, want: f64| {
+            let got = items.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
+            assert!(
+                got.is_some_and(|v| (v - want).abs() < 0.01),
+                "{key}: {got:?}"
+            );
+        };
+        let nose = produced(&Message::GimbalAttitude { flags: 128, q });
+        near(&nose, "gimbal.pitch_deg", -30.0);
+        near(&nose, "gimbal.yaw_deg", 45.0);
+        assert!(!nose.iter().any(|(k, _)| k == "gimbal.heading_deg"));
+        let north = produced(&Message::GimbalAttitude { flags: 256, q });
+        near(&north, "gimbal.heading_deg", 45.0);
+        assert!(!north.iter().any(|(k, _)| k == "gimbal.yaw_deg"));
+        // Older flags: north only while the yaw is locked there.
+        near(
+            &produced(&Message::GimbalAttitude { flags: 16, q }),
+            "gimbal.heading_deg",
+            45.0,
+        );
+        near(
+            &produced(&Message::GimbalAttitude { flags: 0, q }),
+            "gimbal.yaw_deg",
+            45.0,
+        );
+        // No attitude yet: nothing.
+        let unknown = [f32::NAN; 4];
+        assert!(
+            produced(&Message::GimbalAttitude {
+                flags: 128,
+                q: unknown
+            })
+            .is_empty()
+        );
+        let mount = produced(&Message::MountStatus {
+            pitch_cdeg: -9000,
+            yaw_cdeg: -1250,
+        });
+        near(&mount, "gimbal.pitch_deg", -90.0);
+        near(&mount, "gimbal.yaw_deg", -12.5);
     }
 
     #[test]

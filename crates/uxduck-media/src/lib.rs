@@ -5,16 +5,24 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aac;
 pub mod au;
+pub mod audio;
 pub mod bits;
 pub mod klv;
 pub mod mp4;
 pub mod nal;
+pub mod opus;
+pub mod photo;
 pub mod record;
 pub mod replay;
+pub mod rtcp;
 pub mod rtp;
+pub mod rtp_audio;
 pub mod rtp_klv;
 pub mod source;
 pub mod ts;
+pub mod tsmux;
+pub mod tsrecord;
 pub mod udp;
 pub mod wire;

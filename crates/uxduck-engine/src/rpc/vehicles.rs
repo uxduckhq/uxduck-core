@@ -965,6 +965,12 @@ pub(crate) fn remove_link(
     let simulated = engine.state.links[id].kind.is_simulator();
     for mut vehicle in on_link {
         if !simulated || vehicle.saved {
+            // A stopped simulator cannot remain armed. Its saved profile
+            // outlives the simulation link, so preserve no armed evidence
+            // that could be mistaken for disconnected hardware later.
+            if simulated {
+                vehicle.armed = false;
+            }
             vehicle.presence = uxduck_core::domain::vehicle::Presence::Offline;
             vehicle.version += 1;
             engine.commit(connection, Change::VehicleUpserted { vehicle });

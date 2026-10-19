@@ -6,8 +6,9 @@
 //! catalogue's files are zstd-compressed and decompressed as they arrive;
 //! the compressed bytes are kept in `.download` so a broken download
 //! resumes, and they are what the checksum is of. Deleting a
-//! build removes that folder. Nothing is fetched until the simulation page
-//! asks.
+//! build removes that folder. The one build Start flying needs downloads
+//! once at start-up when there is none ([`Catalogue::prefetch`]); any other
+//! waits until the simulation page asks.
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -26,6 +27,10 @@ use super::{BUILD_FILE, Simulators};
 
 /// Where the catalogue is published (R2, `docs/plan/review.md` S18).
 pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/catalogue.json";
+
+/// Beside the installed builds once one was downloaded unasked; it names
+/// that build.
+const PREFETCHED_FILE: &str = "prefetched";
 
 /// This machine, as the catalogue names platforms: `aarch64-macos`.
 #[must_use]
@@ -154,18 +159,64 @@ impl Catalogue {
     fn fetch(self: &Arc<Self>) {
         self.lock().fetch = Fetch::Loading;
         let this = self.clone();
+        self.runtime.spawn(async move { this.load().await });
+    }
+
+    async fn load(&self) {
+        let fetched = self.fetch_verified().await;
+        let mut state = self.lock();
+        match fetched {
+            Ok(builds) => {
+                state.builds = builds;
+                state.fetch = Fetch::Ready;
+            }
+            Err(why) => {
+                tracing::warn!(%why, "cannot read the simulator catalogue");
+                state.fetch = Fetch::Failed(why);
+            }
+        }
+    }
+
+    /// Downloads the newest build of `program` in the background when
+    /// UXDuck has none, so Start flying finds it ready (maintainer,
+    /// 2026-10-18: a new person wants a simulation first). Once only: a
+    /// marker beside the builds keeps a deleted build deleted. A download
+    /// that breaks resumes when Start flying asks for the build.
+    pub fn prefetch(self: &Arc<Self>, program: &'static str) {
+        let marker = self.simulators.catalogue_dir().join(PREFETCHED_FILE);
+        if self.url.is_none() || self.key.is_none() || marker.exists() {
+            return;
+        }
+        let this = self.clone();
         self.runtime.spawn(async move {
-            let fetched = this.fetch_verified().await;
-            let mut state = this.lock();
-            match fetched {
-                Ok(builds) => {
-                    state.builds = builds;
-                    state.fetch = Fetch::Ready;
+            let simulators = this.simulators.clone();
+            let builds = tokio::task::spawn_blocking(move || simulators.binaries())
+                .await
+                .unwrap_or_default();
+            if builds.iter().any(|b| b.program == program) {
+                return;
+            }
+            if !matches!(this.lock().fetch, Fetch::Ready) {
+                this.lock().fetch = Fetch::Loading;
+                this.load().await;
+            }
+            let newest = {
+                let state = this.lock();
+                state
+                    .builds
+                    .iter()
+                    .filter(|b| b.firmware == "ardupilot" && b.program == program)
+                    .max_by(|a, b| by_version(&a.version, &b.version))
+                    .map(|b| b.id.clone())
+            };
+            let Some(id) = newest else { return };
+            match this.download(&id) {
+                Ok(()) => {
+                    tracing::info!(build = %id, "downloading a simulator before it is asked for");
+                    let _ = std::fs::create_dir_all(this.simulators.catalogue_dir());
+                    let _ = std::fs::write(&marker, &id);
                 }
-                Err(why) => {
-                    tracing::warn!(%why, "cannot read the simulator catalogue");
-                    state.fetch = Fetch::Failed(why);
-                }
+                Err(why) => tracing::warn!(%why, "cannot download a simulator in advance"),
             }
         });
     }
@@ -473,6 +524,16 @@ impl std::io::Write for Decompress {
     fn flush(&mut self) -> std::io::Result<()> {
         self.0.flush()
     }
+}
+
+/// Compares versions by their numbers: 4.7.10 is newer than 4.7.9.
+fn by_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let numbers = |v: &str| -> Vec<u64> {
+        v.split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse().ok())
+            .collect()
+    };
+    numbers(a).cmp(&numbers(b))
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -9,7 +9,7 @@
   "start": {},
   "steps": [
     {
-      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
       "hint": "Go to sends it to the place you clicked and holds it there.",
       "hintAfterS": 45,
       "all": [
@@ -18,7 +18,7 @@
       ]
     },
     {
-      "text": "Choose BRAKE in the Mode menu in the Control tab.",
+      "text": "Choose BRAKE in the Mode menu in the Cockpit tab.",
       "hint": "Brake stops it where it is and holds it there.",
       "hintAfterS": 45,
       "all": [
@@ -27,7 +27,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home and lands it there by itself.",
       "hintAfterS": 45,
       "all": [
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab, or wait for it to land at home.",
+      "text": "Press Land in the Cockpit tab, or wait for it to land at home.",
       "hint": "Land brings it straight down where it is. This step ticks once it's on the ground.",
       "hintAfterS": 45,
       "all": [{ "check": "landed" }]

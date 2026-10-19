@@ -42,6 +42,8 @@ quick-xml = "0.37"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rust-embed = { version = "8", features = ["include-exclude", "mime-guess"] }
 semver = "1"
+# Canonical paths without Windows' `\\?\` prefix: Electron started from one failed to load its page.
+dunce = "1"
 # Process CPU time and memory for `cargo xtask perf` (S24).
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 mavio = { version = "0.5.10", default-features = false, features = ["std", "dlct-ardupilotmega"] }
@@ -56,6 +58,8 @@ tar = { version = "0.4", default-features = false }
 zstd = { version = "0.13", default-features = false }
 md-5 = "0.10"
 base64 = "0.22"
+# The computer's time zone, for recordings named by local time (S150).
+jiff = "0.2"
 thiserror = "2"
 serialport = { version = "4.10", default-features = false }
 # Gamepads (S12); on Linux it needs libudev.

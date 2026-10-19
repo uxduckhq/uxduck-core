@@ -196,6 +196,7 @@ pub fn router(
         .route("/rpc", get(rpc))
         .route("/video", get(video_socket))
         .route("/recordings/{file}", get(recording))
+        .route("/photos/{file}", get(photo))
         .route("/api/vehicle-files/{file}", get(vehicle_file))
         // A page's start (S109): never with a session, since the pairing
         // screen is a start too; the guard keeps other sites out.
@@ -235,6 +236,7 @@ pub fn network_router(
         .route("/api/maps/relay", get(map_relay))
         // Not live video: a page on plain HTTP cannot decode it (S97).
         .route("/recordings/{file}", get(recording))
+        .route("/photos/{file}", get(photo))
         .route("/api/vehicle-files/{file}", get(vehicle_file))
         .route("/interface/ready", post(interface_ready))
         .route("/interface/boot-failed", post(interface_boot_failed))
@@ -819,22 +821,75 @@ async fn video_socket(
     })
 }
 
+/// Recordings converted for playback one at a time (S151).
+static CONVERTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A recording to play (S40), with the token `video/playback` gave. Range
-/// requests work, so a `<video>` can seek.
+/// requests work, so a `<video>` can seek; one kept as MPEG-TS plays as its
+/// MP4 copy, and gives its original as `<id>.ts` (S151).
 async fn recording(
     State(state): State<AppState>,
     Path(file): Path<String>,
     Query(query): Query<VideoQuery>,
     request: Request,
 ) -> Response {
-    let Some(id) = state.video.playback(&query.token) else {
+    let Some((id, name)) = state.video.playback(&query.token) else {
         return (StatusCode::UNAUTHORIZED, "ask for the recording first").into_response();
     };
-    if file != format!("{id}.mp4") {
+    let dir = state.video.dir().to_owned();
+    let kept_as_ts = std::path::Path::new(&name)
+        .extension()
+        .is_some_and(|e| e == "ts");
+    let path = if kept_as_ts && file == format!("{id}.ts") {
+        // The original, for Save… (S151).
+        dir.join(&name)
+    } else if file != format!("{id}.mp4") {
+        return StatusCode::NOT_FOUND.into_response();
+    } else if kept_as_ts {
+        // Played as MP4: the copy in the cache, made now if it isn't there.
+        let mp4 = crate::video::playback::cached(&crate::video::playback::cache_dir(&dir), &id);
+        let _one_at_a_time = CONVERTING.lock().await;
+        let (ts, to) = (dir.join(&name), mp4.clone());
+        let made = tokio::task::spawn_blocking(move || {
+            crate::video::playback::convert(&ts, &to)?;
+            crate::video::playback::mark_used(&to);
+            Ok::<(), std::io::Error>(())
+        })
+        .await;
+        if !matches!(made, Ok(Ok(()))) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the recording could not be prepared to play",
+            )
+                .into_response();
+        }
+        mp4
+    } else {
+        dir.join(&name)
+    };
+    match ServeFile::new(path).try_call(request).await {
+        Ok(response) => response.map(Body::new).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A photo from the video (S144), with the address `video/photo/show` gave.
+async fn photo(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    Query(query): Query<VideoQuery>,
+    request: Request,
+) -> Response {
+    let Some((id, name)) = state.video.photo(&query.token) else {
+        return (StatusCode::UNAUTHORIZED, "ask for the photo first").into_response();
+    };
+    if file != format!("{id}.jpg") {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let path = crate::video::recorder::mp4_path(state.video.dir(), &id);
-    match ServeFile::new(path).try_call(request).await {
+    match ServeFile::new(state.video.dir().join(name))
+        .try_call(request)
+        .await
+    {
         Ok(response) => response.map(Body::new).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

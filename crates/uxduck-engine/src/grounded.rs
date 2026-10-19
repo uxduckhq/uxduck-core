@@ -36,10 +36,24 @@ pub(crate) struct Flights {
     crashed_us: BTreeMap<String, u64>,
 }
 
+/// Hitting the ground at least this fast, in metres a second, is a crash.
+/// A copter lands at 0.5 (`LAND_SPD_MS`), and one let down without throttle
+/// at 2.5 at most (`PILOT_SPD_UP`, which `PILOT_SPD_DN` takes by default).
+const HARD_HIT_MPS: f64 = 3.0;
+
 /// Whether an autopilot's message reports a crash: `ArduCopter`'s "Crash:
-/// Disarming", `ArduPlane`'s "Crash detected" (with or without an action).
+/// Disarming", `ArduPlane`'s "Crash detected" (with or without an action),
+/// or the simulator's "SIM Hit ground at 3.983069 m/s" (maintainer,
+/// 2026-10-17) when that fast. The simulator says it at every touchdown,
+/// gentle ones too, with the speed straight down.
 pub(crate) fn is_crash(text: &str) -> bool {
-    text.starts_with("Crash")
+    if text.starts_with("Crash") {
+        return true;
+    }
+    text.strip_prefix("SIM Hit ground at ")
+        .and_then(|rest| rest.strip_suffix(" m/s"))
+        .and_then(|speed| speed.trim().parse::<f64>().ok())
+        .is_some_and(|speed| speed.abs() >= HARD_HIT_MPS)
 }
 
 fn condition(vehicle_id: &str) -> String {
@@ -121,6 +135,8 @@ impl Engine {
             )
         };
         self.raise_or_update(Raise {
+            // The web tells a crash by this warning on `grounded:` and
+            // shows it over the maps (CrashFlash.tsx).
             severity: if crashed {
                 Severity::Warning
             } else {
@@ -145,5 +161,23 @@ impl Engine {
             condition: Some(condition(&vehicle.id)),
             report: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_crash;
+
+    #[test]
+    fn crash_messages() {
+        assert!(is_crash("Crash: Disarming"));
+        assert!(is_crash("Crash detected"));
+        assert!(is_crash("SIM Hit ground at 3.983069 m/s"));
+        assert!(is_crash("SIM Hit ground at 12.500000 m/s"));
+        // A landing, or a let-down without throttle, is no crash.
+        assert!(!is_crash("SIM Hit ground at 0.512345 m/s"));
+        assert!(!is_crash("SIM Hit ground at 2.499000 m/s"));
+        assert!(!is_crash("SIM Hit ground at fast m/s"));
+        assert!(!is_crash("Land complete"));
     }
 }

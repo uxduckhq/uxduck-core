@@ -960,6 +960,13 @@ impl Engine {
             self.launch_order_done(order_id, status == WriteStatus::Accepted, detail);
             return;
         }
+        if write.reply.is_some() {
+            self.track_task(
+                &write.vehicle_id,
+                uxduck_contracts::dto::analytics::EngagementTask::ParameterWritten,
+                status == WriteStatus::Accepted,
+            );
+        }
         let Some(parameter) = self.state.parameters.get(&key).cloned() else {
             return;
         };
@@ -1110,6 +1117,13 @@ impl Engine {
         // How the mission came, for its record (S134): a plan's is recorded
         // once read back, any other upload now.
         let plain = !self.transfers.plan_jobs.contains_key(order_id);
+        if plain && upload.reply.is_some() && upload.kind == 0 {
+            self.track_task(
+                &upload.vehicle_id,
+                uxduck_contracts::dto::analytics::EngagementTask::MissionUploaded,
+                result.is_ok(),
+            );
+        }
         if result.is_ok() && upload.kind == 0 {
             let origin = match self.transfers.plan_jobs.get(order_id) {
                 Some(_) if upload.actor.client_id == crate::launch::ACTOR => MissionOrigin::Example,
@@ -1459,6 +1473,11 @@ impl Engine {
         let Some((connection, request_id)) = job.reply else {
             return;
         };
+        self.track_task(
+            &job.vehicle_id,
+            uxduck_contracts::dto::analytics::EngagementTask::PlanVerified,
+            status == PlanUploadStatus::Verified,
+        );
         let mission = MissionDto::from(&self.mission(&job.vehicle_id));
         // A mission from history (S134) has no plan.
         let result = match self.state.plans.get(&job.plan_id) {

@@ -69,6 +69,8 @@ impl From<s::StorageCategory> for dto::StorageCategory {
             s::StorageCategory::Plugins => Self::Plugins,
             s::StorageCategory::Video => Self::Video,
             s::StorageCategory::Simulators => Self::Simulators,
+            s::StorageCategory::SimulatorLogs => Self::SimulatorLogs,
+            s::StorageCategory::SimulatorData => Self::SimulatorData,
             s::StorageCategory::Parameters => Self::Parameters,
             s::StorageCategory::VehicleFiles => Self::VehicleFiles,
         }
@@ -86,6 +88,8 @@ impl From<dto::StorageCategory> for s::StorageCategory {
             dto::StorageCategory::Plugins => Self::Plugins,
             dto::StorageCategory::Video => Self::Video,
             dto::StorageCategory::Simulators => Self::Simulators,
+            dto::StorageCategory::SimulatorLogs => Self::SimulatorLogs,
+            dto::StorageCategory::SimulatorData => Self::SimulatorData,
             dto::StorageCategory::Parameters => Self::Parameters,
             dto::StorageCategory::VehicleFiles => Self::VehicleFiles,
         }
@@ -124,7 +128,16 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
                 category: (*category).into(),
                 days: *days,
             })
+            .chain(
+                settings
+                    .simulator_log_retention_days
+                    .map(|days| dto::AutoDelete {
+                        category: dto::StorageCategory::SimulatorLogs,
+                        days,
+                    }),
+            )
             .collect(),
+        simulator_log_max_bytes: Some(settings.simulator_log_max_bytes),
         shell_path: settings.shell_path.clone(),
         launch_action: Some(settings.launch_action.into()),
         usage_analytics: settings.usage_analytics,
@@ -141,6 +154,11 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
             .map(|c| (*c).into())
             .collect(),
         network_address: settings.network_address.clone(),
+        network_addresses: if settings.network_addresses.is_empty() {
+            settings.network_address.iter().cloned().collect()
+        } else {
+            settings.network_addresses.clone()
+        },
         supervision_grace_s: settings.supervision_grace_s,
         gcs_system_id: settings.gcs_system_id,
         store_flights: settings.store_flights,

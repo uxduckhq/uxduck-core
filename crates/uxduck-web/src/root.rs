@@ -16,7 +16,7 @@ use uxduck_contracts::dto::inspect::{
 use uxduck_contracts::dto::param_definitions::CatalogueSet;
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
-use uxduck_core::domain::link::{Link, LinkKind, LinkStatus, SimVehicle};
+use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, LinkStatus, SimVehicle};
 use uxduck_core::domain::param_definitions::DefinitionSet;
 use uxduck_core::events::{Change, Event};
 use uxduck_core::policy::admission::Trust;
@@ -867,6 +867,13 @@ impl Browser {
                 self.apply(effects, outputs);
             }
             let reports = self.controls.input(event);
+            // A neutral report can now switch a following controller to
+            // its first vehicle. Publish this event's raw readings before
+            // the engine checks its mapping and airborne throttle gate.
+            if !reports.is_empty() {
+                *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) =
+                    self.controls.snapshot();
+            }
             self.report_controls(reports);
         }
         *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) = self.controls.snapshot();
@@ -937,6 +944,7 @@ impl Browser {
         if now.saturating_sub(self.last_expiry_us) >= EXPIRY_EVERY_US {
             self.last_expiry_us = now;
             self.engine.expire_approvals(now);
+            self.engine.expire_display_pulls(now);
             self.engine.expire_detached_claims(now);
         }
         let gone = self.controls.stale_keyboard_inputs(now);
@@ -1139,6 +1147,8 @@ fn start(link: &Link) -> Option<Order> {
         SimVehicle::Boat => ("rover", "motorboat"),
         SimVehicle::Submarine => ("sub", "vectored"),
         SimVehicle::Airship => ("blimp", "blimp"),
+        // ArduPlane's jet frame, with UXDuck's jet profile (S143).
+        SimVehicle::Jet => ("plane", JET_FRAME),
     };
     Some(Order::Start {
         link_id: link.id.clone(),

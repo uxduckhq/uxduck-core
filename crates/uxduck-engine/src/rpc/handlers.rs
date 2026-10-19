@@ -27,6 +27,12 @@ pub(crate) fn handle(
     connection: ConnectionId,
     request: ClientRequest,
 ) -> Result<Value, ApiError> {
+    if engine.app_update.installing {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "UXDuck is installing an update. Reconnect after it restarts.",
+        ));
+    }
     if let ClientRequest::Initialize(params) = &request {
         return initialize(engine, connection, params);
     }
@@ -150,6 +156,13 @@ pub(crate) fn handle(
         | ClientRequest::SerialList(_)) => {
             super::vehicles::handle(engine, connection, request, &granted)
         }
+        request @ (ClientRequest::ClientDisplayRegister(_)
+        | ClientRequest::ClientDisplayList(_)
+        | ClientRequest::ClientDisplayPull(_)
+        | ClientRequest::ClientDisplayReply(_)) => {
+            require(Read)?;
+            crate::display::handle(engine, connection, request)
+        }
         request @ (ClientRequest::ClientList(_)
         | ClientRequest::ClientSetCapabilities(_)
         | ClientRequest::ClientForget(_)
@@ -220,7 +233,13 @@ pub(crate) fn handle(
         | ClientRequest::PluginInstallShared(_)) => {
             crate::plugin_sync::handle(engine, connection, request, &granted, operator)
         }
-        request @ (ClientRequest::AnalyticsTrack(_) | ClientRequest::AnalyticsAlias(_)) => {
+        request @ (ClientRequest::AnalyticsTrack(_)
+        | ClientRequest::AnalyticsFeedback(_)
+        | ClientRequest::AnalyticsActiveTime(_)
+        | ClientRequest::AnalyticsTakeFlightTime(_)
+        | ClientRequest::AnalyticsTakeEngagement(_)
+        | ClientRequest::AnalyticsPerformance(_)
+        | ClientRequest::AnalyticsAlias(_)) => {
             crate::analytics::handle(engine, connection, request, operator)
         }
         ClientRequest::FeedbackSuggest(params) => {
@@ -236,6 +255,7 @@ pub(crate) fn handle(
             "only an operator client may change the daemon's server",
         )),
         request @ (ClientRequest::AccountGet(_)
+        | ClientRequest::AccountFlights(_)
         | ClientRequest::AccountEnvironment(_)
         | ClientRequest::AccountSetEnvironment(_)
         | ClientRequest::AccountSignIn(_)
@@ -323,14 +343,20 @@ pub(crate) fn handle(
         | ClientRequest::VideoList(_)
         | ClientRequest::VideoAssign(_)
         | ClientRequest::VideoWatch(_)
+        | ClientRequest::VideoMetadataWatch(_)
         | ClientRequest::VideoUnwatch(_)
         | ClientRequest::VideoAdd(_)
         | ClientRequest::VideoRemove(_)
         | ClientRequest::VideoRecord(_)
+        | ClientRequest::VideoRecordAll(_)
+        | ClientRequest::VideoRecordWithOthers(_)
         | ClientRequest::VideoPlayback(_)
         | ClientRequest::VideoRename(_)
         | ClientRequest::VideoTrack(_)
-        | ClientRequest::VideoReveal(_)) => {
+        | ClientRequest::VideoReveal(_)
+        | ClientRequest::VideoPhoto(_)
+        | ClientRequest::VideoPhotoShow(_)
+        | ClientRequest::VideoVehicleCamera(_)) => {
             crate::video::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::ParamSearch(_)
@@ -362,6 +388,12 @@ pub(crate) fn handle(
         | ClientRequest::TrayLocation(_)) => {
             crate::location::handle(engine, connection, request, operator, &granted)
         }
+        request @ (ClientRequest::UpdateStatus(_)
+        | ClientRequest::UpdateCheck(_)
+        | ClientRequest::UpdateInstall(_)
+        | ClientRequest::UpdateLater(_)) => {
+            crate::app_update::handle(engine, &request, operator, &granted)
+        }
         request @ (ClientRequest::InterfaceStatus(_) | ClientRequest::InterfaceCheck(_)) => {
             crate::interface::handle(engine, &request, &granted)
         }
@@ -374,6 +406,8 @@ pub(crate) fn handle(
         | ClientRequest::DebugPanic(_)
         | ClientRequest::SettingsUpdate(_)
         | ClientRequest::StorageUsage(_)
+        | ClientRequest::StorageClearSimulatorLogs(_)
+        | ClientRequest::StorageReveal(_)
         | ClientRequest::DaemonWakeups(_)
         | ClientRequest::DaemonAbout(_)
         | ClientRequest::MavlinkInspect(_)
@@ -384,6 +418,7 @@ pub(crate) fn handle(
         | ClientRequest::KeyboardInput(_)
         | ClientRequest::KeyboardStop(_)
         | ClientRequest::ControllerClaim(_)
+        | ClientRequest::ControllerTakeOver(_)
         | ClientRequest::ControllerRelease(_)
         | ClientRequest::ControllerForget(_)
         | ClientRequest::ControllerSetTarget(_)
@@ -535,6 +570,9 @@ fn subscribe(
         video_recordings: types
             .contains(&EntityType::VideoRecording)
             .then(|| each(&engine.state.video_recordings)),
+        video_photos: types
+            .contains(&EntityType::VideoPhoto)
+            .then(|| each(&engine.state.video_photos)),
         practice_attempts: types
             .contains(&EntityType::PracticeAttempt)
             .then(|| engine.state.practice.values().map(Into::into).collect()),

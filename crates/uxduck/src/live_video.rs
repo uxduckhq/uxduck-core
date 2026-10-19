@@ -36,9 +36,8 @@ use uxduck_contracts::dto::edge::{
 use crate::daemon::engine_task::EngineHandle;
 use crate::video::hub::Item;
 
-/// A camera nobody watches any more goes on this long, so a page that
-/// reloads does not restart its stream.
-pub const LINGER: Duration = Duration::from_secs(10);
+/// Stop publishing and retrying as soon as the last remote viewer leaves.
+pub const LINGER: Duration = Duration::ZERO;
 
 /// Which cameras to publish, from what the relay says is watched.
 #[derive(Debug)]
@@ -455,6 +454,7 @@ impl Shared {
 /// with it, so nothing is sent while the computer is not connected.
 #[derive(Debug)]
 pub struct Live {
+    engine: EngineHandle,
     shared: Arc<Shared>,
     wanted: watch::Sender<Vec<String>>,
     rung: watch::Sender<usize>,
@@ -465,6 +465,7 @@ impl Drop for Live {
     fn drop(&mut self) {
         // The cameras' tasks are in the manager's set, which goes with it.
         self.task.abort();
+        self.engine.post(|e| e.video_remote_wanted(Vec::new()));
     }
 }
 
@@ -497,6 +498,7 @@ impl Live {
         };
         let task = tokio::spawn(manage(ctx, wanted_rx));
         Self {
+            engine: engine.clone(),
             shared,
             wanted,
             rung,
@@ -506,6 +508,8 @@ impl Live {
 
     /// The cameras the relay says someone away watches.
     pub fn want(&self, cameras: Vec<String>) {
+        let needed = cameras.clone();
+        self.engine.post(move |e| e.video_remote_wanted(needed));
         self.wanted.send_if_modified(|was| {
             let changed = *was != cameras;
             *was = cameras;
@@ -907,9 +911,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_camera_starts_when_watched_and_stops_a_while_after_nobody_does() {
-        let start = Instant::now();
+    fn the_last_remote_viewer_leaving_stops_publishing_immediately_by_default() {
+        let now = Instant::now();
         let mut demand = Demand::default();
+        assert_eq!(
+            demand.update(&["camera".into()], now),
+            (vec!["camera".into()], vec![])
+        );
+        assert_eq!(demand.update(&[], now), (vec![], vec!["camera".into()]));
+        assert!(demand.running().is_empty());
+    }
+
+    #[test]
+    fn an_explicit_linger_can_keep_a_stream_over_a_page_reload() {
+        let start = Instant::now();
+        let linger = Duration::from_secs(10);
+        let mut demand = Demand {
+            linger,
+            ..Demand::default()
+        };
         assert_eq!(
             demand.update(&["a".into(), "b".into()], start),
             (vec!["a".into(), "b".into()], vec![])
@@ -923,23 +943,23 @@ mod tests {
         let soon = start + Duration::from_secs(3);
         assert_eq!(demand.update(&["a".into()], soon), (vec![], vec![]));
         assert_eq!(
-            demand.update(&["a".into()], soon + LINGER),
+            demand.update(&["a".into()], soon + linger),
             (vec![], vec!["b".into()])
         );
         // A reload: gone and back within the linger, never restarted.
-        let later = soon + LINGER + Duration::from_secs(1);
+        let later = soon + linger + Duration::from_secs(1);
         assert_eq!(demand.update(&[], later), (vec![], vec![]));
         assert_eq!(
             demand.update(&["a".into()], later + Duration::from_secs(2)),
             (vec![], vec![])
         );
         assert_eq!(
-            demand.update(&[], later + Duration::from_secs(3) + LINGER),
+            demand.update(&[], later + Duration::from_secs(3) + linger),
             (vec![], vec![]),
             "the linger starts again when it is unwatched again"
         );
         assert_eq!(
-            demand.update(&[], later + Duration::from_secs(4) + LINGER * 2),
+            demand.update(&[], later + Duration::from_secs(4) + linger * 2),
             (vec![], vec!["a".into()])
         );
         assert!(demand.running().is_empty());

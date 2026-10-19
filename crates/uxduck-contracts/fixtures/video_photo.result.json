@@ -1,0 +1,15 @@
+{
+  "id": "vp4f1c2a9e0b7d3e61",
+  "sourceId": "udp-5600-192.168.144.25",
+  "vehicleId": "veh_1",
+  "takenAtUs": 1792316523000000,
+  "fileName": "2026-10-18 10.42.03 Alpha.jpg",
+  "bytes": 412337,
+  "width": 1280,
+  "height": 720,
+  "latitudeDeg": -35.363261,
+  "longitudeDeg": 149.16523,
+  "altitudeM": 584.2,
+  "headingDeg": 92.5,
+  "version": 1
+}

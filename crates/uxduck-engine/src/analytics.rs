@@ -4,8 +4,9 @@
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::analytics::{
-    AnalyticsAliasParams, AnalyticsEvent, AppEvent, CommandName, CommandOutcome, DaemonEvent,
-    ErrorFrame, LinkType, TurnOutcome, is_error_type, is_token,
+    AnalyticsAliasParams, AnalyticsEvent, AnalyticsPerformanceParams, AppEvent, CommandName,
+    CommandOutcome, DaemonEvent, EngagementTask, EngagementUsage, ErrorFrame, LinkType,
+    TurnOutcome, is_error_type, is_token,
 };
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -19,6 +20,73 @@ use uxduck_core::events::{Actor, Change};
 use crate::runtime::AnalyticsPort;
 use crate::{ConnectionId, Engine};
 
+fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
+    (1..=60_000).contains(&sample.window_ms)
+        && [
+            sample.long_tasks,
+            sample.blocking_ms,
+            sample.max_task_ms,
+            sample.max_input_delay_ms,
+            sample.controller_gaps,
+            sample.max_controller_gap_ms,
+        ]
+        .iter()
+        .all(|&value| value <= 60_000)
+        && sample.heap_mb.is_none_or(|mb| mb <= 1_048_576)
+        && sample.cpu_percent.is_none_or(|cpu| cpu <= 10_000)
+        && sample.process_memory_mb.is_none_or(|mb| mb <= 1_048_576)
+}
+
+fn validate_event(event: &AppEvent) -> Result<(), ApiError> {
+    if let AppEvent::AppPerformance { sample } = event
+        && !performance_valid(sample)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "performance samples must be bounded aggregates over at most one minute",
+        ));
+    }
+
+    if let AppEvent::AppActiveTime { active_ms, .. } = event
+        && !(1..=60_000).contains(active_ms)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "active time is a delta of 1 to 60000 milliseconds",
+        ));
+    }
+    if let AppEvent::ErrorShown { code } = event
+        && !is_token(code)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "an error code is lower case letters, digits and dashes",
+        ));
+    }
+    if let AppEvent::Exception {
+        error_type,
+        code,
+        frames,
+        ..
+    } = event
+        && !(is_error_type(error_type) && is_token(code) && frames_ok(frames))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "an exception is a type, a known code and up to 50 frames, with no text",
+        ));
+    }
+    if let AppEvent::TelemetryLayoutChanged { item, .. } = event
+        && !is_item_key(item)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "an item is a telemetry key, such as speed.air_mps",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -31,37 +99,34 @@ pub(crate) fn handle(
             "only an operator client may send analytics",
         ));
     }
+    let request = match request {
+        ClientRequest::AnalyticsFeedback(event) => ClientRequest::AnalyticsTrack(event),
+        ClientRequest::AnalyticsPerformance(sample) => {
+            ClientRequest::AnalyticsTrack(AppEvent::AppPerformance { sample })
+        }
+        ClientRequest::AnalyticsActiveTime(params) => {
+            ClientRequest::AnalyticsTrack(AppEvent::AppActiveTime {
+                active_ms: params.active_ms,
+                surface: params.surface,
+                daemon: params.daemon,
+            })
+        }
+        other => other,
+    };
     match request {
+        ClientRequest::AnalyticsTakeFlightTime(_) => Ok(json!(engine.take_flight_usage())),
+        ClientRequest::AnalyticsTakeEngagement(_) => {
+            let events = std::mem::take(&mut engine.engagement);
+            Ok(json!(EngagementUsage {
+                events: if engine.state.settings.usage_analytics {
+                    events
+                } else {
+                    Vec::new()
+                }
+            }))
+        }
         ClientRequest::AnalyticsTrack(event) => {
-            if let AppEvent::ErrorShown { code } = &event
-                && !is_token(code)
-            {
-                return Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    "an error code is lower case letters, digits and dashes",
-                ));
-            }
-            if let AppEvent::Exception {
-                error_type,
-                code,
-                frames,
-                ..
-            } = &event
-                && !(is_error_type(error_type) && is_token(code) && frames_ok(frames))
-            {
-                return Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    "an exception is a type, a known code and up to 50 frames, with no text",
-                ));
-            }
-            if let AppEvent::TelemetryLayoutChanged { item, .. } = &event
-                && !is_item_key(item)
-            {
-                return Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    "an item is a telemetry key, such as speed.air_mps",
-                ));
-            }
+            validate_event(&event)?;
             if engine.state.settings.usage_analytics {
                 // A page over the WebSocket is a browser tab; the desktop
                 // app's page comes over the local socket.
@@ -69,6 +134,19 @@ pub(crate) fn handle(
                     Some(Transport::WebSocket) => "browser",
                     _ => "desktop",
                 };
+                if let AppEvent::AppOpened {
+                    surface: app_surface,
+                    daemon,
+                } = &event
+                {
+                    engine.analytics.track(
+                        AnalyticsEvent::App(AppEvent::EngagementStarted {
+                            surface: *app_surface,
+                            daemon: *daemon,
+                        }),
+                        surface,
+                    );
+                }
                 engine.analytics.track(AnalyticsEvent::App(event), surface);
             }
             Ok(json!({}))
@@ -98,6 +176,39 @@ pub(crate) fn handle(
 }
 
 impl Engine {
+    /// Only called after an authoritative acknowledgement or judged result.
+    /// Browser workers have no outbox: the existing page sender drains once.
+    pub(crate) fn track_task(
+        &mut self,
+        vehicle_id: &str,
+        task_type: EngagementTask,
+        completed: bool,
+    ) {
+        if !self.state.settings.usage_analytics {
+            return;
+        }
+        let vehicle_kind = self.analytics_vehicle_kind(vehicle_id);
+        let event = if completed {
+            AppEvent::TaskCompleted {
+                task_type,
+                vehicle_kind,
+            }
+        } else {
+            AppEvent::TaskFailed {
+                task_type,
+                vehicle_kind,
+            }
+        };
+        if self.config.capabilities.runs_in == uxduck_contracts::dto::initialize::RunsIn::Browser {
+            if self.engagement.len() == 100 {
+                self.engagement.remove(0);
+            }
+            self.engagement.push(event);
+        } else {
+            self.analytics.track(AnalyticsEvent::App(event), "daemon");
+        }
+    }
+
     /// Where analytics go. The port is told at once whether the switch is on.
     pub fn set_analytics(&mut self, mut port: Box<dyn AnalyticsPort>) {
         port.set_enabled(self.state.settings.usage_analytics);
@@ -115,6 +226,8 @@ impl Engine {
     /// Switches usage analytics off, as `--no-analytics` does at start, so
     /// an install can begin with nothing sent (ADR-0016 O15).
     pub fn turn_analytics_off(&mut self) {
+        self.engagement.clear();
+        self.flight_usage = crate::flight_usage::FlightUsage::default();
         if !self.state.settings.usage_analytics {
             return;
         }
@@ -136,6 +249,8 @@ impl Engine {
     pub(crate) fn analytics_settings_changed(&mut self, before: &Settings) {
         let on = self.state.settings.usage_analytics;
         if before.usage_analytics != on {
+            self.engagement.clear();
+            self.flight_usage = crate::flight_usage::FlightUsage::default();
             self.analytics.set_enabled(on);
         }
     }

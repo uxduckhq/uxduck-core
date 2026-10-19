@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use uxduck_media::aac::AudioUnit;
 use uxduck_media::au::AccessUnit;
 
 /// How much a watcher may fall behind (V7).
@@ -19,7 +20,15 @@ const TOKEN_LIFETIME: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub enum Item {
     Unit(Arc<AccessUnit>),
-    Klv { timestamp_us: u64, data: Arc<[u8]> },
+    Klv {
+        timestamp_us: u64,
+        data: Arc<[u8]>,
+    },
+    /// A frame of the camera's sound: for recordings only (S147).
+    Audio(Arc<AudioUnit>),
+    /// A camera's MPEG-TS bytes as they arrived, ahead of the pictures
+    /// they bring: for recordings only, which keep them (S151).
+    Ts(Arc<[u8]>),
 }
 
 #[derive(Debug, Default)]
@@ -137,14 +146,17 @@ impl Watcher {
 
 #[derive(Debug, Default)]
 struct Inner {
+    needed: std::collections::HashSet<String>,
     /// Tokens the engine handed out, not yet opened.
     allowed: HashMap<String, (String, Instant)>,
     /// Open sockets by token: their source and queue.
     open: HashMap<String, (String, Arc<Watcher>)>,
     /// Recordings by id: their source, and their writer's end (S40).
     recorders: HashMap<String, (String, std::sync::mpsc::Sender<Item>)>,
-    /// Playback tokens: the recording, and when the token was given.
-    playback: HashMap<String, (String, Instant)>,
+    /// Playback tokens: the recording and its file, and when given.
+    playback: HashMap<String, (String, String, Instant)>,
+    /// Photo tokens (S144): the photo's id and file, and when given.
+    photos: HashMap<String, (String, String, Instant)>,
 }
 
 /// How long a playback token lasts.
@@ -154,11 +166,25 @@ const PLAYBACK_LIFETIME: Duration = Duration::from_secs(3600);
 #[derive(Debug, Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
-    /// Where recordings are kept: the Video storage category.
+    /// Where photos and recordings are kept, together (S150): the Video
+    /// storage category.
     dir: std::path::PathBuf,
 }
 
 impl Hub {
+    pub fn demand(&self, source_id: &str, needed: bool) {
+        let mut inner = self.lock();
+        if needed {
+            inner.needed.insert(source_id.to_owned());
+        } else {
+            inner.needed.remove(source_id);
+        }
+    }
+
+    pub fn needed(&self, source_id: &str) -> bool {
+        self.lock().needed.contains(source_id)
+    }
+
     #[must_use]
     pub fn new(dir: std::path::PathBuf) -> Self {
         Self {
@@ -172,6 +198,25 @@ impl Hub {
         &self.dir
     }
 
+    pub fn allow_photo(&self, token: &str, photo_id: &str, file_name: &str) {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner
+            .photos
+            .retain(|_, (_, _, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
+        inner.photos.insert(
+            token.to_owned(),
+            (photo_id.to_owned(), file_name.to_owned(), now),
+        );
+    }
+
+    /// The photo a token is for, while it lasts: its id and file.
+    pub fn photo(&self, token: &str) -> Option<(String, String)> {
+        let inner = self.lock();
+        let (id, file, at) = inner.photos.get(token)?;
+        (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), file.clone()))
+    }
+
     /// Sends a source's pictures to a recording's writer too.
     pub fn record(&self, recording_id: &str, source_id: &str, to: std::sync::mpsc::Sender<Item>) {
         self.lock()
@@ -179,27 +224,47 @@ impl Hub {
             .insert(recording_id.to_owned(), (source_id.to_owned(), to));
     }
 
+    /// Whether a recording takes this source's items now.
+    pub fn recorded(&self, source_id: &str) -> bool {
+        self.lock().recorders.values().any(|(s, _)| s == source_id)
+    }
+
+    /// A camera's MPEG-TS bytes for its recordings, when it has any and
+    /// the bytes are MPEG-TS (raw or inside RTP): before the pictures they
+    /// bring are published (S151).
+    pub fn publish_ts(&self, source_id: &str, datagram: &[u8]) {
+        if !self.recorded(source_id) {
+            return;
+        }
+        if let Ok(uxduck_media::udp::Packet::Ts { ts, .. }) = uxduck_media::udp::classify(datagram)
+        {
+            self.publish(source_id, &Item::Ts(ts.into()));
+        }
+    }
+
     /// Ends a recording: its writer finishes the file.
     pub fn stop_recording(&self, recording_id: &str) {
         self.lock().recorders.remove(recording_id);
     }
 
-    pub fn allow_playback(&self, token: &str, recording_id: &str) {
+    pub fn allow_playback(&self, token: &str, recording_id: &str, file: &str) {
         let mut inner = self.lock();
         let now = Instant::now();
         inner
             .playback
-            .retain(|_, (_, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
-        inner
-            .playback
-            .insert(token.to_owned(), (recording_id.to_owned(), now));
+            .retain(|_, (_, _, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
+        inner.playback.insert(
+            token.to_owned(),
+            (recording_id.to_owned(), file.to_owned(), now),
+        );
     }
 
-    /// The recording a playback token is for, while it lasts.
-    pub fn playback(&self, token: &str) -> Option<String> {
+    /// The recording a playback token is for, while it lasts: its id and
+    /// its file in the media folder.
+    pub fn playback(&self, token: &str) -> Option<(String, String)> {
         let inner = self.lock();
-        let (id, at) = inner.playback.get(token)?;
-        (at.elapsed() < PLAYBACK_LIFETIME).then(|| id.clone())
+        let (id, file, at) = inner.playback.get(token)?;
+        (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), file.clone()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -292,8 +357,11 @@ impl Hub {
             .filter(|(s, _)| s == source_id)
             .map(|(_, w)| w.clone())
             .collect();
-        for watcher in watchers {
-            watcher.push(item.clone(), now);
+        // Sockets and the live publisher take pictures and KLV only.
+        if matches!(item, Item::Unit(_) | Item::Klv { .. }) {
+            for watcher in watchers {
+                watcher.push(item.clone(), now);
+            }
         }
         // Recordings get every picture: no dropping to catch up.
         let mut inner = self.lock();
@@ -345,6 +413,32 @@ mod tests {
         watcher.push(unit(true, 2), now);
         watcher.push(unit(false, 3), now);
         assert_eq!(drain(&watcher), [(2, false), (3, false)]);
+    }
+
+    #[test]
+    fn sound_is_recorded_but_never_queued_for_live_viewers() {
+        let hub = Hub::default();
+        let watcher = hub.tap("viewer", "camera");
+        let (to, from) = std::sync::mpsc::channel();
+        hub.record("recording", "camera", to);
+        hub.publish("camera", &unit(true, 0));
+        let _ = from.try_recv().unwrap();
+        let _ = drain(&watcher);
+        hub.publish(
+            "camera",
+            &Item::Audio(Arc::new(AudioUnit::aac(
+                vec![1, 2, 3],
+                0,
+                uxduck_media::aac::AacConfig {
+                    object_type: 2,
+                    frequency_index: 3,
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+            ))),
+        );
+        assert!(matches!(from.try_recv().unwrap(), Item::Audio(_)));
+        assert!(watcher.lock().items.is_empty());
     }
 
     #[test]

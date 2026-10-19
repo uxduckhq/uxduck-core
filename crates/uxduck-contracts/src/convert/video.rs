@@ -58,6 +58,7 @@ impl From<&core::VideoTrack> for dto::VideoTrack {
 impl From<&core::VideoSource> for dto::VideoSource {
     fn from(v: &core::VideoSource) -> Self {
         Self {
+            recording_requested: v.recording_requested,
             id: v.id.clone(),
             name: v.name.clone(),
             named_by_hand: v.named_by_hand,
@@ -72,11 +73,17 @@ impl From<&core::VideoSource> for dto::VideoSource {
             state_detail: v.state_detail.clone(),
             vehicle_id: v.vehicle_id.clone(),
             assigned_by_hand: v.assigned_by_hand,
+            vehicle_camera: v.vehicle_camera,
+            record_alone: v.record_alone,
             klv: v.klv,
             url: v.url.as_deref().map(core::redact),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),
             tracks: v.tracks.iter().map(Into::into).collect(),
+            audio: v.audio.as_ref().map(|a| dto::VideoAudio {
+                name: a.name.clone(),
+                recorded: a.recorded,
+            }),
             counters: (&v.counters).into(),
             first_seen_us: v.first_seen_us,
             changed_at_us: v.changed_at_us,
@@ -126,11 +133,35 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
             },
             detail: v.detail.clone(),
             capture: v.capture.as_ref().map(Into::into),
+            camera_receipt_id: v.camera_receipt_id.clone(),
+            sound: v.sound,
+            file_name: v.file_name.clone(),
             trigger: match v.trigger {
                 core::RecordingTrigger::ByHand => dto::RecordingTrigger::ByHand,
                 core::RecordingTrigger::Armed => dto::RecordingTrigger::Armed,
                 core::RecordingTrigger::Always => dto::RecordingTrigger::Always,
             },
+            version: v.version,
+        }
+    }
+}
+
+impl From<&core::VideoPhoto> for dto::VideoPhoto {
+    fn from(v: &core::VideoPhoto) -> Self {
+        Self {
+            id: v.id.clone(),
+            source_id: v.source_id.clone(),
+            vehicle_id: v.vehicle_id.clone(),
+            taken_at_us: v.taken_at_us,
+            file_name: v.file_name.clone(),
+            bytes: v.bytes,
+            width: v.width,
+            height: v.height,
+            latitude_deg: v.latitude_deg,
+            longitude_deg: v.longitude_deg,
+            altitude_m: v.altitude_m,
+            heading_deg: v.heading_deg,
+            camera_receipt_id: v.camera_receipt_id.clone(),
             version: v.version,
         }
     }
@@ -151,6 +182,11 @@ impl From<&core::CaptureInput> for dto::CaptureInput {
             height: v.height,
             frame_rate: v.frame_rate,
             deinterlace: v.deinterlace,
+            record_sound: v.record_sound,
+            sound_input: v.sound_input.as_ref().map(|s| dto::SoundInput {
+                device_id: s.device_id.clone(),
+                name: s.name.clone(),
+            }),
         }
     }
 }
@@ -169,6 +205,11 @@ impl From<dto::CaptureInput> for core::CaptureInput {
             height: v.height,
             frame_rate: v.frame_rate,
             deinterlace: v.deinterlace,
+            record_sound: v.record_sound,
+            sound_input: v.sound_input.map(|s| core::SoundInput {
+                device_id: s.device_id,
+                name: s.name,
+            }),
         }
     }
 }

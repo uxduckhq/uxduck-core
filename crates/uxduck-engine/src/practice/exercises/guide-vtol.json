@@ -9,7 +9,7 @@
   "start": {},
   "steps": [
     {
-      "text": "Press Go to in the Control tab, then click a place on the map.",
+      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
       "hint": "Go to sends it to the place you clicked, flying forward like a plane.",
       "hintAfterS": 45,
       "all": [
@@ -18,7 +18,7 @@
       ]
     },
     {
-      "text": "Choose LOITER in the Mode menu in the Control tab.",
+      "text": "Choose LOITER in the Mode menu in the Cockpit tab.",
       "hint": "Loiter circles where it is, flying forward like a plane.",
       "hintAfterS": 45,
       "all": [
@@ -27,7 +27,7 @@
       ]
     },
     {
-      "text": "Press Return to launch in the Control tab.",
+      "text": "Press Return to launch in the Cockpit tab.",
       "hint": "Return to launch flies it home.",
       "hintAfterS": 45,
       "all": [
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "text": "Press Land in the Control tab.",
+      "text": "Press Land in the Cockpit tab.",
       "hint": "Land slows it to a hover and brings it straight down where it is. This step ticks once it's on the ground.",
       "hintAfterS": 45,
       "all": [{ "check": "landed" }]

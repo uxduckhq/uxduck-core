@@ -40,8 +40,8 @@
       "goal": "A first flight: send it somewhere, change its mode, bring it home and land.",
       "steps": [
         {
-          "text": "Right-click the map, or press and hold it, and choose Fly here.",
-          "hint": "Fly here sends it to the place you chose and holds it there.",
+          "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+          "hint": "Go to sends it to the place you clicked, flying forward like a plane.",
           "hintAfterS": 45.0
         }
       ]
