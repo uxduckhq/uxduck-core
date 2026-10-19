@@ -804,6 +804,7 @@ mod tests {
             desktop_app: Some(uxduck_contracts::dto::release::DesktopAppRelease {
                 version: "0.2.0".into(),
                 artifacts: vec![artifact.clone()],
+                inputs: None,
             }),
         };
         let (version, _) = offered(&manifest, "test").unwrap();

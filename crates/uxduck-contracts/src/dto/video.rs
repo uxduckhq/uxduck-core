@@ -356,7 +356,8 @@ pub struct VideoPhoto {
     pub vehicle_id: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub taken_at_us: u64,
-    /// Its name in the pictures folder, such as `2026-10-18 10.42.03 Alpha.jpg`.
+    /// Its name in the pictures folder, such as `2026-10-18 10.42.03 Alpha - Front.jpg`:
+    /// the vehicle and the camera, or the camera alone.
     pub file_name: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
@@ -508,7 +509,8 @@ pub struct VideoRecording {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sound: bool,
     /// Its file in the media folder, such as `2026-10-18 10.42.03
-    /// Alpha.mp4` (S150); none for one made before, named `<id>.mp4`.
+    /// Alpha - Front.ts` (S150): the vehicle and the camera, or the camera
+    /// alone; none for one made before, named `<id>.mp4`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]

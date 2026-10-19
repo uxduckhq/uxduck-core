@@ -47,6 +47,16 @@ pub(crate) fn file_safe(name: &str) -> String {
     }
 }
 
+/// Who a photo or recording is of, for its file name: the vehicle and the
+/// camera, "Alpha - Front", so a vehicle's cameras are told apart
+/// (maintainer, 2026-10-19); the camera alone when it is nobody's (S150).
+pub(crate) fn file_who(vehicle: Option<&str>, camera: &str) -> String {
+    match vehicle {
+        Some(vehicle) => format!("{} - {}", file_safe(vehicle), file_safe(camera)),
+        None => file_safe(camera),
+    }
+}
+
 impl Engine {
     /// Where a vehicle is now, for a photo's EXIF: the autopilot's own
     /// estimate first, as the map draws it, and its height above sea level.
@@ -130,7 +140,7 @@ impl Engine {
         let stem = format!(
             "{} {}",
             Civil::at(taken_at_us, offset).file_stem(),
-            file_safe(vehicle_name.as_ref().unwrap_or(&source.name))
+            file_who(vehicle_name.as_deref(), &source.name)
         );
         let port = self.video.port.as_mut().ok_or_else(|| {
             ApiError::new(ErrorKind::InvalidRequest, "Photos need UXDuck Desktop.")
@@ -247,5 +257,11 @@ mod tests {
         assert_eq!(file_safe("udp://127.0.0.1:5600"), "udp 127.0.0.1 5600");
         assert_eq!(file_safe("  ..  "), "Camera");
         assert_eq!(file_safe("a\u{0}b\nc"), "a b c");
+        // A vehicle's cameras told apart; a camera of nobody's by itself.
+        assert_eq!(super::file_who(Some("Alpha"), "Front"), "Alpha - Front");
+        assert_eq!(
+            super::file_who(None, "MacBook Pro Camera"),
+            "MacBook Pro Camera"
+        );
     }
 }

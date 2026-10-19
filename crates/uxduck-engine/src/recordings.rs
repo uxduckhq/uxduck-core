@@ -225,18 +225,19 @@ impl Engine {
             .recording
             .insert(source.id.clone(), recording.id.clone());
         let sound = source.audio.as_ref().is_some_and(|a| a.recorded);
-        // Named as photos are: the local time and the vehicle (S150).
-        let who = source
+        // Named as photos are: the local time, the vehicle and the camera (S150).
+        let vehicle = source
             .vehicle_id
             .as_ref()
             .and_then(|id| self.state.vehicles.get(id))
-            .map_or_else(|| source.name.clone(), |v| v.name.clone());
+            .map(|v| v.name.clone());
+        let who = crate::photos::file_who(vehicle.as_deref(), &source.name);
         if let Some(port) = self.video.port.as_mut() {
             let at = recording.started_at_us;
             let stem = format!(
                 "{} {}",
                 uxduck_media::photo::Civil::at(at, port.utc_offset_minutes(at)).file_stem(),
-                crate::photos::file_safe(&who)
+                who
             );
             recording.file_name =
                 Some(port.start_recording(&recording.id, &source.id, sound, &stem));

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use rustix::fs::{CWD, RenameFlags, renameat_with};
+use uxduck_contracts::dto::release::BundleFiles;
 
 const REQUIREMENT: &str = "=identifier \"com.uxduck.app\" and anchor apple generic and certificate leaf[subject.OU] = \"N938V577RX\"";
 
@@ -146,8 +147,60 @@ pub(super) fn install(package: &Path, app: &Path, version: &str) -> Result<(), S
     // This is our versioned packaging contract, not a recursive search for any
     // .app an arbitrary package might contain. No scripts or global files run.
     let candidate = expanded.join("uxduck.pkg/Payload/Applications/UXDuck.app");
-    validate(&candidate, version)?;
-    if let Err(error) = replace(&candidate, app, || validate(app, version)) {
+    commit(stage, &candidate, app, version)
+}
+
+/// The new bundle of a per-file update (S164), built in a staging folder
+/// beside the app with exactly the signed list's files. Unchanged files are
+/// clones of the installed ones. It is then checked as a package's app is:
+/// UXDuck's signature, Gatekeeper and the version.
+fn candidate(
+    dir: &Path,
+    list: &BundleFiles,
+    app: &Path,
+    stage: &tempfile::TempDir,
+) -> Result<std::path::PathBuf, String> {
+    let candidate = stage.path().join("UXDuck.app");
+    crate::app_update::files::build(dir, list, app, &candidate)?;
+    Ok(candidate)
+}
+
+/// Builds and checks a per-file update's bundle before shutdown, then
+/// removes it; the worker builds it again once UXDuck has stopped.
+pub(super) fn preflight_files(
+    dir: &Path,
+    list: &BundleFiles,
+    app: &Path,
+    version: &str,
+) -> Result<(), String> {
+    check_destination(app)?;
+    let stage = staging(app)?;
+    validate(&candidate(dir, list, app, &stage)?, version)?;
+    stage.close().map_err(|e| e.to_string())
+}
+
+pub(super) fn install_files(
+    dir: &Path,
+    list: &BundleFiles,
+    app: &Path,
+    version: &str,
+) -> Result<(), String> {
+    check_destination(app)?;
+    let stage = staging(app)?;
+    let candidate = candidate(dir, list, app, &stage)?;
+    commit(stage, &candidate, app, version)
+}
+
+/// Swaps a checked candidate in, keeping the old app until the installed
+/// one passes too.
+fn commit(
+    stage: tempfile::TempDir,
+    candidate: &Path,
+    app: &Path,
+    version: &str,
+) -> Result<(), String> {
+    validate(candidate, version)?;
+    if let Err(error) = replace(candidate, app, || validate(app, version)) {
         // In particular, never delete the old bundle after a failed rollback.
         let preserved = stage.keep();
         return Err(format!("{error}. Recovery files: {}", preserved.display()));

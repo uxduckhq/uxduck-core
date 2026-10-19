@@ -52,6 +52,9 @@ pub struct FeedbackUi {
     /// The desktop app's version and capabilities, inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellInfo>,
+    /// The same bounded snapshot About copies; absent when support details are excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<super::support::SupportDetails>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

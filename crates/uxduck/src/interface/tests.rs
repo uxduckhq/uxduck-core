@@ -243,9 +243,24 @@ impl Publisher {
         self.key.pk.to_base64()
     }
 
-    /// Puts each archive and a manifest naming them, signed with `key`.
+    /// Puts each archive and a production manifest naming them, signed
+    /// with `key`.
     fn publish_signed(
         &self,
+        at: &str,
+        builds: &[(Vec<u8>, InterfaceEntry)],
+        key: &minisign::KeyPair,
+    ) {
+        self.publish_as("production", "production", at, builds, key);
+    }
+
+    /// Puts a manifest saying it is `channel`'s where `host` serves its
+    /// channel: production at `/manifest.json`, staging at
+    /// `/staging/manifest.json`.
+    fn publish_as(
+        &self,
+        host: &str,
+        channel: &str,
         at: &str,
         builds: &[(Vec<u8>, InterfaceEntry)],
         key: &minisign::KeyPair,
@@ -259,7 +274,7 @@ impl Publisher {
         }
         let manifest = serde_json::to_vec(&InterfaceManifest {
             schema: 1,
-            channel: "production".into(),
+            channel: channel.into(),
             published_at: at.into(),
             entries,
         })
@@ -267,8 +282,13 @@ impl Publisher {
         let signature = minisign::sign(None, &key.sk, manifest.as_slice(), None, None)
             .unwrap()
             .into_string();
-        self.served.put("/manifest.json", manifest);
-        self.served.put("/manifest.json.minisig", signature);
+        let path = if host == "staging" {
+            "/staging/manifest.json"
+        } else {
+            "/manifest.json"
+        };
+        self.served.put(path, manifest);
+        self.served.put(&format!("{path}.minisig"), signature);
     }
 
     fn publish(&self, at: &str, builds: &[(Vec<u8>, InterfaceEntry)]) {
@@ -278,6 +298,7 @@ impl Publisher {
     fn config(&self) -> Config {
         Config {
             url: Some(format!("{}/manifest.json", self.base)),
+            staging_url: Some(format!("{}/staging/manifest.json", self.base)),
             key: Some(self.public_key()),
             dev: None,
             first_check: Duration::ZERO,
@@ -583,6 +604,69 @@ async fn updates_off_pins_the_current_interface() {
     interfaces.check().await;
     assert_eq!(interfaces.status().version, "v1");
     assert!(set_updates(data.path(), "maybe").is_err());
+}
+
+#[tokio::test]
+async fn staging_is_followed_only_when_chosen_and_signed_as_staging() {
+    let publisher = Publisher::new().await;
+    let data = tempfile::tempdir().unwrap();
+    let v1 = archive("v1", "2026-10-12T00:00:00Z", &build("v1", &[]));
+    let v2 = archive("v2", "2026-10-11T00:00:00Z", &build("v2", &[]));
+    publisher.publish("2026-10-12T00:00:00Z", std::slice::from_ref(&v1));
+    // Staging publishes at its own times, here before production's last.
+    publisher.publish_as(
+        "staging",
+        "staging",
+        "2026-10-11T00:00:00Z",
+        std::slice::from_ref(&v2),
+        &publisher.key,
+    );
+    let interfaces = Arc::new(Interfaces::open(data.path(), None, publisher.config()).unwrap());
+    interfaces.check().await;
+    let status = interfaces.status();
+    assert_eq!(status.version, "v1", "production unless chosen");
+    assert_eq!(status.channel, None);
+
+    set_channel(data.path(), "staging").unwrap();
+    interfaces.check().await;
+    let status = interfaces.status();
+    assert_eq!(status.problem, None);
+    assert_eq!(status.version, "v2");
+    assert_eq!(status.channel.as_deref(), Some("staging"));
+    assert!(status.updates);
+
+    // Production's manifest where staging's belongs, signed: refused.
+    publisher.publish_as(
+        "staging",
+        "production",
+        "2026-10-13T00:00:00Z",
+        std::slice::from_ref(&v1),
+        &publisher.key,
+    );
+    interfaces.check().await;
+    let status = interfaces.status();
+    assert_eq!(status.version, "v2");
+    assert_eq!(
+        status.problem.as_deref(),
+        Some(
+            "Couldn't check for a new interface: the answer was for the production channel, not staging"
+        )
+    );
+
+    // Pinning keeps the channel, and the next start keeps both.
+    set_updates(data.path(), "off").unwrap();
+    let again = Arc::new(Interfaces::open(data.path(), None, publisher.config()).unwrap());
+    assert_eq!(again.status().channel.as_deref(), Some("staging"));
+    assert!(!again.status().updates);
+    set_updates(data.path(), "on").unwrap();
+
+    set_channel(data.path(), "production").unwrap();
+    again.check().await;
+    let status = again.status();
+    assert_eq!(status.problem, None);
+    assert_eq!(status.version, "v1");
+    assert_eq!(status.channel, None);
+    assert!(set_channel(data.path(), "beta").is_err());
 }
 
 #[tokio::test]

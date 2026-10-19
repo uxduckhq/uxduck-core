@@ -5,6 +5,10 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "macos")]
 mod macos;
 
+/// Where the Mac app is installed and updated; only Unix builds use it.
+#[cfg(unix)]
+pub(super) const INSTALLED_APP: &str = "/Applications/UXDuck.app";
+
 /// Validate helpers and, on macOS, Gatekeeper acceptance before shutting down.
 pub(super) fn preflight(package: &Path) -> Result<(), String> {
     if !package.is_file() {
@@ -12,7 +16,7 @@ pub(super) fn preflight(package: &Path) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        macos::check_destination(Path::new("/Applications/UXDuck.app"))?;
+        macos::check_destination(Path::new(INSTALLED_APP))?;
         let result = Command::new("/usr/sbin/spctl")
             .args(["--assess", "--type", "install"])
             .arg(package)
@@ -45,7 +49,7 @@ pub(super) fn preflight(package: &Path) -> Result<(), String> {
 pub(super) fn install(package: &Path, kind: &str, version: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if kind == "pkg" {
-        return macos::install(package, Path::new("/Applications/UXDuck.app"), version);
+        return macos::install(package, Path::new(INSTALLED_APP), version);
     }
     let _ = version;
     let (program, args) = command(std::env::consts::OS, kind)?;
@@ -64,6 +68,46 @@ pub(super) fn install(package: &Path, kind: &str, version: &str) -> Result<(), S
         Ok(())
     } else {
         Err(format!("The installer was cancelled or failed ({status})."))
+    }
+}
+
+/// Before shutdown, the same checks a per-file update (S164) gets after it:
+/// the new bundle built from the installed app and the downloaded files,
+/// matching the signed list exactly, then signature, Gatekeeper and version.
+#[cfg(unix)]
+pub(super) fn preflight_files(
+    dir: &Path,
+    list: &uxduck_contracts::dto::release::BundleFiles,
+    installed: &Path,
+    version: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::preflight_files(dir, list, installed, version)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, list, installed, version);
+        Err("Per-file updates are only for the Mac app.".into())
+    }
+}
+
+/// Installs a per-file update (S164) by replacing the whole app, as a
+/// package update does.
+#[cfg(unix)]
+pub(super) fn install_files(
+    dir: &Path,
+    list: &uxduck_contracts::dto::release::BundleFiles,
+    version: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::install_files(dir, list, Path::new(INSTALLED_APP), version)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, list, version);
+        Err("Per-file updates are only for the Mac app.".into())
     }
 }
 

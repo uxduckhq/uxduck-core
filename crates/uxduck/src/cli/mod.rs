@@ -842,6 +842,8 @@ pub enum ConfigCommand {
     /// from standard input when it is not given, so it stays out of shell history.
     /// `uxduck config set interface.updates off` pins the interface UXDuck
     /// serves now, for sites that must not change software by themselves.
+    /// `uxduck config set interface.channel staging` follows staging's
+    /// interface instead of production's, for the maintainer; About says so.
     Set { name: String, value: Option<String> },
 }
 
@@ -2036,6 +2038,31 @@ async fn config_set(
                 "UXDuck keeps the interface it serves now"
             } else {
                 "UXDuck follows the latest interface"
+            }
+        );
+        return Ok(());
+    }
+    if name == "interface.channel" {
+        let value = value.unwrap_or_default();
+        crate::interface::set_channel(data_dir, &value).map_err(CliError::Usage)?;
+        // A running UXDuck checks now rather than within the hour.
+        let checked = match LocalClient::connect(data_dir).await {
+            Ok(mut client) => {
+                client.initialize().await?;
+                client
+                    .call("interface/check", serde_json::json!({}))
+                    .await?;
+                true
+            }
+            Err(CliError::NoDaemon(_)) => false,
+            Err(error) => return Err(error),
+        };
+        eprintln!(
+            "interface.channel {value}: UXDuck follows {value}'s interface{}",
+            if checked {
+                "; reload its pages once it is ready"
+            } else {
+                " from its next start"
             }
         );
         return Ok(());

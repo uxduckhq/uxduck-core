@@ -34,6 +34,7 @@ pub mod search;
 pub mod settings;
 pub mod sim;
 pub mod state;
+pub mod support;
 pub mod sync;
 pub mod telemetry;
 pub mod telemetry_window;

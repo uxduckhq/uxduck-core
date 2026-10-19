@@ -1,0 +1,60 @@
+{
+  "method": "feedback/send",
+  "params": {
+    "reportId": "0192f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6",
+    "kind": "problem",
+    "text": "The map stopped updating",
+    "includeDetails": true,
+    "surface": "browser",
+    "ui": {
+      "route": "/vehicles/:id",
+      "panes": ["map", "controllers"],
+      "theme": "dark",
+      "density": "comfortable",
+      "mapEngine": "maplibre",
+      "actions": ["open:feedback:sidebar"],
+      "appVersion": "0.3.0",
+      "locale": "en-AU",
+      "browser": "Chrome 141",
+      "window": "1280×900",
+      "support": {
+        "capturedAt": "2026-10-19T12:00:00Z",
+        "mode": "browser-desktop",
+        "connection": "connected",
+        "page": {
+          "version": "0.3.0",
+          "commit": "1234567890abcdef1234567890abcdef12345678",
+          "builtAt": "2026-10-19T11:00:00Z"
+        },
+        "interfaceId": "0.3.0+12345678.20261019T110000Z",
+        "protocol": 1,
+        "runtime": {
+          "build": {
+            "version": "0.3.0",
+            "commit": "2345678901abcdef2345678901abcdef23456789",
+            "builtAt": "2026-10-19T10:00:00Z"
+          },
+          "protocol": 1,
+          "target": "aarch64-apple-darwin",
+          "uptimeUs": 120000000
+        },
+        "platform": "macOS",
+        "browser": "Chrome 141",
+        "window": "1280×900",
+        "locale": "en-AU",
+        "performance": {
+          "windowMs": 10000,
+          "longTasks": 1,
+          "blockingMs": 700,
+          "maxTaskMs": 750,
+          "maxInputDelayMs": 10,
+          "controllerGaps": 1,
+          "maxControllerGapMs": 250,
+          "heapMb": 140
+        },
+        "unavailable": []
+      }
+    },
+    "errors": []
+  }
+}

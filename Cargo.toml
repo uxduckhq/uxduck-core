@@ -130,6 +130,14 @@ opt-level = 3
 [profile.dev.package.wasmparser]
 opt-level = 3
 
+# Per-file Mac updates (S164): `cargo xtask bundle-files` compresses and
+# hashes the whole app, about 330 MB, from a dev build in CI; the updater
+# hashes the installed app. Unoptimised, zstd and SHA-256 take minutes.
+[profile.dev.package.zstd-sys]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 # The browser's daemon (S20): small over fast, since every visitor who runs a
 # simulation downloads it. `cargo xtask web` builds with it.
 [profile.web]

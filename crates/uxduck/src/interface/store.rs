@@ -5,7 +5,7 @@
 //!   current                 the version being served, one line
 //!   followed.json           the last manifest accepted: publishedAt, entry chosen
 //!   bad.json                versions marked bad, and why
-//!   settings.json           `interface.updates`: on or off
+//!   settings.json           `interface.updates` (on or off) and `interface.channel`
 //!   <version>/              an unpacked, verified interface
 //!   <version>.json          its manifest entry; a folder without one is not complete
 //!   <version>.partial/      one being unpacked; deleted on start
@@ -58,6 +58,10 @@ pub enum InstallError {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Followed {
+    /// The channel it came from; none from before channels were chosen,
+    /// which followed production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     pub published_at: String,
     /// The entry it chose from it, if any listed this UXDuck's protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,15 +81,32 @@ pub struct Bad {
     pub manifest_published_at: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// `on` (the default) or `off`, which pins the current interface.
     #[serde(default = "on")]
     pub updates: String,
+    /// `production` (the default) or `staging`, for the maintainer to try
+    /// staging's interface in an installed UXDuck.
+    #[serde(default = "production")]
+    pub channel: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            updates: on(),
+            channel: production(),
+        }
+    }
 }
 
 fn on() -> String {
     "on".into()
+}
+
+fn production() -> String {
+    "production".into()
 }
 
 /// A complete interface on disk.
@@ -130,6 +151,17 @@ impl Store {
         let store = Self { dir };
         store.clean()?;
         Ok(store)
+    }
+
+    /// Opens the store for its settings alone, cleaning nothing: a running
+    /// UXDuck may be part-way through an install.
+    ///
+    /// # Errors
+    /// When the folder cannot be made.
+    pub fn for_settings(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
     }
 
     fn clean(&self) -> std::io::Result<()> {
@@ -219,8 +251,7 @@ impl Store {
 
     #[must_use]
     pub fn settings(&self) -> Settings {
-        self.read_json("settings.json")
-            .unwrap_or(Settings { updates: on() })
+        self.read_json("settings.json").unwrap_or_default()
     }
 
     /// # Errors

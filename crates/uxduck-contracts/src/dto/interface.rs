@@ -94,6 +94,11 @@ pub struct InterfaceStatus {
     /// builds without the release key.
     #[serde(default)]
     pub updates: bool,
+    /// The channel followed when it is not production: `staging`, set with
+    /// `uxduck config set interface.channel staging` to try staging's
+    /// interface. Settings › About names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     /// The newest published interface needs a newer UXDuck: "Update UXDuck
     /// to get the latest version".
     #[serde(default)]

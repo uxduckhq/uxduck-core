@@ -171,10 +171,12 @@ fn markers(seen: Option<&Seen>, today: &str) -> (bool, bool) {
 
 /// The artifact for this platform: this target's, preferring an installer.
 /// Releases before 0.1.1 had one universal macOS build, which any Mac takes.
+/// A per-file list (S164) is never the download itself.
 #[must_use]
 pub fn artifact_for(manifest: &ReleaseManifest, target: &str) -> Option<ReleaseArtifact> {
     let rank = |kind: &str| match kind {
         "pkg" | "msi" | "deb" => 0,
+        uxduck_contracts::dto::release::BUNDLE_FILES_KIND => 2,
         _ => 1,
     };
     let best = |wanted: &str| {
@@ -419,6 +421,22 @@ mod tests {
             panic!("{newer:?}");
         };
         assert_eq!(artifact.kind, "pkg", "the installer before the archive");
+        let mut listed = manifest("0.2.0", false);
+        for kind in ["files", "tar.gz"] {
+            listed.artifacts.push(ReleaseArtifact {
+                target: "aarch64-apple-darwin".into(),
+                kind: kind.into(),
+                file: kind.into(),
+                url: "https://example.test/x".into(),
+                sha256: "00".into(),
+                size: 1,
+            });
+        }
+        assert_eq!(
+            artifact_for(&listed, "aarch64-apple-darwin").unwrap().kind,
+            "tar.gz",
+            "a per-file list is never the download"
+        );
         assert_eq!(
             compare("0.2.0", manifest("0.2.0", false), "x")
                 .unwrap()

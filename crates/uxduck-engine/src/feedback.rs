@@ -183,6 +183,12 @@ fn scrub_under(value: &mut Value, key: &str) {
                 *value = serde_json::json!((degrees * 100.0).round() / 100.0);
             }
         }
+        // Git build identities are public diagnostics, including full CI SHAs.
+        // Secret-named fields above still win even when their value is hex.
+        Value::String(text)
+            if name == "commit"
+                && (4..=40).contains(&text.len())
+                && text.bytes().all(|byte| byte.is_ascii_hexdigit()) => {}
         Value::String(text) => *text = scrub_text(text),
         Value::Number(_) => {}
     }

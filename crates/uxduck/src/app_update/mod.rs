@@ -1,6 +1,17 @@
 //! Background product downloads and the consented installer handoff. Electron
 //! is never involved. The signed installer is checked both before and after
 //! shutdown; a copied worker holds the daemon lock until installation ends.
+//! A Mac downloads only the files of the app that changed when the release
+//! lists them (S164, `files`), and falls back to the full package otherwise.
+#[cfg(unix)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "only the Mac installer builds bundles; tested everywhere"
+    )
+)]
+mod files;
 mod installer;
 #[cfg(test)]
 mod tests;
@@ -25,6 +36,9 @@ static HANDOFF_PIPE: std::sync::Mutex<Option<std::process::ChildStdin>> =
 
 const MAX_PACKAGE: u64 = 1 << 30;
 const MAX_MANIFEST: u64 = 4 << 20;
+/// Files downloaded at once for a per-file update.
+#[cfg(unix)]
+const PARALLEL_FILES: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Plan {
@@ -137,11 +151,34 @@ pub fn start(engine: EngineHandle, data_dir: PathBuf, port: u16, enabled: bool) 
                     drop(permission);
                     let _ = child.wait();
                 }
-                Err(why) => publish_failure(&engine, why).await,
+                Err(why) => {
+                    publish_failure(&engine, why).await;
+                    // A per-file update that failed its checks: fetch the
+                    // full installer now, and ask again once it is ready.
+                    if dir.join(FILES_FAILED).is_file()
+                        && !dir.join(format!("package.{PACKAGE_KIND}")).is_file()
+                    {
+                        ready = None;
+                        next = tokio::time::Instant::now();
+                    }
+                }
             }
         }
     });
 }
+
+/// The full installer kind on this platform.
+const PACKAGE_KIND: &str = if cfg!(target_os = "macos") {
+    "pkg"
+} else if cfg!(windows) {
+    "msi"
+} else {
+    "deb"
+};
+
+/// Marks a version whose per-file update failed, so it installs from its
+/// full package instead. Kept in the version's folder.
+const FILES_FAILED: &str = "files.failed";
 
 async fn publish_failure(engine: &EngineHandle, why: String) {
     tracing::warn!(%why, "app update failed");
@@ -178,13 +215,37 @@ fn installer_artifact(
     {
         return Err("The release has an invalid installer size or checksum.".into());
     }
-    if !(artifact.url.starts_with("https://")
-        || (cfg!(debug_assertions) || crate::update::IS_UPDATE_TEST)
-            && artifact.url.starts_with("http://127.0.0.1:"))
-    {
+    if !allowed_url(&artifact.url) {
         return Err("The installer download must use HTTPS.".into());
     }
     Ok(artifact)
+}
+
+/// Downloads use HTTPS; development and the local update test may use this
+/// computer's own server.
+fn allowed_url(url: &str) -> bool {
+    url.starts_with("https://")
+        || (cfg!(debug_assertions) || crate::update::IS_UPDATE_TEST)
+            && url.starts_with("http://127.0.0.1:")
+}
+
+/// The per-file list of this target's app (S164), when the release has one.
+#[cfg(unix)]
+fn files_artifact(report: &crate::update::Report, target: &str) -> Option<ReleaseArtifact> {
+    use uxduck_contracts::dto::release::BUNDLE_FILES_KIND;
+    report
+        .manifest
+        .artifacts
+        .iter()
+        .find(|a| a.target == target && a.kind == BUNDLE_FILES_KIND)
+        .filter(|a| {
+            a.size > 0
+                && a.size <= files::MAX_LIST
+                && a.sha256.len() == 64
+                && a.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                && allowed_url(&a.url)
+        })
+        .cloned()
 }
 
 async fn download(
@@ -214,45 +275,70 @@ async fn download(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let package = dir.join(format!("package.{}", artifact.kind));
     let mut s = status(UpdatePhase::Downloading);
-    s.version = Some(version);
+    s.version = Some(version.clone());
     s.size = Some(artifact.size);
     s.notes_url = report
         .manifest
         .notes_url
+        .clone()
         .filter(|url| url.starts_with("https://"));
-    let initial = s.clone();
-    engine
-        .run(move |e| e.app_update_publish(initial))
-        .await
-        .map_err(|e| e.to_string())?;
-    if verify_file_async(&package, &artifact).await.is_err() {
-        let partial = dir.join("package.partial");
-        let fetched = download_file(engine, &artifact, &partial, &s).await;
-        if let Err(error) = fetched {
-            let _ = std::fs::remove_file(&partial);
-            return Err(error);
-        }
-        if let Err(error) = verify_file_async(&partial, &artifact).await {
-            let _ = std::fs::remove_file(&partial);
-            return Err(error);
-        }
-        if package.exists() {
-            std::fs::remove_file(&package).map_err(|e| e.to_string())?;
-        }
-        std::fs::rename(&partial, &package).map_err(|e| e.to_string())?;
-    }
-    let metadata_dir = dir.clone();
+    let (metadata_dir, signed, signature) = (
+        dir.clone(),
+        report.signed_bytes.clone(),
+        report.signature.clone(),
+    );
     tokio::task::spawn_blocking(move || {
-        write(&metadata_dir.join("manifest.json"), &report.signed_bytes)?;
-        write(
-            &metadata_dir.join("manifest.minisig"),
-            report.signature.as_bytes(),
-        )
+        write(&metadata_dir.join("manifest.json"), &signed)?;
+        write(&metadata_dir.join("manifest.minisig"), signature.as_bytes())
     })
     .await
     .map_err(|e| e.to_string())??;
+    #[cfg(unix)]
+    let staged = match files_artifact(&report, crate::update::TARGET) {
+        Some(list) if cfg!(target_os = "macos") => {
+            let installed = Path::new(installer::INSTALLED_APP);
+            match download_files(engine, &dir, &list, &version, installed, &mut s).await {
+                Ok(()) => true,
+                Err(why) => {
+                    // Never a half-built app: this version uses its full package.
+                    tracing::warn!(%why, "per-file update unavailable; downloading the full installer");
+                    let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
+                    let _ = std::fs::remove_file(dir.join(files::LIST));
+                    s.size = Some(artifact.size);
+                    s.received = None;
+                    false
+                }
+            }
+        }
+        _ => false,
+    };
+    #[cfg(not(unix))]
+    let staged = false;
+    if !staged {
+        let initial = s.clone();
+        engine
+            .run(move |e| e.app_update_publish(initial))
+            .await
+            .map_err(|e| e.to_string())?;
+        if verify_file_async(&package, &artifact).await.is_err() {
+            let partial = dir.join("package.partial");
+            let fetched = download_file(engine, &artifact, &partial, &s).await;
+            if let Err(error) = fetched {
+                let _ = std::fs::remove_file(&partial);
+                return Err(error);
+            }
+            if let Err(error) = verify_file_async(&partial, &artifact).await {
+                let _ = std::fs::remove_file(&partial);
+                return Err(error);
+            }
+            if package.exists() {
+                std::fs::remove_file(&package).map_err(|e| e.to_string())?;
+            }
+            std::fs::rename(&partial, &package).map_err(|e| e.to_string())?;
+        }
+        s.received = Some(artifact.size);
+    }
     s.phase = UpdatePhase::Ready;
-    s.received = Some(artifact.size);
     // Surface a cancelled/failed installation when the background process returns.
     if let Ok(result) = std::fs::read_to_string(data_dir.join("app-update-result")) {
         s.detail = Some(result);
@@ -262,6 +348,199 @@ async fn download(
         .await
         .map_err(|e| e.to_string())?;
     Ok(Some(dir))
+}
+
+/// Shared download progress across files fetched at once.
+#[cfg(unix)]
+struct Progress {
+    received: std::sync::atomic::AtomicU64,
+    published: std::sync::Mutex<std::time::Instant>,
+}
+
+#[cfg(unix)]
+impl Progress {
+    /// Adds `bytes`, and returns the total when it is time to show it.
+    fn add(&self, bytes: u64) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        let total = self.received.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let mut last = self.published.lock().ok()?;
+        (last.elapsed() >= Duration::from_secs(1)).then(|| {
+            *last = std::time::Instant::now();
+            total
+        })
+    }
+}
+
+/// A per-file update (S164): the list the signed manifest names, then only
+/// the files the installed app does not have, each checked, then a complete
+/// candidate bundle built and checked like the installed update will be.
+/// On success the list is kept in `dir` as the staged update.
+#[cfg(unix)]
+async fn download_files(
+    engine: &EngineHandle,
+    dir: &Path,
+    artifact: &ReleaseArtifact,
+    version: &str,
+    installed: &Path,
+    s: &mut AppUpdateStatus,
+) -> Result<(), String> {
+    use futures::{StreamExt, TryStreamExt};
+    if let Ok(why) = std::fs::read_to_string(dir.join(FILES_FAILED)) {
+        return Err(why);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_mins(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = fetch_bounded(&client, &artifact.url, artifact.size).await?;
+    let list = files::read(
+        &bytes,
+        artifact,
+        version,
+        crate::update::TARGET,
+        allowed_url,
+    )?;
+    let (stage, plan, from) = (dir.to_owned(), list.clone(), installed.to_owned());
+    let missing = tokio::task::spawn_blocking(move || {
+        let have = files::index(&from, &plan)?;
+        Ok::<_, String>(files::missing(&plan, |sha, size| {
+            have.contains_key(sha) || files::have_blob(&stage, sha, size)
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let total: u64 = missing.iter().map(|m| m.packed).sum();
+    if missing
+        .iter()
+        .map(|m| files::packed_limit(m.size))
+        .sum::<u64>()
+        > MAX_PACKAGE
+    {
+        return Err("The update's files are larger than UXDuck accepts.".into());
+    }
+    s.size = Some(total);
+    s.received = Some(0);
+    let initial = s.clone();
+    engine
+        .run(move |e| e.app_update_publish(initial))
+        .await
+        .map_err(|e| e.to_string())?;
+    let progress = Progress {
+        received: 0.into(),
+        published: std::sync::Mutex::new(std::time::Instant::now()),
+    };
+    let shown = s.clone();
+    futures::stream::iter(missing)
+        .map(|file| {
+            let (client, list, progress, shown) = (&client, &list, &progress, &shown);
+            async move {
+                let compressed = dir.join("blobs").join(format!("{}.zst", file.sha256));
+                std::fs::create_dir_all(dir.join("blobs")).map_err(|e| e.to_string())?;
+                let url = format!("{}{}.zst", list.blobs, file.sha256);
+                let fetched = fetch_file(
+                    client,
+                    &url,
+                    &compressed,
+                    files::packed_limit(file.size),
+                    |bytes| {
+                        if let Some(received) = progress.add(bytes) {
+                            let mut s = shown.clone();
+                            s.received = Some(received.min(total));
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    },
+                    engine,
+                )
+                .await;
+                let unpacked = match fetched {
+                    Ok(()) => {
+                        let (compressed, dir) = (compressed.clone(), dir.to_owned());
+                        tokio::task::spawn_blocking(move || {
+                            files::unpack(&compressed, &dir, &file.sha256, file.size)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result)
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = std::fs::remove_file(&compressed);
+                unpacked
+            }
+        })
+        .buffer_unordered(PARALLEL_FILES)
+        .try_collect::<Vec<()>>()
+        .await?;
+    s.received = Some(total);
+    // The same build and checks the installation repeats after shutdown.
+    let (stage, plan, approved) = (dir.to_owned(), list.clone(), version.to_owned());
+    let installed = installed.to_owned();
+    tokio::task::spawn_blocking(move || {
+        installer::preflight_files(&stage, &plan, &installed, &approved)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    write(&dir.join(files::LIST), &bytes)
+}
+
+/// Fetches `url` whole into memory, refusing more than `size` bytes.
+#[cfg(unix)]
+async fn fetch_bounded(client: &reqwest::Client, url: &str, size: u64) -> Result<Vec<u8>, String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if (bytes.len() + chunk.len()) as u64 > size {
+            return Err("The update's file list is larger than the signed release says.".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Streams `url` to `path`, refusing more than `limit` bytes, and reports
+/// progress through `tick`, whose status is published when it returns one.
+#[cfg(unix)]
+async fn fetch_file(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    limit: u64,
+    tick: impl Fn(u64) -> Option<AppUpdateStatus>,
+    engine: &EngineHandle,
+) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let mut out = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut have = 0;
+    while let Some(bytes) = response.chunk().await.map_err(|e| e.to_string())? {
+        have += bytes.len() as u64;
+        if have > limit {
+            return Err("An update file is larger than the signed release allows.".into());
+        }
+        out.write_all(&bytes).await.map_err(|e| e.to_string())?;
+        if let Some(s) = tick(bytes.len() as u64) {
+            engine
+                .run(move |e| e.app_update_publish(s))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    out.sync_all().await.map_err(|e| e.to_string())
 }
 
 async fn download_file(
@@ -339,7 +618,8 @@ fn verify_file(path: &Path, artifact: &ReleaseArtifact) -> Result<(), String> {
     Ok(())
 }
 
-fn verified_artifact(dir: &Path, key: &str) -> Result<ReleaseArtifact, String> {
+/// The staged manifest, checked against the release key and its folder.
+fn verified_report(dir: &Path, key: &str) -> Result<crate::update::Report, String> {
     let manifest = dir.join("manifest.json");
     if std::fs::metadata(&manifest)
         .map_err(|e| e.to_string())?
@@ -355,11 +635,61 @@ fn verified_artifact(dir: &Path, key: &str) -> Result<ReleaseArtifact, String> {
     if dir.file_name().and_then(|s| s.to_str()) != Some(&manifest.version) {
         return Err("The staged release version changed. Check for updates again.".into());
     }
-    let report = crate::update::compare(env!("CARGO_PKG_VERSION"), manifest, crate::update::TARGET)
-        .map_err(|e| e.to_string())?;
+    crate::update::compare(env!("CARGO_PKG_VERSION"), manifest, crate::update::TARGET)
+        .map_err(|e| e.to_string())
+}
+
+fn verified_artifact(dir: &Path, key: &str) -> Result<ReleaseArtifact, String> {
+    let report = verified_report(dir, key)?;
     let artifact = installer_artifact(&report, crate::update::TARGET)?;
     verify_file(&dir.join(format!("package.{}", artifact.kind)), &artifact)?;
     Ok(artifact)
+}
+
+/// What an approved update installs from.
+#[derive(Debug)]
+enum Staged {
+    /// The platform's full installer, checked against the signed manifest.
+    Package(ReleaseArtifact),
+    /// The app's files (S164): the list, checked against the signed
+    /// manifest. Each file is checked again as the new bundle is built.
+    #[cfg(unix)]
+    Files(uxduck_contracts::dto::release::BundleFiles),
+}
+
+impl Staged {
+    fn kind(&self) -> &str {
+        match self {
+            Self::Package(artifact) => &artifact.kind,
+            #[cfg(unix)]
+            Self::Files(_) => uxduck_contracts::dto::release::BUNDLE_FILES_KIND,
+        }
+    }
+}
+
+/// The per-file update when one was staged and has not failed, otherwise
+/// the full installer.
+fn verified_staged(dir: &Path, key: &str) -> Result<Staged, String> {
+    #[cfg(unix)]
+    if dir.join(files::LIST).is_file() && !dir.join(FILES_FAILED).exists() {
+        let report = verified_report(dir, key)?;
+        let artifact = files_artifact(&report, crate::update::TARGET)
+            .ok_or("The release no longer lists the update's files.")?;
+        let path = dir.join(files::LIST);
+        if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > files::MAX_LIST {
+            return Err("The update's file list is too large.".into());
+        }
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        return files::read(
+            &bytes,
+            &artifact,
+            &report.manifest.version,
+            crate::update::TARGET,
+            allowed_url,
+        )
+        .map(Staged::Files);
+    }
+    verified_artifact(dir, key).map(Staged::Package)
 }
 
 fn prepare_worker(
@@ -368,8 +698,25 @@ fn prepare_worker(
     port: u16,
     reopen: bool,
 ) -> Result<(Child, std::process::ChildStdin), String> {
-    let artifact = verified_artifact(dir, &key().ok_or("This build has no release key")?)?;
-    installer::preflight(&dir.join(format!("package.{}", artifact.kind)))?;
+    let staged = verified_staged(dir, &key().ok_or("This build has no release key")?)?;
+    match &staged {
+        Staged::Package(artifact) => {
+            installer::preflight(&dir.join(format!("package.{}", artifact.kind)))?;
+        }
+        // The installed app may have changed since the download: build and
+        // check the new bundle again before anything stops.
+        #[cfg(unix)]
+        Staged::Files(list) => {
+            let version = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let installed = Path::new(installer::INSTALLED_APP);
+            if let Err(why) = installer::preflight_files(dir, list, installed, version) {
+                let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
+                return Err(format!(
+                    "UXDuck could not prepare the smaller update ({why}). It is downloading the complete installer; install again when it is ready."
+                ));
+            }
+        }
+    }
     let executable = std::fs::canonicalize(std::env::current_exe().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let plan = Plan {
@@ -378,7 +725,7 @@ fn prepare_worker(
             .and_then(|s| s.to_str())
             .ok_or("Invalid update folder")?
             .into(),
-        kind: artifact.kind,
+        kind: staged.kind().to_owned(),
         executable: executable.clone(),
         installed_executable: Some(installer::installed_executable()?),
         data_dir: data_dir.into(),
@@ -482,15 +829,27 @@ pub fn worker(dir: &Path) -> Result<(), String> {
         .as_ref()
         .unwrap_or(&plan.executable);
     let result: Result<(), String> = (|| {
-        let artifact = verified_artifact(dir, &key().ok_or("This build has no release key")?)?;
+        let staged = verified_staged(dir, &key().ok_or("This build has no release key")?)?;
         if plan.version != dir.file_name().and_then(|s| s.to_str()).unwrap_or("")
-            || plan.kind != artifact.kind
+            || plan.kind != staged.kind()
         {
             return Err("The approved installer changed.".into());
         }
-        let package = dir.join(format!("package.{}", artifact.kind));
-        installer::preflight(&package)?;
-        installer::install(&package, &artifact.kind, &plan.version)?;
+        match staged {
+            Staged::Package(artifact) => {
+                let package = dir.join(format!("package.{}", artifact.kind));
+                installer::preflight(&package)?;
+                installer::install(&package, &artifact.kind, &plan.version)?;
+            }
+            // A failure leaves the previous app in place; the next attempt
+            // downloads this version's full package.
+            #[cfg(unix)]
+            Staged::Files(list) => {
+                installer::install_files(dir, &list, &plan.version).inspect_err(|why| {
+                    let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
+                })?;
+            }
+        }
         let version = Command::new(installed)
             .arg("--version")
             .output()

@@ -42,14 +42,26 @@ use store::{Bad, Followed, Kept, Store};
 /// Where the production manifest is published.
 pub const DEFAULT_URL: &str = "https://app.uxduck.com/interface/manifest.json";
 
+/// Where staging's manifest is published, for the maintainer to try
+/// staging's interface in an installed UXDuck
+/// (`uxduck config set interface.channel staging`).
+pub const STAGING_URL: &str = "https://app-staging.uxduck.com/interface/manifest.json";
+
+/// The channels an installed UXDuck can follow; production by default.
+pub const CHANNELS: [&str; 2] = ["production", "staging"];
+
 /// How long a page has, after loading `index.html`, to say it is ready.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What follows the interface, and how often.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The manifest; none switches fetching off (`UXDUCK_INTERFACE_URL=none`).
+    /// The production manifest; none switches fetching off
+    /// (`UXDUCK_INTERFACE_URL=none`).
     pub url: Option<String>,
+    /// Staging's manifest, followed when the store's `interface.channel`
+    /// is `staging`; none switches fetching off on that channel.
+    pub staging_url: Option<String>,
     /// The release key; none in builds without it, which never fetch.
     pub key: Option<String>,
     /// `--dev`: the Vite origin that serves the interface; nothing is
@@ -61,16 +73,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// The production manifest and the key built into this binary. A
-    /// development build also takes `UXDUCK_INTERFACE_KEY` and shorter
-    /// times (`UXDUCK_INTERFACE_FIRST_CHECK_MS`, `UXDUCK_INTERFACE_READY_MS`),
-    /// for tests.
+    /// Each channel's manifest and the key built into this binary. A
+    /// development build also takes `UXDUCK_INTERFACE_URL` for both
+    /// channels, `UXDUCK_INTERFACE_KEY` and shorter times
+    /// (`UXDUCK_INTERFACE_FIRST_CHECK_MS`, `UXDUCK_INTERFACE_READY_MS`), for
+    /// tests.
     #[must_use]
     pub fn from_env(dev: Option<String>) -> Self {
-        let url = match crate::update::url_override("UXDUCK_INTERFACE_URL") {
-            Some(url) if url == "none" => None,
-            Some(url) => Some(url),
-            None => Some(DEFAULT_URL.to_owned()),
+        let (url, staging_url) = match crate::update::url_override("UXDUCK_INTERFACE_URL") {
+            Some(url) if url == "none" => (None, None),
+            Some(url) => (Some(url.clone()), Some(url)),
+            None => (Some(DEFAULT_URL.to_owned()), Some(STAGING_URL.to_owned())),
         };
         let debug_env = |name: &str| std::env::var(name).ok().filter(|_| cfg!(debug_assertions));
         let ms = |name: &str| {
@@ -80,6 +93,7 @@ impl Config {
         };
         Self {
             url,
+            staging_url,
             key: debug_env("UXDUCK_INTERFACE_KEY")
                 .or_else(|| crate::update::PUBLIC_KEY.map(str::to_owned)),
             dev,
@@ -104,6 +118,8 @@ struct Serving {
 
 #[derive(Debug, Default)]
 struct Run {
+    /// The channel the manifest, its entry and its tag below came from.
+    channel: Option<String>,
     /// The manifest accepted this run, and the entry it chose.
     manifest: Option<InterfaceManifest>,
     followed: Option<InterfaceEntry>,
@@ -148,6 +164,8 @@ enum CheckError {
     Invalid(String),
     #[error("the answer was older than one already followed")]
     Replayed,
+    #[error("the answer was for the {got} channel, not {want}")]
+    Channel { got: String, want: String },
 }
 
 fn now_ms() -> u64 {
@@ -206,25 +224,44 @@ impl Interfaces {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The channel followed, from the store's settings; production in
+    /// `--dev`, which follows none.
+    fn channel(&self) -> String {
+        self.store
+            .as_ref()
+            .map_or_else(|| CHANNELS[0].to_owned(), |store| store.settings().channel)
+    }
+
+    /// The manifest of `channel`; none when fetching is off for it.
+    fn manifest_url(&self, channel: &str) -> Option<&str> {
+        if channel == "staging" {
+            self.config.staging_url.as_deref()
+        } else {
+            self.config.url.as_deref()
+        }
+    }
+
     /// Whether this UXDuck follows the published interface now.
     fn updates_on(&self) -> bool {
-        self.config.url.is_some()
-            && self.config.key.is_some()
-            && self
-                .store
-                .as_ref()
-                .is_some_and(|store| store.settings().updates != "off")
+        self.config.key.is_some()
+            && self.store.as_ref().is_some_and(|store| {
+                let settings = store.settings();
+                settings.updates != "off" && self.manifest_url(&settings.channel).is_some()
+            })
     }
 
     /// What `interface/status` answers.
     #[must_use]
     pub fn status(&self) -> InterfaceStatus {
+        let channel = self.channel();
+        let updates = self.updates_on();
         let inner = self.lock();
         InterfaceStatus {
             version: inner.serving.version.clone(),
             published_at: inner.serving.published_at.clone(),
             built_in: inner.serving.source == Source::BuiltIn,
-            updates: self.updates_on(),
+            updates,
+            channel: (channel != CHANNELS[0]).then_some(channel),
             update_uxduck: inner.run.update_uxduck,
             checked_at_ms: inner.run.checked_at_ms,
             problem: inner.run.problem.clone(),
@@ -394,10 +431,24 @@ impl Interfaces {
     }
 
     async fn check_inner(&self) -> Result<(), String> {
-        let (Some(store), Some(url), Some(key)) = (&self.store, &self.config.url, &self.config.key)
-        else {
+        let (Some(store), Some(key)) = (&self.store, &self.config.key) else {
             return Ok(());
         };
+        let channel = store.settings().channel;
+        let Some(url) = self.manifest_url(&channel) else {
+            return Ok(());
+        };
+        {
+            // A switch of channel forgets what the other one said.
+            let mut inner = self.lock();
+            if inner.run.channel.as_deref() != Some(channel.as_str()) {
+                inner.run.channel = Some(channel.clone());
+                inner.run.manifest = None;
+                inner.run.followed = None;
+                inner.run.etag = None;
+                inner.run.update_uxduck = false;
+            }
+        }
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_mins(10))
@@ -406,7 +457,7 @@ impl Interfaces {
             .build()
             .map_err(|e| e.to_string())?;
         let manifest = self
-            .fetch_manifest(&client, url, key, store)
+            .fetch_manifest(&client, url, key, store, &channel)
             .await
             .map_err(|e| format!("Couldn't check for a new interface: {e}"))?;
         let bad = store.bad();
@@ -433,6 +484,7 @@ impl Interfaces {
             }
         }
         if let Err(error) = store.set_followed(&Followed {
+            channel: Some(channel.clone()),
             published_at: manifest.published_at.clone(),
             version: pick.entry.as_ref().map(|e| e.version.clone()),
         }) {
@@ -459,6 +511,7 @@ impl Interfaces {
         url: &str,
         key: &str,
         store: &Store,
+        channel: &str,
     ) -> Result<InterfaceManifest, CheckError> {
         let (etag, known) = {
             let inner = self.lock();
@@ -496,7 +549,20 @@ impl Interfaces {
         }
         let signature = signature.text().await.map_err(|e| fetch_error(&e))?;
         let manifest = verify(&bytes, &signature, key)?;
-        let followed = store.followed().map(|f| f.published_at).unwrap_or_default();
+        // Signed, so a host cannot pass one channel's manifest off as the other's.
+        if manifest.channel != channel {
+            return Err(CheckError::Channel {
+                got: manifest.channel,
+                want: channel.to_owned(),
+            });
+        }
+        // Each channel publishes at its own times: only the same channel's
+        // last manifest says what is a replay.
+        let followed = store
+            .followed()
+            .filter(|f| f.channel.as_deref().unwrap_or(CHANNELS[0]) == channel)
+            .map(|f| f.published_at)
+            .unwrap_or_default();
         // RFC 3339 in UTC compares as text.
         if manifest.published_at < followed {
             return Err(CheckError::Replayed);
@@ -951,12 +1017,32 @@ pub fn set_updates(data_dir: &Path, value: &str) -> Result<(), String> {
     if value != "on" && value != "off" {
         return Err("interface.updates is on or off".into());
     }
-    let store = Store::open(data_dir.join("interface")).map_err(|e| e.to_string())?;
-    store
-        .set_settings(&store::Settings {
-            updates: value.to_owned(),
-        })
-        .map_err(|e| e.to_string())
+    change_settings(data_dir, |settings| value.clone_into(&mut settings.updates))
+}
+
+/// `uxduck config set interface.channel staging|production`: which
+/// channel's interface this UXDuck follows, for the maintainer to try
+/// staging's in an installed UXDuck. Checked with the same release key;
+/// Settings › About names the channel when it is not production.
+///
+/// # Errors
+/// A channel other than production or staging, or a store that cannot be
+/// written.
+pub fn set_channel(data_dir: &Path, value: &str) -> Result<(), String> {
+    if !CHANNELS.contains(&value) {
+        return Err("interface.channel is production or staging".into());
+    }
+    change_settings(data_dir, |settings| value.clone_into(&mut settings.channel))
+}
+
+fn change_settings(
+    data_dir: &Path,
+    change: impl FnOnce(&mut store::Settings),
+) -> Result<(), String> {
+    let store = Store::for_settings(data_dir.join("interface")).map_err(|e| e.to_string())?;
+    let mut settings = store.settings();
+    change(&mut settings);
+    store.set_settings(&settings).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

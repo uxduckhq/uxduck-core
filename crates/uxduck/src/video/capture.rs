@@ -696,8 +696,10 @@ fn naming_words(name: &str) -> Vec<String> {
 /// The camera's own microphone (S161): the sound input whose name starts
 /// with the same words as the camera's, once what each is ("Camera",
 /// "Microphone", "USB"…) is set aside, so "`MacBook` Pro Microphone" for
-/// "`MacBook` Pro Camera" and "Storm Microphone" for "Storm Camera"; the one
-/// sharing the most. Most cameras have none, so most get no sound.
+/// "`MacBook` Pro Camera" and "Storm Microphone" for "Storm Camera": every
+/// word of the shorter name, in order, so a "Logitech G Pro" headset is not a
+/// "Logitech BRIO"'s. The one sharing the most. Most cameras have none, so
+/// most get no sound; matching by the USB device behind both would find more.
 #[must_use]
 pub fn own_microphone<'a>(
     camera: &CaptureDevice,
@@ -705,11 +707,14 @@ pub fn own_microphone<'a>(
 ) -> Option<&'a CaptureDevice> {
     let theirs = naming_words(&camera.name);
     let shared = |input: &CaptureDevice| {
-        naming_words(&input.name)
-            .iter()
-            .zip(&theirs)
-            .take_while(|(a, b)| a == b)
-            .count()
+        let ours = naming_words(&input.name);
+        let n = ours.iter().zip(&theirs).take_while(|(a, b)| a == b).count();
+        // All of the shorter name, or no match.
+        if n == ours.len().min(theirs.len()) {
+            n
+        } else {
+            0
+        }
     };
     // The first listed of those sharing the most.
     inputs
@@ -1023,6 +1028,12 @@ mod tests {
         assert_eq!(own("Iriun Camera"), None);
         assert_eq!(own("OBS Virtual Camera"), None);
         assert_eq!(own("USB Video"), None);
+        // A shared brand is not enough: a headset is not the webcam's.
+        let brand = [device("headset", "Logitech G Pro Microphone")];
+        assert_eq!(
+            own_microphone(&device("brio", "Logitech BRIO"), &brand),
+            None
+        );
         // A capture adapter whose audio has its name, as DirectShow and ALSA list them.
         let adapter = [
             device("dshow:a", "Cam Link 4K"),
