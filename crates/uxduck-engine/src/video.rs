@@ -1550,14 +1550,27 @@ impl Engine {
                     {
                         port.open_rtsp(&source.id, url);
                     }
-                } else if let Some(input) = &source.capture {
+                } else if let Some(input) = source.capture.clone() {
                     if !self.video.capture_epochs.contains_key(&source.id) {
+                        // Whether a local camera sends sound is known again
+                        // with each start: its own microphone may be gone or
+                        // refused, or sound turned off (S161).
+                        if source.audio.is_some() {
+                            source.audio = None;
+                            source.version += 1;
+                            self.commit_as(
+                                actor(),
+                                Change::VideoSourceUpserted {
+                                    source: source.clone(),
+                                },
+                            );
+                        }
                         // Idle/enable/configuration transitions advance the source version.
                         self.video
                             .capture_epochs
                             .insert(source.id.clone(), source.version);
                         if let Some(port) = self.video.port.as_mut() {
-                            port.open_capture(&source.id, input, source.version);
+                            port.open_capture(&source.id, &input, source.version);
                         }
                     }
                 } else {

@@ -449,7 +449,7 @@ fn sound_problem(text: &str, sound: &CaptureDevice) -> Option<String> {
     let lower = text.to_lowercase();
     if lower.contains("sound input is not connected") {
         return Some(format!(
-            "The sound input {} is not connected. Reconnect it, or turn off Record sound.",
+            "The sound input {} is not connected. Reconnect it, or choose No sound under Sound.",
             sound.name
         ));
     }
@@ -465,7 +465,7 @@ fn sound_problem(text: &str, sound: &CaptureDevice) -> Option<String> {
     .any(|w| lower.contains(w));
     (about && refused).then(|| {
         format!(
-            "UXDuck couldn't open the sound input {}. Allow UXDuck in your system's microphone privacy settings (on Linux, check the device's permissions), or turn off Record sound.",
+            "UXDuck couldn't open the sound input {}. Allow UXDuck in your system's microphone privacy settings (on Linux, check the device's permissions), or choose No sound under Sound.",
             sound.name
         )
     })
@@ -649,31 +649,123 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
         let mut backoff = 1u64;
+        // Why the camera's own microphone, picked by itself, couldn't be
+        // opened: then the pictures go on without it (S161).
+        let mut own_refused: Option<String> = None;
         loop {
-            let result = run(&id, &input, epoch, &hub, &engine).await;
+            let (result, refused) =
+                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref()).await;
+            if refused.is_some() {
+                own_refused = refused;
+                backoff = 0;
+            }
             let report_id = id.clone();
             let config = input.clone();
             engine.post(move |e| e.capture_stopped(&report_id, &config, epoch, result));
             tokio::time::sleep(Duration::from_secs(backoff)).await;
-            backoff = (backoff * 2).min(15);
+            backoff = (backoff * 2).clamp(1, 15);
         }
     })
 }
 
+/// Words that say what a device is rather than which one it is.
+const KIND_WORDS: &[&str] = &[
+    "camera",
+    "webcam",
+    "video",
+    "microphone",
+    "mic",
+    "audio",
+    "input",
+    "capture",
+    "usb",
+    "hd",
+    "built-in",
+    "integrated",
+    "internal",
+];
+
+fn naming_words(name: &str) -> Vec<String> {
+    name.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .filter(|w| !w.is_empty() && !KIND_WORDS.contains(w))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The camera's own microphone (S161): the sound input whose name starts
+/// with the same words as the camera's, once what each is ("Camera",
+/// "Microphone", "USB"…) is set aside, so "`MacBook` Pro Microphone" for
+/// "`MacBook` Pro Camera" and "Storm Microphone" for "Storm Camera"; the one
+/// sharing the most. Most cameras have none, so most get no sound.
+#[must_use]
+pub fn own_microphone<'a>(
+    camera: &CaptureDevice,
+    inputs: &'a [CaptureDevice],
+) -> Option<&'a CaptureDevice> {
+    let theirs = naming_words(&camera.name);
+    let shared = |input: &CaptureDevice| {
+        naming_words(&input.name)
+            .iter()
+            .zip(&theirs)
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    // The first listed of those sharing the most.
+    inputs
+        .iter()
+        .map(|input| (shared(input), input))
+        .filter(|(n, _)| *n > 0)
+        .fold(
+            None,
+            |best: Option<(usize, &CaptureDevice)>, (n, input)| match best {
+                Some((most, _)) if most >= n => best,
+                _ => Some((n, input)),
+            },
+        )
+        .map(|(_, input)| input)
+}
+
+/// Why a run stopped, and why the camera's own microphone couldn't be used
+/// when that was the reason.
+struct Stopped(String, Option<String>);
+
+impl From<String> for Stopped {
+    fn from(why: String) -> Self {
+        Self(why, None)
+    }
+}
+
+impl From<&str> for Stopped {
+    fn from(why: &str) -> Self {
+        Self(why.to_owned(), None)
+    }
+}
+
+/// One run of the capture helper until it stops: why it stopped, and, when
+/// the camera's own microphone picked by itself was what failed, why, so the
+/// next run goes on without it.
 async fn run(
     id: &str,
     input: &CaptureInput,
     epoch: u64,
     hub: &Hub,
     engine: &EngineHandle,
-) -> String {
+    own_refused: Option<&str>,
+) -> (String, Option<String>) {
+    let automatic = !input.no_sound && !input.record_sound;
     let result = async {
         let program = program()?;
         let found = discover().await?;
         let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or("Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically.")?;
         // A sound input that is missing leaves the pictures playing, and says so.
         let (sound, note) = match input.sound_input.as_ref().filter(|_| input.record_sound) {
-            None => (None, None),
+            // Not chosen: the camera's own microphone, when it has one (S161).
+            None if !automatic => (None, None),
+            None => match own_refused {
+                Some(why) => (None, Some(why.to_owned())),
+                None => (own_microphone(&device, &found.sound_inputs).cloned(), None),
+            },
             Some(chosen) => match found.sound_inputs.into_iter().find(|d| d.id == chosen.device_id) {
                 Some(device) => (Some(device), None),
                 None => (None, Some(format!("The sound input {} is not connected, so recordings have no sound. The video plays.", chosen.name))),
@@ -726,16 +818,25 @@ async fn run(
         let _ = child.kill().await;
         let _ = child.wait().await;
         let diagnostics = diagnostics.await.unwrap_or_default();
-        Err::<(), String>(
-            sound
-                .as_ref()
-                .and_then(|s| sound_problem(&diagnostics, s))
-                .unwrap_or_else(|| problem(&diagnostics, failure)),
+        Err::<(), Stopped>(
+            match sound.as_ref().and_then(|s| sound_problem(&diagnostics, s)) {
+                // Picked by itself: go on without it, and say so.
+                Some(why) if automatic => {
+                    let note = format!(
+                        "{} Recordings have no sound. The video plays.",
+                        why.split(" Allow UXDuck").next().unwrap_or(&why)
+                    );
+                    Stopped(why, Some(note))
+                }
+                Some(why) => Stopped(why, None),
+                None => Stopped(problem(&diagnostics, failure), None),
+            },
         )
     }.await;
-    result
-        .err()
-        .unwrap_or_else(|| "Camera capture ended".into())
+    match result {
+        Err(Stopped(why, refused)) => (why, refused),
+        Ok(()) => ("Camera capture ended".into(), None),
+    }
 }
 
 #[cfg(test)]
@@ -792,6 +893,7 @@ mod tests {
             deinterlace: true,
             record_sound: false,
             sound_input: None,
+            no_sound: false,
         };
         let device = CaptureDevice {
             id: input.device_id.clone(),
@@ -836,6 +938,7 @@ mod tests {
             deinterlace: false,
             record_sound: true,
             sound_input: None,
+            no_sound: false,
         };
         let device = |id: &str| CaptureDevice {
             id: id.into(),
@@ -896,6 +999,42 @@ mod tests {
     }
 
     #[test]
+    fn a_camera_records_its_own_microphone_and_no_one_elses() {
+        let device = |id: &str, name: &str| CaptureDevice {
+            id: id.into(),
+            name: name.into(),
+            persistent: true,
+        };
+        // As listed on a Mac with BlackHole, Camo, Teams and a Storm webcam.
+        let inputs = [
+            device("bh", "BlackHole 2ch"),
+            device("mac", "MacBook Pro Microphone"),
+            device("storm", "Storm Microphone"),
+            device("camo", "Camo Microphone"),
+            device("teams", "Microsoft Teams Audio"),
+        ];
+        let own =
+            |camera: &str| own_microphone(&device("cam", camera), &inputs).map(|d| d.id.as_str());
+        assert_eq!(own("MacBook Pro Camera"), Some("mac"));
+        assert_eq!(own("MacBook Pro Desk View Camera"), Some("mac"));
+        assert_eq!(own("Storm Camera"), Some("storm"));
+        assert_eq!(own("Camo Camera"), Some("camo"));
+        // Most cameras have none: no sound, never another microphone.
+        assert_eq!(own("Iriun Camera"), None);
+        assert_eq!(own("OBS Virtual Camera"), None);
+        assert_eq!(own("USB Video"), None);
+        // A capture adapter whose audio has its name, as DirectShow and ALSA list them.
+        let adapter = [
+            device("dshow:a", "Cam Link 4K"),
+            device("dshow:b", "Microphone (Realtek)"),
+        ];
+        assert_eq!(
+            own_microphone(&device("dshow:v", "Cam Link 4K"), &adapter).map(|d| d.id.as_str()),
+            Some("dshow:a")
+        );
+    }
+
+    #[test]
     fn a_sound_input_that_fails_says_so_in_words() {
         let mic = CaptureDevice {
             id: "avfoundation:mic".into(),
@@ -908,7 +1047,7 @@ mod tests {
         )
         .unwrap();
         assert!(refused.contains("microphone privacy settings"), "{refused}");
-        assert!(refused.contains("turn off Record sound"));
+        assert!(refused.contains("choose No sound under Sound"));
         let gone = sound_problem(
             "[AVFoundation indev @ x] The selected sound input is not connected",
             &mic,

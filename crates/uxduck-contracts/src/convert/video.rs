@@ -187,6 +187,7 @@ impl From<&core::CaptureInput> for dto::CaptureInput {
                 device_id: s.device_id.clone(),
                 name: s.name.clone(),
             }),
+            no_sound: v.no_sound,
         }
     }
 }
@@ -210,6 +211,7 @@ impl From<dto::CaptureInput> for core::CaptureInput {
                 device_id: s.device_id,
                 name: s.name,
             }),
+            no_sound: v.no_sound,
         }
     }
 }

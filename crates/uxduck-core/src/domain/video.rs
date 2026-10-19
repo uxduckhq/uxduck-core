@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 /// A camera attached to the computer running the daemon, never to a UI session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent choices made with the camera"
+)]
 pub struct CaptureInput {
     /// Opaque platform device identity returned by `video/devices`.
     pub device_id: String,
@@ -27,13 +31,17 @@ pub struct CaptureInput {
     /// Bob deinterlacing preserves each field's time for analog FPV.
     #[serde(default)]
     pub deinterlace: bool,
-    /// Record the sound input's sound with the pictures (S148); off unless
-    /// turned on.
+    /// Record `sound_input` with the pictures (S148), the one chosen. Not
+    /// set and not `no_sound`, the camera's own microphone is recorded when
+    /// it has one (S161): the sound input named like it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub record_sound: bool,
-    /// The sound input chosen with the camera, kept while sound is off.
+    /// The sound input chosen with the camera, kept while it isn't used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound_input: Option<SoundInput>,
+    /// No sound, not even the camera's own microphone (S161).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sound: bool,
 }
 
 /// A sound input chosen with a local camera (S148): a microphone, or a

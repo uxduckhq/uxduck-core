@@ -36,9 +36,13 @@ pub enum VideoCommand {
         #[arg(long)]
         deinterlace: bool,
         /// Record sound from this input, an exact id or unambiguous name from
-        /// `uxduck video devices`' sound inputs (S148).
-        #[arg(long)]
+        /// `uxduck video devices`' sound inputs (S148). Without it, the
+        /// camera's own microphone when it has one (S161).
+        #[arg(long, conflicts_with = "no_sound")]
         sound: Option<String>,
+        /// No sound, not even the camera's own microphone (S161).
+        #[arg(long)]
+        no_sound: bool,
     },
     /// Pause a configured local camera, closing its device and recording segment.
     Pause { source: String },
@@ -100,6 +104,7 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
             frame_rate,
             deinterlace,
             sound,
+            no_sound,
         } => {
             capture(
                 data_dir,
@@ -111,6 +116,7 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
                     frame_rate,
                     deinterlace,
                     sound: sound.as_deref(),
+                    no_sound,
                 },
             )
             .await
@@ -458,6 +464,7 @@ struct Capture<'a> {
     frame_rate: Option<f64>,
     deinterlace: bool,
     sound: Option<&'a str>,
+    no_sound: bool,
 }
 
 async fn capture(data_dir: &Path, c: &Capture<'_>) -> Result<(), CliError> {
@@ -487,6 +494,7 @@ async fn capture(data_dir: &Path, c: &Capture<'_>) -> Result<(), CliError> {
                 "deinterlace": c.deinterlace || c.standard != "auto",
                 "recordSound": sound.is_some(),
                 "soundInput": sound.map(|s| json!({ "deviceId": s.id, "name": s.name })),
+                "noSound": c.no_sound,
             }})).await?;
     println!(
         "{}  {}",
