@@ -70,6 +70,10 @@
                       {
                         "id": "parameters",
                         "kind": "parameters"
+                      },
+                      {
+                        "id": "camera",
+                        "kind": "camera"
                       }
                     ],
                     "active": 0
@@ -174,6 +178,10 @@
                           {
                             "id": "parameters",
                             "kind": "parameters"
+                          },
+                          {
+                            "id": "camera",
+                            "kind": "camera"
                           }
                         ],
                         "active": 0
@@ -211,7 +219,7 @@
           },
           "preset": {
             "kind": "simple",
-            "version": 8,
+            "version": 10,
             "base": {
               "type": "split",
               "direction": "column",
@@ -277,6 +285,10 @@
                             {
                               "id": "parameters",
                               "kind": "parameters"
+                            },
+                            {
+                              "id": "camera",
+                              "kind": "camera"
                             }
                           ],
                           "active": 0

@@ -401,12 +401,19 @@ impl Engine {
             ClientRequest::VideoPhoto(params) => {
                 format!("keep a photo from the camera {}", params.source_id)
             }
-            ClientRequest::VideoRecordAll(params) => if params.on {
-                "start recording every camera that records with the others"
-            } else {
-                "stop recording every camera"
-            }
-            .into(),
+            ClientRequest::VideoRecordAll(params) => format!(
+                "{}{}",
+                if params.on {
+                    "start recording every camera that records with the others"
+                } else {
+                    "stop recording every camera"
+                },
+                params
+                    .vehicle_id
+                    .as_deref()
+                    .map(|id| format!(" of the vehicle {id}"))
+                    .unwrap_or_default()
+            ),
             ClientRequest::VideoRecordWithOthers(params) => format!(
                 "{} the camera {} when the others record",
                 if params.on { "include" } else { "leave out" },

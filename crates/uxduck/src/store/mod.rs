@@ -22,6 +22,9 @@ use event_log::EventLog;
 /// milliseconds").
 const FSYNC_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How long forgetting a session waits for the writer to delete it.
+const FORGET_WAIT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("the event log {path}: {source}")]
@@ -37,13 +40,15 @@ enum Command {
     Append(Box<Event>),
     Checkpoint(Box<State>),
     Session(String, Session),
-    /// A session forgotten, by its token's hash (S97).
-    ForgetSession(String),
+    /// A session forgotten, by its token's hash (S97), answered once it is
+    /// deleted.
+    ForgetSession(String, mpsc::Sender<()>),
     /// Sync everything and end the thread.
     Stop,
 }
 
-/// The engine's end: sends work to the store thread and never blocks.
+/// The engine's end: sends work to the store thread and never blocks, apart
+/// from forgetting a session, which waits for the delete.
 #[derive(Clone, Debug)]
 pub struct StoreHandle {
     commands: mpsc::Sender<Command>,
@@ -63,10 +68,17 @@ impl Persistence for StoreHandle {
             .commands
             .send(Command::Session(token_hash.to_owned(), session.clone()));
     }
+    /// Waits, up to [`FORGET_WAIT`], until the session is deleted, so a
+    /// daemon stopped straight after cannot bring a forgotten phone back.
     fn delete_session(&mut self, token_hash: &str) {
-        let _ = self
+        let (deleted, written) = mpsc::channel();
+        if self
             .commands
-            .send(Command::ForgetSession(token_hash.to_owned()));
+            .send(Command::ForgetSession(token_hash.to_owned(), deleted))
+            .is_ok()
+        {
+            let _ = written.recv_timeout(FORGET_WAIT);
+        }
     }
 }
 
@@ -205,8 +217,9 @@ fn run(inbox: &mpsc::Receiver<Command>, log: &mut EventLog, db: &mut rusqlite::C
                     sqlite::save_session(db, &hash, &session),
                     "saving a session",
                 ),
-                Command::ForgetSession(hash) => {
+                Command::ForgetSession(hash, deleted) => {
                     report_sqlite(sqlite::delete_session(db, &hash), "forgetting a session");
+                    let _ = deleted.send(());
                 }
                 Command::Stop => stop = true,
             }
@@ -392,6 +405,33 @@ mod tests {
         assert!(!dir.path().join("events.ndjson.damaged-3").exists());
         let log = std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap();
         assert_eq!(log.lines().count(), 3, "nothing truncated");
+    }
+
+    /// Forgetting answers only once the delete is written, even with the
+    /// writer busy, so stopping the daemon at once keeps it forgotten.
+    #[test]
+    fn a_forgotten_session_is_written_before_forgetting_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = open(dir.path()).unwrap();
+        let mut handle = store.handle.clone();
+        let session = Session {
+            origin: "http://localhost:5173".into(),
+        };
+        handle.save_session("phone", &session);
+        handle.save_session("laptop", &session);
+        for seq in 1..=1500 {
+            handle.append(&upsert(seq, "Ana"));
+        }
+        handle.delete_session("phone");
+        let db = rusqlite::Connection::open(dir.path().join("uxduck.db")).unwrap();
+        let hashes: Vec<String> = sqlite::load_sessions(&db)
+            .unwrap()
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect();
+        assert_eq!(hashes, ["laptop"]);
+        drop(db);
+        store.close();
     }
 
     #[test]

@@ -35,6 +35,23 @@ fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
         && sample.heap_mb.is_none_or(|mb| mb <= 1_048_576)
         && sample.cpu_percent.is_none_or(|cpu| cpu <= 10_000)
         && sample.process_memory_mb.is_none_or(|mb| mb <= 1_048_576)
+        && sample.renderer_cpu_percent.is_none_or(|cpu| cpu <= 10_000)
+        && sample.gpu_cpu_percent.is_none_or(|cpu| cpu <= 10_000)
+        && sample.cpu_window_ms.is_none_or(|ms| ms <= 86_400_000)
+        && sample.cpu_sample_age_ms.is_none_or(|ms| ms <= 86_400_000)
+        && [
+            sample.app_window_count,
+            sample.map_2d_count,
+            sample.map_3d_count,
+            sample.globe_count,
+            sample.map_vehicle_count,
+        ]
+        .iter()
+        .all(|count| count.is_none_or(|count| count <= 10_000))
+        && [sample.map_2d_fps, sample.map_3d_fps]
+            .iter()
+            .all(|fps| fps.is_none_or(|fps| fps <= 1000))
+        && sample.ui_build.as_deref().is_none_or(is_token)
 }
 
 fn validate_event(event: &AppEvent) -> Result<(), ApiError> {
@@ -407,5 +424,64 @@ mod tests {
         assert!(!super::is_item_key("my rover's airspeed"));
         assert!(!super::is_item_key("speed"));
         assert!(!super::is_item_key(&"a.".repeat(40)));
+    }
+
+    #[test]
+    fn performance_context_is_optional_bounded_and_survives_event_serialization() {
+        use serde_json::json;
+        use uxduck_contracts::dto::analytics::{AnalyticsPerformanceParams, AppEvent};
+
+        let base = json!({
+            "window_ms": 30000, "long_tasks": 0, "blocking_ms": 0, "max_task_ms": 0,
+            "max_input_delay_ms": 0, "controller_gaps": 0, "max_controller_gap_ms": 0,
+            "surface": "desktop", "daemon": "installed"
+        });
+        let old: AnalyticsPerformanceParams = serde_json::from_value(base.clone()).unwrap();
+        assert!(super::performance_valid(&old));
+        assert!(old.map_3d_count.is_none());
+
+        let mut full = base;
+        let fields = json!({
+            "map_2d_count": 1, "map_3d_count": 1, "globe_count": 0, "map_vehicle_count": 10,
+            "map_2d_fps": 60, "map_3d_fps": 30, "map_3d_trails": "off",
+            "renderer_cpu_percent": 210, "gpu_cpu_percent": 35, "ui_build": "abcdef1",
+            "cpu_window_ms": 30000, "cpu_sample_age_ms": 0, "app_window_count": 1
+        });
+        full.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let sample: AnalyticsPerformanceParams = serde_json::from_value(full.clone()).unwrap();
+        assert!(super::performance_valid(&sample));
+        let event = AppEvent::AppPerformance { sample };
+        let encoded = serde_json::to_value(event).unwrap();
+        assert_eq!(encoded["map_vehicle_count"], 10);
+        assert_eq!(encoded["map_3d_fps"], 30);
+        assert_eq!(encoded["renderer_cpu_percent"], 210);
+        assert_eq!(encoded["map_3d_trails"], "off");
+
+        for (field, value) in [
+            ("map_2d_count", json!(10001)),
+            ("map_3d_count", json!(10001)),
+            ("globe_count", json!(10001)),
+            ("map_vehicle_count", json!(10001)),
+            ("map_2d_fps", json!(1001)),
+            ("map_3d_fps", json!(1001)),
+            ("renderer_cpu_percent", json!(10001)),
+            ("gpu_cpu_percent", json!(10001)),
+            ("cpu_window_ms", json!(86_400_001)),
+            ("cpu_sample_age_ms", json!(86_400_001)),
+            ("app_window_count", json!(10001)),
+            ("ui_build", json!("a private path/with text")),
+        ] {
+            let mut invalid = full.clone();
+            invalid[field] = value;
+            let sample = serde_json::from_value(invalid).unwrap();
+            assert!(
+                !super::performance_valid(&sample),
+                "accepted invalid {field}"
+            );
+        }
+        full["map_3d_trails"] = json!("unrecognised");
+        assert!(serde_json::from_value::<AnalyticsPerformanceParams>(full).is_err());
     }
 }

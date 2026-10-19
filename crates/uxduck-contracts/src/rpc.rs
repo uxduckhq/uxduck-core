@@ -1190,7 +1190,8 @@ pub enum ClientRequest {
     /// with the others and isn't paused or unplayable to record, as
     /// `video/record` would, and stops none; off stops every camera recording or asked to, as
     /// `video/record` off would, until it is recorded again or its vehicle
-    /// next arms. Needs `config`. Result: `Empty`.
+    /// next arms. With `vehicleId`, only that vehicle's cameras (S154).
+    /// Needs `config`. Result: `Empty`.
     #[serde(rename = "video/recordAll")]
     VideoRecordAll(VideoRecordAllParams),
     /// Whether a camera records with the others (S153): off, neither the

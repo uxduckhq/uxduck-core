@@ -1,1 +1,1 @@
-{ "method": "video/recordAll", "params": { "on": false } }
+{ "method": "video/recordAll", "params": { "on": true, "vehicleId": "veh_1" } }

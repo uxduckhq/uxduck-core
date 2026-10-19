@@ -514,6 +514,9 @@ pub struct VideoRecordAllParams {
     /// or unplayable (`true`), or stop every camera recording (`false`),
     /// whatever the policy says.
     pub on: bool,
+    /// Only this vehicle's cameras (S154); every camera without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

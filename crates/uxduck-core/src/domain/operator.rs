@@ -505,7 +505,11 @@ pub struct LayoutPreset {
 /// 7 (2026-10-18): Simple keeps four panes and gains Advanced's Messages,
 /// Flight display, Instruments and Parameters as tabs.
 /// 8 (2026-10-18): Built-in layouts migrate automatically; named copies stay.
-pub const LAYOUT_PRESET_VERSION: u32 = 8;
+/// 9 (2026-10-18): Simple and Advanced keep a Camera tab, not showing, last in
+/// Parameters' group.
+/// 10 (2026-10-18): the page's phone layouts keep one too; the desktop's are
+/// unchanged, the number matching the page's.
+pub const LAYOUT_PRESET_VERSION: u32 = 10;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -964,6 +968,7 @@ impl Layout {
                                     TabKind::Controllers,
                                     TabKind::History,
                                     TabKind::Parameters,
+                                    TabKind::Camera,
                                 ]),
                             },
                             DockChild {
@@ -1044,6 +1049,7 @@ impl Layout {
                                                 TabKind::Controllers,
                                                 TabKind::Inspector,
                                                 TabKind::Chart,
+                                                TabKind::Camera,
                                             ]),
                                         ),
                                     ],

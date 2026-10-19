@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "18e863ebe25353afe84bce35f93583e221009d4f",
+  "sourceCommit": "d0fb2f2bc9c2879f45a78e794cf39712f0a200df",
   "licenseReady": true,
   "files": [
     {
@@ -16,12 +16,12 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "12fc793d78e8ae94b7064823d44e0e745be6afcc548c06c64c969e0a4efce6fe",
+      "sha256": "327094fe59a0c21e3953fdd93bebac47b666c8a11e767002baab2aeb9d5aed0c",
       "executable": false
     },
     {
       "path": "Cargo.toml",
-      "sha256": "e42b33cfdd4b1339a6f7805909ef8c6fcf2d82fd482e09f865b4aa9eb5d4de6f",
+      "sha256": "b0991cd025654d818a469ce29c032c10f03f43e02746d8e8c0ebebcc0003bfe9",
       "executable": false
     },
     {
@@ -1556,7 +1556,7 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/operator_update.request.simple-view.json",
-      "sha256": "a7a7f5ce4300d67939c3466b12695f4507f13515c1f88b87e021f253d3960e00",
+      "sha256": "b613fccc1f06e2326e27423b9f5ac0e2e4f917a8598b595a46f4328dc44a865b",
       "executable": false
     },
     {
@@ -3131,7 +3131,7 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/video_recordAll.request.json",
-      "sha256": "0e3d924855a827b1a6a28ac1a681949a674f97b89425fbcf44bf395deefdd9b6",
+      "sha256": "6f56983e0a6f0cd55cd0db7e6784cf8e6397d9ebc9bd48ebdcf43c360fe3913f",
       "executable": false
     },
     {
@@ -3371,7 +3371,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/analytics.rs",
-      "sha256": "8153fc6f531ae7c1f65829132de9c2979972648f042d1b0b934903d40143c45d",
+      "sha256": "2c3131a635b62d3c68fb1601bead67ccd4a77dfdbc908d5e846eeb060168b34f",
       "executable": false
     },
     {
@@ -3586,7 +3586,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/video.rs",
-      "sha256": "9b32ec46e762b7cf21e9be12a28bdb64e9a51fd6c18b7c85cdf06daff73e538e",
+      "sha256": "30c89773db5558b3b777b132210eea9edeb61da3f72fb162361c2183e4629b4e",
       "executable": false
     },
     {
@@ -3611,7 +3611,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "57372d9460e4d6d32eaf738929bb6f3ea51a2dece2cd4a170ae400df11be6749",
+      "sha256": "20513dcfd65f3a50f479865077ddb8eab5c417c75f72a28ba6d5ccc3d99b5344",
       "executable": false
     },
     {
@@ -3706,7 +3706,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/operator.rs",
-      "sha256": "21f19c04153025d06d20fc682d1a6eebb71e4de40135f411eb778db56a8bada4",
+      "sha256": "95e4c08988e778d9e695180b807733b570b7d166d7f8c2e4ead85c95768daa6a",
       "executable": false
     },
     {
@@ -3821,7 +3821,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/analytics.rs",
-      "sha256": "77d4d3b9c6af01f966ebac54aa7c20aa27983a18076e99d18d42905501ad8665",
+      "sha256": "f760ebfdabb06f9cda06d600062307a1c4b5cca54f6af7be378f28e27f8f830f",
       "executable": false
     },
     {
@@ -3836,7 +3836,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/approvals.rs",
-      "sha256": "6649d9edb6cf18ade56501130ae774d3fd00c32e7af11e52d96f5596dbb1a80d",
+      "sha256": "4c49eb1af54ca954a7adc64f5e4c46711f08d24903daa078eb998e5ed411080d",
       "executable": false
     },
     {
@@ -4176,7 +4176,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/recordings.rs",
-      "sha256": "47559aedfce27b10245c3c0a67b612f8f111822cb49804b745d34dd3533ae639",
+      "sha256": "319f01ef17a892973bdd11cd646be8e8e1d9da01baed2791d36b96aecb25ac16",
       "executable": false
     },
     {
@@ -5161,7 +5161,7 @@
     },
     {
       "path": "crates/uxduck/src/store/mod.rs",
-      "sha256": "d096f584e29943305b846b2f6116ac2c733adc788d4bd868f0d96286025f94c9",
+      "sha256": "ed59033b841c27e3c85e890cbf2653cbe6b81c1c1f41fc628496e7c38f043ad9",
       "executable": false
     },
     {
@@ -5381,7 +5381,7 @@
     },
     {
       "path": "plugins/Cargo.lock",
-      "sha256": "c0935b61b3c243239e79d11f40ea122141efbf34a447ba73433104a87d808db2",
+      "sha256": "c7a72505e7a80c005a451af1624f3163eb60a2a1c29e0fadf054f8ae6f72a94e",
       "executable": false
     },
     {

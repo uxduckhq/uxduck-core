@@ -80,7 +80,17 @@ pub struct AnalyticsActiveTimeParams {
     pub daemon: DaemonPresence,
 }
 
-/// One bounded, aggregate renderer-performance window; no device or flight data.
+/// A visible map's trail choice, or differing choices across visible 3D maps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceTrails {
+    Off,
+    Recent,
+    Whole,
+    Mixed,
+}
+
+/// One bounded renderer-performance window; counts and settings, never flight values or IDs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AnalyticsPerformanceParams {
     pub window_ms: u32,
@@ -96,6 +106,38 @@ pub struct AnalyticsPerformanceParams {
     pub cpu_percent: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_memory_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_cpu_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_cpu_percent: Option<u32>,
+    /// Electron CPU averages cover this interval, which can differ from `window_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_window_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_sample_age_ms: Option<u32>,
+    /// Process CPU is app-wide; map context belongs to the reporting window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_window_count: Option<u32>,
+    /// Visible engine instances, including decorative globes, which are also counted separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_2d_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub globe_count: Option<u32>,
+    /// Largest vehicle count in a visible map; the same fleet in two views is not added twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_vehicle_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_trails: Option<PerformanceTrails>,
+    /// Rounded actual render events/s per visible engine instance; idle maps can report zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_2d_fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_fps: Option<u32>,
+    /// The renderer's commit, or dev, independently of the connected daemon's release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_build: Option<String>,
     pub surface: Surface,
     pub daemon: DaemonPresence,
 }

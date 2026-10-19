@@ -541,6 +541,12 @@ impl Engine {
             .video_sources
             .values()
             .filter(|s| {
+                params
+                    .vehicle_id
+                    .as_deref()
+                    .is_none_or(|id| s.vehicle_id.as_deref() == Some(id))
+            })
+            .filter(|s| {
                 if params.on {
                     s.state != VideoState::Unsupported
                         && !s.record_alone
