@@ -71,7 +71,7 @@ The result's `place` contains `latitudeDeg` and `longitudeDeg`. Read `terrain/at
 at those coordinates for the ground elevation, then use them and that height with
 `sim/start`. Searching and locating read data only; they never start a simulation
 or save a place. Both respect the selected operator's place-name search setting.
-See [Use with AI agents](/docs/mcp#choose-a-simulations-starting-place) for MCP.
+See [Use with AI agents](/docs/mcp#choose-a-simulation-s-starting-place) for MCP.
 
 ## Send a command
 

@@ -898,6 +898,7 @@ pub async fn run(cli: Cli) -> ExitCode {
     if let Err(error) =
         crate::dev_api::initialize(&crate::paths::data_dir(cli.data_dir.as_deref(), cli.dev))
     {
+        crate::startup::record(&error);
         eprintln!("uxduck: {error}");
         return ExitCode::from(2);
     }
@@ -921,6 +922,7 @@ pub async fn run(cli: Cli) -> ExitCode {
     let closed = match crate::parent::stdin_closed(true) {
         Ok(closed) => closed,
         Err(error) => {
+            crate::startup::record(&format!("cannot watch the parent pipe: {error}"));
             eprintln!("uxduck: cannot watch the parent pipe: {error}");
             return ExitCode::from(2);
         }
@@ -945,7 +947,7 @@ async fn run_command(cli: Cli) -> ExitCode {
             ..
         })) => daemon_action(&data_dir, action).await,
         Some(Command::Daemon(args)) => {
-            return run_daemon(args, data_dir, cli.dev, Vec::new(), false, owned).await;
+            run_daemon(args, data_dir, cli.dev, Vec::new(), false, owned).await
         }
         Some(Command::Forward(args)) => {
             let links = match link_spec::forward_links(
@@ -960,7 +962,7 @@ async fn run_command(cli: Cli) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            return run_daemon(args.daemon, data_dir, cli.dev, links, true, owned).await;
+            run_daemon(args.daemon, data_dir, cli.dev, links, true, owned).await
         }
         Some(Command::Update {
             command: UpdateCommand::Check { url, public_key },
@@ -1038,6 +1040,9 @@ async fn run_command(cli: Cli) -> ExitCode {
 
 /// How a command ended: an API error as JSON, anything else in words.
 fn exit_code(result: Result<(), CliError>) -> ExitCode {
+    if let Err(error) = &result {
+        crate::startup::record(&error.to_string());
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Api(error)) => {
@@ -1888,6 +1893,8 @@ pub(crate) async fn start_daemon(
     let exe = std::env::current_exe()
         .map_err(|e| CliError::Usage(format!("cannot find uxduck to start it: {e}")))?;
     let mut command = std::process::Command::new(exe);
+    let mut diagnostic = tempfile::NamedTempFile::new()?;
+    command.env(crate::startup::ERROR_FILE, diagnostic.path());
     if dev {
         command.arg("--dev");
     }
@@ -1918,8 +1925,9 @@ pub(crate) async fn start_daemon(
             return Ok(client);
         }
         if let Ok(Some(status)) = child.try_wait() {
+            let reason = crate::startup::read(diagnostic.as_file_mut())?;
             return Err(CliError::Usage(format!(
-                "UXDuck stopped while starting ({status}); run `uxduck daemon` to see why"
+                "UXDuck stopped while starting ({status}). {reason}"
             )));
         }
         if std::time::Instant::now() > deadline {
@@ -2679,7 +2687,7 @@ async fn run_daemon(
     links: Vec<uxduck_contracts::dto::link::LinkAddParams>,
     headless: bool,
     exit_on_stdin_close: bool,
-) -> ExitCode {
+) -> Result<(), CliError> {
     if args.spin_for_tests {
         spin_for_tests();
     }
@@ -2698,15 +2706,14 @@ async fn run_daemon(
             delay: std::time::Duration::from_millis(40),
         },
         other => {
-            eprintln!(
-                "uxduck daemon: unknown agent provider {other}; use {}",
+            return Err(CliError::Usage(format!(
+                "unknown agent provider {other}; use {}",
                 if dev_build {
                     "uxduck, openai, auto or fake"
                 } else {
                     "uxduck or fake"
                 }
-            );
-            return ExitCode::from(2);
+            )));
         }
     };
     let options = DaemonOptions {
@@ -2763,13 +2770,9 @@ async fn run_daemon(
             gateway: !args.find_no_gateway,
         },
     };
-    match daemon::run(options).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("uxduck daemon: {error}");
-            ExitCode::from(2)
-        }
-    }
+    daemon::run(options)
+        .await
+        .map_err(|error| CliError::Usage(error.to_string()))
 }
 
 /// `--video-port`: a port, or `off`.

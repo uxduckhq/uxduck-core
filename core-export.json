@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "ba2b57cf943090bf3d7fc4f75eec480d4c8cead1",
+  "sourceCommit": "ee64d1ae6d11851bae15108236b8c22bc877e62a",
   "licenseReady": true,
   "files": [
     {
@@ -16,7 +16,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "40d309d0c5b6bbfee001c7c202e9f71f4e3844f9f4e175ed20ab170dadda71aa",
+      "sha256": "1bf350669d135a3bb26bb02d79e3aeab880e347a9efd2f965b25f1226aa9ed30",
       "executable": false
     },
     {
@@ -4726,7 +4726,7 @@
     },
     {
       "path": "crates/uxduck/Cargo.toml",
-      "sha256": "a1b1c42e9d21650268c1ba68ff7fccd4402c2578b6c060e7929c2c7d630580a7",
+      "sha256": "76740b9dc91c6d4ac89b803e58104d726201fd81f0da9ebcca79419418bc2a57",
       "executable": false
     },
     {
@@ -4841,7 +4841,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/client.rs",
-      "sha256": "a648c6ed85c7e14d2c3c8e7f0671f368ca267001ea16590c197a043642bd8023",
+      "sha256": "274ebd7d95c418ed5f67e9ed5cdde3bf45826c71897618d611279b26a4c27d1a",
       "executable": false
     },
     {
@@ -4861,7 +4861,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/mod.rs",
-      "sha256": "1792e602640380fa64b1b93cf364551a796addfeddb4ee8af158b41aa2ad7e56",
+      "sha256": "28ad065a29c928f9fc235882dd26818cea189544ecdedbc66ad00cf3c3328045",
       "executable": false
     },
     {
@@ -5051,7 +5051,7 @@
     },
     {
       "path": "crates/uxduck/src/main.rs",
-      "sha256": "bcb4687a9f97acb9533d33015bdb24245e56798d20e8ad5009696fa02a95ccac",
+      "sha256": "eaf80035f58fc459d47aefb53e13b36ffa3b10cc036d35f751844199285b261e",
       "executable": false
     },
     {
@@ -5162,6 +5162,11 @@
     {
       "path": "crates/uxduck/src/spool.rs",
       "sha256": "b6bc4ce9891c44928ec9f5856cb2fdfa4e22d753c550a90b3a192f138c5733d5",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck/src/startup.rs",
+      "sha256": "0dbe36aaee07a4b5fd2e3f1e687d7209dea07ec490b2203300e6580c85013199",
       "executable": false
     },
     {
@@ -5336,7 +5341,7 @@
     },
     {
       "path": "crates/uxduck/tests/cli.rs",
-      "sha256": "33837684069f9f437c445dad2169794d9ceb881c4cdd1ac46f065805b3cde248",
+      "sha256": "fac3dca74db75eefba93c45b631b9cca493b92747f19b6027818d0b72041c31e",
       "executable": false
     },
     {
@@ -5361,7 +5366,7 @@
     },
     {
       "path": "docs/site/cli.md",
-      "sha256": "afe2c21e48ffb2936f2a8304cd3d15d65d6b4ba01fe25887b467ea09c55a7677",
+      "sha256": "2b00b609b4441a34036bdf3da608b0bf06d9d93dfd8ecf1ab376a959c9dec0bd",
       "executable": false
     },
     {

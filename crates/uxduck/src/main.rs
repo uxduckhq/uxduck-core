@@ -35,6 +35,7 @@ mod service;
 mod shipped;
 mod sim;
 mod spool;
+mod startup;
 mod store;
 mod sync;
 mod terrain;
@@ -71,6 +72,7 @@ fn main() -> ExitCode {
     let (console, _console_guard) = match logs::Tee::new(std::io::stderr()) {
         Ok(console) => console,
         Err(error) => {
+            startup::record(&format!("cannot start the console writer: {error}"));
             eprintln!("uxduck: cannot start the console writer: {error}");
             return ExitCode::from(2);
         }
@@ -84,13 +86,28 @@ fn main() -> ExitCode {
         .with(errors::ErrorLayer)
         .init();
     errors::install_panic_hook();
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let failed = error.use_stderr();
+            if failed {
+                startup::record(&error.to_string());
+            }
+            let _ = error.print();
+            return if failed {
+                ExitCode::from(2)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+    };
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime.block_on(cli::run(cli)),
         Err(error) => {
+            startup::record(&format!("cannot start the runtime: {error}"));
             eprintln!("uxduck: cannot start the runtime: {error}");
             ExitCode::from(2)
         }

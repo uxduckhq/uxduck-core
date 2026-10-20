@@ -44,14 +44,6 @@ impl std::fmt::Debug for LocalClient {
 impl LocalClient {
     /// # Errors
     /// When no daemon listens for `data_dir`.
-    #[cfg_attr(
-        windows,
-        allow(
-            clippy::unused_async,
-            clippy::unused_async_trait_impl,
-            reason = "opening a named pipe does not wait"
-        )
-    )]
     pub async fn connect(data_dir: &Path) -> Result<Self, CliError> {
         #[cfg(unix)]
         let stream = {
@@ -61,9 +53,18 @@ impl LocalClient {
                 .map_err(|_| CliError::NoDaemon(data_dir.display().to_string()))?
         };
         #[cfg(windows)]
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(crate::paths::pipe_name(data_dir))
-            .map_err(|_| CliError::NoDaemon(data_dir.display().to_string()))?;
+        let stream = open_named_pipe(
+            &crate::paths::pipe_name(data_dir),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                CliError::Io(error)
+            } else {
+                CliError::NoDaemon(data_dir.display().to_string())
+            }
+        })?;
         let (reader, writer) = tokio::io::split(stream);
         Ok(Self {
             lines: BufReader::new(reader).lines(),
@@ -159,5 +160,91 @@ impl LocalClient {
         serde_json::from_str(&line)
             .map(Some)
             .map_err(|e| CliError::Protocol(e.to_string()))
+    }
+}
+
+/// A pipe can exist with every listening instance temporarily occupied.
+/// Retrying `ERROR_PIPE_BUSY` must not turn a live daemon into a second launch.
+#[cfg(windows)]
+async fn open_named_pipe(name: &str, timeout: std::time::Duration) -> std::io::Result<Stream> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use tokio::time::{Instant, sleep};
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match ClientOptions::new().open(name) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed()) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "UXDuck's local pipe remained busy; retry the command",
+                    ));
+                }
+                sleep(remaining.min(std::time::Duration::from_millis(50))).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::time::Duration;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    use super::{CliError, LocalClient, open_named_pipe};
+
+    #[tokio::test]
+    async fn a_busy_pipe_connects_when_the_server_replaces_its_listener() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = crate::paths::pipe_name(directory.path());
+        let occupied = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let first = ClientOptions::new().open(&name).unwrap();
+        let connecting = open_named_pipe(&name, Duration::from_secs(2));
+        tokio::pin!(connecting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut connecting)
+                .await
+                .is_err()
+        );
+        let next = ServerOptions::new().create(&name).unwrap();
+        let connected = tokio::time::timeout(Duration::from_secs(2), connecting)
+            .await
+            .unwrap()
+            .unwrap();
+        next.connect().await.unwrap();
+        drop((connected, first, occupied, next));
+    }
+
+    #[tokio::test]
+    async fn a_persistently_busy_pipe_has_a_bounded_explicit_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = crate::paths::pipe_name(directory.path());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let client = ClientOptions::new().open(&name).unwrap();
+        let error = open_named_pipe(&name, Duration::from_millis(75))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("remained busy"));
+        drop((client, server));
+    }
+
+    #[tokio::test]
+    async fn a_missing_pipe_still_reports_no_daemon() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            LocalClient::connect(directory.path()).await,
+            Err(CliError::NoDaemon(_))
+        ));
     }
 }

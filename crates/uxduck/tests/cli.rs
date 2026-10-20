@@ -59,3 +59,68 @@ fn version_prints_the_crate_version() {
     assert!(lines[2].starts_with("built "), "{long}");
     assert_eq!(lines[3], concat!("target ", env!("UXDUCK_TARGET")));
 }
+
+#[test]
+fn opening_shows_the_daemons_actual_startup_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["open", "--print"])
+        .env("UXDUCK_AGENT_PROVIDER", "startup-regression-invalid")
+        .env("UXDUCK_API_URL", "none")
+        .output()
+        .expect("spawn uxduck");
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("UXDuck stopped while starting"), "{error}");
+    assert!(
+        error.contains("unknown agent provider startup-regression-invalid"),
+        "{error}"
+    );
+    assert!(!dir.path().join("daemon.json").exists());
+}
+
+#[test]
+fn opening_explains_a_busy_port_without_touching_its_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = busy.local_addr().unwrap().port();
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["open", "--print"])
+        .env("UXDUCK_PORT", port.to_string())
+        .env("UXDUCK_AGENT_PROVIDER", "fake")
+        .env("UXDUCK_API_URL", "none")
+        .env("UXDUCK_TERRAIN_URL", "none")
+        .env("UXDUCK_TRAY", "")
+        .output()
+        .expect("spawn uxduck");
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains(&format!("cannot listen on localhost:{port}")),
+        "{error}"
+    );
+    assert!(!dir.path().join("daemon.json").exists());
+    assert_eq!(busy.local_addr().unwrap().port(), port);
+}
+
+#[test]
+fn opening_shows_argument_errors_from_the_background_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["open", "--print"])
+        .env("UXDUCK_PORT", "not-a-port")
+        .env("UXDUCK_API_URL", "none")
+        .output()
+        .expect("spawn uxduck");
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("invalid value 'not-a-port'"), "{error}");
+    assert!(error.contains("--port"), "{error}");
+    assert!(!dir.path().join("daemon.json").exists());
+}

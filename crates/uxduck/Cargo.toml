@@ -43,6 +43,7 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 # Checks the cloud's signed grants for control from away (S80): Ed25519,
@@ -61,12 +62,11 @@ oxc = { version = "0.152", features = ["transformer", "codegen", "semantic"], op
 # reports an input only once it changes. The crates and versions gilrs uses.
 # Keeping the system and display awake on Windows (SetThreadExecutionState).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Atomic app replacement on the same volume, without a privileged helper.
 rustix = { version = "1.1", features = ["fs", "process"] }
-tempfile.workspace = true
 objc2-io-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "libc",
