@@ -38,6 +38,9 @@ pub enum Command {
         /// `ellipsoid` is refused.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
+        /// Submarine heading. Omitted commands retain the existing default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heading: Option<GoToHeading>,
     },
     /// Any `MAV_CMD` by number with up to seven parameters, as plugins send
     /// for protocols the core does not name. Offline: `warn`.
@@ -45,6 +48,16 @@ pub enum Command {
         command: u16,
         params: Vec<f32>,
     },
+}
+
+/// How a submarine faces while going to a location. Bearings are degrees
+/// clockwise from true north.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum GoToHeading {
+    FaceDestination,
+    KeepCurrent,
+    Set { degrees: f64 },
 }
 
 /// What happens to a command while the vehicle is not `online`: `allow`

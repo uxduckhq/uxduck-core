@@ -158,6 +158,7 @@ impl Replay {
                             longitude_deg: lon,
                             altitude_m: float(f, "z").unwrap_or_default(),
                             altitude_frame: AltitudeFrame::AboveHome,
+                            heading: None,
                         })
                 }
                 _ => None,
@@ -176,6 +177,7 @@ impl Replay {
                         longitude_deg: lon,
                         altitude_m: float(f, "z").unwrap_or_default(),
                         altitude_frame: AltitudeFrame::AboveHome,
+                        heading: None,
                     })
                 } else {
                     if let (Some(seq), Some(command), Some(place)) =

@@ -18,11 +18,13 @@ impl From<&core::Command> for dto::Command {
                 longitude_deg,
                 altitude_m,
                 altitude_frame,
+                heading,
             } => Self::GoTo {
                 latitude_deg,
                 longitude_deg,
                 altitude_m,
                 altitude_frame: altitude_frame.into(),
+                heading: heading.map(Into::into),
             },
             core::Command::Long { command, params } => Self::Long { command, params },
         }
@@ -43,13 +45,35 @@ impl From<dto::Command> for core::Command {
                 longitude_deg,
                 altitude_m,
                 altitude_frame,
+                heading,
             } => Self::GoTo {
                 latitude_deg,
                 longitude_deg,
                 altitude_m,
                 altitude_frame: altitude_frame.into(),
+                heading: heading.map(Into::into),
             },
             dto::Command::Long { command, params } => Self::Long { command, params },
+        }
+    }
+}
+
+impl From<core::GoToHeading> for dto::GoToHeading {
+    fn from(value: core::GoToHeading) -> Self {
+        match value {
+            core::GoToHeading::FaceDestination => Self::FaceDestination,
+            core::GoToHeading::KeepCurrent => Self::KeepCurrent,
+            core::GoToHeading::Set { degrees } => Self::Set { degrees },
+        }
+    }
+}
+
+impl From<dto::GoToHeading> for core::GoToHeading {
+    fn from(value: dto::GoToHeading) -> Self {
+        match value {
+            dto::GoToHeading::FaceDestination => Self::FaceDestination,
+            dto::GoToHeading::KeepCurrent => Self::KeepCurrent,
+            dto::GoToHeading::Set { degrees } => Self::Set { degrees },
         }
     }
 }
@@ -236,6 +260,35 @@ impl From<dto::CommandClass> for core::CommandClass {
             dto::CommandClass::Mission => Self::Mission,
             dto::CommandClass::Payload => Self::Payload,
             dto::CommandClass::Critical => Self::Critical,
+        }
+    }
+}
+
+#[cfg(test)]
+mod heading_tests {
+    use super::*;
+    #[test]
+    fn heading_choices_survive_wire_and_journal_conversion_and_old_commands_still_decode() {
+        for heading in [
+            None,
+            Some(dto::GoToHeading::FaceDestination),
+            Some(dto::GoToHeading::KeepCurrent),
+            Some(dto::GoToHeading::Set { degrees: 125.0 }),
+        ] {
+            let command = dto::Command::GoTo {
+                latitude_deg: 37.7,
+                longitude_deg: -122.4,
+                altitude_m: -5.0,
+                altitude_frame: crate::dto::telemetry::AltitudeFrame::AboveHome,
+                heading,
+            };
+            let json = serde_json::to_value(&command).unwrap();
+            if heading.is_none() {
+                assert!(json.get("heading").is_none());
+            }
+            let parsed: dto::Command = serde_json::from_value(json).unwrap();
+            let core: core::Command = parsed.into();
+            assert_eq!(dto::Command::from(&core), command);
         }
     }
 }

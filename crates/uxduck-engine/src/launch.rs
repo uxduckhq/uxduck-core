@@ -6,6 +6,8 @@
 //! speed. Its commands are journaled as the simulation start's, never a
 //! person's or the agent's, and a refusal along the way is retried quietly;
 //! only the outcome is shown, on the link (`Link::launch`).
+//! A new submarine also prepares here: wait for positioning and pre-arm
+//! checks, select `POSHOLD`, arm, and confirm the heartbeat without taking off.
 //!
 //! A simulation started from a snapshot (S34) runs through here too, in the
 //! air or on the ground: once the new vehicle's own parameters and mission
@@ -84,6 +86,8 @@ enum Step {
     /// The mode it takes off in.
     TakeOffMode,
     Arm,
+    /// Arming is complete only when a fresh heartbeat reports it.
+    Armed,
     /// `MAV_CMD_NAV_TAKEOFF`, for a multicopter or a VTOL in `GUIDED`.
     TakeOff,
     /// Until a plane is clear of the ground (`LIFT_OFF_M`).
@@ -150,6 +154,11 @@ fn plan(vehicle: SimVehicle, in_air: bool, snapshot: Option<&Snapshot>) -> Vec<S
         if snapshot.mission.len() > 1 {
             steps.push(Mission);
         }
+    }
+    // A new submarine starts holding position, ready to accept Go to. A
+    // snapshot keeps its existing restoration policy, including disarmed starts.
+    if vehicle == SimVehicle::Submarine && snapshot.is_none() {
+        return vec![Heard, Ready, Hold, Arm, Step::Armed];
     }
     if in_air {
         steps.push(Ready);
@@ -344,9 +353,10 @@ impl Engine {
             .as_ref()
             .and_then(|id| self.state.snapshots.get(id))
             .cloned();
-        if in_air_m.is_none() && snapshot.is_none() {
+        if in_air_m.is_none() && snapshot.is_none() && vehicle != SimVehicle::Submarine {
             return;
         }
+        let new_submarine = vehicle == SimVehicle::Submarine && snapshot_id.is_none();
         // A new start: the last one's failure, if any, is over.
         self.resolve(&format!("launch:{link_id}"));
         let now = self.clock.now_us();
@@ -382,7 +392,8 @@ impl Engine {
         } else {
             LaunchStage::Restoring
         };
-        self.show_launch(link_id, stage, None);
+        let detail = new_submarine.then(|| "Preparing submarine".into());
+        self.show_launch(link_id, stage, detail);
     }
 
     /// Whether a link's simulation start is still under way.
@@ -407,6 +418,11 @@ impl Engine {
         let Some(launch) = self.launches.running.get_mut(&link_id) else {
             return;
         };
+        if launch.vehicle == SimVehicle::Submarine && launch.snapshot.is_none() {
+            self.drop_launch(&link_id);
+            self.clear_launch(&link_id);
+            return;
+        }
         launch.handed_over = true;
         // Climb waits for nothing sent; Hold or Mode not yet sent is skipped:
         // `next_step` from the step before moves past all of them.
@@ -482,7 +498,10 @@ impl Engine {
             Answer::Refused(_) if step == Step::TakeOff && off_the_ground => {
                 self.next_step(&link_id);
             }
-            Answer::Refused(why) if step == Step::Arm => {
+            Answer::Refused(why)
+                if step == Step::Arm
+                    || (step == Step::Hold && launch.vehicle == SimVehicle::Submarine) =>
+            {
                 launch.refusal = Some(why.clone());
                 let since = launch.ready_since_us.unwrap_or(launch.started_us);
                 if now.saturating_sub(since) >= READY_US {
@@ -697,6 +716,20 @@ impl Engine {
                 self.launch_command(link_id, vehicle, Command::Arm);
                 false
             }
+            Step::Armed => {
+                if vehicle.armed && vehicle.last_heartbeat_us >= at.started_us {
+                    self.next_step(link_id);
+                    true
+                } else {
+                    if waited >= READY_US {
+                        self.fail_launch(
+                            link_id,
+                            "arming was acknowledged but no armed heartbeat arrived".into(),
+                        );
+                    }
+                    false
+                }
+            }
             Step::TakeOff => {
                 #[allow(clippy::cast_possible_truncation, reason = "a height in metres")]
                 let height = height_m as f32;
@@ -767,13 +800,35 @@ impl Engine {
         let since = *launch.ready_since_us.get_or_insert(now);
         if now.saturating_sub(since) >= READY_US {
             let why = launch.refusal.as_ref().map_or_else(
-                || "it failed its pre-arm checks (Messages says why)".into(),
+                || {
+                    if launch.vehicle == SimVehicle::Submarine {
+                        "position or pre-arm checks did not become ready (Messages says why)".into()
+                    } else {
+                        "it failed its pre-arm checks (Messages says why)".into()
+                    }
+                },
                 |why| format!("it would not arm: {why}"),
             );
             self.fail_launch(link_id, why);
             return false;
         }
-        if self.ready_to_arm(&vehicle.id, started_us) {
+        let position_ready = launch.vehicle != SimVehicle::Submarine
+            || self.telemetry(&vehicle.id).is_some_and(|telemetry| {
+                telemetry.items.iter().any(|item| {
+                    item.key == "ekf.status"
+                        && item.text.as_deref() == Some("Good")
+                        && item.time_us >= started_us
+                        && now.saturating_sub(item.time_us) <= 5_000_000
+                }) && telemetry.positions.iter().any(|position| {
+                    position.source == "fused"
+                        && position.time_us >= started_us
+                        && now.saturating_sub(position.time_us) <= 5_000_000
+                        && position.latitude_deg.is_finite()
+                        && position.longitude_deg.is_finite()
+                        && (position.latitude_deg != 0.0 || position.longitude_deg != 0.0)
+                })
+            });
+        if position_ready && self.ready_to_arm(&vehicle.id, started_us) {
             self.next_step(link_id);
             return true;
         }
@@ -1039,7 +1094,11 @@ impl Engine {
             subject: Subject::Link {
                 id: link_id.to_owned(),
             },
-            title: format!("{name} stayed on the ground"),
+            title: if launch.vehicle == SimVehicle::Submarine {
+                format!("{name} failed to start")
+            } else {
+                format!("{name} stayed on the ground")
+            },
             body: Some(detail),
             actions: Vec::new(),
             // One per simulation, however often it is started again.

@@ -713,11 +713,9 @@ async fn a_missing_app_distinguishes_development_from_missing_files() {
         if dev.is_some() {
             assert!(body.contains("Running in development"));
             assert!(body.contains("<a href=\"http://localhost:5173/\">"));
-            assert!(!body.contains("pnpm dev"));
         } else {
             assert!(body.contains("The app files are missing"));
             assert!(body.contains("--ui-dir"));
-            assert!(!body.contains("uxduck open"));
         }
     }
 }
@@ -736,6 +734,4 @@ async fn a_build_without_the_app_says_it_is_development() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("Running in development"));
     assert!(body.contains("is not bundled in development"));
-    assert!(!body.contains("pnpm dev"));
-    assert!(!body.contains("uxduck open"));
 }

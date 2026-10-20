@@ -198,6 +198,43 @@ impl Engine {
         self.app_update.check || self.app_update.consent.is_some()
     }
 
+    /// Changing eligibility invalidates prepared work and any consent immediately.
+    pub(crate) fn app_update_settings_changed(&mut self, was_beta: bool) {
+        if was_beta == self.state.settings.include_beta {
+            return;
+        }
+        self.app_update.consent = None;
+        self.app_update.dismissed = false;
+        self.app_update.status = AppUpdateStatus {
+            phase: if self.app_update.status.phase == UpdatePhase::Unavailable {
+                UpdatePhase::Unavailable
+            } else {
+                UpdatePhase::Checking
+            },
+            ..AppUpdateStatus::default()
+        };
+        self.app_update.check = true;
+        self.push_tray();
+    }
+
+    /// Atomically reject readiness from a download with obsolete eligibility.
+    pub fn app_update_publish_for_channel(
+        &mut self,
+        include_beta: bool,
+        status: AppUpdateStatus,
+    ) -> bool {
+        if self.state.settings.include_beta != include_beta {
+            return false;
+        }
+        self.app_update_publish(status);
+        true
+    }
+
+    pub fn app_update_request_check(&mut self) {
+        self.app_update.check = true;
+    }
+
+    #[must_use]
     pub fn app_update_take_check(&mut self) -> bool {
         std::mem::take(&mut self.app_update.check)
     }

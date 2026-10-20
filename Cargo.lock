@@ -4645,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "eventsource-stream",
@@ -4715,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-contracts"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "quick-xml",
  "schemars",
@@ -4726,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4734,7 +4734,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -4755,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-mavlink"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mavinspect",
  "mavio",
@@ -4770,11 +4770,11 @@ dependencies = [
 
 [[package]]
 name = "uxduck-media"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "uxduck-sdk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "extism-pdk",
@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-terrain"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "minisign",
@@ -4800,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "uxduck-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "futures",

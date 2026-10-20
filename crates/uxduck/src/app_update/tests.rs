@@ -391,10 +391,11 @@ async fn a_per_file_download_fetches_and_checks_only_the_files_this_app_lacks() 
     };
     let artifact = publish_list(&list).await;
     let engine = EngineHandle::spawn(test_engine());
+    let channel = DownloadChannel::current(&engine).await.unwrap();
     let dir = root.path().join("0.2.0");
     std::fs::create_dir_all(&dir).unwrap();
     let mut s = status(UpdatePhase::Downloading);
-    let result = download_files(&engine, &dir, &artifact, "0.2.0", &installed, &mut s).await;
+    let result = download_files(channel, &dir, &artifact, "0.2.0", &installed, &mut s).await;
     // Only the changed daemon was downloaded, and kept once it checked out.
     assert_eq!(
         *asked.lock().unwrap(),
@@ -433,7 +434,7 @@ async fn a_per_file_download_fetches_and_checks_only_the_files_this_app_lacks() 
     let artifact = publish_list(&tampered).await;
     let other = root.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
-    let error = download_files(&engine, &other, &artifact, "0.2.0", &installed, &mut s)
+    let error = download_files(channel, &other, &artifact, "0.2.0", &installed, &mut s)
         .await
         .unwrap_err();
     assert!(
@@ -441,4 +442,49 @@ async fn a_per_file_download_fetches_and_checks_only_the_files_this_app_lacks() 
         "{error}"
     );
     assert!(!files::have_blob(&other, &sha, new_daemon.len() as u64));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn obsolete_download_progress_and_failures_cannot_replace_the_new_channel() {
+    use futures::channel::mpsc::unbounded;
+    let mut e = test_engine();
+    let (sender, _receiver) = unbounded();
+    let c = e.connect(
+        uxduck_contracts::dto::trace::Transport::Socket,
+        uxduck_core::policy::admission::Trust::LocalUser,
+        sender,
+    );
+    e.receive(c, &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test","kind":"operator-ui","version":"0.1.1"},"capabilities":{"protocolVersion":1}}}).to_string());
+    e.app_update_publish(status(UpdatePhase::Downloading));
+    e.receive(c, &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"settings/update","params":{"expectedVersion":0,"includeBeta":true}}).to_string());
+    assert!(e.state().settings.include_beta);
+    let engine = EngineHandle::spawn(e);
+    let channel = DownloadChannel {
+        engine: &engine,
+        include_beta: false,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _) = serve([("/blob".to_owned(), b"obsolete".to_vec())].into()).await;
+    let error = fetch_file(
+        &reqwest::Client::new(),
+        &format!("{base}/blob"),
+        &dir.path().join("partial"),
+        20,
+        |_| Some(status(UpdatePhase::Downloading)),
+        channel,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("preference changed"));
+    publish_channel_failure(&engine, false, "obsolete error".into()).await;
+    assert!(channel.publish(status(UpdatePhase::Ready)).await.is_err());
+    let (s, pending) = engine
+        .run(|e| (e.app_update_status(), e.app_update_pending()))
+        .await
+        .unwrap();
+    assert_eq!(s.phase, UpdatePhase::Checking);
+    assert!(s.detail.is_none());
+    assert!(s.version.is_none());
+    assert!(pending, "the new check must remain queued");
 }

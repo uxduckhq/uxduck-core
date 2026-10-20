@@ -857,6 +857,7 @@ mod tests {
                     longitude_deg: ring.1,
                     altitude_m: 50.0,
                     altitude_frame: AltitudeFrame::AboveHome,
+                    heading: None,
                 },
             ));
             views.push(View {
@@ -965,6 +966,7 @@ mod tests {
             longitude_deg: ring.1,
             altitude_m: 50.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            heading: None,
         };
         let set = |s: u64, value: f64| (s * S, "WPNAV_SPEED".to_owned(), value);
         let fixed = View {
@@ -1408,6 +1410,7 @@ mod tests {
                             longitude_deg: HOME.1,
                             altitude_m: 50.0,
                             altitude_frame: AltitudeFrame::AboveHome,
+                            heading: None,
                         },
                         other => panic!("{other:?}"),
                     },

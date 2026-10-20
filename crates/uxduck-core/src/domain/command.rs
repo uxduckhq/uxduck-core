@@ -38,6 +38,9 @@ pub enum Command {
         /// The ellipsoid is refused; `DO_REPOSITION` has no such frame.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
+        /// Submarine heading. Omitted commands retain the existing default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heading: Option<GoToHeading>,
     },
     /// Any `MAV_CMD` by number, with up to seven parameters: what plugins
     /// use for protocols the core does not name, such as the camera's.
@@ -45,6 +48,16 @@ pub enum Command {
         command: u16,
         params: Vec<f32>,
     },
+}
+
+/// How a submarine faces while going to a location. Bearings are degrees
+/// clockwise from true north.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum GoToHeading {
+    FaceDestination,
+    KeepCurrent,
+    Set { degrees: f64 },
 }
 
 /// What the daemon and the UI do with a command while the vehicle is not
@@ -418,6 +431,7 @@ mod tests {
             longitude_deg: 149.16,
             altitude_m: 30.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            heading: None,
         };
         assert_eq!(level(&go_to, false, false), Risk::Confirm);
         assert_eq!(level(&go_to, true, false), Risk::Confirm);

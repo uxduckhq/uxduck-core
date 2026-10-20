@@ -119,6 +119,7 @@ impl From<dto::PilotInputMethod> for s::PilotInputMethod {
 #[must_use]
 pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dto::Settings {
     dto::Settings {
+        include_beta: Some(settings.include_beta),
         close_policy: settings.close_policy.unwrap_or(default_close).into(),
         close_policy_set: settings.close_policy.is_some(),
         auto_delete: settings

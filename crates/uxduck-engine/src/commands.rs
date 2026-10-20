@@ -13,7 +13,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::{
-    Command, OfflineBehaviour, Receipt, ReceiptStatus, RefusalReason,
+    Command, GoToHeading, OfflineBehaviour, Receipt, ReceiptStatus, RefusalReason,
 };
 use uxduck_core::domain::link::LinkPolicy;
 use uxduck_core::domain::modes::{self, AvailableMode, Family, is_vtol};
@@ -147,6 +147,7 @@ fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
         longitude_deg,
         altitude_m,
         altitude_frame,
+        ..
     } = command
     else {
         return None;
@@ -415,6 +416,7 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             longitude_deg: 0.0,
             altitude_m: 0.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            heading: (family == Some(Family::Sub)).then_some(GoToHeading::FaceDestination),
         });
     }
     // Plane preserves next_WP_loc's horizontal destination itself. Copter
@@ -755,6 +757,7 @@ mod unsafe_place_tests {
             longitude_deg,
             altitude_m,
             altitude_frame: frame,
+            heading: None,
         }
     }
 

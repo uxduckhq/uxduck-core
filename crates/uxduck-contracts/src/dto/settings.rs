@@ -74,6 +74,9 @@ pub struct PilotInputSetting {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Absent on older daemons. This computer receives beta and stable releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_beta: Option<bool>,
     /// What happens when the last window closes, as set here or, when never
     /// set, on the command line.
     pub close_policy: ClosePolicy,
@@ -197,6 +200,8 @@ const fn warning() -> u8 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_beta: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_action: Option<LaunchAction>,
     /// Set one vehicle's pilot input method. Requires its controller released.

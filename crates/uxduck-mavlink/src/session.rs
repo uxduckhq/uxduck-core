@@ -31,6 +31,7 @@ const REBOOT_TOLERANCE_US: u64 = 5_000_000;
 const PAUSE_SLACK_MS: u32 = 5_000;
 
 const MAV_CMD_NAV_TAKEOFF: u16 = 22;
+const MAV_CMD_CONDITION_YAW: u16 = 115;
 /// `AVAILABLE_MODES`: a vehicle's own list of modes, asked for by
 /// `MAV_CMD_REQUEST_MESSAGE`.
 const AVAILABLE_MODES: u32 = 435;
@@ -372,6 +373,10 @@ struct Vehicle {
     /// Home's altitude above mean sea level, from `GLOBAL_POSITION_INT`,
     /// for PX4's take-off.
     home_amsl_m: Option<f32>,
+    /// The latest fused position, retained across telemetry flushes, for a
+    /// simulated submarine's explicit Go to heading.
+    position: Option<(f64, f64, u64)>,
+    heading: Option<(f64, u64)>,
     /// The terrain's height above mean sea level under the vehicle, from
     /// the latest `TERRAIN_REPORT` with data, and when it came.
     terrain: Option<(f64, u64)>,
@@ -431,11 +436,64 @@ impl Vehicle {
             mission_download: None,
             mission_upload: None,
             home_amsl_m: None,
+            position: None,
+            heading: None,
             terrain: None,
             modes: Vec::new(),
             modes_heard: BTreeMap::new(),
             modes_seq: None,
         }
+    }
+
+    /// `ArduSub` ignores reposition's yaw: apply the heading separately.
+    fn go_to_heading(
+        &self,
+        command: &uxduck_core::domain::command::Command,
+        now_us: u64,
+    ) -> Result<Option<(u16, crate::commands::Wire)>, &'static str> {
+        use uxduck_core::domain::command::{Command, GoToHeading};
+        let Command::GoTo {
+            latitude_deg,
+            longitude_deg,
+            heading,
+            ..
+        } = command
+        else {
+            return Ok(None);
+        };
+        let current = || {
+            self.heading
+                .filter(|(_, at)| now_us.saturating_sub(*at) <= 5_000_000)
+                .map(|(degrees, _)| degrees)
+                .ok_or("a fresh heading is required to keep the current heading")
+        };
+        let degrees = match heading.unwrap_or(GoToHeading::FaceDestination) {
+            GoToHeading::KeepCurrent => current()?,
+            GoToHeading::Set { degrees } => degrees.rem_euclid(360.0),
+            GoToHeading::FaceDestination => {
+                let Some((lat, lon, _)) = self
+                    .position
+                    .filter(|(_, _, at)| now_us.saturating_sub(*at) <= 5_000_000)
+                else {
+                    return Err("a fresh fused position is required to face the destination");
+                };
+                match heading_to(lat, lon, *latitude_deg, *longitude_deg) {
+                    Some(bearing) => f64::from(bearing),
+                    // A depth-only move keeps the measured heading, including
+                    // when an earlier yaw command was still turning the nose.
+                    None => current()?,
+                }
+            }
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a validated heading in degrees"
+        )]
+        let degrees = degrees as f32;
+        Ok(Some((
+            MAV_CMD_CONDITION_YAW,
+            crate::commands::Wire::Long([degrees, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        )))
     }
 
     /// Remembers the terrain's height under the vehicle from a
@@ -532,6 +590,27 @@ struct PendingCommand {
     attempts: u8,
     sent_us: u64,
     issued_us: u64,
+    /// Go to on a simulated `ArduSub` needs a separate acknowledged yaw
+    /// command: its `DO_REPOSITION` handler ignores the heading parameter.
+    follow_up: Option<(u16, crate::commands::Wire)>,
+    first_command: u16,
+    completed_attempts: u8,
+}
+
+/// Initial great-circle bearing. A destination within one metre keeps the
+/// existing heading, avoiding an arbitrary rotation for a depth-only Go to.
+fn heading_to(lat: f64, lon: f64, target_lat: f64, target_lon: f64) -> Option<f32> {
+    let (lat, target_lat) = (lat.to_radians(), target_lat.to_radians());
+    let delta_lon = (target_lon - lon).to_radians();
+    let a = ((target_lat - lat) / 2.0).sin().powi(2)
+        + lat.cos() * target_lat.cos() * (delta_lon / 2.0).sin().powi(2);
+    if 2.0 * 6_371_000.0 * a.clamp(0.0, 1.0).sqrt().asin() < 1.0 {
+        return None;
+    }
+    let y = delta_lon.sin() * target_lat.cos();
+    let x = lat.cos() * target_lat.sin() - lat.sin() * target_lat.cos() * delta_lon.cos();
+    #[allow(clippy::cast_possible_truncation, reason = "a heading in degrees")]
+    Some(y.atan2(x).to_degrees().rem_euclid(360.0) as f32)
 }
 
 #[derive(Debug, Default)]
@@ -815,7 +894,14 @@ impl Session {
                     {
                         effects.extend(self.boot_time(&key, time_boot_ms, received_us));
                     }
-                    self.note_home(&key, &message);
+                    if let Message::Attitude { yaw, .. } = message
+                        && yaw.is_finite()
+                        && let Some(vehicle) = self.vehicles.get_mut(&key)
+                    {
+                        vehicle.heading =
+                            Some((f64::from(yaw).to_degrees().rem_euclid(360.0), received_us));
+                    }
+                    self.note_home(&key, &message, received_us);
                     if let Some(vehicle) = self.vehicles.get_mut(&key) {
                         vehicle.note_terrain(&message, received_us);
                         for producer in &self.producers {
@@ -1538,13 +1624,31 @@ impl Session {
             params[5] = f32::NAN;
             params[6] += home_m;
         }
+        let follow_up = if family == Some(crate::modes::Family::Sub)
+            && (self.simulated.contains(&key.0)
+                || matches!(
+                    &order.command,
+                    uxduck_core::domain::command::Command::GoTo {
+                        heading: Some(_),
+                        ..
+                    }
+                )) {
+            match vehicle.go_to_heading(&order.command, now_us) {
+                Ok(heading) => heading,
+                Err(why) => return not_sent(order, why),
+            }
+        } else {
+            None
+        };
         // One command of a kind at a time per vehicle: an ack cannot say
         // which of two identical commands it answers.
-        if self
-            .commands
-            .iter()
-            .any(|p| p.key == *key && p.command == command)
-        {
+        if self.commands.iter().any(|p| {
+            p.key == *key
+                && (p.command == command
+                    || p.first_command == command
+                    || p.follow_up.is_some_and(|(next, _)| next == command)
+                    || follow_up.is_some_and(|(next, _)| next == p.command))
+        }) {
             return not_sent(order, "the same command is still waiting for its answer");
         }
         let pending = PendingCommand {
@@ -1556,10 +1660,54 @@ impl Session {
             attempts: 0,
             sent_us: now_us,
             issued_us: now_us,
+            follow_up,
+            first_command: command,
+            completed_attempts: 0,
+        };
+        // A mode change or disarm takes over from any
+        // queued automatic heading. Do not rotate later after that takeover.
+        let takes_over = matches!(
+            pending.order.command,
+            uxduck_core::domain::command::Command::SetMode { .. }
+                | uxduck_core::domain::command::Command::Disarm
+                | uxduck_core::domain::command::Command::Rtl
+                | uxduck_core::domain::command::Command::Land
+        );
+        let mut effects = if takes_over {
+            self.cancel_heading(&pending.key)
+        } else {
+            Vec::new()
         };
         self.commands.push(pending);
         let index = self.commands.len() - 1;
-        vec![self.transmit(index, now_us)]
+        effects.push(self.transmit(index, now_us));
+        effects
+    }
+
+    /// Cancel the automatic heading when an explicit mode or disarm command
+    /// takes over. The destination may already have been accepted.
+    fn cancel_heading(&mut self, key: &(String, String, u8)) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.commands.retain_mut(|previous| {
+            if previous.key != *key {
+                return true;
+            }
+            previous.follow_up = None;
+            if previous.completed_attempts == 0 {
+                return true;
+            }
+            effects.push(Effect::CommandDone {
+                receipt_id: previous.order.receipt_id.clone(),
+                outcome: CommandOutcome::NotSent(
+                    "destination accepted; heading superseded by another command".into(),
+                ),
+                attempts: previous
+                    .completed_attempts
+                    .saturating_add(previous.attempts),
+            });
+            false
+        });
+        effects
     }
 
     fn transmit(&mut self, index: usize, now_us: u64) -> Effect {
@@ -1627,15 +1775,31 @@ impl Session {
             self.commands[index].sent_us = self.commands[index].sent_us.max(now_us);
             return Vec::new();
         }
+        if result == 0
+            && let Some((command, wire)) = self.commands[index].follow_up.take()
+        {
+            let pending = &mut self.commands[index];
+            pending.completed_attempts = pending.attempts;
+            pending.attempts = 0;
+            pending.command = command;
+            pending.wire = wire;
+            pending.issued_us = now_us;
+            return vec![self.transmit(index, now_us)];
+        }
         let pending = self.commands.remove(index);
         vec![Effect::CommandDone {
             receipt_id: pending.order.receipt_id,
             outcome: if result == 0 {
                 CommandOutcome::Accepted
             } else {
-                CommandOutcome::Rejected(crate::commands::result_text(result).into())
+                let reason = crate::commands::result_text(result);
+                CommandOutcome::Rejected(if pending.completed_attempts > 0 {
+                    format!("destination accepted; heading refused: {reason}")
+                } else {
+                    reason.into()
+                })
             },
-            attempts: pending.attempts,
+            attempts: pending.completed_attempts.saturating_add(pending.attempts),
         }]
     }
 
@@ -1654,8 +1818,14 @@ impl Session {
                 let pending = self.commands.remove(index);
                 effects.push(Effect::CommandDone {
                     receipt_id: pending.order.receipt_id,
-                    outcome: CommandOutcome::Timeout,
-                    attempts: pending.attempts,
+                    outcome: if pending.completed_attempts > 0 {
+                        CommandOutcome::Rejected(
+                            "destination accepted; heading command timed out".into(),
+                        )
+                    } else {
+                        CommandOutcome::Timeout
+                    },
+                    attempts: pending.completed_attempts.saturating_add(pending.attempts),
                 });
             }
         }
@@ -2124,17 +2294,27 @@ impl Session {
         }
     }
 
-    /// Home's altitude above mean sea level, from where the vehicle is
-    /// above sea level and above home.
-    fn note_home(&mut self, key: &(String, String, u8), message: &Message) {
+    /// Remember the fused position and home's altitude above mean sea
+    /// level, from the vehicle's altitudes above sea level and above home.
+    fn note_home(&mut self, key: &(String, String, u8), message: &Message, now_us: u64) {
         if let Message::GlobalPositionInt {
-            alt, relative_alt, ..
+            alt,
+            relative_alt,
+            lat,
+            lon,
+            ..
         } = *message
             && let Some(vehicle) = self.vehicles.get_mut(key)
         {
             #[allow(clippy::cast_precision_loss, reason = "millimetres")]
             let home_m = (i64::from(alt) - i64::from(relative_alt)) as f32 / 1000.0;
             vehicle.home_amsl_m = Some(home_m);
+            if (-900_000_000..=900_000_000).contains(&lat)
+                && (-1_800_000_000..=1_800_000_000).contains(&lon)
+                && (lat != 0 || lon != 0)
+            {
+                vehicle.position = Some((f64::from(lat) / 1e7, f64::from(lon) / 1e7, now_us));
+            }
         }
     }
 
@@ -2365,6 +2545,8 @@ impl Session {
             }
             Some(_) if restarted => {
                 vehicle.boot_instant_us = Some(estimate);
+                vehicle.position = None;
+                vehicle.heading = None;
                 vehicle.params = None;
                 vehicle.rc_input = crate::rc_input::RcInput::default();
                 vehicle.rc_overridden = [false; 18];
@@ -3585,6 +3767,240 @@ mod tests {
         assert_eq!(vehicles(&seen)[0].mode.as_deref(), Some("LOITER"));
     }
 
+    fn submarine_go_to_fixture(simulated: bool) -> (Session, CommandOrder) {
+        let mut session = Session::new(Config::default());
+        if simulated {
+            session.simulated.insert("l1".into());
+        }
+        session.ingest("l1", PEER, &crate::sim::heartbeat_frame(1, 1, 0), 1_000);
+        let vehicle = session.vehicles.values_mut().next().unwrap();
+        vehicle.observation.vehicle_type = "Submarine".into();
+        vehicle.position = Some((37.763_932, -122.385_804, 1_000));
+        vehicle.heading = Some((91.0, 1_000));
+        let order = CommandOrder {
+            receipt_id: "goto".into(),
+            vehicle_id: vehicle.observation.id.clone(),
+            command: Command::GoTo {
+                latitude_deg: 37.765_026_5,
+                longitude_deg: -122.384_205_6,
+                altitude_m: -5.0,
+                altitude_frame: AltitudeFrame::AboveHome,
+                heading: None,
+            },
+            force: false,
+        };
+        (session, order)
+    }
+
+    fn submarine_ack(session: &mut Session, command: u16, result: u8, at: u64) -> Vec<Effect> {
+        session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::command_ack_frame(1, 1, (255, 190), 0, command, result),
+            at,
+        )
+    }
+
+    #[test]
+    fn simulated_submarine_go_to_faces_the_target_after_the_destination_is_accepted() {
+        let (mut session, order) = submarine_go_to_fixture(true);
+        assert!(matches!(
+            session.command(order.clone(), 2_000).as_slice(),
+            [Effect::Send { .. }]
+        ));
+        let yaw = submarine_ack(&mut session, 192, 0, 3_000);
+        let [Effect::Send { bytes, .. }] = yaw.as_slice() else {
+            panic!("{yaw:?}")
+        };
+        let frames = crate::framing::split(bytes).frames;
+        let Message::CommandLong {
+            command,
+            param1,
+            param2,
+            ..
+        } = decode(frames[0]).unwrap().message
+        else {
+            panic!("not yaw")
+        };
+        assert_eq!(command, 115);
+        assert!((param1 - 49.1).abs() < 0.5, "bearing {param1}");
+        assert_eq!(param2, 0.0);
+        assert_eq!(
+            &bytes[18..26],
+            &[0; 8],
+            "absolute yaw with no forced direction"
+        );
+        // Keep the original command reserved while heading is pending.
+        assert!(matches!(
+            session.command(order, 3_100).as_slice(),
+            [Effect::CommandDone {
+                outcome: CommandOutcome::NotSent(_),
+                ..
+            }]
+        ));
+        assert!(
+            matches!(submarine_ack(&mut session, 115, 0, 4_000).as_slice(),
+            [Effect::CommandDone { receipt_id, outcome: CommandOutcome::Accepted, attempts: 2 }] if receipt_id == "goto")
+        );
+    }
+
+    #[test]
+    fn submarine_heading_choices_capture_current_yaw_and_validate_explicit_bearings() {
+        use uxduck_core::domain::command::GoToHeading;
+        for (heading, expected) in [
+            (GoToHeading::FaceDestination, 49.1),
+            (GoToHeading::KeepCurrent, 91.0),
+            (GoToHeading::Set { degrees: 125.0 }, 125.0),
+        ] {
+            // Explicit heading choices also work on a real ArduSub; legacy
+            // omitted headings keep the existing real-vehicle behavior.
+            let (mut session, mut order) = submarine_go_to_fixture(false);
+            if let Command::GoTo {
+                heading: choice, ..
+            } = &mut order.command
+            {
+                *choice = Some(heading);
+            }
+            let sent = session.command(order, 2_000);
+            assert!(matches!(sent.as_slice(), [Effect::Send { .. }]), "{sent:?}");
+            let yaw = submarine_ack(&mut session, 192, 0, 3_000);
+            let [Effect::Send { bytes, .. }] = yaw.as_slice() else {
+                panic!("{yaw:?}")
+            };
+            let frames = crate::framing::split(bytes).frames;
+            let Message::CommandLong {
+                command: 115,
+                param1,
+                ..
+            } = decode(frames[0]).unwrap().message
+            else {
+                panic!("not yaw")
+            };
+            assert!((param1 - expected).abs() < 0.5, "{heading:?}: {param1}");
+        }
+        for degrees in [-1.0, 361.0, f64::NAN] {
+            let (mut session, mut order) = submarine_go_to_fixture(true);
+            if let Command::GoTo { heading, .. } = &mut order.command {
+                *heading = Some(GoToHeading::Set { degrees });
+            }
+            assert!(matches!(session.command(order, 2_000).as_slice(),
+                [Effect::CommandDone { outcome: CommandOutcome::NotSent(why), .. }] if why.contains("0 to 360")));
+        }
+        // Keeping a heading must never silently use an old target heading.
+        let (mut session, mut order) = submarine_go_to_fixture(true);
+        session.vehicles.values_mut().next().unwrap().heading = None;
+        if let Command::GoTo { heading, .. } = &mut order.command {
+            *heading = Some(GoToHeading::KeepCurrent);
+        }
+        assert!(matches!(session.command(order, 2_000).as_slice(),
+            [Effect::CommandDone { outcome: CommandOutcome::NotSent(why), .. }] if why.contains("fresh heading")));
+        // A depth-only default faces the captured heading, not a stale yaw target.
+        let (mut session, mut order) = submarine_go_to_fixture(true);
+        if let Command::GoTo {
+            latitude_deg,
+            longitude_deg,
+            ..
+        } = &mut order.command
+        {
+            *latitude_deg = 37.763_932;
+            *longitude_deg = -122.385_804;
+        }
+        session.command(order, 2_000);
+        let yaw = submarine_ack(&mut session, 192, 0, 3_000);
+        let [Effect::Send { bytes, .. }] = yaw.as_slice() else {
+            panic!("{yaw:?}")
+        };
+        let frames = crate::framing::split(bytes).frames;
+        assert!(matches!(
+            decode(frames[0]).unwrap().message,
+            Message::CommandLong {
+                command: 115,
+                param1: 91.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn submarine_go_to_rejections_and_heading_timeouts_are_visible() {
+        let (mut session, order) = submarine_go_to_fixture(true);
+        session.command(order, 2_000);
+        assert!(matches!(
+            submarine_ack(&mut session, 192, 2, 3_000).as_slice(),
+            [Effect::CommandDone {
+                outcome: CommandOutcome::Rejected(_),
+                attempts: 1,
+                ..
+            }]
+        ));
+        let (mut session, order) = submarine_go_to_fixture(true);
+        session.command(order, 2_000);
+        submarine_ack(&mut session, 192, 0, 3_000);
+        assert!(
+            matches!(submarine_ack(&mut session, 115, 2, 4_000).as_slice(),
+            [Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. }] if why.contains("destination accepted; heading refused"))
+        );
+        let (mut session, order) = submarine_go_to_fixture(true);
+        session.config.command_attempts = 1;
+        session.command(order, 2_000);
+        submarine_ack(&mut session, 192, 0, 3_000);
+        let effects = session.tick(3_000 + session.config.command_timeout_us);
+        assert!(effects.iter().any(|effect| matches!(effect,
+            Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. } if why.contains("heading command timed out"))));
+    }
+
+    #[test]
+    fn submarine_heading_requires_fresh_position_and_leaves_real_vehicles_alone() {
+        for position in [None, Some((37.7, -122.4, 0))] {
+            let (mut session, order) = submarine_go_to_fixture(true);
+            session.vehicles.values_mut().next().unwrap().position = position;
+            assert!(matches!(session.command(order, 6_000_000).as_slice(),
+                [Effect::CommandDone { outcome: CommandOutcome::NotSent(why), .. }] if why.contains("fresh fused position")));
+        }
+        let (mut session, order) = submarine_go_to_fixture(false);
+        session.vehicles.values_mut().next().unwrap().position = None;
+        session.command(order, 2_000);
+        assert!(matches!(
+            submarine_ack(&mut session, 192, 0, 3_000).as_slice(),
+            [Effect::CommandDone {
+                outcome: CommandOutcome::Accepted,
+                attempts: 1,
+                ..
+            }]
+        ));
+        assert_eq!(heading_to(37.7, -122.4, 37.7, -122.4), None);
+        assert!((heading_to(0.0, 179.9, 0.0, -179.9).unwrap() - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_disarm_cancels_a_simulated_submarines_pending_heading() {
+        for yaw_sent in [false, true] {
+            let (mut session, order) = submarine_go_to_fixture(true);
+            session.command(order.clone(), 2_000);
+            if yaw_sent {
+                submarine_ack(&mut session, 192, 0, 3_000);
+            }
+            let disarm = CommandOrder {
+                command: Command::Disarm,
+                receipt_id: "stop".into(),
+                ..order
+            };
+            session.command(disarm, 4_000);
+            if yaw_sent {
+                assert!(submarine_ack(&mut session, 115, 0, 5_000).is_empty());
+                assert!(session.commands.iter().all(|p| p.command != 115));
+            } else {
+                assert!(matches!(
+                    submarine_ack(&mut session, 192, 0, 5_000).as_slice(),
+                    [Effect::CommandDone {
+                        outcome: CommandOutcome::Accepted,
+                        ..
+                    }]
+                ));
+            }
+        }
+    }
+
     #[test]
     fn px4_takes_off_to_home_plus_the_height_and_shows_its_modes() {
         use crate::sim::{global_position_frame, px4_heartbeat_frame};
@@ -3648,6 +4064,7 @@ mod tests {
                         longitude_deg: 149.17,
                         altitude_m,
                         altitude_frame: frame,
+                        heading: None,
                     },
                     force: false,
                 },
@@ -3712,6 +4129,7 @@ mod tests {
                     longitude_deg: to.1,
                     altitude_m: 30.0,
                     altitude_frame: uxduck_core::domain::telemetry::AltitudeFrame::AboveHome,
+                    heading: None,
                 },
                 force: false,
             },

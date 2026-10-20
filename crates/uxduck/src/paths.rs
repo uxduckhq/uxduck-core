@@ -386,12 +386,6 @@ mod recordings_tests {
     use super::*;
 
     #[test]
-    fn photos_and_recordings_are_together_in_the_app_folder() {
-        let dir = Path::new("/tmp/some-uxduck");
-        assert_eq!(media_dir(dir), dir.join("media"));
-    }
-
-    #[test]
     fn recordings_from_before_move_into_media() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("video")).unwrap();

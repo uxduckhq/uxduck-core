@@ -334,6 +334,9 @@ mod tests {
 
     #[test]
     fn a_busy_udp_port_names_its_owner_and_is_ours_to_free() {
+        // Let the OS choose an unused port for the successful-bind branch.
+        // A released ephemeral port can immediately be claimed by another test.
+        assert!(check_udp_bind("127.0.0.1", 0).is_ok());
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = socket.local_addr().unwrap().port();
         let message = check_udp_bind("127.0.0.1", port).unwrap_err();
@@ -347,8 +350,6 @@ mod tests {
             assert!(message.contains(&format!("(pid {})", std::process::id())));
             assert!(!may_stop(&found), "never ourselves");
         }
-        drop(socket);
-        assert!(check_udp_bind("127.0.0.1", port).is_ok());
     }
 
     #[test]

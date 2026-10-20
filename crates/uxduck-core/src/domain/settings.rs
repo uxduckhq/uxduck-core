@@ -113,6 +113,9 @@ impl StorageCategory {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Receive newer beta releases as well as stable releases on this computer.
+    #[serde(default)]
+    pub include_beta: bool,
     /// Unset: the command line's choice (`--on-last-client-closed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_policy: Option<ClosePolicy>,
@@ -279,6 +282,7 @@ const fn warning() -> u8 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            include_beta: false,
             close_policy: None,
             auto_delete_days: BTreeMap::new(),
             simulator_log_retention_days: simulator_log_retention(),

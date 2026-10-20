@@ -80,6 +80,20 @@ pub fn encode_listed(
     listed: &[AvailableMode],
     force: bool,
 ) -> Result<(u16, Wire), String> {
+    if let Command::GoTo {
+        heading: Some(heading),
+        ..
+    } = command
+    {
+        if family != Some(Family::Sub) {
+            return Err("heading options are supported only by ArduSub".into());
+        }
+        if let uxduck_core::domain::command::GoToHeading::Set { degrees } = heading
+            && (!degrees.is_finite() || !(0.0..=360.0).contains(degrees))
+        {
+            return Err("heading must be from 0 to 360 degrees true".into());
+        }
+    }
     encode_long(command, family, listed, force)
         .map(|(command, params)| (command, Wire::Long(params)))
         .or_else(|first| match command {
@@ -88,6 +102,7 @@ pub fn encode_listed(
                 longitude_deg,
                 altitude_m,
                 altitude_frame,
+                ..
             } => go_to(*latitude_deg, *longitude_deg, *altitude_m, *altitude_frame),
             _ => Err(first),
         })
@@ -297,6 +312,7 @@ mod tests {
             longitude_deg: 149.165_230,
             altitude_m: 30.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            heading: None,
         };
         let (command, wire) = encode(&go_to, Some(Family::Copter), false).unwrap();
         assert_eq!(command, 192);
@@ -321,6 +337,7 @@ mod tests {
                     longitude_deg: 0.0,
                     altitude_m: 10.0,
                     altitude_frame: AltitudeFrame::AboveHome,
+                    heading: None,
                 },
                 None,
                 false
@@ -336,6 +353,7 @@ mod tests {
             longitude_deg: 149.165_230,
             altitude_m: -12.3,
             altitude_frame: AltitudeFrame::AboveHome,
+            heading: None,
         };
         let (command, wire) = encode(&go_to, Some(Family::Sub), false).unwrap();
         assert_eq!(command, MAV_CMD_DO_REPOSITION);
@@ -361,6 +379,8 @@ mod tests {
                 longitude_deg: 149.0,
                 altitude_m: 600.0,
                 altitude_frame,
+
+                heading: None,
             };
             match encode(&go_to, Some(Family::Plane), false).map(|(_, wire)| wire) {
                 Ok(Wire::Int { frame, z, .. }) => Ok((frame, z)),

@@ -39,6 +39,12 @@ use crate::daemon::engine_task::EngineHandle;
 use choose::{BuiltIn, Known, Source};
 use store::{Bad, Followed, Kept, Store};
 
+/// Installed betas serve their tested, embedded interface, including offline
+/// and when this computer kept a newer production interface before switching.
+fn bundled_beta_interface() -> bool {
+    env!("CARGO_PKG_VERSION").contains('-') && !cfg!(debug_assertions)
+}
+
 /// Where the production manifest is published.
 pub const DEFAULT_URL: &str = "https://app.uxduck.com/interface/manifest.json";
 
@@ -80,11 +86,18 @@ impl Config {
     /// tests.
     #[must_use]
     pub fn from_env(dev: Option<String>) -> Self {
-        let (url, staging_url) = match crate::update::url_override("UXDUCK_INTERFACE_URL") {
+        let (mut url, mut staging_url) = match crate::update::url_override("UXDUCK_INTERFACE_URL") {
             Some(url) if url == "none" => (None, None),
             Some(url) => (Some(url.clone()), Some(url)),
             None => (Some(DEFAULT_URL.to_owned()), Some(STAGING_URL.to_owned())),
         };
+        // A prerelease is a tested app/interface pair. Production hot updates
+        // must never replace its beta interface; install the next beta or stable
+        // release to update it. Development overrides remain available for tests.
+        if bundled_beta_interface() {
+            url = None;
+            staging_url = None;
+        }
         let debug_env = |name: &str| std::env::var(name).ok().filter(|_| cfg!(debug_assertions));
         let ms = |name: &str| {
             debug_env(name)
@@ -191,7 +204,7 @@ impl Interfaces {
     /// # Errors
     /// When the store's folder cannot be made or read.
     pub fn open(data_dir: &Path, ui_dir: Option<PathBuf>, config: Config) -> std::io::Result<Self> {
-        let store = if config.dev.is_some() {
+        let store = if config.dev.is_some() || bundled_beta_interface() {
             None
         } else {
             Some(Store::open(data_dir.join("interface"))?)

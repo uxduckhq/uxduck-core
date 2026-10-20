@@ -452,6 +452,9 @@ pub enum UpdateCommand {
         /// The channel's manifest.
         #[arg(long, env = "UXDUCK_UPDATE_URL", default_value = crate::update::DEFAULT_URL)]
         url: String,
+        /// Include newer numbered beta releases alongside stable releases.
+        #[arg(long)]
+        beta: bool,
         /// The release public key, for tests; release builds have it built in.
         #[arg(long, hide = true)]
         public_key: Option<String>,
@@ -965,12 +968,17 @@ async fn run_command(cli: Cli) -> ExitCode {
             run_daemon(args.daemon, data_dir, cli.dev, links, true, owned).await
         }
         Some(Command::Update {
-            command: UpdateCommand::Check { url, public_key },
+            command:
+                UpdateCommand::Check {
+                    url,
+                    public_key,
+                    beta,
+                },
         }) => {
             let key = public_key
                 .as_deref()
                 .or(crate::update::APP_UPDATE_PUBLIC_KEY);
-            return match crate::update::check(&url, key, &data_dir).await {
+            return match crate::update::check_channels(&url, beta, key, &data_dir).await {
                 Ok(report) => {
                     println!("{report}");
                     ExitCode::SUCCESS

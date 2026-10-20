@@ -13,6 +13,8 @@
 )]
 mod files;
 mod installer;
+#[cfg(target_os = "macos")]
+mod sparkle;
 #[cfg(test)]
 mod tests;
 
@@ -32,6 +34,10 @@ use crate::daemon::engine_task::EngineHandle;
 // Kept open until process exit, so the worker cannot install while the old
 // daemon, Electron children or background tasks are still alive.
 static HANDOFF_PIPE: std::sync::Mutex<Option<std::process::ChildStdin>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+static SPARKLE_GUARD_PIPE: std::sync::Mutex<Option<std::process::ChildStdin>> =
     std::sync::Mutex::new(None);
 
 const MAX_PACKAGE: u64 = 1 << 30;
@@ -68,6 +74,11 @@ fn status(phase: UpdatePhase) -> AppUpdateStatus {
 }
 
 pub fn start(engine: EngineHandle, data_dir: PathBuf, port: u16, enabled: bool) {
+    #[cfg(target_os = "macos")]
+    if enabled && sparkle::installed_app().is_ok() {
+        sparkle::start(engine, data_dir, port);
+        return;
+    }
     let Some(key) = key().filter(|_| enabled) else {
         return;
     };
@@ -99,11 +110,14 @@ pub fn start(engine: EngineHandle, data_dir: PathBuf, port: u16, enabled: bool) 
                 let _ = engine
                     .run(|e| e.app_update_publish(status(UpdatePhase::Checking)))
                     .await;
-                match download(&engine, &data_dir, &url, &key).await {
+                let Ok(channel) = DownloadChannel::current(&engine).await else {
+                    return;
+                };
+                match download_selected(channel, &data_dir, &url, &key).await {
                     Ok(path) => ready = path,
                     Err(why) => {
                         ready = None;
-                        publish_failure(&engine, why).await;
+                        publish_channel_failure(&engine, channel.include_beta, why).await;
                     }
                 }
                 let spread = Duration::from_secs(u64::from(std::process::id() % 3600));
@@ -192,6 +206,52 @@ async fn publish_failure(engine: &EngineHandle, why: String) {
         .await;
 }
 
+async fn publish_channel_failure(engine: &EngineHandle, include_beta: bool, why: String) {
+    tracing::warn!(%why, "app update failed");
+    let _ = engine
+        .run(move |e| {
+            let mut s = e.app_update_status();
+            s.phase = UpdatePhase::Failed;
+            s.detail = Some(why);
+            e.app_update_publish_for_channel(include_beta, s);
+        })
+        .await;
+}
+
+/// Every callback from one download belongs to its original eligibility.
+#[derive(Clone, Copy)]
+struct DownloadChannel<'a> {
+    engine: &'a EngineHandle,
+    include_beta: bool,
+}
+
+impl<'a> DownloadChannel<'a> {
+    async fn current(engine: &'a EngineHandle) -> Result<Self, String> {
+        let include_beta = engine
+            .run(|e| e.state().settings.include_beta)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            engine,
+            include_beta,
+        })
+    }
+
+    async fn publish(self, status: AppUpdateStatus) -> Result<(), String> {
+        let include_beta = self.include_beta;
+        let accepted = self
+            .engine
+            .run(move |e| e.app_update_publish_for_channel(include_beta, status))
+            .await
+            .map_err(|e| e.to_string())?;
+        if accepted {
+            Ok(())
+        } else {
+            Err("Update preference changed. Checking the selected channel again.".into())
+        }
+    }
+}
+
 /// Use the platform's installer, never an archive of individual binaries.
 fn installer_artifact(
     report: &crate::update::Report,
@@ -248,23 +308,66 @@ fn files_artifact(report: &crate::update::Report, target: &str) -> Option<Releas
         .cloned()
 }
 
-async fn download(
+async fn publish_current(
     engine: &EngineHandle,
+    include_beta: bool,
+    warning: Option<String>,
+) -> Result<(), String> {
+    let mut current = status(UpdatePhase::Current);
+    if !include_beta && env!("CARGO_PKG_VERSION").contains('-') {
+        current.detail = Some("You’ll receive stable updates when they catch up.".into());
+    }
+    if let Some(warning) = warning {
+        current.detail = Some(warning);
+    }
+    engine
+        .run(move |e| e.app_update_publish_for_channel(include_beta, current))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Cancel even a stalled network read promptly when eligibility changes.
+async fn download_selected(
+    channel: DownloadChannel<'_>,
     data_dir: &Path,
     url: &str,
     key: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let report = crate::update::check(url, Some(key), data_dir)
+    let download = download(channel, data_dir, url, key);
+    tokio::pin!(download);
+    loop {
+        tokio::select! {
+            result = &mut download => return result,
+            () = tokio::time::sleep(Duration::from_secs(1)) => {
+                let include_beta = channel.include_beta;
+                if !channel.engine.run(move |e| e.state().settings.include_beta == include_beta)
+                    .await.unwrap_or(false) {
+                    return Err("Update preference changed. Checking the selected channel again.".into());
+                }
+            }
+        }
+    }
+}
+
+async fn download(
+    channel: DownloadChannel<'_>,
+    data_dir: &Path,
+    url: &str,
+    key: &str,
+) -> Result<Option<PathBuf>, String> {
+    let DownloadChannel {
+        engine,
+        include_beta,
+    } = channel;
+    let report = crate::update::check_channels(url, include_beta, Some(key), data_dir)
         .await
         .map_err(|e| e.to_string())?;
     if !matches!(
         report.verdict,
         crate::update::Verdict::Available(_) | crate::update::Verdict::RolledBack(_)
     ) {
-        engine
-            .run(|e| e.app_update_publish(status(UpdatePhase::Current)))
-            .await
-            .map_err(|e| e.to_string())?;
+        publish_current(engine, include_beta, report.warning).await?;
         return Ok(None);
     }
     let artifact = installer_artifact(&report, crate::update::TARGET)?;
@@ -276,6 +379,7 @@ async fn download(
     let package = dir.join(format!("package.{}", artifact.kind));
     let mut s = status(UpdatePhase::Downloading);
     s.version = Some(version.clone());
+    s.detail = report.warning.clone();
     s.size = Some(artifact.size);
     s.notes_url = report
         .manifest
@@ -297,9 +401,10 @@ async fn download(
     let staged = match files_artifact(&report, crate::update::TARGET) {
         Some(list) if cfg!(target_os = "macos") => {
             let installed = Path::new(installer::INSTALLED_APP);
-            match download_files(engine, &dir, &list, &version, installed, &mut s).await {
+            match download_files(channel, &dir, &list, &version, installed, &mut s).await {
                 Ok(()) => true,
                 Err(why) => {
+                    channel.publish(s.clone()).await?;
                     // Never a half-built app: this version uses its full package.
                     tracing::warn!(%why, "per-file update unavailable; downloading the full installer");
                     let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
@@ -316,13 +421,10 @@ async fn download(
     let staged = false;
     if !staged {
         let initial = s.clone();
-        engine
-            .run(move |e| e.app_update_publish(initial))
-            .await
-            .map_err(|e| e.to_string())?;
+        channel.publish(initial).await?;
         if verify_file_async(&package, &artifact).await.is_err() {
             let partial = dir.join("package.partial");
-            let fetched = download_file(engine, &artifact, &partial, &s).await;
+            let fetched = download_file(channel, &artifact, &partial, &s).await;
             if let Err(error) = fetched {
                 let _ = std::fs::remove_file(&partial);
                 return Err(error);
@@ -341,12 +443,12 @@ async fn download(
     s.phase = UpdatePhase::Ready;
     // Surface a cancelled/failed installation when the background process returns.
     if let Ok(result) = std::fs::read_to_string(data_dir.join("app-update-result")) {
-        s.detail = Some(result);
+        s.detail = Some(
+            s.detail
+                .map_or_else(|| result.clone(), |warning| format!("{warning} {result}")),
+        );
     }
-    engine
-        .run(move |e| e.app_update_publish(s))
-        .await
-        .map_err(|e| e.to_string())?;
+    channel.publish(s).await?;
     Ok(Some(dir))
 }
 
@@ -377,7 +479,7 @@ impl Progress {
 /// On success the list is kept in `dir` as the staged update.
 #[cfg(unix)]
 async fn download_files(
-    engine: &EngineHandle,
+    channel: DownloadChannel<'_>,
     dir: &Path,
     artifact: &ReleaseArtifact,
     version: &str,
@@ -421,10 +523,7 @@ async fn download_files(
     s.size = Some(total);
     s.received = Some(0);
     let initial = s.clone();
-    engine
-        .run(move |e| e.app_update_publish(initial))
-        .await
-        .map_err(|e| e.to_string())?;
+    channel.publish(initial).await?;
     let progress = Progress {
         received: 0.into(),
         published: std::sync::Mutex::new(std::time::Instant::now()),
@@ -451,7 +550,7 @@ async fn download_files(
                             None
                         }
                     },
-                    engine,
+                    channel,
                 )
                 .await;
                 let unpacked = match fetched {
@@ -514,7 +613,7 @@ async fn fetch_file(
     path: &Path,
     limit: u64,
     tick: impl Fn(u64) -> Option<AppUpdateStatus>,
-    engine: &EngineHandle,
+    channel: DownloadChannel<'_>,
 ) -> Result<(), String> {
     let mut response = client
         .get(url)
@@ -534,17 +633,14 @@ async fn fetch_file(
         }
         out.write_all(&bytes).await.map_err(|e| e.to_string())?;
         if let Some(s) = tick(bytes.len() as u64) {
-            engine
-                .run(move |e| e.app_update_publish(s))
-                .await
-                .map_err(|e| e.to_string())?;
+            channel.publish(s).await?;
         }
     }
     out.sync_all().await.map_err(|e| e.to_string())
 }
 
 async fn download_file(
-    engine: &EngineHandle,
+    channel: DownloadChannel<'_>,
     artifact: &ReleaseArtifact,
     partial: &Path,
     s: &AppUpdateStatus,
@@ -574,10 +670,7 @@ async fn download_file(
         if progress.elapsed() >= Duration::from_secs(1) {
             let mut s = s.clone();
             s.received = Some(have);
-            engine
-                .run(move |e| e.app_update_publish(s))
-                .await
-                .map_err(|e| e.to_string())?;
+            channel.publish(s).await?;
             progress = std::time::Instant::now();
         }
     }
@@ -732,6 +825,10 @@ fn prepare_worker(
         port,
         reopen,
     };
+    spawn_worker(dir, &plan)
+}
+
+fn spawn_worker(dir: &Path, plan: &Plan) -> Result<(Child, std::process::ChildStdin), String> {
     write(
         &dir.join("plan.json"),
         &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
@@ -741,7 +838,7 @@ fn prepare_worker(
     } else {
         "uxduck-updater"
     });
-    std::fs::copy(executable, &copy)
+    std::fs::copy(&plan.executable, &copy)
         .map_err(|e| format!("Couldn't prepare the installer helper: {e}"))?;
     let mut command = Command::new(copy);
     command
@@ -800,6 +897,10 @@ pub fn worker(dir: &Path) -> Result<(), String> {
     installing
         .try_lock()
         .map_err(|_| "Another UXDuck update is already installing")?;
+    if plan.kind == "sparkle" {
+        let _ = std::fs::remove_file(plan.data_dir.join("sparkle-installed"));
+        let _ = std::fs::remove_file(plan.data_dir.join("sparkle-failed"));
+    }
     println!("ready");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let mut permission = String::new();
@@ -829,25 +930,29 @@ pub fn worker(dir: &Path) -> Result<(), String> {
         .as_ref()
         .unwrap_or(&plan.executable);
     let result: Result<(), String> = (|| {
-        let staged = verified_staged(dir, &key().ok_or("This build has no release key")?)?;
-        if plan.version != dir.file_name().and_then(|s| s.to_str()).unwrap_or("")
-            || plan.kind != staged.kind()
-        {
-            return Err("The approved installer changed.".into());
-        }
-        match staged {
-            Staged::Package(artifact) => {
-                let package = dir.join(format!("package.{}", artifact.kind));
-                installer::preflight(&package)?;
-                installer::install(&package, &artifact.kind, &plan.version)?;
+        if plan.kind == "sparkle" {
+            wait_for_sparkle(&plan)?;
+        } else {
+            let staged = verified_staged(dir, &key().ok_or("This build has no release key")?)?;
+            if plan.version != dir.file_name().and_then(|s| s.to_str()).unwrap_or("")
+                || plan.kind != staged.kind()
+            {
+                return Err("The approved installer changed.".into());
             }
-            // A failure leaves the previous app in place; the next attempt
-            // downloads this version's full package.
-            #[cfg(unix)]
-            Staged::Files(list) => {
-                installer::install_files(dir, &list, &plan.version).inspect_err(|why| {
-                    let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
-                })?;
+            match staged {
+                Staged::Package(artifact) => {
+                    let package = dir.join(format!("package.{}", artifact.kind));
+                    installer::preflight(&package)?;
+                    installer::install(&package, &artifact.kind, &plan.version)?;
+                }
+                // A failure leaves the previous app in place; the next attempt
+                // downloads this version's full package.
+                #[cfg(unix)]
+                Staged::Files(list) => {
+                    installer::install_files(dir, &list, &plan.version).inspect_err(|why| {
+                        let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
+                    })?;
+                }
             }
         }
         let version = Command::new(installed)
@@ -919,4 +1024,22 @@ pub fn check_startup(data_dir: &Path) -> std::io::Result<()> {
         .write(true)
         .open(data_dir.join("app-install.lock"))?;
     lock.try_lock().map_err(|_| std::io::Error::other("UXDuck is installing an update. Wait for installation to finish, then open UXDuck again."))
+}
+
+/// The standard Sparkle installer performs replacement and relaunches its helper.
+/// The copied guardian keeps UXDuck's lease until that helper reports completion.
+fn wait_for_sparkle(plan: &Plan) -> Result<(), String> {
+    let marker = plan.data_dir.join("sparkle-installed");
+    // Do not reopen while Sparkle may still be installing or awaiting native
+    // authorization. Only its explicit success/failure releases the lease.
+    loop {
+        if let Ok(error) = std::fs::read_to_string(plan.data_dir.join("sparkle-failed")) {
+            return Err(error);
+        }
+        if std::fs::read_to_string(&marker).is_ok_and(|version| version == plan.version) {
+            let _ = std::fs::remove_file(marker);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

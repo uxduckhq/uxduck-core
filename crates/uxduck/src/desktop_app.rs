@@ -2,6 +2,8 @@
 //! app/window action. Signed runtime updates may also be kept in the data
 //! folder. The daemon and menu-bar helper run independently of Electron.
 
+mod startup;
+
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -48,6 +50,12 @@ struct State {
 }
 
 #[derive(Debug)]
+struct DesktopChild {
+    process: Child,
+    starting: bool,
+}
+
+#[derive(Debug)]
 pub struct DesktopApp {
     /// The release manifest, or none: downloads are off.
     url: Option<String>,
@@ -61,7 +69,7 @@ pub struct DesktopApp {
     state: Mutex<State>,
     /// Started desktop apps: their standard input closes when UXDuck
     /// stops, and they quit with it.
-    children: Mutex<Vec<Child>>,
+    children: Mutex<Vec<DesktopChild>>,
 }
 
 impl DesktopApp {
@@ -368,7 +376,11 @@ impl DesktopApp {
     /// # Errors
     /// When it is not UXDuck's desktop app, fails its checks, or does not
     /// start.
-    pub fn open(&self, path: &str, args: &[String]) -> Result<(), String> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordered signature, child supervision and startup receipt lifecycle"
+    )]
+    pub fn open(self: &Arc<Self>, path: &str, args: &[String]) -> Result<(), String> {
         let path = Path::new(path);
         let inside = std::fs::canonicalize(path).is_ok_and(|exe| {
             std::fs::canonicalize(executable(&self.bundled_dir))
@@ -395,6 +407,11 @@ impl DesktopApp {
             .map_err(|e| format!("Could not resolve the desktop app path: {e}"))?;
         let data_dir = dunce::canonicalize(&self.data_dir)
             .map_err(|e| format!("Could not resolve UXDuck's data folder: {e}"))?;
+        let startup = tempfile::Builder::new()
+            .prefix("desktop-startup-")
+            .tempdir_in(&data_dir)
+            .map_err(|e| format!("Could not create the desktop startup receipt: {e}"))?;
+        let receipt = startup.path().join("result.json");
         let mut command = Command::new(&executable);
         // Start from the runtime's folder, as a direct Explorer launch does;
         // do not inherit a launcher's working directory or verbatim data path.
@@ -406,7 +423,9 @@ impl DesktopApp {
             )
             .arg("--quit-with-uxduck")
             .args(args)
-            .env("UXDUCK_DATA_DIR", data_dir);
+            .env("UXDUCK_DATA_DIR", data_dir)
+            .env("UXDUCK_DESKTOP_STARTUP_FILE", &receipt)
+            .env("ELECTRON_ENABLE_LOGGING", "1");
         // A development UXDuck's window keeps Reload and the developer tools
         // even when `pnpm desktop:local` packaged it.
         if cfg!(debug_assertions) {
@@ -425,7 +444,7 @@ impl DesktopApp {
             std::fs::rename(&log_path, previous)
                 .map_err(|e| format!("Could not rotate the desktop startup log: {e}"))?;
         }
-        let log = std::fs::OpenOptions::new()
+        let mut log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
@@ -435,6 +454,13 @@ impl DesktopApp {
                     log_path.display()
                 )
             })?;
+        writeln!(
+            log,
+            "\nDesktop startup: {} ({})",
+            executable.display(),
+            jiff::Timestamp::now()
+        )
+        .map_err(|e| format!("Could not write the desktop startup log: {e}"))?;
         let errors = log
             .try_clone()
             .map_err(|e| format!("Could not share the desktop startup log: {e}"))?;
@@ -443,10 +469,71 @@ impl DesktopApp {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(errors))
             .spawn()
-            .map_err(|e| format!("The desktop app did not start: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "The desktop app did not start: {e}. Startup log: {}",
+                    log_path.display()
+                )
+            })?;
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-        children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
-        children.push(child);
+        children.retain_mut(|child| child.starting || matches!(child.process.try_wait(), Ok(None)));
+        let pid = child.id();
+        children.push(DesktopChild {
+            process: child,
+            starting: true,
+        });
+        drop(children);
+        let this = Arc::clone(self);
+        this.runtime.clone().spawn(async move {
+            let result = startup::wait(
+                &receipt,
+                || {
+                    let mut children = this.children.lock().unwrap_or_else(PoisonError::into_inner);
+                    children.iter_mut().find(|child| child.process.id() == pid)
+                        .map_or(Ok(None), |child| child.process.try_wait().map_err(|e| e.to_string()))
+                },
+                std::time::Duration::from_secs(30),
+            ).await;
+            if result.is_ok() {
+                let mut children = this.children.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(child) = children.iter_mut().find(|child| child.process.id() == pid) {
+                    child.starting = false;
+                }
+            }
+            if let Err(why) = result {
+                // Removing the runtime deliberately cancels pending launches.
+                if !this.children.lock().unwrap_or_else(PoisonError::into_inner)
+                    .iter().any(|child| child.process.id() == pid) {
+                    return;
+                }
+                {
+                    let mut children = this.children.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(child) = children.iter_mut().find(|child| child.process.id() == pid) {
+                        let _ = child.process.kill();
+                        let _ = child.process.wait();
+                        child.starting = false;
+                    }
+                }
+                let message = format!("{why}\n\nStartup log: {}\n\nYou can open UXDuck in your browser with uxduck open --browser.", log_path.display());
+                this.lock().failed = Some(message.clone());
+                tracing::error!(%message, "desktop startup failed");
+                if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+                    let _ = writeln!(log, "{message}");
+                }
+                if let Some(helper) = crate::tray::binary() {
+                    let result = tokio::process::Command::new(helper)
+                        .arg("--window-error").arg(&message)
+                        .env("UXDUCK_DATA_DIR", &this.data_dir)
+                        .stdin(Stdio::null()).output().await;
+                    if !result.is_ok_and(|output| output.status.success()) {
+                        tracing::error!("could not show the desktop startup error dialog");
+                    }
+                } else {
+                    tracing::error!("the menu-bar helper is missing; could not show the desktop startup error dialog");
+                }
+            }
+            drop(startup);
+        });
         Ok(())
     }
 
@@ -455,9 +542,10 @@ impl DesktopApp {
     /// # Errors
     /// When its folder cannot be deleted.
     pub fn remove(&self) -> Result<(), String> {
-        let children: Vec<Child> =
+        let children: Vec<DesktopChild> =
             std::mem::take(&mut *self.children.lock().unwrap_or_else(PoisonError::into_inner));
-        for mut child in children {
+        for child in children {
+            let mut child = child.process;
             // Its standard input closing tells it to quit.
             drop(child.stdin.take());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

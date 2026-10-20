@@ -11,7 +11,13 @@ Download for your computer from [uxduck.com/download](/download). Then:
 
 ## macOS
 
-Open the `.pkg` and follow the installer.
+Open the `.dmg` and drag **UXDuck** onto **Applications**. Wait for copying to finish, then open the installed app. If reinstalling, quit UXDuck from its menu bar before replacing it; closing its window leaves it running.
+
+Without administrator access, copy the same app to the **Applications** folder inside your home folder (`~/Applications`). Create that folder if needed. Finder can open it with **Go › Go to Folder** and `~/Applications`. No administrator password is needed for that folder.
+
+Existing 0.3.0 settings and data are preserved. If the old copy is in `/Applications` and you cannot replace it, copy UXDuck into your home Applications folder instead and open it from `~/Applications`.
+
+The command-line tool is inside the app: use `~/Applications/UXDuck.app/Contents/MacOS/uxduck` in place of `uxduck` in the commands below.
 
 ## Windows
 
@@ -20,17 +26,20 @@ Run the `.msi`. If Windows says "Windows protected your PC", choose **More info*
 ## Linux and Raspberry Pi
 
 ```
+sudo apt update
 sudo apt install ./uxduck-*.deb
-systemctl --user start uxduck
 ```
+
+The `.deb` installs the desktop app as well as the daemon and command line. Open **UXDuck** from your applications menu, or run `uxduck open`. To run UXDuck without a window, use `systemctl --user start uxduck`.
+
+The ARM64 `.deb` is for any 64-bit ARM Linux, such as a Raspberry Pi or an Ubuntu virtual machine on an Apple silicon Mac.
 
 The desktop window needs no graphics card, so it works in a virtual machine too. To start it with other Chromium switches, such as `--ozone-platform=wayland`, put them in `~/.config/uxduck-flags.conf`, then open UXDuck again.
 
 ## Open the app
 
 Open **UXDuck** from Applications, Spotlight or the Start menu. It starts UXDuck
-in the background and opens its desktop window. The installer finishes without
-opening a window. You can also use:
+in the background and follows your window preference. You can also use:
 
 ```
 uxduck open
@@ -55,8 +64,8 @@ While UXDuck runs, its icon is in the menu bar on a Mac, the notification area o
 
 ## Updates
 
-UXDuck downloads new app versions in the background, including with its window closed. It asks before installing. Open **About › App updates** to check, install, or see what is waiting. Installing restarts UXDuck and may ask for your computer's administrator permission.
+UXDuck checks for new app versions even with its window closed and asks before installing. Open **About › App updates** to check, install, or see what is waiting. Installing restarts UXDuck. On macOS, downloading starts after approval and safe shutdown; updates to your own `~/Applications/UXDuck.app` need no administrator password. Replacing a protected system installation may require administrator permission. Windows and Linux download updates in the background and may ask for authorization to install.
 
 Choose **Install when idle** to wait for UXDuck’s windows and browser tabs to close and for vehicles, recordings, simulations and other work to finish. UXDuck also waits for a disconnected real vehicle last seen armed to reconnect and confirm it is disarmed. You can cancel the scheduled update; quitting UXDuck cancels it too. Updates never stop that work or restart your computer.
 
-macOS uses its signed installer, Windows uses Windows Installer, and Debian/Ubuntu Linux uses its `.deb` package and polkit. A headless Linux computer can download updates but needs a manual package installation when no desktop authorization agent is available. Interface updates continue separately: **Reload** applies them to an open page.
+macOS uses Sparkle to replace the complete signed app, Windows uses Windows Installer, and Debian/Ubuntu Linux uses its `.deb` package and polkit. A headless Linux computer can download updates but needs a manual package installation when no desktop authorization agent is available. Interface updates continue separately: **Reload** applies them to an open page.

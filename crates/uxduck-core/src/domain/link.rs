@@ -227,13 +227,13 @@ pub struct Link {
     pub version: u64,
 }
 
-/// The take-off a simulation start runs for a vehicle started in the air
-/// (S33). Its commands are the simulation start's, not a person's.
+/// Simulation preparation, take-off (S33), or snapshot restoration (S34).
+/// Its commands are the simulation start's, not a person's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Launch {
     pub stage: LaunchStage,
-    /// Why it failed, for a failed one.
+    /// Preparation status, or why it failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -241,8 +241,8 @@ pub struct Launch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LaunchStage {
-    /// Putting a snapshot's parameters and mission back, on the ground
-    /// (S34).
+    /// Preparing a submarine or putting a snapshot's parameters and
+    /// mission back (S34).
     Restoring,
     /// Getting the vehicle into the air.
     Climbing,

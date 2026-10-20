@@ -494,6 +494,29 @@ fn storage_policies(
     Ok(())
 }
 
+fn update_channel(
+    engine: &Engine,
+    connection: ConnectionId,
+    include_beta: Option<bool>,
+    settings: &mut Settings,
+) -> Result<(), ApiError> {
+    if let Some(on) = include_beta {
+        // Update policy belongs to this computer, never a remote account.
+        if !engine
+            .connections
+            .get(&connection)
+            .is_some_and(|c| matches!(c.trust, Trust::LocalUser | Trust::PairedBrowser { .. }))
+        {
+            return Err(ApiError::new(
+                ErrorKind::CapabilityDenied,
+                "Change beta updates on this computer.",
+            ));
+        }
+        settings.include_beta = on;
+    }
+    Ok(())
+}
+
 fn update_settings(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -530,6 +553,7 @@ fn update_settings(
             ));
         };
     }
+    update_channel(engine, connection, params.include_beta, &mut settings)?;
     if let Some(on) = params.usage_analytics {
         settings.usage_analytics = on;
     }
@@ -584,6 +608,7 @@ fn update_settings(
             settings: settings.clone(),
         },
     );
+    engine.app_update_settings_changed(before.include_beta);
     engine.analytics_settings_changed(&before);
     engine.listen_video_ports(&before.video_ports, &settings.video_ports);
     gcs_system_id_changed(engine, before.gcs_system_id, settings.gcs_system_id);

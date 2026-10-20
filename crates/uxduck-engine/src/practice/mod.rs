@@ -870,6 +870,7 @@ impl Engine {
                         longitude_deg: target.1,
                         altitude_m: exercise.start.height_m,
                         altitude_frame: AltitudeFrame::AboveHome,
+                        heading: None,
                     },
                 );
                 self.practice

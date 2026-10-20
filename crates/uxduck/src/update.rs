@@ -10,6 +10,7 @@
 //! Worker counts them as new installs and installs in use, whatever the
 //! analytics switch says (ADR-0016 O7).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,6 +22,8 @@ pub const DEFAULT_URL: &str = match option_env!("UXDUCK_UPDATE_TEST_URL") {
     Some(url) => url,
     None => "https://app.uxduck.com/releases/stable.json",
 };
+
+pub const DEFAULT_BETA_URL: &str = "https://app-staging.uxduck.com/releases/beta.json";
 
 /// Isolated installer tests bake their feed and a separate signing key into
 /// both versions. The full-app updater in ordinary releases ignores runtime
@@ -75,6 +78,8 @@ pub const TARGET: &str = env!("UXDUCK_TARGET");
 pub enum UpdateError {
     #[error("this build has no release key, so it cannot check for updates")]
     NoKey,
+    #[error("no release has been published at {0}")]
+    NotFound(String),
     #[error("cannot fetch {url}: {reason}")]
     Fetch { url: String, reason: String },
     #[error("the manifest's signature does not verify: {0}")]
@@ -104,6 +109,8 @@ pub struct Report {
     /// Exact signed bytes retained for the installer worker to verify again.
     pub signed_bytes: Vec<u8>,
     pub signature: String,
+    /// A failed optional channel never hides a verified stable update.
+    pub warning: Option<String>,
 }
 
 impl std::fmt::Display for Report {
@@ -114,6 +121,9 @@ impl std::fmt::Display for Report {
                 |a| format!("\n  {} ({} bytes, sha256 {})", a.url, a.size, a.sha256),
             )
         };
+        if let Some(warning) = &self.warning {
+            writeln!(f, "{warning}")?;
+        }
         match &self.verdict {
             Verdict::UpToDate => write!(f, "UXDuck {} is up to date.", self.current),
             Verdict::Available(artifact) => write!(
@@ -139,6 +149,10 @@ impl std::fmt::Display for Report {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Seen {
+    /// Replay protection is independent for each signed channel. Analytics
+    /// markers remain shared, so a beta check never counts an install twice.
+    #[serde(default)]
+    channels: BTreeMap<String, String>,
     #[serde(default)]
     published_at: String,
     /// The UTC day of the last check that reached the server.
@@ -261,10 +275,14 @@ pub fn compare(
         verdict,
         signed_bytes: Vec::new(),
         signature: String::new(),
+        warning: None,
     })
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, UpdateError> {
+async fn fetch(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(Vec<u8>, Option<String>), UpdateError> {
     let failed = |reason: String| UpdateError::Fetch {
         url: url.to_owned(),
         reason,
@@ -274,9 +292,18 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, UpdateErr
         .send()
         .await
         .map_err(|e| failed(e.to_string()))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(UpdateError::NotFound(url.into()));
+    }
     if !response.status().is_success() {
         return Err(failed(response.status().to_string()));
     }
+    let signature = response
+        .headers()
+        .get("x-uxduck-signature")
+        .map(|value| value.to_str().map(str::to_owned))
+        .transpose()
+        .map_err(|e| failed(e.to_string()))?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|e| failed(e.to_string()))? {
         if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
@@ -284,23 +311,30 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, UpdateErr
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes)
+    Ok((bytes, signature))
 }
 
-/// Fetches, verifies and compares, remembering what it saw in `data_dir`.
-///
-/// # Errors
-/// Any of [`UpdateError`].
-pub async fn check(
+async fn check_channel(
     url: &str,
+    channel: Option<&str>,
     public_key: Option<&str>,
     data_dir: &Path,
 ) -> Result<Report, UpdateError> {
     let public_key = public_key.ok_or(UpdateError::NoKey)?;
     let seen_path = data_dir.join("update.json");
-    let read: Option<Seen> = std::fs::read(&seen_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let read: Option<Seen> = match std::fs::read(&seen_path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .map_err(|e| UpdateError::Invalid(format!("{}: {e}", seen_path.display())))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(UpdateError::Invalid(format!(
+                "{}: {error}",
+                seen_path.display()
+            )));
+        }
+    };
     let today = crate::analytics::utc_day(now_us());
     let (first, new_today) = markers(read.as_ref(), &today);
     let mut seen = read.unwrap_or_default();
@@ -312,26 +346,149 @@ pub async fn check(
             url: url.to_owned(),
             reason: e.to_string(),
         })?;
-    let bytes = fetch(&client, url).await?;
+    let (bytes, inline_signature) = fetch(&client, url).await?;
     // It reached the server, so it was counted: the markers are spent.
     seen.last_check_day = Some(today);
-    let _ = std::fs::create_dir_all(data_dir);
-    let _ = std::fs::write(&seen_path, serde_json::to_vec(&seen).unwrap_or_default());
-    let signature = fetch(&client, &format!("{url}.minisig")).await?;
+    remember(&seen_path, &seen)?;
+    let signature = if let Some(encoded) = inline_signature {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| UpdateError::Signature(e.to_string()))?
+    } else {
+        // Compatibility with a channel published before atomic signatures.
+        fetch(&client, &format!("{url}.minisig")).await?.0
+    };
     let manifest = verify(&bytes, &String::from_utf8_lossy(&signature), public_key)?;
+    if let Some(channel) = channel {
+        validate_channel(&manifest, channel)?;
+    }
+    let previous = seen
+        .channels
+        .get(&manifest.channel)
+        .cloned()
+        .unwrap_or_else(|| {
+            if manifest.channel == "stable" {
+                seen.published_at.clone()
+            } else {
+                String::new()
+            }
+        });
     // RFC 3339 in UTC compares as text.
-    if manifest.published_at < seen.published_at {
+    if manifest.published_at < previous {
         return Err(UpdateError::Replayed {
             offered: manifest.published_at,
-            seen: seen.published_at,
+            seen: previous,
         });
     }
-    seen.published_at.clone_from(&manifest.published_at);
-    let _ = std::fs::write(&seen_path, serde_json::to_vec(&seen).unwrap_or_default());
+    seen.channels
+        .insert(manifest.channel.clone(), manifest.published_at.clone());
+    if manifest.channel == "stable" {
+        seen.published_at.clone_from(&manifest.published_at);
+    }
+    remember(&seen_path, &seen)?;
     let mut report = compare(env!("CARGO_PKG_VERSION"), manifest, TARGET)?;
     report.signed_bytes = bytes;
     report.signature = String::from_utf8_lossy(&signature).into_owned();
     Ok(report)
+}
+
+/// Replay state is required for trusting a channel: never silently discard a
+/// write failure or leave a half-written clock after a process interruption.
+fn remember(path: &Path, seen: &Seen) -> Result<(), UpdateError> {
+    let save = || -> Result<(), String> {
+        let parent = path.parent().ok_or("The update cache has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let partial = path.with_extension(format!("{}.partial", std::process::id()));
+        let bytes = serde_json::to_vec(seen).map_err(|e| e.to_string())?;
+        std::fs::write(&partial, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&partial, path).map_err(|e| e.to_string())
+    };
+    save().map_err(|why| {
+        UpdateError::Invalid(format!(
+            "Cannot save update verification state at {}: {why}",
+            path.display()
+        ))
+    })
+}
+
+/// Validate eligibility even for correctly signed metadata from another channel.
+fn validate_channel(manifest: &ReleaseManifest, channel: &str) -> Result<(), UpdateError> {
+    let version = semver::Version::parse(&manifest.version)
+        .map_err(|e| UpdateError::Invalid(e.to_string()))?;
+    let valid = match channel {
+        "stable" => version.pre.is_empty(),
+        "beta" => version
+            .pre
+            .as_str()
+            .strip_prefix("beta.")
+            .is_some_and(|n| n.parse::<u32>().is_ok()),
+        _ => false,
+    };
+    if manifest.channel != channel || !valid {
+        return Err(UpdateError::Invalid(format!(
+            "expected a {channel} release, got {} {}",
+            manifest.channel, manifest.version
+        )));
+    }
+    Ok(())
+}
+
+/// Beta expands eligibility to prereleases; it never replaces stable eligibility.
+/// An unpublished beta (404) is intentional. Other beta failures are visible
+/// warnings; they never prevent a verified stable update from being offered.
+pub async fn check_channels(
+    stable_url: &str,
+    include_beta: bool,
+    public_key: Option<&str>,
+    data_dir: &Path,
+) -> Result<Report, UpdateError> {
+    let stable = check_channel(stable_url, Some("stable"), public_key, data_dir).await?;
+    if !include_beta {
+        return Ok(stable);
+    }
+    let base = stable_url.strip_suffix("stable.json").ok_or_else(|| {
+        UpdateError::Invalid("Beta updates require a stable.json feed URL".into())
+    })?;
+    let beta_url = if stable_url == DEFAULT_URL && !IS_UPDATE_TEST {
+        DEFAULT_BETA_URL.to_owned()
+    } else {
+        format!("{base}beta.json")
+    };
+    let beta = check_channel(&beta_url, Some("beta"), public_key, data_dir).await;
+    select_beta(stable, beta, &beta_url, TARGET)
+}
+
+fn select_beta(
+    mut stable: Report,
+    beta: Result<Report, UpdateError>,
+    beta_url: &str,
+    target: &str,
+) -> Result<Report, UpdateError> {
+    match beta {
+        Ok(beta) => newest(stable, Some(beta), target),
+        Err(UpdateError::NotFound(url)) if url == beta_url => Ok(stable),
+        Err(error) => {
+            stable.warning = Some(format!(
+                "Beta updates could not be checked: {error}. Stable updates remain available."
+            ));
+            Ok(stable)
+        }
+    }
+}
+
+fn newest(stable: Report, beta: Option<Report>, target: &str) -> Result<Report, UpdateError> {
+    if let Some(beta) = beta {
+        let parse =
+            |v: &str| semver::Version::parse(v).map_err(|e| UpdateError::Invalid(e.to_string()));
+        if artifact_for(&beta.manifest, target).is_some()
+            && (artifact_for(&stable.manifest, target).is_none()
+                || parse(&beta.manifest.version)? > parse(&stable.manifest.version)?)
+        {
+            return Ok(beta);
+        }
+    }
+    Ok(stable)
 }
 
 fn now_us() -> u64 {
@@ -384,6 +541,7 @@ mod tests {
     fn the_markers_count_a_new_install_once_and_each_day_once() {
         assert_eq!(markers(None, "2026-09-30"), (true, true));
         let seen = Seen {
+            channels: BTreeMap::new(),
             published_at: String::new(),
             last_check_day: Some("2026-09-30".into()),
         };
@@ -493,5 +651,127 @@ mod tests {
             None,
             "never the other architecture"
         );
+    }
+    #[test]
+    fn beta_includes_stable_and_newer_betas_without_downgrading() {
+        let target = "aarch64-apple-darwin";
+        for (current, stable, beta, expected, available) in [
+            ("0.4.0", "0.4.1", "0.5.0-beta.1", "0.5.0-beta.1", true),
+            (
+                "0.5.0-beta.1",
+                "0.4.1",
+                "0.5.0-beta.2",
+                "0.5.0-beta.2",
+                true,
+            ),
+            ("0.5.0-beta.2", "0.5.0", "0.5.0-beta.2", "0.5.0", true),
+            (
+                "0.5.0-beta.2",
+                "0.4.1",
+                "0.5.0-beta.1",
+                "0.5.0-beta.1",
+                false,
+            ),
+            ("0.5.0", "0.5.0", "0.6.0-beta.1", "0.6.0-beta.1", true),
+        ] {
+            let stable = compare(current, manifest(stable, false), target).unwrap();
+            let beta = compare(current, manifest(beta, false), target).unwrap();
+            let selected = newest(stable, Some(beta), target).unwrap();
+            assert_eq!(selected.manifest.version, expected);
+            assert_eq!(matches!(selected.verdict, Verdict::Available(_)), available);
+        }
+        let stable = compare("0.5.0-beta.2", manifest("0.4.1", false), target).unwrap();
+        assert_eq!(
+            newest(stable, None, target).unwrap().verdict,
+            Verdict::UpToDate
+        );
+    }
+
+    #[test]
+    fn beta_failures_stay_visible_without_blocking_verified_stable_updates() {
+        let target = "aarch64-apple-darwin";
+        let stable = compare("0.4.0", manifest("0.5.0", false), target).unwrap();
+        for error in [
+            UpdateError::Signature("tampered".into()),
+            UpdateError::Fetch {
+                url: "beta.json".into(),
+                reason: "HTTP 503".into(),
+            },
+            UpdateError::Replayed {
+                offered: "old".into(),
+                seen: "new".into(),
+            },
+            UpdateError::NotFound("beta.json.minisig".into()),
+        ] {
+            let selected = select_beta(stable.clone(), Err(error), "beta.json", target).unwrap();
+            assert_eq!(selected.manifest.version, "0.5.0");
+            assert!(matches!(selected.verdict, Verdict::Available(Some(_))));
+            assert!(
+                selected
+                    .warning
+                    .as_ref()
+                    .unwrap()
+                    .contains("Stable updates remain available")
+            );
+            assert!(
+                selected
+                    .to_string()
+                    .contains("Beta updates could not be checked")
+            );
+        }
+        let unpublished = select_beta(
+            stable,
+            Err(UpdateError::NotFound("beta.json".into())),
+            "beta.json",
+            target,
+        )
+        .unwrap();
+        assert!(unpublished.warning.is_none());
+    }
+
+    #[test]
+    fn a_newer_unsupported_stable_does_not_hide_a_compatible_beta() {
+        let target = "x86_64-pc-windows-msvc";
+        let stable = compare("0.4.0", manifest("0.6.0", false), target).unwrap();
+        let mut beta = manifest("0.5.0-beta.1", false);
+        beta.artifacts[0].target = target.into();
+        beta.artifacts[0].kind = "msi".into();
+        let selected = newest(
+            stable,
+            Some(compare("0.4.0", beta, target).unwrap()),
+            target,
+        )
+        .unwrap();
+        assert_eq!(selected.manifest.version, "0.5.0-beta.1");
+    }
+
+    #[test]
+    fn signed_metadata_cannot_cross_channel_eligibility() {
+        assert!(validate_channel(&manifest("0.5.0-beta.1", false), "stable").is_err());
+        assert!(validate_channel(&manifest("0.5.0", false), "beta").is_err());
+        let mut beta = manifest("0.5.0-beta.1", false);
+        beta.channel = "beta".into();
+        assert!(validate_channel(&beta, "beta").is_ok());
+        let legacy: Seen = serde_json::from_str(
+            r#"{"publishedAt":"2026-10-10T00:00:00Z","lastCheckDay":"2026-10-10"}"#,
+        )
+        .unwrap();
+        assert!(legacy.channels.is_empty());
+        assert_eq!(markers(Some(&legacy), "2026-10-10"), (false, false));
+    }
+    #[test]
+    fn replay_clocks_are_saved_together_and_write_errors_fail_the_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update.json");
+        let mut seen = Seen::default();
+        seen.channels
+            .insert("stable".into(), "2026-10-20T00:00:00Z".into());
+        seen.channels
+            .insert("beta".into(), "2026-10-19T00:00:00Z".into());
+        remember(&path, &seen).unwrap();
+        let saved: Seen = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.channels, seen.channels);
+        std::fs::write(dir.path().join("not-a-folder"), b"file").unwrap();
+        assert!(remember(&dir.path().join("not-a-folder/update.json"), &seen).is_err());
     }
 }
