@@ -26,6 +26,8 @@ pub const AGENT_METHODS: &[&str] = &[
     "command/list",
     "command/send",
     "search/query",
+    "place/search",
+    "place/locate",
     // Where this computer is, once a person has turned it on (S137,
     // ADR-0030 L4); the agent cannot turn it on.
     "location/status",
@@ -134,6 +136,8 @@ pub const AGENT_METHODS: &[&str] = &[
 /// and runs them with `tool_call`. Every tool the instructions name stays
 /// loaded. MCP discovery searches the full generated catalogue separately.
 pub const DEFERRED_METHODS: &[&str] = &[
+    "place/search",
+    "place/locate",
     "video/devices",
     "video/capture",
     "video/capture/enable",

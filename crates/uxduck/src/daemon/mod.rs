@@ -516,6 +516,8 @@ async fn start_online(
     // The account (S27): signed in by this daemon, never by a page.
     let account = crate::account::start(data_dir, FileCredentials::new(data_dir), engine.clone());
     let _ = engine.run(move |e| e.set_account(Box::new(account))).await;
+    let places = crate::places::Host::new(engine.clone());
+    let _ = engine.run(move |e| e.set_places(Box::new(places))).await;
     // Cloud sync (S16): idle until it is on and UXDuck is signed in.
     let sync = crate::sync::start(data_dir, FileCredentials::new(data_dir), engine.clone());
     let _ = engine.run(move |e| e.set_sync(Box::new(sync))).await;

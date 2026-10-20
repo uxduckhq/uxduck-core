@@ -176,6 +176,9 @@ pub(crate) fn handle(
         | ClientRequest::PlaceRemove(_)) => {
             crate::search::handle(engine, connection, request, &granted)
         }
+        request @ (ClientRequest::PlaceSearch(_) | ClientRequest::PlaceLocate(_)) => {
+            crate::places::handle(engine, connection, request, &granted)
+        }
         request @ (ClientRequest::PlanList(_)
         | ClientRequest::PlanGet(_)
         | ClientRequest::PlanCreate(_)

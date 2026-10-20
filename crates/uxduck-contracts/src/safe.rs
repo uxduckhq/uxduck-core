@@ -20,6 +20,12 @@ pub fn optional_integer(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": ["integer", "null"], "minimum": 0, "maximum": MAX_SAFE_INTEGER })
 }
 
+/// A bounded build commit, without arbitrary names or diagnostic text.
+#[must_use]
+pub fn optional_commit(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": ["string", "null"], "pattern": "^[0-9a-f]{7,40}$" })
+}
+
 /// The same on an `i64`, such as a JSON-RPC id.
 #[must_use]
 pub fn signed_integer(_: &mut SchemaGenerator) -> Schema {

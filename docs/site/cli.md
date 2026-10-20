@@ -51,6 +51,28 @@ uxduck vehicle history VEHICLE_ID
 
 For connection or stale-value problems, follow [Troubleshooting](/docs/troubleshooting). For an agent that compares readings over time, follow [Use with AI agents](/docs/mcp).
 
+## Find a simulation's starting place
+
+Search names and addresses through the same hosted API as the Starting point
+picker:
+
+```sh
+uxduck rpc call place/search --json '{"query":"Queenstown, New Zealand","limit":5}'
+```
+
+Choose the intended region from `suggestions`. Pass that suggestion's exact
+`key`, `text` and `near` hint, if present, to `place/locate`:
+
+```sh
+uxduck rpc call place/locate --json '{"key":"CHOSEN_KEY","text":"CHOSEN_TEXT"}'
+```
+
+The result's `place` contains `latitudeDeg` and `longitudeDeg`. Read `terrain/at`
+at those coordinates for the ground elevation, then use them and that height with
+`sim/start`. Searching and locating read data only; they never start a simulation
+or save a place. Both respect the selected operator's place-name search setting.
+See [Use with AI agents](/docs/mcp#choose-a-simulations-starting-place) for MCP.
+
 ## Send a command
 
 Choose the target explicitly when more than one vehicle is connected. Read the command's receipt to see whether UXDuck refused it, the vehicle rejected it, or the vehicle accepted it. Acceptance does not prove the action has finished: check the resulting telemetry and messages.

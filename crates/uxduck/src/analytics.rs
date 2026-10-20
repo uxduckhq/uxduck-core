@@ -197,7 +197,7 @@ impl Outbox {
 }
 
 enum Message {
-    Track(AnalyticsEvent, String),
+    Track(Box<AnalyticsEvent>, String),
     Alias(String),
     Enabled(bool),
     /// Something was written to the outbox directly (a panic): look again.
@@ -220,7 +220,7 @@ static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
 pub fn queue_event(event: DaemonEvent) {
     if let Some(sink) = SINK.get() {
         let _ = sink.tx.send(Message::Track(
-            AnalyticsEvent::Daemon(event),
+            Box::new(AnalyticsEvent::Daemon(event)),
             "daemon".into(),
         ));
     }
@@ -265,7 +265,9 @@ impl std::fmt::Debug for Message {
 
 impl AnalyticsPort for AnalyticsChannel {
     fn track(&mut self, event: AnalyticsEvent, surface: &str) {
-        let _ = self.tx.send(Message::Track(event, surface.to_owned()));
+        let _ = self
+            .tx
+            .send(Message::Track(Box::new(event), surface.to_owned()));
     }
     fn alias(&mut self, browser_id: &str) {
         let _ = self.tx.send(Message::Alias(browser_id.to_owned()));

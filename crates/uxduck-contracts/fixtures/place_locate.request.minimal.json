@@ -1,0 +1,4 @@
+{
+  "method": "place/locate",
+  "params": { "key": "queenstown-nz", "text": "Queenstown, Otago, New Zealand" }
+}

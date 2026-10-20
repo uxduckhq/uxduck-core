@@ -57,7 +57,9 @@ use crate::dto::plugin::{
     PluginCommandParams, PluginDraftParams, PluginInstallParams, PluginLayer, PluginShareParams,
     PluginTestParams, PluginTokenParams, ToolSearchParams,
 };
-use crate::dto::search::{PlaceSaveParams, PlaceUpdateParams, SearchQueryParams};
+use crate::dto::search::{
+    PlaceLocateParams, PlaceSaveParams, PlaceSearchParams, PlaceUpdateParams, SearchQueryParams,
+};
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams};
 use crate::dto::sim::{
     SimBuildParams, SimCatalogueParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams,
@@ -530,6 +532,21 @@ pub enum ClientRequest {
     /// `read`. Result: `SearchResult`.
     #[serde(rename = "search/query")]
     SearchQuery(SearchQueryParams),
+    /// Searches global towns, landmarks and addresses for a simulation's
+    /// starting point or other map use. Returns names, region details and
+    /// keys; choose the requested place, then use `place_locate` to obtain
+    /// coordinates. Ask when the place is ambiguous. Uses the hosted API,
+    /// respects the operator's place-search setting and needs `read`.
+    /// Result: `PlaceSearchResult`.
+    #[serde(rename = "place/search")]
+    PlaceSearch(PlaceSearchParams),
+    /// Locates the chosen `place_search` result using its key, text and
+    /// original near hint. Returns latitudeDeg and longitudeDeg; read
+    /// `terrain_at` for altitudeM before passing them to `sim_start`.
+    /// Starts nothing and saves nothing. Respects the operator's place-search
+    /// setting and needs `read`. Result: `PlaceLocateResult`.
+    #[serde(rename = "place/locate")]
+    PlaceLocate(PlaceLocateParams),
     /// Saves a place on the connection's operator's list. Needs `config`.
     /// Result: `SavedPlace`.
     #[serde(rename = "place/save")]
@@ -1271,7 +1288,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 257] = [
+    pub const METHODS: [&'static str; 259] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1385,6 +1402,8 @@ impl ClientRequest {
         "desktopApp/choose",
         "desktopApp/remove",
         "search/query",
+        "place/search",
+        "place/locate",
         "place/save",
         "place/update",
         "place/remove",

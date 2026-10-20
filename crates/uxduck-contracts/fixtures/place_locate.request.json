@@ -1,0 +1,8 @@
+{
+  "method": "place/locate",
+  "params": {
+    "key": "queenstown-nz",
+    "text": "Queenstown, Otago, New Zealand",
+    "near": { "latitudeDeg": -45.03, "longitudeDeg": 168.72 }
+  }
+}

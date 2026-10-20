@@ -389,22 +389,59 @@ impl DesktopApp {
             self.lock().failed = Some(why.clone());
             return Err(why);
         }
-        // Chromium started from a `\\?\` path on Windows fails to load
-        // UXDuck's address (ERR_FAILED), so it is always given a plain one.
-        let mut command = Command::new(dunce::simplified(path));
+        // Keep Windows executable and profile paths in the same plain form
+        // as a direct launch, including a caller's relative data directory.
+        let executable = dunce::canonicalize(path)
+            .map_err(|e| format!("Could not resolve the desktop app path: {e}"))?;
+        let data_dir = dunce::canonicalize(&self.data_dir)
+            .map_err(|e| format!("Could not resolve UXDuck's data folder: {e}"))?;
+        let mut command = Command::new(&executable);
+        // Start from the runtime's folder, as a direct Explorer launch does;
+        // do not inherit a launcher's working directory or verbatim data path.
         command
+            .current_dir(
+                executable
+                    .parent()
+                    .ok_or("The desktop app has no parent folder.")?,
+            )
             .arg("--quit-with-uxduck")
             .args(args)
-            .env("UXDUCK_DATA_DIR", &self.data_dir);
+            .env("UXDUCK_DATA_DIR", data_dir);
         // A development UXDuck's window keeps Reload and the developer tools
         // even when `pnpm desktop:local` packaged it.
         if cfg!(debug_assertions) {
             command.env("UXDUCK_DEVELOPMENT", "1");
         }
+        // Keep Chromium's own errors: discarding stderr left only the
+        // generic ERR_FAILED dialog when the Windows interface did not load.
+        let log_path = self.data_dir.join("desktop-app.log");
+        if std::fs::metadata(&log_path).is_ok_and(|meta| meta.len() > 1024 * 1024) {
+            let previous = self.data_dir.join("desktop-app.previous.log");
+            if previous.exists() {
+                std::fs::remove_file(&previous).map_err(|e| {
+                    format!("Could not remove the previous desktop startup log: {e}")
+                })?;
+            }
+            std::fs::rename(&log_path, previous)
+                .map_err(|e| format!("Could not rotate the desktop startup log: {e}"))?;
+        }
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| {
+                format!(
+                    "Could not open the desktop startup log {}: {e}",
+                    log_path.display()
+                )
+            })?;
+        let errors = log
+            .try_clone()
+            .map_err(|e| format!("Could not share the desktop startup log: {e}"))?;
         let child = command
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(errors))
             .spawn()
             .map_err(|e| format!("The desktop app did not start: {e}"))?;
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);

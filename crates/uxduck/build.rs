@@ -3,9 +3,13 @@
 
 include!("stamp.rs");
 
+#[path = "../../packaging/windows/resource.rs"]
+mod windows_resource;
+
 use std::path::Path;
 
 fn main() {
+    windows_resource::embed("uxduck");
     stamp();
     println!("cargo:rerun-if-env-changed=UXDUCK_RELEASE_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=UXDUCK_UPDATE_TEST_URL");

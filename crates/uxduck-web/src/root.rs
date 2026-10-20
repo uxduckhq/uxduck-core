@@ -3,11 +3,12 @@
 //! call returns what the worker must do next, so the whole root runs and is
 //! tested natively; `lib.rs` hands the outputs to JavaScript.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use serde::Serialize;
+use uxduck_contracts::dto::analytics::{ControllerInputInterruption, ControllerInterruptionReason};
 use uxduck_contracts::dto::controller::ControllerInputsResult;
 use uxduck_contracts::dto::initialize::{DaemonCapabilities, RunsIn};
 use uxduck_contracts::dto::inspect::{
@@ -67,6 +68,13 @@ pub enum Output {
     /// and terrain files (S23). A network failure's error starts with
     /// [`OFFLINE`].
     Fetch { request: u32, url: String },
+    /// POST this path and JSON body through the worker's configured UXDuck
+    /// place API, then return its bytes through `Browser::fetched`.
+    PlaceLookup {
+        request: u32,
+        path: String,
+        body: String,
+    },
     /// Keep, read or remove terrain files in the Origin Private File
     /// System (S23).
     Store(Store),
@@ -217,6 +225,7 @@ enum Call {
     Turn(TurnRequest),
     Definitions(DefinitionsOrder),
     Terrain(uxduck_terrain::Order),
+    Places(uxduck_engine::places::Order),
     /// What a controller drives now, as the engine decided.
     Route(String, Option<ControlRoute>),
     Input(InputEvent),
@@ -309,6 +318,14 @@ impl DefinitionsPort for Definitions {
 #[derive(Debug)]
 struct TerrainFiles(Queue);
 
+struct PlaceLookup(Queue);
+
+impl uxduck_engine::places::PlacePort for PlaceLookup {
+    fn request(&mut self, order: uxduck_engine::places::Order) {
+        push(&self.0, Call::Places(order));
+    }
+}
+
 impl TerrainPort for TerrainFiles {
     fn order(&mut self, order: uxduck_terrain::Order) {
         push(&self.0, Call::Terrain(order));
@@ -318,6 +335,7 @@ impl TerrainPort for TerrainFiles {
 /// What a fetch in flight is for.
 #[derive(Debug)]
 enum Fetching {
+    Place(uxduck_engine::places::Order),
     /// A terrain file, by its key.
     Terrain(String),
     Manifest,
@@ -459,6 +477,8 @@ pub struct Browser {
     /// What `controller/inputs` returns, shared with the host.
     inputs: Arc<Mutex<ControllerInputsResult>>,
     last_pilot_us: u64,
+    last_tick_us: Option<u64>,
+    last_tick_gap_ms: u32,
 }
 
 impl std::fmt::Debug for Browser {
@@ -573,11 +593,16 @@ impl Browser {
             controls: Controls::browser(),
             inputs,
             last_pilot_us: 0,
+            last_tick_us: None,
+            last_tick_gap_ms: 0,
         };
         let port = Definitions(browser.queue.clone());
         browser.engine.set_definitions(Box::new(port));
         let terrain = TerrainFiles(browser.queue.clone());
         browser.engine.set_terrain(Box::new(terrain), release_key());
+        browser
+            .engine
+            .set_places(Box::new(PlaceLookup(browser.queue.clone())));
         let outputs = browser.drain();
         Ok((browser, outputs))
     }
@@ -622,6 +647,16 @@ impl Browser {
     /// The worker fetched what [`Output::Fetch`] asked for, or could not.
     pub fn fetched(&mut self, request: u32, result: Result<Vec<u8>, String>) -> Vec<Output> {
         match self.fetches.remove(&request) {
+            Some(Fetching::Place(order)) => {
+                let result = result
+                    .map_err(|error| {
+                        uxduck_engine::places::failed(
+                            error.strip_prefix("http:").and_then(|s| s.parse().ok()),
+                        )
+                    })
+                    .and_then(|bytes| uxduck_engine::places::response(&order.action, &bytes));
+                self.engine.place_lookup_done(&order.id, result);
+            }
             Some(Fetching::Manifest) => {
                 self.arriving.manifest = Some(result);
                 self.catalogue_arrived();
@@ -809,8 +844,9 @@ impl Browser {
     }
 
     pub fn disconnect(&mut self, connection: u32) -> Vec<Output> {
-        let gone = self.pads.forget(connection);
+        let gone = self.pads.forget(connection, self.clock.now_us());
         let mut outputs = Vec::new();
+        let _ = self.report_gamepad_interruptions(&mut outputs);
         self.controller_input(gone, &mut outputs);
         if let Some((id, _)) = self.connections.remove(&connection) {
             self.engine.disconnect(id);
@@ -825,13 +861,89 @@ impl Browser {
     fn gamepads(&mut self, connection: u32, frame: gamepads::Frame) -> Vec<Output> {
         let now = self.clock.now_us();
         let mut outputs = Vec::new();
-        if self.connections.contains_key(&connection) {
+        if let Some(&(owner, _)) = self.connections.get(&connection) {
+            let read_at_us = frame
+                .read_at_ms
+                .map_or(now, |at| at.saturating_mul(1000).min(now));
+            let reported: Vec<_> = frame
+                .pads
+                .iter()
+                .filter(|pad| {
+                    self.engine
+                        .state()
+                        .controllers
+                        .get(&pad.id)
+                        .is_some_and(|c| !c.connected)
+                })
+                .map(|pad| pad.id.clone())
+                .collect();
             let events = self.pads.frame(connection, now, frame);
-            self.controller_input(events, &mut outputs);
+            let recoverable = self.report_gamepad_interruptions(&mut outputs);
+            self.controller_input_recoverable(events, &mut outputs, &recoverable);
+            for id in reported {
+                self.engine
+                    .controller_input_recovered(&id, owner, read_at_us);
+            }
         }
         self.send_pilot(&mut outputs);
         outputs.extend(self.drain());
         outputs
+    }
+
+    /// Observe actual input loss before output pauses. Page closure releases
+    /// activation; other losses may recover while the claiming page stays alive.
+    /// One diagnostic per reporting page, even when several devices stop together.
+    fn report_gamepad_interruptions(&mut self, outputs: &mut Vec<Output>) -> BTreeSet<String> {
+        let now = self.clock.now_us();
+        let worker_tick_gap_ms = self.last_tick_gap_ms.max(
+            self.last_tick_us
+                .map_or(0, |at| gamepads::bounded_ms(now.saturating_sub(at))),
+        );
+        let mut reports = BTreeMap::<u32, ControllerInputInterruption>::new();
+        let mut recoverable = BTreeSet::new();
+        for lost in self.pads.take_interruptions() {
+            if lost.reason != ControllerInterruptionReason::PageClosed {
+                recoverable.insert(lost.id.clone());
+            }
+            let report = reports
+                .entry(lost.page)
+                .or_insert(ControllerInputInterruption {
+                    engine_build: option_env!("UXDUCK_GIT_SHA").map(str::to_owned),
+                    reason: lost.reason,
+                    interrupted_at_ms: now / 1000,
+                    report_gap_ms: 0,
+                    worker_tick_gap_ms,
+                    affected_controllers: 0,
+                    claimed_controllers: 0,
+                    driving_controllers: 0,
+                });
+            report.report_gap_ms = report.report_gap_ms.max(lost.gap_ms);
+            report.affected_controllers = (report.affected_controllers + 1).min(64);
+            if self
+                .engine
+                .state()
+                .controllers
+                .get(&lost.id)
+                .is_some_and(|c| c.claim.is_some())
+            {
+                report.claimed_controllers = (report.claimed_controllers + 1).min(64);
+                if self.controls.target(&lost.id).is_some() {
+                    report.driving_controllers = (report.driving_controllers + 1).min(64);
+                }
+            }
+        }
+        for (connection, report) in reports {
+            outputs.push(Output::Post {
+                connection,
+                text: serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": gamepads::INTERRUPTED,
+                    "params": report,
+                })
+                .to_string(),
+            });
+        }
+        recoverable
     }
 
     fn send_pilot(&mut self, outputs: &mut Vec<Output>) {
@@ -856,6 +968,15 @@ impl Browser {
     /// Input events, as the daemon's data plane takes them: an unplugged
     /// controller's vehicle gets its inputs back first.
     fn controller_input(&mut self, events: Vec<InputEvent>, outputs: &mut Vec<Output>) {
+        self.controller_input_recoverable(events, outputs, &BTreeSet::new());
+    }
+
+    fn controller_input_recoverable(
+        &mut self,
+        events: Vec<InputEvent>,
+        outputs: &mut Vec<Output>,
+        recoverable: &BTreeSet<String>,
+    ) {
         if events.is_empty() {
             return;
         }
@@ -874,27 +995,38 @@ impl Browser {
                 *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) =
                     self.controls.snapshot();
             }
-            self.report_controls(reports);
+            for report in reports {
+                match report {
+                    Report::Disconnected { id } if recoverable.contains(&id) => {
+                        self.engine.controller_input_interrupted(&id);
+                    }
+                    report => self.report_control(report),
+                }
+            }
         }
         *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) = self.controls.snapshot();
     }
 
     fn report_controls(&mut self, reports: Vec<Report>) {
         for report in reports {
-            match report {
-                Report::Connected {
-                    id,
-                    name,
-                    layout_known,
-                } => self.engine.controller_connected(&id, &name, layout_known),
-                Report::Disconnected { id } => self.engine.controller_disconnected(&id),
-                Report::Neutral { id, neutral } => self.engine.controller_neutral(&id, neutral),
-                Report::Pressed { id, button, code } => {
-                    self.engine.controller_pressed(&id, button, code);
-                }
-                Report::Positioned { id, position } => {
-                    self.engine.controller_positioned(&id, &position);
-                }
+            self.report_control(report);
+        }
+    }
+
+    fn report_control(&mut self, report: Report) {
+        match report {
+            Report::Connected {
+                id,
+                name,
+                layout_known,
+            } => self.engine.controller_connected(&id, &name, layout_known),
+            Report::Disconnected { id } => self.engine.controller_disconnected(&id),
+            Report::Neutral { id, neutral } => self.engine.controller_neutral(&id, neutral),
+            Report::Pressed { id, button, code } => {
+                self.engine.controller_pressed(&id, button, code);
+            }
+            Report::Positioned { id, position } => {
+                self.engine.controller_positioned(&id, &position);
             }
         }
     }
@@ -936,6 +1068,10 @@ impl Browser {
     /// and approvals that ran out.
     pub fn tick(&mut self) -> Vec<Output> {
         let now = self.clock.now_us();
+        self.last_tick_gap_ms = self
+            .last_tick_us
+            .map_or(0, |at| gamepads::bounded_ms(now.saturating_sub(at)));
+        self.last_tick_us = Some(now);
         let mut outputs = Vec::new();
         if self.session.needs_tick() {
             let effects = self.session.tick(now);
@@ -952,7 +1088,8 @@ impl Browser {
         // A page that stopped reporting (hidden, frozen) lets its pads go.
         if self.pads.any() {
             let gone = self.pads.expire(now);
-            self.controller_input(gone, &mut outputs);
+            let recoverable = self.report_gamepad_interruptions(&mut outputs);
+            self.controller_input_recoverable(gone, &mut outputs, &recoverable);
         }
         outputs.extend(self.drain());
         outputs
@@ -1062,6 +1199,17 @@ impl Browser {
             }
             Call::Definitions(order) => self.definitions(order, outputs),
             Call::Terrain(order) => self.terrain(order, outputs),
+            Call::Places(order) => {
+                self.next_fetch += 1;
+                let path = order.action.path().to_owned();
+                let body = order.action.body().to_string();
+                self.fetches.insert(self.next_fetch, Fetching::Place(order));
+                outputs.push(Output::PlaceLookup {
+                    request: self.next_fetch,
+                    path,
+                    body,
+                });
+            }
             Call::Input(event) => {
                 self.controller_input(vec![event], outputs);
                 // Keyboard frames arrive without any gamepad notifications.

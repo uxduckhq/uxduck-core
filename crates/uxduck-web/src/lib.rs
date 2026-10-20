@@ -240,6 +240,16 @@ mod web {
                         self.fetch
                             .call2(&this, &JsValue::from(request), &JsValue::from(url))
                     }
+                    Output::PlaceLookup {
+                        request,
+                        path,
+                        body,
+                    } => self.fetch.call3(
+                        &this,
+                        &JsValue::from(request),
+                        &JsValue::from(path),
+                        &JsValue::from(body),
+                    ),
                     Output::Store(store) => {
                         let (op, key, bytes, request) = match store {
                             Store::Read { request, key } => ("read", key, None, Some(request)),

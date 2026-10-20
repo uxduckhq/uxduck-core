@@ -65,6 +65,28 @@ uxduck approvals deny <id>
 
 Change tool permissions in **Settings › Agents and tools**. Read access can inspect what is happening without arming, changing modes or writing parameters.
 
+## Choose a simulation's starting place
+
+Ask: **“Find Queenstown in New Zealand and start a simulated VTOL there.”**
+The agent finds `place_search` with `uxduck_search_tools`, searches by name or
+address, and uses the region details to distinguish results. If your intended
+place is ambiguous, it should ask you to choose. `place_locate` takes the chosen
+suggestion's `key`, `text` and original `near` hint and returns `latitudeDeg` and
+`longitudeDeg`.
+
+Both lookups need read access and use UXDuck's existing place API without saving a
+place or starting anything. They respect **Settings › Place-name search**; saved
+places remain available through `search_query` when it is off. An optional `near`
+hint favors nearby results without restricting global searches or requesting this
+computer's location.
+An MCP connection without a selected operator honors every operator's opt-out.
+
+Before `sim_start`, the agent reads `terrain_at` for the chosen coordinates and
+uses its `heightM` as the starting ground `altitudeM`. Starting the simulation still
+uses the existing configuration permission and approval. A failed place or terrain
+lookup needs a retry or another location; the agent should not invent coordinates
+or elevation. Reconnect MCP after updating UXDuck to discover the new tools.
+
 ## Investigate a vehicle
 
 Start with `vehicle_list`, `telemetry_get`, `vehicle_messages` and `vehicle_history`. Useful questions include:

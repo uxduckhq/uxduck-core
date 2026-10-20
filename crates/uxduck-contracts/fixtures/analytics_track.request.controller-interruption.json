@@ -1,0 +1,28 @@
+{
+  "method": "analytics/track",
+  "params": {
+    "event": "controller_input_interrupted",
+    "reason": "report_timeout",
+    "interrupted_at_ms": 1700000000500,
+    "delivery_delay_ms": 700,
+    "report_gap_ms": 600,
+    "worker_tick_gap_ms": 100,
+    "affected_controllers": 2,
+    "claimed_controllers": 1,
+    "driving_controllers": 1,
+    "visible": true,
+    "window_ms": 30000,
+    "long_tasks": 1,
+    "blocking_ms": 1150,
+    "max_task_ms": 1200,
+    "max_input_delay_ms": 0,
+    "controller_gaps": 1,
+    "max_controller_gap_ms": 1250,
+    "map_2d_count": 1,
+    "map_3d_count": 1,
+    "heap_mb": 455,
+    "ui_build": "abcdef1",
+    "surface": "browser",
+    "daemon": "none"
+  }
+}

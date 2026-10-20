@@ -102,6 +102,9 @@ tempfile.workspace = true
 serialport.workspace = true
 tokio-tungstenite.workspace = true
 
+[build-dependencies]
+embed-resource = "3.0.12"
+
 [lints]
 workspace = true
 

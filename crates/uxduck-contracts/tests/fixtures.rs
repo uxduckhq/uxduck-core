@@ -114,6 +114,12 @@ fn check(name: &str) {
         ("result", "search_query") => {
             round_trip::<uxduck_contracts::dto::search::SearchResult>(name, &json);
         }
+        ("result", "place_search") => {
+            round_trip::<uxduck_contracts::dto::search::PlaceSearchResult>(name, &json);
+        }
+        ("result", "place_locate") => {
+            round_trip::<uxduck_contracts::dto::search::PlaceLocateResult>(name, &json);
+        }
         ("result", "place_save" | "place_update") => {
             round_trip::<uxduck_contracts::dto::search::SavedPlace>(name, &json);
         }

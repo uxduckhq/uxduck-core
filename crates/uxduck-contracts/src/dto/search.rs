@@ -39,6 +39,69 @@ pub struct Coordinates {
     pub longitude_deg: f64,
 }
 
+/// Global place-name search through UXDuck's hosted geocoder. Suggestions
+/// have names and keys; `place/locate` resolves the one chosen to coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceSearchParams {
+    /// A town, landmark or address, from 2 to 200 characters.
+    pub query: String,
+    /// Default 5, at most 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Optional proximity hint, rounded to a neighbourhood; never restricts
+    /// the search area or requests this computer's location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Coordinates>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceSuggestion {
+    pub name: String,
+    pub detail: String,
+    pub key: String,
+    pub text: String,
+    /// Pass this same hint to `place/locate` with the key and text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Coordinates>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceSearchResult {
+    pub suggestions: Vec<PlaceSuggestion>,
+    pub attribution: String,
+}
+
+/// The chosen suggestion's key, full text and original proximity hint.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceLocateParams {
+    pub key: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Coordinates>,
+}
+
+/// Coordinates for `terrain/at`, `sim/start` or saving a place. No simulation
+/// is started and no place is saved by this lookup.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LocatedPlace {
+    pub name: String,
+    pub detail: String,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceLocateResult {
+    pub place: LocatedPlace,
+    pub attribution: String,
+}
+
 /// One hit: what it is, and where it lives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -142,6 +142,37 @@ pub struct AnalyticsPerformanceParams {
     pub daemon: DaemonPresence,
 }
 
+/// Observed reasons for losing browser input, never a guess about USB or Bluetooth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerInterruptionReason {
+    ReportTimeout,
+    PageHidden,
+    #[default]
+    DeviceMissing,
+    ReadError,
+    ReaderStopped,
+    PageClosed,
+}
+
+/// One worker-observed interruption, grouped by reporting page. No device or vehicle IDs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ControllerInputInterruption {
+    /// The reporting engine's commit, distinct from the page displaying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_commit")]
+    pub engine_build: Option<String>,
+    pub reason: ControllerInterruptionReason,
+    /// Worker's wall clock at the cutoff, before a stalled renderer can receive this.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub interrupted_at_ms: u64,
+    pub report_gap_ms: u32,
+    pub worker_tick_gap_ms: u32,
+    pub affected_controllers: u32,
+    pub claimed_controllers: u32,
+    pub driving_controllers: u32,
+}
+
 /// A download's platform, as the website's `/download/<platform>` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -298,6 +329,15 @@ pub enum AppEvent {
     },
     /// Aggregate responsiveness and memory, only when usage analytics is allowed.
     AppPerformance {
+        #[serde(flatten)]
+        sample: AnalyticsPerformanceParams,
+    },
+    /// Actual browser input loss, captured before claims are released, with renderer context.
+    ControllerInputInterrupted {
+        #[serde(flatten)]
+        interruption: ControllerInputInterruption,
+        visible: bool,
+        delivery_delay_ms: u32,
         #[serde(flatten)]
         sample: AnalyticsPerformanceParams,
     },

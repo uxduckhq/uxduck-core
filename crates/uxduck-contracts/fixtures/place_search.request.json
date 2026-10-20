@@ -1,0 +1,8 @@
+{
+  "method": "place/search",
+  "params": {
+    "query": "Queenstown, New Zealand",
+    "limit": 5,
+    "near": { "latitudeDeg": -45.03, "longitudeDeg": 168.72 }
+  }
+}

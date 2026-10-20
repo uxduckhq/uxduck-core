@@ -26,6 +26,7 @@ mod online;
 mod params;
 mod parent;
 mod paths;
+mod places;
 mod plugin_bundle;
 mod ports;
 mod remote_users;

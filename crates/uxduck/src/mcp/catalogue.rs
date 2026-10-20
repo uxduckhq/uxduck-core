@@ -22,7 +22,7 @@ pub fn list(catalogue: &[Tool], all_tools: bool) -> Value {
     json!({ "tools": [
         {
             "name": SEARCH,
-            "description": "Find UXDuck tools by name or words: vehicles, telemetry, messages, history, parameters, missions and plans, commands, simulations, links, terrain, files, video and plugins. Returns matching names and full input schemas; use uxduck_call_tool to run one. Search an exact name for one schema. No vehicle action.",
+            "description": "Find UXDuck tools by name or words: vehicles, telemetry, messages, history, parameters, missions and plans, commands, simulations, places and addresses, links, terrain, files, video and plugins. Returns matching names and full input schemas; use uxduck_call_tool to run one. Search an exact name for one schema. No vehicle action.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -45,6 +45,7 @@ pub mod mission_history;
 pub mod pairing;
 pub mod param_definitions;
 mod photos;
+pub mod places;
 pub mod plan_checks;
 pub mod plan_examples;
 pub mod plan_files;
@@ -223,6 +224,8 @@ struct Connection {
     operator_id: Option<String>,
     /// Arrival time of requests not answered yet, for the tap's latency.
     pending: HashMap<RequestId, u64>,
+    /// Place lookup requests whose replies must not enter diagnostic traces.
+    private_requests: std::collections::HashSet<RequestId>,
     /// The program on the other end, where the transport shows it.
     executable: Option<String>,
     /// The name it declared in `initialize`.
@@ -285,6 +288,7 @@ pub struct Engine {
     interface: interface::Interface,
     /// Where this computer is, while a person has it on (S137).
     location: location::Location,
+    places: places::Places,
     remote_viewing: remote_view::RemoteViewing,
     /// A client asked for a restart.
     restart: bool,
@@ -456,6 +460,7 @@ impl Engine {
             finding: finds::Finding::default(),
             interface: interface::Interface::default(),
             location: location::Location::default(),
+            places: places::Places::default(),
             remote_viewing: remote_view::RemoteViewing::default(),
             live: controllers::Live::default(),
             restart: false,
@@ -580,6 +585,7 @@ impl Engine {
                 admitted: None,
                 operator_id: None,
                 pending: HashMap::new(),
+                private_requests: std::collections::HashSet::new(),
                 recent: std::collections::VecDeque::new(),
                 executable: None,
                 name: String::new(),
@@ -641,6 +647,7 @@ impl Engine {
     }
 
     pub fn disconnect(&mut self, id: ConnectionId) {
+        self.disconnect_places(id);
         self.disconnect_display(id);
         self.abandon_approvals(id);
         self.release_claims_of(id);
@@ -674,6 +681,9 @@ impl Engine {
             && let (Some(request_id), Some(connection)) =
                 (parsed.id.clone(), self.connections.get_mut(&id))
         {
+            if trace::private_method(parsed.method.as_deref()) {
+                connection.private_requests.insert(request_id.clone());
+            }
             connection.pending.insert(request_id, now);
         }
         self.tap(id, TraceDirection::In, &parsed, text.len(), None);
@@ -750,11 +760,14 @@ impl Engine {
     /// Serialises and sends one frame to a connection, through the tap.
     fn send(&mut self, id: ConnectionId, frame: &Value) {
         let text = frame.to_string();
-        let parsed = trace::classify(frame);
+        let mut parsed = trace::classify(frame);
         let latency = match (&parsed.id, self.connections.get_mut(&id)) {
             (Some(request_id), Some(connection))
                 if matches!(parsed.kind, FrameKind::Response | FrameKind::Error) =>
             {
+                if connection.private_requests.remove(request_id) {
+                    trace::hide_place_reply(&mut parsed.payload);
+                }
                 connection
                     .pending
                     .remove(request_id)

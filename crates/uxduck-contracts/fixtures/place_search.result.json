@@ -1,0 +1,12 @@
+{
+  "suggestions": [
+    {
+      "name": "Queenstown",
+      "detail": "Otago, New Zealand",
+      "key": "queenstown-nz",
+      "text": "Queenstown, Otago, New Zealand",
+      "near": { "latitudeDeg": -45.03, "longitudeDeg": 168.72 }
+    }
+  ],
+  "attribution": "Powered by Esri"
+}

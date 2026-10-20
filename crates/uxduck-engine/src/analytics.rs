@@ -55,6 +55,32 @@ fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
 }
 
 fn validate_event(event: &AppEvent) -> Result<(), ApiError> {
+    if let AppEvent::ControllerInputInterrupted {
+        interruption,
+        sample,
+        delivery_delay_ms,
+        ..
+    } = event
+        && (!performance_valid(sample)
+            || interruption.engine_build.as_deref().is_some_and(|build| {
+                !(7..=40).contains(&build.len())
+                    || !build
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            })
+            || interruption.report_gap_ms > 60_000
+            || interruption.worker_tick_gap_ms > 60_000
+            || interruption.interrupted_at_ms > 9_007_199_254_740_991
+            || *delivery_delay_ms > 60_000
+            || !(1..=64).contains(&interruption.affected_controllers)
+            || interruption.claimed_controllers > interruption.affected_controllers
+            || interruption.driving_controllers > interruption.claimed_controllers)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "controller interruptions must contain bounded timings and controller counts",
+        ));
+    }
     if let AppEvent::AppPerformance { sample } = event
         && !performance_valid(sample)
     {
@@ -483,5 +509,50 @@ mod tests {
         }
         full["map_3d_trails"] = json!("unrecognised");
         assert!(serde_json::from_value::<AnalyticsPerformanceParams>(full).is_err());
+    }
+
+    #[test]
+    fn interruption_diagnostics_validate_counts_timings_and_the_reason_vocabulary() {
+        use serde_json::json;
+        use uxduck_contracts::dto::analytics::AppEvent;
+        let request: serde_json::Value = serde_json::from_str(include_str!(
+            "../../uxduck-contracts/fixtures/analytics_track.request.controller-interruption.json"
+        ))
+        .unwrap();
+        let valid = request["params"].clone();
+        let event = serde_json::from_value::<AppEvent>(valid.clone()).unwrap();
+        assert!(super::validate_event(&event).is_ok());
+        // Reports from older engines omit their build. New engines send only a commit.
+        let mut with_build = valid.clone();
+        with_build["engine_build"] = json!("abcdef1");
+        let event = serde_json::from_value::<AppEvent>(with_build).unwrap();
+        assert!(super::validate_event(&event).is_ok());
+        for (field, value) in [
+            ("engine_build", json!("private/device-name")),
+            ("engine_build", json!("ABCDEF1")),
+            ("engine_build", json!("abcdef")),
+            ("engine_build", json!("a".repeat(41))),
+            ("report_gap_ms", json!(60_001)),
+            ("worker_tick_gap_ms", json!(60_001)),
+            ("delivery_delay_ms", json!(60_001)),
+            ("interrupted_at_ms", json!(9_007_199_254_740_992_u64)),
+            ("affected_controllers", json!(0)),
+            ("affected_controllers", json!(65)),
+            ("claimed_controllers", json!(3)),
+            ("driving_controllers", json!(2)),
+            ("window_ms", json!(60_001)),
+            ("ui_build", json!("private/path")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let event = serde_json::from_value::<AppEvent>(invalid).unwrap();
+            assert!(
+                super::validate_event(&event).is_err(),
+                "accepted invalid {field}"
+            );
+        }
+        let mut invalid = valid;
+        invalid["reason"] = json!("untrusted free text");
+        assert!(serde_json::from_value::<AppEvent>(invalid).is_err());
     }
 }

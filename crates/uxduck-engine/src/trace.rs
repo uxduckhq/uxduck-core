@@ -20,6 +20,19 @@ const SENSITIVE_KEYS: [&str; 10] = [
 
 pub const REDACTED: &str = "[redacted]";
 
+pub(crate) fn private_method(method: Option<&str>) -> bool {
+    matches!(method, Some("place/search" | "place/locate"))
+}
+
+pub(crate) fn hide_place_reply(payload: &mut Value) {
+    if let Some(result) = payload.get_mut("result") {
+        *result = Value::String(REDACTED.into());
+    }
+    if let Some(message) = payload.get_mut("error").and_then(|e| e.get_mut("message")) {
+        *message = Value::String(REDACTED.into());
+    }
+}
+
 /// Longest raw text kept from a frame that is not JSON.
 const MAX_INVALID_CHARS: usize = 256;
 
@@ -92,11 +105,15 @@ pub fn classify(value: &Value) -> Parsed {
     } else {
         FrameKind::Invalid
     };
+    let mut payload = redact(value);
+    if private_method(method.as_deref()) {
+        payload["params"] = Value::String(REDACTED.into());
+    }
     Parsed {
         kind,
         method,
         id,
-        payload: redact(value),
+        payload,
     }
 }
 

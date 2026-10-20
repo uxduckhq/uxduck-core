@@ -2,19 +2,23 @@
 //! posts every plugged-in pad's axes and buttons about 25 times a second
 //! while it is visible, and these become the same input events the
 //! installed daemon gets from gilrs. A pad stops counting when no page has
-//! reported it for [`STALE_US`], so a hidden or frozen tab lets it go
-//! rather than holding its last sticks.
+//! reported it for [`STALE_US`], so a hidden or frozen tab stops its input
+//! rather than holding its last sticks. The composition root retains an
+//! existing activation while that page lives, resuming only from fresh input.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use uxduck_contracts::dto::analytics::ControllerInterruptionReason;
 use uxduck_core::domain::controller::{GamepadAxis, GamepadButton};
 use uxduck_engine::controller_input::InputEvent;
 
 /// The notification a page sends with its pads.
 pub const METHOD: &str = "browser/gamepads";
+/// Diagnostic notification for the page whose input was interrupted.
+pub const INTERRUPTED: &str = "browser/controllerInputInterrupted";
 
-/// A pad no page has reported for this long is unplugged.
+/// Input older than this cannot drive a vehicle.
 pub const STALE_US: u64 = 500_000;
 
 /// One page's report.
@@ -22,6 +26,12 @@ pub const STALE_US: u64 = 500_000;
 pub struct Frame {
     #[serde(default)]
     pub pads: Vec<Pad>,
+    /// Source sampling time, not worker delivery time. Older pages omit it.
+    #[serde(default, rename = "readAtMs")]
+    pub read_at_ms: Option<u64>,
+    /// Why this page stopped reporting pads. Older pages omit it.
+    #[serde(default)]
+    pub reason: ControllerInterruptionReason,
 }
 
 /// One pad as the page reads it.
@@ -46,24 +56,47 @@ struct Known {
     standard: bool,
     /// The pages reporting it, and when each last did.
     seen: BTreeMap<u32, u64>,
+    last_page: u32,
+    last_report_us: u64,
+}
+
+#[derive(Debug)]
+pub struct Interruption {
+    pub id: String,
+    pub page: u32,
+    pub reason: ControllerInterruptionReason,
+    pub gap_ms: u32,
+}
+
+#[must_use]
+pub fn bounded_ms(us: u64) -> u32 {
+    u32::try_from((us / 1000).min(60_000)).unwrap_or(60_000)
 }
 
 /// Every pad pages report.
 #[derive(Debug, Default)]
 pub struct Pads {
     known: BTreeMap<String, Known>,
+    interruptions: Vec<Interruption>,
 }
 
 impl Pads {
     /// A page's report: the events since the last one.
     pub fn frame(&mut self, page: u32, now_us: u64, frame: Frame) -> Vec<InputEvent> {
-        let mut events = Vec::new();
+        let read_at_us = frame
+            .read_at_ms
+            .map_or(now_us, |at| at.saturating_mul(1000).min(now_us));
+        let mut events = self.expire(now_us);
+        // A worker backlog must not replay old input or refresh its lease.
+        if now_us.saturating_sub(read_at_us) >= STALE_US {
+            return events;
+        }
         let reported: Vec<String> = frame.pads.iter().map(|pad| pad.id.clone()).collect();
         for pad in frame.pads {
             let Some(known) = self.known.get_mut(&pad.id) else {
                 events.extend(connected(&pad));
                 let mut seen = BTreeMap::new();
-                seen.insert(page, now_us);
+                seen.insert(page, read_at_us);
                 self.known.insert(
                     pad.id,
                     Known {
@@ -71,11 +104,15 @@ impl Pads {
                         buttons: pad.buttons,
                         standard: pad.standard,
                         seen,
+                        last_page: page,
+                        last_report_us: read_at_us,
                     },
                 );
                 continue;
             };
-            known.seen.insert(page, now_us);
+            known.seen.insert(page, read_at_us);
+            known.last_page = page;
+            known.last_report_us = read_at_us;
             for (index, &value) in pad.axes.iter().enumerate() {
                 if known
                     .axes
@@ -99,16 +136,16 @@ impl Pads {
                 known.seen.remove(&page);
             }
         }
-        events.extend(self.unseen());
+        events.extend(self.unseen(now_us, frame.reason));
         events
     }
 
     /// A page closed: what only it reported is unplugged.
-    pub fn forget(&mut self, page: u32) -> Vec<InputEvent> {
+    pub fn forget(&mut self, page: u32, now_us: u64) -> Vec<InputEvent> {
         for known in self.known.values_mut() {
             known.seen.remove(&page);
         }
-        self.unseen()
+        self.unseen(now_us, ControllerInterruptionReason::PageClosed)
     }
 
     /// Pads no page has reported lately are unplugged.
@@ -118,7 +155,12 @@ impl Pads {
                 .seen
                 .retain(|_, &mut at| now_us.saturating_sub(at) < STALE_US);
         }
-        self.unseen()
+        self.unseen(now_us, ControllerInterruptionReason::ReportTimeout)
+    }
+
+    /// Drained before the engine pauses output or releases a closing page's claims.
+    pub fn take_interruptions(&mut self) -> Vec<Interruption> {
+        std::mem::take(&mut self.interruptions)
     }
 
     /// Whether any page reports a pad, so sticks may be sent.
@@ -127,7 +169,7 @@ impl Pads {
         !self.known.is_empty()
     }
 
-    fn unseen(&mut self) -> Vec<InputEvent> {
+    fn unseen(&mut self, now_us: u64, reason: ControllerInterruptionReason) -> Vec<InputEvent> {
         let gone: Vec<String> = self
             .known
             .iter()
@@ -136,7 +178,14 @@ impl Pads {
             .collect();
         gone.into_iter()
             .map(|id| {
-                self.known.remove(&id);
+                if let Some(known) = self.known.remove(&id) {
+                    self.interruptions.push(Interruption {
+                        id: id.clone(),
+                        page: known.last_page,
+                        reason,
+                        gap_ms: bounded_ms(now_us.saturating_sub(known.last_report_us)),
+                    });
+                }
                 InputEvent::Disconnected { id }
             })
             .collect()
@@ -257,6 +306,7 @@ mod tests {
                 axes,
                 buttons,
             }],
+            ..Frame::default()
         }
     }
 
@@ -317,6 +367,7 @@ mod tests {
                     axes: vec![0.2, -0.4],
                     buttons: vec![],
                 }],
+                ..Frame::default()
             },
         );
         let InputEvent::Present { axes, .. } = &events[1] else {
@@ -326,11 +377,32 @@ mod tests {
     }
 
     #[test]
+    fn old_queued_samples_cannot_connect_or_extend_the_input_deadline() {
+        let mut pads = Pads::default();
+        let mut frame = pad(vec![0.0; 4], vec![false]);
+        frame.read_at_ms = Some(0);
+        assert!(pads.frame(1, STALE_US, frame).is_empty());
+        assert!(!pads.any(), "an already stale snapshot never connects");
+        let mut frame = pad(vec![0.0; 4], vec![false]);
+        frame.read_at_ms = Some(1_000);
+        pads.frame(1, 1_100_000, frame);
+        assert!(pads.expire(1_499_999).is_empty());
+        assert_eq!(
+            pads.expire(1_500_000).len(),
+            1,
+            "cutoff starts at sampling, not delivery"
+        );
+    }
+
+    #[test]
     fn a_pad_goes_when_no_page_reports_it() {
         let mut pads = Pads::default();
         pads.frame(1, 0, pad(vec![], vec![]));
         pads.frame(2, 0, pad(vec![], vec![]));
-        assert!(pads.forget(1).is_empty(), "the other page still has it");
+        assert!(
+            pads.forget(1, 40_000).is_empty(),
+            "the other page still has it"
+        );
         let gone = pads.frame(2, 10_000, Frame::default());
         assert_eq!(
             gone,
@@ -347,5 +419,56 @@ mod tests {
         pads.frame(1, 0, pad(vec![], vec![]));
         assert!(pads.expire(STALE_US - 1).is_empty());
         assert_eq!(pads.expire(STALE_US).len(), 1);
+        let interruptions = pads.take_interruptions();
+        assert_eq!(interruptions.len(), 1);
+        assert_eq!(
+            interruptions[0].reason,
+            ControllerInterruptionReason::ReportTimeout
+        );
+        assert_eq!(interruptions[0].gap_ms, 500);
+        assert!(pads.take_interruptions().is_empty());
+    }
+
+    #[test]
+    fn explicit_losses_keep_their_reason_and_do_not_interrupt_another_reporting_page() {
+        for reason in [
+            ControllerInterruptionReason::PageHidden,
+            ControllerInterruptionReason::ReadError,
+            ControllerInterruptionReason::DeviceMissing,
+            ControllerInterruptionReason::ReaderStopped,
+        ] {
+            let mut pads = Pads::default();
+            pads.frame(1, 0, pad(vec![], vec![]));
+            pads.frame(2, 40_000, pad(vec![], vec![]));
+            assert!(
+                pads.frame(
+                    1,
+                    80_000,
+                    Frame {
+                        reason,
+                        ..Frame::default()
+                    }
+                )
+                .is_empty()
+            );
+            assert!(pads.take_interruptions().is_empty());
+            assert_eq!(
+                pads.frame(
+                    2,
+                    120_000,
+                    Frame {
+                        reason,
+                        ..Frame::default()
+                    }
+                )
+                .len(),
+                1
+            );
+            let interruptions = pads.take_interruptions();
+            assert_eq!(interruptions.len(), 1);
+            assert_eq!(interruptions[0].reason, reason);
+            assert_eq!(interruptions[0].page, 2);
+            assert_eq!(interruptions[0].gap_ms, 80);
+        }
     }
 }

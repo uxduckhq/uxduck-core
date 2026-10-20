@@ -11,9 +11,10 @@
 //!   operator's), without another confirmation;
 //!   meanwhile it stays on the old one and says so;
 //! - two controllers never drive one vehicle;
-//! - when the controller is unplugged, or the claiming client goes, it is
-//!   released and sends nothing, so the vehicle's own failsafe decides; a
-//!   window gets a moment first, so a reload takes its controllers back.
+//! - native unplugging releases control. Missing browser input pauses output
+//!   while retaining activation for fresh input from the claiming page;
+//! - a departing client releases its controllers; a native window gets a
+//!   moment first, so a reload takes its controllers back.
 //! - the same operator's other window on this computer may take a held
 //!   controller over, still flying what it flew.
 
@@ -81,6 +82,10 @@ pub(crate) struct Live {
     keyboards: BTreeMap<ConnectionId, String>,
     /// Simulator links whose controller routes need a safe restart handover.
     restarting: BTreeSet<String>,
+    /// Browser input is missing, but the person has not released activation.
+    /// The value is the interruption time: queued earlier samples cannot resume.
+    /// No route or action may run until the claiming page supplies fresh input.
+    input_lost: BTreeMap<String, u64>,
 }
 
 fn daemon() -> Actor {
@@ -1233,7 +1238,12 @@ impl Engine {
             .state
             .controllers
             .get(controller_id)
-            .filter(|c| c.connected && c.claim.is_some() && c.input_pause.is_none())
+            .filter(|c| {
+                c.connected
+                    && c.claim.is_some()
+                    && c.input_pause.is_none()
+                    && !self.live.input_lost.contains_key(controller_id)
+            })
             .and_then(|c| {
                 Some(ControlRoute {
                     vehicle_id: c.target.clone()?,
@@ -1274,6 +1284,7 @@ impl Engine {
         };
         self.live.claimant.remove(id);
         self.live.detached.remove(id);
+        let was_interrupted = self.live.input_lost.remove(id);
         if controller.claim.is_none() {
             return;
         }
@@ -1294,6 +1305,9 @@ impl Engine {
             },
         );
         self.route(id);
+        if was_interrupted.is_some() {
+            self.controller_presence(id, &controller.name, false);
+        }
         if let (Some(why), Some(target)) = (why, target) {
             let name = self.target_name(&target);
             self.raise(Raise {
@@ -1398,6 +1412,12 @@ impl Engine {
         let window = self.window_identity(connection);
         let until_us = self.clock.now_us() + CLAIM_GRACE_US;
         for id in held {
+            // Browser input belongs to this live page. It cannot keep or
+            // inherit activation after its connection has actually closed.
+            if id.starts_with("web-") || self.live.input_lost.contains_key(&id) {
+                self.release(&id, connection, Some("its page closed"));
+                continue;
+            }
             match &window {
                 Some((record, trust)) => {
                     self.live.claimant.remove(&id);
@@ -1515,6 +1535,7 @@ impl Engine {
     /// mapping, and leaves one that reads only gamepad stick names, which
     /// read nothing of it. Plugging one in says so, with the way to its tab.
     pub fn controller_connected(&mut self, id: &str, name: &str, layout_known: bool) {
+        let waiting_for_input = self.live.input_lost.contains_key(id);
         let plugged_in = self.state.controllers.get(id).is_none_or(|c| !c.connected);
         let fitting = if layout_known {
             InputMapping::mode_2().id
@@ -1537,7 +1558,9 @@ impl Engine {
                 if known.connected && known.name == name && !refit {
                     return;
                 }
-                known.connected = true;
+                // A connection notice precedes the complete input snapshot.
+                // Keep a recovering controller paused until that snapshot.
+                known.connected = !waiting_for_input;
                 name.clone_into(&mut known.name);
                 if refit {
                     known.mapping_id = fitting;
@@ -1559,13 +1582,18 @@ impl Engine {
             },
         };
         self.commit_as(daemon(), Change::ControllerUpserted { controller });
-        if plugged_in && !id.starts_with("keyboard:") {
+        if plugged_in && !waiting_for_input && !id.starts_with("keyboard:") {
             self.controller_presence(id, name, true);
         }
     }
 
     /// Reconnects update one notice per device, including old notices without a condition.
     fn controller_presence(&mut self, id: &str, name: &str, connected: bool) {
+        let activated = self
+            .state
+            .controllers
+            .get(id)
+            .is_some_and(|c| c.claim.is_some());
         let condition = format!("controller-presence:{id}");
         let title = if connected {
             format!("{name} connected")
@@ -1576,7 +1604,11 @@ impl Engine {
         };
         let body = (!connected).then(|| {
             if id.starts_with("web-") {
-                "The browser stopped reporting this controller. Check the connection and keep this tab visible. A busy browser can interrupt input.".to_owned()
+                if activated {
+                    "Input is paused. It will resume automatically when fresh readings return. Release the controller to keep it off.".to_owned()
+                } else {
+                    "The browser stopped reporting this controller. Check the connection and keep this tab visible. A busy browser can interrupt input.".to_owned()
+                }
             } else {
                 "Check its USB or wireless connection. Reconnect it before using it again.".to_owned()
             }
@@ -1602,7 +1634,11 @@ impl Engine {
             notice.title = title;
             notice.body = body;
             notice.severity = severity;
-            if interrupted {
+            if interrupted && activated {
+                notice.title = format!("{name} input resumed");
+                notice.body =
+                    Some("Fresh controller input returned. Control resumed automatically.".into());
+            } else if interrupted {
                 notice.title = format!("{name} reconnected");
                 notice.body = Some(
                     "Input was interrupted. Check its connection before using it again.".to_owned(),
@@ -1648,6 +1684,7 @@ impl Engine {
     /// A controller was unplugged: released, so the vehicle's own failsafe
     /// takes over.
     pub fn controller_disconnected(&mut self, id: &str) {
+        self.live.input_lost.remove(id);
         let previous = self.state.controllers.get(id).cloned();
         if let Some(controller) = previous
             .as_ref()
@@ -1694,9 +1731,89 @@ impl Engine {
         );
     }
 
+    /// Missing browser input pauses output, retaining an existing activation.
+    /// The host clears its raw inputs and releases the vehicle's overrides first.
+    pub fn controller_input_interrupted(&mut self, id: &str) {
+        let Some(mut controller) = self
+            .state
+            .controllers
+            .get(id)
+            .cloned()
+            .filter(|c| c.claim.is_some() && self.live.claimant.contains_key(id))
+        else {
+            self.controller_disconnected(id);
+            return;
+        };
+        self.live
+            .input_lost
+            .insert(id.to_owned(), self.clock.now_us());
+        self.live.neutral.remove(id);
+        controller.connected = false;
+        controller.version += 1;
+        self.commit_as(
+            daemon(),
+            Change::ControllerUpserted {
+                controller: controller.clone(),
+            },
+        );
+        self.links.route_controller(id, None);
+        self.controller_presence(id, &controller.name, false);
+    }
+
+    /// A complete fresh browser report, after its raw inputs were installed.
+    /// Only the claiming page may resume an activation. Explicit release has
+    /// already removed it; an unclaimed controller simply becomes available.
+    pub fn controller_input_recovered(
+        &mut self,
+        id: &str,
+        connection: ConnectionId,
+        read_at_us: u64,
+    ) {
+        let waiting = self.live.input_lost.get(id).copied();
+        let Some(controller) = self.state.controllers.get(id) else {
+            return;
+        };
+        if waiting.is_none() && controller.connected {
+            return;
+        }
+        let mut controller = controller.clone();
+        let sticks = if let Some(lost_at) = waiting {
+            if read_at_us < lost_at || self.live.claimant.get(id) != Some(&connection) {
+                return;
+            }
+            let Some((sticks, _)) = self.mapped_controller_input(&controller) else {
+                return;
+            };
+            Some(sticks)
+        } else {
+            None
+        };
+        self.live.input_lost.remove(id);
+        controller.connected = true;
+        controller.version += 1;
+        self.commit_as(
+            daemon(),
+            Change::ControllerUpserted {
+                controller: controller.clone(),
+            },
+        );
+        self.controller_presence(id, &controller.name, true);
+        if let Some(sticks) = sticks {
+            // Installing the route seeds held switches from this snapshot;
+            // neither held buttons nor positions become new commands.
+            self.route(id);
+            self.controller_neutral(id, sticks.neutral());
+        }
+    }
+
     /// Whether a controller's sticks are centred, as the data plane sees
     /// them through its mapping.
     pub fn controller_neutral(&mut self, id: &str, neutral: bool) {
+        // Connected emits a provisional neutral value before Present has
+        // installed the fresh axes. It must not switch a recovering target.
+        if self.live.input_lost.contains_key(id) {
+            return;
+        }
         self.live.neutral.insert(id.to_owned(), neutral);
         if neutral {
             self.follow_selection(id);
@@ -1714,7 +1831,10 @@ impl Engine {
         let Some(controller) = self.state.controllers.get(id).cloned() else {
             return;
         };
-        if controller.input_pause.is_some() {
+        if !controller.connected
+            || self.live.input_lost.contains_key(id)
+            || controller.input_pause.is_some()
+        {
             return;
         }
         let (Some(connection), Some(target)) =
@@ -1740,7 +1860,10 @@ impl Engine {
         let Some(controller) = self.state.controllers.get(id).cloned() else {
             return;
         };
-        if controller.input_pause.is_some() {
+        if !controller.connected
+            || self.live.input_lost.contains_key(id)
+            || controller.input_pause.is_some()
+        {
             return;
         }
         let (Some(connection), Some(target)) =
