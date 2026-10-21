@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "f26851c8e160a35da5f14be2769232a819713eef",
+  "sourceCommit": "dc126e0c41a9b4730714f51bb03c644823553dd8",
   "licenseReady": true,
   "files": [
     {
@@ -5396,7 +5396,7 @@
     },
     {
       "path": "docs/site/cli.md",
-      "sha256": "a3c534c255e316cfae3dc195a32d7daf38ba294f1bbc7a47bb9fa30326ff36ba",
+      "sha256": "2b00b609b4441a34036bdf3da608b0bf06d9d93dfd8ecf1ab376a959c9dec0bd",
       "executable": false
     },
     {
