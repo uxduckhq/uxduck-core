@@ -99,6 +99,9 @@ pub enum Command {
         /// Skip the prompt.
         #[arg(long)]
         email: Option<String>,
+        /// Local operator ID; otherwise use a profile named after your email.
+        #[arg(long, value_name = "ID")]
+        operator: Option<String>,
         /// Join the product updates list.
         #[arg(long)]
         product_updates: bool,
@@ -1029,8 +1032,9 @@ async fn run_command(cli: Cli) -> ExitCode {
         }) => find::run(&data_dir, network, all_serial, json).await,
         Some(Command::Login {
             email,
+            operator,
             product_updates,
-        }) => login(&data_dir, email, product_updates).await,
+        }) => login(&data_dir, email, operator.as_deref(), product_updates).await,
         Some(Command::Logout) => logout(&data_dir).await,
         Some(Command::Account { command }) => account(&data_dir, command).await,
         Some(Command::Config {
@@ -1158,14 +1162,18 @@ fn prompt(question: &str) -> Result<String, CliError> {
 async fn login(
     data_dir: &std::path::Path,
     email: Option<String>,
+    operator: Option<&str>,
     product_updates: bool,
 ) -> Result<(), CliError> {
     let email = match email {
         Some(email) => email,
         None => prompt("Email: ")?,
-    };
+    }
+    .trim()
+    .to_lowercase();
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
+    select_login_operator(&mut client, &email, operator).await?;
     client
         .call("account/signIn", serde_json::json!({ "email": email }))
         .await?;
@@ -1183,6 +1191,55 @@ async fn login(
     } else {
         eprintln!("Signed in as {email}");
     }
+    Ok(())
+}
+
+/// CLI connections have no window's operator selection. Choose before asking
+/// for a code, and use the same handover guards as the people switcher.
+async fn select_login_operator(
+    client: &mut LocalClient,
+    email: &str,
+    operator: Option<&str>,
+) -> Result<(), CliError> {
+    use uxduck_contracts::dto::operator::{Operator, OperatorListResult};
+
+    let id = if let Some(id) = operator {
+        id.to_owned()
+    } else {
+        if email.chars().count() > uxduck_core::domain::operator::MAX_NAME_CHARS {
+            return Err(CliError::Usage(
+                "This email is too long for a profile name. Create a named local operator with `uxduck rpc call operator/create`, then sign in with --operator ID.".into(),
+            ));
+        }
+        let listed: OperatorListResult =
+            serde_json::from_value(client.call("operator/list", serde_json::json!({})).await?)
+                .map_err(|error| CliError::Protocol(error.to_string()))?;
+        let matches: Vec<_> = listed
+            .operators
+            .iter()
+            .filter(|profile| profile.name.eq_ignore_ascii_case(email))
+            .collect();
+        match matches.as_slice() {
+            [profile] => profile.id.clone(),
+            [] => {
+                let profile: Operator = serde_json::from_value(
+                    client
+                        .call("operator/create", serde_json::json!({ "name": email }))
+                        .await?,
+                )
+                .map_err(|error| CliError::Protocol(error.to_string()))?;
+                profile.id
+            }
+            _ => {
+                return Err(CliError::Usage(
+                    "Several local profiles use this email. Choose one with --operator ID; list them with `uxduck rpc call operator/list`.".into(),
+                ));
+            }
+        }
+    };
+    client
+        .call("operator/switch", serde_json::json!({ "operatorId": id }))
+        .await?;
     Ok(())
 }
 

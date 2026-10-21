@@ -32,10 +32,26 @@ pub struct AccountEnvironmentParams {
 }
 
 /// Whether this UXDuck is signed in, and as whom.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent account and analytics flags in the wire contract"
+)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountState {
     pub signed_in: bool,
+    /// Stable, server-verified identity; absent for legacy/offline unknowns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// The local operator associated with this fresh sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+    /// This account owns the computer's shared cloud dataset. A different
+    /// person's sign-in must never transfer the existing dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owns_workspace: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub analytics_excluded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

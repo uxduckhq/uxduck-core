@@ -92,6 +92,7 @@ fn daemon() -> Actor {
     Actor {
         client_id: "daemon".into(),
         operator_id: None,
+        identity: None,
     }
 }
 
@@ -392,6 +393,7 @@ fn claim(
     connection: ConnectionId,
     params: ControllerClaimParams,
 ) -> Result<Value, ApiError> {
+    engine.ensure_identity_settled()?;
     let mut controller = engine
         .state
         .controllers
@@ -477,6 +479,7 @@ fn on_this_computer(trust: &Trust) -> bool {
 /// moments ago. It keeps flying what it flew with the same mapping, so
 /// nothing is checked about its sticks; only who answers for it changes.
 fn take_over(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Value, ApiError> {
+    engine.ensure_identity_settled()?;
     let mut controller = engine
         .state
         .controllers
@@ -1908,5 +1911,67 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
             ..upsert(EntityType::InputMapping, &mapping.id)
         }],
         _ => Vec::new(),
+    }
+}
+
+impl Engine {
+    pub(crate) fn ensure_identity_settled(&self) -> Result<(), ApiError> {
+        if !self.awaiting_operator.is_empty() || !self.awaiting_identity.is_empty() {
+            return Err(ApiError::new(
+                ErrorKind::Busy,
+                "Wait for the operator or account change to finish before claiming control.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A profile change never transfers an existing control claim, including
+    /// one held through a reload grace period or another window of that actor.
+    pub(crate) fn ensure_operator_handover(
+        &self,
+        connection: ConnectionId,
+        next: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let actor = self.actor(connection);
+        if actor.operator_id.as_deref() == next {
+            return Ok(());
+        }
+        // The personal session is shared by this daemon. Another window
+        // cannot sign its person out while any controller is still held.
+        // Restoring a window for that same person preserves their session.
+        let local_operator = self
+            .connections
+            .get(&connection)
+            .and_then(|c| c.admitted.as_ref())
+            .is_some_and(crate::Admitted::is_operator);
+        let can_resume = actor.operator_id.is_none()
+            && (self.account_identity.operator_id.as_deref() == next
+                || (self.account_identity.operator_id.is_none()
+                    && self.account_identity.signed_in));
+        if local_operator && !can_resume && !self.remote.leases.is_empty() {
+            return Err(ApiError::new(
+                ErrorKind::ConfirmationRequired,
+                "End remote control before switching operators. Telemetry and recordings will continue.",
+            ));
+        }
+        let changes_person = local_operator
+            && self.account_identity.signed_in
+            && !(actor.operator_id.is_none()
+                && self.account_identity.operator_id.as_deref() == next);
+        if self.state.controllers.values().any(|controller| {
+            controller.claim.as_ref().is_some_and(|claim| {
+                changes_person
+                    || self.live.claimant.get(&controller.id) == Some(&connection)
+                    || (local_operator
+                        && actor.operator_id.is_some()
+                        && claim.operator_id == actor.operator_id)
+            })
+        }) {
+            return Err(ApiError::new(
+                ErrorKind::ConfirmationRequired,
+                "Release your controllers before switching operators. Telemetry and recordings will continue.",
+            ));
+        }
+        Ok(())
     }
 }

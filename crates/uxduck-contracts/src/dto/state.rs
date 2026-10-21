@@ -231,6 +231,15 @@ pub struct EntityChange {
     pub file_transfer: Option<FileTransfer>,
 }
 
+/// Immutable identity at the time an action began.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorIdentity {
+    pub operator_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
 /// Who made a change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -238,6 +247,8 @@ pub struct Actor {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ActorIdentity>,
 }
 
 /// One journal entry as seen by a subscriber. Every `seq` reaches every

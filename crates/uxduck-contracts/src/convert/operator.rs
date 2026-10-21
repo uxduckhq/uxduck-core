@@ -120,6 +120,13 @@ impl From<&events::Actor> for Actor {
         Self {
             client_id: value.client_id.clone(),
             operator_id: value.operator_id.clone(),
+            identity: value
+                .identity
+                .as_ref()
+                .map(|identity| crate::dto::state::ActorIdentity {
+                    operator_name: identity.operator_name.clone(),
+                    account_id: identity.account_id.clone(),
+                }),
         }
     }
 }

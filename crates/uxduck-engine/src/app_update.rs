@@ -7,6 +7,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::command::ReceiptStatus;
+use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 
 use crate::{Engine, rpc::handlers::to_value};
@@ -157,8 +158,21 @@ impl Engine {
     }
 
     #[must_use]
-    pub fn app_update_visible(&self) -> bool {
-        self.has_visible_ui()
+    pub fn app_update_reopen_target(&self) -> Option<LaunchAction> {
+        // A shell connection lives until its last window closes, including
+        // minimized windows. Page visibility alone loses those open windows.
+        if self.connections.values().any(|connection| {
+            connection
+                .admitted
+                .as_ref()
+                .is_some_and(|client| client.kind == ClientKind::Shell)
+        }) {
+            Some(LaunchAction::Window)
+        } else if self.has_visible_ui() {
+            Some(LaunchAction::Browser)
+        } else {
+            None
+        }
     }
 
     #[must_use]

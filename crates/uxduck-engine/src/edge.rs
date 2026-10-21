@@ -16,6 +16,7 @@ fn edge_actor() -> Actor {
     Actor {
         client_id: "edge".into(),
         operator_id: None,
+        identity: None,
     }
 }
 

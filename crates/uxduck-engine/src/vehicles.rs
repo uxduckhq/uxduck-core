@@ -19,6 +19,7 @@ fn data_plane() -> Actor {
     Actor {
         client_id: "data-plane".into(),
         operator_id: None,
+        identity: None,
     }
 }
 
@@ -58,6 +59,7 @@ impl Engine {
         let actor = Actor {
             client_id: "uxduck-forward".into(),
             operator_id: None,
+            identity: None,
         };
         crate::rpc::vehicles::create_link(self, actor, params).map(|link| link.id)
     }

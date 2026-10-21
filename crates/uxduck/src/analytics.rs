@@ -45,6 +45,7 @@ pub struct Config {
     pub host: String,
     /// How long events gather before a send: a minute, shorter in tests.
     pub gather: Duration,
+    pub internal: bool,
 }
 
 impl Config {
@@ -65,6 +66,10 @@ impl Config {
             key,
             host: std::env::var("UXDUCK_POSTHOG_HOST").unwrap_or_else(|_| HOST.into()),
             gather,
+            internal: dev
+                || cfg!(debug_assertions)
+                || std::env::var("UXDUCK_ANALYTICS_INTERNAL")
+                    .is_ok_and(|value| value == "1" || value == "true"),
         }
     }
 }
@@ -141,6 +146,22 @@ impl Outbox {
         Ok(())
     }
 
+    fn internal(&self) -> bool {
+        self.db
+            .query_row("SELECT value FROM meta WHERE key = 'internal'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .is_ok_and(|value| value == "true")
+    }
+
+    fn set_internal(&self, internal: bool) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('internal', ?1)",
+            params![internal.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Forgets the install id and everything queued.
     fn forget(&self) -> rusqlite::Result<()> {
         self.db
@@ -200,6 +221,7 @@ enum Message {
     Track(Box<AnalyticsEvent>, String),
     Alias(String),
     Enabled(bool),
+    Internal(bool),
     /// Something was written to the outbox directly (a panic): look again.
     Wake,
 }
@@ -210,6 +232,7 @@ enum Message {
 struct Sink {
     db: PathBuf,
     enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    internal: bool,
     tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -242,7 +265,9 @@ pub fn record_now(event: DaemonEvent) {
     let Some(install_id) = outbox.install_id() else {
         return;
     };
-    let (name, properties) = AnalyticsEvent::Daemon(event).split();
+    let (name, mut properties) = AnalyticsEvent::Daemon(event).split();
+    properties.insert("is_internal".into(), json!(outbox.internal()));
+    properties.insert("analytics_internal".into(), json!(sink.internal));
     let now = now_us();
     let _ = outbox.push(
         now,
@@ -275,6 +300,9 @@ impl AnalyticsPort for AnalyticsChannel {
     fn set_enabled(&mut self, on: bool) {
         let _ = self.tx.send(Message::Enabled(on));
     }
+    fn set_internal(&mut self, internal: bool) {
+        let _ = self.tx.send(Message::Internal(internal));
+    }
 }
 
 /// Starts the outbox task. With no key it keeps and sends nothing.
@@ -287,6 +315,7 @@ pub fn start(data_dir: &Path, config: Config) -> AnalyticsChannel {
         let _ = SINK.set(Sink {
             db: db.clone(),
             enabled: enabled.clone(),
+            internal: config.internal,
             tx: tx.clone(),
         });
     }
@@ -403,6 +432,26 @@ impl Task {
                 if let Err(error) = result {
                     tracing::warn!(%error, "analytics: the outbox could not be updated");
                 }
+                if on && outbox.internal() {
+                    self.mark_internal();
+                }
+            }
+            Message::Internal(internal) => {
+                let previous = outbox.internal();
+                if previous == internal {
+                    return;
+                }
+                let result = outbox.set_internal(internal).and_then(|()| {
+                    if previous && !internal && self.enabled {
+                        outbox.set_install_id(&uuid_v4())?;
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    tracing::warn!(%error, "analytics: internal account status could not be updated");
+                } else if internal && self.enabled {
+                    self.mark_internal();
+                }
             }
             Message::Track(event, surface) if self.enabled => {
                 let (name, properties) = event.split();
@@ -417,12 +466,22 @@ impl Task {
         }
     }
 
+    fn mark_internal(&self) {
+        self.queue(
+            "internal_account_identified",
+            Map::from_iter([("$set".into(), json!({ "is_internal": true }))]),
+            "daemon",
+        );
+    }
+
     /// Adds the install id, the time, a unique id (so a retried batch is
     /// counted once) and the daemon's own properties.
-    fn queue(&self, name: &str, properties: Map<String, Value>, surface: &str) {
+    fn queue(&self, name: &str, mut properties: Map<String, Value>, surface: &str) {
         let Some(outbox) = &self.outbox else {
             return;
         };
+        properties.insert("is_internal".into(), json!(outbox.internal()));
+        properties.insert("analytics_internal".into(), json!(self.config.internal));
         let Some(install_id) = outbox.install_id() else {
             return;
         };
@@ -673,5 +732,74 @@ mod tests {
             .unwrap();
         assert_eq!(count, MAX_EVENTS);
         assert_eq!(outbox.batch(1).unwrap().0, vec![json!({"n": 5})]);
+    }
+
+    #[test]
+    fn internal_sign_in_marks_existing_history_and_sign_out_starts_a_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = Task {
+            outbox: Some(Outbox::open(&dir.path().join("analytics.db")).unwrap()),
+            config: Config {
+                key: Some("test".into()),
+                host: "http://localhost".into(),
+                gather: Duration::ZERO,
+                internal: false,
+            },
+            enabled: false,
+            shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            client: None,
+        };
+        task.handle(Message::Enabled(true));
+        task.queue("before_sign_in", Map::new(), "daemon");
+        let original = task.outbox.as_ref().unwrap().install_id().unwrap();
+        task.handle(Message::Internal(true));
+        task.queue("after_sign_in", Map::new(), "daemon");
+        let events = task.outbox.as_ref().unwrap().batch(10).unwrap().0;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["properties"]["is_internal"], false);
+        assert_eq!(events[1]["event"], "internal_account_identified");
+        assert_eq!(events[1]["properties"]["distinct_id"], original);
+        assert_eq!(events[1]["properties"]["$set"]["is_internal"], true);
+        assert_eq!(events[2]["properties"]["is_internal"], true);
+        task.handle(Message::Internal(false));
+        task.queue("after_sign_out", Map::new(), "daemon");
+        let events = task.outbox.as_ref().unwrap().batch(10).unwrap().0;
+        assert_ne!(events[3]["properties"]["distinct_id"], original);
+        assert_eq!(events[3]["properties"]["is_internal"], false);
+        assert_eq!(events[0]["properties"]["distinct_id"], original);
+        task.config.internal = true;
+        task.queue("development_launch", Map::new(), "daemon");
+        let events = task.outbox.as_ref().unwrap().batch(10).unwrap().0;
+        assert_eq!(events[4]["properties"]["analytics_internal"], true);
+        assert_eq!(events[4]["properties"]["is_internal"], false);
+    }
+
+    #[test]
+    fn internal_status_survives_restart_but_never_enables_analytics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("analytics.db");
+        let mut task = Task {
+            outbox: Some(Outbox::open(&path).unwrap()),
+            config: Config {
+                key: Some("test".into()),
+                host: "http://localhost".into(),
+                gather: Duration::ZERO,
+                internal: false,
+            },
+            enabled: false,
+            shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            client: None,
+        };
+        task.handle(Message::Internal(true));
+        assert!(task.outbox.as_ref().unwrap().is_empty());
+        assert!(task.outbox.as_ref().unwrap().install_id().is_none());
+        task.handle(Message::Enabled(true));
+        assert_eq!(task.outbox.as_ref().unwrap().batch(10).unwrap().0.len(), 1);
+        task.handle(Message::Enabled(false));
+        assert!(task.outbox.as_ref().unwrap().is_empty());
+        drop(task);
+        let reopened = Outbox::open(&path).unwrap();
+        assert!(reopened.internal());
+        assert!(reopened.install_id().is_none());
     }
 }

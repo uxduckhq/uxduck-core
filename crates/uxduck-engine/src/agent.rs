@@ -89,6 +89,7 @@ impl Engine {
             || Actor {
                 client_id: "agent".into(),
                 operator_id: None,
+                identity: None,
             },
             |id| self.actor(id),
         )

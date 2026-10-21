@@ -22,7 +22,7 @@ use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::initialize::{Capability, ClientKind, InitializeResult};
 use uxduck_contracts::dto::link::{Link, SerialListResult};
-use uxduck_contracts::dto::operator::{Operator, OperatorListResult};
+use uxduck_contracts::dto::operator::{Operator, OperatorListResult, OperatorProfile};
 use uxduck_contracts::dto::pairing::{BootstrapToken, PairingListResult};
 use uxduck_contracts::dto::state::StateSubscribeResult;
 use uxduck_contracts::dto::telemetry::{TelemetrySubscribeResult, VehicleTelemetry};
@@ -503,6 +503,7 @@ fn check(name: &str) {
         }
         ("result", "state_subscribe") => round_trip::<StateSubscribeResult>(name, &json),
         ("result", "operator_list") => round_trip::<OperatorListResult>(name, &json),
+        ("result", "operator_profile") => round_trip::<OperatorProfile>(name, &json),
         ("result", "operator_create" | "operator_update") => round_trip::<Operator>(name, &json),
         (
             "result",
@@ -513,6 +514,7 @@ fn check(name: &str) {
             | "pairing_deny"
             | "operator_remove"
             | "client_setOperator"
+            | "operator_switch"
             | "thread_cancel"
             | "credentials_set"
             | "thread_delete"

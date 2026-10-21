@@ -25,6 +25,16 @@ use crate::domain::thread::{Folder, Item, Thread};
 use crate::domain::vehicle::Vehicle;
 use crate::domain::video::{VideoPhoto, VideoRecording, VideoSource};
 
+/// Identity captured at action time. A later rename or sign-in cannot
+/// reinterpret a guest action as verified activity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorIdentity {
+    pub operator_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
 /// Who caused a change: the connection and the operator it was acting as.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +42,8 @@ pub struct Actor {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ActorIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -52,6 +52,7 @@ fn practice_start() -> Actor {
     Actor {
         client_id: ACTOR.into(),
         operator_id: None,
+        identity: None,
     }
 }
 

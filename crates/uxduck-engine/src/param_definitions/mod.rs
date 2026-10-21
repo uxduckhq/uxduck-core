@@ -116,6 +116,7 @@ fn actor() -> Actor {
     Actor {
         client_id: "param-definitions".into(),
         operator_id: None,
+        identity: None,
     }
 }
 

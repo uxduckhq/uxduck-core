@@ -265,6 +265,7 @@ impl Engine {
         if !take {
             return self.give_back(&vehicle, sender.as_ref(), held, operator);
         }
+        self.ensure_identity_settled()?;
         let Some((user_id, name)) = sender else {
             return Err(ApiError::new(
                 ErrorKind::CapabilityDenied,

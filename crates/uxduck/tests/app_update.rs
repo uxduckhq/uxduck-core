@@ -165,3 +165,47 @@ fn sparkle_guard_waits_for_consent_parent_exit_and_the_matching_completion() {
         "Updated UXDuck to 0.3.1."
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn window_reopen_failure_is_recorded_after_a_successful_update() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = tempfile::tempdir().unwrap();
+    let stage = data.path().join("updates/sparkle/0.3.1");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(data.path().join("daemon.lock"), b"").unwrap();
+    let installed = data.path().join("installed");
+    std::fs::write(&installed, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'uxduck 0.3.1'; elif [ \"$3\" = open ]; then echo 'window startup failed' >&2; exit 1; fi\n").unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let plan = serde_json::json!({"version":"0.3.1","kind":"sparkle","executable":installed,"data_dir":data.path(),"port":48091,"reopen":true,"reopen_target":"window"});
+    std::fs::write(stage.join("plan.json"), serde_json::to_vec(&plan).unwrap()).unwrap();
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("__install-update")
+        .arg(&stage)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(worker.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "ready\n");
+    std::fs::write(data.path().join("sparkle-installed"), "0.3.1").unwrap();
+    worker
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"install\n")
+        .unwrap();
+    drop(worker.stdin.take());
+    let result = worker.wait_with_output().unwrap();
+    assert!(
+        !result.status.success(),
+        "reopen failure was silently ignored"
+    );
+    let detail = std::fs::read_to_string(data.path().join("app-update-result")).unwrap();
+    assert!(detail.contains("Updated UXDuck to 0.3.1."), "{detail}");
+    assert!(detail.contains("window startup failed"), "{detail}");
+}

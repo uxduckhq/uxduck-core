@@ -531,3 +531,22 @@ pub struct LayoutOpenResult {
 pub struct ClientSetOperatorParams {
     pub operator_id: Option<String>,
 }
+
+/// Locally attributed activity; not inferred flight time or cloud ownership.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorProfileParams {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorProfile {
+    pub operator: Operator,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub commands_requested: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub notes_written: u64,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_active_us: Option<u64>,
+}

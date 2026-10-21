@@ -264,10 +264,11 @@ async fn cycle(
         }
         let version = ready.as_deref().ok_or("No prepared Mac update")?;
         semver::Version::parse(version).map_err(|_| "The Mac update has an invalid version")?;
-        let reopen = engine
-            .run(|e| e.app_update_visible())
+        let reopen_target = engine
+            .run(|e| e.app_update_reopen_target())
             .await
-            .unwrap_or(false);
+            .unwrap_or(None);
+        let reopen = reopen_target.is_some();
         let dir = data.join("updates/sparkle").join(version);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -279,6 +280,7 @@ async fn cycle(
             data_dir: data.into(),
             port,
             reopen,
+            reopen_target,
         };
         let (mut guard, mut permission) = super::spawn_worker(&dir, &plan)?;
         if engine

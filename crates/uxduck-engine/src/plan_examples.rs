@@ -227,6 +227,7 @@ impl Engine {
         let actor = Actor {
             client_id: crate::launch::ACTOR.into(),
             operator_id: None,
+            identity: None,
         };
         // A refusal (busy, not answering) leaves it without; nothing to say.
         let _ = self.upload_plan_mission_as(actor, job);

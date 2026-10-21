@@ -223,11 +223,27 @@ impl Task {
             let page: PullPage = answer.json().await.map_err(|_| {
                 Stop::Problem("The account server's answer was not understood.".into())
             })?;
+            if self.credentials.get(crate::account::TOKEN).as_deref() != Some(token.as_str()) {
+                return Err(Stop::Problem("The account changed. Sync is paused.".into()));
+            }
             let (changes, cursor, more) = (page.changes, page.cursor, page.more);
-            self.engine
-                .run(move |e| e.sync_pulled(changes, cursor))
+            let credentials = self.credentials.clone();
+            let expected = token.clone();
+            let applied = self
+                .engine
+                .run(move |e| {
+                    if credentials.get(crate::account::TOKEN).as_deref() != Some(expected.as_str())
+                    {
+                        return false;
+                    }
+                    e.sync_pulled(changes, cursor);
+                    true
+                })
                 .await
                 .map_err(|_| Stop::Gone)?;
+            if !applied {
+                return Err(Stop::Problem("The account changed. Sync is paused.".into()));
+            }
             if !more || cursor <= after {
                 break;
             }
@@ -482,6 +498,7 @@ mod tests {
                     "c1".into()
                 },
                 operator_id: None,
+                identity: None,
             },
             change: Change::FolderUpserted {
                 folder: Folder {

@@ -4,6 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+
+use sha2::{Digest, Sha256};
+
+static WRITE: Mutex<()> = Mutex::new(());
 
 use uxduck_engine::runtime::Credentials;
 
@@ -24,32 +29,135 @@ impl FileCredentials {
         }
     }
 
-    fn load(&self) -> BTreeMap<String, String> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    fn load(&self) -> Result<BTreeMap<String, String>, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| format!("Cannot read {}: {e}", self.path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(format!("Cannot read {}: {error}", self.path.display())),
+        }
     }
 
     /// Read fresh on every call, so a key set a moment ago is used at once.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<String> {
-        let mut all = self.load();
+        let mut all = self.load().ok()?;
         if name == uxduck_engine::ACCOUNT_TOKEN {
             let api = self.api.as_deref()?;
-            return all.remove(&account_key(api)).or_else(|| {
+            let token = all.remove(&account_key(api)).or_else(|| {
                 (self.api == self.legacy_api)
                     .then(|| all.remove(name))
                     .flatten()
-            });
+            })?;
+            // Shared local data never follows a different person's sign-in.
+            let owner = all.get(&self.scoped("workspace.owner"));
+            let person = all.get(&self.scoped("account.person"));
+            if owner.is_some() && owner != person {
+                return None;
+            }
+            if owner.is_none()
+                && all
+                    .get(&self.scoped("workspace.legacy"))
+                    .is_none_or(|pending| *pending != fingerprint(&token))
+            {
+                return None;
+            }
+            return Some(token);
         }
         all.remove(name)
+    }
+
+    fn scoped(&self, name: &str) -> String {
+        format!(
+            "{name}:{}",
+            self.api.as_deref().unwrap_or("none").trim_end_matches('/')
+        )
+    }
+
+    /// The active person's token. Background data services use `get(TOKEN)`
+    /// instead, which additionally checks the dataset's immutable owner.
+    pub fn account_session(&self) -> Option<String> {
+        self.api.as_ref()?;
+        let all = self.load().ok()?;
+        all.get(&self.scoped("account.token"))
+            .cloned()
+            .or_else(|| {
+                (self.api == self.legacy_api)
+                    .then(|| all.get(uxduck_engine::ACCOUNT_TOKEN).cloned())
+                    .flatten()
+            })
+            .filter(|token| !token.is_empty())
+    }
+
+    pub fn account_operator(&self) -> Option<String> {
+        self.load()
+            .ok()?
+            .get(&self.scoped("account.operator"))
+            .cloned()
+    }
+
+    pub fn bind_operator(&self, operator: Option<&str>) -> Result<(), String> {
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.load()?;
+        let key = self.scoped("account.operator");
+        if let Some(operator) = operator {
+            all.insert(key, operator.into());
+        } else {
+            all.remove(&key);
+        }
+        self.save(&all).map_err(|e| e.to_string())
+    }
+
+    pub fn workspace_needs_identity(&self) -> bool {
+        self.load().is_ok_and(|all| {
+            !all.contains_key(&self.scoped("workspace.owner"))
+                && all.contains_key(&self.scoped("workspace.legacy"))
+        })
+    }
+
+    /// Preserve evidence of the legacy workspace before a person can switch.
+    /// An unreachable server must not make the next sign-in its new owner.
+    pub fn protect_legacy_workspace(&self) -> Result<(), String> {
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.load()?;
+        if !all.contains_key(&self.scoped("workspace.owner"))
+            && !all.contains_key(&self.scoped("workspace.legacy"))
+            && let Some(token) = self.account_session()
+        {
+            all.insert(self.scoped("workspace.legacy"), fingerprint(&token));
+            self.save(&all).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Identity comes from the authenticated /v1/me response, never email input.
+    pub fn remember_person(&self, token: &str, id: &str) -> Result<bool, String> {
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.account_session().as_deref() != Some(token) {
+            return Ok(false);
+        }
+        let mut all = self.load()?;
+        all.insert(self.scoped("account.person"), id.into());
+        let owner = self.scoped("workspace.owner");
+        let legacy = self.scoped("workspace.legacy");
+        if !all.contains_key(&owner)
+            && all
+                .get(&legacy)
+                .is_none_or(|old| *old == fingerprint(token))
+        {
+            all.insert(owner.clone(), id.into());
+            all.remove(&legacy);
+        }
+        let owns = all.get(&owner).is_some_and(|owner| owner == id);
+        self.save(&all).map_err(|e| e.to_string())?;
+        Ok(owns)
     }
 
     /// Move the pre-selector token into its original server's slot before
     /// background tasks start. It can never become another server's token.
     pub fn migrate_account_token(&self) -> Result<(), String> {
-        let mut all = self.load();
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.load()?;
         let Some(api) = self.legacy_api.as_deref() else {
             return Ok(());
         };
@@ -75,13 +183,16 @@ impl FileCredentials {
 
 impl Credentials for FileCredentials {
     fn set(&mut self, name: &str, value: &str) -> Result<(), String> {
-        let mut all = self.load();
+        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.load()?;
         let scoped;
         let name = if name == uxduck_engine::ACCOUNT_TOKEN {
             let api = self
                 .api
                 .as_deref()
                 .ok_or("This UXDuck has no account server.")?;
+            // A new credential is unverified until its own /v1/me completes.
+            all.remove(&self.scoped("account.person"));
             scoped = account_key(api);
             if self.api == self.legacy_api {
                 all.remove(name);
@@ -104,6 +215,10 @@ impl Credentials for FileCredentials {
     }
 }
 
+fn fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
 fn account_key(api: &str) -> String {
     format!("account.token:{}", api.trim_end_matches('/'))
 }
@@ -111,6 +226,60 @@ fn account_key(api: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_persons_login_never_becomes_a_shared_data_export_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileCredentials::new(dir.path());
+        store.api = Some("https://api.uxduck.test".into());
+        store
+            .set(uxduck_engine::ACCOUNT_TOKEN, "ana-token")
+            .unwrap();
+        assert!(
+            store.get(uxduck_engine::ACCOUNT_TOKEN).is_none(),
+            "unverified tokens cannot export shared data"
+        );
+        assert!(store.remember_person("ana-token", "ana").unwrap());
+        store
+            .set(uxduck_engine::ACCOUNT_TOKEN, "ben-token")
+            .unwrap();
+        assert!(store.get(uxduck_engine::ACCOUNT_TOKEN).is_none());
+        assert!(!store.remember_person("ben-token", "ben").unwrap());
+        assert_eq!(store.account_session().as_deref(), Some("ben-token"));
+        assert!(store.get(uxduck_engine::ACCOUNT_TOKEN).is_none());
+        store
+            .set(uxduck_engine::ACCOUNT_TOKEN, "ana-new-token")
+            .unwrap();
+        assert!(store.remember_person("ana-new-token", "ana").unwrap());
+        assert_eq!(
+            store.get(uxduck_engine::ACCOUNT_TOKEN).as_deref(),
+            Some("ana-new-token")
+        );
+    }
+
+    #[test]
+    fn legacy_ownership_and_corrupt_credentials_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileCredentials::new(dir.path());
+        store.api = Some("https://api.uxduck.test".into());
+        store
+            .set(uxduck_engine::ACCOUNT_TOKEN, "legacy-token")
+            .unwrap();
+        store.protect_legacy_workspace().unwrap();
+        store
+            .set(uxduck_engine::ACCOUNT_TOKEN, "another-person")
+            .unwrap();
+        assert!(!store.remember_person("another-person", "ben").unwrap());
+        assert!(store.get(uxduck_engine::ACCOUNT_TOKEN).is_none());
+        std::fs::write(&store.path, "broken").unwrap();
+        assert!(store.get(uxduck_engine::ACCOUNT_TOKEN).is_none());
+        assert!(
+            store
+                .set(uxduck_engine::ACCOUNT_TOKEN, "cannot-overwrite")
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), "broken");
+    }
 
     #[test]
     fn stores_reads_and_removes_privately() {
@@ -147,9 +316,15 @@ mod tests {
         staging
             .set(uxduck_engine::ACCOUNT_TOKEN, "staging-token")
             .unwrap();
+        staging
+            .remember_person("staging-token", "staging-person")
+            .unwrap();
         assert!(!production.has(uxduck_engine::ACCOUNT_TOKEN));
         production
             .set(uxduck_engine::ACCOUNT_TOKEN, "production-token")
+            .unwrap();
+        production
+            .remember_person("production-token", "production-person")
             .unwrap();
         assert_eq!(
             staging.get(uxduck_engine::ACCOUNT_TOKEN).as_deref(),
@@ -179,6 +354,7 @@ mod tests {
         assert!(!credentials.has(uxduck_engine::ACCOUNT_TOKEN));
         assert_eq!(credentials.get("openai.key").as_deref(), Some("key"));
         credentials.api = credentials.legacy_api.clone();
+        credentials.protect_legacy_workspace().unwrap();
         assert_eq!(
             credentials.get(uxduck_engine::ACCOUNT_TOKEN).as_deref(),
             Some("old")
@@ -186,6 +362,7 @@ mod tests {
         assert!(
             !credentials
                 .load()
+                .unwrap()
                 .contains_key(uxduck_engine::ACCOUNT_TOKEN)
         );
     }

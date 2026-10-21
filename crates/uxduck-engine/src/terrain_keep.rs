@@ -425,5 +425,6 @@ pub(crate) fn actor() -> uxduck_core::events::Actor {
     uxduck_core::events::Actor {
         client_id: "terrain".into(),
         operator_id: None,
+        identity: None,
     }
 }

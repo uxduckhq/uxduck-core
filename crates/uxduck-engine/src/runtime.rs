@@ -788,6 +788,7 @@ pub trait AnalyticsPort: Send {
     /// On: make sure there is an install id. Off: forget it and drop
     /// whatever was queued, so nothing identifies this install any more.
     fn set_enabled(&mut self, on: bool);
+    fn set_internal(&mut self, _internal: bool) {}
 }
 
 /// No analytics: everything is dropped. The default, for tests and the

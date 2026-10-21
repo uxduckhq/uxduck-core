@@ -345,6 +345,7 @@ impl Engine {
         let actor = Actor {
             client_id: format!("{FROM_ACCOUNT}{}", pulled.device),
             operator_id: None,
+            identity: None,
         };
         if let Change::VehicleUpserted { vehicle } = &change.change {
             return self.take_library(actor, &pulled.device, vehicle, change.version);
@@ -479,6 +480,7 @@ impl Engine {
         let actor = Actor {
             client_id: format!("{FROM_ACCOUNT}library"),
             operator_id: self.actor(connection).operator_id,
+            identity: None,
         };
         self.activate_as(actor, entry);
     }
@@ -584,5 +586,6 @@ fn sync_actor(what: &str) -> Actor {
     Actor {
         client_id: format!("{FROM_ACCOUNT}{what}"),
         operator_id: None,
+        identity: None,
     }
 }

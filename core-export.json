@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "f87eebdcce740fc846544e0d308adf5d70afabca",
+  "sourceCommit": "f26851c8e160a35da5f14be2769232a819713eef",
   "licenseReady": true,
   "files": [
     {
@@ -16,12 +16,12 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "3516d77e72e79bdee1c62d0c54aa6337589227ef2d087a7fd12fa81a1f1573ae",
+      "sha256": "2d33beb64a8bc74641f4ee658d215509883a0b7551a763f8674c4c040bbfcf6a",
       "executable": false
     },
     {
       "path": "Cargo.toml",
-      "sha256": "0b9f75b4e34d07aa87313890c1d8677117f9b9de3c230b53637615e1d3a19220",
+      "sha256": "1398460d58b6ea415bb36de73376899c005f0ba677eccabdd58869b1b0e875da",
       "executable": false
     },
     {
@@ -1540,12 +1540,32 @@
       "executable": false
     },
     {
+      "path": "crates/uxduck-contracts/fixtures/operator_profile.request.json",
+      "sha256": "1956bf4ca50cfb6d8b44ae37cb4d8b8400b39b68202de077c9d07e93b73ea2da",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/operator_profile.result.json",
+      "sha256": "0c348250028a98ab098766100f078216c406596f5c919a32636ae95929ede98c",
+      "executable": false
+    },
+    {
       "path": "crates/uxduck-contracts/fixtures/operator_remove.request.json",
       "sha256": "233d53ff23c45d0c07dd2cfcc22f5770713c4bb12d2589c75b7c3817aa31cfe0",
       "executable": false
     },
     {
       "path": "crates/uxduck-contracts/fixtures/operator_remove.result.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/operator_switch.request.json",
+      "sha256": "1445e4b6b20c13f6030ca7f666bbd6f93b613c6a6d4701222668ac024f493c03",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-contracts/fixtures/operator_switch.result.json",
       "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
       "executable": false
     },
@@ -3346,7 +3366,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/operator.rs",
-      "sha256": "dc45e25067ab88c3e1ba7feb4a3a878293b0c8ec4c1711de734bdf1897114076",
+      "sha256": "31ca41b74a27e2bd7c41516224d0f4957338e480fba7eb8a712fd11cbaf4e31f",
       "executable": false
     },
     {
@@ -3411,7 +3431,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/account.rs",
-      "sha256": "038d41827fa69b52da5a19f7bdf5c9532a6bf71df1d3d893ae1bcb1f1eba4264",
+      "sha256": "e304bcfc42d579a2ebca654cd2dead570c4f8d6e82032c29ecb82e49fc5d269b",
       "executable": false
     },
     {
@@ -3526,7 +3546,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/operator.rs",
-      "sha256": "3f7e72b460c97e77babbc0a299a2a6ccdfed1a908d820d65942a7b3ae2c57404",
+      "sha256": "870e00b27c9cd5a670a061005500970519c7551881e428c6b6eff49f5beb7d4b",
       "executable": false
     },
     {
@@ -3581,7 +3601,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/state.rs",
-      "sha256": "23cbe36aeaeb83de3106669bfe1b3face866d44d7162902867be61d2716ebba6",
+      "sha256": "24a0777673e67ba90920a937e3ffbf6c9599ddc2631e241ca7baa5a7ee1ce5fd",
       "executable": false
     },
     {
@@ -3661,7 +3681,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "14d86e28a5d1fe5cd981d85491e1eb71d37178a8e9c850d9394f90147388fb3c",
+      "sha256": "205851afb29db7e9189cfe35f2c7f908dd951e1de1970c56393a8fe3688823f6",
       "executable": false
     },
     {
@@ -3676,7 +3696,7 @@
     },
     {
       "path": "crates/uxduck-contracts/tests/fixtures.rs",
-      "sha256": "b5149bfd88aeabf2eff7d98ad7fef82358cd04b9ac5ee429a73fdf3ed1713282",
+      "sha256": "161d910d488d4d6709806e44339c09da0d63ebbf4952efed6d3f8c73837dedb3",
       "executable": false
     },
     {
@@ -3831,7 +3851,7 @@
     },
     {
       "path": "crates/uxduck-core/src/events.rs",
-      "sha256": "0b1e59b2869432a67bc957c61167f20bf8f1229999c38da40e494e3f4b62ddd4",
+      "sha256": "7f93c4d8b6898d0f840e57cfd04e19f6c5a64608d9de1fd2c08d25940f529fcf",
       "executable": false
     },
     {
@@ -3861,17 +3881,17 @@
     },
     {
       "path": "crates/uxduck-engine/src/account.rs",
-      "sha256": "8f27e85bf29810c9971278eb056c08e6810f4608fe7c41cb7031988000a0ec61",
+      "sha256": "303a7991cafdb42d62b0d6a1a92467b09e2c16874b3c19545589dcc8dfa56fdf",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/agent.rs",
-      "sha256": "bf10209869a2aa62d84ec41bdcc56e591d6c5bba6b153ac18b5ab418b5b6d1e7",
+      "sha256": "85df801e61d207d2a1126e136a7d832a3b1b92e15c98d59da61c3a02f8f5bbf7",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/analytics.rs",
-      "sha256": "588a007cd45792247d5e968180345ced1607f257780a6a55917ddc62af2167bc",
+      "sha256": "7a4eb4ebba13ecdcc3934d320cba360f464cd106133ebcd50a87f6ba8addb61e",
       "executable": false
     },
     {
@@ -3881,17 +3901,17 @@
     },
     {
       "path": "crates/uxduck-engine/src/app_update.rs",
-      "sha256": "0a919b44b647ca18b403caded4683e85fa353bc9ee2586b93439636983334e09",
+      "sha256": "484120bc6637e2c56674f60fb617a384e681603a73c232854625d048c5c25309",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/approvals.rs",
-      "sha256": "4c49eb1af54ca954a7adc64f5e4c46711f08d24903daa078eb998e5ed411080d",
+      "sha256": "4a7b00e79503d0f0a509f00371c0ea01a69d6452a43ee17e97963e3e4c3a1fd0",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/commands.rs",
-      "sha256": "3d2ff09d1d3fc965fc875c03565bdfeab90f0aac7acdcd46cd45fb2f981148cb",
+      "sha256": "b6545efd791b2d5021b0cd114cc8a1692d9ac4bcdebde38a114739417070974c",
       "executable": false
     },
     {
@@ -3901,7 +3921,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/controllers.rs",
-      "sha256": "7752f97c44b3539a562942aab01c78d54619921a1ea252f58983f1efc3440dab",
+      "sha256": "59c4a58417238d171772b05d23d9d2c4e0782bd35adf1271eb030cb15a716d86",
       "executable": false
     },
     {
@@ -3916,7 +3936,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/edge.rs",
-      "sha256": "45b8ec0af6a5bed7b9c04ccdf1576c3da252fa86f741ba341687cf8b38bd7bb3",
+      "sha256": "430a7be42840025d000fb3d4a2e2a26e9a5ae6a773013e7fbe418ba0140eaa86",
       "executable": false
     },
     {
@@ -3951,7 +3971,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/history.rs",
-      "sha256": "907458d4f58e9c5dd06ce182716fa5da95a0ecbe87c0e241c00f0d50be893391",
+      "sha256": "6b75673aa2d23619a72f442b9de50111e88c322343c9b1e44d846f5f3ffe1b2b",
       "executable": false
     },
     {
@@ -3961,7 +3981,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/import.rs",
-      "sha256": "44d52d4605c593c13d74eaebd2d9e3aaa5d56cc2525284ee10829956ba2472be",
+      "sha256": "ce5acc129283e814a35db286b40e6d50425327dd5ad40131095defe52dea3470",
       "executable": false
     },
     {
@@ -3971,12 +3991,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/klv.rs",
-      "sha256": "a315b73711c205c3b9c57b8d9e7211a7bd2fea7c9e4181fc64defecbb2a84bec",
+      "sha256": "d99a4ab7f078a6f24a9dd352731582d1e84cd4709afe590e8d6aa6ca0e81a8f2",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/launch.rs",
-      "sha256": "9044a9182c6500b2f71fa8db84c69f1a0fe6cb0a60fe611bac51da1a3396951a",
+      "sha256": "d46c79ff149476471a7885f0c2a02100f24532fc8afb4db5852e6f705db44e76",
       "executable": false
     },
     {
@@ -3986,7 +4006,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/lib.rs",
-      "sha256": "c82449419d74f6c946111dbe2090cb53812a4e842878b0632b17d7fd743cccad",
+      "sha256": "f6c317f1db5d0514415424b7da2cb7803bf5ab68ce50297d0f42e611aa5d4091",
       "executable": false
     },
     {
@@ -4021,7 +4041,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/param_definitions/mod.rs",
-      "sha256": "c6355cedd7a9de6692b24e42a82ba047cb7ed02632b923578960939dccb4e5db",
+      "sha256": "40854641e583c80b5be1b8ad570782577f86bc21f994fdc100048971ec8fbe7a",
       "executable": false
     },
     {
@@ -4031,7 +4051,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/photos.rs",
-      "sha256": "0360c250f171bbeb4dc902edfcf7dd59234886605413ee220e8b76d87cdaafeb",
+      "sha256": "5f236689942c8f45c5f26c9af62e54d8cfd277f3f3d9ea5b05cb0c02a3d47982",
       "executable": false
     },
     {
@@ -4046,7 +4066,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/plan_examples.rs",
-      "sha256": "8f51a0050333646307419eee6d9e3973f7a6e3afae6d36da3fd244589282ef25",
+      "sha256": "30dca37086614b8b53565361407bff404778640ddd18db73a95b6b6b771adc3f",
       "executable": false
     },
     {
@@ -4071,12 +4091,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/plugin_sync.rs",
-      "sha256": "3782c0caa230eee34c28418d0a38098bb0b374df28ba294af7643c396124c737",
+      "sha256": "003718b350d1e95b5d4ebcaf235ccccc23ee5101247ae33536c50a3ae7412c75",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/plugins.rs",
-      "sha256": "9a21337880f48754a0f5e74d368abb633dd13a28f267a0e0570713363f80e7d6",
+      "sha256": "b6d1204d439c0e1492485358da66f297cbc9d778c021e12b8b14765821b55a5d",
       "executable": false
     },
     {
@@ -4226,17 +4246,17 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/mod.rs",
-      "sha256": "d61e0505e5e0921c0e9da261054d5ded6be0c8984c86aa999eb879c368acdf22",
+      "sha256": "0673949ed02c6c5969aa0d0e0d7629322b05a007b51d511bbfe9932b880902bb",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/recordings.rs",
-      "sha256": "a46e52d806c5212b8ed0a0f03e25ce837847a6810715f916dc20a01c940b9ec1",
+      "sha256": "83362338622a654f1c86cee707d3ff0d617873d1fa55c5db96eb9ae48564a707",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/remote.rs",
-      "sha256": "b19573280483ea7a4d4078156137341c94f28e05d1d7317e737325764ed0008d",
+      "sha256": "74f1361775c67a00a06c75956cf37dbef369015fb5397706b86f2ad9c7660e1d",
       "executable": false
     },
     {
@@ -4246,7 +4266,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/restart.rs",
-      "sha256": "e10d3e907f87098ab2ecb1f77ad429a0be967d2765458fb42402c3c3318e4717",
+      "sha256": "65808ba2af095c0cbfce8e7a30a2f3a32d9552348ef6d8bf8b70ebeb36a9fbf9",
       "executable": false
     },
     {
@@ -4256,7 +4276,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/rpc/handlers.rs",
-      "sha256": "d375ad06e08d24e1931bd0dce3f44b72dd6c7accead879eb9ae57ef20fd82189",
+      "sha256": "5109b1ffb84f8c12a4dd6815838a085738c895ca8cad7f53e21ff6b75ed9bb07",
       "executable": false
     },
     {
@@ -4281,7 +4301,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/runtime.rs",
-      "sha256": "99ae6f11b7eda028baf7fe960369c4b4238bef867dbb4f12b47224fc3146b5ef",
+      "sha256": "84bed8912538556bb7e21ddbcca91a787059e8dc4292d07da4973fa74b2a69f0",
       "executable": false
     },
     {
@@ -4316,7 +4336,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/sync.rs",
-      "sha256": "9a66f6543f740dc3f632d8dc76d051b2407dc18f11611014e9a753e0cf661207",
+      "sha256": "af804f433d71484947adbbe63789140336f3f85ab78d1c3e3315d53ad73585b4",
       "executable": false
     },
     {
@@ -4341,7 +4361,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/terrain_keep.rs",
-      "sha256": "6e96bba5225bcce7dde70cc7836f3c0a4b4cf9b8a6c1ff05d5af05d35175e06d",
+      "sha256": "3ec545d6aad5a7edb38f2f4288ba05043a9d1e1285192d5b1ec96ad07a76a18f",
       "executable": false
     },
     {
@@ -4351,7 +4371,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/transfers.rs",
-      "sha256": "df7ebdcc4514a923a660171a2b9729891570fc0cb4c6d447aff1b008745a506c",
+      "sha256": "92908d7b9cdd42cbd344c5957e100f6c552e203ffa7a2b96f2905736ace4808d",
       "executable": false
     },
     {
@@ -4361,12 +4381,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/vehicle_files.rs",
-      "sha256": "4e4716ac8656577be8593d297567a772215997965f428d3fd18c5035d93c8d6b",
+      "sha256": "75fe5cec6063ec9d9920ef51d9b116e9655d6be77f6cf1cab1c9d30facec0815",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/vehicles.rs",
-      "sha256": "2f5bf031f3f5972e21af690a7ad265536937c0ada35edc2e78d35e0626e191e6",
+      "sha256": "019a983ad0a33ace9667faba422a084ec6d8a8282558f00d52a854533cae804d",
       "executable": false
     },
     {
@@ -4376,7 +4396,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/video.rs",
-      "sha256": "010dcdb971d9c002380119f979ad2ac5ab553bc591ef01dea0f09d9847c44047",
+      "sha256": "4c2c0f7f861f47b4db64689d34b6c459dad56287cb0d92b97a7fde679c28e0ca",
       "executable": false
     },
     {
@@ -4736,12 +4756,12 @@
     },
     {
       "path": "crates/uxduck/src/account.rs",
-      "sha256": "47f3da7bf4011b46dc50a1a3153bf7405d89e2c2c55eb57db75f93ad6c2973a4",
+      "sha256": "86481f0d372355b9438df89258d76f8bdc17bf16a90f3d9aa07d9ef6ba30d813",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/account/tests.rs",
-      "sha256": "3359cbe9bd75797b30f1aecb232603c267ab1385f7082bccdaa6dd5143f0eb71",
+      "sha256": "2aa5f2e05aeb132d9ab2ce7d1005faca732123d007c02f1500532acb2a3fa75d",
       "executable": false
     },
     {
@@ -4756,7 +4776,7 @@
     },
     {
       "path": "crates/uxduck/src/adapters/credentials.rs",
-      "sha256": "04c780413e67797cc593cf1364d659fd36c8f9e4c40487403215e199641f5619",
+      "sha256": "38cf2e62d79d19240043176a98ca9563200beffca34ee4db9d1355eb8ea31145",
       "executable": false
     },
     {
@@ -4786,7 +4806,7 @@
     },
     {
       "path": "crates/uxduck/src/analytics.rs",
-      "sha256": "c2da443a3749f490312dac369c10fcf9e9c62cad6489021829fd049e3c64777b",
+      "sha256": "b186e8f88789bae55cac6a9064db4a83e22edbe2106cec7706a7682eb0e03799",
       "executable": false
     },
     {
@@ -4826,12 +4846,12 @@
     },
     {
       "path": "crates/uxduck/src/app_update/mod.rs",
-      "sha256": "7b98b66fad2a694ca081926a1a9e370667ef6a2f5bb2f79af66c3697610b7b84",
+      "sha256": "4f5e06293546e61addfd13c8c6240252b6a7097c21507714ffd0dd040358e9f7",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/app_update/sparkle.rs",
-      "sha256": "002444c56d7999d6e30af3091996fe99acc750ea046897aef7ab0952a3e41546",
+      "sha256": "2c225b71e7263fb81cd905d7b67996e1b5e9bdcdff750e74e944d79b20ec0c0d",
       "executable": false
     },
     {
@@ -4866,7 +4886,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/mod.rs",
-      "sha256": "6c8a5feefacf62357692a96e63a3ffd629f6e61dea491f3bfa5e15f502b37d84",
+      "sha256": "5c9a805a7498d48ccc10842ea63d8d2c40c20b01d96b2e83e06c0d734d17312c",
       "executable": false
     },
     {
@@ -4936,7 +4956,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/mod.rs",
-      "sha256": "7b8760e87a5b242c89d10a32325212e08bd6ce9002949f8cafbaa7fb91fe9972",
+      "sha256": "b0c283062f2ed0eb00a311bd64d929178a706a94803401aeb21f8315bd1dd466",
       "executable": false
     },
     {
@@ -5251,7 +5271,7 @@
     },
     {
       "path": "crates/uxduck/src/sync.rs",
-      "sha256": "e012c71bd222bd1a8d6b0e7ef9b3263d1c4dbfa7361c21e02fff82750da8597f",
+      "sha256": "424c3d2ed9087e46b325bce86ef995cd6cc6fcd5ac66435bc8cfddca02e9c4e2",
       "executable": false
     },
     {
@@ -5346,7 +5366,7 @@
     },
     {
       "path": "crates/uxduck/tests/app_update.rs",
-      "sha256": "7acf8b4c927876f30580126df8e3530d4cbdd398ea63397cbfa56450e38cb617",
+      "sha256": "c3199167f623f5c399943ced6b947c3b23854020339c459f5a3557b8c07faf23",
       "executable": false
     },
     {
@@ -5376,7 +5396,7 @@
     },
     {
       "path": "docs/site/cli.md",
-      "sha256": "2b00b609b4441a34036bdf3da608b0bf06d9d93dfd8ecf1ab376a959c9dec0bd",
+      "sha256": "a3c534c255e316cfae3dc195a32d7daf38ba294f1bbc7a47bb9fa30326ff36ba",
       "executable": false
     },
     {
@@ -5476,7 +5496,7 @@
     },
     {
       "path": "plugins/Cargo.lock",
-      "sha256": "19d4579555ef07a99fc4a3f46e6e7b8dd3c14496cabf3c1c283abb27140ca117",
+      "sha256": "1ac4dafb0d8fa102b4bb5a1a62629dffffae7c7ec792af020c2d13fce748002b",
       "executable": false
     },
     {

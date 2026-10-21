@@ -49,6 +49,7 @@ pub(crate) fn handle(
     let actor = Actor {
         client_id: format!("import:{source}"),
         operator_id: None,
+        identity: None,
     };
     let mut result = JournalImportResult {
         imported: 0,

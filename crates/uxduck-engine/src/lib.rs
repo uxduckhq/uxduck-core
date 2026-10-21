@@ -308,6 +308,9 @@ pub struct Engine {
     awaiting_feedback: BTreeMap<String, (ConnectionId, Value)>,
     /// Account calls waiting for the root (S27).
     awaiting_account: BTreeMap<String, (ConnectionId, Value)>,
+    awaiting_operator: BTreeMap<String, Option<String>>,
+    awaiting_identity: std::collections::BTreeSet<String>,
+    account_identity: uxduck_contracts::dto::account::AccountState,
     /// Account orders that fetch a shared plugin to install (S59).
     awaiting_shared_installs: std::collections::BTreeSet<String>,
     /// Account orders that list the account's computers (S78).
@@ -472,6 +475,9 @@ impl Engine {
             feedback: Box::new(feedback::NoFeedback),
             awaiting_feedback: BTreeMap::new(),
             awaiting_account: BTreeMap::new(),
+            awaiting_operator: BTreeMap::new(),
+            awaiting_identity: std::collections::BTreeSet::new(),
+            account_identity: uxduck_contracts::dto::account::AccountState::default(),
             awaiting_shared_installs: std::collections::BTreeSet::new(),
             awaiting_computers: std::collections::BTreeSet::new(),
             awaiting_watch: BTreeMap::new(),
@@ -706,6 +712,21 @@ impl Engine {
             .map_or_else(Actor::default, |connection| Actor {
                 client_id: connection.client_id.clone(),
                 operator_id: connection.operator_id.clone(),
+                identity: connection.operator_id.as_ref().and_then(|id| {
+                    self.state.operators.get(id).map(|operator| {
+                        uxduck_core::events::ActorIdentity {
+                            operator_name: operator.name.clone(),
+                            account_id: (self.account_identity.signed_in
+                                && connection
+                                    .admitted
+                                    .as_ref()
+                                    .is_some_and(Admitted::is_operator)
+                                && self.account_identity.operator_id.as_ref() == Some(id))
+                            .then(|| self.account_identity.account_id.clone())
+                            .flatten(),
+                        }
+                    })
+                }),
             })
     }
 
@@ -964,6 +985,7 @@ impl Engine {
             uxduck_core::events::Actor {
                 client_id: "daemon".into(),
                 operator_id: None,
+                identity: None,
             },
             uxduck_core::events::Change::ClientUpserted { client: record },
         );
@@ -1015,6 +1037,7 @@ impl Engine {
             uxduck_core::events::Actor {
                 client_id: "daemon".into(),
                 operator_id: None,
+                identity: None,
             },
             uxduck_core::events::Change::ClientRemoved { id: id.to_owned() },
         );

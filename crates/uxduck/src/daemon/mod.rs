@@ -277,6 +277,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
 fn initialize_private_state(data_dir: &Path) -> Result<(), DaemonError> {
     FileCredentials::new(data_dir)
         .migrate_account_token()
+        .and_then(|()| FileCredentials::new(data_dir).protect_legacy_workspace())
         .map_err(|error| DaemonError::DataDir {
             path: data_dir.join("credentials.json").display().to_string(),
             source: std::io::Error::other(error),

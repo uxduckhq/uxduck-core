@@ -40,8 +40,8 @@ use crate::dto::location::TrayLocationParams;
 use crate::dto::messages::{VehicleMessage, VehicleMessagesParams};
 use crate::dto::mission::MissionUploadParams;
 use crate::dto::operator::{
-    ClientSetOperatorParams, LayoutOpenParams, OperatorCreateParams, OperatorRemoveParams,
-    OperatorUpdateParams,
+    ClientSetOperatorParams, LayoutOpenParams, OperatorCreateParams, OperatorProfileParams,
+    OperatorRemoveParams, OperatorUpdateParams,
 };
 use crate::dto::pairing::PairingAnswerParams;
 use crate::dto::param_definitions::{
@@ -119,6 +119,9 @@ pub enum ClientRequest {
     /// Every operator. Needs `read`. Result: `OperatorListResult`.
     #[serde(rename = "operator/list")]
     OperatorList(Empty),
+    /// Activity attributed to a local operator. Needs read. Result: `OperatorProfile`.
+    #[serde(rename = "operator/profile")]
+    OperatorProfile(OperatorProfileParams),
     /// Needs `config`. Result: `Operator`.
     #[serde(rename = "operator/create")]
     OperatorCreate(OperatorCreateParams),
@@ -131,6 +134,10 @@ pub enum ClientRequest {
     /// Act as this operator from now on. Result: `Empty`.
     #[serde(rename = "client/setOperator")]
     ClientSetOperator(ClientSetOperatorParams),
+    /// Switch people with account sign-out and control handover guards.
+    /// New clients use this method so older daemons fail closed. Result: `Empty`.
+    #[serde(rename = "operator/switch")]
+    OperatorSwitch(ClientSetOperatorParams),
     /// The vehicles the daemon hears or has saved, without dismissed ones.
     /// Needs `read`. Result: `VehicleListResult`.
     #[serde(rename = "vehicle/list")]
@@ -1288,7 +1295,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 259] = [
+    pub const METHODS: [&'static str; 261] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1297,10 +1304,12 @@ impl ClientRequest {
         "session/createBootstrap",
         "state/subscribe",
         "operator/list",
+        "operator/profile",
         "operator/create",
         "operator/update",
         "operator/remove",
         "client/setOperator",
+        "operator/switch",
         "vehicle/list",
         "thread/create",
         "thread/send",
@@ -1575,6 +1584,9 @@ pub struct CancelParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params")]
 pub enum ServerNotification {
+    /// Invalidate private account views; contains no identity or credentials.
+    #[serde(rename = "account/changed")]
+    AccountChanged(Empty),
     /// One requester explicitly wants this connection's current display settings.
     #[serde(rename = "client/displayRequested")]
     ClientDisplayRequested(DisplayRequested),

@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use uxduck_contracts::dto::release::ReleaseArtifact;
 use uxduck_contracts::dto::update::{AppUpdateStatus, UpdatePhase};
+use uxduck_core::domain::settings::LaunchAction;
 
 use crate::daemon::engine_task::EngineHandle;
 
@@ -56,6 +57,8 @@ struct Plan {
     data_dir: PathBuf,
     port: u16,
     reopen: bool,
+    #[serde(default)]
+    reopen_target: Option<LaunchAction>,
 }
 
 fn key() -> Option<String> {
@@ -137,15 +140,16 @@ pub fn start(engine: EngineHandle, data_dir: PathBuf, port: u16, enabled: bool) 
             let Some(dir) = ready.as_ref() else {
                 continue;
             };
-            let reopen = engine
-                .run(|e| e.app_update_visible())
+            let reopen_target = engine
+                .run(|e| e.app_update_reopen_target())
                 .await
-                .unwrap_or(false);
+                .unwrap_or(None);
             let (stage, data) = (dir.clone(), data_dir.clone());
-            let prepared =
-                tokio::task::spawn_blocking(move || prepare_worker(&stage, &data, port, reopen))
-                    .await
-                    .unwrap_or_else(|error| Err(format!("The installer helper failed: {error}")));
+            let prepared = tokio::task::spawn_blocking(move || {
+                prepare_worker(&stage, &data, port, reopen_target)
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("The installer helper failed: {error}")));
             match prepared {
                 Ok((mut child, mut permission)) => {
                     // The engine's final gate runs after the helper is spawned.
@@ -789,7 +793,7 @@ fn prepare_worker(
     dir: &Path,
     data_dir: &Path,
     port: u16,
-    reopen: bool,
+    reopen_target: Option<LaunchAction>,
 ) -> Result<(Child, std::process::ChildStdin), String> {
     let staged = verified_staged(dir, &key().ok_or("This build has no release key")?)?;
     match &staged {
@@ -823,7 +827,8 @@ fn prepare_worker(
         installed_executable: Some(installer::installed_executable()?),
         data_dir: data_dir.into(),
         port,
-        reopen,
+        reopen: reopen_target.is_some(),
+        reopen_target,
     };
     spawn_worker(dir, &plan)
 }
@@ -1001,14 +1006,37 @@ pub fn worker(dir: &Path) -> Result<(), String> {
         );
     }
     if plan.reopen {
-        let _ = Command::new(restart)
-            .arg("--data-dir")
-            .arg(&plan.data_dir)
-            .arg("open")
+        let mut open = Command::new(restart);
+        open.arg("--data-dir").arg(&plan.data_dir).arg("open");
+        match plan.reopen_target {
+            Some(LaunchAction::Window) => {
+                open.arg("--window");
+            }
+            Some(LaunchAction::Browser) => {
+                open.arg("--browser");
+            }
+            // Plans from older workers have no explicit target.
+            None | Some(LaunchAction::MenuBar) => {}
+        }
+        let reopened = open
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .output()
+            .map_err(|error| format!("Couldn't reopen UXDuck: {error}"))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Couldn't reopen UXDuck: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ))
+                }
+            });
+        if let Err(why) = reopened {
+            let detail = format!("{message} {why}. Open UXDuck again.");
+            write(&plan.data_dir.join("app-update-result"), detail.as_bytes())?;
+            return Err(detail);
+        }
     }
     result
 }

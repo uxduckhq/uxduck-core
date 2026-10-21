@@ -258,6 +258,10 @@ impl Engine {
         self.analytics = port;
     }
 
+    pub fn set_analytics_internal(&mut self, internal: bool) {
+        self.analytics.set_internal(internal);
+    }
+
     /// Queues one of the daemon's own events, if usage analytics are on.
     pub fn track(&mut self, event: DaemonEvent) {
         if self.state.settings.usage_analytics {
@@ -281,6 +285,7 @@ impl Engine {
             Actor {
                 client_id: "daemon".into(),
                 operator_id: None,
+                identity: None,
             },
             Change::SettingsChanged { settings },
         );

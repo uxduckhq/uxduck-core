@@ -18,6 +18,12 @@ use crate::{ConnectionId, Engine};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountAction {
     Get,
+    /// Forget a different person's sign-in before acknowledging a local switch.
+    SwitchOperator {
+        operator_id: Option<String>,
+        restoring: bool,
+        device: Option<String>,
+    },
     /// Recorded flight-log summaries; a read-only `AccountFlights`.
     Flights,
     Environment,
@@ -127,19 +133,28 @@ pub struct AccountOrder {
     /// Answered with [`Engine::account_done`].
     pub id: String,
     pub action: AccountAction,
+    /// Captured by the engine, never supplied as a claimed cloud identity.
+    pub operator_id: Option<String>,
+    /// Orders without a requesting connection operate on the computer's workspace.
+    pub workspace: bool,
 }
 
 /// Where account calls go; the root answers through [`Engine::account_done`].
 pub trait AccountPort: Send {
+    /// The native host's cached association; this is not a new identity claim.
+    fn initial_state(&self) -> AccountState {
+        AccountState::default()
+    }
     fn request(&mut self, order: AccountOrder);
 }
 
 pub(crate) fn handle(
     engine: &mut Engine,
-    _connection: ConnectionId,
+    connection: ConnectionId,
     request: ClientRequest,
     granted: &[Capability],
 ) -> Result<Value, ApiError> {
+    allow_private_account(engine, connection, &request)?;
     let action = match request {
         ClientRequest::AccountGet(_) => AccountAction::Get,
         ClientRequest::AccountFlights(_) => AccountAction::Flights,
@@ -233,6 +248,52 @@ pub(crate) fn handle(
     Ok(Value::Null)
 }
 
+fn allow_private_account(
+    engine: &Engine,
+    connection: ConnectionId,
+    request: &ClientRequest,
+) -> Result<(), ApiError> {
+    if !engine
+        .connections
+        .get(&connection)
+        .and_then(|c| c.admitted.as_ref())
+        .is_some_and(crate::Admitted::is_operator)
+    {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Private accounts are available only to a local operator.",
+        ));
+    }
+    if matches!(request, ClientRequest::AccountVerify(_))
+        && engine
+            .connections
+            .get(&connection)
+            .and_then(|c| c.operator_id.as_ref())
+            .is_none()
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Choose a local operator before signing in.",
+        ));
+    }
+    if matches!(
+        request,
+        ClientRequest::AccountVerify(_)
+            | ClientRequest::AccountSignOut(_)
+            | ClientRequest::AccountSignOutSession(_)
+            | ClientRequest::AccountSignOutOthers(_)
+    ) {
+        engine.ensure_operator_handover(connection, None)?;
+        if !engine.remote.leases.is_empty() {
+            return Err(ApiError::new(
+                ErrorKind::ConfirmationRequired,
+                "End remote control before changing account sessions.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Something with one `@` and a dot after it; the API checks properly.
 fn plausible(email: &str) -> bool {
     let mut parts = email.split('@');
@@ -264,15 +325,58 @@ fn allow_environment_change(engine: &Engine) -> Result<(), ApiError> {
 }
 
 impl Engine {
+    /// Private session state from the native account task. Attribution only
+    /// uses it when the acting connection selected that same operator.
+    pub fn set_account_identity(&mut self, state: AccountState) {
+        if self.account_identity == state {
+            return;
+        }
+        self.account_identity = state;
+        let frame = crate::rpc::router::notification(
+            &uxduck_contracts::rpc::ServerNotification::AccountChanged(
+                uxduck_contracts::dto::Empty {},
+            ),
+        );
+        let readers: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|(_, c)| {
+                c.admitted
+                    .as_ref()
+                    .is_some_and(|a| a.granted.contains(&Capability::Read))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for connection in readers {
+            self.send(connection, &frame);
+        }
+    }
+
     /// Where account calls go; accounts are unavailable until the root sets it.
     pub fn set_account(&mut self, port: Box<dyn AccountPort>) {
+        self.set_account_identity(port.initial_state());
         self.account = Some(port);
     }
 
     /// Hands an account call to the root, to be answered through
     /// [`Engine::account_done`]; returns the order's id.
     pub(crate) fn ask_account(&mut self, action: AccountAction) -> String {
+        let workspace = self.replying_to.is_none();
+        let operator_id = self
+            .replying_to
+            .as_ref()
+            .and_then(|(connection, _)| self.connections.get(connection))
+            .and_then(|connection| connection.operator_id.clone());
         let id = format!("ac{}", &self.random.token()[..16]);
+        if matches!(
+            action,
+            AccountAction::Verify { .. }
+                | AccountAction::SignOut { .. }
+                | AccountAction::SignOutSession { .. }
+                | AccountAction::SignOutOthers
+        ) {
+            self.awaiting_identity.insert(id.clone());
+        }
         // Answered when the root reports back.
         if let Some(waiting) = self.replying_to.take() {
             self.awaiting_account.insert(id.clone(), waiting);
@@ -281,6 +385,8 @@ impl Engine {
             port.request(AccountOrder {
                 id: id.clone(),
                 action,
+                operator_id,
+                workspace,
             });
         }
         id
@@ -288,6 +394,7 @@ impl Engine {
 
     /// The root finished an account call: answers the request that made it.
     pub fn account_done(&mut self, id: &str, result: Result<Value, ApiError>) {
+        self.awaiting_identity.remove(id);
         if self.awaiting_shared_installs.remove(id) {
             self.shared_fetched(id, result);
             return;
@@ -308,6 +415,26 @@ impl Engine {
         };
         let Some((connection, request_id)) = self.awaiting_account.remove(id) else {
             return;
+        };
+        let result = if let Some(operator_id) = self.awaiting_operator.remove(id) {
+            result.and_then(|_| {
+                self.ensure_operator_handover(connection, operator_id.as_deref())?;
+                if operator_id
+                    .as_ref()
+                    .is_some_and(|id| !self.state.operators.contains_key(id))
+                {
+                    return Err(ApiError::new(
+                        ErrorKind::NotFound,
+                        "That operator was removed.",
+                    ));
+                }
+                if let Some(state) = self.connections.get_mut(&connection) {
+                    state.operator_id = operator_id;
+                }
+                Ok(serde_json::json!({}))
+            })
+        } else {
+            result
         };
         let frame = match result {
             Ok(value) => serde_json::json!({ "jsonrpc": "2.0", "id": request_id, "result": value }),

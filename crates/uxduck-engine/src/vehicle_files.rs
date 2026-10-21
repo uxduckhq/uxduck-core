@@ -139,6 +139,7 @@ fn actor() -> Actor {
     Actor {
         client_id: "files".into(),
         operator_id: None,
+        identity: None,
     }
 }
 

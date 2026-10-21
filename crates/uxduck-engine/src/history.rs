@@ -47,6 +47,7 @@ pub(crate) fn actor() -> Actor {
     Actor {
         client_id: "history".into(),
         operator_id: None,
+        identity: None,
     }
 }
 

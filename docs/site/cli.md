@@ -39,6 +39,24 @@ uxduck open --print
 starts UXDuck in the background without a window. `uxduck mcp` only connects to
 an already running UXDuck; start it yourself before connecting an AI agent.
 
+## Sign in
+
+```sh
+uxduck login --email ana@example.com
+uxduck account sessions
+uxduck logout
+```
+
+Enter the emailed code in the terminal. Sign-in creates or reuses a local profile
+named after your email. To use an existing named profile, find its ID with
+`uxduck rpc call operator/list`, then run
+`uxduck login --email ana@example.com --operator OPERATOR_ID`.
+Emails longer than 64 characters need a named profile selected this way.
+
+Later CLI commands use the daemon's current person. Switching people clears the
+previous personal sign-in, and held controllers or remote control must be released
+before changing people.
+
 ## Read one vehicle
 
 Copy a vehicle ID from `vehicle/list` in place of `VEHICLE_ID`:

@@ -273,6 +273,7 @@ impl Engine {
         let actor = Actor {
             client_id: format!("{}plugins", crate::sync::FROM_ACCOUNT),
             operator_id: None,
+            identity: None,
         };
         match install_as(self, actor, path, origin, true) {
             Ok(plugin) if !plugin.waiting.is_empty() => {

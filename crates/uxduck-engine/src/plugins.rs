@@ -36,6 +36,7 @@ pub(crate) fn daemon() -> Actor {
     Actor {
         client_id: "daemon".into(),
         operator_id: None,
+        identity: None,
     }
 }
 

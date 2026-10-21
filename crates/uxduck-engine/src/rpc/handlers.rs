@@ -1,7 +1,9 @@
 //! One function per method. Thin: checks, then a call into state.
 
 use serde_json::{Value, json};
-use uxduck_contracts::dto::initialize::{Capability, InitializeParams, InitializeResult};
+use uxduck_contracts::dto::initialize::{
+    Capability, ClientKind, InitializeParams, InitializeResult,
+};
 use uxduck_contracts::dto::operator::{
     ClientSetOperatorParams, LayoutOpenParams, LayoutOpenResult, Operator as OperatorDto,
     OperatorCreateParams, OperatorListResult, OperatorRemoveParams, OperatorUpdateParams,
@@ -119,6 +121,10 @@ pub(crate) fn handle(
                 operators: operators(engine),
             })
         }
+        ClientRequest::OperatorProfile(params) => {
+            require(Read)?;
+            operator_profile(engine, &params.id)
+        }
         ClientRequest::OperatorCreate(params) => {
             require(Config)?;
             operator_create(engine, connection, &params)
@@ -131,7 +137,9 @@ pub(crate) fn handle(
             require(Config)?;
             operator_remove(engine, connection, params)
         }
-        ClientRequest::ClientSetOperator(params) => set_operator(engine, connection, params),
+        ClientRequest::ClientSetOperator(params) | ClientRequest::OperatorSwitch(params) => {
+            set_operator(engine, connection, params)
+        }
         ClientRequest::LayoutOpen(params) => {
             require(Read)?;
             layout_open(engine, connection, &params)
@@ -463,6 +471,42 @@ pub(crate) fn handle(
     }
 }
 
+fn operator_profile(engine: &Engine, id: &str) -> Result<Value, ApiError> {
+    let operator = engine
+        .state
+        .operators
+        .get(id)
+        .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "That operator was removed."))?;
+    let receipts: Vec<_> = engine
+        .state
+        .receipts
+        .values()
+        .filter(|r| r.operator_id.as_deref() == Some(id))
+        .collect();
+    let notes: Vec<_> = engine
+        .state
+        .history
+        .values()
+        .filter(|entry| {
+            entry.author.operator_id.as_deref() == Some(id)
+                && matches!(
+                    entry.kind,
+                    uxduck_core::domain::history::EntryKind::Note { .. }
+                )
+        })
+        .collect();
+    to_value(&uxduck_contracts::dto::operator::OperatorProfile {
+        operator: operator.into(),
+        commands_requested: receipts.len() as u64,
+        notes_written: notes.len() as u64,
+        last_active_us: receipts
+            .iter()
+            .map(|r| r.created_at_us)
+            .chain(notes.iter().map(|n| n.written_at_us))
+            .max(),
+    })
+}
+
 fn operator_remove(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -472,6 +516,21 @@ fn operator_remove(
     }: OperatorRemoveParams,
 ) -> Result<Value, ApiError> {
     current(engine, &id, expected_version)?;
+    if engine
+        .connections
+        .values()
+        .any(|c| c.operator_id.as_deref() == Some(&id))
+        || engine.state.controllers.values().any(|c| {
+            c.claim
+                .as_ref()
+                .is_some_and(|claim| claim.operator_id.as_deref() == Some(&id))
+        })
+    {
+        return Err(ApiError::new(
+            ErrorKind::ConfirmationRequired,
+            "Switch away from this operator and release their controllers before removing them.",
+        ));
+    }
     engine.commit(connection, Change::OperatorRemoved { id });
     Ok(json!({}))
 }
@@ -488,6 +547,36 @@ fn set_operator(
             ErrorKind::NotFound,
             format!("no operator {id}"),
         ));
+    }
+    engine.ensure_operator_handover(connection, operator_id.as_deref())?;
+    let previous = engine
+        .connections
+        .get(&connection)
+        .and_then(|c| c.operator_id.as_ref());
+    if previous == operator_id.as_ref() {
+        return Ok(json!({}));
+    }
+    if !engine.awaiting_operator.is_empty() {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "An operator switch is already in progress. Try again.",
+        ));
+    }
+    if engine.account.is_some()
+        && engine
+            .connections
+            .get(&connection)
+            .and_then(|c| c.admitted.as_ref())
+            .is_some_and(crate::Admitted::is_operator)
+    {
+        let id = engine.ask_account(crate::account::AccountAction::SwitchOperator {
+            operator_id: operator_id.clone(),
+            restoring: previous.is_none(),
+            device: (!engine.state.sync.device_id.is_empty())
+                .then(|| engine.state.sync.device_id.clone()),
+        });
+        engine.awaiting_operator.insert(id, operator_id);
+        return Ok(Value::Null);
     }
     if let Some(state) = engine.connections.get_mut(&connection) {
         state.operator_id = operator_id;
@@ -880,6 +969,27 @@ pub(crate) fn notify(
     }
 }
 
+/// A CLI command follows the current person without switching or restoring one.
+fn current_cli_operator(
+    engine: &Engine,
+    connection: ConnectionId,
+    kind: ClientKind,
+) -> Option<String> {
+    let state = engine.connections.get(&connection)?;
+    if kind != ClientKind::OperatorCli
+        || state.transport != Transport::Socket
+        || state.trust != admission::Trust::LocalUser
+    {
+        return None;
+    }
+    engine
+        .account_identity
+        .operator_id
+        .as_ref()
+        .filter(|id| engine.state.operators.contains_key(*id))
+        .cloned()
+}
+
 fn initialize(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -924,6 +1034,7 @@ fn initialize(
     }
 
     let kind = params.client_info.kind;
+    let cli_operator = current_cli_operator(engine, connection, kind);
     if kind == uxduck_contracts::dto::initialize::ClientKind::Plugin {
         return Err(ApiError::new(
             ErrorKind::InvalidParams,
@@ -958,15 +1069,11 @@ fn initialize(
         ),
     };
     let granted: Vec<Capability> = core_granted.iter().copied().map(Into::into).collect();
-    let window = matches!(
-        kind,
-        uxduck_contracts::dto::initialize::ClientKind::OperatorUi
-            | uxduck_contracts::dto::initialize::ClientKind::Shell
-    );
-    engine.opened.window_seen |= window;
+    engine.opened.window_seen |= matches!(kind, ClientKind::OperatorUi | ClientKind::Shell);
     engine.opened.seen_order += 1;
     let order = engine.opened.seen_order;
     if let Some(state) = engine.connections.get_mut(&connection) {
+        state.operator_id = cli_operator;
         state.name.clone_from(&params.client_info.name);
         state.seen = order;
         state.admitted = Some(Admitted {

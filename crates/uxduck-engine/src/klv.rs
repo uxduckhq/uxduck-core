@@ -16,6 +16,7 @@ fn actor() -> Actor {
     Actor {
         client_id: "video".into(),
         operator_id: None,
+        identity: None,
     }
 }
 
