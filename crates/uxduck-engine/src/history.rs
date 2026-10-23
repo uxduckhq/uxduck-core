@@ -213,7 +213,19 @@ impl Engine {
         // already known is heard under a provisional id after each restart
         // until its UID comes, and that record is not a new vehicle.
         let identified = after.uid.is_some() && before.is_none_or(|b| b.uid.is_none());
-        if identified && !self.state.history.values().any(|e| belongs(e, after)) {
+        // A note can predate identification; only an existing FirstSeen event
+        // suppresses this event when the same vehicle is identified again.
+        if identified
+            && !self.state.history.values().any(|e| {
+                belongs(e, after)
+                    && matches!(
+                        &e.kind,
+                        EntryKind::Event {
+                            event: HistoryEvent::FirstSeen { .. }
+                        }
+                    )
+            })
+        {
             self.record(
                 &after.id,
                 HistoryEvent::FirstSeen {
