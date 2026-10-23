@@ -1,6 +1,0 @@
-kind: draft
-component: app
-custom:
-  Draft: |
-    Terrain downloads stop when their received body exceeds 16 MiB, including
-    responses that omit Content-Length, to prevent unbounded buffering.
