@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use futures::StreamExt;
 use uxduck_engine::terrain::TerrainPort;
 use uxduck_terrain::manifest::DEFAULT_BASE_URL;
 use uxduck_terrain::{Arrived, FetchError, Order};
@@ -167,11 +168,21 @@ async fn fetch(url: &str) -> Result<Vec<u8>, FetchError> {
     {
         return Err(failed(false, format!("{url} is too large")));
     }
-    response
-        .bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| failed(e.is_timeout(), format!("cannot fetch {url}: {e}")))
+
+    // Content-Length is only an early rejection: responses may omit it, and
+    // a server may send more bytes than it declared. Enforce the limit while
+    // consuming the decoded response stream as well.
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| failed(e.is_timeout(), format!("cannot fetch {url}: {e}")))?;
+        if chunk.len() > MAX_FILE_BYTES as usize - bytes.len() {
+            return Err(failed(false, format!("{url} is too large")));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
