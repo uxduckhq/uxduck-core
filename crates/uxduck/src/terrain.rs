@@ -15,7 +15,7 @@ use uxduck_terrain::{Arrived, FetchError, Order};
 use crate::daemon::engine_task::EngineHandle;
 
 /// No terrain file is near this large.
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Where terrain comes from, and the key its manifest must be signed with.
 #[derive(Clone, Debug)]
@@ -164,20 +164,19 @@ async fn fetch(url: &str) -> Result<Vec<u8>, FetchError> {
     }
     if response
         .content_length()
-        .is_some_and(|n| n > MAX_FILE_BYTES)
+        .is_some_and(|n| n > MAX_FILE_BYTES as u64)
     {
         return Err(failed(false, format!("{url} is too large")));
     }
 
-    // Content-Length is only an early rejection: responses may omit it, and
-    // a server may send more bytes than it declared. Enforce the limit while
-    // consuming the decoded response stream as well.
+    // Content-Length is only an early rejection: chunked and close-delimited
+    // responses need the same cap while their body is being read.
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|e| failed(e.is_timeout(), format!("cannot fetch {url}: {e}")))?;
-        if chunk.len() > MAX_FILE_BYTES as usize - bytes.len() {
+        let chunk =
+            chunk.map_err(|e| failed(e.is_timeout(), format!("cannot fetch {url}: {e}")))?;
+        if chunk.len() > MAX_FILE_BYTES - bytes.len() {
             return Err(failed(false, format!("{url} is too large")));
         }
         bytes.extend_from_slice(&chunk);
@@ -188,6 +187,117 @@ async fn fetch(url: &str) -> Result<Vec<u8>, FetchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Response, header};
+    use axum::routing::get;
+
+    const LIMIT: usize = 16 * 1024 * 1024;
+
+    fn chunks(length: usize) -> impl futures::Stream<Item = Result<Vec<u8>, std::io::Error>> {
+        const CHUNK: usize = 64 * 1024;
+        futures::stream::iter(
+            (0..length.div_ceil(CHUNK))
+                .map(move |index| Ok(vec![b'x'; CHUNK.min(length - index * CHUNK)])),
+        )
+    }
+
+    async fn fetch_body(body: Body, length: Option<usize>) -> Result<Vec<u8>, FetchError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let mut response = Response::builder();
+        if let Some(length) = length {
+            response = response.header(header::CONTENT_LENGTH, length);
+        }
+        let response = Arc::new(tokio::sync::Mutex::new(Some(response.body(body).unwrap())));
+        let app = axum::Router::new().route(
+            "/",
+            get(move || {
+                let response = response.clone();
+                async move {
+                    response
+                        .lock()
+                        .await
+                        .take()
+                        .expect("only one terrain fetch")
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = tokio::time::timeout(Duration::from_secs(5), fetch(&url)).await;
+        server.abort();
+        result.expect("terrain fetching must not wait for an oversized stream to end")
+    }
+
+    #[tokio::test]
+    async fn fetch_accepts_a_small_file_with_content_length() {
+        let bytes = fetch_body(Body::from("terrain"), Some(7)).await.unwrap();
+        assert_eq!(bytes, b"terrain");
+    }
+
+    #[tokio::test]
+    async fn fetch_accepts_exactly_the_limit_with_content_length() {
+        let bytes = fetch_body(Body::from_stream(chunks(LIMIT)), Some(LIMIT))
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![b'x'; LIMIT]);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_an_oversized_content_length_before_reading_the_body() {
+        let body = Body::from_stream(futures::stream::pending::<Result<Vec<u8>, std::io::Error>>());
+        let error = fetch_body(body, Some(LIMIT + 1)).await.unwrap_err();
+        assert!(error.message.ends_with("is too large"), "{error:?}");
+        assert!(!error.offline);
+    }
+
+    #[tokio::test]
+    async fn fetch_accepts_a_small_chunked_file() {
+        let bytes = fetch_body(Body::from_stream(chunks(123)), None)
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![b'x'; 123]);
+    }
+
+    #[tokio::test]
+    async fn fetch_accepts_exactly_the_limit_without_content_length() {
+        let bytes = fetch_body(Body::from_stream(chunks(LIMIT)), None)
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![b'x'; LIMIT]);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_an_oversized_chunked_file() {
+        let Err(error) = fetch_body(Body::from_stream(chunks(LIMIT + 1)), None).await else {
+            panic!("a chunked body above the terrain limit must be rejected");
+        };
+        assert!(error.message.ends_with("is too large"), "{error:?}");
+        assert!(!error.offline);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_a_chunked_file_one_byte_over_the_limit_before_eof() {
+        let body = Body::from_stream(chunks(LIMIT + 1).chain(futures::stream::pending()));
+        let error = fetch_body(body, None).await.unwrap_err();
+        assert!(error.message.ends_with("is too large"), "{error:?}");
+        assert!(!error.offline);
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_a_truncated_body_as_an_error() {
+        let body = Body::from_stream(futures::stream::once(async {
+            Err::<Vec<u8>, _>(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated",
+            ))
+        }));
+        let error = fetch_body(body, None).await.unwrap_err();
+        assert!(error.message.contains("cannot fetch"), "{error:?}");
+        assert!(!error.offline);
+    }
 
     #[test]
     fn keys_stay_in_the_folder() {
