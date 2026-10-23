@@ -10,7 +10,6 @@ pub mod fake;
 pub mod hosted;
 #[cfg(feature = "http")]
 mod http;
-#[cfg(feature = "http")]
 pub mod openai;
 pub mod resilient;
 

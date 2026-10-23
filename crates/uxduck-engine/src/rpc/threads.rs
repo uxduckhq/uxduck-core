@@ -310,6 +310,8 @@ pub fn send(
         .and_then(|id| engine.vehicle(id))
         .map(|v| (v.id.clone(), v.name.clone()));
     engine.agent.start_turn(TurnRequest {
+        connection,
+        operator_id: engine.actor(connection).operator_id,
         turn,
         vehicle,
         thread_id: current.id,

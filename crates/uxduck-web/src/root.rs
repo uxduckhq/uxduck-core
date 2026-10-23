@@ -4,6 +4,7 @@
 //! tested natively; `lib.rs` hands the outputs to JavaScript.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -27,9 +28,8 @@ use uxduck_engine::param_definitions::files;
 use uxduck_engine::param_definitions::{DefinitionsArrived, DefinitionsOrder, DefinitionsPort};
 use uxduck_engine::plane::{self, Routed};
 use uxduck_engine::runtime::{
-    AgentPort, Clock, CommandOrder, ControlRoute, HistoryOf, LinkPort, MemoryCredentials,
-    NoPlugins, NoSystem, Persistence, Ports, Random, SerialPortInfo, System, TransferOrder,
-    TurnRequest,
+    AgentPort, Clock, CommandOrder, ControlRoute, Credentials, HistoryOf, LinkPort, NoPlugins,
+    NoSystem, Persistence, Ports, Random, SerialPortInfo, System, TransferOrder, TurnRequest,
 };
 use uxduck_engine::state::{self, State};
 use uxduck_engine::terrain::TerrainPort;
@@ -47,14 +47,25 @@ const PEER: &str = "serial0";
 const EXPIRY_EVERY_US: u64 = 1_000_000;
 /// Pilot input goes at most this often: 25 Hz, as in the daemon.
 const PILOT_EVERY_US: u64 = 35_000;
-/// The answer to every message until the agent runs here on the hosted
-/// model (ADR-0011 M9, ADR-0013 P20): signing in is here since S114.
-pub const NO_ACCOUNT: &str =
-    "The agent isn't in UXDuck Web yet. UXDuck Desktop answers now. Your message is kept here.";
+/// Shown when no account is bound to the sending operator.
+pub const NO_ACCOUNT: &str = "Sign in with this operator’s account to use AI. Request access from your account page if needed.";
+
+/// Readiness is a hint only. The HTTP transport and API authorize each request.
+struct AccountCredentials(Arc<AtomicBool>);
+impl Credentials for AccountCredentials {
+    fn set(&mut self, _: &str, _: &str) -> Result<(), String> {
+        Err("Browser AI uses the signed-in account; provider keys are never stored here.".into())
+    }
+    fn has(&self, name: &str) -> bool {
+        name == uxduck_engine::ACCOUNT_TOKEN && self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// What the worker must do after a call.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Output {
+    /// Hosted inference only; tools stay inside the capability-checked engine.
+    Agent(crate::agent::Output),
     /// A JSON-RPC frame for one of the page's connections.
     Post { connection: u32, text: String },
     /// A line for the journal in the browser's storage.
@@ -230,6 +241,7 @@ enum Call {
     Pause(String, bool),
     Journal(Write),
     Turn(TurnRequest),
+    CancelTurn(String),
     Definitions(DefinitionsOrder),
     Terrain(uxduck_terrain::Order),
     Places(uxduck_engine::places::Order),
@@ -311,7 +323,9 @@ impl AgentPort for Agent {
     fn start_turn(&mut self, turn: TurnRequest) {
         push(&self.0, Call::Turn(turn));
     }
-    fn cancel_turn(&mut self, _: &str) {}
+    fn cancel_turn(&mut self, thread_id: &str) {
+        push(&self.0, Call::CancelTurn(thread_id.to_owned()));
+    }
 }
 
 /// Parameter definitions (S67): fetched by the worker, checked here.
@@ -457,6 +471,9 @@ pub struct Unreadable(pub String);
 /// The browser's daemon.
 pub struct Browser {
     engine: Engine,
+    agents: crate::agent::Runtime,
+    accounts: HashMap<ConnectionId, crate::agent::Account>,
+    account_ready: Arc<AtomicBool>,
     session: Session,
     clock: Box<dyn Clock>,
     /// The latest message of each type to and from each vehicle, for
@@ -532,10 +549,11 @@ impl Browser {
         let clock = SharedClock(Arc::new(Mutex::new(clock)));
         let inspector: Arc<Mutex<Inspector>> = Arc::default();
         let inputs: Arc<Mutex<ControllerInputsResult>> = Arc::default();
+        let account_ready = Arc::new(AtomicBool::new(false));
         let ports = Ports {
             persistence: Box::new(Journal(queue.clone())),
             agent: Box::new(Agent(queue.clone())),
-            credentials: Box::new(MemoryCredentials::default()),
+            credentials: Box::new(AccountCredentials(account_ready.clone())),
             links: Box::new(Links(queue.clone())),
             system: Box::new(Host {
                 none: NoSystem::default(),
@@ -554,7 +572,7 @@ impl Browser {
             },
             ui_url: String::new(),
             checkpoint_every: CHECKPOINT_EVERY,
-            models: vec![],
+            models: vec!["gpt-6-luna".into(), "gpt-6-sol".into()],
             // ADR-0011 M9: the agent is the hosted model, after sign-in.
             agent_provider: "hosted".into(),
             // The wasm build's own stamp (`build.rs`); it keeps its data in
@@ -579,6 +597,9 @@ impl Browser {
         );
         let mut browser = Self {
             engine,
+            agents: crate::agent::Runtime::default(),
+            accounts: HashMap::new(),
+            account_ready,
             session: Session::new(Config::default()),
             clock: Box::new(clock),
             inspector,
@@ -840,6 +861,44 @@ impl Browser {
         (connection, self.drain())
     }
 
+    /// Per-page account hint, never a credential. Changes cancel that page’s turns.
+    pub fn account(&mut self, connection: u32, json: &str) -> Vec<Output> {
+        let Some((id, _)) = self.connections.get(&connection) else {
+            return Vec::new();
+        };
+        let id = *id;
+        let account = serde_json::from_str::<crate::agent::Account>(json).unwrap_or_default();
+        let next = account.valid().then_some(account);
+        if self.accounts.get(&id) == next.as_ref() {
+            return Vec::new();
+        }
+        let mut agent_outputs = Vec::new();
+        self.agents
+            .cancel_origin(&mut self.engine, id, &mut agent_outputs);
+        if let Some(previous) = self.accounts.remove(&id) {
+            self.agents.forget_account(&previous);
+        }
+        if let Some(next) = next {
+            self.accounts.insert(id, next);
+        }
+        self.account_ready
+            .store(!self.accounts.is_empty(), Ordering::SeqCst);
+        let mut outputs: Vec<_> = agent_outputs.into_iter().map(Output::Agent).collect();
+        outputs.extend(self.drain());
+        outputs
+    }
+
+    /// One provider event, EOF, or a bounded transport failure.
+    pub fn agent_event(
+        &mut self,
+        request: u64,
+        json: Option<&str>,
+        error: Option<&str>,
+    ) -> Vec<Output> {
+        self.agents.event(request, json, error);
+        self.drain()
+    }
+
     /// One JSON-RPC frame from a page.
     pub fn receive(&mut self, connection: u32, text: &str) -> Vec<Output> {
         if text.contains(gamepads::METHOD)
@@ -847,10 +906,27 @@ impl Browser {
         {
             return self.gamepads(connection, frame);
         }
+        let mut outputs = Vec::new();
         if let Some((id, _)) = self.connections.get(&connection) {
-            self.engine.receive(*id, text);
+            let id = *id;
+            if serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| {
+                matches!(
+                    v["method"].as_str(),
+                    Some("operator/switch" | "client/setOperator")
+                )
+            }) {
+                let mut cancelled = Vec::new();
+                self.agents
+                    .cancel_origin(&mut self.engine, id, &mut cancelled);
+                if let Some(account) = self.accounts.get(&id) {
+                    self.agents.forget_account(account);
+                }
+                outputs.extend(cancelled.into_iter().map(Output::Agent));
+            }
+            self.engine.receive(id, text);
         }
-        self.drain()
+        outputs.extend(self.drain());
+        outputs
     }
 
     pub fn disconnect(&mut self, connection: u32) -> Vec<Output> {
@@ -859,6 +935,15 @@ impl Browser {
         let _ = self.report_gamepad_interruptions(&mut outputs);
         self.controller_input(gone, &mut outputs);
         if let Some((id, _)) = self.connections.remove(&connection) {
+            let mut agent_outputs = Vec::new();
+            self.agents
+                .cancel_origin(&mut self.engine, id, &mut agent_outputs);
+            outputs.extend(agent_outputs.into_iter().map(Output::Agent));
+            if let Some(account) = self.accounts.remove(&id) {
+                self.agents.forget_account(&account);
+            }
+            self.account_ready
+                .store(!self.accounts.is_empty(), Ordering::SeqCst);
             self.engine.disconnect(id);
         }
         outputs.extend(self.drain());
@@ -1148,13 +1233,18 @@ impl Browser {
     fn drain(&mut self) -> Vec<Output> {
         let mut outputs = Vec::new();
         loop {
+            let mut agent_outputs = Vec::new();
+            let progressed =
+                self.agents
+                    .drive(&mut self.engine, self.clock.now_us(), &mut agent_outputs);
+            outputs.extend(agent_outputs.into_iter().map(Output::Agent));
             let calls: Vec<Call> = self
                 .queue
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .drain(..)
                 .collect();
-            if calls.is_empty() {
+            if calls.is_empty() && !progressed {
                 break;
             }
             for call in calls {
@@ -1216,9 +1306,18 @@ impl Browser {
             }
             Call::Journal(write) => outputs.push(Output::Journal(write)),
             Call::Turn(turn) => {
-                self.engine.agent_error(None, &turn.thread_id, NO_ACCOUNT);
-                self.engine
-                    .agent_turn_finish(&turn.thread_id, turn.turn, None);
+                let account = self
+                    .accounts
+                    .get(&turn.connection)
+                    .cloned()
+                    .unwrap_or_default();
+                self.agents.start(&mut self.engine, turn, account, now);
+            }
+            Call::CancelTurn(thread) => {
+                let mut agent_outputs = Vec::new();
+                self.agents
+                    .cancel(&mut self.engine, &thread, &mut agent_outputs);
+                outputs.extend(agent_outputs.into_iter().map(Output::Agent));
             }
             Call::Definitions(order) => self.definitions(order, outputs),
             Call::Terrain(order) => self.terrain(order, outputs),

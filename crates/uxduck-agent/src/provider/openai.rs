@@ -5,19 +5,29 @@
 //! OpenAI caches repeated prefixes by itself; `prompt_cache_key` keeps one
 //! chat's requests together. Nothing is kept at OpenAI.
 
+#[cfg(feature = "http")]
 use std::sync::Arc;
+#[cfg(feature = "http")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "http")]
 use futures::stream::{self, BoxStream, StreamExt};
+#[cfg(feature = "http")]
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+#[cfg(feature = "http")]
+use super::Provider;
+#[cfg(feature = "http")]
 use super::http::{self, client};
-use super::{Provider, ProviderError, ProviderEvent, ProviderRequest, Usage};
+use super::{ProviderError, ProviderEvent, ProviderRequest, Usage};
+#[cfg(feature = "http")]
 use crate::conversation::Wire;
 
+#[cfg(feature = "http")]
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
 
+#[cfg(feature = "http")]
 #[derive(Clone, Debug)]
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -27,6 +37,7 @@ pub struct OpenAiProvider {
     hosted: bool,
 }
 
+#[cfg(feature = "http")]
 impl OpenAiProvider {
     /// With a developer's own key; `api_base` defaults to OpenAI's.
     #[must_use]
@@ -181,6 +192,7 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
     })
 }
 
+#[cfg(feature = "http")]
 impl Provider for OpenAiProvider {
     fn wire(&self) -> Wire {
         Wire::OpenAi
