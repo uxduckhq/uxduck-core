@@ -78,6 +78,40 @@ pub trait VideoPort: Send + std::fmt::Debug {
     }
     fn open_capture(&mut self, _source_id: &str, _input: &CaptureInput, _epoch: u64) {}
     fn close_capture(&mut self, _source_id: &str) {}
+    /// Deliberate selection/enable only. Restoring a source never calls this.
+    fn select_capture(&mut self, _source_id: &str, _input: &CaptureInput) {}
+    /// # Errors
+    /// The host has no supported privacy settings route, or it could not open.
+    fn capture_settings(&mut self, _microphone: bool) -> Result<(), String> {
+        Err("Open camera privacy settings on the computer running UXDuck.".into())
+    }
+    /// # Errors
+    /// A missing helper or an unreadable/unsupported file.
+    fn check_file(&self, _path: &str) -> Result<(), String> {
+        Err("Video files need UXDuck Desktop running on this computer.".into())
+    }
+    fn open_file(
+        &mut self,
+        _id: &str,
+        _input: &uxduck_core::domain::video::VideoFileInput,
+        _epoch: u64,
+    ) {
+    }
+    fn close_file(&mut self, _id: &str) {}
+    /// # Errors
+    /// Unavailable storage, an unknown clip, or an invalid download action.
+    fn demos(
+        &mut self,
+        _params: &uxduck_contracts::dto::video::VideoDemosParams,
+    ) -> Result<uxduck_contracts::dto::video::VideoDemosResult, String> {
+        Err("Demo footage needs UXDuck Desktop running on this computer.".into())
+    }
+    /// # Errors
+    /// The chosen clip is not downloaded or its cached file is unavailable.
+    fn demo_file(&self, _id: &str) -> Result<uxduck_core::domain::video::VideoFileInput, String> {
+        Err("Download this demo before playing it.".into())
+    }
+
     /// Starts writing a camera's pictures to a recording (S40), and its
     /// sound when the stream has AAC (`sound`, S147), in the media folder
     /// as `<stem>.mp4`, or `<stem> 2.mp4` and on when that is taken: the
@@ -240,6 +274,9 @@ pub(crate) struct Video {
     pub(crate) camera_recording: BTreeMap<String, (String, String)>,
     /// Each configured capture run, independent of updates to its source counters.
     capture_epochs: BTreeMap<String, u64>,
+    /// Permission failures need an explicit selection to request/recheck access.
+    capture_permission_issues: std::collections::BTreeSet<String>,
+    file_epochs: BTreeMap<String, u64>,
     /// Session-local recording intent, independent of signal loss.
     pub(crate) by_hand: BTreeMap<String, bool>,
     /// When each recording's progress was last journaled.
@@ -262,6 +299,9 @@ fn actor() -> Actor {
 
 /// What a source is called until someone renames it: where it comes from.
 fn default_name(source: &VideoSource) -> String {
+    if let Some(input) = &source.file {
+        return input.name.clone();
+    }
     if let Some(input) = &source.capture {
         return input.name.clone();
     }
@@ -290,6 +330,9 @@ fn same_machine(a: &str, b: &str) -> bool {
 
 fn validate_capture(input: &CaptureInput) -> Result<(), ApiError> {
     let invalid = |why: &str| ApiError::new(ErrorKind::InvalidValue, why);
+    if input.no_sound && input.record_sound {
+        return Err(invalid("Choose No sound or a sound input, not both."));
+    }
     if input.device_id.is_empty()
         || input.device_id.len() > 1024
         || input.name.trim().is_empty()
@@ -477,6 +520,7 @@ impl Engine {
                     s.port == port
                         && s.url.is_none()
                         && s.capture.is_none()
+                        && s.file.is_none()
                         && s.vehicle_id.is_none()
                 })
                 .cloned()
@@ -533,6 +577,7 @@ impl Engine {
                 url: Some(uri.to_owned()),
                 added_by_hand: false,
                 capture: None,
+                file: None,
                 tracks: Vec::new(),
                 audio: None,
                 counters: uxduck_core::domain::video::VideoCounters::default(),
@@ -597,6 +642,7 @@ impl Engine {
             url: None,
             added_by_hand: false,
             capture: None,
+            file: None,
             tracks: Vec::new(),
             audio: None,
             counters: report.counters.clone(),
@@ -634,7 +680,11 @@ impl Engine {
         source.klv |= report.klv;
         // A source with an address of its own (RTSP) keeps the vehicle it
         // was added or announced for.
-        if !source.assigned_by_hand && source.url.is_none() && source.capture.is_none() {
+        if !source.assigned_by_hand
+            && source.url.is_none()
+            && source.capture.is_none()
+            && source.file.is_none()
+        {
             // The address, then a camera's announcement, then what its KLV
             // named (kept from before).
             let announced = self.video.announced_ports.get(&report.port).cloned();
@@ -762,7 +812,11 @@ impl Engine {
         let Some(source) = self.state.video_sources.get(source_id) else {
             return;
         };
-        if source.capture.is_some() || source.url.is_some() || self.listened(source.port) {
+        if source.file.is_some()
+            || source.capture.is_some()
+            || source.url.is_some()
+            || self.listened(source.port)
+        {
             return;
         }
         let (port, stopped) = (source.port, source.state == VideoState::Stopped);
@@ -911,7 +965,7 @@ impl Engine {
         let Some(url) = source
             .url
             .clone()
-            .filter(|_| source.added_by_hand && source.capture.is_none())
+            .filter(|_| source.added_by_hand && source.capture.is_none() && source.file.is_none())
         else {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -1031,6 +1085,12 @@ impl Engine {
                     format!("no video source {}", params.source_id),
                 )
             })?;
+        if source.file.is_some() && params.on {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Recorded footage cannot trigger a vehicle's camera.",
+            ));
+        }
         source.vehicle_camera = params.on;
         source.vehicle_camera_by_hand = true;
         source.version += 1;
@@ -1107,6 +1167,179 @@ impl Engine {
         }
     }
 
+    /// Permission failures never restart a helper by themselves. A later explicit
+    /// selection of the same configuration must be able to request access again.
+    pub fn capture_permission_issue(&mut self, source_id: &str, input: &CaptureInput, epoch: u64) {
+        if self.video.capture_epochs.get(source_id) == Some(&epoch)
+            && self
+                .state
+                .video_sources
+                .get(source_id)
+                .and_then(|s| s.capture.as_ref())
+                == Some(input)
+        {
+            self.video
+                .capture_permission_issues
+                .insert(source_id.to_owned());
+        }
+    }
+
+    pub fn file_observed(
+        &mut self,
+        epoch: u64,
+        input: &uxduck_core::domain::video::VideoFileInput,
+        report: VideoReport,
+    ) {
+        let id = report.source_id();
+        if self.video.file_epochs.get(&id) == Some(&epoch)
+            && self
+                .state
+                .video_sources
+                .get(&id)
+                .and_then(|s| s.file.as_ref())
+                == Some(input)
+        {
+            self.video_observed(report);
+        }
+    }
+    pub fn file_stopped(&mut self, id: &str, epoch: u64, why: String) {
+        if self.video.file_epochs.get(id) == Some(&epoch) {
+            self.video_stopped_because(id, Some(why));
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a new file source and its persisted fields, one by one"
+    )]
+    fn video_file(
+        &mut self,
+        params: uxduck_contracts::dto::video::VideoFileParams,
+    ) -> Result<VideoSource, ApiError> {
+        let invalid = |why| ApiError::new(ErrorKind::InvalidValue, why);
+        let port = self
+            .video
+            .port
+            .as_ref()
+            .ok_or_else(|| invalid("Video files need UXDuck Desktop.".to_owned()))?;
+        let mut input = match (params.path, params.demo_id) {
+            (Some(path), None) if !path.is_empty() && path.len() <= 4096 => {
+                port.check_file(&path).map_err(invalid)?;
+                let name = path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("Recorded video")
+                    .to_owned();
+                uxduck_core::domain::video::VideoFileInput {
+                    path,
+                    name,
+                    repeat: params.repeat,
+                    demo_id: None,
+                }
+            }
+            (None, Some(id)) => port.demo_file(&id).map_err(invalid)?,
+            _ => {
+                return Err(invalid(
+                    "Choose one video file or downloaded demo.".to_owned(),
+                ));
+            }
+        };
+        input.repeat = params.repeat;
+        let now = self.clock.now_us();
+        let mut source = if let Some(id) = params.source_id {
+            let source = self
+                .state
+                .video_sources
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| not_found(&id))?;
+            if source.file.is_none() {
+                return Err(invalid(
+                    "Only a recorded-video camera can have its footage replaced.".to_owned(),
+                ));
+            }
+            source
+        } else {
+            if self
+                .state
+                .video_sources
+                .values()
+                .filter(|s| s.file.is_some())
+                .count()
+                >= 8
+            {
+                return Err(invalid(
+                    "UXDuck supports at most eight recorded-video cameras.".to_owned(),
+                ));
+            }
+            // The same source shape and lifecycle as a manually added camera.
+            VideoSource {
+                recording_requested: false,
+                id: format!("vs{}", &self.random.token()[..16]),
+                name: input.name.clone(),
+                named_by_hand: false,
+                port: 0,
+                sender: "recorded video".into(),
+                container: uxduck_core::domain::video::VideoContainer::Ts,
+                codec: None,
+                width: None,
+                height: None,
+                frame_rate: None,
+                state: VideoState::Stopped,
+                state_detail: None,
+                vehicle_id: None,
+                assigned_by_hand: false,
+                vehicle_camera: false,
+                vehicle_camera_by_hand: false,
+                record_alone: false,
+                klv: false,
+                url: None,
+                added_by_hand: true,
+                capture: None,
+                file: None,
+                tracks: Vec::new(),
+                audio: None,
+                counters: uxduck_core::domain::video::VideoCounters::default(),
+                first_seen_us: now,
+                changed_at_us: now,
+                version: 0,
+            }
+        };
+        // Choosing the same file again is an explicit replay, including after
+        // a once-only run reached EOF. Configuration equality cannot skip it.
+        if let Some(port) = self.video.port.as_mut() {
+            port.close_file(&source.id);
+        }
+        self.video.file_epochs.remove(&source.id);
+        if let Some(recording) = self.video.recording.remove(&source.id)
+            && let Some(port) = self.video.port.as_mut()
+        {
+            port.stop_recording(&recording);
+        }
+        if !source.named_by_hand {
+            source.name.clone_from(&input.name);
+        }
+        source.file = Some(input);
+        source.codec = None;
+        source.width = None;
+        source.height = None;
+        source.frame_rate = None;
+        source.audio = None;
+        source.state = VideoState::Stopped;
+        source.state_detail = Some("Starting recorded video".into());
+        source.changed_at_us = now;
+        source.version += 1;
+        self.video.live.remove(&source.id);
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.review_recordings();
+        Ok(source)
+    }
+
     fn video_devices(&mut self) -> VideoDevicesResult {
         self.video.port.as_mut().map_or_else(
             || VideoDevicesResult {
@@ -1141,6 +1374,7 @@ impl Engine {
             .cloned();
         if let Some(same) = &previous
             && same.capture.as_ref() == Some(&input)
+            && !self.video.capture_permission_issues.contains(&same.id)
         {
             return Ok(same.clone());
         }
@@ -1181,6 +1415,7 @@ impl Engine {
             url: None,
             added_by_hand: true,
             capture: None,
+            file: None,
             tracks: Vec::new(),
             audio: None,
             counters: uxduck_core::domain::video::VideoCounters::default(),
@@ -1188,10 +1423,15 @@ impl Engine {
             changed_at_us: now,
             version: 0,
         });
-        if self.video.capture_epochs.remove(&source.id).is_some()
-            && let Some(port) = self.video.port.as_mut()
-        {
-            port.close_capture(&source.id);
+        self.video.capture_epochs.remove(&source.id);
+        self.video.capture_permission_issues.remove(&source.id);
+        if let Some(port) = self.video.port.as_mut() {
+            if source.capture.is_some() {
+                port.close_capture(&source.id);
+            }
+            if input.enabled {
+                port.select_capture(&source.id, &input);
+            }
         }
         if !source.named_by_hand {
             source.name.clone_from(&input.name);
@@ -1237,15 +1477,20 @@ impl Engine {
             .capture
             .as_mut()
             .ok_or_else(|| ApiError::new(ErrorKind::InvalidValue, "This is not a local camera."))?;
-        if input.enabled == params.enabled {
+        if input.enabled == params.enabled
+            && !self.video.capture_permission_issues.contains(&source.id)
+        {
             return Ok(source);
         }
         input.enabled = params.enabled;
         let input = input.clone();
-        if self.video.capture_epochs.remove(&source.id).is_some()
-            && let Some(port) = self.video.port.as_mut()
-        {
+        self.video.capture_epochs.remove(&source.id);
+        self.video.capture_permission_issues.remove(&source.id);
+        if let Some(port) = self.video.port.as_mut() {
             port.close_capture(&source.id);
+            if input.enabled {
+                port.select_capture(&source.id, &input);
+            }
         }
         source.state = VideoState::Stopped;
         source.state_detail = Some(
@@ -1342,6 +1587,7 @@ impl Engine {
                     url: Some(url.clone()),
                     added_by_hand: true,
                     capture: None,
+                    file: None,
                     tracks: Vec::new(),
                     audio: None,
                     counters: uxduck_core::domain::video::VideoCounters::default(),
@@ -1408,11 +1654,14 @@ impl Engine {
             if let Some(port) = self.video.port.as_mut() {
                 port.close_rtsp(id);
                 port.close_capture(id);
+                port.close_file(id);
                 if let Some(recording) = self.video.recording.remove(id) {
                     port.stop_recording(&recording);
                 }
             }
             self.video.capture_epochs.remove(id);
+            self.video.capture_permission_issues.remove(id);
+            self.video.file_epochs.remove(id);
             self.video.opened.remove(id);
             self.video.needed.remove(id);
             if let Some(port) = self.video.port.as_mut() {
@@ -1532,6 +1781,8 @@ impl Engine {
                 if !was_needed && source.state == VideoState::Stopped {
                     source.state_detail = Some(if let Some(url) = &source.url {
                         format!("Connecting to {}", redact(url))
+                    } else if source.file.is_some() {
+                        "Starting recorded video".into()
                     } else if source.capture.is_some() {
                         "Starting camera capture".into()
                     } else {
@@ -1550,6 +1801,15 @@ impl Engine {
                         && let Some(port) = self.video.port.as_mut()
                     {
                         port.open_rtsp(&source.id, url);
+                    }
+                } else if let Some(input) = source.file.clone() {
+                    if !self.video.file_epochs.contains_key(&source.id) {
+                        self.video
+                            .file_epochs
+                            .insert(source.id.clone(), source.version);
+                        if let Some(port) = self.video.port.as_mut() {
+                            port.open_file(&source.id, &input, source.version);
+                        }
                     }
                 } else if let Some(input) = source.capture.clone() {
                     if !self.video.capture_epochs.contains_key(&source.id) {
@@ -1588,19 +1848,29 @@ impl Engine {
                 {
                     port.close_capture(&source.id);
                 }
+                if self.video.file_epochs.remove(&source.id).is_some()
+                    && let Some(port) = self.video.port.as_mut()
+                {
+                    port.close_file(&source.id);
+                }
                 let detail = if source.capture.as_ref().is_some_and(|c| !c.enabled) {
-                    "Camera capture paused"
+                    "Camera capture paused".to_owned()
+                } else if self.video.capture_permission_issues.contains(&source.id) {
+                    source
+                        .state_detail
+                        .clone()
+                        .unwrap_or_else(|| "Camera idle".into())
                 } else {
-                    "Camera idle"
+                    "Camera idle".to_owned()
                 };
                 if source.state != VideoState::Stopped
-                    || source.state_detail.as_deref() != Some(detail)
+                    || source.state_detail.as_deref() != Some(detail.as_str())
                 {
                     if source.state != VideoState::Stopped {
                         source.changed_at_us = self.clock.now_us();
                     }
                     source.state = VideoState::Stopped;
-                    source.state_detail = Some(detail.into());
+                    source.state_detail = Some(detail);
                     source.counters.bitrate_bps = 0;
                     source.version += 1;
                     self.commit_as(actor(), Change::VideoSourceUpserted { source });
@@ -1671,6 +1941,55 @@ pub(crate) fn handle(
         }
     };
     match request {
+        ClientRequest::VideoCaptureSettings(params) => {
+            require(Capability::Config)?;
+            engine
+                .video
+                .port
+                .as_mut()
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorKind::InvalidRequest,
+                        "Camera privacy settings need UXDuck on this computer.",
+                    )
+                })?
+                .capture_settings(params.microphone)
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&uxduck_contracts::dto::Empty {})
+        }
+        ClientRequest::VideoFile(params) => {
+            require(Capability::Config)?;
+            let source = engine.video_file(params)?;
+            to_value(&VideoSourceDto::from(&source))
+        }
+        ClientRequest::VideoDemos(params) => {
+            require(Capability::Config)?;
+            if params.action == uxduck_contracts::dto::video::DemoAction::Remove
+                && engine
+                    .state
+                    .video_sources
+                    .values()
+                    .any(|s| s.file.as_ref().is_some_and(|f| f.demo_id == params.id))
+            {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "This demo is used by a camera. Replace its footage or remove the camera first.",
+                ));
+            }
+            let result = engine
+                .video
+                .port
+                .as_mut()
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "Demo footage needs UXDuck Desktop.",
+                    )
+                })?
+                .demos(&params)
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&result)
+        }
         ClientRequest::VideoDevices(_) => {
             require(Capability::Config)?;
             to_value(&engine.video_devices())

@@ -411,7 +411,7 @@ impl Producer for MissionProgress {
     }
 
     fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
-        let &Message::MissionCurrent { seq } = message else {
+        let &Message::MissionCurrent { seq, state, mode } = message else {
             return;
         };
         let from = (self.id(), component_id, now_us);
@@ -420,6 +420,20 @@ impl Producer for MissionProgress {
             "Mission item",
             Unit::None,
             f64::from(seq),
+            from,
+        );
+        out.item(
+            "mission.state",
+            "Mission state",
+            Unit::None,
+            f64::from(state),
+            from,
+        );
+        out.item(
+            "mission.mode",
+            "Mission execution mode",
+            Unit::None,
+            f64::from(mode),
             from,
         );
     }
@@ -1030,6 +1044,20 @@ mod tests {
             .into_iter()
             .map(|i| (i.key, i.value.unwrap_or(f64::NAN)))
             .collect()
+    }
+
+    #[test]
+    fn mission_progress_keeps_the_reported_execution_state() {
+        for state in [0, 2, 3, 4, 5] {
+            let items = produced(&Message::MissionCurrent {
+                seq: 4,
+                state,
+                mode: 1,
+            });
+            assert!(items.contains(&("mission.current".into(), 4.0)));
+            assert!(items.contains(&("mission.state".into(), f64::from(state))));
+            assert!(items.contains(&("mission.mode".into(), 1.0)));
+        }
     }
 
     #[test]

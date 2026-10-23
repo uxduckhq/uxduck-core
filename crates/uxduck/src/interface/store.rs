@@ -455,7 +455,14 @@ fn sync_tree(dir: &Path) -> std::io::Result<()> {
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let count = std::io::Read::read(&mut file, &mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
     Ok(hex(&hasher.finalize()))
 }
 

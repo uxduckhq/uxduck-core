@@ -1,0 +1,9 @@
+{
+  "method": "video/file",
+  "params": {
+    "sourceId": null,
+    "path": "/recordings/flight.mp4",
+    "demoId": null,
+    "repeat": false
+  }
+}

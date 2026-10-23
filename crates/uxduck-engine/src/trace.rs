@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 use uxduck_contracts::dto::trace::{FrameKind, RequestId};
 
 /// Object keys whose string values are never shown by the tap.
-const SENSITIVE_KEYS: [&str; 10] = [
+const SENSITIVE_KEYS: [&str; 11] = [
     "token",
+    "followUpKey",
     "bootstrap",
     "session",
     "password",

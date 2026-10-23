@@ -132,6 +132,16 @@ pub fn example(
             ],
             Vec::new(),
         ),
+        PlanVehicleType::Blimp => (
+            "Example airship route",
+            vec![
+                waypoint(0.0, 20.0, 10.0),
+                waypoint(20.0, 20.0, 10.0),
+                waypoint(20.0, 0.0, 10.0),
+                waypoint(0.0, 0.0, 10.0),
+            ],
+            Vec::new(),
+        ),
     };
     let mut body = PlanBody::new(name.into(), vehicle_type, autopilot);
     body.frame = PlanFrame::AboveHome;
@@ -152,16 +162,16 @@ pub fn example(
     body
 }
 
-/// The plan type a simulated vehicle flies as, if one.
-fn plan_type(vehicle: SimVehicle) -> Option<PlanVehicleType> {
+/// The plan type a simulated vehicle flies as.
+fn plan_type(vehicle: SimVehicle) -> PlanVehicleType {
     match vehicle {
-        SimVehicle::Multicopter => Some(PlanVehicleType::Multicopter),
-        SimVehicle::Plane | SimVehicle::Jet => Some(PlanVehicleType::Plane),
-        SimVehicle::Vtol => Some(PlanVehicleType::Vtol),
-        SimVehicle::Rover => Some(PlanVehicleType::Rover),
-        SimVehicle::Boat => Some(PlanVehicleType::Boat),
-        SimVehicle::Submarine => Some(PlanVehicleType::Submarine),
-        SimVehicle::Airship => None,
+        SimVehicle::Multicopter => PlanVehicleType::Multicopter,
+        SimVehicle::Plane | SimVehicle::Jet => PlanVehicleType::Plane,
+        SimVehicle::Vtol => PlanVehicleType::Vtol,
+        SimVehicle::Rover => PlanVehicleType::Rover,
+        SimVehicle::Boat => PlanVehicleType::Boat,
+        SimVehicle::Submarine => PlanVehicleType::Submarine,
+        SimVehicle::Airship => PlanVehicleType::Blimp,
     }
 }
 
@@ -199,9 +209,7 @@ impl Engine {
         if snapshot_id.is_some() || self.transfers.examples_sent.contains(&key) {
             return;
         }
-        let Some(vehicle_type) = plan_type(kind) else {
-            return;
-        };
+        let vehicle_type = plan_type(kind);
         self.transfers.examples_sent.insert(key);
         let px4 = autopilot == SimAutopilot::Px4;
         let body = example(
@@ -255,6 +263,7 @@ mod tests {
             PlanVehicleType::Rover,
             PlanVehicleType::Boat,
             PlanVehicleType::Submarine,
+            PlanVehicleType::Blimp,
         ] {
             let body = example(vehicle_type, PlanAutopilot::Ardupilot, HOME, 0.0);
             assert!(body.items.len() >= 4, "{vehicle_type:?}");

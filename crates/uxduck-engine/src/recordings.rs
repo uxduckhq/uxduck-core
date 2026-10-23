@@ -213,6 +213,7 @@ impl Engine {
             detail: None,
             trigger,
             capture: source.capture.clone(),
+            file: source.file.clone(),
             camera_receipt_id: self
                 .video
                 .camera_recording

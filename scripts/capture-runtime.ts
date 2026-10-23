@@ -22,8 +22,8 @@ const runtime = join(base, "capture");
 const sources = [
   {
     name: "ffmpeg.tar.xz",
-    url: "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz",
-    sha: "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+    url: "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+    sha: "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
     dir: "ffmpeg",
   },
   {
@@ -127,6 +127,20 @@ try {
       if (!devices.includes(expected))
         throw new Error(
           `The built capture helper has no ${expected} device input. Check configure's dependency warnings.`,
+        );
+      const formats = execFileSync(executable, ["-hide_banner", "-demuxers"], { encoding: "utf8" });
+      const protocols = execFileSync(executable, ["-hide_banner", "-protocols"], {
+        encoding: "utf8",
+      });
+      const filters = execFileSync(executable, ["-hide_banner", "-bsfs"], { encoding: "utf8" });
+      if (
+        !/mov,mp4/.test(formats) ||
+        !/mpegts/.test(formats) ||
+        !/^\s*file\s*$/m.test(protocols) ||
+        !/^h264_mp4toannexb$/m.test(filters)
+      )
+        throw new Error(
+          "The media helper lacks required MP4/MPEG-TS file playback support. Rebuild it with pnpm capture:build.",
         );
       const encoders = execFileSync(executable, ["-hide_banner", "-encoders"], {
         encoding: "utf8",
@@ -265,6 +279,10 @@ try {
         "BWDIF_FILTER",
         "AAC_ENCODER",
         "ARESAMPLE_FILTER",
+        "FILE_PROTOCOL",
+        "MOV_DEMUXER",
+        "MPEGTS_DEMUXER",
+        "H264_MP4TOANNEXB_BSF",
       ]) {
         if (!components.includes(`#define CONFIG_${required} 1`))
           throw new Error(`The cross-built capture helper is missing ${required}.`);

@@ -8,7 +8,7 @@ their own OS/architecture. Cross-built Mac binaries are checked by their Mach-O
 architecture and compiled capture components; their execution is verified on the
 target architecture. No installed codec libraries are used.
 
-The script downloads FFmpeg 8.1.2 and x264 commit
+The script downloads FFmpeg 9.0.2 and x264 commit
 `31e19f92f00c7003fa115047ce50978bc98c3a0d`, validates their pinned SHA-256 hashes,
 applies the small AVFoundation identity/default-mode patch, builds a static
 standalone executable and checks the required capture input and H.264 encoders.

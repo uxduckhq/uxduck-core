@@ -19,7 +19,7 @@ fn report(target: &str, kind: &str) -> crate::update::Report {
                 file: "unused".into(),
                 url: "https://example.test/update".into(),
                 size: 5,
-                sha256: format!("{:x}", Sha256::digest(b"hello")),
+                sha256: checksum(b"hello"),
             }],
         },
         target,
@@ -147,7 +147,7 @@ fn worker_checks_the_exact_signed_manifest_and_package_again() {
     assert!(verified_artifact(&dir, public).is_err());
 }
 
-fn test_engine() -> uxduck_engine::Engine {
+pub(super) fn test_engine() -> uxduck_engine::Engine {
     use crate::adapters::system::{OsRandom, SystemClock};
     use uxduck_engine::runtime::{
         Forget, MemoryCredentials, NoAgent, NoLinks, NoPlugins, NoSystem, Ports,
@@ -235,7 +235,7 @@ fn staged_with_files(root: &Path) -> (PathBuf, String, Vec<u8>) {
         file: "list".into(),
         url: "https://example.test/list".into(),
         size: list.len() as u64,
-        sha256: format!("{:x}", Sha256::digest(&list)),
+        sha256: checksum(&list),
     });
     let bytes = serde_json::to_vec(&report.manifest).unwrap();
     let signature = minisign::sign(None, &key.sk, std::io::Cursor::new(&bytes), None, None)
@@ -303,7 +303,7 @@ fn only_this_targets_checked_https_list_is_used() {
 
 /// Serves `files` at their paths on this computer, as the release bucket does.
 #[cfg(unix)]
-async fn serve(
+pub(super) async fn serve(
     files: std::collections::HashMap<String, Vec<u8>>,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use axum::response::IntoResponse;
@@ -336,7 +336,7 @@ async fn publish_list(list: &uxduck_contracts::dto::release::BundleFiles) -> Rel
         file: "list".into(),
         url: format!("{base}/list"),
         size: bytes.len() as u64,
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        sha256: checksum(&bytes),
     }
 }
 
@@ -353,19 +353,13 @@ async fn a_per_file_download_fetches_and_checks_only_the_files_this_app_lacks() 
         path: path.into(),
         mode: 0o755,
         size: bytes.len() as u64,
-        sha256: format!("{:x}", Sha256::digest(bytes)),
+        sha256: checksum(bytes),
         packed,
     };
     let new_daemon = b"new daemon".repeat(50);
+    let sha = checksum(&new_daemon);
     let compressed = zstd::encode_all(&new_daemon[..], 3).unwrap();
-    let (base, asked) = serve(
-        [(
-            format!("/files/{:x}.zst", Sha256::digest(&new_daemon)),
-            compressed.clone(),
-        )]
-        .into(),
-    )
-    .await;
+    let (base, asked) = serve([(format!("/files/{sha}.zst"), compressed.clone())].into()).await;
     let list = BundleFiles {
         schema: 1,
         version: "0.2.0".into(),
@@ -397,13 +391,9 @@ async fn a_per_file_download_fetches_and_checks_only_the_files_this_app_lacks() 
     let mut s = status(UpdatePhase::Downloading);
     let result = download_files(channel, &dir, &artifact, "0.2.0", &installed, &mut s).await;
     // Only the changed daemon was downloaded, and kept once it checked out.
-    assert_eq!(
-        *asked.lock().unwrap(),
-        [format!("/files/{:x}.zst", Sha256::digest(&new_daemon))]
-    );
+    assert_eq!(*asked.lock().unwrap(), [format!("/files/{sha}.zst")]);
     assert_eq!(s.size, Some(compressed.len() as u64));
     assert_eq!(s.received, Some(compressed.len() as u64));
-    let sha = format!("{:x}", Sha256::digest(&new_daemon));
     assert!(files::have_blob(&dir, &sha, new_daemon.len() as u64));
     assert!(!dir.join("blobs").join(format!("{sha}.zst")).exists());
     if cfg!(target_os = "macos") {
@@ -487,4 +477,8 @@ async fn obsolete_download_progress_and_failures_cannot_replace_the_new_channel(
     assert!(s.detail.is_none());
     assert!(s.version.is_none());
     assert!(pending, "the new check must remain queued");
+}
+
+fn checksum(bytes: impl AsRef<[u8]>) -> String {
+    format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes)))
 }

@@ -36,7 +36,8 @@ pub(super) fn read(
     allowed: impl Fn(&str) -> bool,
 ) -> Result<BundleFiles, String> {
     if bytes.len() as u64 != artifact.size
-        || format!("{:x}", Sha256::digest(bytes)) != artifact.sha256.to_ascii_lowercase()
+        || format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes)))
+            != artifact.sha256.to_ascii_lowercase()
     {
         return Err("The update's file list does not match the signed release.".into());
     }
@@ -75,7 +76,10 @@ pub(super) fn sha256(path: &Path) -> Result<String, String> {
         }
         hash.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!(
+        "{:x}",
+        uxduck_core::encoding::Hex(&hash.finalize())
+    ))
 }
 
 /// The bundle folder's mode and every item under it, sorted by path, as
@@ -239,7 +243,9 @@ pub(super) fn unpack(compressed: &Path, dir: &Path, sha256: &str, size: u64) -> 
             hash.update(&buffer[..read]);
             file.write_all(&buffer[..read]).map_err(|e| e.to_string())?;
         }
-        if written != size || format!("{:x}", hash.finalize()) != sha256 {
+        if written != size
+            || format!("{:x}", uxduck_core::encoding::Hex(&hash.finalize())) != sha256
+        {
             return Err("An update file does not match the signed release.".to_owned());
         }
         file.sync_all().map_err(|e| e.to_string())?;
@@ -456,7 +462,14 @@ mod tests {
 
     fn store(dir: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(dir.join("blobs")).unwrap();
-        std::fs::write(blob(dir, &format!("{:x}", Sha256::digest(bytes))), bytes).unwrap();
+        std::fs::write(
+            blob(
+                dir,
+                &format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes))),
+            ),
+            bytes,
+        )
+        .unwrap();
     }
 
     fn artifact(bytes: &[u8]) -> ReleaseArtifact {
@@ -465,7 +478,7 @@ mod tests {
             kind: "files".into(),
             file: "uxduck-0.3.0-aarch64-apple-darwin.files.json".into(),
             url: "https://app.uxduck.com/releases/v0.3.0/x.files.json".into(),
-            sha256: format!("{:x}", Sha256::digest(bytes)),
+            sha256: format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes))),
             size: bytes.len() as u64,
         }
     }
@@ -676,7 +689,10 @@ mod tests {
     fn a_downloaded_file_is_kept_only_when_it_is_exactly_the_listed_contents() {
         let dir = tempfile::tempdir().unwrap();
         let contents = b"the new daemon".repeat(100);
-        let sha = format!("{:x}", Sha256::digest(&contents));
+        let sha = format!(
+            "{:x}",
+            uxduck_core::encoding::Hex(&Sha256::digest(&contents))
+        );
         let size = contents.len() as u64;
         let compressed = dir.path().join("download.zst");
         std::fs::write(&compressed, zstd::encode_all(&contents[..], 3).unwrap()).unwrap();

@@ -216,7 +216,10 @@ impl Credentials for FileCredentials {
 }
 
 fn fingerprint(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    format!(
+        "{:x}",
+        uxduck_core::encoding::Hex(&Sha256::digest(token.as_bytes()))
+    )
 }
 
 fn account_key(api: &str) -> String {

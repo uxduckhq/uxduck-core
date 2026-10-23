@@ -5,6 +5,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Prerecorded footage played as a camera, independent of vehicle motion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFileInput {
+    /// Absolute path on the computer running UXDuck; never uploaded.
+    pub path: String,
+    pub name: String,
+    pub repeat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_id: Option<String>,
+}
+
 /// A camera attached to the computer running the daemon, never to a UI session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -192,6 +204,9 @@ pub struct VideoSource {
     /// Local device capture and its encoding provenance; absent for network cameras.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    /// A local file or downloaded demo, never a live camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<VideoFileInput>,
     /// Every video track an RTSP camera offers, the one playing marked
     /// (S90); empty until it answers, and for UDP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -363,6 +378,9 @@ pub struct VideoRecording {
     /// Capture settings at the start; these pictures were encoded by UXDuck's helper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    /// A local file or downloaded demo, never a live camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<VideoFileInput>,
     /// The receipt of the vehicle's camera told to record too (S145).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_receipt_id: Option<String>,

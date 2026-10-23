@@ -17,6 +17,7 @@ pub enum PlanVehicleType {
     Rover,
     Boat,
     Submarine,
+    Blimp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -482,6 +483,6 @@ pub struct PlanExamplesParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExamplesResult {
-    /// One per vehicle type: multicopter, plane, VTOL, rover, boat, submarine.
+    /// One per vehicle type: multicopter, plane, VTOL, rover, boat, submarine, blimp.
     pub examples: Vec<PlanBody>,
 }

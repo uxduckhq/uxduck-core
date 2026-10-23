@@ -665,12 +665,14 @@ impl Engine {
         self.item_watchers.remove(&id);
         self.location_disconnected(id);
         self.tray_watchers.remove(&id);
+        self.app_update.watchers.remove(&id);
         self.messages.forget(id);
         self.connections.remove(&id);
         self.tracers.remove(&id);
         self.telemetry_subscribers.remove(&id);
         self.subscribers.remove(&id);
         self.review_idle_simulations();
+        self.app_update_flush();
     }
 
     #[must_use]
@@ -697,6 +699,7 @@ impl Engine {
             self.send(id, &reply);
         }
         self.review_idle_simulations();
+        self.app_update_flush();
     }
 
     /// Journals one change and pushes it to subscribers: the only way state

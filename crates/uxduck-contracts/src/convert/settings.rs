@@ -73,6 +73,7 @@ impl From<s::StorageCategory> for dto::StorageCategory {
             s::StorageCategory::SimulatorData => Self::SimulatorData,
             s::StorageCategory::Parameters => Self::Parameters,
             s::StorageCategory::VehicleFiles => Self::VehicleFiles,
+            s::StorageCategory::DemoVideos => Self::DemoVideos,
         }
     }
 }
@@ -92,6 +93,7 @@ impl From<dto::StorageCategory> for s::StorageCategory {
             dto::StorageCategory::SimulatorData => Self::SimulatorData,
             dto::StorageCategory::Parameters => Self::Parameters,
             dto::StorageCategory::VehicleFiles => Self::VehicleFiles,
+            dto::StorageCategory::DemoVideos => Self::DemoVideos,
         }
     }
 }

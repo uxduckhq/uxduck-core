@@ -79,6 +79,7 @@ impl From<&core::VideoSource> for dto::VideoSource {
             url: v.url.as_deref().map(core::redact),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),
+            file: v.file.as_ref().map(Into::into),
             tracks: v.tracks.iter().map(Into::into).collect(),
             audio: v.audio.as_ref().map(|a| dto::VideoAudio {
                 name: a.name.clone(),
@@ -133,6 +134,7 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
             },
             detail: v.detail.clone(),
             capture: v.capture.as_ref().map(Into::into),
+            file: v.file.as_ref().map(Into::into),
             camera_receipt_id: v.camera_receipt_id.clone(),
             sound: v.sound,
             file_name: v.file_name.clone(),
@@ -212,6 +214,17 @@ impl From<dto::CaptureInput> for core::CaptureInput {
                 name: s.name,
             }),
             no_sound: v.no_sound,
+        }
+    }
+}
+
+impl From<&core::VideoFileInput> for dto::VideoFileInput {
+    fn from(v: &core::VideoFileInput) -> Self {
+        Self {
+            path: v.path.clone(),
+            name: v.name.clone(),
+            repeat: v.repeat,
+            demo_id: v.demo_id.clone(),
         }
     }
 }

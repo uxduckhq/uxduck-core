@@ -122,6 +122,7 @@ impl EngineHandle {
                     // not start work either. Checkpoint remains available above.
                     Command::Run(_) => {}
                 }
+                engine.app_update_flush();
                 let now = Requested {
                     restart: engine.restart_requested(),
                     stop: engine.stop_requested(),

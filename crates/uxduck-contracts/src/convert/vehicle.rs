@@ -289,6 +289,7 @@ impl From<&core_link::Link> for link::Link {
                 },
                 detail: launch.detail.clone(),
             }),
+            paused: l.paused,
             version: l.version,
         }
     }

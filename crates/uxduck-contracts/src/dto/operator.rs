@@ -281,6 +281,7 @@ pub struct Layout {
 pub enum VehicleClass {
     Plane,
     Copter,
+    Airship,
     Rover,
     Boat,
     Sub,

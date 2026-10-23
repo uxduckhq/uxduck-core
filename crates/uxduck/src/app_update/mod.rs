@@ -709,7 +709,9 @@ fn verify_file(path: &Path, artifact: &ReleaseArtifact) -> Result<(), String> {
         }
         hash.update(&buf[..n]);
     }
-    if format!("{:x}", hash.finalize()) != artifact.sha256.to_ascii_lowercase() {
+    if format!("{:x}", uxduck_core::encoding::Hex(&hash.finalize()))
+        != artifact.sha256.to_ascii_lowercase()
+    {
         return Err("The installer does not match the signed release's checksum.".into());
     }
     Ok(())

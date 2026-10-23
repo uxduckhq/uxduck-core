@@ -52,8 +52,9 @@ pub const AGENT_METHODS: &[&str] = &[
     "sim/binaries",
     "sim/start",
     "sim/stop",
-    // Starting one again after a crash asks too.
+    // Starting one again after a crash asks too, and so does pausing one.
     "sim/restart",
+    "sim/pause",
     // Practice (S100, ADR-0024 X12): listing and reading attempts; starting
     // one asks first; the agent never flies an exercise for the person.
     "practice/list",
@@ -169,6 +170,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "sim/start",
     "sim/stop",
     "sim/restart",
+    "sim/pause",
     "sim/snapshot",
     "snapshot/list",
     "snapshot/start",

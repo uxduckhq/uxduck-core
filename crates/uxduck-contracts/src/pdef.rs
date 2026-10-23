@@ -144,6 +144,7 @@ pub fn from_xml(text: &str) -> Result<(Option<Firmware>, Vec<ParamDefinition>), 
     let mut field: Option<String> = None;
     let mut value_code: Option<String> = None;
     let mut in_values = false;
+    let mut content = String::new();
     let bad = |e: &dyn std::fmt::Display| format!("not ArduPilot's apm.pdef.xml: {e}");
     loop {
         let event = reader.read_event().map_err(|e| bad(&e))?;
@@ -151,13 +152,13 @@ pub fn from_xml(text: &str) -> Result<(Option<Firmware>, Vec<ParamDefinition>), 
             Event::Start(ref tag) | Event::Empty(ref tag) => {
                 let empty = matches!(event, Event::Empty(_));
                 match tag.name().as_ref() {
-                    b"parameters" => {
+                    "parameters" => {
                         group = attribute(tag, "name").unwrap_or_default();
                         if let Some(f) = Firmware::parse(&group) {
                             firmware = Some(f);
                         }
                     }
-                    b"param" => {
+                    "param" => {
                         let full = attribute(tag, "name").unwrap_or_default();
                         // Vehicle parameters are written `ArduCopter:RTL_ALT`.
                         let name = full.rsplit(':').next().unwrap_or_default().to_owned();
@@ -181,32 +182,44 @@ pub fn from_xml(text: &str) -> Result<(Option<Firmware>, Vec<ParamDefinition>), 
                             current = Some(definition);
                         }
                     }
-                    b"field" => field = attribute(tag, "name"),
-                    b"values" => in_values = true,
-                    b"value" if in_values => value_code = attribute(tag, "code"),
+                    "field" => {
+                        content.clear();
+                        field = (!empty).then(|| attribute(tag, "name")).flatten();
+                    }
+                    "values" => in_values = true,
+                    "value" if in_values => {
+                        content.clear();
+                        value_code = (!empty).then(|| attribute(tag, "code")).flatten();
+                    }
                     _ => {}
                 }
             }
-            Event::Text(ref raw) => {
-                let text = raw.unescape().map_err(|e| bad(&e))?;
-                let Some(definition) = current.as_mut() else {
-                    continue;
-                };
-                if let Some(code) = value_code.take() {
-                    if let Some(value) = number(&code) {
-                        definition.values.push(ValueName {
-                            value,
-                            name: text.trim().to_owned(),
-                        });
-                    }
-                } else if let Some(name) = field.take() {
-                    apply_field(definition, &name, text.trim());
-                }
+            Event::Text(raw) => content.push_str(&raw.xml10_content()),
+            Event::CData(raw) => content.push_str(&raw.xml10_content()),
+            Event::GeneralRef(raw) => {
+                let reference = format!("&{};", raw.as_ref());
+                content.push_str(&quick_xml::escape::unescape(&reference).map_err(|e| bad(&e))?);
             }
             Event::End(ref tag) => match tag.name().as_ref() {
-                b"param" => parameters.extend(current.take()),
-                b"field" => field = None,
-                b"values" => in_values = false,
+                "param" => parameters.extend(current.take()),
+                "field" => {
+                    if let (Some(definition), Some(name)) = (current.as_mut(), field.take()) {
+                        apply_field(definition, &name, content.trim());
+                    }
+                    content.clear();
+                }
+                "value" => {
+                    if let (Some(definition), Some(code)) = (current.as_mut(), value_code.take())
+                        && let Some(value) = number(&code)
+                    {
+                        definition.values.push(ValueName {
+                            value,
+                            name: content.trim().to_owned(),
+                        });
+                    }
+                    content.clear();
+                }
+                "values" => in_values = false,
                 _ => {}
             },
             Event::Eof => break,
@@ -346,7 +359,7 @@ fn attribute(tag: &BytesStart<'_>, name: &str) -> Option<String> {
     tag.try_get_attribute(name)
         .ok()
         .flatten()
-        .and_then(|a| a.unescape_value().ok())
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
         .map(std::borrow::Cow::into_owned)
 }
 
@@ -395,6 +408,22 @@ mod tests {
         assert_eq!(find(&all, "INS_ACC_ID").user, UserLevel::Advanced);
         let gains = all.iter().filter(|p| p.name == "ATC_RAT_PIT_D").count();
         assert_eq!(gains, 1, "JSON keeps one variant");
+    }
+
+    #[test]
+    fn xml_reassembles_entities_and_cdata_before_applying_fields() {
+        let (_, parameters) = from_xml(
+            r#"<paramfile><parameters name="ArduCopter">
+            <param name="TEST" humanName="A &amp; B">
+                <field name="Units">m&#x2f;s</field>
+                <values><value code="1">A &amp; B <![CDATA[<ready>]]> &#937;</value></values>
+            </param></parameters></paramfile>"#,
+        )
+        .unwrap();
+        assert_eq!(parameters[0].display_name, "A & B");
+        assert_eq!(parameters[0].units.as_deref(), Some("m/s"));
+        assert_eq!(parameters[0].values[0].name, "A & B <ready> Ω");
+        assert!(from_xml(r#"<parameters><param name="X"><field name="Units">&unknown;</field></param></parameters>"#).is_err());
     }
 
     #[test]

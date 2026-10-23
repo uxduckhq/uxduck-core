@@ -182,9 +182,26 @@ const DEV_INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <key>LSUIElement</key><true/>
   <key>NSLocationUsageDescription</key><string>UXDuck shows where you are on its maps, and its AI can use it when you ask.</string>
   <key>NSLocationWhenInUseUsageDescription</key><string>UXDuck shows where you are on its maps, and its AI can use it when you ask.</string>
+  <key>NSCameraUsageDescription</key><string>UXDuck shows and records video from the camera you choose.</string>
+  <key>NSMicrophoneUsageDescription</key><string>UXDuck records sound when you choose a camera microphone.</string>
 </dict>
 </plist>
 "#;
+
+/// Media authorization must use the matching outer app executable. In particular,
+/// never fall back to an older installed tray when running a development daemon.
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_permission_binary() -> std::io::Result<PathBuf> {
+    let exe = dunce::canonicalize(std::env::current_exe()?)?;
+    let binary = exe.with_file_name("uxduck-tray");
+    if !binary.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Camera permission needs the matching uxduck-tray beside uxduck. Run cargo build -p uxduck-tray, or reinstall UXDuck.",
+        ));
+    }
+    in_app(&binary)
+}
 
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::unnecessary_wraps, reason = "macOS can fail here")]

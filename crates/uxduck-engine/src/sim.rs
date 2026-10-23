@@ -6,7 +6,9 @@
 use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::RunsIn;
 use uxduck_contracts::dto::link::{IdParams, Link as LinkDto, LinkAddParams};
-use uxduck_contracts::dto::sim::{SimBinariesResult, SimBuildParams, SimForward, SimStartParams};
+use uxduck_contracts::dto::sim::{
+    SimBinariesResult, SimBuildParams, SimForward, SimPauseParams, SimStartParams,
+};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
@@ -263,6 +265,10 @@ pub(crate) fn handle(
             require(Capability::Config)?;
             restart(engine, connection, &id)
         }
+        ClientRequest::SimPause(SimPauseParams { id, paused }) => {
+            require(Capability::Control)?;
+            pause(engine, connection, &id, paused)
+        }
         ClientRequest::SimBinaries(_) => {
             require(Capability::Read)?;
             to_value(&SimBinariesResult {
@@ -370,12 +376,107 @@ pub(crate) fn restart(
     link.status = LinkStatus::Configured;
     link.status_detail = None;
     link.launch = None;
+    // A new simulator starts running, whatever the last one was doing.
+    link.paused = false;
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
     engine.links.open(&link);
     engine.begin_launch(id);
     let link = engine.state.links.get(id).unwrap_or(&link);
     to_value(&uxduck_contracts::dto::link::Link::from(link))
+}
+
+/// Pauses a simulated vehicle where it is, or resumes it (maintainer,
+/// 2026-10-19: real vehicles cannot pause, but a simulation can). Its
+/// simulator runs no time while paused: it does not move, its failsafes do
+/// not count down, and UXDuck neither expects to hear from it nor sends it
+/// anything; commands and changes to it are refused until it resumes. Only
+/// a running ArduPilot simulation pauses: PX4's clock does not stop with
+/// its process, and a start in the air finishes its take-off first.
+pub(crate) fn pause(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    id: &str,
+    paused: bool,
+) -> Result<Value, ApiError> {
+    let Some(mut link) = engine.state.links.get(id).cloned() else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no simulated vehicle on link {id}"),
+        ));
+    };
+    let LinkKind::Simulator { autopilot, .. } = &link.kind else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no simulated vehicle on link {id}"),
+        ));
+    };
+    if link.paused == paused {
+        return to_value(&LinkDto::from(&link));
+    }
+    if paused {
+        if *autopilot == SimAutopilot::Px4 {
+            return Err(invalid("a PX4 simulation can't be paused"));
+        }
+        if link.status != LinkStatus::Up {
+            return Err(invalid("the simulation isn't running"));
+        }
+        if link.launch.as_ref().is_some_and(|l| {
+            matches!(
+                l.stage,
+                uxduck_core::domain::link::LaunchStage::Climbing
+                    | uxduck_core::domain::link::LaunchStage::Restoring
+            )
+        }) {
+            return Err(invalid(
+                "the simulation can be paused once its take-off finishes",
+            ));
+        }
+    }
+    engine.links.pause_simulation(id, paused);
+    link.paused = paused;
+    link.version += 1;
+    engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+    to_value(&LinkDto::from(&link))
+}
+
+impl Engine {
+    /// The data plane could not pause or resume a simulator: the link shows
+    /// what it is really doing, and the person is told why.
+    pub fn simulation_pause_failed(&mut self, link_id: &str, paused: bool, why: String) {
+        let Some(mut link) = self.state.links.get(link_id).cloned() else {
+            return;
+        };
+        if link.paused == paused {
+            link.paused = !paused;
+            link.version += 1;
+            let name = link.name.clone();
+            self.commit_as(
+                uxduck_core::events::Actor {
+                    client_id: "data-plane".into(),
+                    operator_id: None,
+                    identity: None,
+                },
+                Change::LinkUpserted { link },
+            );
+            self.raise(crate::commands::Raise {
+                severity: uxduck_core::domain::notification::Severity::Warning,
+                kind: uxduck_core::domain::notification::NotificationKind::Transient,
+                subject: uxduck_core::domain::notification::Subject::Link {
+                    id: link_id.to_owned(),
+                },
+                title: if paused {
+                    format!("Couldn't pause {name}")
+                } else {
+                    format!("Couldn't resume {name}")
+                },
+                body: Some(why),
+                actions: Vec::new(),
+                condition: None,
+                report: Some("sim-pause-failed".into()),
+            });
+        }
+    }
 }
 
 fn add_params(params: SimStartParams) -> LinkAddParams {

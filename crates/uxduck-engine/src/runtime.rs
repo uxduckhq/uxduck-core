@@ -180,6 +180,12 @@ pub trait LinkPort: Send {
     fn message(&mut self, order: MessageOrder) {
         let _ = order;
     }
+    /// Freezes a simulated vehicle's simulator where it is, or lets it run
+    /// again (`sim/pause`). Nothing is sent on the link while it is paused.
+    /// A data plane without simulators has none to pause.
+    fn pause_simulation(&mut self, link_id: &str, paused: bool) {
+        let _ = (link_id, paused);
+    }
     /// UXDuck's 1 Hz ground station heartbeat to a vehicle (S81): on as it
     /// starts; off when nobody supervises the vehicle, so its own lost
     /// ground station failsafe acts (ADR-0003 C16).
@@ -789,6 +795,8 @@ pub trait AnalyticsPort: Send {
     /// whatever was queued, so nothing identifies this install any more.
     fn set_enabled(&mut self, on: bool);
     fn set_internal(&mut self, _internal: bool) {}
+    /// Ends a reporting session without changing consent or rewriting queued events.
+    fn reset_session(&mut self) {}
 }
 
 /// No analytics: everything is dropped. The default, for tests and the

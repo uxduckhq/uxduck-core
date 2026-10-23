@@ -68,13 +68,17 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::MissionRestore(_)
         | ClientRequest::TransferCancel(_)
         | ClientRequest::PluginCommand(_)
-        | ClientRequest::PracticeGuide(_) => Some(Capability::Control),
+        | ClientRequest::PracticeGuide(_)
+        | ClientRequest::SimPause(_) => Some(Capability::Control),
         ClientRequest::ParamSet(_)
         | ClientRequest::PluginInstall(_)
         | ClientRequest::VehicleAddNote(_)
         | ClientRequest::VideoAssign(_)
         | ClientRequest::VideoDevices(_)
+        | ClientRequest::VideoFile(_)
+        | ClientRequest::VideoDemos(_)
         | ClientRequest::VideoCapture(_)
+        | ClientRequest::VideoCaptureSettings(_)
         | ClientRequest::VideoCaptureEnable(_)
         | ClientRequest::VideoAdd(_)
         | ClientRequest::VideoRemove(_)
@@ -376,7 +380,12 @@ impl Engine {
                     params.source_id
                 ),
             },
+            ClientRequest::VideoFile(_) => "play prerecorded footage as a camera".into(),
+            ClientRequest::VideoDemos(_) => "manage optional demo footage downloads".into(),
             ClientRequest::VideoDevices(_) => "list cameras attached to this computer".into(),
+            ClientRequest::VideoCaptureSettings(_) => {
+                "open camera privacy settings on this computer".into()
+            }
             ClientRequest::VideoCapture(params) => {
                 format!("capture video from {}", params.input.name)
             }
@@ -487,7 +496,10 @@ impl Engine {
             ClientRequest::VehicleEditNote(_) => "edit a note in a vehicle's history".into(),
             request @ (ClientRequest::VideoAssign(_)
             | ClientRequest::VideoDevices(_)
+            | ClientRequest::VideoFile(_)
+            | ClientRequest::VideoDemos(_)
             | ClientRequest::VideoCapture(_)
+            | ClientRequest::VideoCaptureSettings(_)
             | ClientRequest::VideoCaptureEnable(_)
             | ClientRequest::VideoAdd(_)
             | ClientRequest::VideoRemove(_)
@@ -569,6 +581,12 @@ impl Engine {
             ClientRequest::SimRestart(_) => {
                 "start a simulated vehicle again from where it started".into()
             }
+            ClientRequest::SimPause(params) => if params.paused {
+                "pause a simulated vehicle"
+            } else {
+                "resume a paused simulated vehicle"
+            }
+            .into(),
             ClientRequest::SimSnapshot(_) => "save a snapshot of a simulated vehicle".into(),
             ClientRequest::SnapshotStart(params) => format!(
                 "start a simulation from the snapshot {}",

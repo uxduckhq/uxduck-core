@@ -23,7 +23,7 @@ Altitude is three tiles: **Altitude above home** in every flying type's defaults
 
 ## Cockpit
 
-Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Save snapshot** and **Stop simulation**. The **…** beside its name is the same menu as in the sidebar.
+Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Pause**, **Save snapshot** and **Stop simulation**. **Pause** freezes it where it is until you choose **Resume**; **Shift+P** does the same. The **…** beside its name is the same menu as in the sidebar.
 
 ## Messages
 

@@ -258,6 +258,12 @@ impl Engine {
         self.analytics = port;
     }
 
+    pub(crate) fn reset_analytics_session(&mut self) {
+        self.engagement.clear();
+        self.flight_usage = crate::flight_usage::FlightUsage::default();
+        self.analytics.reset_session();
+    }
+
     pub fn set_analytics_internal(&mut self, internal: bool) {
         self.analytics.set_internal(internal);
     }

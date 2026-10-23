@@ -17,6 +17,10 @@ pub enum UpdatePhase {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent update consent, presentation and compatibility flags on the wire"
+)]
 pub struct AppUpdateStatus {
     pub phase: UpdatePhase,
     pub current: String,
@@ -32,7 +36,13 @@ pub struct AppUpdateStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub size: Option<u64>,
+    /// This engine pushes changed status after `update/status` is requested.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub push_updates: bool,
     pub blockers: Vec<String>,
+    /// True only when running simulations are the sole work blocking an install.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_install_with_simulations: bool,
     pub install_when_idle: bool,
     pub dismissed: bool,
 }
@@ -43,4 +53,7 @@ pub struct AppUpdateStatus {
 pub struct AppUpdateInstallParams {
     pub version: String,
     pub when_idle: bool,
+    /// Explicit consent to stop running simulations during this version's restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stop_simulations: bool,
 }

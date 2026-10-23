@@ -341,6 +341,32 @@ async fn get(interfaces: &Arc<Interfaces>, path: &str) -> (StatusCode, String, S
 }
 
 #[tokio::test]
+async fn startup_follows_a_signed_interface_without_a_ten_second_delay() {
+    let publisher = Publisher::new().await;
+    let data = tempfile::tempdir().unwrap();
+    let ui = shipped(data.path());
+    let next = archive("next", "2026-10-11T00:00:00Z", &build("next", &[]));
+    publisher.publish("2026-10-11T00:00:00Z", &[next]);
+    let config = Config {
+        first_check: Config::from_env(None).first_check,
+        ..publisher.config()
+    };
+    let interfaces = Arc::new(Interfaces::open(data.path(), Some(ui), config).unwrap());
+    let background = tokio::spawn(interfaces.clone().follow());
+    let updated = tokio::time::timeout(Duration::from_secs(3), async {
+        while interfaces.status().version != "next" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    background.abort();
+    assert!(
+        updated.is_ok(),
+        "startup did not fetch the signed interface promptly"
+    );
+}
+
+#[tokio::test]
 async fn online_it_follows_the_manifest_and_an_open_page_keeps_its_chunks() {
     let publisher = Publisher::new().await;
     let data = tempfile::tempdir().unwrap();

@@ -279,6 +279,8 @@ pub(crate) fn handle(
         | ClientRequest::AccountSignOutOthers(_)
         | ClientRequest::AccountRequestDeletion(_)
         | ClientRequest::AccountShared(_)
+        | ClientRequest::AccountFeedback(_)
+        | ClientRequest::AccountClaimFeedback(_)
         | ClientRequest::AccountComputers(_)
         | ClientRequest::AccountDeleteShared(_)) => {
             crate::account::handle(engine, connection, request, &granted)
@@ -321,6 +323,7 @@ pub(crate) fn handle(
         request @ (ClientRequest::SimStart(_)
         | ClientRequest::SimStop(_)
         | ClientRequest::SimRestart(_)
+        | ClientRequest::SimPause(_)
         | ClientRequest::SimBinaries(_)
         | ClientRequest::SimCatalogue(_)
         | ClientRequest::SimDownload(_)
@@ -349,7 +352,10 @@ pub(crate) fn handle(
             crate::remote_view::handle(engine, connection, request)
         }
         request @ (ClientRequest::VideoDevices(_)
+        | ClientRequest::VideoFile(_)
+        | ClientRequest::VideoDemos(_)
         | ClientRequest::VideoCapture(_)
+        | ClientRequest::VideoCaptureSettings(_)
         | ClientRequest::VideoCaptureEnable(_)
         | ClientRequest::VideoList(_)
         | ClientRequest::VideoAssign(_)
@@ -403,7 +409,7 @@ pub(crate) fn handle(
         | ClientRequest::UpdateCheck(_)
         | ClientRequest::UpdateInstall(_)
         | ClientRequest::UpdateLater(_)) => {
-            crate::app_update::handle(engine, &request, operator, &granted)
+            crate::app_update::handle(engine, connection, &request, operator, &granted)
         }
         request @ (ClientRequest::InterfaceStatus(_) | ClientRequest::InterfaceCheck(_)) => {
             crate::interface::handle(engine, &request, &granted)
@@ -578,6 +584,7 @@ fn set_operator(
         engine.awaiting_operator.insert(id, operator_id);
         return Ok(Value::Null);
     }
+    engine.reset_analytics_session();
     if let Some(state) = engine.connections.get_mut(&connection) {
         state.operator_id = operator_id;
     }

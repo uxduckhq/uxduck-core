@@ -15,7 +15,6 @@ use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::{
     Command, GoToHeading, OfflineBehaviour, Receipt, ReceiptStatus, RefusalReason,
 };
-use uxduck_core::domain::link::LinkPolicy;
 use uxduck_core::domain::modes::{self, AvailableMode, Family, is_vtol};
 use uxduck_core::domain::notification::{
     Action, Notification, NotificationAction, NotificationKind, NotificationState, Severity,
@@ -215,13 +214,11 @@ fn send(
         &command,
         &mut receipt,
     );
-    match engine.state.links.get(&vehicle.link_id) {
-        _ if receipt.status != ReceiptStatus::Sent => {}
-        None => not_sent(&mut receipt, "its link is gone".into()),
-        Some(link) if link.policy == LinkPolicy::Read => {
-            not_sent(&mut receipt, format!("{} is read-only", link.name));
-        }
-        Some(_) => {}
+    // Its link is gone, read-only, or a paused simulation's (`sim/pause`).
+    if receipt.status == ReceiptStatus::Sent
+        && let Some(why) = engine.not_writable(&vehicle.link_id)
+    {
+        not_sent(&mut receipt, why);
     }
     if receipt.status == ReceiptStatus::Sent && vehicle.presence != Presence::Online {
         let presence = format!("{:?}", vehicle.presence).to_lowercase();

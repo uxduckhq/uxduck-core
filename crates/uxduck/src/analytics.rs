@@ -10,6 +10,9 @@
 //! The file is not part of the record, so it has no migrations and can be
 //! deleted at any time.
 
+mod session;
+use session::Session;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -222,6 +225,7 @@ enum Message {
     Alias(String),
     Enabled(bool),
     Internal(bool),
+    ResetSession,
     /// Something was written to the outbox directly (a panic): look again.
     Wake,
 }
@@ -300,6 +304,9 @@ impl AnalyticsPort for AnalyticsChannel {
     fn set_enabled(&mut self, on: bool) {
         let _ = self.tx.send(Message::Enabled(on));
     }
+    fn reset_session(&mut self) {
+        let _ = self.tx.send(Message::ResetSession);
+    }
     fn set_internal(&mut self, internal: bool) {
         let _ = self.tx.send(Message::Internal(internal));
     }
@@ -342,6 +349,7 @@ struct Task {
     /// The same, for the panic hook.
     shared_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     client: Option<reqwest::Client>,
+    session: Session,
 }
 
 async fn run(
@@ -372,6 +380,7 @@ async fn run(
         enabled: false,
         shared_enabled: enabled,
         client,
+        session: Session::default(),
     };
     let mut failures = 0usize;
     loop {
@@ -417,7 +426,9 @@ impl Task {
             return;
         };
         match message {
+            Message::ResetSession => self.session = Session::default(),
             Message::Enabled(on) => {
+                self.session = Session::default();
                 self.enabled = on;
                 self.shared_enabled
                     .store(on, std::sync::atomic::Ordering::SeqCst);
@@ -441,6 +452,7 @@ impl Task {
                 if previous == internal {
                     return;
                 }
+                self.session = Session::default();
                 let result = outbox.set_internal(internal).and_then(|()| {
                     if previous && !internal && self.enabled {
                         outbox.set_install_id(&uuid_v4())?;
@@ -466,7 +478,7 @@ impl Task {
         }
     }
 
-    fn mark_internal(&self) {
+    fn mark_internal(&mut self) {
         self.queue(
             "internal_account_identified",
             Map::from_iter([("$set".into(), json!({ "is_internal": true }))]),
@@ -476,7 +488,7 @@ impl Task {
 
     /// Adds the install id, the time, a unique id (so a retried batch is
     /// counted once) and the daemon's own properties.
-    fn queue(&self, name: &str, mut properties: Map<String, Value>, surface: &str) {
+    fn queue(&mut self, name: &str, mut properties: Map<String, Value>, surface: &str) {
         let Some(outbox) = &self.outbox else {
             return;
         };
@@ -486,6 +498,11 @@ impl Task {
             return;
         };
         let now_us = now_us();
+        properties.insert("session_schema".into(), json!(1));
+        if let Some(id) = self.session.observe(name, &properties, surface, now_us) {
+            properties.insert("$session_id".into(), json!(id));
+            properties.insert("session_scope".into(), json!("installation"));
+        }
         let body = event_body(name, properties, install_id, surface, now_us);
         if let Err(error) = outbox.push(now_us, &body) {
             tracing::warn!(%error, "analytics: an event could not be queued");
@@ -735,6 +752,45 @@ mod tests {
     }
 
     #[test]
+    fn person_boundary_ends_the_session_without_reclassifying_queued_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = Task {
+            outbox: Some(Outbox::open(&dir.path().join("analytics.db")).unwrap()),
+            config: Config {
+                key: Some("test".into()),
+                host: "http://localhost".into(),
+                gather: Duration::ZERO,
+                internal: false,
+            },
+            enabled: false,
+            shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            client: None,
+            session: Session::default(),
+        };
+        task.handle(Message::Enabled(true));
+        task.queue("app_opened", Map::new(), "desktop");
+        task.handle(Message::ResetSession);
+        task.queue("update_checked", Map::new(), "daemon");
+        task.queue("app_opened", Map::new(), "desktop");
+        let events = task.outbox.as_ref().unwrap().batch(10).unwrap().0;
+        let first = &events[0]["properties"];
+        let second = &events[2]["properties"];
+        assert!(first["$session_id"].is_string());
+        assert_ne!(first["$session_id"], second["$session_id"]);
+        assert!(events[1]["properties"].get("$session_id").is_none());
+        assert_eq!(first["distinct_id"], second["distinct_id"]);
+        assert_eq!(first["is_internal"], false);
+        task.handle(Message::Internal(true));
+        assert_eq!(
+            task.outbox.as_ref().unwrap().batch(10).unwrap().0[0],
+            events[0]
+        );
+        task.handle(Message::Enabled(false));
+        assert!(task.outbox.as_ref().unwrap().is_empty());
+        assert!(task.outbox.as_ref().unwrap().install_id().is_none());
+    }
+
+    #[test]
     fn internal_sign_in_marks_existing_history_and_sign_out_starts_a_new_identity() {
         let dir = tempfile::tempdir().unwrap();
         let mut task = Task {
@@ -748,6 +804,7 @@ mod tests {
             enabled: false,
             shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client: None,
+            session: Session::default(),
         };
         task.handle(Message::Enabled(true));
         task.queue("before_sign_in", Map::new(), "daemon");
@@ -789,6 +846,7 @@ mod tests {
             enabled: false,
             shared_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             client: None,
+            session: Session::default(),
         };
         task.handle(Message::Internal(true));
         assert!(task.outbox.as_ref().unwrap().is_empty());

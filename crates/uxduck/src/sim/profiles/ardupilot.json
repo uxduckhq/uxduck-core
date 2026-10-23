@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "programs": {
     "arducopter": { "frames": {} },
+    "arducopter-heli": { "frames": {} },
     "arduplane": {
       "frames": {
         "plane-jet": {
@@ -73,6 +74,51 @@
       }
     },
     "ardusub": { "frames": {} },
-    "blimp": { "frames": {} }
+    "blimp": {
+      "frames": {
+        "blimp-motor": {
+          "LOIT_MAX_POSX": 1,
+          "LOIT_MAX_POSY": 0.7,
+          "LOIT_MAX_POSZ": 0.5,
+          "LOIT_MAX_VELX": 1,
+          "LOIT_MAX_VELY": 0.7,
+          "LOIT_MAX_VELZ": 0.5
+        },
+        "blimp-motor-inspection-v1": {
+          "FINS_THR_MAX": 1,
+          "LOIT_POS_LAG": 6,
+          "LOIT_MAX_POSX": 8,
+          "LOIT_MAX_POSY": 1.5,
+          "LOIT_MAX_POSZ": 0.75,
+          "LOIT_MAX_POSYAW": 0.2,
+          "LOIT_MAX_VELX": 8,
+          "LOIT_MAX_VELY": 1.5,
+          "LOIT_MAX_VELZ": 0.75,
+          "LOIT_MAX_VELYAW": 0.2,
+          "LOIT_POSX_P": 0.2,
+          "LOIT_POSY_P": 0.1,
+          "LOIT_POSZ_P": 0.5,
+          "LOIT_POSYAW_P": 0.2,
+          "LOIT_VELX_P": 0.8,
+          "LOIT_VELX_I": 0.02,
+          "LOIT_VELX_FF": 0.1,
+          "LOIT_VELX_D": 0,
+          "LOIT_VELX_IMAX": 1,
+          "LOIT_VELY_P": 1.3,
+          "LOIT_VELY_I": 0.02,
+          "LOIT_VELY_FF": 0.33,
+          "LOIT_VELY_D": 0,
+          "LOIT_VELY_IMAX": 1,
+          "LOIT_VELZ_P": 1.5,
+          "LOIT_VELZ_I": 0.15,
+          "LOIT_VELZ_D": 0,
+          "LOIT_VELZ_IMAX": 1,
+          "LOIT_VELYAW_P": 6,
+          "LOIT_VELYAW_I": 0.02,
+          "LOIT_VELYAW_D": 0,
+          "LOIT_VELYAW_IMAX": 1
+        }
+      }
+    }
   }
 }

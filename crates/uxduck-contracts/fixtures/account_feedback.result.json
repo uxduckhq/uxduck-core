@@ -1,0 +1,23 @@
+{
+  "reports": [
+    {
+      "id": "0192f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6",
+      "kind": "problem",
+      "text": "",
+      "transcript": "The map is tiny on Windows at 150%",
+      "at": 1792600000000,
+      "status": "filed",
+      "issue": "FB-12",
+      "files": ["maps.pdf"],
+      "addKey": "3f1c0e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e",
+      "additions": [
+        {
+          "id": "0192f3a4-5b6c-4d7e-8f90-a1b2c3d4e700",
+          "at": 1792603600000,
+          "text": "Also on a 4K screen",
+          "files": []
+        }
+      ]
+    }
+  ]
+}

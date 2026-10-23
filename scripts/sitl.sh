@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds ArduPilot's native SITL for the installed daemon's simulation
-# manager (S17, ADR-0011), for the vehicles given (default: copter plane),
+# manager (S17, ADR-0011), for the vehicles given (default: all six programs),
 # into .cache/simulators/native/ (Blimp is `blimp`, others `ardu<vehicle>`). It uses the same ArduPilot checkout
 # and commit as scripts/simulator.sh (target/wasm-sitl/ardupilot).
 #
@@ -15,6 +15,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=scripts/simulator-cache.sh
 source "$root/scripts/simulator-cache.sh"
+source "$root/scripts/simulator-programs.sh"
 work="$root/target/wasm-sitl"
 ap="$work/ardupilot"
 out="$sim_cache/native"
@@ -35,11 +36,16 @@ if [ -n "$arch" ]; then
 fi
 mkdir -p "$out"
 
-if [ ! -x "$ap/waf" ]; then
+pin=${ARDUPILOT_COMMIT:-$(sed -n 's/.*ARDUPILOT_COMMIT:-\([0-9a-f]\{40\}\).*/\1/p' "$root/scripts/simulator.sh")}
+[ -n "$pin" ] || { echo "sitl.sh: required ArduPilot source pin is missing" >&2; exit 1; }
+current=$(git -C "$ap" rev-parse HEAD 2>/dev/null || true)
+wanted=$(git -C "$ap" rev-parse "$pin^{commit}" 2>/dev/null || true)
+if [ ! -x "$ap/waf" ] || [ "$current" != "$wanted" ]; then
   # The WebAssembly script fetches and pins the checkout; build nothing there.
   # A cache can restore its .git without its files, so the files decide.
   "$root/scripts/simulator.sh" --checkout-only
 fi
+python3 "$root/scripts/prepare-simulator.py" "$ap"
 
 cd "$ap"
 # A CI cache can restore part of a venv; one without its activate script is
@@ -57,10 +63,12 @@ if [ "$(uname)" = Darwin ]; then export LDFLAGS="${LDFLAGS:-} -Wl,-no_fixup_chai
 ./waf configure --board sitl --out "$build" >/dev/null
 
 vehicles=("$@")
-[ ${#vehicles[@]} -gt 0 ] || vehicles=(copter plane)
+[ ${#vehicles[@]} -gt 0 ] || vehicles=("${SIMULATOR_PROGRAMS[@]}")
 for vehicle in "${vehicles[@]}"; do
-  program="ardu$vehicle"
-  [ "$vehicle" != blimp ] || program=blimp
+  case "$vehicle" in
+    ardu* | blimp) program="$vehicle" ;;
+    *) program="ardu$vehicle" ;;
+  esac
   started=$(date +%s)
   ./waf build --out "$build" --target "bin/$program"
   cp "$build/sitl/bin/$program" "$out/"

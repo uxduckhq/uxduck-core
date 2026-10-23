@@ -229,6 +229,12 @@ fn check(name: &str) {
         ("result", "feedback_suggest") => {
             round_trip::<uxduck_contracts::dto::feedback::SuggestionCard>(name, &json);
         }
+        ("result", "account_feedback") => {
+            round_trip::<uxduck_contracts::dto::feedback::AccountFeedbackList>(name, &json);
+        }
+        ("result", "account_claimFeedback") => {
+            round_trip::<uxduck_contracts::dto::feedback::ClaimFeedbackResult>(name, &json);
+        }
         ("result", "feedback_send") => {
             round_trip::<uxduck_contracts::dto::feedback::FeedbackSendResult>(name, &json);
         }
@@ -293,6 +299,9 @@ fn check(name: &str) {
         ("result", "video_devices") => {
             round_trip::<uxduck_contracts::dto::video::VideoDevicesResult>(name, &json);
         }
+        ("result", "video_demos") => {
+            round_trip::<uxduck_contracts::dto::video::VideoDemosResult>(name, &json);
+        }
         ("result", "video_list") => {
             round_trip::<uxduck_contracts::dto::video::VideoListResult>(name, &json);
         }
@@ -303,6 +312,7 @@ fn check(name: &str) {
             | "video_track"
             | "video_capture"
             | "video_capture_enable"
+            | "video_file"
             | "video_vehicleCamera"
             | "video_recordWithOthers",
         ) => {
@@ -397,7 +407,7 @@ fn check(name: &str) {
         ("result", "sim_binaries") => {
             round_trip::<uxduck_contracts::dto::sim::SimBinariesResult>(name, &json);
         }
-        ("result", "sim_start" | "sim_restart" | "snapshot_start") => {
+        ("result", "sim_start" | "sim_restart" | "sim_pause" | "snapshot_start") => {
             round_trip::<uxduck_contracts::dto::link::Link>(name, &json);
         }
         ("result", "sim_snapshot" | "snapshot_rename") => {
@@ -554,6 +564,7 @@ fn check(name: &str) {
             | "video_remove"
             | "video_record"
             | "video_recordAll"
+            | "video_capture_settings"
             | "find_stop"
             | "plugin_unshare"
             | "watchLink_revoke"

@@ -256,6 +256,7 @@ pub(crate) fn create_link_from(
         from_link: from_link.filter(|_| kind_is_forward),
         keep_alive: params.keep_alive,
         launch: None,
+        paused: false,
         created_at_us: engine.clock.now_us(),
         version: 1,
     };

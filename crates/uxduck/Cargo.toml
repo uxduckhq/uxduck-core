@@ -56,17 +56,26 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # This computer's addresses, for "Phones and tablets on this network" (S97).
 if-addrs = "0.15"
-oxc = { version = "0.152", features = ["transformer", "codegen", "semantic"], optional = true }
+oxc = { version = "0.155", features = ["transformer", "codegen", "semantic"], optional = true }
+
+# Keeping the system and display awake on Windows (SetThreadExecutionState).
+# Pausing a simulation suspends its build's threads (Toolhelp, SuspendThread).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Power",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+] }
+
+# Pausing a simulation stops its build (SIGSTOP, SIGCONT); on macOS also
+# atomic app replacement on the same volume, without a privileged helper.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # Every input of a joystick and its value when it connects (macOS): gilrs
 # reports an input only once it changes. The crates and versions gilrs uses.
-# Keeping the system and display awake on Windows (SetThreadExecutionState).
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power"] }
-
 [target.'cfg(target_os = "macos")'.dependencies]
-# Atomic app replacement on the same volume, without a privileged helper.
-rustix = { version = "1.1", features = ["fs", "process"] }
 objc2-io-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "libc",

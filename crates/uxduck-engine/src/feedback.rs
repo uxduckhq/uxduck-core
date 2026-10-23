@@ -13,8 +13,8 @@ use serde_json::{Map, Value};
 use uxduck_contracts::dto::analytics::Surface;
 use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
-    BundleVehicle, FeedbackBundle, FeedbackKind, FeedbackSendParams, FeedbackSendResult,
-    FeedbackSuggestParams, SuggestionCard,
+    BundleVehicle, FeedbackAttachment, FeedbackBundle, FeedbackKind, FeedbackSendParams,
+    FeedbackSendResult, FeedbackSuggestParams, SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -34,6 +34,11 @@ const KEPT_STRING: usize = 512;
 const MAX_TEXT: usize = 5000;
 /// A 3 MB image in base64.
 const MAX_SCREENSHOT_B64: usize = 4 * 1024 * 1024 + 4;
+/// A 10 MB voice note in base64.
+const MAX_VOICE_B64: usize = 10 * 1024 * 1024 / 3 * 4 + 4;
+/// Files the person attached: how many, and 25 MB together in base64.
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_ATTACHMENTS_B64: usize = 25 * 1024 * 1024 / 3 * 4 + 4 * MAX_ATTACHMENTS;
 
 /// What the composition root sends: the report, the scrubbed bundle, and
 /// which vehicle's flight data to add from the tlogs.
@@ -53,6 +58,12 @@ pub struct FeedbackOrder {
     /// Credit the signed-in account, or tell this install, when it ships (S73).
     pub credit: bool,
     pub from_agent: bool,
+    /// Files the person attached, base64, as the page sent them.
+    pub attachments: Vec<FeedbackAttachment>,
+    /// The key the page keeps to add to the report later.
+    pub follow_up_key: Option<String>,
+    /// A recorded voice note, base64, for the API to transcribe.
+    pub voice_note: Option<FeedbackAttachment>,
 }
 
 /// Where a vehicle's raw frames are: its link's tlogs, its system id.
@@ -112,8 +123,9 @@ fn cut_strings(value: &mut Value) {
 }
 
 /// Field names whose values are secrets.
-const SECRET_KEYS: [&str; 12] = [
+const SECRET_KEYS: [&str; 13] = [
     "token",
+    "followupkey",
     "bootstrap",
     "session",
     "password",
@@ -355,6 +367,47 @@ pub(crate) fn suggest(params: &FeedbackSuggestParams) -> Result<Value, ApiError>
     })
 }
 
+/// The files sent with a report, and its key, within what the API takes.
+fn check_files(params: &FeedbackSendParams) -> Result<(), ApiError> {
+    if params
+        .voice_note
+        .as_ref()
+        .is_some_and(|v| v.data.len() > MAX_VOICE_B64)
+    {
+        return Err(invalid("the voice note is longer than 5 minutes"));
+    }
+    if params
+        .screenshot
+        .as_ref()
+        .is_some_and(|s| s.len() > MAX_SCREENSHOT_B64)
+    {
+        return Err(invalid("the screenshot is larger than 3 MB"));
+    }
+    if params.attachments.len() > MAX_ATTACHMENTS {
+        return Err(invalid("attach up to 10 files at a time"));
+    }
+    if params
+        .attachments
+        .iter()
+        .map(|a| a.data.len())
+        .sum::<usize>()
+        > MAX_ATTACHMENTS_B64
+    {
+        return Err(invalid(
+            "the attached files come to more than 25 MB. Remove some and send again",
+        ));
+    }
+    if params.follow_up_key.as_ref().is_some_and(|key| {
+        !(32..=128).contains(&key.len())
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }) {
+        return Err(invalid("the follow-up key is not one UXDuck made"));
+    }
+    Ok(())
+}
+
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -371,19 +424,16 @@ pub(crate) fn handle(
         ));
     }
     let text = params.text.trim().to_owned();
-    if text.is_empty() || text.chars().count() > MAX_TEXT {
-        return Err(invalid("the text must be 1 to 5,000 characters"));
+    // A voice note may say it all; the API transcribes it.
+    if (text.is_empty() && params.voice_note.is_none()) || text.chars().count() > MAX_TEXT {
+        return Err(invalid(
+            "write up to 5,000 characters, or record a voice note",
+        ));
     }
     if !is_uuid(&params.report_id) {
         return Err(invalid("the report id must be a UUID"));
     }
-    if params
-        .screenshot
-        .as_ref()
-        .is_some_and(|s| s.len() > MAX_SCREENSHOT_B64)
-    {
-        return Err(invalid("the screenshot is larger than 3 MB"));
-    }
+    check_files(&params)?;
     if params
         .reply_email
         .as_ref()
@@ -423,6 +473,9 @@ pub(crate) fn handle(
         flight,
         credit: params.credit,
         from_agent: params.from_agent,
+        attachments: params.attachments.clone(),
+        follow_up_key: params.follow_up_key.clone(),
+        voice_note: params.voice_note.clone(),
     };
     // Answered when the root reports back (`feedback_done`).
     if let Some(waiting) = engine.replying_to.take() {

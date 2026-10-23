@@ -188,6 +188,10 @@ pub struct Link {
     /// start runs is going.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<Launch>,
+    /// A simulated vehicle frozen where it is (`sim/pause`): no time passes
+    /// for it until it resumes, and commands wait for that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }

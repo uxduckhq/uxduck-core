@@ -77,10 +77,12 @@ pub enum StorageCategory {
     Parameters,
     /// Copies of vehicles' files, by vehicle (S121, ADR-0027 F5).
     VehicleFiles,
+    /// Optional demo footage, removed explicitly from the catalogue.
+    DemoVideos,
 }
 
 impl StorageCategory {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Tlogs,
         Self::EventLog,
         Self::Database,
@@ -91,6 +93,7 @@ impl StorageCategory {
         Self::Simulators,
         Self::Parameters,
         Self::VehicleFiles,
+        Self::DemoVideos,
         Self::SimulatorLogs,
         Self::SimulatorData,
     ];

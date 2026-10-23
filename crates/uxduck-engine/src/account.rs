@@ -79,6 +79,13 @@ pub enum AccountAction {
     /// The account's computers (S78): a `ComputerList`, which the engine
     /// answers with this computer's own state as `AccountComputers`.
     Computers,
+    /// The account's feedback reports: an `AccountFeedbackList`.
+    SentFeedback,
+    /// Reports sent signed out, kept in the account by their keys
+    /// (`id`, `key`): a `ClaimFeedbackResult`.
+    ClaimFeedback {
+        reports: Vec<(String, String)>,
+    },
     /// What the account shared, and deleting it.
     Shared,
     DeleteShared,
@@ -148,14 +155,9 @@ pub trait AccountPort: Send {
     fn request(&mut self, order: AccountOrder);
 }
 
-pub(crate) fn handle(
-    engine: &mut Engine,
-    connection: ConnectionId,
-    request: ClientRequest,
-    granted: &[Capability],
-) -> Result<Value, ApiError> {
-    allow_private_account(engine, connection, &request)?;
-    let action = match request {
+/// What an `account/*` request asks of the root.
+fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, ApiError> {
+    Ok(match request {
         ClientRequest::AccountGet(_) => AccountAction::Get,
         ClientRequest::AccountFlights(_) => AccountAction::Flights,
         ClientRequest::AccountEnvironment(_) => AccountAction::Environment,
@@ -192,16 +194,39 @@ pub(crate) fn handle(
         ClientRequest::AccountSignOutOthers(_) => AccountAction::SignOutOthers,
         ClientRequest::AccountRequestDeletion(_) => AccountAction::RequestDeletion,
         ClientRequest::AccountShared(_) => AccountAction::Shared,
+        ClientRequest::AccountFeedback(_) => AccountAction::SentFeedback,
+        ClientRequest::AccountClaimFeedback(p) => {
+            if p.reports.len() > 50 {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "claim up to 50 reports at a time",
+                ));
+            }
+            AccountAction::ClaimFeedback {
+                reports: p.reports.into_iter().map(|r| (r.id, r.key)).collect(),
+            }
+        }
         ClientRequest::AccountComputers(_) => AccountAction::Computers,
         ClientRequest::AccountDeleteShared(_) => AccountAction::DeleteShared,
         _ => return Err(ApiError::new(ErrorKind::Internal, "not an account method")),
-    };
+    })
+}
+
+pub(crate) fn handle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    request: ClientRequest,
+    granted: &[Capability],
+) -> Result<Value, ApiError> {
+    allow_private_account(engine, connection, &request)?;
+    let action = action_of(engine, request)?;
     let needed = if matches!(
         action,
         AccountAction::Get
             | AccountAction::Flights
             | AccountAction::Environment
             | AccountAction::Shared
+            | AccountAction::SentFeedback
             | AccountAction::Computers
             | AccountAction::Sessions
     ) {
@@ -331,6 +356,14 @@ impl Engine {
         if self.account_identity == state {
             return;
         }
+        if (
+            self.account_identity.signed_in,
+            &self.account_identity.account_id,
+            &self.account_identity.operator_id,
+        ) != (state.signed_in, &state.account_id, &state.operator_id)
+        {
+            self.reset_analytics_session();
+        }
         self.account_identity = state;
         let frame = crate::rpc::router::notification(
             &uxduck_contracts::rpc::ServerNotification::AccountChanged(
@@ -427,6 +460,15 @@ impl Engine {
                         ErrorKind::NotFound,
                         "That operator was removed.",
                     ));
+                }
+                let restoring_current = self
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|c| c.operator_id.is_none())
+                    && self.account_identity.signed_in
+                    && self.account_identity.operator_id == operator_id;
+                if !restoring_current {
+                    self.reset_analytics_session();
                 }
                 if let Some(state) = self.connections.get_mut(&connection) {
                     state.operator_id = operator_id;

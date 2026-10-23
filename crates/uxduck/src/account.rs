@@ -558,6 +558,45 @@ impl Account {
         }
     }
 
+    /// The account's feedback from any computer, and keeping reports sent
+    /// signed out in it.
+    async fn sent_feedback(
+        &self,
+        api: &str,
+        client: &reqwest::Client,
+        action: AccountAction,
+        session: &SessionSnapshot,
+    ) -> Result<Value, ApiError> {
+        match action {
+            AccountAction::SentFeedback => {
+                let answer = client
+                    .get(format!("{api}/v1/feedback/mine"))
+                    .bearer_auth(session.signed_in()?)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let answer = refused_or(answer).await?;
+                answer.json::<Value>().await.map_err(|_| unreadable_reply())
+            }
+            AccountAction::ClaimFeedback { reports } => {
+                let reports: Vec<Value> = reports
+                    .into_iter()
+                    .map(|(id, key)| json!({ "id": id, "key": key }))
+                    .collect();
+                let answer = client
+                    .post(format!("{api}/v1/feedback/claim"))
+                    .bearer_auth(session.signed_in()?)
+                    .json(&json!({ "reports": reports }))
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                let answer = refused_or(answer).await?;
+                answer.json::<Value>().await.map_err(|_| unreadable_reply())
+            }
+            _ => Err(ApiError::new(ErrorKind::Internal, "not a feedback action")),
+        }
+    }
+
     /// Feedback, a sent conversation, and the shared data (S29).
     async fn learning(
         &self,
@@ -624,6 +663,9 @@ impl Account {
                     return Ok(json!({ "computers": [] }));
                 }
                 answer.json::<Value>().await.map_err(|_| unreadable_reply())
+            }
+            action @ (AccountAction::SentFeedback | AccountAction::ClaimFeedback { .. }) => {
+                self.sent_feedback(api, client, action, session).await
             }
             AccountAction::Shared | AccountAction::DeleteShared => {
                 let url = format!("{api}/v1/turns/mine");

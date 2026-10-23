@@ -5,8 +5,8 @@
 //! asked for, and said to be missing until it comes.
 
 use uxduck_core::domain::plan::{
-    FenceCircle, FencePolygon, LatLon, PlanAutopilot, PlanBody, PlanFrame, PlanVehicleType,
-    command_has_position, distance_m, has_position,
+    FenceCircle, FencePolygon, FenceSettings, LatLon, PlanAutopilot, PlanBody, PlanFrame,
+    PlanVehicleType, command_has_position, distance_m, has_position,
 };
 
 /// How bad a check is.
@@ -43,6 +43,9 @@ const LANDS: [u16; 2] = [21, 85];
 /// Which commands a type cannot fly (the app's `commands.ts`, its refusals).
 fn unfit(command: u16, kind: PlanVehicleType) -> bool {
     use PlanVehicleType::{Boat, Multicopter, Plane, Rover, Submarine, Vtol};
+    if kind == PlanVehicleType::Blimp {
+        return !matches!(command, 16 | 177 | 183 | 206);
+    }
     match command {
         84 | 85 | 3000 => kind != Vtol,
         189 => !matches!(kind, Plane | Vtol),
@@ -65,6 +68,7 @@ fn label(kind: PlanVehicleType) -> &'static str {
         PlanVehicleType::Rover => "a rover",
         PlanVehicleType::Boat => "a boat",
         PlanVehicleType::Submarine => "a submarine",
+        PlanVehicleType::Blimp => "a blimp",
     }
 }
 
@@ -86,16 +90,59 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
     };
     let number = |i: usize| u32::try_from(i + 1).ok();
 
+    if body.vehicle_type == PlanVehicleType::Blimp {
+        checks.push(warning(
+            "blimp-auto",
+            None,
+            "Blimp AUTO is experimental: climb manually before AUTO; it holds the last target when finished. LAND stops actuators, not a controlled descent. Go to is not implemented.".into(),
+        ));
+        if body.autopilot != PlanAutopilot::Ardupilot {
+            checks.push(error(
+                "blimp-autopilot",
+                None,
+                "Blimp plans require ArduPilot Blimp firmware with AUTO support.".into(),
+            ));
+        }
+        if !body.fence.polygons.is_empty()
+            || !body.fence.circles.is_empty()
+            || body.fence.settings != FenceSettings::default()
+            || !body.rally.is_empty()
+        {
+            checks.push(error("blimp-parts", None, "Blimp uploads support waypoints, not fence or rally transfers. Remove those parts before uploading.".into()));
+        }
+        for (index, item) in body.items.iter().enumerate() {
+            if item.command == 16
+                && item
+                    .params
+                    .iter()
+                    .flatten()
+                    .any(|value| value.is_finite() && *value != 0.0)
+            {
+                checks.push(error("blimp-waypoint-options", number(index), "Blimp ignores waypoint hold, acceptance/pass radius and yaw parameters. Clear them; use WP_RADIUS and WP_VEL in Parameters.".into()));
+            }
+            if matches!(item.command, 183 | 206) {
+                checks.push(warning("blimp-payload", number(index), "Payload commands require the matching firmware feature and configured hardware; mission acceptance does not verify the payload action.".into()));
+            }
+        }
+    }
+
     for (i, item) in body.items.iter().enumerate() {
         if unfit(item.command, body.vehicle_type) {
             checks.push(error(
                 "command-unfit",
                 number(i),
-                format!(
-                    "item {} is a command {} cannot fly",
-                    i + 1,
-                    label(body.vehicle_type)
-                ),
+                if body.vehicle_type == PlanVehicleType::Blimp {
+                    format!(
+                        "item {} is outside UXDuck's supported Blimp mission commands",
+                        i + 1
+                    )
+                } else {
+                    format!(
+                        "item {} is a command {} cannot fly",
+                        i + 1,
+                        label(body.vehicle_type)
+                    )
+                },
             ));
         } else if body.autopilot == PlanAutopilot::Px4 && PX4_UNFIT.contains(&item.command) {
             checks.push(error(
@@ -202,6 +249,7 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
             ));
         }
         if let Some(last) = body.items.last()
+            && body.vehicle_type != PlanVehicleType::Blimp
             && !ENDS.contains(&last.command)
         {
             checks.push(warning(
@@ -279,44 +327,49 @@ fn clearance(body: &PlanBody, ground: &mut Ground<'_>, checks: &mut Vec<Check>) 
     let mut worst_below: Option<(f64, Option<usize>)> = None;
     let mut worst_low: Option<(f64, Option<usize>)> = None;
     let mut too_high: Option<usize> = None;
-    let mut measure = |at: LatLon, height: f64, frame: Option<PlanFrame>, item: Option<usize>| {
-        let Some(frame) = frame else {
-            return;
-        };
-        let Some(known) = ground(at) else {
-            missing = true;
-            return;
-        };
-        let Some(ground_m) = known else {
-            return;
-        };
-        let amsl = match frame {
-            PlanFrame::AboveSeaLevel => height,
-            PlanFrame::AboveTerrain => ground_m + height,
-            PlanFrame::AboveHome => {
-                let Some(home) = home_ground else {
-                    missing = true;
-                    return;
-                };
-                home + height
+    let mut measure =
+        |at: LatLon, height: f64, frame: Option<PlanFrame>, item: Option<usize>, minimum: f64| {
+            let Some(frame) = frame else {
+                return;
+            };
+            let Some(known) = ground(at) else {
+                missing = true;
+                return;
+            };
+            let Some(ground_m) = known else {
+                return;
+            };
+            let amsl = match frame {
+                PlanFrame::AboveSeaLevel => height,
+                PlanFrame::AboveTerrain => ground_m + height,
+                PlanFrame::AboveHome => {
+                    let Some(home) = home_ground else {
+                        missing = true;
+                        return;
+                    };
+                    home + height
+                }
+            };
+            let over = amsl - ground_m;
+            if over < 0.0 && worst_below.is_none_or(|(w, _)| over < w) {
+                worst_below = Some((over, item));
+            } else if over >= 0.0 && over < minimum && worst_low.is_none_or(|(w, _)| over < w) {
+                worst_low = Some((over, item));
+            }
+            if over > HEIGHT_LIMIT_M && too_high.is_none() {
+                too_high = item.or(Some(0));
             }
         };
-        let over = amsl - ground_m;
-        if over < 0.0 && worst_below.is_none_or(|(w, _)| over < w) {
-            worst_below = Some((over, item));
-        } else if over >= 0.0
-            && over < body.min_clearance_m
-            && worst_low.is_none_or(|(w, _)| over < w)
-        {
-            worst_low = Some((over, item));
-        }
-        if over > HEIGHT_LIMIT_M && too_high.is_none() {
-            too_high = item.or(Some(0));
-        }
-    };
     for (index, &(number, at, height, frame)) in points.iter().enumerate() {
-        measure(at, height, frame, Some(number));
-        let Some(&(_, next, next_height, _)) = points.get(index + 1) else {
+        let landing = LANDS.contains(&body.items[number - 1].command);
+        measure(
+            at,
+            height,
+            frame,
+            Some(number),
+            if landing { 0.0 } else { body.min_clearance_m },
+        );
+        let Some(&(next_number, next, next_height, _)) = points.get(index + 1) else {
             continue;
         };
         // Along the leg, at the heights the autopilot flies between them.
@@ -333,7 +386,20 @@ fn clearance(body: &PlanBody, ground: &mut Ground<'_>, checks: &mut Vec<Check>) 
                 latitude_deg: at.latitude_deg + (next.latitude_deg - at.latitude_deg) * f,
                 longitude_deg: at.longitude_deg + (next.longitude_deg - at.longitude_deg) * f,
             };
-            measure(spot, height + (next_height - height) * f, frame, None);
+            // A normal approach descends to touchdown. Its clearance margin
+            // tapers to zero; terrain penetration is still always an error.
+            let minimum = if LANDS.contains(&body.items[next_number - 1].command) {
+                body.min_clearance_m * (1.0 - f)
+            } else {
+                body.min_clearance_m
+            };
+            measure(
+                spot,
+                height + (next_height - height) * f,
+                frame,
+                None,
+                minimum,
+            );
         }
     }
     let item_of = |item: Option<usize>| item.and_then(|n| u32::try_from(n).ok());
@@ -453,6 +519,29 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn blimp_waypoints_work_without_takeoff_or_landing_but_skipped_commands_block() {
+        let mut plan = body(vec![item(16, 0.0001, 0.001, 30.0, 3)]);
+        plan.vehicle_type = PlanVehicleType::Blimp;
+        let clean = check(&plan, &mut hill);
+        assert!(!clean.iter().any(|check| check.severity == Severity::Error));
+        assert!(codes(&clean).contains(&"blimp-auto"));
+        assert!(!codes(&clean).contains(&"no-end"));
+        for command in [17, 18, 19, 20, 21, 22, 82, 93, 178, 201, 31000] {
+            plan.items[0].command = command;
+            assert!(
+                codes(&check(&plan, &mut hill)).contains(&"command-unfit"),
+                "{command}"
+            );
+        }
+        plan.items[0].command = 16;
+        plan.items[0].params[0] = Some(5.0);
+        assert!(codes(&check(&plan, &mut hill)).contains(&"blimp-waypoint-options"));
+        plan.items[0].params = [None; 4];
+        plan.autopilot = PlanAutopilot::Px4;
+        assert!(codes(&check(&plan, &mut hill)).contains(&"blimp-autopilot"));
+    }
+
     fn item(command: u16, lat: f64, lon: f64, alt: f64, frame: u8) -> PlanItem {
         PlanItem {
             command,
@@ -526,6 +615,36 @@ mod tests {
         assert_eq!(codes(&checks), ["low-clearance"]);
         let mut nothing = |_: LatLon| None;
         assert_eq!(codes(&check(&plan, &mut nothing)), ["terrain-missing"]);
+    }
+
+    #[test]
+    fn normal_landings_do_not_warn_but_approach_terrain_and_buried_touchdown_still_fail() {
+        for command in [21, 85] {
+            let mut plan = body(vec![
+                item(22, 0.0, 0.0, 40.0, 3),
+                item(16, 0.0001, 0.001, 40.0, 3),
+                item(command, 0.0001, 0.003, 0.0, 3),
+            ]);
+            if command == 85 {
+                plan.vehicle_type = PlanVehicleType::Vtol;
+                plan.items[0].command = 84;
+            }
+            let mut flat = |_: LatLon| Some(Some(100.0));
+            assert!(check(&plan, &mut flat).is_empty(), "{command}");
+            // A hill under the approach cannot hide behind the landing exception.
+            let mut approach_hill = |at: LatLon| {
+                Some(Some(
+                    if at.longitude_deg > 0.0015 && at.longitude_deg < 0.0025 {
+                        180.0
+                    } else {
+                        100.0
+                    },
+                ))
+            };
+            assert!(codes(&check(&plan, &mut approach_hill)).contains(&"below-ground"));
+            plan.items[2].altitude_m = -5.0;
+            assert!(codes(&check(&plan, &mut flat)).contains(&"below-ground"));
+        }
     }
 
     #[test]

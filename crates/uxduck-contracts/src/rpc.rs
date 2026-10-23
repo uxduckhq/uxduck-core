@@ -62,8 +62,8 @@ use crate::dto::search::{
 };
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams};
 use crate::dto::sim::{
-    SimBuildParams, SimCatalogueParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams,
-    SnapshotStartParams,
+    SimBuildParams, SimCatalogueParams, SimPauseParams, SimSnapshotParams, SimStartParams,
+    SnapshotRenameParams, SnapshotStartParams,
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
@@ -82,10 +82,10 @@ use crate::dto::vehicle::{
 };
 use crate::dto::video::{
     VideoAddParams, VideoAssignParams, VideoCaptureEnableParams, VideoCaptureParams,
-    VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams,
-    VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams,
-    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams,
-    VideoWatchParams,
+    VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams, VideoPhotoParams,
+    VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams, VideoRecordParams,
+    VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams, VideoRevealParams,
+    VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams, VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -475,12 +475,14 @@ pub enum ClientRequest {
     #[serde(rename = "daemon/stop")]
     DaemonStop(Empty),
     /// Full product update status and current restart blockers. Needs read.
+    /// Also subscribes this connection to changed `update/status` notifications.
     #[serde(rename = "update/status")]
     UpdateStatus(Empty),
     /// Check and download a signed full app update. Local operators only.
     #[serde(rename = "update/check")]
     UpdateCheck(Empty),
-    /// Approve this version now or when idle. No safety override. Local operators only.
+    /// Approve this version now or when idle, optionally stopping simulations.
+    /// Real-vehicle checks cannot be overridden. Local operators only.
     #[serde(rename = "update/install")]
     UpdateInstall(AppUpdateInstallParams),
     /// Cancel queued consent and silence this version's prompt. Local operators only.
@@ -898,6 +900,12 @@ pub enum ClientRequest {
     /// agent asks first. Result: `Link`.
     #[serde(rename = "sim/restart")]
     SimRestart(IdParams),
+    /// Pauses a simulated vehicle where it is, or resumes it: no time
+    /// passes for it while paused, so it neither moves nor counts down a
+    /// failsafe, and commands to it are refused until it resumes. Real
+    /// vehicles cannot be paused. Control capability. Result: `Link`.
+    #[serde(rename = "sim/pause")]
+    SimPause(SimPauseParams),
     /// Saves a snapshot of a simulated vehicle: where it is, its height,
     /// heading, mode, parameters and mission (S34). Configuration
     /// capability. Result: `SimSnapshot`.
@@ -988,6 +996,15 @@ pub enum ClientRequest {
     /// `Empty`.
     #[serde(rename = "account/requestDeletion")]
     AccountRequestDeletion(Empty),
+    /// The account's feedback reports from any computer, with what was
+    /// added since and a key to add more. Needs `read`. Result:
+    /// `AccountFeedbackList`.
+    #[serde(rename = "account/feedback")]
+    AccountFeedback(Empty),
+    /// Keeps reports this browser sent signed out in the account, by their
+    /// keys. Needs `config`. Result: `ClaimFeedbackResult`.
+    #[serde(rename = "account/claimFeedback")]
+    AccountClaimFeedback(crate::dto::feedback::ClaimFeedbackParams),
     /// Whether this computer mirrors its work to the account, how far it
     /// has got, and the vehicles other computers published (S16).
     /// Result: `SyncStatus`.
@@ -1169,6 +1186,15 @@ pub enum ClientRequest {
     /// Adds or configures a camera attached to the daemon's computer. Needs config.
     #[serde(rename = "video/capture")]
     VideoCapture(VideoCaptureParams),
+    /// Opens macOS camera/microphone privacy settings on the daemon computer. Needs config. Result: Empty.
+    #[serde(rename = "video/capture/settings")]
+    VideoCaptureSettings(VideoCaptureSettingsParams),
+    /// Add/replace a prerecorded camera; result `VideoSource`.
+    #[serde(rename = "video/file")]
+    VideoFile(VideoFileParams),
+    /// Optional demo catalogue and downloads; result `VideoDemosResult`.
+    #[serde(rename = "video/demos")]
+    VideoDemos(VideoDemosParams),
     /// Enables or pauses capture independently of UI sessions. Needs config.
     #[serde(rename = "video/capture/enable")]
     VideoCaptureEnable(VideoCaptureEnableParams),
@@ -1295,7 +1321,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 261] = [
+    pub const METHODS: [&'static str; 267] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1446,6 +1472,7 @@ impl ClientRequest {
         "sim/start",
         "sim/stop",
         "sim/restart",
+        "sim/pause",
         "sim/snapshot",
         "snapshot/start",
         "snapshot/list",
@@ -1504,6 +1531,9 @@ impl ClientRequest {
         "vehicle/delete",
         "video/devices",
         "video/capture",
+        "video/capture/settings",
+        "video/file",
+        "video/demos",
         "video/capture/enable",
         "video/list",
         "video/assign",
@@ -1546,6 +1576,8 @@ impl ClientRequest {
         "account/signOutSession",
         "account/signOutOthers",
         "account/requestDeletion",
+        "account/feedback",
+        "account/claimFeedback",
         "param/history",
         "mavlink/inspect",
         "mavlink/history",
@@ -1584,6 +1616,9 @@ pub struct CancelParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "method", content = "params")]
 pub enum ServerNotification {
+    /// Full product update status changed. Sent to connections that requested `update/status`.
+    #[serde(rename = "update/status")]
+    UpdateStatus(crate::dto::update::AppUpdateStatus),
     /// Invalidate private account views; contains no identity or credentials.
     #[serde(rename = "account/changed")]
     AccountChanged(Empty),

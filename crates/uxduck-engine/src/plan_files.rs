@@ -309,6 +309,7 @@ fn vehicle_type_from_mav_type(mav_type: i64) -> Option<PlanVehicleType> {
         10 => PlanVehicleType::Rover,
         11 => PlanVehicleType::Boat,
         12 => PlanVehicleType::Submarine,
+        7 => PlanVehicleType::Blimp,
         19..=22 => PlanVehicleType::Vtol,
         _ => return None,
     })
@@ -322,6 +323,7 @@ fn mav_type_for(vehicle_type: PlanVehicleType) -> i64 {
         PlanVehicleType::Rover => 10,
         PlanVehicleType::Boat => 11,
         PlanVehicleType::Submarine => 12,
+        PlanVehicleType::Blimp => 7,
     }
 }
 
@@ -759,46 +761,42 @@ fn read_kml(name: &str, text: &str, parts: &mut Parts) -> Result<(), String> {
     let mut reader = Reader::from_str(text);
     let mut stack: Vec<String> = Vec::new();
     let mut found = false;
+    let mut content = String::new();
     // The placemark's own name, for the fence area it holds.
     let mut placemark: Option<String> = None;
     loop {
         match reader.read_event() {
             Ok(Event::Start(tag)) => {
-                let tag = String::from_utf8_lossy(tag.local_name().as_ref()).into_owned();
+                let tag = tag.local_name().as_ref().to_owned();
                 if tag == "Placemark" {
                     placemark = None;
                 }
+                if tag == "name" || tag == "coordinates" {
+                    content.clear();
+                }
                 stack.push(tag);
             }
-            Ok(Event::Text(raw))
+            Ok(Event::Text(raw)) => content.push_str(&raw.xml10_content()),
+            Ok(Event::CData(raw)) => content.push_str(&raw.xml10_content()),
+            Ok(Event::GeneralRef(raw)) => {
+                let reference = format!("&{};", raw.as_ref());
+                content.push_str(
+                    &quick_xml::escape::unescape(&reference)
+                        .map_err(|error| format!("{name} is not valid KML: {error}."))?,
+                );
+            }
+            Ok(Event::End(_))
                 if stack.last().is_some_and(|t| t == "name")
                     && stack.iter().rev().nth(1).is_some_and(|t| t == "Placemark") =>
             {
-                let text = raw
-                    .unescape()
-                    .map_err(|error| format!("{name} is not valid KML: {error}."))?;
-                let text = text.trim();
+                let text = content.trim();
                 placemark = (!text.is_empty()).then(|| text.to_string());
-            }
-            Ok(Event::End(_)) => {
+                content.clear();
                 stack.pop();
             }
-            Ok(Event::Text(raw)) if stack.last().is_some_and(|t| t == "coordinates") => {
-                let raw = raw
-                    .unescape()
-                    .map_err(|error| format!("{name} is not valid KML: {error}."))?;
-                let points: Vec<LatLon> = raw
-                    .split_whitespace()
-                    .filter_map(|tuple| {
-                        let mut fields = tuple.split(',');
-                        let lon = fields.next()?.parse::<f64>().ok()?;
-                        let lat = fields.next()?.parse::<f64>().ok()?;
-                        Some(LatLon {
-                            latitude_deg: lat,
-                            longitude_deg: lon,
-                        })
-                    })
-                    .collect();
+            Ok(Event::End(_)) if stack.last().is_some_and(|t| t == "coordinates") => {
+                let raw = &content;
+                let points = kml_points(raw);
                 if stack.iter().any(|t| t == "innerBoundaryIs") {
                     parts
                         .skipped
@@ -834,6 +832,11 @@ fn read_kml(name: &str, text: &str, parts: &mut Parts) -> Result<(), String> {
                         .skipped
                         .push(format!("{name}: a single point was left out."));
                 }
+                content.clear();
+                stack.pop();
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
             }
             Ok(Event::Eof) => break,
             Err(error) => return Err(format!("{name} is not valid KML: {error}.")),
@@ -844,6 +847,20 @@ fn read_kml(name: &str, text: &str, parts: &mut Parts) -> Result<(), String> {
         return Err(format!("{name} has no polygon or line UXDuck can use."));
     }
     Ok(())
+}
+
+fn kml_points(raw: &str) -> Vec<LatLon> {
+    raw.split_whitespace()
+        .filter_map(|tuple| {
+            let mut fields = tuple.split(',');
+            let lon = fields.next()?.parse::<f64>().ok()?;
+            let lat = fields.next()?.parse::<f64>().ok()?;
+            Some(LatLon {
+                latitude_deg: lat,
+                longitude_deg: lon,
+            })
+        })
+        .collect()
 }
 
 /// A file to save.
@@ -1291,7 +1308,7 @@ mod tests {
     #[test]
     fn kml_polygon_and_line() {
         let kml = r#"<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>
-          <Placemark><name> North field </name><Polygon><outerBoundaryIs><LinearRing><coordinates>
+          <Placemark><name> North &amp; south &#937; <![CDATA[<field>]]> </name><Polygon><outerBoundaryIs><LinearRing><coordinates>
             8.54,47.40,0 8.55,47.39,0 8.54,47.38,0 8.54,47.40,0
           </coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
           <Placemark><LineString><coordinates>8.50,47.30 8.51,47.31</coordinates></LineString></Placemark>
@@ -1300,7 +1317,7 @@ mod tests {
         assert_eq!(imported.body.fence.polygons[0].points.len(), 3);
         assert_eq!(
             imported.body.fence.polygons[0].name.as_deref(),
-            Some("North field")
+            Some("North & south Ω <field>")
         );
         assert_eq!(imported.body.items.len(), 2);
         assert_eq!(imported.body.items[1].latitude_deg, 47.31);

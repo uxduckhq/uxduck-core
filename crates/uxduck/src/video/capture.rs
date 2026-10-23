@@ -31,6 +31,25 @@ pub struct Devices {
 }
 
 impl Devices {
+    pub fn wants_sound(&self, input: &CaptureInput) -> bool {
+        if input.no_sound {
+            return false;
+        }
+        if input.record_sound {
+            return true;
+        }
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .0
+            .devices
+            .iter()
+            .find(|d| d.id == input.device_id)
+            .and_then(|camera| own_microphone(camera, &state.0.sound_inputs))
+            .is_some()
+    }
     pub fn list(self: &Arc<Self>, runtime: &tokio::runtime::Handle) -> VideoDevicesResult {
         let mut state = self
             .state
@@ -84,7 +103,10 @@ impl Devices {
                     .into(),
             );
         }
-        if let Some(sound) = input.sound_input.as_ref().filter(|_| input.record_sound)
+        if let Some(sound) = input
+            .sound_input
+            .as_ref()
+            .filter(|_| input.record_sound && !input.no_sound)
             && !state.0.sound_inputs.iter().any(|d| d.id == sound.device_id)
         {
             return Err(
@@ -151,7 +173,7 @@ pub fn program() -> Result<PathBuf, String> {
     Err("The local camera capture helper is missing. Reinstall UXDuck, or build it from source with pnpm capture:build.".into())
 }
 
-fn command(program: &Path) -> Command {
+pub(super) fn command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command.kill_on_drop(true).stdin(Stdio::null());
     #[cfg(windows)]
@@ -160,7 +182,7 @@ fn command(program: &Path) -> Command {
 }
 
 /// Drain diagnostics even during capture, keeping bounded memory.
-async fn tail(mut reader: impl AsyncRead + Unpin) -> String {
+pub(super) async fn tail(mut reader: impl AsyncRead + Unpin) -> String {
     let mut kept = Vec::new();
     let mut chunk = [0; 2048];
     while let Ok(n) = reader.read(&mut chunk).await {
@@ -597,7 +619,7 @@ fn outputs(input: &CaptureInput, sound: Option<&str>) -> Vec<String> {
     args
 }
 
-fn encoding_args() -> Vec<String> {
+pub(super) fn encoding_args() -> Vec<String> {
     let mut args = Vec::new();
     args.extend(
         [
@@ -646,15 +668,42 @@ pub fn spawn(
     epoch: u64,
     hub: Arc<Hub>,
     engine: EngineHandle,
+    selection: Option<super::permission::Receiver>,
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
         let mut backoff = 1u64;
         // Why the camera's own microphone, picked by itself, couldn't be
         // opened: then the pictures go on without it (S161).
         let mut own_refused: Option<String> = None;
+        let mut first = if let Some(mut answer) = selection {
+            let report_id = id.clone();
+            let config = input.clone();
+            engine.post(move |e| e.capture_stopped(&report_id, &config, epoch,
+                "Waiting for macOS permission. Respond to the camera or microphone question before video starts.".into()));
+            Some(super::permission::selected(&mut answer).await)
+        } else { None };
         loop {
+            // Reconnects, recording policy and restored sources only check access.
+            let access = match first.take() {
+                Some(answer) => answer,
+                None => super::permission::query(false, false).await,
+            };
+            let access = match access.and_then(|access| {
+                access.camera_error().map_or(Ok(access), Err)
+            }) {
+                Ok(access) => access,
+                Err(why) => {
+                    let report_id = id.clone();
+                    let config = input.clone();
+                    engine.post(move |e| {
+                        e.capture_permission_issue(&report_id, &config, epoch);
+                        e.capture_stopped(&report_id, &config, epoch, why);
+                    });
+                    return;
+                }
+            };
             let (result, refused) =
-                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref()).await;
+                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref(), &access).await;
             if refused.is_some() {
                 own_refused = refused;
                 backoff = 0;
@@ -757,6 +806,7 @@ async fn run(
     hub: &Hub,
     engine: &EngineHandle,
     own_refused: Option<&str>,
+    access: &super::permission::Access,
 ) -> (String, Option<String>) {
     let automatic = !input.no_sound && !input.record_sound;
     let result = async {
@@ -764,7 +814,7 @@ async fn run(
         let found = discover().await?;
         let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or("Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically.")?;
         // A sound input that is missing leaves the pictures playing, and says so.
-        let (sound, note) = match input.sound_input.as_ref().filter(|_| input.record_sound) {
+        let (mut sound, mut note) = match input.sound_input.as_ref().filter(|_| input.record_sound && !input.no_sound) {
             // Not chosen: the camera's own microphone, when it has one (S161).
             None if !automatic => (None, None),
             None => match own_refused {
@@ -776,6 +826,13 @@ async fn run(
                 None => (None, Some(format!("The sound input {} is not connected, so recordings have no sound. The video plays.", chosen.name))),
             },
         };
+        if sound.is_some() && let Some(why) = access.microphone_note() {
+            sound = None;
+            note = Some(why);
+            let report_id = id.to_owned();
+            let config = input.clone();
+            engine.post(move |e| e.capture_permission_issue(&report_id, &config, epoch));
+        }
         let mut child = command(&program).args(args(input, &device, sound.as_ref())?).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("The camera capture helper could not start: {e}"))?;
         let mut stdout = child.stdout.take().ok_or("The capture helper has no output pipe")?;
         let stderr = child.stderr.take().ok_or("The capture helper has no diagnostic pipe")?;

@@ -313,7 +313,7 @@ impl Engine {
         let condition = format!(
             "vehicle-message:{}:{component_id}:{:x}",
             vehicle.id,
-            Sha256::digest(text.as_bytes())
+            uxduck_core::encoding::Hex(&Sha256::digest(text.as_bytes()))
         );
         let title = format!("{}: {text}", vehicle.name);
         let subject = Subject::Vehicle {

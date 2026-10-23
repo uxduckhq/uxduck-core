@@ -509,7 +509,8 @@ pub struct LayoutPreset {
 /// Parameters' group.
 /// 10 (2026-10-18): the page's phone layouts keep one too; the desktop's are
 /// unchanged, the number matching the page's.
-pub const LAYOUT_PRESET_VERSION: u32 = 10;
+/// 11 (2026-10-22): Simple and both phone presets include Mission as a tab.
+pub const LAYOUT_PRESET_VERSION: u32 = 11;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -932,7 +933,7 @@ impl Layout {
     }
 
     /// The map and the 3D map (always, maintainer 2026-10-18) above
-    /// Control (with Controllers, History and Parameters) beside Telemetry
+    /// Control (with Mission, Controllers, History and Parameters) beside Telemetry
     /// (with Messages, Flight display and Instruments): four panes, with
     /// Advanced's everyday tools as tabs (maintainer, 2026-10-18).
     #[must_use]
@@ -965,6 +966,7 @@ impl Layout {
                                 size: 500,
                                 node: DockNode::of(&[
                                     TabKind::Control,
+                                    TabKind::Mission,
                                     TabKind::Controllers,
                                     TabKind::History,
                                     TabKind::Parameters,
@@ -2005,6 +2007,7 @@ mod tests {
             layout.dock.contains(TabKind::Map3d),
             "the 3D map always shows"
         );
+        assert!(layout.dock.contains(TabKind::Mission));
         assert!(!layout.dock.contains(TabKind::Inspector));
         assert!(
             !layout.dock.contains(TabKind::Home),
@@ -2022,7 +2025,7 @@ mod tests {
         layout.dock = DockNode::of(&[TabKind::Map, TabKind::Camera]);
         layout.saved[0].dock = layout.dock.clone();
         let preset = layout.saved[0].preset.as_mut().unwrap();
-        preset.version = 3;
+        preset.version = LAYOUT_PRESET_VERSION - 1;
         preset.base = Layout::flight_dock();
         let back: Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
         assert_eq!(back.dock, Layout::simple_dock());

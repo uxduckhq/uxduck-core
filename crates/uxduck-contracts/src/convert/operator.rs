@@ -415,6 +415,7 @@ impl From<uxduck_core::domain::telemetry_layout::VehicleClass> for dto::VehicleC
         match value {
             uxduck_core::domain::telemetry_layout::VehicleClass::Plane => Self::Plane,
             uxduck_core::domain::telemetry_layout::VehicleClass::Copter => Self::Copter,
+            uxduck_core::domain::telemetry_layout::VehicleClass::Airship => Self::Airship,
             uxduck_core::domain::telemetry_layout::VehicleClass::Rover => Self::Rover,
             uxduck_core::domain::telemetry_layout::VehicleClass::Boat => Self::Boat,
             uxduck_core::domain::telemetry_layout::VehicleClass::Sub => Self::Sub,
@@ -428,6 +429,7 @@ impl From<dto::VehicleClass> for uxduck_core::domain::telemetry_layout::VehicleC
         match value {
             dto::VehicleClass::Plane => Self::Plane,
             dto::VehicleClass::Copter => Self::Copter,
+            dto::VehicleClass::Airship => Self::Airship,
             dto::VehicleClass::Rover => Self::Rover,
             dto::VehicleClass::Boat => Self::Boat,
             dto::VehicleClass::Sub => Self::Sub,

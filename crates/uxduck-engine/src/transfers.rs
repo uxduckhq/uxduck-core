@@ -211,7 +211,12 @@ pub(crate) fn handle(
             require(Capability::Read)?;
             let id = engine.writable_vehicle(&id)?;
             // Asked for: the fence and rally points come too (S128).
-            engine.transfers.with_parts.insert(id.clone());
+            if engine
+                .vehicle(&id)
+                .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
+            {
+                engine.transfers.with_parts.insert(id.clone());
+            }
             engine.download_mission(&id);
             to_value(&MissionDto::from(&engine.mission(&id)))
         }
@@ -521,6 +526,7 @@ impl Engine {
             Some(link) if link.policy == LinkPolicy::Read => {
                 Some(format!("{} is read-only", link.name))
             }
+            Some(link) if link.paused => Some("the simulation is paused. Resume it first".into()),
             Some(_) => None,
         }
     }
@@ -1368,7 +1374,12 @@ impl Engine {
                 for (name, value, kind) in std::mem::take(&mut job.fence_settings) {
                     self.write_parameter_as(daemon(), &vehicle_id, &name, value, kind);
                 }
-                self.transfers.with_parts.insert(vehicle_id.clone());
+                if self
+                    .vehicle(&vehicle_id)
+                    .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
+                {
+                    self.transfers.with_parts.insert(vehicle_id.clone());
+                }
                 self.transfers
                     .plan_jobs
                     .insert(format!("verify:{vehicle_id}"), job);
@@ -1615,9 +1626,22 @@ fn restore(
     }
     // The same three parts on PX4 (P14).
     let (fence, rally) = (record.fence.clone(), record.rally.clone());
+    let blimp = engine
+        .vehicle(&vehicle_id)
+        .is_some_and(|vehicle| vehicle.vehicle_type == "Airship");
+    if blimp && (!fence.is_empty() || !rally.is_empty()) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Blimp history restore does not support fence or rally transfers",
+        ));
+    }
     let job = PlanJob {
         reply: engine.replying_to.take(),
-        parts: vec![(1, fence.clone()), (2, rally.clone())],
+        parts: if blimp {
+            Vec::new()
+        } else {
+            vec![(1, fence.clone()), (2, rally.clone())]
+        },
         fence,
         rally,
         fence_settings: Vec::new(),

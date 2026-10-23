@@ -1,0 +1,7 @@
+{
+  "method": "video/demos",
+  "params": {
+    "action": "list",
+    "id": null
+  }
+}

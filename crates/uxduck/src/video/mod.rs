@@ -3,9 +3,12 @@
 //! daemon parses and relays; it never decodes a picture (V1).
 
 pub mod capture;
+pub mod demos;
+pub mod file;
 pub mod folder;
 pub mod hub;
 pub mod listener;
+pub mod permission;
 pub mod playback;
 pub mod recorder;
 pub mod rtsp;
@@ -29,7 +32,10 @@ pub struct VideoHost {
     listeners: HashMap<u16, Arc<AtomicBool>>,
     rtsp: HashMap<String, tokio::task::JoinHandle<()>>,
     captures: HashMap<String, tokio::task::JoinHandle<()>>,
+    selections: HashMap<String, permission::Selection>,
     devices: Arc<capture::Devices>,
+    files: HashMap<String, tokio::task::JoinHandle<()>>,
+    demos: Arc<demos::Demos>,
 }
 
 impl uxduck_engine::video::VideoPort for VideoHost {
@@ -102,7 +108,9 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         input: &uxduck_core::domain::video::CaptureInput,
         epoch: u64,
     ) {
-        self.close_capture(source_id);
+        if let Some(task) = self.captures.remove(source_id) {
+            task.abort();
+        }
         let task = capture::spawn(
             &self.runtime,
             source_id.to_owned(),
@@ -110,14 +118,71 @@ impl uxduck_engine::video::VideoPort for VideoHost {
             epoch,
             self.hub.clone(),
             self.engine.clone(),
+            self.selections.get(source_id).map(|s| s.answer.clone()),
         );
         self.captures.insert(source_id.to_owned(), task);
     }
 
     fn close_capture(&mut self, source_id: &str) {
+        self.selections.remove(source_id);
         if let Some(task) = self.captures.remove(source_id) {
             task.abort();
         }
+    }
+
+    fn select_capture(
+        &mut self,
+        source_id: &str,
+        input: &uxduck_core::domain::video::CaptureInput,
+    ) {
+        if !permission::required() {
+            return;
+        }
+        self.selections.insert(
+            source_id.to_owned(),
+            permission::Selection::start(&self.runtime, self.devices.wants_sound(input)),
+        );
+    }
+
+    fn capture_settings(&mut self, microphone: bool) -> Result<(), String> {
+        permission::settings(microphone)
+    }
+
+    fn check_file(&self, path: &str) -> Result<(), String> {
+        file::check(path)
+    }
+    fn open_file(
+        &mut self,
+        id: &str,
+        input: &uxduck_core::domain::video::VideoFileInput,
+        epoch: u64,
+    ) {
+        self.close_file(id);
+        self.files.insert(
+            id.to_owned(),
+            file::spawn(
+                &self.runtime,
+                id.to_owned(),
+                input.clone(),
+                epoch,
+                self.hub.clone(),
+                self.engine.clone(),
+            ),
+        );
+    }
+    fn close_file(&mut self, id: &str) {
+        if let Some(task) = self.files.remove(id) {
+            task.abort();
+        }
+    }
+    fn demos(
+        &mut self,
+        params: &uxduck_contracts::dto::video::VideoDemosParams,
+    ) -> Result<uxduck_contracts::dto::video::VideoDemosResult, String> {
+        self.demos.request(&self.runtime, params)
+    }
+    fn demo_file(&self, id: &str) -> Result<uxduck_core::domain::video::VideoFileInput, String> {
+        self.demos.file(id)
     }
 
     fn start_recording(
@@ -262,7 +327,12 @@ pub async fn start(
         listeners: HashMap::new(),
         rtsp: HashMap::new(),
         captures: HashMap::new(),
+        selections: HashMap::new(),
         devices: Arc::new(capture::Devices::default()),
+        files: HashMap::new(),
+        demos: Arc::new(demos::Demos::new(
+            playback::cache_dir(hub.dir()).with_file_name("demo-videos"),
+        )),
     };
     let _ = engine.run(move |e| e.set_video(Box::new(host))).await;
     // Files deleted in Finder leave the list (S151).
@@ -295,6 +365,9 @@ pub async fn start(
 
 impl Drop for VideoHost {
     fn drop(&mut self) {
+        for task in self.files.values() {
+            task.abort();
+        }
         for task in self.captures.values() {
             task.abort();
         }

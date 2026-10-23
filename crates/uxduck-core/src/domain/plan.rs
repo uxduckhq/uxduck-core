@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What a plan is for (P3): the simulator's list without the blimp.
+/// What a plan is for (P3).
 /// Helicopters plan as multicopters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -16,13 +16,17 @@ pub enum PlanVehicleType {
     Rover,
     Boat,
     Submarine,
+    Blimp,
 }
 
 impl PlanVehicleType {
     /// Whether altitude means anything for it: rovers and boats ignore it.
     #[must_use]
     pub fn flies(self) -> bool {
-        matches!(self, Self::Multicopter | Self::Plane | Self::Vtol)
+        matches!(
+            self,
+            Self::Multicopter | Self::Plane | Self::Vtol | Self::Blimp
+        )
     }
 
     /// The frame a new plan of this type starts in (P4).
@@ -32,7 +36,7 @@ impl PlanVehicleType {
             Self::Multicopter | Self::Plane | Self::Vtol => PlanFrame::AboveTerrain,
             // Rovers and boats ignore heights; subs give depth as a
             // negative height above home (normally the surface).
-            Self::Rover | Self::Boat | Self::Submarine => PlanFrame::AboveHome,
+            Self::Rover | Self::Boat | Self::Submarine | Self::Blimp => PlanFrame::AboveHome,
         }
     }
 }

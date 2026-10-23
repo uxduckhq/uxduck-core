@@ -223,6 +223,10 @@ pub struct Link {
     /// A simulated vehicle started in the air: how its take-off is going.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<Launch>,
+    /// A simulated vehicle frozen where it is (`sim/pause`): its simulator
+    /// runs no time until it resumes. Never set for a real vehicle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
     pub created_at_us: u64,
     pub version: u64,
 }

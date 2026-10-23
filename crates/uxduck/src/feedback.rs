@@ -1,6 +1,7 @@
 //! Sending feedback (ADR-0016 O9, O11): the engine hands over a report with
 //! its scrubbed bundle; this adds the platform, the log tail and, when
-//! ticked, the vehicle's last five minutes of tlog, keeps it all in
+//! ticked, the vehicle's last five minutes of tlog, keeps it all with the
+//! files the person attached in
 //! `feedback/<report id>/` in the data directory, and posts it to the UXDuck
 //! API. People in the field are often offline: a report that cannot be sent
 //! stays there and goes out later, including after a restart, for up to a
@@ -136,6 +137,7 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<FeedbackOrder>, eng
                 Sent::Later => Ok(FeedbackSendResult {
                     status: FeedbackStatus::Queued,
                     issue: None,
+                    transcript: None,
                 }),
                 Sent::Refused(why) => {
                     let _ = std::fs::remove_dir_all(&dir);
@@ -237,6 +239,7 @@ impl Sender {
             "surface": order.surface,
             "via": "daemon",
             "context": format!("{} · {}", platform_name(), order.context),
+            "followUpKey": order.follow_up_key,
         });
         std::fs::write(dir.join("report.json"), report.to_string())?;
         if let Some(mut bundle) = order.bundle {
@@ -249,6 +252,32 @@ impl Sender {
         }
         if let Some(image) = order.screenshot.as_deref().and_then(base64_decode) {
             std::fs::write(dir.join("screenshot"), image)?;
+        }
+        if let Some(voice) = &order.voice_note {
+            let bytes = base64_decode(&voice.data).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the voice note is not base64",
+                )
+            })?;
+            std::fs::write(dir.join("voice"), bytes)?;
+        }
+        // The person's files as `attachments/<n>`, their names beside them.
+        if !order.attachments.is_empty() {
+            let files = dir.join("attachments");
+            std::fs::create_dir_all(&files)?;
+            let mut names = Vec::new();
+            for (n, file) in order.attachments.iter().enumerate() {
+                let bytes = base64_decode(&file.data).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{} is not base64", file.name),
+                    )
+                })?;
+                std::fs::write(files.join(n.to_string()), bytes)?;
+                names.push(file.name.clone());
+            }
+            std::fs::write(files.join("names.json"), json!(names).to_string())?;
         }
         if let Some(flight) = order.flight {
             let tlogs = self.tlogs.clone();
@@ -277,23 +306,38 @@ impl Sender {
             ("screenshot", "screenshot", "application/octet-stream"),
             ("bundle", "feedback-bundle.json", "application/json"),
             ("flight", "flight.tlog", "application/octet-stream"),
+            ("voice", "voice", "application/octet-stream"),
         ] {
             if let Ok(bytes) = std::fs::read(dir.join(file)) {
                 form.part(name, Some(file), kind, &bytes);
             }
+        }
+        let names: Vec<String> = std::fs::read(dir.join("attachments/names.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        for (n, name) in names.iter().enumerate() {
+            let Ok(bytes) = std::fs::read(dir.join("attachments").join(n.to_string())) else {
+                return Sent::Refused(format!("the attached {name} is missing from the outbox"));
+            };
+            form.part(
+                "attachment",
+                Some(&quoted(name)),
+                "application/octet-stream",
+                &bytes,
+            );
         }
         let (content_type, body) = form.finish();
         let mut request = client
             .post(format!("{api}/v1/feedback"))
             .header("Content-Type", content_type)
             .body(body);
-        // Credited: the API reads the account from its token (S73).
-        let credit = serde_json::from_slice::<Value>(&report).is_ok_and(|r| r["credit"] == true);
-        if credit
-            && let Some(token) = self
-                .credentials
-                .get(crate::account::TOKEN)
-                .filter(|t| !t.is_empty())
+        // Signed in: the report is the account's, to see on any computer,
+        // and credited when asked (S73). The API reads it from the token.
+        if let Some(token) = self
+            .credentials
+            .get(crate::account::TOKEN)
+            .filter(|t| !t.is_empty())
         {
             request = request.bearer_auth(token);
         }
@@ -320,6 +364,7 @@ impl Sender {
                 Sent::Done(FeedbackSendResult {
                     status,
                     issue: answer["issue"].as_str().map(str::to_owned),
+                    transcript: answer["transcript"].as_str().map(str::to_owned),
                 })
             }
             // A redirect is a network that wants a sign-in first, or
@@ -435,6 +480,20 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// A file name fit for a `filename="…"` parameter: no quotes, backslashes or
+/// line breaks. The API cleans names again on arrival.
+fn quoted(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if matches!(c, '"' | '\\' | '\r' | '\n') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// A `multipart/form-data` body, built by hand: the API takes a few parts.

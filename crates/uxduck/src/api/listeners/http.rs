@@ -757,6 +757,9 @@ async fn pairing_poll(
     }
 }
 
+/// The largest JSON-RPC message from a paired page.
+const RPC_MESSAGE: usize = 48 * 1024 * 1024;
+
 /// JSON-RPC over WebSocket, one text frame per message. Needs a session.
 async fn rpc(
     State(state): State<AppState>,
@@ -782,9 +785,13 @@ async fn rpc(
             None,
         ),
     };
-    // A browser that offered subprotocols closes unless one is echoed.
+    // A browser that offered subprotocols closes unless one is echoed. A
+    // browser sends a message as one frame, and a feedback report with its
+    // screenshot and 25 MB of attached files is about 38 MB in base64.
     upgrade
         .protocols([PROTOCOL])
+        .max_frame_size(RPC_MESSAGE)
+        .max_message_size(RPC_MESSAGE)
         .on_upgrade(move |socket| serve_websocket(socket, engine, trust, stopped))
 }
 

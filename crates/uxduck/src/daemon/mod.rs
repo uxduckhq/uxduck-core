@@ -5,6 +5,8 @@ pub mod agent;
 pub mod controllers;
 pub mod data_plane;
 pub mod engine_task;
+#[cfg(any(feature = "gamepad", test))]
+mod gamepad_events;
 #[cfg(all(feature = "gamepad", target_os = "macos"))]
 pub mod hid;
 #[cfg(feature = "plugins")]

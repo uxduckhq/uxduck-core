@@ -2,7 +2,7 @@
 //! design is `docs/plan/interface-updates.md`).
 //!
 //! Online, UXDuck follows the interface app.uxduck.com publishes: it
-//! checks the signed manifest 10 s after start, every hour and when a page
+//! checks the signed manifest on start, every hour and when a page
 //! asks (`interface/check`), downloads the newest entry that talks this
 //! UXDuck's protocol, checks the archive and every file in it, and keeps it
 //! in `<data dir>/interface/`. Offline it serves the last one it followed;
@@ -81,7 +81,7 @@ pub struct Config {
 impl Config {
     /// Each channel's manifest and the key built into this binary. A
     /// development build also takes `UXDUCK_INTERFACE_URL` for both
-    /// channels, `UXDUCK_INTERFACE_KEY` and shorter times
+    /// channels, `UXDUCK_INTERFACE_KEY` and timing overrides
     /// (`UXDUCK_INTERFACE_FIRST_CHECK_MS`, `UXDUCK_INTERFACE_READY_MS`), for
     /// tests.
     #[must_use]
@@ -110,7 +110,7 @@ impl Config {
             key: debug_env("UXDUCK_INTERFACE_KEY")
                 .or_else(|| crate::update::PUBLIC_KEY.map(str::to_owned)),
             dev,
-            first_check: ms("UXDUCK_INTERFACE_FIRST_CHECK_MS").unwrap_or(Duration::from_secs(10)),
+            first_check: ms("UXDUCK_INTERFACE_FIRST_CHECK_MS").unwrap_or(Duration::ZERO),
             every: Duration::from_hours(1),
             ready_timeout: ms("UXDUCK_INTERFACE_READY_MS").unwrap_or(READY_TIMEOUT),
         }
@@ -386,7 +386,7 @@ impl Interfaces {
         }
     }
 
-    /// Hands the engine its port and status, then checks 10 s after start
+    /// Hands the engine its port and status, then checks asynchronously on start
     /// and every hour, and watches for pages that never say they are ready.
     pub fn start(self: &Arc<Self>, engine: &EngineHandle) {
         let _ = self.engine.set(engine.clone());
@@ -399,17 +399,7 @@ impl Interfaces {
         if self.config.key.is_none() {
             tracing::info!("this build has no release key: it serves the interface built into it");
         }
-        let checker = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(checker.config.first_check).await;
-            loop {
-                checker.check().await;
-                tokio::select! {
-                    () = tokio::time::sleep(checker.config.every) => {}
-                    () = checker.wake.notified() => {}
-                }
-            }
-        });
+        tokio::spawn(self.clone().follow());
         let watcher = self.clone();
         tokio::spawn(async move {
             let step = (watcher.config.ready_timeout / 12).max(Duration::from_millis(100));
@@ -419,6 +409,18 @@ impl Interfaces {
                 watcher.overdue();
             }
         });
+    }
+
+    /// Network work stays off the startup path; opening a window never waits for it.
+    async fn follow(self: Arc<Self>) {
+        tokio::time::sleep(self.config.first_check).await;
+        loop {
+            self.check().await;
+            tokio::select! {
+                () = tokio::time::sleep(self.config.every) => {}
+                () = self.wake.notified() => {}
+            }
+        }
     }
 
     /// Checks the manifest and installs what it names, then chooses again.

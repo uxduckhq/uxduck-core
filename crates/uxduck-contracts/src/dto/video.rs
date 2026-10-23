@@ -66,6 +66,18 @@ pub struct VideoCounters {
     pub klv_bad: u64,
 }
 
+/// Prerecorded footage played as a camera, independent of vehicle motion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFileInput {
+    /// Absolute path on the computer running UXDuck; never uploaded.
+    pub path: String,
+    pub name: String,
+    pub repeat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_id: Option<String>,
+}
+
 /// A camera attached to the computer running the daemon, never to a UI session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +199,8 @@ pub struct VideoSource {
     /// Local device capture and its encoding provenance; absent for network cameras.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<VideoFileInput>,
     /// Every video track an RTSP camera offers, the one playing marked;
     /// empty until it answers, and for UDP. `video/track` chooses another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -502,6 +516,8 @@ pub struct VideoRecording {
     /// Capture settings at the start; these pictures were encoded by UXDuck's helper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<VideoFileInput>,
     /// The receipt of the vehicle's camera told to record too (S145).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_receipt_id: Option<String>,
@@ -592,9 +608,89 @@ pub struct VideoCaptureParams {
     pub input: CaptureInput,
 }
 
+/// Opens a fixed camera/microphone privacy pane on the daemon's computer.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VideoCaptureSettingsParams {
+    #[serde(default)]
+    pub microphone: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoCaptureEnableParams {
     pub source_id: String,
     pub enabled: bool,
+}
+
+/// Add or replace a file camera. Exactly one of path and demoId is required.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFileParams {
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub demo_id: Option<String>,
+    pub repeat: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDemosParams {
+    #[serde(default)]
+    pub action: DemoAction,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DemoAction {
+    #[default]
+    List,
+    Refresh,
+    Download,
+    Cancel,
+    Remove,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoVideo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub duration_seconds: u32,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// SHA-256 of the complete MP4; also its immutable object name.
+    pub sha256: String,
+    pub credit: String,
+    pub source_url: String,
+    pub license: String,
+    pub thumbnail: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoDownload {
+    pub id: String,
+    pub ready: bool,
+    pub downloading: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub received_bytes: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDemosResult {
+    pub clips: Vec<DemoVideo>,
+    pub downloads: Vec<DemoDownload>,
+    pub refreshing: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }

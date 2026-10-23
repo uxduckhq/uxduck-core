@@ -40,6 +40,8 @@ pub enum StorageCategory {
     Parameters,
     /// Copies of vehicles' files, by vehicle (S121).
     VehicleFiles,
+    /// Optional demo footage, removed explicitly from the catalogue.
+    DemoVideos,
 }
 
 /// Delete a category's files older than `days`.

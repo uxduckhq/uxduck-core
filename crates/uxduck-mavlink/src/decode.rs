@@ -139,6 +139,8 @@ pub enum Message {
     /// The mission item the vehicle is flying to.
     MissionCurrent {
         seq: u16,
+        state: u8,
+        mode: u8,
     },
     /// A message from the vehicle, or one part of a long one (S26).
     StatusText {
@@ -657,6 +659,14 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
     })
 }
 
+fn mission_current(m: &mavio::dialects::ardupilotmega::messages::MissionCurrent) -> Message {
+    Message::MissionCurrent {
+        seq: m.seq,
+        state: m.mission_state as u8,
+        mode: m.mission_mode,
+    }
+}
+
 fn transfer(message: Ardupilotmega) -> Option<Message> {
     match message {
         Ardupilotmega::ParamValue(m) => Some(Message::ParamValue {
@@ -717,7 +727,7 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             result: m.type_ as u8,
             mission_type: m.mission_type as u8,
         }),
-        Ardupilotmega::MissionCurrent(m) => Some(Message::MissionCurrent { seq: m.seq }),
+        Ardupilotmega::MissionCurrent(m) => Some(mission_current(&m)),
         Ardupilotmega::Statustext(m) => {
             let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
             Some(Message::StatusText {

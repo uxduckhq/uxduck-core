@@ -13,19 +13,20 @@ Type `>` in the input to list every action with its shortcut. Keep typing to nar
 
 ## Shortcuts
 
-| Action                   | macOS | Windows and Linux |
-| ------------------------ | ----- | ----------------- |
-| Open the command palette | ⌘K    | Ctrl+K            |
-| Open Settings            | ⌘,    | Ctrl+,            |
-| Show or hide the sidebar | ⌘B    | Ctrl+B            |
-| Show or hide Home        | ⌥H    | Alt+H             |
-| Show or hide Fleet       | ⌥⇧V   | Alt+Shift+V       |
-| Show or hide Places      | ⌥P    | Alt+P             |
-| Send feedback            | ⌥B    | Alt+B             |
-| Open the Map tab         | ⌥M    | Alt+M             |
-| Open the Telemetry tab   | ⌥T    | Alt+T             |
-| Back                     | ⌘[    | Alt+←             |
-| Forward                  | ⌘]    | Alt+→             |
+| Action                       | macOS | Windows and Linux |
+| ---------------------------- | ----- | ----------------- |
+| Open the command palette     | ⌘K    | Ctrl+K            |
+| Open Settings                | ⌘,    | Ctrl+,            |
+| Show or hide the sidebar     | ⌘B    | Ctrl+B            |
+| Show or hide Home            | ⌥H    | Alt+H             |
+| Show or hide Fleet           | ⌥⇧V   | Alt+Shift+V       |
+| Show or hide Places          | ⌥P    | Alt+P             |
+| Send feedback                | ⌥B    | Alt+B             |
+| Open the Map tab             | ⌥M    | Alt+M             |
+| Open the Telemetry tab       | ⌥T    | Alt+T             |
+| Back                         | ⌘[    | Alt+←             |
+| Forward                      | ⌘]    | Alt+→             |
+| Pause or resume a simulation | ⇧P    | Shift+P           |
 
 Shortcuts with ⌥ (Alt) follow the key's place on the keyboard, whatever character it types. Most actions leave text fields alone; Settings, the command palette, the sidebar, Home, Fleet and Places also work while typing. There are none on touch screens; use `>` in the input instead.
 

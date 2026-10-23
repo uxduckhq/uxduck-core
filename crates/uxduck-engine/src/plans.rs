@@ -262,6 +262,7 @@ pub(crate) fn handle(
                 PlanVehicleType::Rover,
                 PlanVehicleType::Boat,
                 PlanVehicleType::Submarine,
+                PlanVehicleType::Blimp,
             ]
             .into_iter()
             .map(|t| {
@@ -360,20 +361,29 @@ pub(crate) fn plan_job(
     let ardupilot = engine
         .vehicle(&vehicle_id)
         .is_none_or(|v| v.autopilot.to_lowercase().contains("ardupilot"));
+    let blimp = engine
+        .vehicle(&vehicle_id)
+        .is_some_and(|vehicle| vehicle.vehicle_type == "Airship");
     let fence = plan_files::fence_items(&body.fence)
         .iter()
         .map(as_mission_item)
         .collect::<Vec<_>>();
     let rally = rally_items(body);
     // The same three parts on PX4 (P14); its fence settings are `GF_`.
-    let fence_settings = if ardupilot {
+    let fence_settings = if blimp {
+        Vec::new()
+    } else if ardupilot {
         fence_settings(engine, &vehicle_id, body)
     } else {
         px4_fence_settings(engine, &vehicle_id, body)
     };
     crate::transfers::PlanJob {
         reply: None,
-        parts: vec![(1, fence.clone()), (2, rally.clone())],
+        parts: if blimp {
+            Vec::new()
+        } else {
+            vec![(1, fence.clone()), (2, rally.clone())]
+        },
         fence,
         rally,
         fence_settings,
@@ -966,6 +976,13 @@ pub(crate) fn px4_heights(
 /// A plan's checks, against the terrain a vehicle would use (or the
 /// default dataset), asking for what is not fetched yet.
 fn checks_of(engine: &mut Engine, body: &PlanBody, vehicle_id: Option<&str>) -> Vec<Check> {
+    let mut targeted = body.clone();
+    if vehicle_id
+        .and_then(|id| engine.vehicle(id))
+        .is_some_and(|vehicle| vehicle.vehicle_type == "Airship")
+    {
+        targeted.vehicle_type = PlanVehicleType::Blimp;
+    }
     let dataset = vehicle_id.map_or_else(
         || crate::terrain::setting(engine.state.settings.terrain_dataset),
         |id| engine.terrain_dataset_of(id),
@@ -983,7 +1000,7 @@ fn checks_of(engine: &mut Engine, body: &PlanBody, vehicle_id: Option<&str>) -> 
             _ => None,
         })
     };
-    let checks = crate::plan_checks::check(body, &mut ground);
+    let checks = crate::plan_checks::check(&targeted, &mut ground);
     engine.terrain_flush();
     checks
 }

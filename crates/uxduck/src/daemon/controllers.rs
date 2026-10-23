@@ -195,12 +195,10 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + 'static) {
             }
             let mut steady = Steady::default();
             loop {
-                let Some(event) = gilrs.next_event_blocking(None) else {
-                    // Only when gilrs has lost its event source; without a
-                    // pause this would spin a core (S24).
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    continue;
-                };
+                let event = super::gamepad_events::next(
+                    || gilrs.next_event_blocking(None),
+                    std::thread::sleep,
+                );
                 let id = id_of(&gilrs, event.id);
                 match event.event {
                     gilrs::EventType::Connected => announce(&gilrs, event.id),

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub enum VehicleClass {
     Plane,
     Copter,
+    Airship,
     Rover,
     Boat,
     Sub,
@@ -25,7 +26,9 @@ impl VehicleClass {
     #[must_use]
     pub fn of(mav_type: &str) -> Self {
         let t = mav_type.to_ascii_lowercase();
-        if t.contains("submarine") {
+        if t.contains("airship") || t.contains("blimp") {
+            Self::Airship
+        } else if t.contains("submarine") {
             Self::Sub
         } else if t.contains("surface") || t.contains("boat") {
             Self::Boat
@@ -248,6 +251,8 @@ mod tests {
         for (mav, class) in [
             ("Quadrotor", VehicleClass::Copter),
             ("Helicopter", VehicleClass::Copter),
+            ("Airship", VehicleClass::Airship),
+            ("Blimp", VehicleClass::Airship),
             ("VtolTiltrotor", VehicleClass::Plane),
             ("GroundRover", VehicleClass::Rover),
             ("SurfaceBoat", VehicleClass::Boat),

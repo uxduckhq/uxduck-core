@@ -1,0 +1,31 @@
+{
+  "id": "vs-file",
+  "name": "Flight",
+  "port": 0,
+  "sender": "recorded video",
+  "container": "rtp",
+  "state": "stopped",
+  "stateDetail": "Opening recorded video",
+  "addedByHand": true,
+  "counters": {
+    "bitrateBps": 0,
+    "datagrams": 0,
+    "pictures": 0,
+    "keyframes": 0,
+    "lost": 0,
+    "damaged": 0,
+    "pesLengthMismatches": 0,
+    "pesLengthMaxExcess": 0,
+    "nalsDropped": 0,
+    "klv": 0,
+    "klvBad": 0
+  },
+  "firstSeenUs": 1790000000000000,
+  "changedAtUs": 1790000000000000,
+  "version": 1,
+  "file": {
+    "path": "/recordings/flight.mp4",
+    "name": "Flight.mp4",
+    "repeat": false
+  }
+}

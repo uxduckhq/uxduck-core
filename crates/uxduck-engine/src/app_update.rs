@@ -1,5 +1,7 @@
 //! Full app update consent and restart admission. The host downloads and installs;
 //! this engine alone decides when the current state permits a handoff.
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use uxduck_contracts::dto::tray::TrayAlert;
 use uxduck_contracts::dto::update::{AppUpdateStatus, UpdatePhase};
@@ -10,11 +12,13 @@ use uxduck_core::domain::command::ReceiptStatus;
 use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 
-use crate::{Engine, rpc::handlers::to_value};
+use crate::{ConnectionId, Engine, rpc::handlers::to_value};
 
 #[derive(Default)]
 pub(crate) struct Updates {
     pub status: AppUpdateStatus,
+    pub watchers: BTreeSet<ConnectionId>,
+    last_status: Option<AppUpdateStatus>,
     consent: Option<Consent>,
     dismissed: bool,
     check: bool,
@@ -24,10 +28,12 @@ pub(crate) struct Updates {
 struct Consent {
     version: String,
     when_idle: bool,
+    stop_simulations: bool,
 }
 
 pub(crate) fn handle(
     engine: &mut Engine,
+    connection: ConnectionId,
     request: &ClientRequest,
     operator: bool,
     granted: &[Capability],
@@ -45,7 +51,9 @@ pub(crate) fn handle(
         ));
     }
     match request {
-        ClientRequest::UpdateStatus(_) => {}
+        ClientRequest::UpdateStatus(_) => {
+            engine.app_update.watchers.insert(connection);
+        }
         ClientRequest::UpdateCheck(_) => engine.app_update.check = true,
         ClientRequest::UpdateLater(_) => {
             engine.app_update.consent = None;
@@ -60,7 +68,13 @@ pub(crate) fn handle(
                     "That update is no longer ready. Check for updates again.",
                 ));
             }
-            let blockers = engine.app_update_blockers();
+            if params.when_idle && params.stop_simulations {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Stopping simulations requires installing now, not when idle.",
+                ));
+            }
+            let blockers = engine.app_update_blockers_for(params.stop_simulations);
             if !params.when_idle && !blockers.is_empty() {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
@@ -70,6 +84,7 @@ pub(crate) fn handle(
             engine.app_update.consent = Some(Consent {
                 version: params.version.clone(),
                 when_idle: params.when_idle,
+                stop_simulations: params.stop_simulations,
             });
             engine.app_update.dismissed = false;
         }
@@ -80,10 +95,41 @@ pub(crate) fn handle(
 }
 
 impl Engine {
+    /// Push changed status to subscribers after a host engine turn. This also
+    /// covers work held outside journaled state, such as AI tasks and transfers.
+    pub fn app_update_flush(&mut self) {
+        if self.app_update.watchers.is_empty() {
+            return;
+        }
+        let status = self.app_update_status();
+        if self.app_update.last_status.as_ref() == Some(&status) {
+            return;
+        }
+        let frame = crate::rpc::router::notification(
+            &uxduck_contracts::rpc::ServerNotification::UpdateStatus(status.clone()),
+        );
+        self.app_update.last_status = Some(status);
+        let watchers: Vec<_> = self.app_update.watchers.iter().copied().collect();
+        for connection in watchers {
+            if self
+                .connections
+                .get(&connection)
+                .and_then(|c| c.admitted.as_ref())
+                .is_some_and(|a| a.granted.contains(&Capability::Read))
+            {
+                self.send(connection, &frame);
+            }
+        }
+    }
+
     /// Evaluate current state, including vehicles last seen armed before losing
     /// contact. Missing simulator provenance is treated as real hardware.
     #[must_use]
     pub fn app_update_blockers(&self) -> Vec<String> {
+        self.app_update_blockers_for(false)
+    }
+
+    fn app_update_blockers_for(&self, stop_simulations: bool) -> Vec<String> {
         let mut blockers = Vec::new();
         for vehicle in self.state.vehicles.values() {
             let simulated = self
@@ -109,7 +155,8 @@ impl Engine {
         for stop in self.stop_preview().stops {
             use uxduck_contracts::dto::app::StopKind;
             let reason = match stop.kind {
-                StopKind::Simulation => "Simulations are running. Stop them before installing",
+                StopKind::Simulation if stop_simulations => continue,
+                StopKind::Simulation => "Simulations are running",
                 StopKind::ForwardLink => "Forwarding is active",
                 StopKind::Recording => "A recording is in progress",
                 StopKind::Vehicle => continue,
@@ -179,7 +226,21 @@ impl Engine {
     pub fn app_update_status(&self) -> AppUpdateStatus {
         let mut status = self.app_update.status.clone();
         status.current.clone_from(&self.config.daemon_version);
-        status.blockers = self.app_update_blockers();
+        status.push_updates = true;
+        let blockers_without_simulations = self.app_update_blockers_for(true);
+        let blockers = self.app_update_blockers();
+        status.can_install_with_simulations =
+            !blockers.is_empty() && blockers_without_simulations.is_empty();
+        status.blockers = if self
+            .app_update
+            .consent
+            .as_ref()
+            .is_some_and(|c| c.stop_simulations)
+        {
+            blockers_without_simulations
+        } else {
+            blockers
+        };
         if self
             .app_update
             .consent
@@ -259,8 +320,10 @@ impl Engine {
             && self.app_update.consent.as_ref().is_some_and(|consent| {
                 self.app_update.status.version.as_deref() == Some(consent.version.as_str())
                     && (!consent.when_idle || !self.has_update_ui())
+                    && self
+                        .app_update_blockers_for(consent.stop_simulations)
+                        .is_empty()
             })
-            && self.app_update_blockers().is_empty()
     }
 
     /// Called only after the installer worker is ready. This final check and

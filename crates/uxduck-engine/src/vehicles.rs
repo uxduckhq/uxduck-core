@@ -37,6 +37,10 @@ impl Engine {
         if link.status == status && link.status_detail == detail {
             return;
         }
+        // A simulator that stopped or lost its link is no longer paused.
+        if status != LinkStatus::Up {
+            link.paused = false;
+        }
         link.status = status;
         link.status_detail = detail;
         link.version += 1;

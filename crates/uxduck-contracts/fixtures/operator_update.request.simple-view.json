@@ -60,6 +60,10 @@
                         "kind": "control"
                       },
                       {
+                        "id": "mission",
+                        "kind": "mission"
+                      },
+                      {
                         "id": "controllers",
                         "kind": "controllers"
                       },
@@ -168,6 +172,10 @@
                             "kind": "control"
                           },
                           {
+                            "id": "mission",
+                            "kind": "mission"
+                          },
+                          {
                             "id": "controllers",
                             "kind": "controllers"
                           },
@@ -219,7 +227,7 @@
           },
           "preset": {
             "kind": "simple",
-            "version": 10,
+            "version": 11,
             "base": {
               "type": "split",
               "direction": "column",
@@ -273,6 +281,10 @@
                             {
                               "id": "control",
                               "kind": "control"
+                            },
+                            {
+                              "id": "mission",
+                              "kind": "mission"
                             },
                             {
                               "id": "controllers",

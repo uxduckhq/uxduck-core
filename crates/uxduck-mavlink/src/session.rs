@@ -634,6 +634,8 @@ pub struct Session {
     stations: BTreeMap<(String, String, u8), u64>,
     /// Simulator links, whose vehicles take their ids from the link.
     simulated: std::collections::BTreeSet<String>,
+    /// Simulators' links that are paused (`sim/pause`).
+    paused: std::collections::BTreeSet<String>,
     /// Terrain answers waiting to go, paced per vehicle (S118).
     terrain: crate::terrain::Outbox,
     /// `TERRAIN_CHECK`s waiting for their report (S119), by vehicle: the
@@ -666,6 +668,39 @@ impl Session {
     /// whatever another simulation of the same build was.
     pub fn simulated(&mut self, link_id: &str) {
         self.simulated.insert(link_id.to_owned());
+    }
+
+    /// Pauses a simulator's link or lets it run again (`sim/pause`). A
+    /// paused simulator sends nothing, which is not a lost vehicle: its
+    /// vehicles keep their presence and nothing is asked of them again.
+    /// Nothing is sent to it either ([`Session::is_paused`]), since it would
+    /// read everything at once as it resumes. Resuming counts as a
+    /// heartbeat and gives its streams time to come back before they are
+    /// asked for.
+    pub fn pause(&mut self, link_id: &str, paused: bool, now_us: u64) {
+        if paused {
+            self.paused.insert(link_id.to_owned());
+            return;
+        }
+        if !self.paused.remove(link_id) {
+            return;
+        }
+        for vehicle in self
+            .vehicles
+            .values_mut()
+            .filter(|v| v.observation.link_id == link_id)
+        {
+            if vehicle.observation.presence != Presence::Offline {
+                vehicle.observation.last_heartbeat_us = now_us;
+                vehicle.online_since_us = now_us;
+            }
+        }
+    }
+
+    /// Whether a link is a paused simulator's: nothing is sent on it.
+    #[must_use]
+    pub fn is_paused(&self, link_id: &str) -> bool {
+        self.paused.contains(link_id)
     }
 
     /// A frame from a forward, which the session does not read otherwise:
@@ -1384,7 +1419,13 @@ impl Session {
         let mut sends = Vec::new();
         let mut stream_requests = Vec::new();
         for vehicle in self.vehicles.values_mut() {
-            let presence = presence_at(config, vehicle.observation.last_heartbeat_us, now_us);
+            // A paused simulator's vehicle stays as it was until it resumes.
+            let paused = self.paused.contains(&vehicle.observation.link_id);
+            let presence = if paused {
+                vehicle.observation.presence
+            } else {
+                presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
+            };
             if presence != vehicle.observation.presence {
                 vehicle.observation.presence = presence;
                 effects.push(Effect::Vehicle(Box::new(vehicle.observation.clone())));
@@ -1404,6 +1445,7 @@ impl Session {
                 effects.push(Effect::Telemetry(telemetry));
             }
             let retry = vehicle.observation.uid.is_none()
+                && !paused
                 && presence == Presence::Online
                 && vehicle.version_requests < config.version_attempts
                 && now_us.saturating_sub(vehicle.last_request_us) >= config.version_retry_us;
@@ -1417,7 +1459,7 @@ impl Session {
                     vehicle.autopilot_component,
                 ));
             }
-            if presence == Presence::Online {
+            if presence == Presence::Online && !paused {
                 for (message_id, interval_us) in missing_streams(vehicle, &config, now_us) {
                     stream_requests.push((
                         vehicle.observation.link_id.clone(),
@@ -2918,6 +2960,7 @@ impl Session {
         self.peers.retain(|(link, _), _| link != link_id);
         self.stations.retain(|(link, _, _), _| link != link_id);
         self.simulated.remove(link_id);
+        self.paused.remove(link_id);
         ids
     }
 }
@@ -3274,6 +3317,40 @@ mod tests {
         );
         let back = session.ingest("l1", PEER, &heartbeat_frame(1, 1, 1), 2_100);
         assert_eq!(vehicles(&back)[0].presence, Presence::Online);
+    }
+
+    #[test]
+    fn a_paused_simulator_keeps_its_vehicle_until_it_resumes() {
+        let mut session = Session::new(Config {
+            stale_after_us: 100,
+            offline_after_us: 1_000,
+            ..Config::default()
+        });
+        session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
+        session.pause("l1", true, 50);
+        assert!(session.is_paused("l1"));
+        // Silent for far longer than the vehicle would be offline, and
+        // nothing asked of it.
+        let quiet = session.tick(60_000);
+        assert!(
+            vehicles(&quiet).is_empty(),
+            "no presence change while paused"
+        );
+        assert!(
+            !quiet.iter().any(|e| matches!(e, Effect::Send { .. })),
+            "nothing sent to a paused simulator"
+        );
+        session.pause("l1", false, 60_000);
+        assert!(!session.is_paused("l1"));
+        assert!(
+            vehicles(&session.tick(60_050)).is_empty(),
+            "online on resuming"
+        );
+        assert_eq!(
+            vehicles(&session.tick(60_200))[0].presence,
+            Presence::Stale,
+            "silence after resuming counts again"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod domain;
+pub mod encoding;
 pub mod events;
 pub mod order;
 pub mod policy;

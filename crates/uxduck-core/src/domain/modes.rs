@@ -611,7 +611,7 @@ const ROVER: &[(u32, &str)] = &[
 
 /// ArduPilot Blimp modes, from the pinned Blimp/mode.h.
 const BLIMP_WORDS: &[(&str, &str)] = &[
-    ("LAND", "Descends to the ground"),
+    ("LAND", "Stops actuators; the blimp may drift"),
     ("MANUAL", "You control the fins or motors directly"),
     ("VELOCITY", "You choose its speed and direction"),
     ("LOITER", "Holds position and height"),

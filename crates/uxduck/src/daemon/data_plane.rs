@@ -43,6 +43,8 @@ enum Command {
     GroundHeartbeat(String, bool),
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
+    /// A simulator frozen or let run again (`sim/pause`).
+    Pause(String, bool),
 }
 
 #[derive(Debug)]
@@ -93,6 +95,9 @@ impl LinkPort for LinkChannel {
     }
     fn gcs_system_id(&mut self, id: u8) {
         let _ = self.0.send(Command::GcsSystemId(id));
+    }
+    fn pause_simulation(&mut self, link_id: &str, paused: bool) {
+        let _ = self.0.send(Command::Pause(link_id.to_owned(), paused));
     }
 }
 
@@ -281,6 +286,7 @@ pub fn start(
                         plane.gcs.store(id, Ordering::Relaxed);
                         plane.session.set_gcs_system_id(id);
                     }
+                    Some(Command::Pause(link_id, paused)) => plane.pause(&link_id, paused).await,
                 },
                 Some(incoming) = received.recv() => plane.incoming(incoming).await,
                 _ = manual.tick(), if steering => {
@@ -526,6 +532,29 @@ impl Plane {
         }
     }
 
+    /// Freezes a simulator's build, or lets it run again; the session
+    /// stops expecting to hear from it, and nothing is sent to it.
+    async fn pause(&mut self, link_id: &str, paused: bool) {
+        let Some(simulator) = self
+            .open
+            .get_mut(link_id)
+            .and_then(|open| open.simulator.as_mut())
+        else {
+            tracing::warn!(link = %link_id, paused, "no running simulator to pause or resume");
+            return;
+        };
+        if let Err(error) = simulator.pause(paused) {
+            tracing::warn!(link = %link_id, paused, %error, "cannot pause or resume a simulator");
+            let link_id = link_id.to_owned();
+            let _ = self
+                .engine
+                .run(move |e| e.simulation_pause_failed(&link_id, paused, error))
+                .await;
+            return;
+        }
+        self.session.pause(link_id, paused, SystemClock.now_us());
+    }
+
     fn close(&mut self, link_id: &str) {
         if self.open.remove(link_id).is_some() {
             crate::tlog_index::close(link_id);
@@ -657,6 +686,7 @@ impl Plane {
         for send in routed.sends {
             if let Some(open) = self.open.get(&send.link_id)
                 && (open.forward || open.writable)
+                && !self.session.is_paused(&send.link_id)
             {
                 crate::diagnostics::record(
                     &send.link_id,
@@ -788,7 +818,12 @@ impl Plane {
                     peer,
                     bytes,
                 } => {
-                    if let Some(open) = self.open.get(&link_id).filter(|o| o.writable) {
+                    // A paused simulator would read it all at once on resuming.
+                    if let Some(open) = self
+                        .open
+                        .get(&link_id)
+                        .filter(|o| o.writable && !self.session.is_paused(&link_id))
+                    {
                         inspect_sent(&self.session, &link_id, &peer, &bytes);
                         crate::diagnostics::record(
                             &link_id,

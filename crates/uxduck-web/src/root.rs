@@ -210,6 +210,11 @@ pub enum Order {
     Stop {
         link_id: String,
     },
+    /// Freeze a simulated vehicle where it is, or let it run again.
+    Pause {
+        link_id: String,
+        paused: bool,
+    },
 }
 
 /// What the engine's ports asked for, done after each engine call.
@@ -221,6 +226,8 @@ enum Call {
     Transfer(TransferOrder),
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
+    /// A simulator frozen or let run again (`sim/pause`).
+    Pause(String, bool),
     Journal(Write),
     Turn(TurnRequest),
     Definitions(DefinitionsOrder),
@@ -284,6 +291,9 @@ impl LinkPort for Links {
     }
     fn gcs_system_id(&mut self, id: u8) {
         push(&self.0, Call::GcsSystemId(id));
+    }
+    fn pause_simulation(&mut self, link_id: &str, paused: bool) {
+        push(&self.0, Call::Pause(link_id.to_owned(), paused));
     }
     fn controller_input(&mut self, event: InputEvent) {
         push(&self.0, Call::Input(event));
@@ -1104,7 +1114,8 @@ impl Browser {
                     peer,
                     bytes,
                 } => {
-                    if self.streams.contains_key(&link_id) {
+                    // A paused simulator would read it all at once on resuming.
+                    if self.streams.contains_key(&link_id) && !self.session.is_paused(&link_id) {
                         self.inspect_sent(&link_id, &peer, &bytes);
                         outputs.push(Output::LinkWrite { link_id, bytes });
                     }
@@ -1191,6 +1202,18 @@ impl Browser {
                 self.apply(effects, outputs);
             }
             Call::GcsSystemId(id) => self.session.set_gcs_system_id(id),
+            Call::Pause(link_id, paused) => {
+                if self.streams.contains_key(&link_id) {
+                    self.session.pause(&link_id, paused, now);
+                    outputs.push(Output::Simulator(Order::Pause { link_id, paused }));
+                } else {
+                    self.engine.simulation_pause_failed(
+                        &link_id,
+                        paused,
+                        "the simulation isn't running".into(),
+                    );
+                }
+            }
             Call::Journal(write) => outputs.push(Output::Journal(write)),
             Call::Turn(turn) => {
                 self.engine.agent_error(None, &turn.thread_id, NO_ACCOUNT);
@@ -1288,6 +1311,13 @@ fn start(link: &Link) -> Option<Order> {
     };
     let (program, default_model) = match vehicle {
         SimVehicle::Plane => ("plane", "plane"),
+        SimVehicle::Multicopter
+            if frame
+                .as_deref()
+                .is_some_and(|frame| frame.starts_with("heli")) =>
+        {
+            ("copter-heli", "heli")
+        }
         SimVehicle::Multicopter => ("copter", "quad"),
         SimVehicle::Vtol => ("plane", "quadplane"),
         // ArduRover drives both, as the installed daemon's (S37).

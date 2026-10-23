@@ -42,6 +42,7 @@ fn places(data_dir: &Path, category: StorageCategory) -> Vec<PathBuf> {
         | StorageCategory::SimulatorLogs
         | StorageCategory::SimulatorData => vec![data_dir.join("simulators")],
         StorageCategory::Parameters => vec![data_dir.join("parameters")],
+        StorageCategory::DemoVideos => vec![data_dir.join("cache/demo-videos")],
         StorageCategory::VehicleFiles => vec![crate::vehicle_files::dir(data_dir)],
     }
 }
@@ -132,6 +133,36 @@ pub fn delete_older(data_dir: &Path, category: StorageCategory, cutoff_us: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_cache_counts_separately_and_recording_retention_leaves_it_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache/demo-videos");
+        std::fs::create_dir_all(&cache).unwrap();
+        let video = cache.join("demo.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let usage = report(dir.path());
+        let demo = usage
+            .categories
+            .iter()
+            .find(|(kind, _, _)| *kind == StorageCategory::DemoVideos)
+            .unwrap();
+        assert_eq!(demo.1, 5);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let cutoff = u64::try_from(now).unwrap() + 1_000_000;
+        assert_eq!(
+            delete_older(dir.path(), StorageCategory::Video, cutoff).files,
+            0
+        );
+        assert_eq!(
+            delete_older(dir.path(), StorageCategory::DemoVideos, cutoff).files,
+            0
+        );
+        assert_eq!(std::fs::read(video).unwrap(), b"video");
+    }
 
     #[test]
     fn usage_is_counted_by_category_and_only_old_deletable_files_go() {

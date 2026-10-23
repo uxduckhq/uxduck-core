@@ -1978,8 +1978,10 @@ pub(crate) async fn start_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        command.creation_flags(0x0000_0008 | 0x0000_0200);
+        // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP: a console of its own
+        // with no window, which the console programs it starts (a
+        // simulator, netstat, ffmpeg) share instead of each opening one.
+        command.creation_flags(0x0800_0000 | 0x0000_0200);
     }
     let mut child = command
         .spawn()

@@ -98,38 +98,46 @@ pub fn parse_dialect(xml: &str) -> Result<Vec<Definition>, String> {
             .read_event()
             .map_err(|e| format!("the dialect is not XML: {e}"))?;
         match event {
-            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == b"message" => {
+            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == "message" => {
                 text.clear();
                 open = Some(Open::new(&tag)?);
             }
-            Event::Empty(tag) if tag.name().as_ref() == b"extensions" => {
+            Event::Empty(tag) if tag.name().as_ref() == "extensions" => {
                 if let Some(message) = open.as_mut() {
                     message.extension = true;
                 }
             }
-            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == b"field" => {
+            Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == "field" => {
                 text.clear();
                 if let Some(message) = open.as_mut() {
                     message.field(&tag)?;
                 }
             }
             Event::Start(_) => text.clear(),
-            Event::Text(t) => text.push_str(&t.unescape().unwrap_or_default()),
+            Event::Text(t) => text.push_str(&t.xml10_content()),
+            Event::CData(t) => text.push_str(&t.xml10_content()),
+            Event::GeneralRef(raw) => {
+                let reference = format!("&{};", raw.as_ref());
+                text.push_str(
+                    &quick_xml::escape::unescape(&reference)
+                        .map_err(|e| format!("the dialect is not XML: {e}"))?,
+                );
+            }
             Event::End(tag) => {
                 let Some(message) = open.as_mut() else {
                     continue;
                 };
                 match tag.name().as_ref() {
-                    b"description" if message.description.is_empty() => {
+                    "description" if message.description.is_empty() => {
                         text.trim().clone_into(&mut message.description);
                     }
                     // A field's text is its description.
-                    b"field" => {
+                    "field" => {
                         if let Some(last) = message.fields.last_mut() {
                             text.trim().clone_into(&mut last.description);
                         }
                     }
-                    b"message" => {
+                    "message" => {
                         if let Some(message) = open.take() {
                             messages.push(message.build()?);
                         }
@@ -147,8 +155,8 @@ pub fn parse_dialect(xml: &str) -> Result<Vec<Definition>, String> {
 fn attribute(tag: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     tag.attributes()
         .flatten()
-        .find(|a| a.key.as_ref() == key.as_bytes())
-        .and_then(|a| a.unescape_value().ok())
+        .find(|a| a.key.as_ref() == key)
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
         .map(|v| v.trim().to_owned())
 }
 
@@ -826,6 +834,20 @@ mod tests {
             );
         }
         out + "</message>"
+    }
+
+    #[test]
+    fn dialect_descriptions_preserve_entities_and_cdata() {
+        let messages = parse_dialect(
+            r#"<mavlink><messages><message id="43000" name="XML_TEXT">
+            <description>A &amp; B <![CDATA[<ready>]]> &#937;</description>
+            <field type="uint8_t" name="value">x &lt; y</field>
+            </message></messages></mavlink>"#,
+        )
+        .unwrap();
+        assert_eq!(messages[0].description(), "A & B <ready> Ω");
+        assert_eq!(messages[0].fields()[0].description(), "x < y");
+        assert!(parse_dialect(r#"<mavlink><messages><message id="43000" name="BAD"><description>&unknown;</description></message></messages></mavlink>"#).is_err());
     }
 
     #[test]

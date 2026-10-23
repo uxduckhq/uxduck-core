@@ -74,8 +74,9 @@ pub enum Endpoint {
     Udp(u16),
 }
 /// The programs the manager runs, and what they fly.
-const PROGRAMS: [(&str, &[SimVehicleDto]); 5] = [
+const PROGRAMS: [(&str, &[SimVehicleDto]); 6] = [
     ("arducopter", &[SimVehicleDto::Multicopter]),
+    ("arducopter-heli", &[SimVehicleDto::Multicopter]),
     // S143: the jet is ArduPlane's `plane-jet` frame.
     (
         "arduplane",
@@ -288,7 +289,15 @@ impl Simulators {
             None => self
                 .binaries()
                 .into_iter()
-                .find(|b| b.autopilot == dto_autopilot(autopilot) && b.vehicles.contains(&wanted))
+                .find(|b| {
+                    b.autopilot == dto_autopilot(autopilot)
+                        && b.vehicles.contains(&wanted)
+                        && frame.as_deref().is_none_or(|frame| {
+                            b.frames.iter().any(|candidate| candidate == frame)
+                                || frame.contains(':')
+                                || launcher_base(b, frame).is_some()
+                        })
+                })
                 .ok_or_else(|| missing(autopilot, vehicle))?,
         };
         if !build.vehicles.contains(&wanted) {
@@ -576,7 +585,8 @@ pub fn probe(path: &Path) -> Result<SimBinary, String> {
     }
     let (program, vehicles) = PROGRAMS
         .iter()
-        .find(|(program, _)| name.starts_with(program))
+        .filter(|(program, _)| name.starts_with(program))
+        .max_by_key(|(program, _)| program.len())
         .map(|(program, vehicles)| (*program, vehicles.to_vec()))
         .ok_or_else(|| {
             format!(
@@ -943,6 +953,10 @@ fn command(path: &Path) -> Command {
     command
 }
 
+/// Starts a console program without a console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// A simulated vehicle's guard process. Dropping it closes the guard's
 /// stdin, and the guard stops the build.
 #[derive(Debug)]
@@ -993,6 +1007,14 @@ impl Running {
         {
             use std::os::unix::process::CommandExt;
             guard.process_group(0);
+        }
+        // On Windows, a console of its own with no window, which the build
+        // shares: a daemon with no console would otherwise give each one a
+        // window, and Ctrl-C in a daemon's terminal does not reach it.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            guard.creation_flags(CREATE_NO_WINDOW);
         }
         let mut guard = guard
             .args(["dev", "sim-guard", "--log"])
@@ -1084,6 +1106,24 @@ fn last_line(log: &Path) -> Option<String> {
 }
 
 impl Running {
+    /// Freezes the build where it is, or lets it run again (`sim/pause`),
+    /// through its guard: SITL's clock is its own, so a build that runs no
+    /// code runs no time, and catches up at most a tenth of a second when
+    /// it runs again.
+    ///
+    /// # Errors
+    /// When the guard has gone.
+    pub fn pause(&mut self, paused: bool) -> Result<(), String> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "the simulator has stopped".to_owned())?;
+        stdin
+            .write_all(if paused { PAUSE } else { RESUME })
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("the simulator's guard has stopped: {e}"))
+    }
+
     /// Stops the build and waits until it is gone, so another can take its
     /// ports: a simulation started again on the same link (`sim/restart`).
     /// The guard reaps the build before it exits; a guard that does not
@@ -1125,8 +1165,22 @@ impl Drop for Running {
     }
 }
 
+/// What the daemon writes to a guard's stdin to freeze its build, and to
+/// let it run again.
+const PAUSE: &[u8] = b"p";
+const RESUME: &[u8] = b"r";
+
+/// What a guard hears on its stdin.
+enum Order {
+    Pause,
+    Resume,
+    Closed,
+}
+
 /// `uxduck dev sim-guard`: runs a build and stops it when stdin closes,
-/// which happens when the daemon lets go of it or dies. Returns the exit
+/// which happens when the daemon lets go of it or dies; a paused build is
+/// stopped all the same. [`PAUSE`] and [`RESUME`] on stdin freeze the
+/// build and let it run again. Returns the exit
 /// code to end with: the build's own when it stops by itself (128 plus the
 /// signal when one ended it), 0 when it was stopped, 1 when it could not
 /// start, with why at the end of the log.
@@ -1152,22 +1206,106 @@ pub fn guard(log: &Path, program: &Path, args: &[String]) -> i32 {
             return 1;
         }
     };
-    let (closed, gone) = std::sync::mpsc::channel();
+    let (orders, heard) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 64];
         let mut stdin = std::io::stdin().lock();
-        while matches!(stdin.read(&mut buffer), Ok(n) if n > 0) {}
-        let _ = closed.send(());
+        while let Ok(n) = stdin.read(&mut buffer)
+            && n > 0
+        {
+            for byte in &buffer[..n] {
+                let order = match *byte {
+                    b'p' => Order::Pause,
+                    b'r' => Order::Resume,
+                    _ => continue,
+                };
+                let _ = orders.send(order);
+            }
+        }
+        let _ = orders.send(Order::Closed);
     });
     loop {
         if let Ok(Some(status)) = child.try_wait() {
             return exit_code(status);
         }
-        if gone.recv_timeout(Duration::from_millis(200)).is_ok() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return 0;
+        match heard.recv_timeout(Duration::from_millis(200)) {
+            Ok(Order::Closed) => {
+                // A stopped build is killed all the same.
+                let _ = child.kill();
+                let _ = child.wait();
+                return 0;
+            }
+            Ok(order @ (Order::Pause | Order::Resume)) => {
+                let paused = matches!(order, Order::Pause);
+                if let Err(error) = suspend(&child, paused)
+                    && let Ok(mut out) = std::fs::OpenOptions::new().append(true).open(log)
+                {
+                    let what = if paused { "pause" } else { "resume" };
+                    let _ = writeln!(out, "Cannot {what} the simulator: {error}");
+                }
+            }
+            Err(_) => {}
         }
+    }
+}
+
+/// Stops a build's process where it is, or lets it run on.
+#[cfg(unix)]
+fn suspend(child: &Child, paused: bool) -> std::io::Result<()> {
+    use rustix::process::{Pid, Signal, kill_process};
+    let signal = if paused { Signal::STOP } else { Signal::CONT };
+    kill_process(Pid::from_child(child), signal).map_err(Into::into)
+}
+
+/// Suspends or resumes each thread of a build's process: Windows has no
+/// signal that stops a whole process.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Win32 thread enumeration and suspension require raw handles and a sized entry"
+)]
+fn suspend(child: &Child, paused: bool) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    };
+    let pid = child.id();
+    // SAFETY: the snapshot is checked before use; thread entry pointers refer to
+    // initialized local storage with dwSize set. Only handles returned by Win32
+    // are used, and every successfully opened handle is closed before returning.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>()).unwrap_or(u32::MAX);
+        let mut found = Thread32First(snapshot, &raw mut entry) != 0;
+        let mut result = Ok(());
+        while found {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if thread.is_null() {
+                    result = Err(std::io::Error::last_os_error());
+                } else {
+                    let count = if paused {
+                        SuspendThread(thread)
+                    } else {
+                        ResumeThread(thread)
+                    };
+                    if count == u32::MAX {
+                        result = Err(std::io::Error::last_os_error());
+                    }
+                    CloseHandle(thread);
+                }
+            }
+            found = Thread32Next(snapshot, &raw mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        result
     }
 }
 

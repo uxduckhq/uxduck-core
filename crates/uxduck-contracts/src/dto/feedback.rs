@@ -112,6 +112,27 @@ pub struct FeedbackSendParams {
     /// Written by the agent from a chat, as a suggestion card (S73).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_agent: bool,
+    /// Files the person attached: up to 10, 25 MB together decoded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FeedbackAttachment>,
+    /// A recorded voice note, up to 5 minutes (10 MB decoded), which the API
+    /// transcribes. The text may then be empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_note: Option<FeedbackAttachment>,
+    /// A random key the page keeps to add words and files to the report
+    /// later; the API keeps only its hash. Redacted from traces and bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_key: Option<String>,
+}
+
+/// A file the person attached to a report: any type, checked by the API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackAttachment {
+    /// The file's name on the person's computer.
+    pub name: String,
+    /// The file, base64.
+    pub data: String,
 }
 
 /// What the agent offers to suggest (S73): a card the person reads, edits
@@ -156,6 +177,72 @@ pub struct FeedbackSendResult {
     /// The Linear issue, such as `FB-12`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<String>,
+    /// What the voice note said, once the API has transcribed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+}
+
+/// The account's feedback, newest first (`GET /v1/feedback/mine`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFeedbackList {
+    pub reports: Vec<AccountFeedbackReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFeedbackReport {
+    pub id: String,
+    pub kind: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    /// Milliseconds since 1970.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at: u64,
+    /// `filed`, or `held` for a person to file.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    /// The attached files' names.
+    pub files: Vec<String>,
+    /// Adds to it from any computer the account is on.
+    pub add_key: String,
+    pub additions: Vec<AccountFeedbackAddition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFeedbackAddition {
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at: u64,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    pub files: Vec<String>,
+}
+
+/// Reports sent signed out, by the keys sent with them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimFeedbackParams {
+    /// Up to 50.
+    pub reports: Vec<FeedbackKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackKey {
+    pub id: String,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimFeedbackResult {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub claimed: u64,
 }
 
 /// `feedback-bundle.json`.

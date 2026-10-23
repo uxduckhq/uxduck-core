@@ -1,0 +1,4 @@
+{
+  "method": "video/capture/settings",
+  "params": { "microphone": false }
+}

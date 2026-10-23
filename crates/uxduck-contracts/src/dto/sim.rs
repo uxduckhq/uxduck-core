@@ -272,6 +272,16 @@ pub struct SnapshotStartParams {
     pub forward: Option<SimForward>,
 }
 
+/// Pauses or resumes a simulated vehicle: `paused` true freezes it where
+/// it is, false lets its time run again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimPauseParams {
+    /// The simulated vehicle's link.
+    pub id: String,
+    pub paused: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRenameParams {
