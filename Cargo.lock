@@ -4873,6 +4873,7 @@ dependencies = [
  "minisign",
  "serde",
  "serde_json",
+ "uxduck-agent",
  "uxduck-contracts",
  "uxduck-core",
  "uxduck-engine",

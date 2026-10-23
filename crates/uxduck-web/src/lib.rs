@@ -6,6 +6,7 @@
 //! [`root`] is the root itself and has no JavaScript in it. On `wasm32`,
 //! [`WebDaemon`] wraps it for the worker with wasm-bindgen.
 
+pub mod agent;
 pub mod gamepads;
 pub mod root;
 
@@ -80,6 +81,7 @@ mod web {
         /// `"write"` keeps `bytes`, `"remove"` removes every file under
         /// `key`.
         store: Function,
+        agent: Function,
     }
 
     #[wasm_bindgen]
@@ -107,6 +109,7 @@ mod web {
             link_write: Function,
             fetch: Function,
             store: Function,
+            agent: Function,
         ) -> Result<WebDaemon, JsError> {
             let (browser, outputs) = Browser::new(
                 version,
@@ -128,6 +131,7 @@ mod web {
                 link_write,
                 fetch,
                 store,
+                agent,
             };
             daemon.hand(outputs);
             Ok(daemon)
@@ -207,10 +211,32 @@ mod web {
             serde_json::to_string(&self.browser.export()).unwrap_or_default()
         }
 
+        /// Identity hint from a page, with no session token or provider key.
+        pub fn account(&mut self, connection: u32, json: &str) {
+            let outputs = self.browser.account(connection, json);
+            self.hand(outputs);
+        }
+
+        #[wasm_bindgen(js_name = agentEvent)]
+        #[allow(
+            clippy::needless_pass_by_value,
+            reason = "wasm-bindgen passes optional strings by value"
+        )]
+        pub fn agent_event(&mut self, request: u64, json: Option<String>, error: Option<String>) {
+            let outputs = self
+                .browser
+                .agent_event(request, json.as_deref(), error.as_deref());
+            self.hand(outputs);
+        }
+
         fn hand(&self, outputs: Vec<Output>) {
             let this = JsValue::NULL;
             for output in outputs {
                 let _ = match output {
+                    Output::Agent(order) => self.agent.call1(
+                        &this,
+                        &JsValue::from(serde_json::to_string(&order).unwrap_or_default()),
+                    ),
                     Output::Post { connection, text } => {
                         self.post
                             .call2(&this, &JsValue::from(connection), &JsValue::from(text))

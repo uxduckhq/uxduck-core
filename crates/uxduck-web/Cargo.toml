@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 uxduck-core.workspace = true
 uxduck-contracts.workspace = true
 uxduck-engine.workspace = true
+uxduck-agent = { workspace = true, default-features = false }
 uxduck-mavlink.workspace = true
 # Terrain heights (S23): the files the engine's cache asks for.
 uxduck-terrain.workspace = true

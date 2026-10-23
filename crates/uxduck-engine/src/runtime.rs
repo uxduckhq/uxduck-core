@@ -64,6 +64,9 @@ impl Persistence for Forget {
 /// A turn for the agent host: run the agent on a thread's new message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnRequest {
+    /// The originating operator connection; browser hosts bind its account and cancellation.
+    pub connection: crate::ConnectionId,
+    pub operator_id: Option<String>,
     /// Unique per daemon run; the host reports it back when the turn ends.
     pub turn: u64,
     /// The vehicle the thread is about, as `(id, name)`.

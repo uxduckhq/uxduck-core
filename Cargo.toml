@@ -15,7 +15,7 @@ repository = "https://github.com/uxduckhq/uxduck-core"
 uxduck-core = { path = "crates/uxduck-core" }
 uxduck-contracts = { path = "crates/uxduck-contracts" }
 uxduck-mavlink = { path = "crates/uxduck-mavlink", default-features = false }
-uxduck-agent = { path = "crates/uxduck-agent" }
+uxduck-agent = { path = "crates/uxduck-agent", default-features = false }
 uxduck-engine = { path = "crates/uxduck-engine" }
 uxduck-media = { path = "crates/uxduck-media" }
 uxduck-sdk = { path = "crates/uxduck-sdk" }
