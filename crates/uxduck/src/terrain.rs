@@ -112,10 +112,8 @@ impl TerrainPort for Host {
                     Some(Arrived::Fetched { key, result })
                 }
                 Order::Write { key, bytes } => {
-                    if let Err(error) = write(&dir, &key, &bytes) {
-                        tracing::warn!(%error, key, "cannot keep a terrain file");
-                    }
-                    None
+                    let result = write(&dir, &key, &bytes);
+                    Some(Arrived::Written { key, result })
                 }
                 Order::Remove { prefix } => {
                     if let Some(folder) = path(&dir, prefix.trim_end_matches('/')) {

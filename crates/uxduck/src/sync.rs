@@ -181,6 +181,9 @@ impl Task {
             .reader
             .read_after(state.exported_through)
             .map_err(|e| Stop::Problem(format!("UXDuck could not read its journal: {e}")))?;
+        // What the person left out stays here, unmarked, so it goes if
+        // they bring it back (2026-10-24).
+        self.reader.forget(|change| !state.syncs(&change.entity));
         let waiting = self.reader.waiting();
         let mut sent = 0u64;
         for batch in batches(&waiting) {
@@ -464,6 +467,11 @@ impl LogReader {
             }
         }
         Ok(self.scanned_through.max(cursor))
+    }
+
+    /// Drops waiting changes without marking them sent.
+    fn forget(&mut self, left_out: impl Fn(&SyncChange) -> bool) {
+        self.waiting.retain(|_, change| !left_out(change));
     }
 
     fn waiting(&self) -> Vec<SyncChange> {

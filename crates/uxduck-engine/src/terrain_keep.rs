@@ -188,6 +188,37 @@ pub(crate) fn handle(
 }
 
 impl Engine {
+    /// Explicitly clearing browser terrain also stops keeping its offline areas.
+    pub fn clear_terrain_storage(&mut self) {
+        let mut settings = self.state.settings.clone();
+        if !settings.terrain_areas.is_empty() {
+            settings.terrain_areas.clear();
+            settings.version += 1;
+            self.commit_as(actor(), Change::SettingsChanged { settings });
+        }
+        for (reply, _) in std::mem::take(&mut self.terrain.keeping.sizes) {
+            if let Some((connection, id)) = reply {
+                self.send(
+                    connection,
+                    &crate::rpc::router::error(
+                        &id,
+                        &ApiError::new(
+                            ErrorKind::InvalidValue,
+                            "Terrain storage was cleared. Try again.",
+                        ),
+                    ),
+                );
+            }
+        }
+        self.terrain.keeping = Keeping::default();
+        self.terrain.problems.clear();
+        self.terrain.missing.clear();
+        if let Some(cache) = &mut self.terrain.cache {
+            cache.reset(self.clock.now_us());
+        }
+        self.terrain_flush();
+    }
+
     /// Fetches what is missing of an area into the store.
     fn keep_area(&mut self, area: &TerrainArea) {
         let dataset = crate::terrain::setting(self.state.settings.terrain_dataset);

@@ -78,8 +78,8 @@ mod web {
         fetch: Function,
         /// `(op, key, bytes, request)`: terrain files in the Origin Private
         /// File System (S23). `"read"` answers with `stored(request, …)`,
-        /// `"write"` keeps `bytes`, `"remove"` removes every file under
-        /// `key`.
+        /// `"write"` keeps `bytes` and answers with `terrain_written`,
+        /// `"remove"` removes every file under `key`.
         store: Function,
         agent: Function,
     }
@@ -195,6 +195,18 @@ mod web {
         )]
         pub fn stored(&mut self, request: u32, bytes: Option<Vec<u8>>) {
             let outputs = self.browser.stored(request, bytes);
+            self.hand(outputs);
+        }
+
+        /// Confirms a terrain write only after the file is closed.
+        pub fn terrain_written(&mut self, key: String, error: Option<String>) {
+            let outputs = self.browser.terrain_written(key, error.map_or(Ok(()), Err));
+            self.hand(outputs);
+        }
+
+        #[wasm_bindgen(js_name = clearTerrain)]
+        pub fn clear_terrain(&mut self) {
+            let outputs = self.browser.clear_terrain();
             self.hand(outputs);
         }
 

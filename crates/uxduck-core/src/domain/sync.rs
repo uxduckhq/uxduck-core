@@ -16,6 +16,40 @@ pub enum Activation {
     MirrorAll,
 }
 
+/// What a person can choose to keep off the account (2026-10-24): sync is
+/// everything until they leave something out. Flights are not here: each
+/// goes only when someone saves it (C9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncCategory {
+    /// Operators with their display settings and layouts, and plugins
+    /// they published.
+    Settings,
+    /// Chats and their folders.
+    Chats,
+    Places,
+    /// Saved vehicles, their history, baselines and snapshots, connections
+    /// and parameter definition sets.
+    Vehicles,
+    Plans,
+}
+
+impl SyncCategory {
+    /// The category an entity belongs to; none for one that is always the
+    /// person's own choice, item by item.
+    #[must_use]
+    pub fn of(entity: &str) -> Option<Self> {
+        Some(match entity {
+            "operator" | "plugin" => Self::Settings,
+            "thread" | "item" | "folder" => Self::Chats,
+            "place" => Self::Places,
+            "vehicle" | "history" | "baseline" | "snapshot" | "link" | "own-set" => Self::Vehicles,
+            "plan" => Self::Plans,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncState {
@@ -24,6 +58,9 @@ pub struct SyncState {
     pub enabled: bool,
     #[serde(default)]
     pub activation: Activation,
+    /// What stays off the account; empty syncs everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SyncCategory>,
     /// This computer in the account; minted when sync is first turned on.
     #[serde(default)]
     pub device_id: String,
@@ -44,6 +81,14 @@ pub struct SyncState {
     pub last_synced_at_us: Option<u64>,
     #[serde(default)]
     pub version: u64,
+}
+
+impl SyncState {
+    /// Whether changes to this entity go to the account and come from it.
+    #[must_use]
+    pub fn syncs(&self, entity: &str) -> bool {
+        SyncCategory::of(entity).is_none_or(|category| !self.skipped.contains(&category))
+    }
 }
 
 /// A vehicle another computer published to the account: its profile, not

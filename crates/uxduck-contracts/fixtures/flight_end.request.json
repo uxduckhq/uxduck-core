@@ -1,0 +1,6 @@
+{
+  "method": "flight/end",
+  "params": {
+    "id": "fl0123456789abcdef"
+  }
+}

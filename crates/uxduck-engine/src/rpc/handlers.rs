@@ -411,6 +411,15 @@ pub(crate) fn handle(
             }
             to_value(&engine.keep_flight(connection, &params.id, params.keep, params.always)?)
         }
+        ClientRequest::FlightEnd(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            to_value(&engine.end_lost_flight(&params.id)?)
+        }
         request @ (ClientRequest::ParamBaselineSet(_)
         | ClientRequest::ParamBaselines(_)
         | ClientRequest::ParamBaselineRemove(_)) => {

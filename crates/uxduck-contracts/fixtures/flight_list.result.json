@@ -24,6 +24,14 @@
         }
       ],
       "keep": false,
+      "recordedHere": true,
+      "leftAccount": false,
+      "mission": {
+        "planId": "pl0123456789abcdef",
+        "planName": "North field survey",
+        "completed": true,
+        "runId": "fl0123456789abcdef"
+      },
       "params": {
         "digest": "54ef63fab15e8236074387e18732bcc53802a65f8b0b400edba888baf078442f",
         "count": 912,

@@ -378,6 +378,21 @@ impl State {
             Change::FlightUpserted { flight } => {
                 self.flights.insert(flight.id.clone(), flight.clone());
             }
+            Change::FlightReplaced { old_id, flight } => {
+                self.flights.remove(old_id);
+                self.flights.insert(flight.id.clone(), flight.clone());
+            }
+            Change::FlightRemoved { id } => {
+                if let Some(flight) = self.flights.get_mut(id)
+                    && flight.recorded_here
+                {
+                    flight.keep = false;
+                    flight.left_account = true;
+                    flight.version += 1;
+                } else {
+                    self.flights.remove(id);
+                }
+            }
             Change::BaselineUpserted { baseline } => {
                 self.baselines.insert(baseline.id.clone(), baseline.clone());
             }

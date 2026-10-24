@@ -14,6 +14,24 @@ use uxduck_core::domain::param_definitions::DefinitionSet;
 /// Where the catalogue is published, beside the simulator catalogue.
 pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/parameters/catalogue.json";
 
+/// Where UXDuck Web reaches it: the app's own origin, whose Worker mirrors
+/// `DEFAULT_URL`'s directory at `/parameters/`. A browser does not let a
+/// page read another origin's files unless that origin allows it, and the
+/// isolated page wants its resources same-origin anyway.
+pub const SAME_ORIGIN_URL: &str = "/parameters/catalogue.json";
+
+/// A set's file in the directory the catalogue came from, as published and
+/// as any mirror of it serves. A set is trusted for its SHA-256 in the signed
+/// catalogue, not for where it is fetched, so a host that reached the
+/// catalogue through a mirror fetches its sets from that mirror too.
+#[must_use]
+pub fn beside(catalogue_url: &str, file_name: &str) -> String {
+    let directory = catalogue_url
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    format!("{directory}/sets/{file_name}")
+}
+
 /// Missing public trust configuration is separate from a publisher's
 /// secret signing key. A person's own definitions do not need either.
 pub const NO_CATALOGUE_KEY: &str = "This build has no trusted public verification key for the parameter catalogue. Add descriptions from a matching firmware checkout or use a build with the publisher's public key.";
@@ -120,6 +138,20 @@ mod tests {
     use super::*;
     use uxduck_contracts::dto::param_definitions::Firmware;
     use uxduck_contracts::dto::sim::CatalogueFile;
+
+    #[test]
+    fn sets_are_fetched_beside_the_catalogue() {
+        // As published: the catalogue lists its sets in `sets/` beside it.
+        assert_eq!(
+            beside(DEFAULT_URL, "arducopter-4.5.1-abc.json.gz"),
+            "https://simulators.uxduck.com/parameters/sets/arducopter-4.5.1-abc.json.gz"
+        );
+        // Through the app's own origin, for UXDuck Web.
+        assert_eq!(
+            beside(SAME_ORIGIN_URL, "arducopter-4.5.1-abc.json.gz"),
+            "/parameters/sets/arducopter-4.5.1-abc.json.gz"
+        );
+    }
 
     fn entry(name: &str, url: &str) -> CatalogueSet {
         CatalogueSet {

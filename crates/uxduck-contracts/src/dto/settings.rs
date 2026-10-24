@@ -140,8 +140,9 @@ pub struct Settings {
     /// vehicle's `SYSID_MYGCS` counts only this id's heartbeats.
     #[serde(default = "gcs_system_id")]
     pub gcs_system_id: u8,
-    /// "Store flights and recordings in my account" (S82).
-    #[serde(default = "on")]
+    /// "Store flights and recordings in my account" (S82): off until the
+    /// person turns it on.
+    #[serde(default)]
     pub store_flights: bool,
     /// "Save every flight to my account" (C9).
     #[serde(default)]

@@ -74,6 +74,8 @@ pub enum Action {
     OpenControllers { controller_id: String },
     /// Calls `flight/keep` with `keep: true`: a flight just finished, saved
     /// to the account (C9).
+    /// `flight/end` for the open flight of a vehicle that cannot be heard.
+    EndFlight { flight_id: String },
     KeepFlight {
         flight_id: String,
         /// Every flight from now on too: `flight/keep` with `always`.

@@ -88,6 +88,10 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
     },
+    /// `flight/end`: ends the open flight of a vehicle that cannot be heard.
+    EndFlight {
+        flight_id: String,
+    },
     /// The vehicle's Messages tab at an entry (S26).
     OpenMessages {
         vehicle_id: String,

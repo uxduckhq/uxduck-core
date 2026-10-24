@@ -32,6 +32,9 @@ pub(super) struct Job {
     failed: BTreeMap<ChunkKey, Unavailable>,
     /// Chunks with no data to keep (void, sea or not covered).
     empty: BTreeSet<ChunkKey>,
+    /// Only these files determine whether this job is saved for later.
+    files: BTreeSet<String>,
+    release: Option<String>,
 }
 
 /// What a chunk needs.
@@ -61,6 +64,8 @@ impl Terrain {
                 done: BTreeMap::new(),
                 failed: BTreeMap::new(),
                 empty: BTreeSet::new(),
+                files: BTreeSet::from([manifest::MANIFEST.into(), manifest::SIGNATURE.into()]),
+                release: None,
             },
         );
         self.advance_jobs(now_us);
@@ -72,13 +77,24 @@ impl Terrain {
     pub fn job(&self, id: u64) -> Option<JobStatus> {
         let job = self.jobs.get(&id)?;
         let total = job.keys.len() - job.empty.len();
+        let storage_error = self
+            .storage_errors
+            .iter()
+            .find(|(key, _)| job.files.contains(*key))
+            .map(|(_, why)| why);
         Some(JobStatus {
             total,
             done: job.done.len(),
-            failed: job.failed.len(),
+            failed: job.failed.len().max(usize::from(storage_error.is_some())),
             bytes: job.done.values().map(|&b| u64::from(b)).sum(),
-            finished: job.done.len() + job.failed.len() + job.empty.len() == job.keys.len(),
-            why: job.failed.values().next().cloned(),
+            finished: job.done.len() + job.failed.len() + job.empty.len() == job.keys.len()
+                && !self
+                    .pending_writes
+                    .keys()
+                    .any(|key| job.files.contains(key)),
+            why: storage_error
+                .map(|why| Unavailable::Failed(why.clone()))
+                .or_else(|| job.failed.values().next().cloned()),
         })
     }
 
@@ -182,10 +198,23 @@ impl Terrain {
     pub(super) fn advance_jobs(&mut self, now_us: u64) {
         let ids: Vec<u64> = self.jobs.keys().copied().collect();
         for id in ids {
-            let Some(job) = self.jobs.get(&id) else {
+            let Some(job) = self.jobs.get_mut(&id) else {
                 continue;
             };
             let dataset = job.dataset;
+            if let Some(release) = self.manifest.as_ref().and_then(|m| m.current(dataset))
+                && job.release.as_deref() != Some(release.prefix().as_str())
+            {
+                job.done.clear();
+                job.failed.clear();
+                job.empty.clear();
+                job.files = BTreeSet::from([manifest::MANIFEST.into(), manifest::SIGNATURE.into()]);
+                for key in &job.keys {
+                    job.files.insert(release.cell_path(key.tile.cell()));
+                    job.files.insert(release.chunk_path(*key));
+                }
+                job.release = Some(release.prefix());
+            }
             let open: Vec<ChunkKey> = job
                 .keys
                 .iter()
@@ -275,12 +304,10 @@ impl Terrain {
                 // Written only when no lookup is fetching it too, which
                 // writes it itself.
                 if !matches!(self.chunks.get(path), Some(Slot::Fetching)) {
-                    self.orders.push(Order::Write {
-                        key: path.into(),
-                        bytes: bytes.clone(),
-                    });
+                    self.write(path.into(), bytes.clone());
                 }
-                Slot::Ready(u32::try_from(bytes.len()).unwrap_or(u32::MAX))
+                // A download is only kept once the host confirms the write.
+                Slot::Fetching
             }
             Ok(_) => Slot::Failed {
                 why: Unavailable::Failed(format!("{path} does not match the manifest's checksum")),

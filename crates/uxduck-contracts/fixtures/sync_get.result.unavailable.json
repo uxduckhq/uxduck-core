@@ -2,6 +2,7 @@
   "available": false,
   "enabled": false,
   "activation": "pick",
+  "skipped": [],
   "exported": 0,
   "pulled": 0,
   "problem": "Sync needs UXDuck installed on a computer.",

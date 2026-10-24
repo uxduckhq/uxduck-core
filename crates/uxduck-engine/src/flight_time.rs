@@ -25,7 +25,7 @@ use uxduck_core::domain::command::FLYING_ABOVE_HOME_M;
 use uxduck_core::domain::telemetry::{TelemetryItem, Unit, VehicleTelemetry, off_the_ground};
 use uxduck_core::domain::telemetry_layout::VehicleClass;
 
-use uxduck_core::domain::flight::{Flight, FlightEnd, FlightOperator};
+use uxduck_core::domain::flight::{Flight, FlightEnd, FlightMission, FlightOperator};
 use uxduck_core::events::{Actor, Change};
 
 use crate::Engine;
@@ -58,9 +58,9 @@ struct Timer {
     max_height_m: Option<f64>,
     max_speed_mps: Option<f64>,
     modes: Vec<String>,
-    /// The flight ended when contact was lost while armed, to open again
-    /// if the vehicle is heard still armed.
-    lost: Option<String>,
+    /// The vehicle flew a mission this flight, and said it was complete.
+    mission_flown: bool,
+    mission_complete: bool,
 }
 
 impl Timer {
@@ -188,6 +188,10 @@ impl Engine {
             battery_end_pct: None,
             operators: Vec::new(),
             keep: false,
+            recorded_here: true,
+            left_account: false,
+            contact_lost_at_us: None,
+            mission: None,
             params: crate::param_definitions::baselines::at_arm(self, &vehicle.id),
             version: 1,
         };
@@ -251,17 +255,23 @@ impl Engine {
             timer.max_speed_mps,
             std::mem::take(&mut timer.modes),
         );
+        let (flown, complete) = (
+            std::mem::take(&mut timer.mission_flown),
+            std::mem::take(&mut timer.mission_complete),
+        );
         let Some(mut flight) = self.state.flights.get(&flight_id).cloned() else {
             return;
         };
         flight.ended_at_us = Some(at_us);
         flight.end = end;
+        flight.contact_lost_at_us = None;
         flight.air_us = air_us;
         flight.max_height_m = height;
         flight.max_speed_mps = speed;
         flight.modes = modes;
         flight.battery_end_pct = self.telemetry_value(vehicle_id, "battery.remaining_pct");
         flight.operators = self.flight_operators(vehicle_id, flight.armed_at_us);
+        flight.mission = flown.then(|| self.flight_mission(&flight, complete));
         // "Save every flight to my account" (C9): kept as it ends, not suggested.
         flight.keep |= self.state.settings.save_flights && !flight.simulated;
         flight.version += 1;
@@ -332,14 +342,35 @@ impl Engine {
         keep: bool,
         always: bool,
     ) -> Result<uxduck_contracts::dto::flight::Flight, uxduck_contracts::errors::ApiError> {
-        let mut flight = self.state.flights.get(id).cloned().ok_or_else(|| {
-            uxduck_contracts::errors::ApiError::new(
-                uxduck_contracts::errors::ErrorKind::NotFound,
-                format!("no flight {id}"),
-            )
-        })?;
-        if flight.keep != keep {
-            flight.keep = keep;
+        use uxduck_contracts::errors::{ApiError, ErrorKind};
+        let mut flight = self
+            .state
+            .flights
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no flight {id}")))?;
+        if keep && flight.left_account {
+            // Saved again after a delete (2026-10-24): never by itself, only
+            // when asked, and under a new id the account has no removal for.
+            let again = Flight {
+                id: format!("fl{}", &self.random.token()[..16]),
+                keep: true,
+                left_account: false,
+                version: 1,
+                ..flight
+            };
+            self.commit(
+                connection,
+                Change::FlightReplaced {
+                    old_id: id.to_owned(),
+                    flight: again.clone(),
+                },
+            );
+            self.resolve(&keep_condition(id));
+            return Ok((&again).into());
+        }
+        if keep && !flight.keep {
+            flight.keep = true;
             flight.version += 1;
             self.commit(
                 connection,
@@ -347,6 +378,26 @@ impl Engine {
                     flight: flight.clone(),
                 },
             );
+            // A finished mission's other flights go with it.
+            let others: Vec<Flight> = flight
+                .mission
+                .as_ref()
+                .map(|m| {
+                    self.run_flights(&m.run_id)
+                        .into_iter()
+                        .filter(|f| f.id != flight.id && !f.keep && !f.left_account)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for mut other in others {
+                other.keep = true;
+                other.version += 1;
+                self.commit(connection, Change::FlightUpserted { flight: other });
+            }
+        } else if !keep && flight.keep {
+            // Deleted from the account (2026-10-24): there is no "unsave".
+            self.commit(connection, Change::FlightRemoved { id: id.to_owned() });
         }
         if always && self.state.settings.save_flights != keep {
             let mut settings = self.state.settings.clone();
@@ -355,7 +406,12 @@ impl Engine {
             self.commit(connection, Change::SettingsChanged { settings });
         }
         self.resolve(&keep_condition(id));
-        Ok((&flight).into())
+        // Gone from here too when it only came from the account.
+        let after = self.state.flights.get(id).cloned().unwrap_or(Flight {
+            keep: false,
+            ..flight
+        });
+        Ok((&after).into())
     }
 
     /// A real flight just finished: suggested for the account, never sent
@@ -364,11 +420,34 @@ impl Engine {
         if flight.simulated || flight.keep || flight.end != FlightEnd::Disarmed {
             return;
         }
-        let minutes = flight.air_us / 60_000_000;
-        let air = if minutes > 0 {
-            format!("{minutes} min in the air")
-        } else {
-            format!("{} s in the air", flight.air_us / 1_000_000)
+        let span = |us: u64| match us / 60_000_000 {
+            0 => format!("{} s", us / 1_000_000),
+            m => format!("{m} min"),
+        };
+        // A mission is asked about once it is finished, for all its flights;
+        // landing mid-mission (a battery swap) asks nothing (C8, 2026-10-24).
+        let (title, air) = match &flight.mission {
+            Some(mission) if !mission.completed => return,
+            Some(mission) => {
+                let run = self.run_flights(&mission.run_id);
+                let air: u64 = run.iter().map(|f| f.air_us).sum();
+                let what = mission
+                    .plan_name
+                    .as_deref()
+                    .map_or_else(String::new, |n| format!("{n} · "));
+                let flights = match run.len() {
+                    1 => String::new(),
+                    n => format!("{n} flights, "),
+                };
+                (
+                    format!("{} finished its mission", flight.vehicle_name),
+                    format!("{what}{flights}{} in the air", span(air)),
+                )
+            }
+            None => (
+                format!("{} finished a flight", flight.vehicle_name),
+                format!("{} in the air", span(flight.air_us)),
+            ),
         };
         self.raise(crate::commands::Raise {
             severity: uxduck_core::domain::notification::Severity::Info,
@@ -376,7 +455,7 @@ impl Engine {
             subject: uxduck_core::domain::notification::Subject::Vehicle {
                 id: flight.vehicle_id.clone(),
             },
-            title: format!("{} finished a flight", flight.vehicle_name),
+            title,
             body: Some(format!(
                 "{air}. Save it to your account to have it in your logbook on every computer."
             )),
@@ -401,6 +480,54 @@ impl Engine {
         });
     }
 
+    /// The mission a flight just flew: the one UXDuck last knew on the
+    /// vehicle, by its content (S134), and the plan it came from when UXDuck
+    /// uploaded it. The run goes on from the vehicle's last flight only when
+    /// that one landed mid-mission with the same mission on board (a battery
+    /// swap); a mission changed in between, from UXDuck or anything else,
+    /// starts a new run (maintainer, 2026-10-24).
+    fn flight_mission(&self, flight: &Flight, complete: bool) -> FlightMission {
+        use uxduck_core::domain::mission::MissionOrigin;
+        let record = self.mission_history(&flight.vehicle_id).into_iter().next();
+        let (plan_id, plan_name) = match record.map(|r| &r.origin) {
+            Some(MissionOrigin::Uploaded {
+                plan_id, plan_name, ..
+            }) => (plan_id.clone(), plan_name.clone().filter(|n| !n.is_empty())),
+            _ => (None, None),
+        };
+        let mission_id = record.map(|r| r.id.clone());
+        let previous = self
+            .state
+            .flights
+            .values()
+            .filter(|f| f.vehicle_id == flight.vehicle_id && f.id != flight.id)
+            .filter(|f| f.armed_at_us < flight.armed_at_us)
+            .max_by_key(|f| f.armed_at_us);
+        let run_id = previous
+            .and_then(|f| f.mission.as_ref())
+            .filter(|m| !m.completed && m.mission_id.is_some() && m.mission_id == mission_id)
+            .map_or_else(|| flight.id.clone(), |m| m.run_id.clone());
+        FlightMission {
+            mission_id,
+            plan_id,
+            plan_name,
+            completed: complete,
+            run_id,
+        }
+    }
+
+    /// The unsaved flights of a mission run, oldest first.
+    fn run_flights(&self, run_id: &str) -> Vec<&Flight> {
+        let mut run: Vec<&Flight> = self
+            .state
+            .flights
+            .values()
+            .filter(|f| f.mission.as_ref().is_some_and(|m| m.run_id == run_id))
+            .collect();
+        run.sort_by_key(|f| f.armed_at_us);
+        run
+    }
+
     /// Flights a crash left open, ended where their vehicle was last heard.
     pub(crate) fn close_interrupted_flights(&mut self) {
         let open: Vec<Flight> = self
@@ -423,53 +550,109 @@ impl Engine {
         }
     }
 
-    /// A vehicle went offline or was heard again (C8): an armed one's flight
-    /// ends as contact lost when UXDuck last heard it, and opens again if it
-    /// comes back still armed. One that comes back disarmed stays ended.
+    /// A vehicle went offline or was heard again (C8): its open flight
+    /// notes when it was last heard, and carries on when it is heard again.
+    /// It never ends by itself, since a link can drop and come back
+    /// (maintainer, 2026-10-24); someone can end it (`flight/end`).
     pub(crate) fn flight_presence(&mut self, vehicle_id: &str) {
         let Some(vehicle) = self.vehicle(vehicle_id) else {
             return;
         };
-        let (id, armed, presence, heard) = (
+        let (id, presence, heard, armed) = (
             vehicle.id.clone(),
-            vehicle.armed,
             vehicle.presence,
             vehicle.last_heartbeat_us,
+            vehicle.armed,
         );
-        let Some(timer) = self.flight_times.0.get(&id) else {
+        let Some(flight_id) = self.flight_times.0.get(&id).and_then(|t| t.flight.clone()) else {
+            // Its flight was ended while it was away: heard armed, a new one begins.
+            if armed && presence == uxduck_core::domain::vehicle::Presence::Online {
+                self.review_flight_time(&id);
+            }
             return;
         };
-        match presence {
-            uxduck_core::domain::vehicle::Presence::Offline if timer.flight.is_some() => {
-                let flight_id = timer.flight.clone();
-                self.end_flight(&id, FlightEnd::ContactLost, heard);
-                if let Some(timer) = self.flight_times.0.get_mut(&id) {
-                    timer.lost = flight_id;
-                }
-            }
-            uxduck_core::domain::vehicle::Presence::Online => {
-                let Some(timer) = self.flight_times.0.get_mut(&id) else {
-                    return;
-                };
-                let Some(flight_id) = timer.lost.take() else {
-                    return;
-                };
-                if !armed {
-                    return;
-                }
-                let Some(mut flight) = self.state.flights.get(&flight_id).cloned() else {
-                    return;
-                };
-                timer.flight = Some(flight_id);
-                timer.max_height_m = flight.max_height_m;
-                timer.max_speed_mps = flight.max_speed_mps;
-                timer.modes.clone_from(&flight.modes);
-                flight.end = FlightEnd::Open;
-                flight.ended_at_us = None;
-                flight.version += 1;
-                self.commit_as(flight_actor(), Change::FlightUpserted { flight });
-            }
-            _ => {}
+        let Some(mut flight) = self.state.flights.get(&flight_id).cloned() else {
+            return;
+        };
+        let lost = match presence {
+            uxduck_core::domain::vehicle::Presence::Offline => Some(heard.max(flight.armed_at_us)),
+            uxduck_core::domain::vehicle::Presence::Online => None,
+            uxduck_core::domain::vehicle::Presence::Stale => return,
+        };
+        if flight.contact_lost_at_us == lost {
+            return;
+        }
+        flight.contact_lost_at_us = lost;
+        flight.version += 1;
+        self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+    }
+
+    /// A vehicle's open flight, if it has one.
+    pub(crate) fn open_flight(&self, vehicle_id: &str) -> Option<&Flight> {
+        let flight_id = self.flight_times.0.get(vehicle_id)?.flight.as_ref()?;
+        self.state.flights.get(flight_id)
+    }
+
+    /// `flight/end`: someone ends an open flight whose vehicle cannot be
+    /// heard, at when it was last heard. Heard again still armed, it begins
+    /// a new flight.
+    pub(crate) fn end_lost_flight(
+        &mut self,
+        id: &str,
+    ) -> Result<uxduck_contracts::dto::flight::Flight, uxduck_contracts::errors::ApiError> {
+        use uxduck_contracts::errors::{ApiError, ErrorKind};
+        let flight = self
+            .state
+            .flights
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no flight {id}")))?;
+        if flight.end != FlightEnd::Open {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "That flight has already ended.",
+            ));
+        }
+        let Some(lost_at) = flight.contact_lost_at_us else {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "UXDuck can still hear this vehicle. Disarm it to end the flight.",
+            ));
+        };
+        self.end_flight(&flight.vehicle_id, FlightEnd::ContactLost, lost_at);
+        if let Some(timer) = self.flight_times.0.get_mut(&flight.vehicle_id) {
+            *timer = Timer::default();
+        }
+        self.drop_end_button(id);
+        let ended = self.state.flights.get(id).ok_or_else(|| {
+            ApiError::new(ErrorKind::Internal, "the flight went missing as it ended")
+        })?;
+        Ok(ended.into())
+    }
+
+    /// The offline alarm's End flight button goes once the flight has ended.
+    fn drop_end_button(&mut self, flight_id: &str) {
+        use uxduck_core::domain::notification::Action;
+        let stale: Vec<_> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| {
+                n.actions.iter().any(
+                    |a| matches!(&a.action, Action::EndFlight { flight_id: f } if f == flight_id),
+                )
+            })
+            .cloned()
+            .collect();
+        for mut notification in stale {
+            notification
+                .actions
+                .retain(|a| !matches!(&a.action, Action::EndFlight { .. }));
+            notification.version += 1;
+            self.commit_as(
+                crate::plugins::daemon(),
+                Change::NotificationUpserted { notification },
+            );
         }
     }
 
@@ -545,11 +728,28 @@ impl Engine {
             let height = self.height_above_home(&id);
             let speed = self.telemetry_value(&id, "speed.ground_mps");
             let mode = self.vehicle(&id).and_then(|v| v.mode.clone());
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "small enums"
+            )]
+            let (mission_state, mission_mode) = (
+                self.telemetry_value(&id, "mission.state").map(|v| v as u8),
+                self.telemetry_value(&id, "mission.mode").map(|v| v as u8),
+            );
             if let Some(timer) = self.flight_times.0.get_mut(&id)
                 && timer.flight.is_some()
             {
                 timer.max_height_m = higher(timer.max_height_m, height);
                 timer.max_speed_mps = higher(timer.max_speed_mps, speed);
+                // MISSION_CURRENT: state 3 active, 5 complete; mode 1 in a mission mode.
+                match (mission_state, mission_mode) {
+                    (Some(3), _) | (_, Some(1)) => timer.mission_flown = true,
+                    _ => {}
+                }
+                if mission_state == Some(5) && timer.mission_flown {
+                    timer.mission_complete = true;
+                }
                 if let Some(mode) = mode
                     && timer.modes.last() != Some(&mode)
                     && !timer.modes.contains(&mode)

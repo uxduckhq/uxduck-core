@@ -1,0 +1,27 @@
+{
+  "id": "fl0123456789abcdef",
+  "vehicleId": "vid-1",
+  "vehicleName": "Alpha",
+  "vehicleType": "Quadrotor",
+  "simulated": true,
+  "seenArmed": false,
+  "armedAtUs": 1792713600000000,
+  "endedAtUs": 1792714320000000,
+  "end": "contact-lost",
+  "airUs": 660000000,
+  "maxHeightM": 42.5,
+  "maxSpeedMps": 8.1,
+  "modes": ["GUIDED", "LOITER", "RTL"],
+  "batteryStartPct": 98.0,
+  "batteryEndPct": 61.0,
+  "operators": [
+    {
+      "operatorId": "op1",
+      "name": "Ana",
+      "fromUs": 1792713600000000
+    }
+  ],
+  "keep": false,
+  "recordedHere": true,
+  "leftAccount": false
+}

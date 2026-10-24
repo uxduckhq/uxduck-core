@@ -16,6 +16,45 @@ pub enum SyncActivation {
     MirrorAll,
 }
 
+/// What a person can keep off the account; sync is everything until they
+/// leave something out. Flights go only when someone saves them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncCategory {
+    /// Operators with their display settings and layouts, and published plugins.
+    Settings,
+    Chats,
+    Places,
+    /// Saved vehicles and their history, baselines, snapshots, connections.
+    Vehicles,
+    Plans,
+}
+
+impl From<uxduck_core::domain::sync::SyncCategory> for SyncCategory {
+    fn from(category: uxduck_core::domain::sync::SyncCategory) -> Self {
+        use uxduck_core::domain::sync::SyncCategory as Core;
+        match category {
+            Core::Settings => Self::Settings,
+            Core::Chats => Self::Chats,
+            Core::Places => Self::Places,
+            Core::Vehicles => Self::Vehicles,
+            Core::Plans => Self::Plans,
+        }
+    }
+}
+
+impl From<SyncCategory> for uxduck_core::domain::sync::SyncCategory {
+    fn from(category: SyncCategory) -> Self {
+        match category {
+            SyncCategory::Settings => Self::Settings,
+            SyncCategory::Chats => Self::Chats,
+            SyncCategory::Places => Self::Places,
+            SyncCategory::Vehicles => Self::Vehicles,
+            SyncCategory::Plans => Self::Plans,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
@@ -23,6 +62,9 @@ pub struct SyncStatus {
     pub available: bool,
     pub enabled: bool,
     pub activation: SyncActivation,
+    /// What stays off the account; empty syncs everything.
+    #[serde(default)]
+    pub skipped: Vec<SyncCategory>,
     /// Changes sent to the account so far.
     #[schemars(schema_with = "crate::safe::integer")]
     pub exported: u64,
@@ -93,6 +135,10 @@ pub struct SyncSetParams {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<SyncActivation>,
+    /// What to keep off the account from now on; empty syncs everything.
+    /// Bringing something back sends and takes what it missed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Vec<SyncCategory>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

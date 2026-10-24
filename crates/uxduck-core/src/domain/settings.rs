@@ -207,8 +207,11 @@ pub struct Settings {
     pub gcs_system_id: u8,
     /// "Store flights and recordings in my account" (S82, ADR-0003 C17):
     /// while signed in, each flight's tlog goes to the account as it is
-    /// recorded. On until switched off; signed out, nothing leaves.
-    #[serde(default = "on")]
+    /// recorded. Off until the person turns it on (maintainer, 2026-10-24:
+    /// opt-in, offered when setting up); signed out, nothing leaves. Kept
+    /// under a new name so the old default, on, which nobody chose, is
+    /// not carried over.
+    #[serde(rename = "uploadFlightLogs", default)]
     pub store_flights: bool,
     /// "Save every flight to my account" (C9): each real flight is kept as it
     /// ends instead of suggested. Off, as it starts (maintainer, 2026-10-23:
@@ -319,7 +322,7 @@ impl Default for Settings {
             network_addresses: Vec::new(),
             supervision_grace_s: 10,
             gcs_system_id: 255,
-            store_flights: true,
+            store_flights: false,
             save_flights: false,
             upload_while_armed: true,
             upload_video_while_flying: false,

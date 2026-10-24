@@ -729,6 +729,17 @@ impl Engine {
     /// when it is heard again.
     pub(crate) fn presence_changed(&mut self, vehicle_id: &str, name: &str, presence: Presence) {
         let condition = format!("vehicle-offline:{vehicle_id}");
+        // Armed when it went: its flight stays open, and a person may end it (C8).
+        let actions = self
+            .open_flight(vehicle_id)
+            .map(|flight| NotificationAction {
+                label: "End flight".into(),
+                action: Action::EndFlight {
+                    flight_id: flight.id.clone(),
+                },
+            })
+            .into_iter()
+            .collect();
         match presence {
             Presence::Offline => self.raise(Raise {
                 severity: Severity::Alarm,
@@ -738,7 +749,7 @@ impl Engine {
                 },
                 title: format!("{name} is offline"),
                 body: Some("UXDuck hasn't heard from it for a while. Commands that work offline still go to its last known address.".into()),
-                actions: Vec::new(),
+                actions,
                 condition: Some(condition),
                 report: None,
             }),

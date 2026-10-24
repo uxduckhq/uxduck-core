@@ -14,9 +14,32 @@ pub enum FlightEnd {
     Disarmed,
     /// UXDuck stopped while it was armed; ended when UXDuck last heard it.
     Interrupted,
-    /// It went offline while armed; ended when UXDuck last heard it, and
-    /// open again if it comes back still armed.
+    /// Someone ended it while UXDuck could not hear the vehicle (`flight/end`),
+    /// at when it was last heard. Never ended so by itself: a link can drop
+    /// and come back (maintainer, 2026-10-24).
     ContactLost,
+}
+
+/// A mission a flight flew (C8). One mission can take several flights, a
+/// battery swap apart: they share a run, and UXDuck asks about saving once
+/// the run's mission is finished, not at each landing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightMission {
+    /// The mission on the vehicle, by its content (`<vehicle>:<hash>`,
+    /// S134), when UXDuck knew it: flights share a run only with the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<String>,
+    /// The plan it was uploaded from, when UXDuck uploaded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// The vehicle said the mission was complete during this flight.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completed: bool,
+    /// The first flight of the run.
+    pub run_id: String,
 }
 
 /// The parameters a flight armed with (C7): enough to tell later whether
@@ -49,6 +72,10 @@ pub struct FlightOperator {
     pub from_us: u64,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is a fact about the flight"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Flight {
@@ -88,6 +115,21 @@ pub struct Flight {
     /// when someone keeps it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep: bool,
+    /// Recorded on this computer, rather than had from the account. Never
+    /// sent: the account's copy says false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recorded_here: bool,
+    /// Deleted from the account after it was saved; kept here, and not
+    /// saved again (the account keeps its removal).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_account: bool,
+    /// While open: when UXDuck last heard the vehicle, if it has gone
+    /// offline since. Cleared when it is heard again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_lost_at_us: Option<u64>,
+    /// The mission it flew, if it flew one (C8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<FlightMission>,
     /// The parameters it armed with (C7), when UXDuck had them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FlightParams>,

@@ -360,7 +360,7 @@ fn check(name: &str) {
         ("result", "flight_list") => {
             round_trip::<uxduck_contracts::dto::flight::FlightListResult>(name, &json);
         }
-        ("result", "flight_keep") => {
+        ("result", "flight_keep" | "flight_end") => {
             round_trip::<uxduck_contracts::dto::flight::Flight>(name, &json);
         }
         ("result", "param_baselineSet") => {

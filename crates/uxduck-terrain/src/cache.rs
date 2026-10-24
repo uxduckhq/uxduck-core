@@ -13,7 +13,7 @@
 //! signed manifest (one that might still list a withdrawn release) is
 //! refused. Releases the manifest withdraws are removed from the store.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::chunk::Chunk;
@@ -37,7 +37,7 @@ pub enum Order {
     Read { key: String },
     /// Fetch a file from the bucket; answered with [`Arrived::Fetched`].
     Fetch { key: String },
-    /// Keep a file that was checked.
+    /// Keep a verified file; answer with `Arrived::Written` after the persistent write finishes.
     Write { key: String, bytes: Vec<u8> },
     /// Remove every kept file under a prefix (a withdrawn release).
     Remove { prefix: String },
@@ -54,6 +54,11 @@ pub struct FetchError {
 /// What the host answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Arrived {
+    /// A verified file finished writing to persistent storage.
+    Written {
+        key: String,
+        result: Result<(), String>,
+    },
     /// A kept file, or `None` when there is none.
     Read { key: String, bytes: Option<Vec<u8>> },
     Fetched {
@@ -136,6 +141,8 @@ pub struct Terrain {
     keeping: HashMap<String, Slot<u32>>,
     jobs: std::collections::BTreeMap<u64, keep::Job>,
     next_job: u64,
+    pending_writes: HashMap<String, u32>,
+    storage_errors: BTreeMap<String, String>,
     orders: Vec<Order>,
     problems: Vec<Problem>,
     resolved_problems: Vec<String>,
@@ -162,10 +169,18 @@ impl Terrain {
             keeping: HashMap::new(),
             jobs: std::collections::BTreeMap::new(),
             next_job: 0,
+            pending_writes: HashMap::new(),
+            storage_errors: BTreeMap::new(),
             orders: Vec::new(),
             problems: Vec::new(),
             resolved_problems: Vec::new(),
         }
+    }
+
+    /// Starts again after an explicit removal of the host's saved files.
+    pub fn reset(&mut self, now_us: u64) {
+        *self = Self::new(self.key.clone());
+        self.start(now_us);
     }
 
     /// Reads the kept manifest and fetches the bucket's.
@@ -259,6 +274,7 @@ impl Terrain {
 
     fn arrived_inner(&mut self, arrived: Arrived, now_us: u64) {
         match arrived {
+            Arrived::Written { key, result } => self.written(&key, result, now_us),
             Arrived::Read { key, bytes } => {
                 if key == MANIFEST {
                     self.stored.manifest = bytes;
@@ -337,14 +353,8 @@ impl Terrain {
                     self.refuse_manifest(why);
                     return;
                 }
-                self.orders.push(Order::Write {
-                    key: MANIFEST.into(),
-                    bytes,
-                });
-                self.orders.push(Order::Write {
-                    key: SIGNATURE.into(),
-                    bytes: signature,
-                });
+                self.write(MANIFEST.into(), bytes);
+                self.write(SIGNATURE.into(), signature);
                 self.checked_at_us = Some(now_us);
                 self.manifest_error = None;
                 self.resolved_problems.push("terrain:manifest".into());
@@ -385,6 +395,49 @@ impl Terrain {
             self.orders.push(Order::Remove { prefix });
         }
         self.manifest = Some(Arc::new(manifest));
+    }
+
+    /// The first file that could not be saved for a later session.
+    #[must_use]
+    pub fn storage_error(&self) -> Option<&str> {
+        self.storage_errors.values().next().map(String::as_str)
+    }
+
+    fn write(&mut self, key: String, bytes: Vec<u8>) {
+        // Lookups and offline-area jobs may fetch the same immutable file.
+        if key != MANIFEST && key != SIGNATURE && self.pending_writes.contains_key(&key) {
+            return;
+        }
+        self.pending_writes
+            .insert(key.clone(), u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+        self.orders.push(Order::Write { key, bytes });
+    }
+
+    fn written(&mut self, key: &str, result: Result<(), String>, now_us: u64) {
+        let Some(size) = self.pending_writes.remove(key) else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                self.storage_errors.remove(key);
+                if matches!(self.keeping.get(key), Some(Slot::Fetching)) {
+                    self.keeping.insert(key.into(), Slot::Ready(size));
+                }
+            }
+            Err(error) => {
+                let why = format!("Terrain was not saved for later sessions: {error}");
+                self.storage_errors.insert(key.into(), why.clone());
+                if self.keeping.contains_key(key) {
+                    self.keeping.insert(
+                        key.into(),
+                        Slot::Failed {
+                            why: Unavailable::Failed(why),
+                            at_us: now_us,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn file_read(&mut self, key: &str, bytes: Option<Vec<u8>>) {
@@ -433,10 +486,7 @@ impl Terrain {
                 match outcome {
                     Ok(()) => {
                         self.resolved_problems.push(format!("terrain:file:{key}"));
-                        self.orders.push(Order::Write {
-                            key: key.into(),
-                            bytes,
-                        });
+                        self.write(key.into(), bytes);
                         return;
                     }
                     Err(why) => {

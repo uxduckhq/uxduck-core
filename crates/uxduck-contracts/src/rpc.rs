@@ -387,6 +387,11 @@ pub enum ClientRequest {
     /// by default. Needs `config`. Result: `Flight`.
     #[serde(rename = "flight/keep")]
     FlightKeep(crate::dto::flight::FlightKeepParams),
+    /// Ends an open flight whose vehicle UXDuck cannot hear, at when it was
+    /// last heard (C8). A flight never ends by itself when the link drops.
+    /// Needs `config`. Result: `Flight`.
+    #[serde(rename = "flight/end")]
+    FlightEnd(crate::dto::flight::FlightEndParams),
     /// A vehicle's history, newest first: notes people wrote about what
     /// they did to it (repairs, changes, tests) and what UXDuck recorded
     /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
@@ -1397,7 +1402,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 283] = [
+    pub const METHODS: [&'static str; 284] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1468,6 +1473,7 @@ impl ClientRequest {
         "param/baselineRemove",
         "flight/list",
         "flight/keep",
+        "flight/end",
         "param/diff",
         "vehicle/history",
         "vehicle/addNote",

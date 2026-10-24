@@ -12,7 +12,7 @@ pub enum FlightEnd {
     Disarmed,
     /// UXDuck stopped while it was armed; ended when UXDuck last heard it.
     Interrupted,
-    /// It went offline while armed; ended when UXDuck last heard it.
+    /// Someone ended it while the vehicle could not be heard (`flight/end`).
     ContactLost,
 }
 
@@ -27,6 +27,10 @@ pub struct FlightOperator {
     pub from_us: u64,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is a fact about the flight"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Flight {
@@ -62,9 +66,49 @@ pub struct Flight {
     /// Saved to the account, so it is in the logbook on every computer (C9).
     #[serde(default)]
     pub keep: bool,
+    /// Recorded on this computer, rather than had from the account.
+    #[serde(default)]
+    pub recorded_here: bool,
+    /// Deleted from the account after it was saved; it stays here only.
+    #[serde(default)]
+    pub left_account: bool,
+    /// While open: when UXDuck last heard the vehicle, if it has gone
+    /// offline since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub contact_lost_at_us: Option<u64>,
+    /// The mission it flew, if it flew one (C8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<FlightMission>,
     /// The parameters it armed with (C7), when UXDuck had them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FlightParams>,
+}
+
+/// A mission a flight flew (C8): flights of one mission share a run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightMission {
+    /// The mission on the vehicle by its content, when UXDuck knew it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// The vehicle said the mission was complete during this flight.
+    #[serde(default)]
+    pub completed: bool,
+    /// The first flight of the run.
+    pub run_id: String,
+}
+
+/// `flight/end`: ends an open flight whose vehicle cannot be heard, at when
+/// it was last heard.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightEndParams {
+    pub id: String,
 }
 
 /// The parameters a flight armed with (C7).
@@ -85,7 +129,9 @@ pub struct FlightParams {
     pub baseline_differ: Option<u32>,
 }
 
-/// `flight/keep`: saves a flight to the account, or keeps it here only.
+/// `flight/keep`: saves a flight to the account, or with `keep: false`
+/// deletes it from the account: gone from the computers that had it from
+/// there, kept on the one that recorded it. There is no "unsave".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlightKeepParams {
@@ -174,6 +220,16 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 })
                 .collect(),
             keep: f.keep,
+            recorded_here: f.recorded_here,
+            left_account: f.left_account,
+            contact_lost_at_us: f.contact_lost_at_us,
+            mission: f.mission.as_ref().map(|m| FlightMission {
+                mission_id: m.mission_id.clone(),
+                plan_id: m.plan_id.clone(),
+                plan_name: m.plan_name.clone(),
+                completed: m.completed,
+                run_id: m.run_id.clone(),
+            }),
             params: f.params.as_ref().map(|p| FlightParams {
                 digest: p.digest.clone(),
                 count: p.count,

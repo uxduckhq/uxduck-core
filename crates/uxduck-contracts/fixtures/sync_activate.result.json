@@ -2,6 +2,7 @@
   "available": true,
   "enabled": true,
   "activation": "pick",
+  "skipped": [],
   "exported": 42,
   "pulled": 7,
   "lastSyncedAtUs": 1790770548834528,

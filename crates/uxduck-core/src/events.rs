@@ -183,6 +183,17 @@ pub enum Change {
     FlightUpserted {
         flight: crate::domain::flight::Flight,
     },
+    /// A flight deleted from the account (C9): gone from computers that had
+    /// it from the account; on the one that recorded it, kept, no longer saved.
+    FlightRemoved {
+        id: String,
+    },
+    /// A flight deleted from the account saved there again (2026-10-24):
+    /// under a new id, since the account keeps the old one's removal.
+    FlightReplaced {
+        old_id: String,
+        flight: crate::domain::flight::Flight,
+    },
     /// A vehicle's parameter baseline set or changed (C7).
     BaselineUpserted {
         baseline: crate::domain::parameter::ParamBaseline,

@@ -324,6 +324,8 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::BaselineUpserted { .. }
             | Change::BaselineRemoved { .. }
             | Change::FlightUpserted { .. }
+            | Change::FlightRemoved { .. }
+            | Change::FlightReplaced { .. }
             | Change::ParamDefinitionsChosen { .. }
             | Change::OwnSetUpserted { .. }
             | Change::OwnSetRemoved { .. }

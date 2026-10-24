@@ -19,7 +19,9 @@ use uxduck_contracts::rpc::ClientRequest;
 
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::LinkKind;
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::notification::{
+    Action, NotificationAction, NotificationKind, Severity, Subject,
+};
 use uxduck_core::domain::settings::TerrainDataset as Setting;
 use uxduck_mavlink::terrain::{Block, Group};
 use uxduck_terrain::grid;
@@ -48,15 +50,15 @@ pub(crate) struct TerrainState {
     /// block, by vehicle (S118).
     blocks: BTreeMap<(String, Block), u64>,
     /// Cache faults and affected blocks share one availability notice.
-    problems: BTreeMap<String, Problem>,
-    missing: BTreeMap<(String, Block), MissingTerrain>,
+    pub(crate) problems: BTreeMap<String, Problem>,
+    pub(crate) missing: BTreeMap<(String, Block), MissingTerrain>,
     /// Checks of vehicles' own terrain (S119).
     pub(crate) checks: crate::terrain_check::Checks,
     /// Areas kept offline and missions' terrain (S120).
     pub(crate) keeping: crate::terrain_keep::Keeping,
 }
 
-struct MissingTerrain {
+pub(crate) struct MissingTerrain {
     why: String,
     latitude_deg: f64,
     longitude_deg: f64,
@@ -380,6 +382,23 @@ impl Engine {
 
     /// Hands the cache's orders to the host and raises its problems.
     pub(crate) fn terrain_flush(&mut self) {
+        let Some(cache) = &mut self.terrain.cache else {
+            return;
+        };
+        let storage_error = cache.storage_error().map(str::to_owned);
+        match storage_error {
+            Some(error) => self.raise_or_update(Raise {
+                severity: Severity::Warning,
+                kind: NotificationKind::Persistent,
+                subject: Subject::System,
+                title: "Terrain was not saved".into(),
+                body: Some(format!("{error}. Downloaded heights can still work in this session. Open Settings › Storage to free space, then try again.")),
+                actions: vec![NotificationAction { label: "Storage".into(), action: Action::OpenUrl { url: "/settings#storage".into() } }],
+                condition: Some("terrain:storage".into()),
+                report: None,
+            }),
+            None => self.resolve("terrain:storage"),
+        }
         let Some(cache) = &mut self.terrain.cache else {
             return;
         };

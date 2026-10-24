@@ -147,6 +147,17 @@ fn profile(vehicle: &Vehicle) -> Vehicle {
     }
 }
 
+/// A flight as the account has it: where it was recorded stays here.
+fn shared_flight(
+    flight: &uxduck_core::domain::flight::Flight,
+) -> uxduck_core::domain::flight::Flight {
+    uxduck_core::domain::flight::Flight {
+        recorded_here: false,
+        left_account: false,
+        ..flight.clone()
+    }
+}
+
 /// The entity a change is about, its id, and its own version (none for a
 /// removal or a vehicle).
 fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
@@ -162,7 +173,10 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
         Change::OperatorRemoved { id } => ("operator", id, None),
         Change::VehicleUpserted { vehicle } => ("vehicle", &vehicle.id, None),
         // A flight someone kept for the logbook (C9).
-        Change::FlightUpserted { flight } => ("flight", &flight.id, Some(flight.version)),
+        Change::FlightUpserted { flight } | Change::FlightReplaced { flight, .. } => {
+            ("flight", &flight.id, Some(flight.version))
+        }
+        Change::FlightRemoved { id } => ("flight", id, None),
         // A vehicle's approved parameters (C7).
         Change::BaselineUpserted { baseline } => ("baseline", &baseline.id, Some(baseline.version)),
         Change::BaselineRemoved { id } => ("baseline", id, None),
@@ -224,6 +238,11 @@ pub fn outgoing(event: &Event) -> Outgoing {
         Change::PlanSaved { plan, .. } => shared_plan(plan),
         // Flight data is off by default: only a flight someone kept goes (C9).
         Change::FlightUpserted { flight } if !flight.keep => return Outgoing::Ignore,
+        Change::FlightUpserted { flight } | Change::FlightReplaced { flight, .. } => {
+            Change::FlightUpserted {
+                flight: shared_flight(flight),
+            }
+        }
         Change::LinkUpserted { link } => Change::LinkUpserted { link: recipe(link) },
         change => change.clone(),
     };
@@ -284,6 +303,18 @@ pub(crate) fn handle(
             }
             if sync.enabled && sync.device_id.is_empty() {
                 sync.device_id = format!("dv{}", &engine.random.token()[..16]);
+            }
+            if let Some(skipped) = &params.skipped {
+                let mut skipped: Vec<uxduck_core::domain::sync::SyncCategory> =
+                    skipped.iter().copied().map(Into::into).collect();
+                skipped.sort();
+                skipped.dedup();
+                // Something brought back: what it missed goes and comes again.
+                if sync.skipped.iter().any(|c| !skipped.contains(c)) {
+                    sync.exported_through = 0;
+                    sync.pulled_through = 0;
+                }
+                sync.skipped = skipped;
             }
             let mirror_all = params.activation == Some(SyncActivation::MirrorAll);
             if let Some(activation) = params.activation {
@@ -413,6 +444,10 @@ impl Engine {
         let Some((entity, id, own_version)) = identify(&change.change) else {
             return false;
         };
+        // Left out here (2026-10-24): taken again if it is brought back.
+        if !self.state.sync.syncs(entity) {
+            return false;
+        }
         if entity != change.entity
             || id != change.id
             || digest(&change.change) != change.digest
@@ -493,10 +528,14 @@ impl Engine {
                     },
                 )
             })?,
-            "flight" => state
-                .flights
-                .get(id)
-                .map(|f| (f.version, Change::FlightUpserted { flight: f.clone() }))?,
+            "flight" => state.flights.get(id).map(|f| {
+                (
+                    f.version,
+                    Change::FlightUpserted {
+                        flight: shared_flight(f),
+                    },
+                )
+            })?,
             "baseline" => state.baselines.get(id).map(|b| {
                 (
                     b.version,
@@ -814,7 +853,10 @@ impl Engine {
 
     /// Whether an event just committed is one to send soon.
     pub(crate) fn wake_sync_for(&mut self, event: &Event) {
-        if self.state.sync.enabled && self.sync.is_some() && exportable(event).is_some() {
+        if self.state.sync.enabled
+            && self.sync.is_some()
+            && exportable(event).is_some_and(|c| self.state.sync.syncs(&c.entity))
+        {
             self.wake_sync();
         }
     }
@@ -830,6 +872,7 @@ impl Engine {
                 Activation::Pick => SyncActivation::Pick,
                 Activation::MirrorAll => SyncActivation::MirrorAll,
             },
+            skipped: sync.skipped.iter().copied().map(Into::into).collect(),
             exported: sync.exported,
             pulled: sync.pulled,
             last_synced_at_us: sync.last_synced_at_us.max(self.sync_checked_us),

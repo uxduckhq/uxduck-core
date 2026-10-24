@@ -21,7 +21,7 @@
   "remoteControl": [],
   "supervisionGraceS": 10,
   "gcsSystemId": 255,
-  "storeFlights": true,
+  "storeFlights": false,
   "saveFlights": false,
   "uploadWhileArmed": true,
   "uploadVideoWhileFlying": false,

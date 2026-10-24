@@ -611,7 +611,7 @@ impl Browser {
             streams: HashMap::new(),
             last_expiry_us: 0,
             catalogue: (
-                Some(files::DEFAULT_URL.to_owned()),
+                Some(files::SAME_ORIGIN_URL.to_owned()),
                 option_env!("UXDUCK_RELEASE_PUBLIC_KEY")
                     .filter(|key| !key.trim().is_empty())
                     .map(str::to_owned),
@@ -668,6 +668,22 @@ impl Browser {
         if let Some(key) = self.reading.remove(&request) {
             self.engine.terrain_arrived(Arrived::Read { key, bytes });
         }
+        self.drain()
+    }
+
+    /// A terrain file finished writing, or could not be saved.
+    pub fn terrain_written(&mut self, key: String, result: Result<(), String>) -> Vec<Output> {
+        self.engine
+            .terrain_arrived(Arrived::Written { key, result });
+        self.drain()
+    }
+
+    /// Clears cached terrain after the worker has removed its files.
+    pub fn clear_terrain(&mut self) -> Vec<Output> {
+        self.reading.clear();
+        self.fetches
+            .retain(|_, value| !matches!(value, Fetching::Terrain(_)));
+        self.engine.clear_terrain_storage();
         self.drain()
     }
 
@@ -773,7 +789,16 @@ impl Browser {
                     ))),
             },
             DefinitionsOrder::Set(set) => {
-                let url = set.file.url.clone();
+                // Beside the catalogue this page fetched, not the URL the
+                // catalogue names: another origin's file is unreadable here.
+                let Some(catalogue) = self.catalogue.0.clone() else {
+                    self.engine.definitions_arrived(DefinitionsArrived::Set {
+                        id: set.id.clone(),
+                        result: Err("the definitions catalogue is off here".into()),
+                    });
+                    return;
+                };
+                let url = files::beside(&catalogue, &set.file.name);
                 self.fetch(url, Fetching::Set(set), outputs);
             }
             DefinitionsOrder::Own { id } => {

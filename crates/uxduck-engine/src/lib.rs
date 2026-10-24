@@ -1271,6 +1271,8 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::BaselineUpserted { .. }
         | Change::BaselineRemoved { .. }
         | Change::FlightUpserted { .. }
+        | Change::FlightRemoved { .. }
+        | Change::FlightReplaced { .. }
         | Change::PluginCalled { .. }
         | Change::PluginPublished { .. }
         | Change::PluginDeclined { .. }
