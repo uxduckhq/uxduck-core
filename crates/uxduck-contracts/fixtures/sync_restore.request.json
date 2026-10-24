@@ -1,0 +1,16 @@
+{
+  "method": "sync/restore",
+  "params": {
+    "id": "plan1a2b3c4d5e6f7a8b",
+    "change": {
+      "type": "planSaved",
+      "plan": {
+        "id": "plan1a2b3c4d5e6f7a8b",
+        "name": "Ridge survey"
+      },
+      "revision": {
+        "kind": "none"
+      }
+    }
+  }
+}

@@ -165,12 +165,15 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         supervision_grace_s: settings.supervision_grace_s,
         gcs_system_id: settings.gcs_system_id,
         store_flights: settings.store_flights,
+        save_flights: settings.save_flights,
         upload_while_armed: settings.upload_while_armed,
         upload_video_while_flying: settings.upload_video_while_flying,
         start_at_login: settings.start_at_login,
         login_item: None,
         message_notify_severity: settings.message_notify_severity,
         recreate_simulations: settings.recreate_simulations,
+        traffic_alert_m: settings.traffic_alert_m,
+        traffic_alert_up_m: settings.traffic_alert_up_m,
         terrain_dataset: settings.terrain_dataset.into(),
         terrain_areas: settings
             .terrain_areas

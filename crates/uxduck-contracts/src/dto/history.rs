@@ -47,6 +47,11 @@ pub enum HistoryEvent {
         snapshot_id: String,
         name: String,
     },
+    /// A flight ended (C8): `flight/list` has the record.
+    FlightEnded {
+        flight_id: String,
+        text: String,
+    },
     /// Its mission changed (S134): `mission/history` has the record.
     MissionChanged {
         record_id: String,

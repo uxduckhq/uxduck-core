@@ -26,7 +26,7 @@ pub const TRAY_GONE: &str =
 
 #[derive(Debug, Default)]
 pub(crate) struct Location {
-    status: LocationStatus,
+    pub(crate) status: LocationStatus,
     /// A person has location on.
     wanted: bool,
     /// Connections that asked, which hear `location/changed`.
@@ -212,6 +212,7 @@ impl Engine {
             return;
         }
         self.location.status = status.clone();
+        self.computer_moved();
         let frame = crate::rpc::router::notification(&ServerNotification::LocationChanged(status));
         // Only those still allowed: an agent's "for this connection" or
         // "Always allow", or a person.

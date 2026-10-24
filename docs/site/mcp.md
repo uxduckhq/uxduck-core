@@ -1,8 +1,9 @@
 ---
 title: Use with AI agents
+search: Use ArduPilot telemetry from Claude, Codex or Cursor over MCP
 order: 6
 group: Debug and integrate
-summary: Connect Claude Desktop, Claude Code, Codex or Cursor and investigate telemetry over time.
+summary: Connect Claude Desktop, Claude Code, Codex or Cursor over MCP and investigate a vehicle's telemetry over time.
 ---
 
 Connect an AI agent to UXDuck on this computer to read vehicle telemetry, parameters and messages. The in-app AI chat is currently hidden in production; MCP works through your external agent.

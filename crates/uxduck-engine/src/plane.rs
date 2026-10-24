@@ -64,6 +64,9 @@ pub fn route(effect: Effect) -> Routed {
         Effect::Telemetry(update) => {
             Routed::Engine(Box::new(move |e| e.telemetry_observed(update)))
         }
+        Effect::Traffic { vehicle_id, report } => {
+            Routed::Engine(Box::new(move |e| e.vehicle_traffic(&vehicle_id, report)))
+        }
         Effect::CommandDone {
             receipt_id,
             outcome,
@@ -318,6 +321,7 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         } => Box::new(move |e| e.terrain_checked(&vehicle_id, lat, lon, height)),
         Effect::Vehicle(_)
         | Effect::Telemetry(_)
+        | Effect::Traffic { .. }
         | Effect::CommandDone { .. }
         | Effect::Send { .. } => {
             return None;

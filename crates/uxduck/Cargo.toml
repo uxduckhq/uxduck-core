@@ -42,6 +42,7 @@ sha2.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serialport.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
@@ -108,7 +109,6 @@ plugins = ["dep:extism", "dep:wasmtime", "dep:oxc"]
 minisign.workspace = true
 semver.workspace = true
 tempfile.workspace = true
-serialport.workspace = true
 tokio-tungstenite.workspace = true
 
 [build-dependencies]
@@ -125,6 +125,7 @@ copyright = "UXDuck"
 extended-description = "Ground control for MAVLink vehicles. This package installs the UXDuck desktop app, the daemon that runs links, vehicles, recording and forwarding, and the `uxduck` command line. Open UXDuck from your applications menu or run `uxduck open`. To run it without a window, use `systemctl --user enable --now uxduck`."
 section = "net"
 priority = "optional"
+maintainer-scripts = "../../packaging/linux/maintainer-scripts"
 # Electron runtime dependencies, alongside the native daemon's detected libraries.
 depends = "$auto, libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0, libgbm1, libasound2"
 # The tray icon (S64) needs an app indicator; UXDuck runs without one.
@@ -150,3 +151,4 @@ assets = [
 [[bin]]
 name = "uxduck"
 path = "src/main.rs"
+

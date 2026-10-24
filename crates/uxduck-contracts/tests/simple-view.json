@@ -1,0 +1,352 @@
+{
+  "paneOpen": true,
+  "dock": {
+    "type": "split",
+    "direction": "column",
+    "children": [
+      {
+        "size": 560,
+        "node": {
+          "type": "split",
+          "direction": "row",
+          "children": [
+            {
+              "size": 500,
+              "node": {
+                "type": "group",
+                "tabs": [
+                  {
+                    "id": "map",
+                    "kind": "map"
+                  }
+                ],
+                "active": 0
+              }
+            },
+            {
+              "size": 500,
+              "node": {
+                "type": "group",
+                "tabs": [
+                  {
+                    "id": "map-3d",
+                    "kind": "map-3d"
+                  }
+                ],
+                "active": 0
+              }
+            }
+          ]
+        }
+      },
+      {
+        "size": 440,
+        "node": {
+          "type": "split",
+          "direction": "row",
+          "children": [
+            {
+              "size": 500,
+              "node": {
+                "type": "group",
+                "tabs": [
+                  {
+                    "id": "control",
+                    "kind": "control"
+                  },
+                  {
+                    "id": "mission",
+                    "kind": "mission"
+                  },
+                  {
+                    "id": "controllers",
+                    "kind": "controllers"
+                  },
+                  {
+                    "id": "history",
+                    "kind": "history"
+                  },
+                  {
+                    "id": "parameters",
+                    "kind": "parameters"
+                  },
+                  {
+                    "id": "camera",
+                    "kind": "camera"
+                  }
+                ],
+                "active": 0
+              }
+            },
+            {
+              "size": 500,
+              "node": {
+                "type": "group",
+                "tabs": [
+                  {
+                    "id": "telemetry",
+                    "kind": "telemetry"
+                  },
+                  {
+                    "id": "messages",
+                    "kind": "messages"
+                  },
+                  {
+                    "id": "flight-display",
+                    "kind": "flight-display"
+                  },
+                  {
+                    "id": "instruments",
+                    "kind": "instruments"
+                  },
+                  {
+                    "id": "airspace",
+                    "kind": "airspace"
+                  }
+                ],
+                "active": 0
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "saved": [
+    {
+      "id": "preset-simple",
+      "name": "Simple",
+      "dock": {
+        "type": "split",
+        "direction": "column",
+        "children": [
+          {
+            "size": 560,
+            "node": {
+              "type": "split",
+              "direction": "row",
+              "children": [
+                {
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map",
+                        "kind": "map"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "map-3d",
+                        "kind": "map-3d"
+                      }
+                    ],
+                    "active": 0
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "size": 440,
+            "node": {
+              "type": "split",
+              "direction": "row",
+              "children": [
+                {
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "control",
+                        "kind": "control"
+                      },
+                      {
+                        "id": "mission",
+                        "kind": "mission"
+                      },
+                      {
+                        "id": "controllers",
+                        "kind": "controllers"
+                      },
+                      {
+                        "id": "history",
+                        "kind": "history"
+                      },
+                      {
+                        "id": "parameters",
+                        "kind": "parameters"
+                      },
+                      {
+                        "id": "camera",
+                        "kind": "camera"
+                      }
+                    ],
+                    "active": 0
+                  }
+                },
+                {
+                  "size": 500,
+                  "node": {
+                    "type": "group",
+                    "tabs": [
+                      {
+                        "id": "telemetry",
+                        "kind": "telemetry"
+                      },
+                      {
+                        "id": "messages",
+                        "kind": "messages"
+                      },
+                      {
+                        "id": "flight-display",
+                        "kind": "flight-display"
+                      },
+                      {
+                        "id": "instruments",
+                        "kind": "instruments"
+                      },
+                      {
+                        "id": "airspace",
+                        "kind": "airspace"
+                      }
+                    ],
+                    "active": 0
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "preset": {
+        "kind": "simple",
+        "version": 12,
+        "base": {
+          "type": "split",
+          "direction": "column",
+          "children": [
+            {
+              "size": 560,
+              "node": {
+                "type": "split",
+                "direction": "row",
+                "children": [
+                  {
+                    "size": 500,
+                    "node": {
+                      "type": "group",
+                      "tabs": [
+                        {
+                          "id": "map",
+                          "kind": "map"
+                        }
+                      ],
+                      "active": 0
+                    }
+                  },
+                  {
+                    "size": 500,
+                    "node": {
+                      "type": "group",
+                      "tabs": [
+                        {
+                          "id": "map-3d",
+                          "kind": "map-3d"
+                        }
+                      ],
+                      "active": 0
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "size": 440,
+              "node": {
+                "type": "split",
+                "direction": "row",
+                "children": [
+                  {
+                    "size": 500,
+                    "node": {
+                      "type": "group",
+                      "tabs": [
+                        {
+                          "id": "control",
+                          "kind": "control"
+                        },
+                        {
+                          "id": "mission",
+                          "kind": "mission"
+                        },
+                        {
+                          "id": "controllers",
+                          "kind": "controllers"
+                        },
+                        {
+                          "id": "history",
+                          "kind": "history"
+                        },
+                        {
+                          "id": "parameters",
+                          "kind": "parameters"
+                        },
+                        {
+                          "id": "camera",
+                          "kind": "camera"
+                        }
+                      ],
+                      "active": 0
+                    }
+                  },
+                  {
+                    "size": 500,
+                    "node": {
+                      "type": "group",
+                      "tabs": [
+                        {
+                          "id": "telemetry",
+                          "kind": "telemetry"
+                        },
+                        {
+                          "id": "messages",
+                          "kind": "messages"
+                        },
+                        {
+                          "id": "flight-display",
+                          "kind": "flight-display"
+                        },
+                        {
+                          "id": "instruments",
+                          "kind": "instruments"
+                        },
+                        {
+                          "id": "airspace",
+                          "kind": "airspace"
+                        }
+                      ],
+                      "active": 0
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "arranged": false,
+  "flightOpened": true,
+  "current": "preset-simple"
+}

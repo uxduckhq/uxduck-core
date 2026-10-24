@@ -221,6 +221,7 @@ impl Engine {
                     vehicle_type: vehicle.vehicle_type.clone(),
                     autopilot: vehicle.autopilot.clone(),
                     size_cm: vehicle.size_cm,
+                    look: vehicle.look.map(Into::into),
                     presence: vehicle.presence.into(),
                     armed: vehicle.armed,
                     mode: vehicle.mode.clone(),

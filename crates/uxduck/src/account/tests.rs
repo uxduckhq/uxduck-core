@@ -34,23 +34,23 @@ async fn setup_with_verification(
     setup_scenarios(old_status, delayed, hold_verify, false).await
 }
 
-async fn setup_scenarios(
+fn test_api(
     old_status: StatusCode,
     delayed: bool,
     hold_verify: bool,
     hold_sessions: bool,
-) -> TestAccount {
-    let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
+    started: &Arc<Notify>,
+    release: &Arc<Notify>,
+    signed_out: &Arc<Mutex<Vec<String>>>,
+) -> Router {
     let handler_started = started.clone();
     let handler_release = release.clone();
     let verify_started = started.clone();
     let verify_release = release.clone();
     let session_started = started.clone();
     let session_release = release.clone();
-    let signed_out = Arc::new(Mutex::new(Vec::new()));
     let sign_out_log = signed_out.clone();
-    let app = Router::new()
+    Router::new()
         .route(
             "/v1/me",
             get(move |headers: HeaderMap| {
@@ -82,11 +82,19 @@ async fn setup_scenarios(
             }),
         )
         .route(
-            "/v1/auth/sign-in/email-otp",
-            post(move || {
+            "/v1/auth/email-code/request",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["intent"], "continue");
+                Json(json!({ "challengeId": format!("challenge-{}", body["email"].as_str().unwrap().split('@').next().unwrap()) }))
+            }),
+        )
+        .route(
+            "/v1/auth/email-code/verify",
+            post(move |Json(body): Json<Value>| {
                 let started = verify_started.clone();
                 let release = verify_release.clone();
                 async move {
+                assert_eq!(body["challengeId"], "challenge-new");
                 if hold_verify { started.notify_one(); release.notified().await; }
                 (
                     [("set-auth-token", "new-session")],
@@ -111,7 +119,27 @@ async fn setup_scenarios(
                 log.lock().unwrap().push(headers.get("authorization").unwrap().to_str().unwrap().to_owned());
                 Json(json!({}))
             }
-        }));
+        }))
+}
+
+async fn setup_scenarios(
+    old_status: StatusCode,
+    delayed: bool,
+    hold_verify: bool,
+    hold_sessions: bool,
+) -> TestAccount {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let signed_out = Arc::new(Mutex::new(Vec::new()));
+    let app = test_api(
+        old_status,
+        delayed,
+        hold_verify,
+        hold_sessions,
+        &started,
+        &release,
+        &signed_out,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -123,6 +151,8 @@ async fn setup_scenarios(
         client: crate::online::client(Duration::from_secs(5)),
         credentials,
         session_change: Mutex::new(()),
+        // As though a code was asked for: each test verifies new@example.com.
+        challenge: Mutex::new(Some(("new@example.com".into(), "challenge-new".into()))),
         generation: AtomicU64::new(0),
         last: Mutex::new(AccountState::default()),
         analytics_internal: Mutex::new(None),
@@ -248,6 +278,7 @@ async fn switching_people_clears_the_previous_cloud_session_before_returning() {
         Duration::from_millis(200),
         test.account.act_for(
             AccountAction::SwitchOperator {
+                account_id: None,
                 operator_id: Some("ben".into()),
                 restoring: false,
                 device: None,
@@ -270,6 +301,7 @@ async fn switching_people_clears_the_previous_cloud_session_before_returning() {
     test.account
         .act_for(
             AccountAction::SwitchOperator {
+                account_id: None,
                 operator_id: Some("ana".into()),
                 restoring: false,
                 device: None,
@@ -280,6 +312,78 @@ async fn switching_people_clears_the_previous_cloud_session_before_returning() {
         .await
         .unwrap();
     assert!(test.account.token().is_none());
+}
+
+/// The same person (maintainer, 2026-10-23): choosing an operator who last
+/// signed in as the verified account held now keeps the session; another
+/// account's operator, or one with no account, still needs a fresh sign-in.
+#[tokio::test]
+async fn switching_to_an_operator_of_the_same_account_keeps_the_session() {
+    let test = setup(StatusCode::OK, false).await;
+    test.account.credentials.bind_operator(Some("ana")).unwrap();
+    test.account
+        .get(
+            test.account.api.as_deref().unwrap(),
+            test.account.client.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+    let switch = |operator: &str, account: Option<&str>| AccountAction::SwitchOperator {
+        operator_id: Some(operator.into()),
+        account_id: account.map(Into::into),
+        restoring: false,
+        device: None,
+    };
+    test.account
+        .act_for(switch("ana-laptop", Some("old-person")), Some("ana"), 0)
+        .await
+        .unwrap();
+    assert_eq!(test.account.token().as_deref(), Some("old-session"));
+    assert_eq!(
+        test.account.credentials.account_operator().as_deref(),
+        Some("ana-laptop")
+    );
+    assert!(test.account.last.lock().unwrap().signed_in);
+
+    // Another person's operator: the session goes before the switch returns.
+    test.account
+        .act_for(switch("ben", Some("someone-else")), Some("ana-laptop"), 0)
+        .await
+        .unwrap();
+    assert!(test.account.token().is_none());
+}
+
+#[tokio::test]
+async fn an_unknown_or_offline_account_never_keeps_the_session() {
+    for (offline, recorded) in [(true, Some("old-person")), (false, None)] {
+        let test = setup(StatusCode::OK, false).await;
+        test.account.credentials.bind_operator(Some("ana")).unwrap();
+        test.account
+            .get(
+                test.account.api.as_deref().unwrap(),
+                test.account.client.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+        test.account.last.lock().unwrap().offline = offline;
+        test.account
+            .act_for(
+                AccountAction::SwitchOperator {
+                    operator_id: Some("ana-laptop".into()),
+                    account_id: recorded.map(Into::into),
+                    restoring: false,
+                    device: None,
+                },
+                Some("ana"),
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            test.account.token().is_none(),
+            "offline {offline}, recorded {recorded:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -363,6 +467,7 @@ async fn a_late_verification_response_cannot_sign_the_previous_person_back_in() 
     test.account
         .act_for(
             AccountAction::SwitchOperator {
+                account_id: None,
                 operator_id: Some("ben".into()),
                 restoring: false,
                 device: None,
@@ -389,6 +494,7 @@ async fn restoring_a_legacy_profile_offline_keeps_its_existing_session() {
     test.account
         .act_for(
             AccountAction::SwitchOperator {
+                account_id: None,
                 operator_id: Some("ana".into()),
                 restoring: true,
                 device: None,
@@ -409,6 +515,7 @@ async fn restoring_a_legacy_profile_offline_keeps_its_existing_session() {
         test.account
             .act_for(
                 AccountAction::SwitchOperator {
+                    account_id: None,
                     operator_id: Some("ben".into()),
                     restoring: false,
                     device: None,
@@ -446,11 +553,23 @@ async fn a_delayed_session_sign_out_cannot_sign_out_the_next_person() {
     test.account
         .act_for(
             AccountAction::SwitchOperator {
+                account_id: None,
                 operator_id: Some("ben".into()),
                 restoring: false,
                 device: None,
             },
             Some("ana"),
+            1,
+        )
+        .await
+        .unwrap();
+    // The switch dropped any code asked for before it; Ben asks for his own.
+    test.account
+        .act_for(
+            AccountAction::SignIn {
+                email: "new@example.com".into(),
+            },
+            Some("ben"),
             1,
         )
         .await
@@ -477,4 +596,30 @@ async fn a_delayed_session_sign_out_cannot_sign_out_the_next_person() {
             .iter()
             .all(|token| token == "Bearer old-session")
     );
+}
+
+#[tokio::test]
+async fn a_code_signs_in_only_the_email_it_was_asked_for_once() {
+    let test = setup(StatusCode::OK, false).await;
+    let verify = |email: &str| AccountAction::Verify {
+        email: email.into(),
+        code: "123456".into(),
+        product_updates: false,
+    };
+    *test.account.challenge.lock().unwrap() = None;
+    let missing = test
+        .account
+        .act(verify("new@example.com"))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.message, "Ask for a new code, then try again.");
+    test.account
+        .act(AccountAction::SignIn {
+            email: "new@example.com".into(),
+        })
+        .await
+        .unwrap();
+    assert!(test.account.act(verify("other@example.com")).await.is_err());
+    test.account.act(verify("new@example.com")).await.unwrap();
+    assert!(test.account.challenge.lock().unwrap().is_none());
 }

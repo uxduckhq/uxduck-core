@@ -7,6 +7,7 @@ mod controller;
 mod files;
 mod find;
 mod history;
+mod marker;
 mod operator;
 mod param_definitions;
 mod parameter;

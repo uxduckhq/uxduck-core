@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode, header};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use uxduck_contracts::dto::edge::{
-    EdgeDemand, EdgePong, EdgePublish, EdgeState, EdgeStatus, RemoteVehicle,
+    EdgeDemand, EdgePong, EdgePublish, EdgeState, EdgeStatus, RemoteMarker, RemoteVehicle,
 };
 
 use crate::adapters::credentials::FileCredentials;
@@ -53,6 +53,8 @@ pub struct Publisher {
     seq: u64,
     /// What was last sent of each vehicle, without its date, and when.
     sent: HashMap<String, (String, tokio::time::Instant)>,
+    /// What was last sent of the markers watchers see (S182), and when.
+    sent_markers: Option<(String, tokio::time::Instant)>,
 }
 
 impl Publisher {
@@ -60,6 +62,7 @@ impl Publisher {
     pub fn set_demand(&mut self, demand: EdgeDemand) {
         self.demand = demand;
         self.sent.clear();
+        self.sent_markers = None;
     }
 
     #[must_use]
@@ -77,6 +80,7 @@ impl Publisher {
     pub fn next(
         &mut self,
         vehicles: Vec<RemoteVehicle>,
+        markers: Vec<RemoteMarker>,
         now: tokio::time::Instant,
     ) -> Option<EdgePublish> {
         let present: HashSet<String> = vehicles.iter().map(|v| v.id.clone()).collect();
@@ -109,7 +113,17 @@ impl Publisher {
         for id in &removed {
             self.sent.remove(id);
         }
-        if changed.is_empty() && removed.is_empty() {
+        // The markers, all of them when any changed, as often as the list.
+        let key = serde_json::to_string(&markers).unwrap_or_default();
+        let markers = match &self.sent_markers {
+            Some((last, _)) if *last == key => None,
+            Some((_, at)) if now.duration_since(*at) < SUMMARY => None,
+            _ => {
+                self.sent_markers = Some((key, now));
+                Some(markers)
+            }
+        };
+        if changed.is_empty() && removed.is_empty() && markers.is_none() {
             return None;
         }
         self.seq += 1;
@@ -117,6 +131,7 @@ impl Publisher {
             seq: self.seq,
             vehicles: changed,
             removed,
+            markers,
         })
     }
 }
@@ -367,10 +382,13 @@ async fn session(
             _ = publishing.tick(), if publisher.active() => {
                 let demand = publisher.demand().clone();
                 let cameras = live.cameras();
-                let Ok(vehicles) = engine.run(move |e| e.edge_vehicles(&demand, &cameras)).await else {
+                let Ok((vehicles, markers)) = engine
+                    .run(move |e| (e.edge_vehicles(&demand, &cameras), e.edge_markers()))
+                    .await
+                else {
                     return Ended::Unwanted;
                 };
-                if let Some(publish) = publisher.next(vehicles, tokio::time::Instant::now()) {
+                if let Some(publish) = publisher.next(vehicles, markers, tokio::time::Instant::now()) {
                     let frame = json!({ "jsonrpc": "2.0", "method": "edge/publish", "params": publish });
                     if sink.send(Message::text(frame.to_string())).await.is_err() {
                         return Ended::Dropped("the connection to UXDuck's server closed".into());
@@ -515,6 +533,7 @@ mod tests {
             vehicle_type: "Quadrotor".into(),
             autopilot: "Ardupilotmega".into(),
             size_cm: None,
+            look: None,
             presence: uxduck_contracts::dto::vehicle::Presence::Online,
             armed: false,
             mode: Some(mode.into()),
@@ -544,6 +563,7 @@ mod tests {
         let first = publisher
             .next(
                 vec![vehicle("a", "LOITER", 0), vehicle("b", "HOLD", 0)],
+                Vec::new(),
                 start,
             )
             .unwrap();
@@ -553,13 +573,17 @@ mod tests {
         later.at_ms = 99;
         assert!(
             publisher
-                .next(vec![later, vehicle("b", "HOLD", 0)], start)
+                .next(vec![later, vehicle("b", "HOLD", 0)], Vec::new(), start)
                 .is_none()
         );
         // Open in detail, a change goes at once; the list's waits a second.
         let soon = start + Duration::from_millis(100);
         let changed = publisher
-            .next(vec![vehicle("a", "RTL", 0), vehicle("b", "LAND", 0)], soon)
+            .next(
+                vec![vehicle("a", "RTL", 0), vehicle("b", "LAND", 0)],
+                Vec::new(),
+                soon,
+            )
             .unwrap();
         assert_eq!(
             changed
@@ -573,19 +597,61 @@ mod tests {
         let listed = publisher
             .next(
                 vec![vehicle("a", "RTL", 0), vehicle("b", "LAND", 0)],
+                Vec::new(),
                 second,
             )
             .unwrap();
         assert_eq!(listed.vehicles[0].id, "b");
         // Gone from the computer: said once.
         let gone = publisher
-            .next(vec![vehicle("a", "RTL", 0)], second)
+            .next(vec![vehicle("a", "RTL", 0)], Vec::new(), second)
             .unwrap();
         assert_eq!(gone.removed, ["b"]);
         assert_eq!(gone.seq, 4);
         // A new demand sends everything again.
         publisher.set_demand(EdgeDemand::default());
         assert!(!publisher.active());
+    }
+
+    #[test]
+    fn markers_go_to_watchers_when_they_change_at_most_once_a_second() {
+        let start = tokio::time::Instant::now();
+        let mut publisher = Publisher::default();
+        publisher.set_demand(EdgeDemand {
+            summary: true,
+            ..EdgeDemand::default()
+        });
+        let flag = |latitude_deg: f64| RemoteMarker {
+            id: "mk1".into(),
+            name: "Launch site".into(),
+            look: uxduck_contracts::dto::marker::MarkerLook::Flag,
+            latitude_deg,
+            longitude_deg: -1.0,
+            heading_deg: None,
+            fix_at_ms: None,
+        };
+        let first = publisher.next(Vec::new(), vec![flag(50.0)], start).unwrap();
+        assert_eq!(first.markers.unwrap()[0].name, "Launch site");
+        assert!(
+            publisher
+                .next(Vec::new(), vec![flag(50.0)], start)
+                .is_none(),
+            "unchanged"
+        );
+        let soon = start + Duration::from_millis(200);
+        assert!(
+            publisher.next(Vec::new(), vec![flag(50.1)], soon).is_none(),
+            "a second apart"
+        );
+        let second = start + Duration::from_secs(1);
+        let moved = publisher
+            .next(Vec::new(), vec![flag(50.1)], second)
+            .unwrap();
+        assert!((moved.markers.unwrap()[0].latitude_deg - 50.1).abs() < 1e-9);
+        // Watch links turned off for it: the empty list goes, so it goes.
+        let later = start + Duration::from_secs(2);
+        let none = publisher.next(Vec::new(), Vec::new(), later).unwrap();
+        assert_eq!(none.markers, Some(Vec::new()));
     }
 
     #[test]

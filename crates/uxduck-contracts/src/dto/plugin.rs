@@ -59,6 +59,19 @@ pub struct PluginManifest {
     /// name either already has is refused at install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialect: Option<String>,
+    /// The hosts it may fetch from over HTTPS (S170), such as
+    /// `api.adsb.lol`: names only, no scheme, port or path. Shown before it
+    /// is installed; a fetch from any other is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// It is a traffic source (S171, ADR-0034): Airspace lists it, on or
+    /// off, with its switch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic_source: bool,
+    /// Installed off, until a person turns it on (S171): for a plugin
+    /// UXDuck includes that sends anything from this computer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starts_off: bool,
 }
 
 /// An agent's draft: which agent wrote it, and in which chat.
@@ -110,6 +123,78 @@ pub struct StartInput {
     /// The daemon's clock, in milliseconds since 1970.
     #[schemars(schema_with = "crate::safe::integer")]
     pub now_ms: u64,
+}
+
+/// A page to fetch (S170): `GET` over HTTPS from a host the manifest
+/// names. The answer comes to `on_fetched` with the same `id`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchRequest {
+    /// The plugin's own name for it, given back with the answer.
+    pub id: String,
+    pub url: String,
+}
+
+/// What `on_fetched` receives (S170): the answer to a `fetch`, or why
+/// there was none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedInput {
+    pub id: String,
+    pub url: String,
+    /// The HTTP status; absent when no answer came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Its headers, names in lower case.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// The body as text, at most 1 MB.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    /// Why there is no answer: refused, unreachable, too slow or too large.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The daemon's clock, in milliseconds since 1970.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub now_ms: u64,
+}
+
+/// An aircraft a plugin reports (S170, ADR-0034), as a traffic source of its
+/// own. Only `address` is required; the picture merges it with the others.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTraffic {
+    /// Its ICAO 24-bit address, six hexadecimal digits.
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callsign: Option<String>,
+    /// Its transponder code, four octal digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squawk: Option<String>,
+    #[serde(default)]
+    pub category: crate::dto::traffic::TrafficCategory,
+    #[serde(default)]
+    pub protocol: crate::dto::traffic::TrafficProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude_deg: Option<f64>,
+    /// Metres above sea level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_frame: Option<crate::dto::traffic::TrafficAltitudeFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground_speed_mps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub climb_mps: Option<f64>,
+    /// How long ago it was heard, in seconds; now when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_ago_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
 }
 
 /// What `on_tick` receives (S101).
@@ -579,6 +664,35 @@ pub struct Effects {
     /// on as well.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_in_ms: Option<u32>,
+    /// Pages to fetch from hosts the manifest names (S170); each answer
+    /// comes to `on_fetched`. At most four at a time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<FetchRequest>,
+    /// Aircraft it reports (S170, ADR-0034), joining the traffic picture
+    /// while the plugin is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traffic: Vec<PluginTraffic>,
+    /// How its traffic source is doing (S171), shown in its Airspace row
+    /// until it says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_status: Option<PluginTrafficStatus>,
+}
+
+/// How a plugin's traffic source is doing (S171).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTrafficStatus {
+    /// One line, such as "312 of 500 requests today" or "Cannot reach
+    /// adsb.lol".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The note is a problem: drawn as one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub problem: bool,
+    /// Who to credit wherever its traffic is shown, such as
+    /// `adsb.lol (ODbL)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -631,6 +745,12 @@ pub struct Plugin {
     /// Shipped with UXDuck (S104): turned off, never removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub included: bool,
+    /// The hosts it may fetch from (S170).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// It is a traffic source (S171).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic_source: bool,
 }
 
 const fn on() -> bool {

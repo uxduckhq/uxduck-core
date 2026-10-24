@@ -124,6 +124,9 @@ pub enum TabKind {
     /// A rubber duck, turning: found only by typing "duck" in the command
     /// palette. Follows no vehicle.
     Duck,
+    /// Other aircraft near the vehicles and the sources that report them
+    /// (S168, ADR-0034). It follows no vehicle.
+    Airspace,
 }
 
 /// One tab: what it shows and, when pinned, the vehicle it shows instead of
@@ -400,6 +403,26 @@ pub struct Operator {
     /// A type not listed shows UXDuck's own.
     #[serde(default)]
     pub control_actions: Vec<ControlActions>,
+    /// The marker that is this operator (ADR-0035 M12): "Distance from
+    /// you" and the map's line to the selected vehicle measure from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub me_marker_id: Option<String>,
+    /// The operator's display settings as the app writes them (C1): a JSON
+    /// document (`uxduck.operator-display/1`) with their display
+    /// preferences and saved layouts, synced with the operator. None until
+    /// the app first writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// The verified account this operator last signed in as, recorded by
+    /// UXDuck; read only. Switching to an operator of the account already
+    /// signed in keeps the sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// The mapping this operator uses with each controller, recorded when
+    /// they claim one with it; read only. A claim without a mapping uses
+    /// theirs, else the one the controller last used.
+    #[serde(default)]
+    pub controller_mappings: Vec<ControllerMapping>,
     /// Bumped on every change. Send it back as `expectedVersion` when editing.
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
@@ -471,6 +494,27 @@ pub struct OperatorUpdateParams {
     /// `vehicle:mode:guided`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_actions: Option<Vec<ControlActions>>,
+    /// The operator's display document; replaces the one saved. A JSON
+    /// object of at most 256 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// The marker that is this operator; `null` makes none.
+    #[serde(
+        default,
+        deserialize_with = "crate::nullable::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub me_marker_id: Option<Option<String>>,
+}
+
+/// The mapping an operator uses with one controller: by its id here, and
+/// its name, which finds the same kind of controller on another computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerMapping {
+    pub controller_id: String,
+    pub controller_name: String,
+    pub mapping_id: String,
 }
 
 /// The Control tab's buttons for one type of vehicle, in order, by action

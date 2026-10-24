@@ -1,0 +1,14 @@
+{
+  "markers": [
+    {
+      "id": "mk1a2b3c4d5e6f7a8b",
+      "name": "Launch site",
+      "look": "flag",
+      "latitudeDeg": -35.363261,
+      "longitudeDeg": 149.16523,
+      "headingDeg": 270.5,
+      "createdAtUs": 1790669300000000,
+      "version": 1
+    }
+  ]
+}

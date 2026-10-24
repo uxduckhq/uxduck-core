@@ -208,20 +208,13 @@ fn print_history(result: &Value) {
     }
 }
 
-/// An event as the History tab says it.
+/// An event as the History tab says it, in the daemon's own words; one
+/// this version does not know reads as its type.
 fn event_text(event: &Value) -> String {
-    let text = |key: &str| event[key].as_str().unwrap_or_default().to_owned();
-    match event["type"].as_str().unwrap_or_default() {
-        "first-seen" => format!("First seen, as a {}", text("vehicleType")),
-        "renamed" => format!("Renamed from “{}” to “{}”", text("from"), text("to")),
-        "firmware-changed" => match event["from"].as_str() {
-            Some(from) => format!("Firmware {from} → {}", text("to")),
-            None => format!("Firmware {}", text("to")),
-        },
-        "type-changed" => format!("Type changed from {} to {}", text("from"), text("to")),
-        "snapshot-saved" => format!("Snapshot “{}” saved", text("name")),
-        other => other.to_owned(),
-    }
+    serde_json::from_value::<uxduck_core::domain::history::HistoryEvent>(event.clone()).map_or_else(
+        |_| event["type"].as_str().unwrap_or_default().to_owned(),
+        |event| event.describe(),
+    )
 }
 
 fn now_us() -> i64 {

@@ -1,0 +1,10 @@
+{
+  "method": "marker/update",
+  "params": {
+    "id": "mk1a2b3c4d5e6f7a8b",
+    "expectedVersion": 1,
+    "latitudeDeg": -35.3641,
+    "longitudeDeg": 149.1661,
+    "headingDeg": null
+  }
+}

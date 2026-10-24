@@ -177,6 +177,9 @@ impl From<&n::Notification> for nd::Notification {
                         n::Action::OpenControllers { controller_id } => {
                             nd::Action::OpenControllers { controller_id }
                         }
+                        n::Action::KeepFlight { flight_id, always } => {
+                            nd::Action::KeepFlight { flight_id, always }
+                        }
                         n::Action::OpenMessages {
                             vehicle_id,
                             message_id,

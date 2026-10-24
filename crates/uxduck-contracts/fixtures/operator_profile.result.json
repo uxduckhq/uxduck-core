@@ -52,7 +52,8 @@
     "vehicleTelemetry": [],
     "parameterGroups": [],
     "inspectorPinned": [],
-    "controlActions": []
+    "controlActions": [],
+    "controllerMappings": []
   },
   "commandsRequested": 3,
   "notesWritten": 1,

@@ -572,6 +572,31 @@ fn set_state(
 }
 
 impl Engine {
+    /// ArduPilot refuses a take-off with a bare "Failed" unless the vehicle
+    /// is armed in GUIDED, as it is not after a landing (QA 2026-10-24):
+    /// say what it needs instead. PX4 takes off from any mode.
+    fn take_off_refusal(&self, receipt: &Receipt) -> Option<String> {
+        if !receipt.command.is_take_off() {
+            return None;
+        }
+        let vehicle = self.vehicle(&receipt.vehicle_id)?;
+        let family = Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type);
+        if !matches!(family, Some(Family::Copter | Family::Plane)) {
+            return None;
+        }
+        let guided = vehicle
+            .mode
+            .as_deref()
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("GUIDED"));
+        match (vehicle.armed, guided) {
+            (true, true) => None,
+            (false, true) => Some("It takes off once armed: arm it, then Take off.".into()),
+            _ => Some(
+                "It takes off from GUIDED once armed: choose GUIDED, arm it, then Take off.".into(),
+            ),
+        }
+    }
+
     /// The data plane finished a command: complete its receipt, answer the
     /// request that sent it, and tell people when it did not go through.
     pub fn command_result(&mut self, receipt_id: &str, outcome: Outcome, attempts: u8) {
@@ -581,7 +606,10 @@ impl Engine {
         let was_pending = receipt.status == ReceiptStatus::Sent;
         let (status, detail) = match outcome {
             Outcome::Accepted => (ReceiptStatus::Accepted, None),
-            Outcome::Rejected(why) => (ReceiptStatus::Rejected, Some(why)),
+            Outcome::Rejected(why) => (
+                ReceiptStatus::Rejected,
+                Some(self.take_off_refusal(&receipt).unwrap_or(why)),
+            ),
             Outcome::Timeout => (
                 ReceiptStatus::Timeout,
                 Some(format!("no answer after {attempts} tries")),

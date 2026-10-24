@@ -8,6 +8,10 @@ availability: Preview guide. The Plugins page and in-app AI chat are currently h
 
 Plugins add your own values, panels, map features and commands to UXDuck.
 
+The **native daemon** runs plugins, including when its UI is open in Chrome.
+Browser-only UXDuck has no plugin host. Develop against a local native daemon;
+the folder you install must be readable on that daemon's computer.
+
 ## Three ways to write one
 
 1. **TypeScript**: one `.ts` file and a `plugin.json`, with no build step. Start here.
@@ -17,11 +21,92 @@ Plugins add your own values, panels, map features and commands to UXDuck.
 ## Start one
 
 ```
-uxduck plugin new flight-time --typescript
-uxduck plugin test flight-time
+uxduck plugin new battery-watch --typescript
+uxduck plugin test battery-watch
 ```
 
-The first writes `plugin.json`, `index.ts` and a test: `test.tlog`, a short recorded flight, and `test.json`, the items it must produce. The second runs it against the flight, prints what it was given and what it returned, and checks the test. Install it with `uxduck plugin install flight-time`, or with **Install from a folder** on the **Plugins** page.
+The first writes `plugin.json`, `index.ts` and a test: `test.tlog`, a short synthetic flight, and `test.json`, the items it must produce. Every scaffold starts as a **battery readout**, regardless of its name. The second runs without a daemon, prints each call's input and effects as JSON lines, and checks the test. A successful run exits 0 and prints `test.json: passed` on stderr.
+
+Install with `uxduck plugin install battery-watch`, or **Install from a folder** on
+the **Plugins** page. The daemon must be running. Edit the source, test again, and
+install the same folder again to reload it; there is no file watcher.
+
+## A first useful change
+
+The manifest selects inputs; the script returns outputs. Keep both in step:
+
+```json
+{
+  "abi": 2,
+  "id": "battery-watch",
+  "name": "Battery watch",
+  "version": "0.1.0",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": {
+    "items": { "keys": ["battery.remaining_pct"], "cadenceMs": 1000 }
+  }
+}
+```
+
+```ts
+import type { Description, Effects, ItemBatch } from "@uxduck/sdk";
+import { value } from "@uxduck/sdk";
+
+export function describe(): Description {
+  return {
+    panels: [
+      {
+        id: "battery",
+        title: "Battery",
+        tab: true,
+        vehicle: true,
+        widgets: [{ type: "value", item: "battery_watch.remaining_pct", label: "Battery" }],
+      },
+    ],
+  };
+}
+
+export function onItems(batch: ItemBatch): Effects {
+  return {
+    items: batch.items.flatMap((item) =>
+      item.key !== "battery.remaining_pct" || item.value == null
+        ? []
+        : [value(item.vehicleId, "battery_watch.remaining_pct", "Battery", "percent", item.value)],
+    ),
+  };
+}
+```
+
+Change `test.json` to `{"expect":{"items":["battery_watch.remaining_pct"]}}` when
+changing the output key. Open the tab from **+** › **Plugins** › **Battery watch**.
+Before using other telemetry keys, inspect `uxduck rpc telemetry/get '{"vehicleId":"…"}'`.
+Subscriptions deliver updates rather than a complete snapshot; retain earlier
+values per vehicle when a calculation needs several keys across batches.
+
+## Test another idea
+
+The repository's `plugins/README.md` indexes runnable examples: battery warnings,
+fleet map markers, a persistent session timer, distance from home, clocks and a
+Rust camera controller. Reuse a scaffold's recording with any source folder:
+
+```sh
+uxduck plugin test plugins/fleet-markers-ts --tlog battery-watch/test.tlog
+uxduck plugin test plugins/session-timer-ts --tlog battery-watch/test.tlog --command reset
+uxduck plugin test plugins/home-distance-ts --tlog battery-watch/test.tlog --command mark --params '{"label":"Survey start"}'
+```
+
+`test.json` has the exact shape `{"expect":{"items":["group.key"]}}`, with at least one key. Every listed
+key must be produced; malformed expectations fail. Without that optional file,
+the command reports **replay only**, with no assertions. Key presence does not
+assert a numeric value, a warning threshold, a map shape or a command's outcome.
+The generated 29-second recording cannot verify a low-battery warning or a
+minute-long wake-up. Use a suitable recording and check the actual effects.
+
+Replay validates item naming and cumulative storage, and runs handlers in a
+sandbox. It does not send outbound commands, exercise operator approvals, or
+prove that every effect will be accepted by the engine. Verify installation,
+permissions, rendering and restart behavior against a disposable daemon too.
 
 ## What it receives
 
@@ -36,6 +121,20 @@ A script exports any of these, each taking its input and returning effects:
 - `describe`: its panels.
 
 Effects are commands, messages by name (only those in `sends`), items with a unit, notifications, map features, log lines and `store`. An item's key ends in its unit, such as `home.distance_m`, `stopwatch.elapsed_s` for seconds or `clock.now_at` for a moment. An item with no vehicle is the plugin's own, shown in its tab; give it `ratePerS` (1 for a running stopwatch) and the app counts on between updates. Helpers come from `@uxduck/sdk`; nothing else can be imported.
+
+Handlers are synchronous. There is no DOM, Node runtime, filesystem, fetch or
+package loader. The SDK exposes `value`, `text`, `table`, `latest`, `notify`,
+`point`, `circle` and `commandLong`; its TypeScript types live in
+`packages/sdk/src/index.ts`. This package is currently private to the repository,
+so an external editor needs a checkout and a TypeScript path mapping to that file;
+`uxduck plugin test` resolves the import without package installation.
+
+An item key is `group.name`, lower case with underscores. Units require their
+suffix: meter `_m`, meter-per-second `_mps`, percent `_pct`, volt `_v`, ampere
+`_a`, degree `_deg`, second `_s`, time `_at`. Unitless text and counts have no
+unit suffix. `timeUs` is microseconds; `nowMs` and `Date.now()` are milliseconds;
+an item's `time` unit is **Unix seconds**. During replay, handler clocks advance
+with the recording rather than the time taken to run it.
 
 ## Keeping state
 
@@ -67,7 +166,30 @@ Panels in the Cockpit tab are built from `text`, `value`, `gauge`, `chart`, `tab
 
 A panel with `"tab": true` is a tab of its own instead. A plugin's tab panels share one tab, with a switch between them, opened from **+** › **Plugins** under the plugin's name. It follows no vehicle.
 
+Add `"vehicle": true` to a tab panel to follow the selected vehicle and allow
+pinning it. Its widgets can read vehicle telemetry as well as plugin items.
+Independent tabs omit this flag and produce items with `value(null, …)`. Their
+button handlers receive no `vehicleId`; check it before commanding a vehicle.
+
 Map features are GeoJSON geometries with an id; sending the same id again moves it. They are drawn in the plugin's own layer, which **Layers** above the map hides.
+
+Include the vehicle id in feature ids for a fleet, so one vehicle cannot overwrite
+another's marker. GeoJSON coordinates are `[longitude, latitude]`; the SDK's
+`point(id, latitude, longitude)` and `circle` helpers take latitude first.
+
+## When nothing appears
+
+| Symptom                        | Check                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| Missing test.tlog              | Run the scaffold, or pass `--tlog <recording>`; no live vehicle is recorded automatically |
+| No handler calls or values     | Verify keys/message names in the manifest and whether the recording contains those inputs |
+| Value discarded or a dash      | Match the key's unit suffix, widget item key and vehicle; guard absent values             |
+| No plugin tab                  | Add `tab: true`, reinstall, then open it from **+** › **Plugins**                         |
+| Map markers replace each other | Give every vehicle a distinct feature id                                                  |
+| State disappears on restart    | Return `store` and restore it in onStart; module variables alone are temporary            |
+| Import fails                   | Use only `@uxduck/sdk`; local files and npm dependencies are unavailable                  |
+| Plugin stopped                 | Read its status detail on Plugins; test again for syntax, memory, time or storage errors  |
+| Agent test returns no data     | Inspect error, flightS and calls; zero flightS does not verify a telemetry calculation    |
 
 ## Limits
 

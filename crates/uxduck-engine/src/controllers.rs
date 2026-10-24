@@ -417,7 +417,17 @@ fn claim(
             format!("{} is held by {name}", controller.name),
         ));
     }
-    if let Some(mapping_id) = params.mapping_id {
+    // The person's mapping (maintainer, 2026-10-23): the one named, else
+    // theirs for this controller if it is here, else the one it last used.
+    let operator_id = engine.actor(connection).operator_id;
+    let theirs = operator_id
+        .as_ref()
+        .and_then(|id| engine.state.operators.get(id))
+        .and_then(|o| o.mapping_for(&controller.id, &controller.name))
+        .filter(|id| mapping(engine, id).is_some())
+        .map(str::to_owned);
+    let chosen = params.mapping_id.is_some();
+    if let Some(mapping_id) = params.mapping_id.or(theirs) {
         if mapping(engine, &mapping_id).is_none() {
             return Err(not_found(&format!("mapping {mapping_id}")));
         }
@@ -455,6 +465,9 @@ fn claim(
         .claimant
         .insert(controller.id.clone(), connection);
     engine.resolve(&reclaim(&controller.id));
+    if chosen {
+        engine.remember_mapping(actor.clone(), operator_id.as_deref(), &controller);
+    }
     engine.commit_as(
         actor,
         Change::ControllerUpserted {
@@ -761,6 +774,25 @@ fn update_mapping(
 }
 
 impl Engine {
+    /// Keeps on the operator the mapping they claimed a controller with.
+    fn remember_mapping(
+        &mut self,
+        actor: Actor,
+        operator_id: Option<&str>,
+        controller: &Controller,
+    ) {
+        let Some(mut operator) = operator_id
+            .and_then(|id| self.state.operators.get(id))
+            .cloned()
+        else {
+            return;
+        };
+        if operator.choose_mapping(&controller.id, &controller.name, &controller.mapping_id) {
+            operator.version += 1;
+            self.commit_as(actor, Change::OperatorUpserted { operator });
+        }
+    }
+
     fn client_name(&self, connection: ConnectionId) -> String {
         self.connections
             .get(&connection)

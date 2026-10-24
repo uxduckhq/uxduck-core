@@ -14,14 +14,12 @@ fn adopted_presets_keep_their_version_baseline_and_customisation_on_the_wire() {
 
 #[test]
 fn the_simple_default_matches_the_shared_web_fixture() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/operator_update.request.simple-view.json"
-    ))
-    .expect("a valid fixture");
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("simple-view.json")).expect("a valid fixture");
     let wire = dto::Layout::from(&Layout::initial());
     assert_eq!(
         serde_json::to_value(wire).expect("a serialisable layout"),
-        fixture["params"]["layout"]
+        fixture
     );
 }
 

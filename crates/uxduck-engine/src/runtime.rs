@@ -698,6 +698,8 @@ pub struct PluginLoad {
     pub subscribe: uxduck_contracts::dto::plugin::Subscriptions,
     /// Its vendor's dialect file's path, registered while it runs (S60).
     pub dialect: Option<String>,
+    /// The hosts it may fetch from (S170).
+    pub hosts: Vec<String>,
 }
 
 /// A MAVLink message by name for a vehicle, from a plugin (ADR-0006 X4):

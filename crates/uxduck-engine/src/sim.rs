@@ -183,6 +183,7 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         binary,
         wipe,
         with_mission,
+        traffic,
         ..
     } = kind
     else {
@@ -217,6 +218,7 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         binary,
         wipe,
         with_mission,
+        traffic,
         instance,
     }
 }
@@ -315,6 +317,7 @@ pub(crate) fn start_link(
         vehicle_filter: Vec::new(),
         from_link: None,
         keep_alive: false,
+        carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
     });
     if let Some(forward) = &forward {
         if engine.config.capabilities.runs_in == RunsIn::Browser {
@@ -392,7 +395,8 @@ pub(crate) fn restart(
 /// not count down, and UXDuck neither expects to hear from it nor sends it
 /// anything; commands and changes to it are refused until it resumes. Only
 /// a running ArduPilot simulation pauses: PX4's clock does not stop with
-/// its process, and a start in the air finishes its take-off first.
+/// its process, a start in the air finishes its take-off first, and a
+/// practice exercise is flown through without one.
 pub(crate) fn pause(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -417,6 +421,19 @@ pub(crate) fn pause(
     if paused {
         if *autopilot == SimAutopilot::Px4 {
             return Err(invalid("a PX4 simulation can't be paused"));
+        }
+        // A practice exercise is judged on UXDuck's clock, so a pause would
+        // bend its timings and its result (maintainer, 2026-10-23). The Get
+        // started guide teaches; it may pause.
+        let exercising = engine
+            .state
+            .practice
+            .values()
+            .any(|a| a.link_id == id && !a.state.is_over() && !a.guide);
+        if exercising {
+            return Err(invalid(
+                "a practice exercise can't be paused. Give it up to pause the simulation",
+            ));
         }
         if link.status != LinkStatus::Up {
             return Err(invalid("the simulation isn't running"));
@@ -496,6 +513,7 @@ fn add_params(params: SimStartParams) -> LinkAddParams {
             binary: params.binary.map(|b| b.trim().to_owned()),
             wipe: params.wipe,
             with_mission: params.with_mission,
+            traffic: params.traffic,
             instance: None,
         },
         policy: None,
@@ -503,5 +521,6 @@ fn add_params(params: SimStartParams) -> LinkAddParams {
         vehicle_filter: Vec::new(),
         from_link: None,
         keep_alive: false,
+        carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
     }
 }

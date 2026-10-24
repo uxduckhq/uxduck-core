@@ -217,6 +217,8 @@ pub enum Order {
         /// ArduPilot's `--sysid`: one past the link's instance, so two
         /// simulators in one browser are two vehicles.
         sysid: u8,
+        /// ArduPilot's simulated ADS-B receiver, when asked for (ADR-0034).
+        traffic: bool,
     },
     Stop {
         link_id: String,
@@ -831,6 +833,9 @@ impl Browser {
         changes.extend(state.places.values().map(|place| Change::PlaceUpserted {
             place: place.clone(),
         }));
+        changes.extend(state.markers.values().map(|marker| Change::MarkerUpserted {
+            marker: marker.clone(),
+        }));
         changes.extend(state.plans.values().map(|plan| Change::PlanSaved {
             plan: plan.clone(),
             revision: uxduck_core::domain::plan::PlanRevision::None,
@@ -1177,6 +1182,7 @@ impl Browser {
             self.engine.expire_approvals(now);
             self.engine.expire_display_pulls(now);
             self.engine.expire_detached_claims(now);
+            self.engine.expire_traffic(now);
         }
         let gone = self.controls.stale_keyboard_inputs(now);
         self.controller_input(gone, &mut outputs);
@@ -1403,6 +1409,7 @@ fn start(link: &Link) -> Option<Order> {
         ref frame,
         speedup,
         instance,
+        traffic,
         ..
     } = link.kind
     else {
@@ -1438,5 +1445,6 @@ fn start(link: &Link) -> Option<Order> {
         heading_deg,
         // A link journaled before instances in the browser is the first.
         sysid: instance.map_or(1, |i| i.saturating_add(1)),
+        traffic,
     })
 }

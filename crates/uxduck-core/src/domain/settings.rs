@@ -210,6 +210,11 @@ pub struct Settings {
     /// recorded. On until switched off; signed out, nothing leaves.
     #[serde(default = "on")]
     pub store_flights: bool,
+    /// "Save every flight to my account" (C9): each real flight is kept as it
+    /// ends instead of suggested. Off, as it starts (maintainer, 2026-10-23:
+    /// flight data off by default).
+    #[serde(default)]
+    pub save_flights: bool,
     /// Uploads go on while a vehicle is armed; off keeps the link for
     /// flying until it lands (S82).
     #[serde(default = "on")]
@@ -227,6 +232,12 @@ pub struct Settings {
     /// starts, they are not remembered and go with their vehicles.
     #[serde(default)]
     pub recreate_simulations: bool,
+    /// Settings › Airspace (S174, ADR-0034): traffic this near an armed
+    /// vehicle across, and this near up or down, raises a warning.
+    #[serde(default = "traffic_alert_m")]
+    pub traffic_alert_m: u32,
+    #[serde(default = "traffic_alert_up_m")]
+    pub traffic_alert_up_m: u32,
     /// Settings › Terrain (S23, ADR-0026 T4): the dataset the map reads
     /// and vehicles are answered from, unless one is chosen for a vehicle.
     #[serde(default)]
@@ -309,10 +320,13 @@ impl Default for Settings {
             supervision_grace_s: 10,
             gcs_system_id: 255,
             store_flights: true,
+            save_flights: false,
             upload_while_armed: true,
             upload_video_while_flying: false,
             pilot_input_methods: BTreeMap::new(),
             recreate_simulations: false,
+            traffic_alert_m: traffic_alert_m(),
+            traffic_alert_up_m: traffic_alert_up_m(),
             terrain_dataset: TerrainDataset::Alos,
             vehicle_terrain_datasets: BTreeMap::new(),
             terrain_areas: Vec::new(),
@@ -331,6 +345,16 @@ const fn simulator_log_budget() -> u64 {
 )]
 const fn simulator_log_retention() -> Option<u32> {
     Some(7)
+}
+
+/// 2 km across (S174).
+const fn traffic_alert_m() -> u32 {
+    2_000
+}
+
+/// 300 m up or down (S174).
+const fn traffic_alert_up_m() -> u32 {
+    300
 }
 
 #[cfg(test)]

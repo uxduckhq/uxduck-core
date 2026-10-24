@@ -1,0 +1,7 @@
+{
+  "method": "param/baselineSet",
+  "params": {
+    "vehicleId": "vid-1",
+    "note": "Signed off after the test flight"
+  }
+}

@@ -294,6 +294,18 @@ impl Command {
         }
     }
 
+    /// Whether this is a take-off (`NAV_TAKEOFF`).
+    #[must_use]
+    pub fn is_take_off(&self) -> bool {
+        matches!(
+            self,
+            Self::Long {
+                command: MAV_CMD_NAV_TAKEOFF,
+                ..
+            }
+        )
+    }
+
     /// For people: "Arm", "Set mode LOITER".
     #[must_use]
     pub fn label(&self) -> String {

@@ -1,8 +1,9 @@
 ---
 title: Parameters
+search: ArduPilot parameters: compare, edit and stage changes
 order: 14
 group: Use your vehicle
-summary: Compare and stage parameter changes; load matching firmware descriptions.
+summary: Compare and stage ArduPilot parameter changes, with descriptions from the matching Plane, Copter, Rover or Sub firmware.
 ---
 
 See, search and change a vehicle's parameters, with a history of every change.

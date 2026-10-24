@@ -65,7 +65,8 @@
           "vehicleTelemetry": [],
           "parameterGroups": [],
           "inspectorPinned": [],
-          "controlActions": []
+          "controlActions": [],
+          "controllerMappings": []
         }
       }
     ]

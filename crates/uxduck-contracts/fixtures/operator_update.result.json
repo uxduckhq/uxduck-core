@@ -69,5 +69,6 @@
     }
   ],
   "inspectorPinned": ["received:HEARTBEAT", "sent:COMMAND_LONG"],
-  "controlActions": []
+  "controlActions": [],
+  "controllerMappings": []
 }

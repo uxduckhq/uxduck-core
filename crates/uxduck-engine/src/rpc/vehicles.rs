@@ -9,7 +9,7 @@ use uxduck_contracts::dto::link::{
 };
 use uxduck_contracts::dto::vehicle::{
     Vehicle as VehicleDto, VehicleBookmarksParams, VehicleLabelParams, VehicleListResult,
-    VehicleSaveParams, VehicleSizeParams,
+    VehicleLookParams, VehicleSaveParams, VehicleSizeParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -95,6 +95,10 @@ pub fn handle(
         ClientRequest::VehicleSize(params) => {
             require(Capability::Config)?;
             size_vehicle(engine, connection, params)
+        }
+        ClientRequest::VehicleLook(params) => {
+            require(Capability::Config)?;
+            look_vehicle(engine, connection, params)
         }
         ClientRequest::VehicleBookmarks(params) => {
             require(Capability::Config)?;
@@ -203,6 +207,17 @@ pub(crate) fn create_link(
     create_link_from(engine, actor, params, from_link)
 }
 
+/// [`create_link`] under a given id: a connection from the account (C2)
+/// keeps its id on every computer that uses it.
+pub(crate) fn create_link_as(
+    engine: &mut Engine,
+    actor: uxduck_core::events::Actor,
+    params: LinkAddParams,
+    id: String,
+) -> Result<LinkDto, ApiError> {
+    create_link_inner(engine, actor, params, None, Some(id))
+}
+
 /// [`create_link`], for a forward that carries only `from_link`'s traffic
 /// and goes with it (S102).
 pub(crate) fn create_link_from(
@@ -210,6 +225,16 @@ pub(crate) fn create_link_from(
     actor: uxduck_core::events::Actor,
     params: LinkAddParams,
     from_link: Option<String>,
+) -> Result<LinkDto, ApiError> {
+    create_link_inner(engine, actor, params, from_link, None)
+}
+
+fn create_link_inner(
+    engine: &mut Engine,
+    actor: uxduck_core::events::Actor,
+    params: LinkAddParams,
+    from_link: Option<String>,
+    id: Option<String>,
 ) -> Result<LinkDto, ApiError> {
     let kind: LinkKind = params.kind.into();
     if let Some(source) = &from_link {
@@ -244,17 +269,50 @@ pub(crate) fn create_link_from(
         Vec::new()
     };
     crate::forwarding::check(engine, &kind, from_link.as_deref(), &vehicle_filter, None)?;
+    // A receiver's traffic (S172): SBS-1 over TCP, GDL90 over UDP or serial;
+    // read-only, since nothing is sent to a receiver.
+    // A stick's decoder speaks SBS-1, whatever was asked (S173).
+    let carries: uxduck_core::domain::link::LinkCarries =
+        if matches!(kind, LinkKind::UsbReceiver {}) {
+            uxduck_core::domain::link::LinkCarries::Sbs
+        } else {
+            params.carries.into()
+        };
+    let suits = match carries {
+        uxduck_core::domain::link::LinkCarries::Mavlink => true,
+        uxduck_core::domain::link::LinkCarries::Sbs => {
+            matches!(
+                kind,
+                LinkKind::TcpClient { .. } | LinkKind::TcpServer { .. } | LinkKind::UsbReceiver {}
+            )
+        }
+        uxduck_core::domain::link::LinkCarries::Gdl90 => matches!(
+            kind,
+            LinkKind::UdpListen { .. } | LinkKind::UdpClient { .. } | LinkKind::Serial { .. }
+        ),
+    };
+    if !suits {
+        return Err(invalid(
+            "SBS-1 comes over TCP, and GDL90 over UDP or a serial port",
+        ));
+    }
+    let policy = if carries.is_mavlink() {
+        params.policy.map(Into::into).unwrap_or_default()
+    } else {
+        uxduck_core::domain::link::LinkPolicy::Read
+    };
     let link = Link {
-        id: format!("li{}", &engine.random.token()[..16]),
+        id: id.unwrap_or_else(|| format!("li{}", &engine.random.token()[..16])),
         name,
         kind,
-        policy: params.policy.map(Into::into).unwrap_or_default(),
+        policy,
         topology: params.topology.map(Into::into).unwrap_or_default(),
         status: LinkStatus::Configured,
         status_detail: None,
         vehicle_filter,
         from_link: from_link.filter(|_| kind_is_forward),
         keep_alive: params.keep_alive,
+        carries,
         launch: None,
         paused: false,
         created_at_us: engine.clock.now_us(),
@@ -294,6 +352,7 @@ fn default_name(kind: &LinkKind) -> Option<String> {
         LinkKind::UdpClient { host, port } => Some(format!("UDP {host}:{port}")),
         LinkKind::UdpForward { host, port } => Some(format!("Forward to {host}:{port}")),
         LinkKind::Simulator { .. } => None,
+        LinkKind::UsbReceiver {} => Some("USB receiver stick".into()),
     }
 }
 
@@ -362,6 +421,16 @@ pub(crate) fn check_kind(
             });
             if taken {
                 return Err(invalid(format!("another link already uses {device}")));
+            }
+            Ok(default_name(kind).unwrap_or_default())
+        }
+        // One stick at a time (S173): the decoder takes the first it finds.
+        LinkKind::UsbReceiver {} => {
+            if links
+                .iter()
+                .any(|l| matches!(l.kind, LinkKind::UsbReceiver {}))
+            {
+                return Err(invalid("a USB receiver stick is already added"));
             }
             Ok(default_name(kind).unwrap_or_default())
         }
@@ -463,6 +532,9 @@ fn enable_link(engine: &mut Engine, connection: ConnectionId, id: &str) -> Resul
         link.status_detail = None;
         link.version += 1;
         engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+        if !link.carries.is_mavlink() {
+            engine.traffic_sources_changed();
+        }
         engine.links.open(&link);
     }
     engine.resolve(&format!("link-loop:{id}"));
@@ -491,6 +563,9 @@ fn disable_link(
         link.status_detail = None;
         link.version += 1;
         engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+        if !link.carries.is_mavlink() {
+            engine.traffic_sources_changed();
+        }
         vehicles_offline(engine, connection, id);
         engine.resolve(&format!("link-loop:{id}"));
         engine.refresh_wake_lock();
@@ -845,6 +920,28 @@ fn size_vehicle(
     let mut vehicle = found(engine, &id)?.clone();
     if vehicle.size_cm != size_cm {
         vehicle.size_cm = size_cm;
+        vehicle.version += 1;
+        engine.commit(
+            connection,
+            Change::VehicleUpserted {
+                vehicle: vehicle.clone(),
+            },
+        );
+    }
+    to_value(&VehicleDto::from(&vehicle))
+}
+
+/// `vehicle/look`: the model it is drawn as (ADR-0035 M5), or none for its
+/// type's. As its size, neither saves it nor goes in its history.
+fn look_vehicle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    VehicleLookParams { id, look }: VehicleLookParams,
+) -> Result<Value, ApiError> {
+    let look = look.map(Into::into);
+    let mut vehicle = found(engine, &id)?.clone();
+    if vehicle.look != look {
+        vehicle.look = look;
         vehicle.version += 1;
         engine.commit(
             connection,

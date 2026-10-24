@@ -39,9 +39,11 @@ mod klv;
 mod launch;
 mod learning;
 pub mod location;
+pub mod markers;
 pub mod mavlink_inspect;
 mod messages;
 pub mod mission_history;
+pub mod nmea;
 pub mod pairing;
 pub mod param_definitions;
 mod photos;
@@ -74,6 +76,7 @@ pub mod terrain;
 mod terrain_check;
 mod terrain_keep;
 pub mod trace;
+pub mod traffic;
 pub mod transfers;
 pub mod tray;
 pub mod vehicle_files;
@@ -288,7 +291,10 @@ pub struct Engine {
     interface: interface::Interface,
     /// Where this computer is, while a person has it on (S137).
     location: location::Location,
+    /// Other aircraft near the vehicles (S168).
+    traffic: traffic::Traffic,
     places: places::Places,
+    marker_live: markers::Live,
     remote_viewing: remote_view::RemoteViewing,
     /// A client asked for a restart.
     restart: bool,
@@ -463,7 +469,9 @@ impl Engine {
             finding: finds::Finding::default(),
             interface: interface::Interface::default(),
             location: location::Location::default(),
+            traffic: traffic::Traffic::default(),
             places: places::Places::default(),
+            marker_live: markers::Live::default(),
             remote_viewing: remote_view::RemoteViewing::default(),
             live: controllers::Live::default(),
             restart: false,
@@ -551,6 +559,7 @@ impl Engine {
             item.version += 1;
             engine.commit_as(Actor::default(), Change::ItemUpserted { item });
         }
+        engine.close_interrupted_flights();
         engine.start_data_plane();
         engine.reset_controllers();
         engine.restore_after_restart();
@@ -664,6 +673,8 @@ impl Engine {
         self.feature_watchers.remove(&id);
         self.item_watchers.remove(&id);
         self.location_disconnected(id);
+        self.traffic_disconnected(id);
+        self.markers_disconnected(id);
         self.tray_watchers.remove(&id);
         self.app_update.watchers.remove(&id);
         self.messages.forget(id);
@@ -768,7 +779,7 @@ impl Engine {
                 change => entity_changes(change),
             }
             .into_iter()
-            .filter(|change| types.contains(&change.entity))
+            .filter(|change| types.contains(&change.entity) && self.may_see(id, change))
             .collect();
             let delta = StateDelta {
                 seq: event.seq,
@@ -778,6 +789,38 @@ impl Engine {
             };
             let frame = rpc::router::notification(&ServerNotification::StateDelta(delta));
             self.send(id, &frame);
+        }
+    }
+
+    /// Whether a connection may see a change: another operator's chats,
+    /// their messages and folders are not sent to it (maintainer, 2026-10-23).
+    fn may_see(&self, connection: ConnectionId, change: &EntityChange) -> bool {
+        use rpc::threads::{sees, sees_thread};
+        match change.entity {
+            EntityType::Thread => change
+                .thread
+                .as_ref()
+                .is_none_or(|t| sees(self, connection, t.operator_id.as_deref())),
+            EntityType::Item => change
+                .item
+                .as_ref()
+                .is_none_or(|i| sees_thread(self, connection, &i.thread_id)),
+            EntityType::Folder => change
+                .folder
+                .as_ref()
+                .is_none_or(|f| sees(self, connection, f.operator_id.as_deref())),
+            _ => true,
+        }
+    }
+
+    /// A connection's operator changed, so what it may see did: it asks for
+    /// the state again (`state/resync`) if it follows it.
+    pub(crate) fn operator_changed(&mut self, connection: ConnectionId) {
+        if self.subscribers.contains_key(&connection) {
+            let frame = rpc::router::notification(&ServerNotification::StateResync(
+                uxduck_contracts::dto::Empty {},
+            ));
+            self.send(connection, &frame);
         }
     }
 
@@ -1107,6 +1150,7 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         settings: None,
         plugin: None,
         place: None,
+        marker: None,
         plan: None,
         snapshot: None,
         param_definitions: None,
@@ -1181,6 +1225,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         change @ (Change::PlaceUpserted { .. } | Change::PlaceRemoved { .. }) => {
             search::entity_changes(change)
         }
+        change @ (Change::MarkerUpserted { .. } | Change::MarkerRemoved { .. }) => {
+            markers::entity_changes(change)
+        }
         change @ (Change::PlanSaved { .. } | Change::PlanRemoved { .. }) => {
             plans::entity_changes(change)
         }
@@ -1219,6 +1266,11 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::FlightStored { .. }
         | Change::VideoLost { .. }
         | Change::LibraryUpserted { .. }
+        | Change::LinkLibraryUpserted { .. }
+        | Change::LinkLibraryRemoved { .. }
+        | Change::BaselineUpserted { .. }
+        | Change::BaselineRemoved { .. }
+        | Change::FlightUpserted { .. }
         | Change::PluginCalled { .. }
         | Change::PluginPublished { .. }
         | Change::PluginDeclined { .. }

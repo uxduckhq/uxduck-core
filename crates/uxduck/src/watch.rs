@@ -358,6 +358,7 @@ mod tests {
             vehicle_type: "Quadrotor".into(),
             autopilot: "Ardupilotmega".into(),
             size_cm: None,
+            look: None,
             presence: uxduck_contracts::dto::vehicle::Presence::Online,
             armed: true,
             mode: Some("LOITER".into()),

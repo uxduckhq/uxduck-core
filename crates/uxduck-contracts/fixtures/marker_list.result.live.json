@@ -1,0 +1,28 @@
+{
+  "markers": [
+    {
+      "id": "mk1a2b3c4d5e6f7a8b",
+      "name": "Boat",
+      "look": "boat",
+      "latitudeDeg": 50.5,
+      "longitudeDeg": -1.5,
+      "source": {
+        "type": "udp",
+        "port": 10110
+      },
+      "live": {
+        "state": "live",
+        "fix": {
+          "latitudeDeg": 50.501,
+          "longitudeDeg": -1.499,
+          "headingDeg": 45.5,
+          "accuracyM": 4.5,
+          "satellites": 10,
+          "atMs": 1790669300000
+        }
+      },
+      "createdAtUs": 1790669300000000,
+      "version": 3
+    }
+  ]
+}

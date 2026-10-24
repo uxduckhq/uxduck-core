@@ -21,11 +21,19 @@ pub enum AccountAction {
     /// Forget a different person's sign-in before acknowledging a local switch.
     SwitchOperator {
         operator_id: Option<String>,
+        /// The account the operator switched to last signed in as: when it is
+        /// the one signed in now, the same person keeps their sign-in.
+        account_id: Option<String>,
         restoring: bool,
         device: Option<String>,
     },
     /// Recorded flight-log summaries; a read-only `AccountFlights`.
     Flights,
+    /// One synced entity's copies in the account (C5).
+    Versions {
+        entity: String,
+        id: String,
+    },
     Environment,
     SetEnvironment {
         environment: Option<AccountEnvironment>,
@@ -160,6 +168,10 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
     Ok(match request {
         ClientRequest::AccountGet(_) => AccountAction::Get,
         ClientRequest::AccountFlights(_) => AccountAction::Flights,
+        ClientRequest::AccountVersions(p) => AccountAction::Versions {
+            entity: p.entity,
+            id: p.id,
+        },
         ClientRequest::AccountEnvironment(_) => AccountAction::Environment,
         ClientRequest::AccountSetEnvironment(p) => {
             allow_environment_change(engine)?;
@@ -224,6 +236,7 @@ pub(crate) fn handle(
         action,
         AccountAction::Get
             | AccountAction::Flights
+            | AccountAction::Versions { .. }
             | AccountAction::Environment
             | AccountAction::Shared
             | AccountAction::SentFeedback
@@ -352,6 +365,37 @@ fn allow_environment_change(engine: &Engine) -> Result<(), ApiError> {
 impl Engine {
     /// Private session state from the native account task. Attribution only
     /// uses it when the acting connection selected that same operator.
+    /// Notes on the signed-in operator which verified account they are, so
+    /// another operator of the same account, here or synced from another
+    /// computer, can be chosen without signing in again.
+    fn record_operator_account(&mut self) {
+        let identity = &self.account_identity;
+        let (true, Some(account), Some(operator_id)) = (
+            identity.signed_in && !identity.offline,
+            identity.account_id.clone(),
+            identity.operator_id.clone(),
+        ) else {
+            return;
+        };
+        let Some(mut operator) = self.state.operators.get(&operator_id).cloned() else {
+            return;
+        };
+        if operator.account_id.as_deref() == Some(account.as_str()) {
+            return;
+        }
+        operator.account_id = Some(account);
+        operator.version += 1;
+        let actor = uxduck_core::events::Actor {
+            client_id: "uxduck-account".into(),
+            operator_id: None,
+            identity: None,
+        };
+        self.commit_as(
+            actor,
+            uxduck_core::events::Change::OperatorUpserted { operator },
+        );
+    }
+
     pub fn set_account_identity(&mut self, state: AccountState) {
         if self.account_identity == state {
             return;
@@ -365,6 +409,7 @@ impl Engine {
             self.reset_analytics_session();
         }
         self.account_identity = state;
+        self.record_operator_account();
         let frame = crate::rpc::router::notification(
             &uxduck_contracts::rpc::ServerNotification::AccountChanged(
                 uxduck_contracts::dto::Empty {},
@@ -449,6 +494,7 @@ impl Engine {
         let Some((connection, request_id)) = self.awaiting_account.remove(id) else {
             return;
         };
+        let mut switched = false;
         let result = if let Some(operator_id) = self.awaiting_operator.remove(id) {
             result.and_then(|_| {
                 self.ensure_operator_handover(connection, operator_id.as_deref())?;
@@ -471,6 +517,7 @@ impl Engine {
                     self.reset_analytics_session();
                 }
                 if let Some(state) = self.connections.get_mut(&connection) {
+                    switched = state.operator_id != operator_id;
                     state.operator_id = operator_id;
                 }
                 Ok(serde_json::json!({}))
@@ -483,5 +530,8 @@ impl Engine {
             Err(error) => crate::rpc::router::error(&request_id, &error),
         };
         self.send(connection, &frame);
+        if switched {
+            self.operator_changed(connection);
+        }
     }
 }

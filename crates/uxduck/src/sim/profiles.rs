@@ -13,29 +13,24 @@ const SOURCE: &str = include_str!("profiles/ardupilot.json");
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Profiles {
     schema_version: u8,
+    /// Simulated traffic, when a simulation asks for it (ADR-0034):
+    /// ArduPilot's own ADS-B simulator on serial 1, streamed to UXDuck,
+    /// with avoidance off so the vehicle flies as it would without it.
+    traffic: BTreeMap<String, f32>,
     programs: BTreeMap<String, Program>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Program {
-    frames: BTreeMap<String, BTreeMap<String, f32>>,
-}
-
-pub(super) fn defaults(program: &str, frame: &str) -> Result<Option<String>, String> {
+fn profiles() -> Result<Profiles, String> {
     let profiles: Profiles = serde_json::from_str(SOURCE)
         .map_err(|error| format!("invalid embedded simulation profiles: {error}"))?;
     if profiles.schema_version != 1 {
         return Err("unsupported embedded simulation profile schema".into());
     }
-    let selected = profiles
-        .programs
-        .get(program)
-        .ok_or_else(|| format!("missing simulation profile for {program}"))?;
-    let Some(parameters) = selected.frames.get(frame) else {
-        // Unreviewed frames explicitly retain the firmware's own defaults.
-        return Ok(None);
-    };
+    Ok(profiles)
+}
+
+/// One `NAME value` line per parameter, refusing a name ArduPilot could not hold.
+fn lines(parameters: &BTreeMap<String, f32>, what: &str) -> Result<String, String> {
     let mut text = String::new();
     for (name, value) in parameters {
         if name.is_empty()
@@ -46,25 +41,55 @@ pub(super) fn defaults(program: &str, frame: &str) -> Result<Option<String>, Str
             || !value.is_finite()
         {
             return Err(format!(
-                "invalid simulation profile parameter {program}/{frame}/{name}"
+                "invalid simulation profile parameter {what}/{name}"
             ));
         }
         writeln!(text, "{name} {value}").map_err(|error| error.to_string())?;
     }
-    Ok(Some(text))
+    Ok(text)
 }
 
-/// Append UXDuck's embedded profile after any explicitly supplied frame defaults.
-/// The file is generated before starting SITL, and a write failure prevents launch.
+/// The parameters that give a simulation its simulated traffic.
+pub(super) fn traffic() -> Result<String, String> {
+    lines(&profiles()?.traffic, "traffic")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Program {
+    frames: BTreeMap<String, BTreeMap<String, f32>>,
+}
+
+pub(super) fn defaults(program: &str, frame: &str) -> Result<Option<String>, String> {
+    let profiles = profiles()?;
+    let selected = profiles
+        .programs
+        .get(program)
+        .ok_or_else(|| format!("missing simulation profile for {program}"))?;
+    let Some(parameters) = selected.frames.get(frame) else {
+        // Unreviewed frames explicitly retain the firmware's own defaults.
+        return Ok(None);
+    };
+    lines(parameters, &format!("{program}/{frame}")).map(Some)
+}
+
+/// Append UXDuck's embedded profile, and simulated traffic's parameters when
+/// asked for, after any explicitly supplied frame defaults. The file is
+/// generated before starting SITL, and a write failure prevents launch.
 pub(super) fn with_defaults(
     directory: &Path,
     program: &str,
     frame: &str,
     upstream: Option<String>,
+    traffic: bool,
 ) -> Result<Option<String>, String> {
-    let Some(text) = defaults(program, frame)? else {
+    let mut text = defaults(program, frame)?.unwrap_or_default();
+    if traffic {
+        text.push_str(&self::traffic()?);
+    }
+    if text.is_empty() {
         return Ok(upstream);
-    };
+    }
     let path = directory.join("uxduck-profile.parm");
     std::fs::write(&path, text).map_err(|error| {
         format!(
@@ -154,7 +179,8 @@ mod tests {
                 directory.path(),
                 "ardurover",
                 "rover",
-                Some("base.parm,frame.parm".into())
+                Some("base.parm,frame.parm".into()),
+                false
             ),
             Ok(Some(format!("base.parm,frame.parm,{}", path.display())))
         );
@@ -167,7 +193,8 @@ mod tests {
                 &directory.path().join("missing"),
                 "ardurover",
                 "rover",
-                None
+                None,
+                false
             )
             .is_err()
         );
@@ -176,9 +203,29 @@ mod tests {
                 directory.path(),
                 "arducopter",
                 "X",
-                Some("copter.parm".into())
+                Some("copter.parm".into()),
+                false
             ),
             Ok(Some("copter.parm".into()))
         );
+    }
+
+    /// Simulated traffic only when asked for (ADR-0034): a copter that
+    /// keeps upstream's defaults gets a profile of traffic alone.
+    #[test]
+    fn simulated_traffic_is_added_only_when_asked_for() {
+        let directory = tempfile::tempdir().expect("profile directory");
+        let path = directory.path().join("uxduck-profile.parm");
+        assert_eq!(
+            with_defaults(directory.path(), "arducopter", "X", None, true),
+            Ok(Some(path.display().to_string()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written profile"),
+            "ADSB_TYPE 1\nAVD_ENABLE 0\nMAV1_ADSB 5\nSERIAL1_PROTOCOL 1\nSIM_ADSB_ALT 300\nSIM_ADSB_COUNT 5\nSIM_ADSB_RADIUS 3000\n"
+        );
+        with_defaults(directory.path(), "ardurover", "rover", None, true).expect("rover");
+        let rover = std::fs::read_to_string(&path).expect("written profile");
+        assert!(rover.starts_with("ACRO_TURN_RATE 60\n") && rover.contains("SIM_ADSB_COUNT 5\n"));
     }
 }

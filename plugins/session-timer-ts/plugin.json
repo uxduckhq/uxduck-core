@@ -1,0 +1,18 @@
+{
+  "abi": 2,
+  "id": "session-timer",
+  "name": "Session timer",
+  "version": "0.1.0",
+  "description": "A persistent elapsed-time tab that needs no vehicle and wakes once a minute.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "commands": [
+    {
+      "name": "reset",
+      "title": "Reset session timer",
+      "description": "Start counting again from now.",
+      "risk": "none",
+      "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  ]
+}

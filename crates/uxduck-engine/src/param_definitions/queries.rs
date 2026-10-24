@@ -326,16 +326,31 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
         params.text.as_deref(),
         params.other_vehicle_id.as_deref(),
         params.snapshot_id.as_deref(),
+        params.baseline_id.as_deref(),
     ) {
-        (Some(text), None, None) => {
+        (None, None, None, Some(id)) => {
+            let baseline = engine
+                .state
+                .baselines
+                .get(id)
+                .filter(|b| b.vehicle_id == described.vehicle.id)
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorKind::NotFound,
+                        format!("no baseline {id} for this vehicle"),
+                    )
+                })?;
+            (baseline.values.clone(), true, Vec::new())
+        }
+        (Some(text), None, None, None) => {
             let (values, unread) = read_param_file(text);
             (values, false, unread)
         }
-        (None, Some(other), None) => {
+        (None, Some(other), None, None) => {
             let other = which_vehicle(engine, Some(other))?;
             (Described::of(engine, other).values, true, Vec::new())
         }
-        (None, None, Some(id)) => {
+        (None, None, Some(id), None) => {
             let snapshot =
                 engine.state.snapshots.get(id).ok_or_else(|| {
                     ApiError::new(ErrorKind::NotFound, format!("no snapshot {id}"))
@@ -347,7 +362,11 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
                 .collect();
             (values, true, Vec::new())
         }
-        _ => return Err(invalid("give one of text, otherVehicleId or snapshotId")),
+        _ => {
+            return Err(invalid(
+                "give one of text, otherVehicleId, snapshotId or baselineId",
+            ));
+        }
     };
     let mut names: BTreeSet<&str> = theirs.keys().map(String::as_str).collect();
     if whole {
@@ -372,6 +391,11 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
         differences,
         unread_lines,
     })
+}
+
+/// The vehicle's parameters now, by name (C7).
+pub(crate) fn vehicle_values(engine: &Engine, vehicle: Vehicle) -> BTreeMap<String, f64> {
+    Described::of(engine, vehicle).values
 }
 
 pub(crate) fn handle(

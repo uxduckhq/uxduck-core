@@ -1,0 +1,10 @@
+{
+  "abi": 2,
+  "id": "fleet-markers",
+  "name": "Fleet markers",
+  "version": "0.1.0",
+  "description": "A separate map marker for each vehicle's decoded MAVLink position.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": { "messages": { "names": ["GLOBAL_POSITION_INT"], "cadenceMs": 500 } }
+}

@@ -37,6 +37,7 @@ use crate::dto::inspect::{MavlinkHistoryParams, MavlinkInspectParams};
 use crate::dto::journal::JournalImportParams;
 use crate::dto::link::{IdParams, LinkAddParams, LinkUpdateParams};
 use crate::dto::location::TrayLocationParams;
+use crate::dto::marker::{MarkerAddParams, MarkerShareParams, MarkerUpdateParams};
 use crate::dto::messages::{VehicleMessage, VehicleMessagesParams};
 use crate::dto::mission::MissionUploadParams;
 use crate::dto::operator::{
@@ -78,7 +79,8 @@ use crate::dto::trace::{RequestId, TraceFrame};
 use crate::dto::tray::{FeedbackScreenshotParams, TrayActivateParams, TrayMenu};
 use crate::dto::update::AppUpdateInstallParams;
 use crate::dto::vehicle::{
-    VehicleBookmarksParams, VehicleLabelParams, VehicleSaveParams, VehicleSizeParams,
+    VehicleBookmarksParams, VehicleLabelParams, VehicleLookParams, VehicleSaveParams,
+    VehicleSizeParams,
 };
 use crate::dto::video::{
     VideoAddParams, VideoAssignParams, VideoCaptureEnableParams, VideoCaptureParams,
@@ -196,6 +198,17 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/size")]
     VehicleSize(VehicleSizeParams),
+    /// Whether the traffic a vehicle's ADS-B receiver reports is used
+    /// (S168, ADR-0034): off until a person turns it on. Operators only.
+    /// Result: `Vehicle`.
+    #[serde(rename = "vehicle/traffic")]
+    VehicleTraffic(crate::dto::traffic::VehicleTrafficParams),
+    /// Draws a vehicle as another of UXDuck's models on both maps (plane,
+    /// vtol, multicopter, rover, boat, submarine, airship, jet), such as a
+    /// copter drawn as a boat; without `look`, as its type gives. Kept on
+    /// this computer. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "vehicle/look")]
+    VehicleLook(VehicleLookParams),
     /// A vehicle's web pages, such as its radio's settings page, all of
     /// them in order; an empty list removes them. Doesn't save it. Needs
     /// `config`. Result: `Vehicle`.
@@ -352,6 +365,28 @@ pub enum ClientRequest {
     /// `read`. Result: `ParamDiffResult`.
     #[serde(rename = "param/diff")]
     ParamDiff(ParamDiffParams),
+    /// Pins the vehicle's parameters now as a named baseline (C7), with who
+    /// set it and a note; it syncs to the person's other computers. Needs
+    /// `config`. Result: `ParamBaseline`.
+    #[serde(rename = "param/baselineSet")]
+    ParamBaselineSet(crate::dto::param_definitions::ParamBaselineSetParams),
+    /// A vehicle's baselines, newest first, each with how many parameters
+    /// differ from it now. Needs `read`. Result: `ParamBaselinesResult`.
+    #[serde(rename = "param/baselines")]
+    ParamBaselines(crate::dto::param_definitions::ParamBaselinesParams),
+    /// Removes a baseline. Needs `config`. Result: `{}`.
+    #[serde(rename = "param/baselineRemove")]
+    ParamBaselineRemove(IdParams),
+    /// This computer's flights (C8), newest first: arm to disarm, with time
+    /// in the air, highest point, top speed, modes, battery and who acted
+    /// on the vehicle. Needs `read`. Result: `FlightListResult`.
+    #[serde(rename = "flight/list")]
+    FlightList(crate::dto::flight::FlightListParams),
+    /// Saves a flight to the account, so it is in the logbook on every
+    /// computer, or keeps it on this computer only (C9). Flight data is off
+    /// by default. Needs `config`. Result: `Flight`.
+    #[serde(rename = "flight/keep")]
+    FlightKeep(crate::dto::flight::FlightKeepParams),
     /// A vehicle's history, newest first: notes people wrote about what
     /// they did to it (repairs, changes, tests) and what UXDuck recorded
     /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
@@ -567,6 +602,32 @@ pub enum ClientRequest {
     /// Removes a saved place. Needs `config`. Result: `Empty`.
     #[serde(rename = "place/remove")]
     PlaceRemove(IdParams),
+    /// Every marker on this computer (ADR-0035): named things on the map
+    /// besides vehicles, such as a launch site, a ground station or a boat,
+    /// with their position and heading. Changes nothing. Needs `read`.
+    /// Result: `MarkerListResult`.
+    #[serde(rename = "marker/list")]
+    MarkerList(Empty),
+    /// Adds a marker at a latitude and longitude, seen in every window.
+    /// Needs `config`. Result: `Marker`.
+    #[serde(rename = "marker/add")]
+    MarkerAdd(MarkerAddParams),
+    /// Renames, moves, turns or restyles a marker from `expectedVersion`.
+    /// Needs `config`. Result: `Marker`.
+    #[serde(rename = "marker/update")]
+    MarkerUpdate(MarkerUpdateParams),
+    /// Removes a marker. Needs `config`. Result: `Empty`.
+    #[serde(rename = "marker/remove")]
+    MarkerRemove(IdParams),
+    /// This window's device position for a marker whose position comes
+    /// from a device, about once a second while it shares; refused while
+    /// another device shares it. Needs `config`. Result: `Empty`.
+    #[serde(rename = "marker/share")]
+    MarkerShare(MarkerShareParams),
+    /// Stops this window sharing a marker's position. Needs `config`.
+    /// Result: `Empty`.
+    #[serde(rename = "marker/unshare")]
+    MarkerUnshare(IdParams),
     /// Lists saved plans (ADR-0029): missions kept in UXDuck for a vehicle
     /// type, with a fence and rally points, that reach a vehicle only when
     /// uploaded. Needs `read`. Result: `PlanListResult`.
@@ -801,6 +862,12 @@ pub enum ClientRequest {
     /// only. Result: `LocationStatus`.
     #[serde(rename = "location/stop")]
     LocationStop(Empty),
+    /// Other aircraft near the vehicles (S168, ADR-0034), merged from the
+    /// sources that are on, and every source, on or off. Changes follow as
+    /// `traffic/changed` to the connection that asked. Needs `read`.
+    /// Result: `TrafficStatus`.
+    #[serde(rename = "traffic/status")]
+    TrafficStatus(Empty),
     /// A vehicle's own messages (S26): every one, oldest first, a run of
     /// the same message with nothing between folded into one entry with a
     /// count; or with `raw` each as it came. With `subscribe`,
@@ -952,6 +1019,10 @@ pub enum ClientRequest {
     /// Result: `AccountFlights`. Tokens stay with the daemon.
     #[serde(rename = "account/flights")]
     AccountFlights(Empty),
+    /// Every copy of one synced entity the account was sent (C5), newest
+    /// first, the ones that lost too. Needs `read`. Result: `AccountVersions`.
+    #[serde(rename = "account/versions")]
+    AccountVersions(crate::dto::sync::AccountVersionsParams),
     /// Development daemon's server choice. Result: `AccountEnvironmentState`.
     #[serde(rename = "account/environment")]
     AccountEnvironment(Empty),
@@ -1018,6 +1089,11 @@ pub enum ClientRequest {
     /// capability. Result: `SyncStatus`.
     #[serde(rename = "sync/activate")]
     SyncActivate(SyncActivateParams),
+    /// Puts back an earlier version of a plan from `account/versions` (C6),
+    /// as a new edit that goes to the other computers; the body it replaces
+    /// can be undone back to. Configuration capability. Result: `Plan`.
+    #[serde(rename = "sync/restore")]
+    SyncRestore(crate::dto::sync::SyncRestoreParams),
     /// Thumbs up or down on an agent message, with an optional comment,
     /// sent with the kept turn or, with `send`, with the conversation
     /// (ADR-0013 P13). Operator clients only. Result: `ThreadFeedbackResult`.
@@ -1321,7 +1397,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 267] = [
+    pub const METHODS: [&'static str; 283] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1352,6 +1428,8 @@ impl ClientRequest {
         "vehicle/save",
         "vehicle/label",
         "vehicle/size",
+        "vehicle/traffic",
+        "vehicle/look",
         "vehicle/bookmarks",
         "vehicle/dismiss",
         "link/add",
@@ -1385,6 +1463,11 @@ impl ClientRequest {
         "param/search",
         "param/get",
         "param/list",
+        "param/baselineSet",
+        "param/baselines",
+        "param/baselineRemove",
+        "flight/list",
+        "flight/keep",
         "param/diff",
         "vehicle/history",
         "vehicle/addNote",
@@ -1442,6 +1525,12 @@ impl ClientRequest {
         "place/save",
         "place/update",
         "place/remove",
+        "marker/list",
+        "marker/add",
+        "marker/update",
+        "marker/remove",
+        "marker/share",
+        "marker/unshare",
         "plan/list",
         "plan/get",
         "plan/create",
@@ -1484,6 +1573,7 @@ impl ClientRequest {
         "sim/delete",
         "account/get",
         "account/flights",
+        "account/versions",
         "account/environment",
         "account/setEnvironment",
         "account/signIn",
@@ -1493,6 +1583,7 @@ impl ClientRequest {
         "sync/get",
         "sync/set",
         "sync/activate",
+        "sync/restore",
         "thread/feedback",
         "account/shared",
         "account/computers",
@@ -1568,6 +1659,7 @@ impl ClientRequest {
         "location/status",
         "location/start",
         "location/stop",
+        "traffic/status",
         "vehicle/messages",
         "layout/open",
         "feedback/suggest",
@@ -1631,6 +1723,10 @@ pub enum ServerNotification {
     /// One journal entry, after `state/subscribe`.
     #[serde(rename = "state/delta")]
     StateDelta(StateDelta),
+    /// Subscribe again: this connection's operator changed, so what it may
+    /// see did (each operator's chats are their own). After `state/subscribe`.
+    #[serde(rename = "state/resync")]
+    StateResync(Empty),
     /// Text streamed into an agent message in progress, to subscribers of
     /// `item`.
     #[serde(rename = "agent/itemDelta")]
@@ -1687,6 +1783,16 @@ pub enum ServerNotification {
     /// journaled.
     #[serde(rename = "location/changed")]
     LocationChanged(crate::dto::location::LocationStatus),
+    /// The traffic picture or a source changed (S168): to the connections
+    /// that called `traffic/status`, at most four times a second. Not
+    /// journaled.
+    #[serde(rename = "traffic/changed")]
+    TrafficChanged(crate::dto::traffic::TrafficStatus),
+    /// A live marker's latest position or how its source stands (ADR-0035),
+    /// at most twice a second, to connections subscribed to markers that
+    /// hold `location`. Not journaled.
+    #[serde(rename = "marker/live")]
+    MarkerLive(crate::dto::marker::MarkerLiveChanged),
     /// Opening UXDuck again found this page open: it comes forward, or
     /// flashes its title where the browser will not let it (S107). Sent to
     /// one page. Not journaled.

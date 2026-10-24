@@ -1,8 +1,9 @@
 ---
 title: Try it in the browser
+search: ArduPilot simulator in the browser, nothing to install
 order: 1
 group: Get started
-summary: Start a simulated flight, then connect to UXDuck on your computer.
+summary: Fly a simulated ArduPilot plane, VTOL or copter in Chrome with nothing to install, then connect to UXDuck on your computer.
 ---
 
 Try a simulated vehicle before connecting hardware.

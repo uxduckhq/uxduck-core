@@ -1,0 +1,10 @@
+{
+  "method": "marker/add",
+  "params": {
+    "name": "Launch site",
+    "look": "flag",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523,
+    "headingDeg": 270.5
+  }
+}

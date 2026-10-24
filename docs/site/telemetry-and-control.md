@@ -1,8 +1,9 @@
 ---
 title: Telemetry, Cockpit and Messages
+search: ArduPilot telemetry, flight controls and vehicle messages
 order: 12
 group: Use your vehicle
-summary: Read telemetry, control receipts and vehicle messages.
+summary: Read live telemetry, send commands from the Cockpit and see their receipts, and read the vehicle's messages.
 ---
 
 These tabs show what the vehicle is doing and let you act on it.
@@ -23,7 +24,7 @@ Altitude is three tiles: **Altitude above home** in every flying type's defaults
 
 ## Cockpit
 
-Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Pause**, **Save snapshot** and **Stop simulation**. **Pause** freezes it where it is until you choose **Resume**; **Shift+P** does the same. The **…** beside its name is the same menu as in the sidebar.
+Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Pause**, **Save snapshot** and **Stop simulation**. **Pause** freezes it where it is until you choose **Resume**; **Shift+P** does the same. A real vehicle can't pause, so the Cockpit says what holds one in place instead. A practice exercise can't be paused. The **…** beside its name is the same menu as in the sidebar.
 
 ## Messages
 

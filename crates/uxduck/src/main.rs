@@ -20,6 +20,7 @@ mod inspect;
 mod interface;
 mod live_video;
 mod logs;
+mod marker_sources;
 mod mcp;
 mod network;
 mod online;
@@ -29,6 +30,7 @@ mod paths;
 mod places;
 mod plugin_bundle;
 mod ports;
+mod receiver_stick;
 mod remote_users;
 mod remote_view;
 mod service;
@@ -69,7 +71,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    let (console, _console_guard) = match logs::Tee::new(std::io::stderr()) {
+    let (console, _console_guard) = match logs::console_writer().and_then(logs::Tee::new) {
         Ok(console) => console,
         Err(error) => {
             startup::record(&format!("cannot start the console writer: {error}"));

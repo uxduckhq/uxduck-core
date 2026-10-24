@@ -79,12 +79,12 @@ impl Engine {
             .filter(|v| !v.dismissed)
             .cloned()
             .collect();
-        for vehicle in vehicles {
+        for vehicle in &vehicles {
             let id = vehicle.id.clone();
             if self.supervised(&id) {
                 self.supervision.unsupervised_since.remove(&id);
                 if self.supervision.withheld.remove(&id) {
-                    self.resume_heartbeat(&vehicle);
+                    self.resume_heartbeat(vehicle);
                 }
                 continue;
             }
@@ -96,8 +96,30 @@ impl Engine {
             if !self.supervision.withheld.contains(&id) && now_us.saturating_sub(since) >= grace_us
             {
                 self.supervision.withheld.insert(id.clone());
-                self.withhold_heartbeat(&vehicle);
+                self.withhold_heartbeat(vehicle);
             }
+        }
+        self.forget_gone(&vehicles);
+    }
+
+    /// A vehicle that is gone (its simulation stopped, its record merged
+    /// into another, or dismissed) is nobody's to supervise: its alert
+    /// resolves rather than staying at the foot of the sidebar for good
+    /// (QA 2026-10-24).
+    fn forget_gone(&mut self, vehicles: &[Vehicle]) {
+        let here = |id: &str| vehicles.iter().any(|v| v.id == id);
+        self.supervision.unsupervised_since.retain(|id, _| here(id));
+        self.supervision.withheld.retain(|id| here(id));
+        let gone: Vec<String> = self
+            .state
+            .notifications
+            .values()
+            .filter_map(|n| n.condition.as_deref()?.strip_prefix("supervision:"))
+            .filter(|id| !here(id))
+            .map(condition)
+            .collect();
+        for gone in gone {
+            self.resolve(&gone);
         }
     }
 

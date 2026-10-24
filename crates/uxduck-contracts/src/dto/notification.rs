@@ -72,6 +72,14 @@ pub enum Action {
     /// Opens the Controllers tab, for a controller just plugged in; nothing
     /// is called.
     OpenControllers { controller_id: String },
+    /// Calls `flight/keep` with `keep: true`: a flight just finished, saved
+    /// to the account (C9).
+    KeepFlight {
+        flight_id: String,
+        /// Every flight from now on too: `flight/keep` with `always`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        always: bool,
+    },
     /// Opens the vehicle's Messages tab at this entry (S26); nothing is called.
     OpenMessages {
         vehicle_id: String,

@@ -143,6 +143,9 @@ pub struct Settings {
     /// "Store flights and recordings in my account" (S82).
     #[serde(default = "on")]
     pub store_flights: bool,
+    /// "Save every flight to my account" (C9).
+    #[serde(default)]
+    pub save_flights: bool,
     /// Uploads go on while a vehicle is armed (S82).
     #[serde(default = "on")]
     pub upload_while_armed: bool,
@@ -170,6 +173,13 @@ pub struct Settings {
     /// it starts, they are removed.
     #[serde(default)]
     pub recreate_simulations: bool,
+    /// Settings › Airspace (S174): traffic this near an armed vehicle,
+    /// across, raises a warning. 2 km when an older daemon left it out.
+    #[serde(default = "traffic_alert_m")]
+    pub traffic_alert_m: u32,
+    /// And this near up or down: 300 m when left out.
+    #[serde(default = "traffic_alert_up_m")]
+    pub traffic_alert_up_m: u32,
     /// Settings › Terrain: the dataset the map reads and vehicles are
     /// answered from, unless one is chosen for a vehicle (S23).
     #[serde(default)]
@@ -262,6 +272,8 @@ pub struct SettingsUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_flights: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_flights: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_while_armed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_video_while_flying: Option<bool>,
@@ -273,6 +285,12 @@ pub struct SettingsUpdateParams {
     pub message_notify_severity: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recreate_simulations: Option<bool>,
+    /// 100 m to 20 km (S174).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_alert_m: Option<u32>,
+    /// 30 m to 3 km (S174).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_alert_up_m: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_dataset: Option<crate::dto::terrain::TerrainDataset>,
     /// Chooses one vehicle's dataset, or gives it back to the default.
@@ -428,4 +446,12 @@ pub struct SimulatorLogUsage {
     pub bytes: u64,
     pub files: u32,
     pub running: bool,
+}
+
+const fn traffic_alert_m() -> u32 {
+    2_000
+}
+
+const fn traffic_alert_up_m() -> u32 {
+    300
 }

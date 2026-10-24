@@ -119,6 +119,7 @@ pub fn forward_links(
             vehicle_filter: Vec::new(),
             from_link: None,
             keep_alive: false,
+            carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
         });
     }
     for spec in outputs {
@@ -130,6 +131,7 @@ pub fn forward_links(
             vehicle_filter: vehicles.to_vec(),
             from_link: None,
             keep_alive: false,
+            carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
         });
     }
     Ok(links)

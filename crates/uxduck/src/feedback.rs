@@ -224,7 +224,7 @@ impl Sender {
     async fn keep(&self, order: FeedbackOrder) -> std::io::Result<PathBuf> {
         let dir = self.outbox.join(&order.report_id);
         std::fs::create_dir_all(&dir)?;
-        let report = json!({
+        let mut report = json!({
             "id": order.report_id,
             "kind": match order.kind {
                 FeedbackKind::Problem => "problem",
@@ -241,6 +241,17 @@ impl Sender {
             "context": format!("{} · {}", platform_name(), order.context),
             "followUpKey": order.follow_up_key,
         });
+        // One entry per `voice-<n>` file, in order: what the app wrote down.
+        if !order.voice_notes.is_empty() {
+            report["voiceNotes"] = order
+                .voice_notes
+                .iter()
+                .map(|note| match &note.transcript {
+                    Some(words) => json!({ "transcript": words }),
+                    None => json!({}),
+                })
+                .collect();
+        }
         std::fs::write(dir.join("report.json"), report.to_string())?;
         if let Some(mut bundle) = order.bundle {
             if let Some(report) = bundle.get_mut("report").and_then(Value::as_object_mut) {
@@ -253,14 +264,14 @@ impl Sender {
         if let Some(image) = order.screenshot.as_deref().and_then(base64_decode) {
             std::fs::write(dir.join("screenshot"), image)?;
         }
-        if let Some(voice) = &order.voice_note {
+        for (n, voice) in order.voice_notes.iter().enumerate() {
             let bytes = base64_decode(&voice.data).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "the voice note is not base64",
+                    format!("voice note {} is not base64", n + 1),
                 )
             })?;
-            std::fs::write(dir.join("voice"), bytes)?;
+            std::fs::write(dir.join(format!("voice-{}", n + 1)), bytes)?;
         }
         // The person's files as `attachments/<n>`, their names beside them.
         if !order.attachments.is_empty() {
@@ -300,17 +311,23 @@ impl Sender {
         let Ok(report) = std::fs::read(dir.join("report.json")) else {
             return Sent::Refused("the kept report is unreadable".into());
         };
+        let (report, voices) = match voice_notes(dir, report) {
+            Ok(kept) => kept,
+            Err(why) => return Sent::Refused(why),
+        };
         let mut form = Multipart::new();
         form.part("report", None, "application/json", &report);
         for (name, file, kind) in [
             ("screenshot", "screenshot", "application/octet-stream"),
             ("bundle", "feedback-bundle.json", "application/json"),
             ("flight", "flight.tlog", "application/octet-stream"),
-            ("voice", "voice", "application/octet-stream"),
         ] {
             if let Ok(bytes) = std::fs::read(dir.join(file)) {
                 form.part(name, Some(file), kind, &bytes);
             }
+        }
+        for (file, bytes) in &voices {
+            form.part("voice", Some(file), "application/octet-stream", bytes);
         }
         let names: Vec<String> = std::fs::read(dir.join("attachments/names.json"))
             .ok()
@@ -378,6 +395,36 @@ impl Sender {
             ),
         }
     }
+}
+
+/// A kept report as sent, and its voice notes as (file name, bytes).
+type KeptVoices = (Vec<u8>, Vec<(String, Vec<u8>)>);
+
+/// A kept report's voice notes, in order: `voice-1`, `voice-2`, … as its
+/// `voiceNotes` lists them. A report kept by an earlier version has one
+/// `voice` file and no list; it goes as one note, listed for the API.
+fn voice_notes(dir: &Path, report: Vec<u8>) -> Result<KeptVoices, String> {
+    let mut value: Value =
+        serde_json::from_slice(&report).map_err(|_| "the kept report is unreadable".to_owned())?;
+    let listed = value["voiceNotes"].as_array().map_or(0, Vec::len);
+    if listed == 0 {
+        let Ok(bytes) = std::fs::read(dir.join("voice")) else {
+            return Ok((report, Vec::new()));
+        };
+        value["voiceNotes"] = json!([{}]);
+        return Ok((
+            value.to_string().into_bytes(),
+            vec![("voice".into(), bytes)],
+        ));
+    }
+    let mut voices = Vec::with_capacity(listed);
+    for n in 1..=listed {
+        let file = format!("voice-{n}");
+        let bytes = std::fs::read(dir.join(&file))
+            .map_err(|_| format!("voice note {n} is missing from the outbox"))?;
+        voices.push((file, bytes));
+    }
+    Ok((report, voices))
 }
 
 /// "macOS arm64", for the issue's first line.
@@ -555,6 +602,50 @@ mod tests {
             Some(&b"hello"[..])
         );
         assert_eq!(base64_decode("not base64!"), None);
+    }
+
+    #[test]
+    fn kept_voice_notes_go_in_order_with_their_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = json!({
+            "id": "r1",
+            "voiceNotes": [{ "transcript": "first" }, {}],
+        })
+        .to_string()
+        .into_bytes();
+        std::fs::write(dir.path().join("voice-1"), b"one").unwrap();
+        std::fs::write(dir.path().join("voice-2"), b"two").unwrap();
+        let (sent, voices) = voice_notes(dir.path(), report.clone()).unwrap();
+        assert_eq!(sent, report, "the kept report goes as it is");
+        assert_eq!(
+            voices,
+            [
+                ("voice-1".to_owned(), b"one".to_vec()),
+                ("voice-2".to_owned(), b"two".to_vec())
+            ]
+        );
+
+        std::fs::remove_file(dir.path().join("voice-2")).unwrap();
+        assert_eq!(
+            voice_notes(dir.path(), report).unwrap_err(),
+            "voice note 2 is missing from the outbox"
+        );
+    }
+
+    #[test]
+    fn a_report_kept_by_an_earlier_version_sends_its_one_voice_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = json!({ "id": "r1", "text": "" }).to_string().into_bytes();
+        let (sent, voices) = voice_notes(dir.path(), report.clone()).unwrap();
+        assert_eq!(sent, report);
+        assert!(voices.is_empty(), "no voice note, none sent");
+
+        std::fs::write(dir.path().join("voice"), b"old").unwrap();
+        let (sent, voices) = voice_notes(dir.path(), report).unwrap();
+        let sent: Value = serde_json::from_slice(&sent).unwrap();
+        assert_eq!(sent["voiceNotes"], json!([{}]));
+        assert_eq!(sent["id"], "r1");
+        assert_eq!(voices, [("voice".to_owned(), b"old".to_vec())]);
     }
 
     #[test]

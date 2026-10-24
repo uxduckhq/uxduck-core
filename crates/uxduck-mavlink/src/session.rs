@@ -195,6 +195,11 @@ pub enum Effect {
     },
     /// What changed in a vehicle's telemetry since the last tick.
     Telemetry(VehicleTelemetry),
+    /// An aircraft the vehicle's receiver heard (`ADSB_VEHICLE`, S168).
+    Traffic {
+        vehicle_id: String,
+        report: uxduck_core::domain::traffic::TrafficReport,
+    },
     /// A command ended.
     CommandDone {
         receipt_id: String,
@@ -902,6 +907,17 @@ impl Session {
                     }
                 }
                 Message::Other { .. } => {}
+                ref message @ Message::AdsbVehicle { .. } => {
+                    if let (Some(vehicle), Some(report)) = (
+                        self.vehicles.get(&key),
+                        crate::traffic::report(message, received_us),
+                    ) {
+                        effects.push(Effect::Traffic {
+                            vehicle_id: vehicle.observation.id.clone(),
+                            report,
+                        });
+                    }
+                }
                 Message::TerrainReport {
                     lat,
                     lon,
@@ -955,6 +971,52 @@ impl Session {
         effects
     }
 
+    /// The autopilot at `key` has the UID of one heard earlier at another
+    /// system id on the same link and peer: its system id changed (a
+    /// parameter write, such as a snapshot's), so the old address is let
+    /// go. Left, it would go stale and then offline under the same vehicle
+    /// id while the vehicle flies on at its new address (ADR-0004: the
+    /// address updates and the VID is kept by UID).
+    fn moved(&mut self, key: &(String, String, u8)) {
+        let Some(uid) = self
+            .vehicles
+            .get(key)
+            .and_then(|v| v.observation.uid.clone())
+        else {
+            return;
+        };
+        let old: Vec<(String, String, u8)> = self
+            .vehicles
+            .iter()
+            .filter(|(other, v)| {
+                *other != key
+                    && other.0 == key.0
+                    && other.1 == key.1
+                    && v.observation.uid.as_deref() == Some(uid.as_str())
+            })
+            .map(|(other, _)| other.clone())
+            .collect();
+        for address in old {
+            let Some(gone) = self.vehicles.remove(&address) else {
+                continue;
+            };
+            if let Some(vehicle) = self.vehicles.get_mut(key) {
+                for alias in gone.observation.aliases {
+                    if alias != vehicle.observation.id
+                        && !vehicle.observation.aliases.contains(&alias)
+                    {
+                        vehicle.observation.aliases.push(alias);
+                    }
+                }
+            }
+            for command in &mut self.commands {
+                if command.key == address {
+                    command.key = key.clone();
+                }
+            }
+        }
+    }
+
     /// A component that is not an autopilot, such as a camera or a
     /// companion computer, joins the vehicle at its address.
     fn companion(&mut self, key: &(String, String, u8), component_id: u8) -> Option<Effect> {
@@ -994,8 +1056,13 @@ impl Session {
     ) -> Option<Effect> {
         let simulation = self.simulated.contains(&key.0).then_some(key.0.as_str());
         let vehicle = self.vehicles.get_mut(key)?;
-        identify(vehicle, uid, uid2, versions, simulation)
-            .then(|| Effect::Vehicle(Box::new(vehicle.observation.clone())))
+        if !identify(vehicle, uid, uid2, versions, simulation) {
+            return None;
+        }
+        self.moved(key);
+        self.vehicles
+            .get(key)
+            .map(|vehicle| Effect::Vehicle(Box::new(vehicle.observation.clone())))
     }
 
     /// A heartbeat from something that is not a vehicle: ourselves looped
@@ -3319,6 +3386,43 @@ mod tests {
         assert_eq!(vehicles(&back)[0].presence, Presence::Online);
     }
 
+    /// A simulated vehicle's system id changed by a parameter write (a
+    /// snapshot's `MAV_SYSID`): the same autopilot at a new address on the
+    /// same peer. The old address is let go once the UID says so, so it
+    /// does not report the vehicle stale and then offline while it flies.
+    #[test]
+    fn a_vehicle_whose_system_id_changes_moves_to_its_new_address() {
+        let mut fake = FakeVehicle::new(2, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        assert_eq!(session.vehicle_at("l1", PEER, 2), Some(vid.as_str()));
+
+        fake.system_id = 1;
+        let heard = session.ingest("l1", PEER, &fake.heartbeat(), 500_000);
+        let rest = converse(&mut session, &mut fake, heard, 500_000);
+        let moved = vehicles(&rest);
+        let last = moved.last().expect("identified at its new address");
+        assert_eq!((last.id.as_str(), last.system_id), (vid.as_str(), 1));
+        assert_eq!(session.vehicle_at("l1", PEER, 1), Some(vid.as_str()));
+        assert_eq!(
+            session.vehicle_at("l1", PEER, 2),
+            None,
+            "the old address is gone"
+        );
+
+        // Heartbeats keep coming at the new address only: nothing goes stale.
+        for second in 1..30_u64 {
+            let now = second * 1_000_000;
+            session.ingest("l1", PEER, &fake.heartbeat(), now);
+            let changes = session.tick(now);
+            assert!(
+                vehicles(&changes)
+                    .iter()
+                    .all(|v| v.presence == Presence::Online),
+                "{changes:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_paused_simulator_keeps_its_vehicle_until_it_resumes() {
         let mut session = Session::new(Config {
@@ -4459,7 +4563,10 @@ mod tests {
         let mut session = Session::new(Config::default());
         let first = session.ingest("l1", PEER, &fake.heartbeat(), 0);
         converse(&mut session, fake, first, 0);
-        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let vid = session
+            .vehicle_at("l1", PEER, fake.system_id)
+            .unwrap()
+            .to_owned();
         (session, vid)
     }
 

@@ -31,9 +31,15 @@ pub fn handle(
     }
 }
 
-/// Every folder, tombstones included, by parent and position.
-pub fn folders(engine: &Engine) -> Vec<FolderDto> {
-    let mut folders: Vec<FolderDto> = engine.state.folders.values().map(FolderDto::from).collect();
+/// The folders a connection may see, tombstones included, by parent and position.
+pub fn folders(engine: &Engine, connection: ConnectionId) -> Vec<FolderDto> {
+    let mut folders: Vec<FolderDto> = engine
+        .state
+        .folders
+        .values()
+        .filter(|f| super::threads::sees(engine, connection, f.operator_id.as_deref()))
+        .map(FolderDto::from)
+        .collect();
     folders.sort_by(|a, b| (&a.parent_id, &a.sort_key).cmp(&(&b.parent_id, &b.sort_key)));
     folders
 }
@@ -62,16 +68,20 @@ pub(super) fn place(
     Ok(order::key_between(previous, Some(&siblings[index].1)))
 }
 
-/// Checks a folder id refers to a live folder; `None` (the top level) always does.
-pub(super) fn live_folder(engine: &Engine, id: Option<&str>) -> Result<(), ApiError> {
+/// Checks a folder id refers to a live folder the connection may see;
+/// `None` (the top level) always does.
+pub(super) fn live_folder(
+    engine: &Engine,
+    connection: ConnectionId,
+    id: Option<&str>,
+) -> Result<(), ApiError> {
     match id {
         None => Ok(()),
         Some(id)
-            if engine
-                .state
-                .folders
-                .get(id)
-                .is_some_and(|f| f.deleted_at_us.is_none()) =>
+            if engine.state.folders.get(id).is_some_and(|f| {
+                f.deleted_at_us.is_none()
+                    && super::threads::sees(engine, connection, f.operator_id.as_deref())
+            }) =>
         {
             Ok(())
         }
@@ -82,12 +92,15 @@ pub(super) fn live_folder(engine: &Engine, id: Option<&str>) -> Result<(), ApiEr
     }
 }
 
-fn folder(engine: &Engine, id: &str) -> Result<Folder, ApiError> {
+fn folder(engine: &Engine, connection: ConnectionId, id: &str) -> Result<Folder, ApiError> {
     engine
         .state
         .folders
         .get(id)
-        .filter(|f| f.deleted_at_us.is_none())
+        .filter(|f| {
+            f.deleted_at_us.is_none()
+                && super::threads::sees(engine, connection, f.operator_id.as_deref())
+        })
         .cloned()
         .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no folder {id}")))
 }
@@ -132,7 +145,7 @@ fn create(
     connection: ConnectionId,
     params: &FolderCreateParams,
 ) -> Result<Value, ApiError> {
-    live_folder(engine, params.parent_id.as_deref())?;
+    live_folder(engine, connection, params.parent_id.as_deref())?;
     let created = Folder {
         id: format!("fo{}", &engine.random.token()[..16]),
         name: clean_name(&params.name)?,
@@ -172,14 +185,14 @@ fn update(
     connection: ConnectionId,
     params: FolderUpdateParams,
 ) -> Result<Value, ApiError> {
-    let mut found = folder(engine, &params.id)?;
+    let mut found = folder(engine, connection, &params.id)?;
     stale(&found, params.expected_version)?;
     if let Some(name) = &params.name {
         found.name = clean_name(name)?;
     }
     let moved = match &params.parent_id {
         Some(parent) => {
-            live_folder(engine, parent.as_deref())?;
+            live_folder(engine, connection, parent.as_deref())?;
             if within(engine, &found.id, parent.as_deref()) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
@@ -210,7 +223,7 @@ fn delete(
     connection: ConnectionId,
     params: &DeleteParams,
 ) -> Result<Value, ApiError> {
-    let mut found = folder(engine, &params.id)?;
+    let mut found = folder(engine, connection, &params.id)?;
     stale(&found, params.expected_version)?;
     let parent = found.parent_id.clone();
 

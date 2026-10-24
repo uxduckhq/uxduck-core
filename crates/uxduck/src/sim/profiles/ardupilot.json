@@ -1,5 +1,14 @@
 {
   "schemaVersion": 1,
+  "traffic": {
+    "ADSB_TYPE": 1,
+    "AVD_ENABLE": 0,
+    "MAV1_ADSB": 5,
+    "SERIAL1_PROTOCOL": 1,
+    "SIM_ADSB_ALT": 300,
+    "SIM_ADSB_COUNT": 5,
+    "SIM_ADSB_RADIUS": 3000
+  },
   "programs": {
     "arducopter": { "frames": {} },
     "arducopter-heli": { "frames": {} },

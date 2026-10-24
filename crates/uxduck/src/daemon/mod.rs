@@ -54,6 +54,8 @@ pub struct DaemonOptions {
     pub exit_on_stdin_close: bool,
     /// 0 picks a free port (tests).
     pub port: u16,
+    /// Only the implicit default may fall back when another user owns it.
+    pub port_fallback: bool,
     /// Development: the dev server's origin is allowed and is where
     /// `uxduck open` sends the browser.
     pub dev_origin: Option<String>,
@@ -151,7 +153,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         path: data_dir.display().to_string(),
         source,
     })?;
-    let tcp = bind_port(options.port).await?;
+    let tcp = bind_port(options.port, options.port_fallback).await?;
     let port = tcp
         .local_addr()
         .map_or(options.port, |address| address.port());
@@ -353,11 +355,20 @@ async fn open_store_with_tray(
 /// How long a restarted daemon waits for its port and lock.
 const HANDOVER: std::time::Duration = std::time::Duration::from_secs(10);
 
-async fn bind_port(port: u16) -> Result<tokio::net::TcpListener, DaemonError> {
+async fn bind_port(port: u16, fallback: bool) -> Result<tokio::net::TcpListener, DaemonError> {
     let deadline = std::time::Instant::now() + HANDOVER;
     loop {
         match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(tcp) => return Ok(tcp),
+            Err(error) if fallback && error.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::info!(
+                    port,
+                    "default port is occupied; choosing a free loopback port"
+                );
+                return tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                    .await
+                    .map_err(|source| DaemonError::Port { port: 0, source });
+            }
             Err(_)
                 if std::env::var_os(RESTARTED).is_some()
                     && std::time::Instant::now() < deadline =>
@@ -521,6 +532,11 @@ async fn start_online(
     let _ = engine.run(move |e| e.set_account(Box::new(account))).await;
     let places = crate::places::Host::new(engine.clone());
     let _ = engine.run(move |e| e.set_places(Box::new(places))).await;
+    // GPS receivers that live markers follow (S179).
+    let marker_sources = crate::marker_sources::Host::new(engine.clone());
+    let _ = engine
+        .run(move |e| e.set_marker_sources(Box::new(marker_sources)))
+        .await;
     // Cloud sync (S16): idle until it is on and UXDuck is signed in.
     let sync = crate::sync::start(data_dir, FileCredentials::new(data_dir), engine.clone());
     let _ = engine.run(move |e| e.set_sync(Box::new(sync))).await;
@@ -724,6 +740,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.expire_display_pulls(now);
                 e.expire_video_watches(now);
                 e.expire_pairings();
+                // Aircraft not heard for a minute (S168).
+                e.expire_traffic(now);
                 // Controllers no reloaded window took back.
                 e.expire_detached_claims(now);
                 e.supervise(now);
@@ -772,5 +790,25 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_an_implicit_port_can_fall_back_to_a_private_listener() {
+        let busy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = busy.local_addr().unwrap().port();
+        assert!(
+            matches!(bind_port(port, false).await, Err(DaemonError::Port { port: p, .. }) if p == port)
+        );
+        let other = bind_port(port, true).await.unwrap();
+        assert_ne!(other.local_addr().unwrap().port(), port);
+        assert!(other.local_addr().unwrap().ip().is_loopback());
+        assert_eq!(busy.local_addr().unwrap().port(), port);
     }
 }

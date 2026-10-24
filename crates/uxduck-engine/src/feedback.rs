@@ -14,7 +14,7 @@ use uxduck_contracts::dto::analytics::Surface;
 use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
     BundleVehicle, FeedbackAttachment, FeedbackBundle, FeedbackKind, FeedbackSendParams,
-    FeedbackSendResult, FeedbackSuggestParams, SuggestionCard,
+    FeedbackSendResult, FeedbackSuggestParams, FeedbackVoiceNote, SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -34,8 +34,11 @@ const KEPT_STRING: usize = 512;
 const MAX_TEXT: usize = 5000;
 /// A 3 MB image in base64.
 const MAX_SCREENSHOT_B64: usize = 4 * 1024 * 1024 + 4;
-/// A 10 MB voice note in base64.
+/// A 10 MB voice note in base64, how many a report takes, and the longest
+/// transcript the app sends with one.
 const MAX_VOICE_B64: usize = 10 * 1024 * 1024 / 3 * 4 + 4;
+const MAX_VOICE_NOTES: usize = 5;
+const MAX_TRANSCRIPT: usize = 5000;
 /// Files the person attached: how many, and 25 MB together in base64.
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_ATTACHMENTS_B64: usize = 25 * 1024 * 1024 / 3 * 4 + 4 * MAX_ATTACHMENTS;
@@ -62,8 +65,9 @@ pub struct FeedbackOrder {
     pub attachments: Vec<FeedbackAttachment>,
     /// The key the page keeps to add to the report later.
     pub follow_up_key: Option<String>,
-    /// A recorded voice note, base64, for the API to transcribe.
-    pub voice_note: Option<FeedbackAttachment>,
+    /// Recorded voice notes in the order made, base64, with what the app
+    /// wrote down live.
+    pub voice_notes: Vec<FeedbackVoiceNote>,
 }
 
 /// Where a vehicle's raw frames are: its link's tlogs, its system id.
@@ -342,6 +346,7 @@ fn link_kind(kind: &LinkKind) -> &'static str {
         LinkKind::UdpClient { .. } => "udp-client",
         LinkKind::UdpForward { .. } => "udp-forward",
         LinkKind::Simulator { .. } => "simulator",
+        LinkKind::UsbReceiver {} => "usb-receiver",
     }
 }
 
@@ -369,12 +374,24 @@ pub(crate) fn suggest(params: &FeedbackSuggestParams) -> Result<Value, ApiError>
 
 /// The files sent with a report, and its key, within what the API takes.
 fn check_files(params: &FeedbackSendParams) -> Result<(), ApiError> {
+    if params.voice_notes.len() > MAX_VOICE_NOTES {
+        return Err(invalid("record up to 5 voice notes"));
+    }
     if params
-        .voice_note
-        .as_ref()
-        .is_some_and(|v| v.data.len() > MAX_VOICE_B64)
+        .voice_notes
+        .iter()
+        .any(|v| v.data.len() > MAX_VOICE_B64)
     {
-        return Err(invalid("the voice note is longer than 5 minutes"));
+        return Err(invalid("a voice note is longer than 5 minutes"));
+    }
+    if params.voice_notes.iter().any(|v| {
+        v.transcript
+            .as_ref()
+            .is_some_and(|t| t.chars().count() > MAX_TRANSCRIPT)
+    }) {
+        return Err(invalid(
+            "a voice note's transcript is longer than 5,000 characters",
+        ));
     }
     if params
         .screenshot
@@ -424,8 +441,8 @@ pub(crate) fn handle(
         ));
     }
     let text = params.text.trim().to_owned();
-    // A voice note may say it all; the API transcribes it.
-    if (text.is_empty() && params.voice_note.is_none()) || text.chars().count() > MAX_TEXT {
+    // A voice note may say it all.
+    if (text.is_empty() && params.voice_notes.is_empty()) || text.chars().count() > MAX_TEXT {
         return Err(invalid(
             "write up to 5,000 characters, or record a voice note",
         ));
@@ -475,7 +492,7 @@ pub(crate) fn handle(
         from_agent: params.from_agent,
         attachments: params.attachments.clone(),
         follow_up_key: params.follow_up_key.clone(),
-        voice_note: params.voice_note.clone(),
+        voice_notes: params.voice_notes.clone(),
     };
     // Answered when the root reports back (`feedback_done`).
     if let Some(waiting) = engine.replying_to.take() {
@@ -711,6 +728,30 @@ mod tests {
             bundle["note"],
             "sent to [address] from [device], mail [email], key [redacted]"
         );
+    }
+
+    #[test]
+    fn scrubbing_keeps_what_the_maps_say_about_themselves() {
+        let failed = "failed basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery";
+        let tile = "401 ibasemaps-api.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{n}/{n}/{n}";
+        let renderer =
+            "ANGLE (Intel, Intel(R) UHD Graphics 620 (0x00003EA0) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        let mut bundle = json!({
+            "ui": {
+                "maps": [{
+                    "engine": "maplibre",
+                    "variant": "map",
+                    "size": "822×165",
+                    "basemap": "esri-failed",
+                    "renderer": renderer,
+                    "problems": [failed, tile],
+                }],
+                "mapKeys": [{ "name": "arcgis", "state": "fetched" }, { "name": "google", "state": "saved", "failure": "unreachable" }],
+            },
+        });
+        let before = bundle.clone();
+        scrub(&mut bundle);
+        assert_eq!(bundle, before);
     }
 
     #[test]

@@ -317,7 +317,10 @@ impl Producer for Power {
             let value = if ready { 1.0 } else { 0.0 };
             out.item("arming.ready", "Ready to arm", Unit::None, value, from);
         }
-        if let Some(volts) = known_u16(voltage_battery, 0.001) {
+        // 0 V with the charge left unknown is a vehicle with no battery
+        // monitor: no reading, not a flat pack.
+        let unmonitored = voltage_battery == 0 && battery_remaining < 0;
+        if let Some(volts) = known_u16(voltage_battery, 0.001).filter(|_| !unmonitored) {
             out.item("battery.voltage_v", "Battery", Unit::Volt, volts, from);
         }
         if current_battery >= 0 {
@@ -1058,6 +1061,29 @@ mod tests {
             assert!(items.contains(&("mission.state".into(), f64::from(state))));
             assert!(items.contains(&("mission.mode".into(), 1.0)));
         }
+    }
+
+    #[test]
+    fn no_battery_monitor_is_no_voltage_not_zero() {
+        let status = |voltage_battery, battery_remaining| {
+            produced(&Message::SysStatus {
+                voltage_battery,
+                current_battery: -1,
+                battery_remaining,
+                prearm: None,
+            })
+        };
+        let volts = |items: Vec<(String, f64)>| {
+            items
+                .into_iter()
+                .find(|(k, _)| k == "battery.voltage_v")
+                .map(|(_, v)| v)
+        };
+        assert_eq!(volts(status(0, -1)), None);
+        assert_eq!(volts(status(u16::MAX, -1)), None);
+        // A monitored pack that reads 0 V, such as one unplugged on the bench.
+        assert_eq!(volts(status(0, 0)), Some(0.0));
+        assert_eq!(volts(status(12_600, -1)), Some(12.6));
     }
 
     #[test]

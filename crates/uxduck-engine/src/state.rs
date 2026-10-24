@@ -11,6 +11,7 @@ use uxduck_core::domain::command::Receipt;
 use uxduck_core::domain::controller::{Controller, InputMapping};
 use uxduck_core::domain::history::HistoryEntry;
 use uxduck_core::domain::link::Link;
+use uxduck_core::domain::marker::Marker;
 use uxduck_core::domain::mission::Mission;
 use uxduck_core::domain::notification::{Notification, NotificationState};
 use uxduck_core::domain::operator::Operator;
@@ -21,7 +22,7 @@ use uxduck_core::domain::plan::{Plan, PlanRevisions};
 use uxduck_core::domain::plugin::{Plugin, PublishedPlugin};
 use uxduck_core::domain::settings::Settings;
 use uxduck_core::domain::snapshot::Snapshot;
-use uxduck_core::domain::sync::{LibraryVehicle, SyncState};
+use uxduck_core::domain::sync::{LibraryLink, LibraryVehicle, SyncState};
 use uxduck_core::domain::thread::{Folder, Item, Thread};
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::domain::video::{VideoPhoto, VideoRecording, VideoSource};
@@ -86,6 +87,9 @@ pub struct State {
     /// Saved places, by id.
     #[serde(default)]
     pub places: BTreeMap<String, SavedPlace>,
+    /// Markers on the map, by id (ADR-0035).
+    #[serde(default)]
+    pub markers: BTreeMap<String, Marker>,
     /// Saved plans, by id (ADR-0029).
     #[serde(default)]
     pub plans: BTreeMap<String, Plan>,
@@ -133,6 +137,15 @@ pub struct State {
     /// Vehicles other computers published to the account, by id.
     #[serde(default)]
     pub library: BTreeMap<String, LibraryVehicle>,
+    /// Connections other computers published to the account, by id (C2).
+    #[serde(default)]
+    pub link_library: BTreeMap<String, LibraryLink>,
+    /// Flights, by id (C8).
+    #[serde(default)]
+    pub flights: BTreeMap<String, uxduck_core::domain::flight::Flight>,
+    /// Vehicles' parameter baselines, by id (C7).
+    #[serde(default)]
+    pub baselines: BTreeMap<String, uxduck_core::domain::parameter::ParamBaseline>,
 }
 
 /// Receipts kept per vehicle in the state (and so in snapshots).
@@ -266,6 +279,12 @@ impl State {
             Change::PlaceRemoved { id } => {
                 self.places.remove(id);
             }
+            Change::MarkerUpserted { marker } => {
+                self.markers.insert(marker.id.clone(), marker.clone());
+            }
+            Change::MarkerRemoved { id } => {
+                self.markers.remove(id);
+            }
             Change::PlanSaved { plan, revision } => {
                 let current = self
                     .plans
@@ -349,6 +368,21 @@ impl State {
             }
             Change::LibraryUpserted { vehicle } => {
                 self.library.insert(vehicle.id.clone(), vehicle.clone());
+            }
+            Change::LinkLibraryUpserted { link } => {
+                self.link_library.insert(link.id.clone(), link.clone());
+            }
+            Change::LinkLibraryRemoved { id } => {
+                self.link_library.remove(id);
+            }
+            Change::FlightUpserted { flight } => {
+                self.flights.insert(flight.id.clone(), flight.clone());
+            }
+            Change::BaselineUpserted { baseline } => {
+                self.baselines.insert(baseline.id.clone(), baseline.clone());
+            }
+            Change::BaselineRemoved { id } => {
+                self.baselines.remove(id);
             }
             Change::ControllerUpserted { controller } => {
                 self.controllers
@@ -457,6 +491,10 @@ mod tests {
                     parameter_groups: Vec::new(),
                     inspector_pinned: Vec::new(),
                     control_actions: Vec::new(),
+                    me_marker_id: None,
+                    display: None,
+                    account_id: None,
+                    controller_mappings: Vec::new(),
                     version,
                 },
             },

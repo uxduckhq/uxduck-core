@@ -1,0 +1,8 @@
+{
+  "method": "flight/list",
+  "params": {
+    "vehicleId": "vid-1",
+    "limit": 20,
+    "totalsSinceUs": 1790812800000000
+  }
+}

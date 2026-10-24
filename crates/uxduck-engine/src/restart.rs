@@ -312,6 +312,9 @@ fn remote_control(
     if let Some(on) = params.store_flights {
         settings.store_flights = on;
     }
+    if let Some(on) = params.save_flights {
+        settings.save_flights = on;
+    }
     if let Some(on) = params.upload_while_armed {
         settings.upload_while_armed = on;
     }
@@ -573,9 +576,7 @@ fn update_settings(
     if let Some(on) = params.share_conversations {
         settings.share_conversations = on;
     }
-    if let Some(on) = params.recreate_simulations {
-        settings.recreate_simulations = on;
-    }
+    simulations_and_traffic(&params, &mut settings)?;
     if let Some(dataset) = params.terrain_dataset {
         settings.terrain_dataset = dataset.into();
     }
@@ -891,4 +892,34 @@ fn megabytes(bytes: u64) -> String {
     } else {
         format!("{mb:.0} MB")
     }
+}
+
+/// Settings › Simulations, and Settings › Airspace's traffic alert
+/// distances (S174), checked.
+fn simulations_and_traffic(
+    params: &uxduck_contracts::dto::settings::SettingsUpdateParams,
+    settings: &mut uxduck_core::domain::settings::Settings,
+) -> Result<(), ApiError> {
+    if let Some(on) = params.recreate_simulations {
+        settings.recreate_simulations = on;
+    }
+    if let Some(m) = params.traffic_alert_m {
+        if !(100..=20_000).contains(&m) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "a traffic alert is 100 m to 20 km across",
+            ));
+        }
+        settings.traffic_alert_m = m;
+    }
+    if let Some(m) = params.traffic_alert_up_m {
+        if !(30..=3_000).contains(&m) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "a traffic alert is 30 m to 3 km up or down",
+            ));
+        }
+        settings.traffic_alert_up_m = m;
+    }
+    Ok(())
 }

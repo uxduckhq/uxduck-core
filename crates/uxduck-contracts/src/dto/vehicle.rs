@@ -77,6 +77,14 @@ pub struct Vehicle {
     /// autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// The traffic its ADS-B receiver reports is used, set with
+    /// `vehicle/traffic` (S168). Absent when it is not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic: bool,
+    /// The model it is drawn as, set with `vehicle/look`. Absent, the one
+    /// its type gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<VehicleLook>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -96,6 +104,33 @@ pub struct VehicleSaveParams {
     /// Keep it out of the account's library, or put it back (S16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_only: Option<bool>,
+}
+
+/// A model the person chose to draw a vehicle with (ADR-0035 M5), in place
+/// of the one its type gives: UXDuck's own models only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleLook {
+    Plane,
+    Vtol,
+    Multicopter,
+    Rover,
+    Boat,
+    Submarine,
+    Airship,
+    Jet,
+}
+
+/// `vehicle/look`: the model a vehicle is drawn as on both maps, such as a
+/// copter drawn as a boat it rides on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleLookParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// Absent gives it back the model its type gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<VehicleLook>,
 }
 
 /// `vehicle/size`: a vehicle's length, or wingspan, for the 3D map.

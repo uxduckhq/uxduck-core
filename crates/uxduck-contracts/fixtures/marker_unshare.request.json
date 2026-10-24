@@ -1,0 +1,6 @@
+{
+  "method": "marker/unshare",
+  "params": {
+    "id": "mk1a2b3c4d5e6f7a8b"
+  }
+}

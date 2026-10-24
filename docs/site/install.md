@@ -1,8 +1,9 @@
 ---
 title: Install
+search: Install the ground control station on macOS, Windows, Linux and Raspberry Pi
 order: 2
 group: Get started
-summary: Install on macOS, Windows or Linux and check that UXDuck is running.
+summary: Install the UXDuck ground control station on macOS, Windows, Linux or Raspberry Pi and check that it is running.
 ---
 
 Install UXDuck to connect real vehicles over USB, radio or your network, and to keep things running without a browser tab.

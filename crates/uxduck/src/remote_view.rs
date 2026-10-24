@@ -152,6 +152,7 @@ struct Seen {
     offset_ms: i64,
     vehicles: BTreeMap<String, RemoteVehicle>,
     trails: BTreeMap<String, Vec<TrailPoint>>,
+    markers: Vec<uxduck_contracts::dto::edge::RemoteMarker>,
     /// What the page needs to play each camera asked for (S84).
     video: Vec<RemoteVideo>,
     /// The media node each camera's grant was fetched for.
@@ -169,6 +170,7 @@ impl Seen {
             offset_ms: 0,
             vehicles: BTreeMap::new(),
             trails: BTreeMap::new(),
+            markers: Vec::new(),
             video: Vec::new(),
             granted_for: BTreeMap::new(),
         }
@@ -219,6 +221,7 @@ impl Seen {
             .into_iter()
             .map(|t| (t.vehicle_id, t.points))
             .collect();
+        self.markers = snapshot.markers;
     }
 
     /// A delta in order, or `false` for a gap.
@@ -255,6 +258,9 @@ impl Seen {
             self.vehicles.remove(&id);
             self.trails.remove(&id);
         }
+        if let Some(markers) = delta.markers {
+            self.markers = markers;
+        }
         true
     }
 
@@ -273,6 +279,7 @@ impl Seen {
                     points: points.clone(),
                 })
                 .collect(),
+            markers: self.markers.clone(),
             video: self.video.clone(),
         }
     }
@@ -476,6 +483,7 @@ mod tests {
             .unwrap(),
             vehicles: vec![vehicle("v1", relay_now - 400)],
             trails: Vec::new(),
+            markers: Vec::new(),
             relay_at_ms: relay_now,
         });
         let view = seen.view();
@@ -488,6 +496,7 @@ mod tests {
             source_seq: seq,
             vehicles: vec![vehicle("v1", relay_now)],
             removed: Vec::new(),
+            markers: None,
             relay_at_ms: relay_now,
         };
         assert!(!seen.apply(delta(6)), "a gap");

@@ -44,7 +44,12 @@ impl Engine {
         link.status = status;
         link.status_detail = detail;
         link.version += 1;
+        let receiver = !link.carries.is_mavlink();
         self.commit_as(data_plane(), Change::LinkUpserted { link });
+        // A receiver's state is in its Airspace row (S172).
+        if receiver {
+            self.traffic_sources_changed();
+        }
     }
 
     /// Makes sure a link of this kind exists, creating it as given if not:
@@ -174,11 +179,14 @@ impl Engine {
             labels: Vec::new(),
             bookmarks: Vec::new(),
             size_cm: None,
+            traffic: false,
+            look: None,
             version: 0,
         });
         if known_as.is_none() {
             vehicle.id.clone_from(&seen.id);
         }
+        let duplicates = self.fold_duplicates(&seen.aliases, previous_id.as_ref(), &mut vehicle);
         for alias in &seen.aliases {
             if !vehicle.aliases.contains(alias) {
                 vehicle.aliases.push(alias.clone());
@@ -207,7 +215,7 @@ impl Engine {
             same.version = p.version;
             &same == p
         });
-        if unchanged {
+        if unchanged && duplicates.is_empty() {
             return;
         }
         let presence_changed = previous
@@ -293,6 +301,9 @@ impl Engine {
         if presence_changed && !after.dismissed && !quiet {
             self.presence_changed(&after.id, &after.name, after.presence);
         }
+        if presence_changed {
+            self.flight_presence(&after.id);
+        }
         self.refresh_wake_lock();
         self.drive_launch_of_vehicle(&after.id);
         self.review_practice(&after.id);
@@ -313,6 +324,32 @@ impl Engine {
         for condition in conditions {
             self.resolve(&condition);
         }
+    }
+
+    /// Other records under the observation's earlier ids: the same vehicle
+    /// heard at a second address before its UID said so, such as after its
+    /// system id changed. They fold into `vehicle` (their aliases, and
+    /// whether one was saved); returns their ids, to remove.
+    fn fold_duplicates(
+        &self,
+        aliases: &[String],
+        previous_id: Option<&String>,
+        vehicle: &mut Vehicle,
+    ) -> Vec<String> {
+        let duplicates: Vec<&Vehicle> = aliases
+            .iter()
+            .filter(|alias| previous_id != Some(*alias) && **alias != vehicle.id)
+            .filter_map(|alias| self.state.vehicles.get(alias))
+            .collect();
+        for duplicate in &duplicates {
+            vehicle.saved |= duplicate.saved;
+            for alias in &duplicate.aliases {
+                if *alias != vehicle.id && !vehicle.aliases.contains(alias) {
+                    vehicle.aliases.push(alias.clone());
+                }
+            }
+        }
+        duplicates.into_iter().map(|d| d.id.clone()).collect()
     }
 
     /// A vehicle by id or by an earlier alias.
@@ -361,6 +398,31 @@ impl Engine {
     /// "Recreate simulations when UXDuck starts" is on, when each starts
     /// again afresh where it first started (maintainer, 2026-10-11).
     pub(crate) fn start_data_plane(&mut self) {
+        // A record under another's earlier id is that vehicle, left behind
+        // by a daemon that did not fold it in: it goes, its saved mark with
+        // the record it belongs to.
+        let mut folded = Vec::new();
+        for duplicate in self.state.vehicles.values() {
+            if let Some(owner) = self
+                .state
+                .vehicles
+                .values()
+                .find(|v| v.id != duplicate.id && v.aliases.contains(&duplicate.id))
+            {
+                folded.push((owner.id.clone(), duplicate.id.clone(), duplicate.saved));
+            }
+        }
+        for (owner, duplicate, saved) in folded {
+            if saved
+                && let Some(mut vehicle) = self.state.vehicles.get(&owner).cloned()
+                && !vehicle.saved
+            {
+                vehicle.saved = true;
+                vehicle.version += 1;
+                self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
+            }
+            self.commit_as(data_plane(), Change::VehicleRemoved { id: duplicate });
+        }
         // Nothing is heard yet, and a dismissal lasts one daemon run.
         let stale: Vec<Vehicle> = self
             .state

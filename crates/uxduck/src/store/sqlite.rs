@@ -287,6 +287,8 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             change @ (Change::SettingsChanged { .. }
             | Change::PlaceUpserted { .. }
             | Change::PlaceRemoved { .. }
+            | Change::MarkerUpserted { .. }
+            | Change::MarkerRemoved { .. }
             | Change::SnapshotUpserted { .. }
             | Change::SnapshotRemoved { .. }
             | Change::ControllerUpserted { .. }
@@ -317,6 +319,11 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::FlightStored { .. }
             | Change::VideoLost { .. }
             | Change::LibraryUpserted { .. }
+            | Change::LinkLibraryUpserted { .. }
+            | Change::LinkLibraryRemoved { .. }
+            | Change::BaselineUpserted { .. }
+            | Change::BaselineRemoved { .. }
+            | Change::FlightUpserted { .. }
             | Change::ParamDefinitionsChosen { .. }
             | Change::OwnSetUpserted { .. }
             | Change::OwnSetRemoved { .. }

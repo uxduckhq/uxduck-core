@@ -382,6 +382,27 @@ pub enum Message {
         pitch_cdeg: i32,
         yaw_cdeg: i32,
     },
+    /// `ADSB_VEHICLE` (S168): an aircraft the vehicle's ADS-B receiver
+    /// heard. Degrees ×1e7, millimetres, centidegrees and cm/s; `flags` is
+    /// `ADSB_FLAGS`, saying which fields hold something.
+    AdsbVehicle {
+        icao_address: u32,
+        lat: i32,
+        lon: i32,
+        /// `ADSB_ALTITUDE_TYPE`: 0 pressure (QNH), 1 geometric.
+        altitude_type: u8,
+        altitude: i32,
+        heading: u16,
+        hor_velocity: u16,
+        ver_velocity: i16,
+        callsign: String,
+        /// `ADSB_EMITTER_TYPE`.
+        emitter_type: u8,
+        /// Seconds since the receiver last heard it.
+        tslc: u8,
+        flags: u16,
+        squawk: u16,
+    },
     Other {
         message_id: u32,
     },
@@ -630,6 +651,21 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
         },
         Ardupilotmega::Rangefinder(m) => Message::Rangefinder {
             distance: m.distance,
+        },
+        Ardupilotmega::AdsbVehicle(m) => Message::AdsbVehicle {
+            icao_address: m.icao_address,
+            lat: m.lat,
+            lon: m.lon,
+            altitude_type: m.altitude_type as u8,
+            altitude: m.altitude,
+            heading: m.heading,
+            hor_velocity: m.hor_velocity,
+            ver_velocity: m.ver_velocity,
+            callsign: text(&m.callsign),
+            emitter_type: m.emitter_type as u8,
+            tslc: m.tslc,
+            flags: m.flags.bits(),
+            squawk: m.squawk,
         },
         Ardupilotmega::TerrainReport(m) => Message::TerrainReport {
             lat: m.lat,
@@ -880,6 +916,49 @@ mod tests {
         let written = frame.serialize(&mut buf).unwrap_or(0);
         buf.truncate(written);
         buf
+    }
+
+    #[test]
+    fn decodes_an_adsb_vehicle() {
+        use mavio::dialects::ardupilotmega::enums::{AdsbAltitudeType, AdsbEmitterType, AdsbFlags};
+        use mavio::dialects::ardupilotmega::messages::AdsbVehicle;
+
+        let mut callsign = [0u8; 9];
+        callsign[..6].copy_from_slice(b"EZY12A");
+        let message = AdsbVehicle {
+            icao_address: 0x40_6B_C1,
+            lat: 514_700_000,
+            lon: -4_500_000,
+            altitude_type: AdsbAltitudeType::Geometric,
+            altitude: 914_400,
+            heading: 9_000,
+            hor_velocity: 8_100,
+            ver_velocity: 250,
+            callsign,
+            emitter_type: AdsbEmitterType::Rotocraft,
+            tslc: 1,
+            flags: AdsbFlags::from_bits_truncate(0x1f),
+            squawk: 7000,
+        };
+        let decoded = decode(&frame_of(7, 1, &message)).unwrap_or_else(|| panic!("adsb"));
+        assert_eq!(
+            decoded.message,
+            Message::AdsbVehicle {
+                icao_address: 0x40_6B_C1,
+                lat: 514_700_000,
+                lon: -4_500_000,
+                altitude_type: 1,
+                altitude: 914_400,
+                heading: 9_000,
+                hor_velocity: 8_100,
+                ver_velocity: 250,
+                callsign: "EZY12A".into(),
+                emitter_type: 7,
+                tslc: 1,
+                flags: 0x1f,
+                squawk: 7000,
+            }
+        );
     }
 
     #[test]

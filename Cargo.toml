@@ -5,7 +5,7 @@ members = ["crates/uxduck","crates/uxduck-core","crates/uxduck-contracts","crate
 exclude = ["plugins", "vendor/tray-icon"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.98"
 publish = false

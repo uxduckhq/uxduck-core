@@ -28,9 +28,18 @@ pub const AGENT_METHODS: &[&str] = &[
     "search/query",
     "place/search",
     "place/locate",
+    // Markers on the map (ADR-0035): reading changes nothing; adding and
+    // changing one asks first without `config`, as saved places do.
+    "marker/list",
+    "marker/add",
+    "marker/update",
+    "marker/remove",
     // Where this computer is, once a person has turned it on (S137,
     // ADR-0030 L4); the agent cannot turn it on.
     "location/status",
+    // Other aircraft near the vehicles (S168, ADR-0034); only a person
+    // turns a source on or off.
+    "traffic/status",
     // Saved plans (ADR-0029): drafting and changing one touches no vehicle;
     // making or changing one asks first unless the agent has `config`.
     // Checking one is free; uploading one, or putting back a mission from a
@@ -81,6 +90,7 @@ pub const AGENT_METHODS: &[&str] = &[
     // Labels (S106): putting them on and off asks the operator first.
     "vehicle/label",
     "vehicle/size",
+    "vehicle/look",
     // Parameter changes with who made each and why (S74).
     "param/history",
     // A vehicle's own messages (S26): the folded log, freely.
@@ -139,12 +149,16 @@ pub const AGENT_METHODS: &[&str] = &[
 pub const DEFERRED_METHODS: &[&str] = &[
     "place/search",
     "place/locate",
+    "marker/add",
+    "marker/update",
+    "marker/remove",
     "video/devices",
     "video/capture",
     "video/capture/enable",
     "video/record",
     "video/recordAll",
     "location/status",
+    "traffic/status",
     "daemon/about",
     "mavlink/inspect",
     "mavlink/history",
@@ -180,6 +194,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "param/history",
     "vehicle/label",
     "vehicle/size",
+    "vehicle/look",
     "terrain/at",
     "terrain/check",
     "terrain/status",
@@ -350,6 +365,10 @@ pub fn tools() -> Vec<Tool> {
                 .and_then(Value::as_str)
                 .unwrap_or(method)
                 .to_owned();
+            if *method == "plugin/draft" {
+                description.push_str("\n\n");
+                description.push_str(include_str!("plugin-guide.md"));
+            }
             if *method == "vehicle/messages" {
                 // The doc comment wraps anywhere; match it as one line.
                 description = description.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -376,6 +395,25 @@ pub fn tools() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
+
+    #[test]
+    fn plugin_authors_get_the_runtime_contract_when_they_discover_drafting() {
+        let draft = super::tools()
+            .into_iter()
+            .find(|tool| tool.method == "plugin/draft")
+            .unwrap();
+        for term in [
+            "@uxduck/sdk",
+            "onStart",
+            "onTick",
+            "vehicleId",
+            "battery.remaining_pct",
+            "wakeInMs",
+            "flightS",
+        ] {
+            assert!(draft.description.contains(term), "missing {term}");
+        }
+    }
 
     use super::*;
 

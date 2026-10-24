@@ -1,0 +1,17 @@
+{
+  "method": "marker/live",
+  "params": {
+    "id": "mk1a2b3c4d5e6f7a8b",
+    "live": {
+      "state": "live",
+      "fix": {
+        "latitudeDeg": 51.5007,
+        "longitudeDeg": -0.1246,
+        "headingDeg": 200.5,
+        "accuracyM": 8.5,
+        "atMs": 1790669300000
+      },
+      "from": "iPhone"
+    }
+  }
+}

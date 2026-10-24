@@ -40,6 +40,10 @@ pub enum LinkKind {
     /// Sends vehicle traffic to a UDP destination (another program or
     /// daemon); with `read-write`, what comes back reaches the vehicles.
     UdpForward { host: String, port: u16 },
+    /// A USB receiver stick on this computer (S173): UXDuck starts a decoder
+    /// (readsb or dump1090-fa) on it and reads its SBS-1 output. It carries
+    /// traffic, never MAVLink.
+    UsbReceiver {},
     /// A simulated vehicle this daemon runs, starting at a place: in a
     /// browser, ArduPilot's WebAssembly build (S20, ADR-0011).
     Simulator {
@@ -79,6 +83,11 @@ pub enum LinkKind {
         /// ready to fly. Off unless asked for: Quick start asks.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         with_mission: bool,
+        /// Hears a few simulated aircraft from ArduPilot's ADS-B simulator
+        /// (ADR-0034). Off unless asked for: beside real traffic they
+        /// would confuse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        traffic: bool,
         /// Which instance it is, for its ports and system id. The daemon
         /// assigns it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +229,9 @@ pub struct Link {
     /// shutdown policy).
     #[serde(default)]
     pub keep_alive: bool,
+    /// MAVLink, or traffic from a receiver (S172).
+    #[serde(default, skip_serializing_if = "LinkCarries::is_mavlink")]
+    pub carries: LinkCarries,
     /// A simulated vehicle started in the air: how its take-off is going.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<Launch>,
@@ -229,6 +241,27 @@ pub struct Link {
     pub paused: bool,
     pub created_at_us: u64,
     pub version: u64,
+}
+
+/// What a link's bytes are (S172, ADR-0034): MAVLink from vehicles, or
+/// traffic from a receiver on the ground. A traffic link is read-only and
+/// a traffic source of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkCarries {
+    #[default]
+    Mavlink,
+    /// SBS-1 (`BaseStation`) text, as readsb serves on TCP 30003.
+    Sbs,
+    /// GDL90, as Stratux broadcasts on UDP 4000.
+    Gdl90,
+}
+
+impl LinkCarries {
+    #[must_use]
+    pub fn is_mavlink(&self) -> bool {
+        *self == Self::Mavlink
+    }
 }
 
 /// Simulation preparation, take-off (S33), or snapshot restoration (S34).

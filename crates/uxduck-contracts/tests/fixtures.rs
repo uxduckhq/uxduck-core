@@ -86,7 +86,7 @@ fn check(name: &str) {
         (
             "result",
             "vehicle_get" | "vehicle_save" | "vehicle_size" | "vehicle_bookmarks"
-            | "vehicle_dismiss",
+            | "vehicle_dismiss" | "vehicle_traffic" | "vehicle_look",
         ) => {
             round_trip::<Vehicle>(name, &json);
         }
@@ -123,10 +123,16 @@ fn check(name: &str) {
         ("result", "place_save" | "place_update") => {
             round_trip::<uxduck_contracts::dto::search::SavedPlace>(name, &json);
         }
+        ("result", "marker_list") => {
+            round_trip::<uxduck_contracts::dto::marker::MarkerListResult>(name, &json);
+        }
+        ("result", "marker_add" | "marker_update") => {
+            round_trip::<uxduck_contracts::dto::marker::Marker>(name, &json);
+        }
         (
             "result",
             "plan_get" | "plan_create" | "plan_update" | "plan_undo" | "plan_redo" | "plan_place"
-            | "plan_delete" | "plan_restore",
+            | "sync_restore" | "plan_delete" | "plan_restore",
         ) => {
             round_trip::<uxduck_contracts::dto::plan::Plan>(name, &json);
         }
@@ -247,6 +253,9 @@ fn check(name: &str) {
         ("result", "daemon_wakeups") => {
             round_trip::<uxduck_contracts::dto::settings::Wakeups>(name, &json);
         }
+        ("result", "traffic_status") => {
+            round_trip::<uxduck_contracts::dto::traffic::TrafficStatus>(name, &json);
+        }
         ("result", "location_status" | "location_start" | "location_stop") => {
             round_trip::<uxduck_contracts::dto::location::LocationStatus>(name, &json);
         }
@@ -348,6 +357,20 @@ fn check(name: &str) {
         ("result", "param_list") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamListResult>(name, &json);
         }
+        ("result", "flight_list") => {
+            round_trip::<uxduck_contracts::dto::flight::FlightListResult>(name, &json);
+        }
+        ("result", "flight_keep") => {
+            round_trip::<uxduck_contracts::dto::flight::Flight>(name, &json);
+        }
+        ("result", "param_baselineSet") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamBaseline>(name, &json);
+        }
+        ("result", "param_baselines") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamBaselinesResult>(
+                name, &json,
+            );
+        }
         ("result", "param_diff") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamDiffResult>(name, &json);
         }
@@ -432,6 +455,9 @@ fn check(name: &str) {
         }
         ("result", "account_flights") => {
             round_trip::<uxduck_contracts::dto::account::AccountFlights>(name, &json);
+        }
+        ("result", "account_versions") => {
+            round_trip::<uxduck_contracts::dto::sync::AccountVersions>(name, &json);
         }
         ("result", "account_environment" | "account_setEnvironment") => {
             round_trip::<uxduck_contracts::dto::account::AccountEnvironmentState>(name, &json);
@@ -530,6 +556,7 @@ fn check(name: &str) {
             | "thread_delete"
             | "folder_delete"
             | "link_remove"
+            | "param_baselineRemove"
             | "controller_release"
             | "controller_keyboardInput"
             | "controller_keyboardStop"
@@ -576,7 +603,10 @@ fn check(name: &str) {
             | "files_rename"
             | "files_cancel"
             | "terrain_removeArea"
-            | "tray_location",
+            | "tray_location"
+            | "marker_remove"
+            | "marker_share"
+            | "marker_unshare",
         ) => {
             round_trip::<Empty>(name, &json);
         }

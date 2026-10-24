@@ -101,6 +101,18 @@ impl From<&core::Operator> for dto::Operator {
                 .collect(),
             inspector_pinned: value.inspector_pinned.clone(),
             control_actions: value.control_actions.iter().map(Into::into).collect(),
+            me_marker_id: value.me_marker_id.clone(),
+            display: value.display.clone(),
+            account_id: value.account_id.clone(),
+            controller_mappings: value
+                .controller_mappings
+                .iter()
+                .map(|m| dto::ControllerMapping {
+                    controller_id: m.controller_id.clone(),
+                    controller_name: m.controller_name.clone(),
+                    mapping_id: m.mapping_id.clone(),
+                })
+                .collect(),
             version: value.version,
         }
     }
@@ -165,6 +177,7 @@ fn tab_to_dto(kind: core::TabKind) -> dto::TabKind {
         core::TabKind::Missions => dto::TabKind::Missions,
         core::TabKind::Profile => dto::TabKind::Profile,
         core::TabKind::Duck => dto::TabKind::Duck,
+        core::TabKind::Airspace => dto::TabKind::Airspace,
     }
 }
 
@@ -206,6 +219,7 @@ fn tab_from_dto(kind: dto::TabKind) -> core::TabKind {
         dto::TabKind::Missions => core::TabKind::Missions,
         dto::TabKind::Profile => core::TabKind::Profile,
         dto::TabKind::Duck => core::TabKind::Duck,
+        dto::TabKind::Airspace => core::TabKind::Airspace,
     }
 }
 

@@ -384,6 +384,25 @@ const MOST: usize = 64;
 
 /// What the engine checks of a manifest; names of messages the host checks,
 /// since only it knows the dialect.
+/// The most hosts a plugin may fetch from (S170).
+const MAX_HOSTS: usize = 8;
+
+/// A host name as a manifest gives it: `api.adsb.lol`, or `localhost`.
+fn valid_host(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    (host == "localhost" || labels.len() >= 2)
+        && host.len() <= 253
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
 fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if !valid_id(&manifest.id) {
         return Err(format!(
@@ -395,6 +414,19 @@ fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
         return Err(format!(
             "{} is built for plugin ABI v{}. This UXDuck runs v{PLUGIN_ABI}. Rebuild it with the current SDK.",
             manifest.id, manifest.abi
+        ));
+    }
+    // Host names only (S170): no scheme, port, path or wildcard.
+    if manifest.hosts.len() > MAX_HOSTS {
+        return Err(format!(
+            "{} names {} hosts; a plugin may fetch from at most {MAX_HOSTS}",
+            manifest.id,
+            manifest.hosts.len()
+        ));
+    }
+    if let Some(bad) = manifest.hosts.iter().find(|h| !valid_host(h)) {
+        return Err(format!(
+            "host {bad:?} must be a name such as api.adsb.lol: lower case, no scheme, port or path"
         ));
     }
     let cadence = |ms: u32| (20..=60_000).contains(&ms);
@@ -460,12 +492,13 @@ pub(crate) fn install_as(
         .inspect(path)
         .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
     check_manifest(&manifest).map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
-    // Installing again keeps it off if it was (S104).
+    // Installing again keeps it off if it was (S104); a plugin that starts
+    // off waits for a person the first time (S171).
     let enabled = engine
         .state
         .plugins
         .get(&manifest.id)
-        .is_none_or(|p| p.enabled);
+        .map_or(!manifest.starts_off, |p| p.enabled);
     // Installing again replaces it.
     if engine.state.plugins.contains_key(&manifest.id) {
         engine.stop_plugin(&manifest.id);
@@ -530,6 +563,8 @@ pub(crate) fn install_as(
             .map_or(1, |p| p.revision + 1),
         enabled,
         included: engine.plugin_host.included().iter().any(|p| p == path),
+        hosts: manifest.hosts,
+        traffic_source: manifest.traffic_source,
     };
     engine.commit_as(
         actor,
@@ -580,6 +615,7 @@ impl Engine {
                     .display()
                     .to_string()
             }),
+            hosts: plugin.hosts.clone(),
         });
     }
 
@@ -693,6 +729,8 @@ impl Engine {
         if enabled {
             self.start_plugin(&plugin);
         }
+        // A plugin's traffic is in the picture while it is on (S170).
+        self.traffic_sources_changed();
         Ok(plugin)
     }
 
@@ -782,6 +820,10 @@ impl Engine {
         self.plugin_messages(&plugin, effects.messages);
         self.plugin_features(&plugin, effects.features, &effects.removed_features);
         self.plugin_items(&plugin, effects.items);
+        self.plugin_traffic(&plugin.id, effects.traffic);
+        if let Some(status) = effects.traffic_status {
+            self.plugin_traffic_status(&plugin.id, status);
+        }
         for notification in effects
             .notifications
             .into_iter()

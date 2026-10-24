@@ -5,6 +5,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A model the person chose to draw a vehicle with (ADR-0035 M5), in place
+/// of the one its type gives: UXDuck's own models only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleLook {
+    Plane,
+    Vtol,
+    Multicopter,
+    Rover,
+    Boat,
+    Submarine,
+    Airship,
+    Jet,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Presence {
@@ -73,6 +88,14 @@ pub struct Vehicle {
     /// one its autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// Whether the traffic its ADS-B receiver reports is used (S168,
+    /// ADR-0034): off until a person turns it on, so one vehicle's faulty
+    /// receiver never puts aircraft in front of the whole fleet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic: bool,
+    /// The model it is drawn as, as the person chose; absent, its type's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<VehicleLook>,
     pub version: u64,
 }
 

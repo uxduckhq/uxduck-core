@@ -47,6 +47,9 @@ impl From<&core::HistoryEvent> for dto::HistoryEvent {
             core::HistoryEvent::MissionChanged { record_id, text } => {
                 Self::MissionChanged { record_id, text }
             }
+            core::HistoryEvent::FlightEnded { flight_id, text } => {
+                Self::FlightEnded { flight_id, text }
+            }
             core::HistoryEvent::ParameterChanged {
                 name,
                 from,

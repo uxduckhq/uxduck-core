@@ -1,0 +1,7 @@
+{
+  "method": "flight/keep",
+  "params": {
+    "id": "fl0123456789abcdef",
+    "keep": true
+  }
+}

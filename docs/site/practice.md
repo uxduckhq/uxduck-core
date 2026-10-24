@@ -1,5 +1,6 @@
 ---
 title: Practice
+search: Learn to fly a drone with simulated practice exercises
 order: 13.6
 group: Get started
 summary: Get started in the sidebar, then short exercises on a simulated vehicle, judged as you fly.

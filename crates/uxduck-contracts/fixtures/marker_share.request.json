@@ -1,0 +1,11 @@
+{
+  "method": "marker/share",
+  "params": {
+    "id": "mk1a2b3c4d5e6f7a8b",
+    "latitudeDeg": 51.5007,
+    "longitudeDeg": -0.1246,
+    "headingDeg": 200.5,
+    "accuracyM": 8.5,
+    "device": "iPhone"
+  }
+}

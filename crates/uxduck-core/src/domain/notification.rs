@@ -81,6 +81,13 @@ pub enum Action {
     OpenControllers {
         controller_id: String,
     },
+    /// `flight/keep`: a flight just finished, saved to the account (C9);
+    /// `always` saves every flight from now on too.
+    KeepFlight {
+        flight_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        always: bool,
+    },
     /// The vehicle's Messages tab at an entry (S26).
     OpenMessages {
         vehicle_id: String,

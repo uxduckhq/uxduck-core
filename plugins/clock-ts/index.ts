@@ -110,7 +110,7 @@ function shown(now: number): ProducedItem[] {
       ? counting("alarm.left_s", "Alarm", Math.max(0, alarm.at - now) / 1000, -1)
       : counting("alarm.left_s", "Alarm", 0, 0),
     alarm.at === null
-      ? text(null, "alarm.at_at", "Rings at", "—")
+      ? { ...text(null, "alarm.at_at", "Rings at", "—"), unit: "time" }
       : counting("alarm.at_at", "Rings at", alarm.at / 1000, 0),
     text(null, "alarm.state", "Alarm", alarmState()),
   ];

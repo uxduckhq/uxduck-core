@@ -124,6 +124,7 @@ impl Engine {
         else {
             return;
         };
+        let thread_id_for_check = thread_id.clone();
         let frame =
             rpc::router::notification(&ServerNotification::AgentItemDelta(AgentItemDelta {
                 thread_id,
@@ -133,7 +134,10 @@ impl Engine {
         let subscribers: Vec<ConnectionId> = self
             .subscribers
             .iter()
-            .filter(|(_, types)| types.contains(&EntityType::Item))
+            .filter(|(id, types)| {
+                types.contains(&EntityType::Item)
+                    && rpc::threads::sees_thread(self, **id, &thread_id_for_check)
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in subscribers {

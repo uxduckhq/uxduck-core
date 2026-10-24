@@ -67,3 +67,25 @@ pub struct LibraryVehicle {
     /// When that computer changed it.
     pub updated_at_us: u64,
 }
+
+/// A connection another computer published to the account (C2): how to
+/// reach its vehicles, not whether it is up. Used on a computer only once
+/// someone there chooses it, or "Use them all" for a network link; a
+/// serial link names its USB device. Signing keys never travel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryLink {
+    pub id: String,
+    pub name: String,
+    pub kind: crate::domain::link::LinkKind,
+    pub policy: crate::domain::link::LinkPolicy,
+    pub topology: crate::domain::link::Topology,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vehicle_filter: Vec<String>,
+    #[serde(default)]
+    pub carries: crate::domain::link::LinkCarries,
+    /// The computer that published this copy.
+    pub device: String,
+    /// When that computer changed it.
+    pub updated_at_us: u64,
+}

@@ -73,6 +73,9 @@ pub enum Endpoint {
     /// and sends to port 14550 until someone has.
     Udp(u16),
 }
+/// How long a simulated vehicle's port may stay taken before it starts:
+/// the link's own build, stopped a moment ago, may still be letting go.
+const PORT_WAIT: Duration = Duration::from_secs(3);
 /// The programs the manager runs, and what they fly.
 const PROGRAMS: [(&str, &[SimVehicleDto]); 6] = [
     ("arducopter", &[SimVehicleDto::Multicopter]),
@@ -271,6 +274,7 @@ impl Simulators {
             speedup,
             ref binary,
             wipe,
+            traffic,
             instance,
             // The take-off is the engine's, over MAVLink (S33).
             in_air_m: _,
@@ -331,6 +335,9 @@ impl Simulators {
             return Err(format!("{frame} is not a {} frame", vehicle_name(vehicle)));
         }
         let port = BASE_PORT + 10 * u16::from(instance);
+        // Another program, such as another daemon's SITL, listens there:
+        // this build could not, and the link would reach that one instead.
+        require_simulator_port(port)?;
         let directory = self.data_dir.join("simulators").join(&link.id);
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("cannot make {}: {e}", directory.display()))?;
@@ -344,13 +351,22 @@ impl Simulators {
             // SITL waits for the daemon's connection, so start-up is the
             // same every time; the other ports would listen for nobody.
             "--serial0=tcp:0:wait".into(),
-            "--serial1=none".into(),
+            // ArduPilot's simulated ADS-B receiver when the simulation asks
+            // for traffic (ADR-0034; the profile's `traffic` sets the vehicle
+            // up for it).
+            if traffic {
+                "--serial1=sim:adsb"
+            } else {
+                "--serial1=none"
+            }
+            .into(),
             "--serial2=none".into(),
         ];
         if wipe {
             args.push("--wipe".into());
         }
-        let defaults = profiles::with_defaults(&directory, &build.program, &frame, defaults)?;
+        let defaults =
+            profiles::with_defaults(&directory, &build.program, &frame, defaults, traffic)?;
         if let Some(defaults) = defaults {
             args.push(format!("--defaults={defaults}"));
         }
@@ -456,6 +472,31 @@ fn px4_root(directory: &Path, link_id: &str) -> Result<PathBuf, String> {
             )
         })?;
         Ok(root)
+    }
+}
+
+/// Whether nothing listens on `port`, waiting a little for it to be let go.
+fn require_simulator_port(port: u16) -> Result<(), String> {
+    if port_frees_up(port) {
+        Ok(())
+    } else {
+        Err(crate::ports::in_use_message(
+            crate::ports::Protocol::Tcp,
+            port,
+        ))
+    }
+}
+
+fn port_frees_up(port: u16) -> bool {
+    let deadline = std::time::Instant::now() + PORT_WAIT;
+    loop {
+        if crate::ports::tcp_port_free(port) {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

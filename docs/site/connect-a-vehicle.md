@@ -1,8 +1,9 @@
 ---
 title: Connect a vehicle
+search: Connect an ArduPilot vehicle over USB, telemetry radio, UDP or TCP
 order: 3
 group: Get started
-summary: Connect USB, radio, UDP or TCP and choose the right vehicle.
+summary: Connect an ArduPilot flight controller over USB, a telemetry radio, UDP or TCP, or a SITL simulator, and choose the right vehicle.
 ---
 
 A link is how UXDuck reaches a vehicle: a USB cable, a telemetry radio or the network.

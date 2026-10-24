@@ -456,6 +456,9 @@ pub struct ParamDiffParams {
     pub other_vehicle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// A baseline set for the vehicle (C7), from `param/baselines`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -480,4 +483,51 @@ pub struct ParamDiffResult {
     /// Lines of the file that were not `NAME,value`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unread_lines: Vec<u32>,
+}
+
+/// A vehicle's named, pinned parameter set (C7).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBaseline {
+    pub id: String,
+    pub vehicle_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    pub set_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// How many parameters it pins.
+    pub count: u32,
+    /// How many of the vehicle's parameters differ from it now.
+    pub differ: u32,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub created_at_us: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub version: u64,
+}
+
+/// `param/baselineSet`: the vehicle's parameters now, pinned as a baseline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBaselineSetParams {
+    pub vehicle_id: String,
+    /// "Approved" and the date, unless named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `param/baselines`: a vehicle's baselines, newest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBaselinesParams {
+    pub vehicle_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBaselinesResult {
+    pub baselines: Vec<ParamBaseline>,
 }

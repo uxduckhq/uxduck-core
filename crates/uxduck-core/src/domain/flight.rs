@@ -1,0 +1,95 @@
+//! A flight (C8): arm to disarm, as UXDuck saw it, kept so a logbook can be
+//! made from it. Landed but still armed does not end one; disarming does.
+
+use serde::{Deserialize, Serialize};
+
+/// How a flight ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlightEnd {
+    /// Still armed.
+    #[default]
+    Open,
+    /// It disarmed.
+    Disarmed,
+    /// UXDuck stopped while it was armed; ended when UXDuck last heard it.
+    Interrupted,
+    /// It went offline while armed; ended when UXDuck last heard it, and
+    /// open again if it comes back still armed.
+    ContactLost,
+}
+
+/// The parameters a flight armed with (C7): enough to tell later whether
+/// two flights flew the same configuration, and how far it was from the
+/// vehicle's approved baseline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightParams {
+    /// SHA-256 of every parameter, one `NAME=value` line each, by name.
+    pub digest: String,
+    pub count: u32,
+    /// The vehicle's newest baseline then, and how many parameters
+    /// differed from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_differ: Option<u32>,
+}
+
+/// Someone who acted on the vehicle during a flight, from their first
+/// command or claim: each a part of the flight (handovers, maintainer
+/// 2026-10-23).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightOperator {
+    pub operator_id: String,
+    pub name: String,
+    pub from_us: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Flight {
+    pub id: String,
+    pub vehicle_id: String,
+    /// The vehicle's name and type when it flew.
+    pub vehicle_name: String,
+    pub vehicle_type: String,
+    /// A simulation's, by its link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
+    /// UXDuck first heard it already armed, so it began earlier.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen_armed: bool,
+    pub armed_at_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_us: Option<u64>,
+    #[serde(default)]
+    pub end: FlightEnd,
+    /// Time off the ground, for one that flies.
+    #[serde(default)]
+    pub air_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_speed_mps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_start_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_end_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operators: Vec<FlightOperator>,
+    /// Saved to the account (C9): flight data is off by default, so a
+    /// flight goes to the account, and the logbook on every computer, only
+    /// when someone keeps it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
+    /// The parameters it armed with (C7), when UXDuck had them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<FlightParams>,
+    pub version: u64,
+}

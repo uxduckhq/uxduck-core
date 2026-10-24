@@ -268,6 +268,7 @@ fn start(
             wipe: false,
             // A snapshot brings its own mission.
             with_mission: false,
+            traffic: false,
             instance: None,
         },
         policy: None,
@@ -275,6 +276,7 @@ fn start(
         vehicle_filter: Vec::new(),
         from_link: None,
         keep_alive: false,
+        carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
     };
     let link = crate::sim::start_link(engine, connection, add, params.forward)?;
     to_value(&link)
@@ -282,9 +284,19 @@ fn start(
 
 /// Parameters a snapshot does not write back: the simulator's own, the
 /// counters, identities and per-boot calibrations, which belong to the new
-/// vehicle.
+/// vehicle. Its system id is `--sysid`'s, one per instance: writing the
+/// snapshot's back would give it the first vehicle's system id
+/// (`SYSID_THISMAV` before ArduPilot 4.7, `MAV_SYSID` since, with
+/// `MAV_GCS_SYSID` for `SYSID_MYGCS`).
 pub(crate) fn restorable(name: &str) -> bool {
-    const KEPT: [&str; 4] = ["SIM_", "STAT_", "SYSID_", "FORMAT_VERSION"];
+    const KEPT: [&str; 6] = [
+        "SIM_",
+        "STAT_",
+        "SYSID_",
+        "MAV_SYSID",
+        "MAV_GCS_SYSID",
+        "FORMAT_VERSION",
+    ];
     const PER_BOOT: [&str; 5] = ["DEV_ID", "DEVID", "GND_PRESS", "GND_ABS_PRESS", "GND_TEMP"];
     let kept = KEPT.iter().any(|p| name.starts_with(p))
         || PER_BOOT.iter().any(|p| name.contains(p))
@@ -319,6 +331,10 @@ mod tests {
             "SIM_SPEEDUP",
             "STAT_RUNTIME",
             "SYSID_THISMAV",
+            // ArduPilot 4.7 renamed SYSID_THISMAV and SYSID_MYGCS.
+            "MAV_SYSID",
+            "MAV_GCS_SYSID",
+            "MAV_GCS_SYSID_HI",
             "FORMAT_VERSION",
             "COMPASS_DEV_ID",
             "BARO1_DEVID",

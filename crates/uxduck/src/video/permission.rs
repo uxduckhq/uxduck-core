@@ -39,6 +39,15 @@ impl Access {
 type Answer = Result<Access, String>;
 pub type Receiver = watch::Receiver<Option<Answer>>;
 
+fn checked_answer(access: Access, requested: bool) -> Answer {
+    if requested && access.camera == Status::NotDetermined {
+        // A request was attempted. Do not describe a TCC/app-policy failure
+        // as though the person simply hasn't opened the permission flow yet.
+        return Err("macOS did not complete UXDuck's camera permission request. Reopen UXDuck and try again. If no permission question appears, reinstall UXDuck.".into());
+    }
+    Ok(access)
+}
+
 pub fn required() -> bool {
     cfg!(target_os = "macos") || std::env::var_os("UXDUCK_CAPTURE_PERMISSIONS").is_some()
 }
@@ -119,7 +128,8 @@ pub async fn query(request: bool, audio: bool) -> Answer {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|why| format!("The camera permission helper returned an invalid answer: {why}. Rebuild uxduck-tray or reinstall UXDuck."))
+    let access = serde_json::from_slice(&output.stdout).map_err(|why| format!("The camera permission helper returned an invalid answer: {why}. Rebuild uxduck-tray or reinstall UXDuck."))?;
+    checked_answer(access, request)
 }
 
 pub fn settings(microphone: bool) -> Result<(), String> {
@@ -165,6 +175,29 @@ mod tests {
         assert!(granted.camera_error().is_none());
         assert!(granted.microphone_note().is_none());
     }
+    #[test]
+    fn an_unanswered_request_is_not_reported_as_never_requested() {
+        let access = || Access {
+            camera: Status::NotDetermined,
+            microphone: Status::NotDetermined,
+        };
+        assert!(checked_answer(access(), false).is_ok());
+        let error = checked_answer(access(), true).unwrap_err();
+        assert!(error.contains("did not complete"));
+        assert!(!error.contains("has not been requested"));
+        for camera in [Status::Granted, Status::Denied, Status::Restricted] {
+            let result = checked_answer(
+                Access {
+                    camera,
+                    microphone: Status::NotDetermined,
+                },
+                true,
+            )
+            .unwrap();
+            assert_eq!(result.camera, camera);
+        }
+    }
+
     #[tokio::test]
     async fn selection_waits_for_an_answer_and_cancellation_is_not_grant() {
         let (sender, mut answer) = watch::channel(None);

@@ -1,0 +1,10 @@
+{
+  "abi": 2,
+  "id": "battery-watch",
+  "name": "Battery watch",
+  "version": "0.1.0",
+  "description": "A vehicle-following battery gauge with one warning below 20 percent.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": { "items": { "keys": ["battery.remaining_pct"], "cadenceMs": 1000 } }
+}

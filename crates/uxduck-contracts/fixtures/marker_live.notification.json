@@ -1,0 +1,15 @@
+{
+  "method": "marker/live",
+  "params": {
+    "id": "mk1a2b3c4d5e6f7a8b",
+    "live": {
+      "state": "failed",
+      "fix": {
+        "latitudeDeg": 50.501,
+        "longitudeDeg": -1.499,
+        "atMs": 1790669300000
+      },
+      "reason": "The GPS receiver on /dev/cu.usbmodem1101 was unplugged. Plug it in again."
+    }
+  }
+}

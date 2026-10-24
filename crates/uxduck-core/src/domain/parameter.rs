@@ -152,9 +152,28 @@ pub fn same_value(a: f64, b: f64) -> bool {
     a as f32 == b as f32
 }
 
+/// A parameter value as people read it: the shortest number that is the
+/// same `f32`, so 0.3499999940395355 reads 0.35.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "showing at the protocol's own precision"
+)]
+pub fn show_value(value: f64) -> String {
+    (value as f32).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_show_at_the_protocols_precision() {
+        assert_eq!(show_value(f64::from(0.35_f32)), "0.35");
+        assert_eq!(show_value(20.0), "20");
+        assert_eq!(show_value(-1.0), "-1");
+        assert_eq!(show_value(0.517_545_461_654_663_1), "0.51754546");
+    }
 
     #[test]
     fn kinds_map_to_mav_param_type_and_back() {
@@ -168,3 +187,28 @@ mod tests {
         assert!(!same_value(0.1, 0.2));
     }
 }
+
+/// A named, pinned parameter set for a vehicle (C7): "Approved
+/// 2026-10-01", who set it and why. The vehicle's parameters are compared
+/// with it; it syncs with the account so every computer sees the same.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBaseline {
+    pub id: String,
+    pub vehicle_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// The operator who set it, by name at the time.
+    pub set_by: String,
+    /// Their verified account, when signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Every parameter's value when it was set, by name.
+    pub values: std::collections::BTreeMap<String, f64>,
+    pub created_at_us: u64,
+    pub version: u64,
+}
+
+/// The longest baseline name or note, in characters.
+pub const MAX_BASELINE_TEXT: usize = 200;

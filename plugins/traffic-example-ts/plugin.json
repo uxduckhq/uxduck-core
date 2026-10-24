@@ -1,0 +1,11 @@
+{
+  "abi": 2,
+  "id": "traffic-example",
+  "name": "Traffic example",
+  "version": "0.1.0",
+  "description": "An example traffic source: aircraft from a readsb aircraft.json on this computer, every 5 seconds.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": { "tickMs": 5000 },
+  "hosts": ["localhost"]
+}

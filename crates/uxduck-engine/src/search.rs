@@ -260,7 +260,7 @@ fn notes(
 
 fn vehicles_and_chats(
     engine: &Engine,
-    _connection: ConnectionId,
+    connection: ConnectionId,
     query: &str,
     wanted: &dyn Fn(SearchKind) -> bool,
     add: &mut dyn FnMut(u8, SearchHit),
@@ -294,12 +294,10 @@ fn vehicles_and_chats(
         }
     }
     if wanted(SearchKind::Chat) {
-        for thread in engine
-            .state
-            .threads
-            .values()
-            .filter(|t| t.deleted_at_us.is_none())
-        {
+        for thread in engine.state.threads.values().filter(|t| {
+            t.deleted_at_us.is_none()
+                && crate::rpc::threads::sees(engine, connection, t.operator_id.as_deref())
+        }) {
             let folder = thread
                 .folder_id
                 .as_ref()
@@ -320,12 +318,10 @@ fn vehicles_and_chats(
         }
     }
     if wanted(SearchKind::Folder) {
-        for folder in engine
-            .state
-            .folders
-            .values()
-            .filter(|f| f.deleted_at_us.is_none())
-        {
+        for folder in engine.state.folders.values().filter(|f| {
+            f.deleted_at_us.is_none()
+                && crate::rpc::threads::sees(engine, connection, f.operator_id.as_deref())
+        }) {
             add(
                 score(&folder.name, query),
                 hit(

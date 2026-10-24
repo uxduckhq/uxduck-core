@@ -21,6 +21,7 @@
           "supervisionGraceS": 10,
           "gcsSystemId": 255,
           "storeFlights": true,
+          "saveFlights": false,
           "uploadWhileArmed": true,
           "uploadVideoWhileFlying": false,
           "usageAnalytics": true,
@@ -39,7 +40,9 @@
           "startAtLogin": false,
           "messageNotifySeverity": 4,
           "recreateSimulations": false,
-          "terrainDataset": "alos"
+          "terrainDataset": "alos",
+          "trafficAlertM": 2000,
+          "trafficAlertUpM": 300
         }
       }
     ]

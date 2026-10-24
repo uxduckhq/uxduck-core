@@ -1,0 +1,21 @@
+{
+  "versions": [
+    {
+      "device": "Laptop",
+      "version": 1792800000000000,
+      "digest": "9f2c",
+      "tsUs": 1792800000000000,
+      "won": true,
+      "change": {
+        "type": "planSaved",
+        "plan": {
+          "id": "plan1a2b3c4d5e6f7a8b",
+          "name": "Ridge survey"
+        },
+        "revision": {
+          "kind": "none"
+        }
+      }
+    }
+  ]
+}

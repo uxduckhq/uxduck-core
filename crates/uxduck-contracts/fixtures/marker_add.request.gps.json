@@ -1,0 +1,14 @@
+{
+  "method": "marker/add",
+  "params": {
+    "name": "Boat",
+    "look": "boat",
+    "latitudeDeg": 50.5,
+    "longitudeDeg": -1.5,
+    "source": {
+      "type": "serial",
+      "port": "/dev/cu.usbmodem1101",
+      "baud": 9600
+    }
+  }
+}

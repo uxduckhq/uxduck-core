@@ -14,6 +14,7 @@ pub mod fake_files;
 pub mod fake_terrain;
 pub mod files;
 pub mod framing;
+pub mod ground_traffic;
 pub mod identity;
 #[cfg(feature = "named")]
 pub mod named;
@@ -26,6 +27,7 @@ pub mod session;
 pub mod sim;
 pub mod terrain;
 pub mod tlog;
+pub mod traffic;
 pub mod transfers;
 pub mod usb_ids;
 

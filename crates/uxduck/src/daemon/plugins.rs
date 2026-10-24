@@ -17,9 +17,9 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uxduck_contracts::dto::plugin::{
-    CommandCall, Description, Effects, Frame, FrameBatch, ItemBatch, ItemInput, MessageBatch,
-    MessageInput, PluginDraft, PluginManifest, PluginTestResult, PluginUsage, StartInput,
-    Subscriptions, TestedItem, TickInput,
+    CommandCall, Description, Effects, FetchRequest, FetchedInput, Frame, FrameBatch, ItemBatch,
+    ItemInput, MessageBatch, MessageInput, PluginDraft, PluginManifest, PluginTestResult,
+    PluginUsage, StartInput, Subscriptions, TestedItem, TickInput,
 };
 use uxduck_core::domain::telemetry::VehicleTelemetry;
 use uxduck_engine::runtime::{DraftOrder, PluginLoad, PluginPort, TestOrder};
@@ -165,6 +165,8 @@ pub fn register_dialect(id: &str, path: Option<&str>) -> Result<(), String> {
 
 enum Message {
     Load(PluginLoad),
+    /// The answer to a plugin's `fetch` (S170), or why there was none.
+    Fetched(String, FetchedInput),
     Unload(String),
     Command(String, CommandCall),
     Test(TestOrder),
@@ -184,19 +186,35 @@ pub struct PluginChannel {
 
 /// The plugins UXDuck comes with (S104): each one's id and files, from the
 /// repository's own `plugins/` folder.
-const INCLUDED: &[(&str, &[(&str, &str)])] = &[(
-    "clock",
-    &[
-        (
-            "plugin.json",
-            include_str!("../../../../plugins/clock-ts/plugin.json"),
-        ),
-        (
-            "index.ts",
-            include_str!("../../../../plugins/clock-ts/index.ts"),
-        ),
-    ],
-)];
+const INCLUDED: &[(&str, &[(&str, &str)])] = &[
+    (
+        "clock",
+        &[
+            (
+                "plugin.json",
+                include_str!("../../../../plugins/clock-ts/plugin.json"),
+            ),
+            (
+                "index.ts",
+                include_str!("../../../../plugins/clock-ts/index.ts"),
+            ),
+        ],
+    ),
+    // Traffic from adsb.lol (S171): off until a person turns it on.
+    (
+        "adsb-lol",
+        &[
+            (
+                "plugin.json",
+                include_str!("../../../../plugins/adsb-lol-ts/plugin.json"),
+            ),
+            (
+                "index.ts",
+                include_str!("../../../../plugins/adsb-lol-ts/index.ts"),
+            ),
+        ],
+    ),
+];
 
 /// Writes UXDuck's own copy of each plugin it comes with into `into`, a
 /// folder per plugin, and returns the folders written.
@@ -379,6 +397,10 @@ fn write_draft(drafts: &Path, order: DraftOrder) -> Result<PluginDraft, String> 
         commands: params.commands,
         written_by: Some(order.written_by),
         dialect: None,
+        // An agent's draft fetches nothing until a person adds hosts.
+        hosts: Vec::new(),
+        traffic_source: false,
+        starts_off: false,
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -501,6 +523,10 @@ fn run_test(order: &TestOrder, tlogs: &Path) -> Result<PluginTestResult, String>
 /// The two ends, before the host starts.
 pub struct Host {
     receiver: Receiver<Message>,
+    /// For answers to fetches, which come back on the same channel.
+    sender: Sender<Message>,
+    /// Where fetches run, once the host has started.
+    runtime: Option<tokio::runtime::Handle>,
     subscribed: Subscribed,
     /// The links' tlogs, for a draft's test against a vehicle's last minutes.
     tlogs: PathBuf,
@@ -519,11 +545,13 @@ pub fn channel(plugins: &Path, tlogs: PathBuf) -> (PluginChannel, Feed, Host) {
             included: write_included(&plugins.join("included")),
         },
         Feed {
-            sender,
+            sender: sender.clone(),
             subscribed: subscribed.clone(),
         },
         Host {
             receiver,
+            sender,
+            runtime: None,
             subscribed,
             tlogs,
             storage: plugins.join("storage"),
@@ -579,6 +607,12 @@ type LatestItems = BTreeMap<(String, String), ItemInput>;
 /// The wall clock at `at`, in milliseconds since 1970: now, in the daemon;
 /// on the tlog's clock, in the harness.
 fn wall_ms(at: Instant) -> u64 {
+    if let Some(clock) = REPLAY_CLOCK.get() {
+        let elapsed = at.saturating_duration_since(clock.origin);
+        return clock
+            .epoch_ms
+            .saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    }
     let system = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
@@ -588,6 +622,26 @@ fn wall_ms(at: Instant) -> u64 {
         system.saturating_add(ms(at - here))
     } else {
         system.saturating_sub(ms(here - at))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayClock {
+    origin: Instant,
+    epoch_ms: u64,
+    at: Instant,
+}
+
+thread_local! {
+    static REPLAY_CLOCK: std::cell::Cell<Option<ReplayClock>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests run on the host thread too. Restore its clock on every exit path.
+struct ReplayClockGuard(Option<ReplayClock>);
+
+impl Drop for ReplayClockGuard {
+    fn drop(&mut self) {
+        REPLAY_CLOCK.set(self.0);
     }
 }
 
@@ -627,6 +681,9 @@ pub struct Running {
     store_file: Option<PathBuf>,
     /// A wake-up it asked for (S104): `on_tick` once, then.
     wake: Option<Instant>,
+    /// The hosts it may fetch from (S170), and how many fetches are out.
+    hosts: Vec<String>,
+    fetching: usize,
 }
 
 impl Running {
@@ -655,7 +712,25 @@ impl Running {
             stored: serde_json::Map::new(),
             store_file: None,
             wake: None,
+            hosts: Vec::new(),
+            fetching: 0,
         }
+    }
+
+    /// The hosts it may fetch from, from its manifest (S170).
+    #[must_use]
+    pub fn with_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.hosts = hosts;
+        self
+    }
+
+    /// Calls `on_fetched` with the answer to a fetch (S170).
+    ///
+    /// # Errors
+    /// When the call traps, times out or returns something else.
+    pub fn fetched(&mut self, input: &FetchedInput) -> Result<Effects, String> {
+        self.fetching = self.fetching.saturating_sub(1);
+        self.timed("on_fetched", input, Instant::now()).result
     }
 
     /// The soonest a held queue is due.
@@ -696,16 +771,17 @@ impl Running {
     /// # Errors
     /// When the call traps, times out or returns something else.
     pub fn command(&mut self, call: &CommandCall) -> Result<Effects, String> {
-        self.timed("on_command", call).result
+        self.timed("on_command", call, Instant::now()).result
     }
 
     /// Calls a function, noting how long it ran.
-    fn timed<I: Serialize>(&mut self, function: &'static str, input: &I) -> Delivered {
+    fn timed<I: Serialize>(&mut self, function: &'static str, input: &I, at: Instant) -> Delivered {
+        REPLAY_CLOCK.set(REPLAY_CLOCK.get().map(|clock| ReplayClock { at, ..clock }));
         let started = Instant::now();
         let delivered = delivered(&mut self.plugin, function, input);
         let now = Instant::now();
         if let Ok(Some(ms)) = delivered.result.as_ref().map(|e| e.wake_in_ms) {
-            self.wake = Some(now + Duration::from_millis(u64::from(ms.max(MIN_TICK_MS))));
+            self.wake = Some(at + Duration::from_millis(u64::from(ms.max(MIN_TICK_MS))));
         }
         self.spent.push_back((now, now - started));
         while self
@@ -735,7 +811,7 @@ impl Running {
             stored: self.stored.clone(),
             now_ms: wall_ms(now),
         };
-        self.timed("on_start", &input).result
+        self.timed("on_start", &input, now).result
     }
 
     /// Keeps what a call asked to keep (S104): a value per key, `null`
@@ -861,7 +937,7 @@ impl Running {
             let input = TickInput {
                 now_ms: wall_ms(now),
             };
-            results.push(self.timed("on_tick", &input));
+            results.push(self.timed("on_tick", &input, now));
         }
         results
     }
@@ -877,7 +953,7 @@ impl Running {
                 items: std::mem::take(&mut queue.held).into_values().collect(),
             };
             queue.next = now + queue.cadence;
-            results.push(self.timed("on_items", &batch));
+            results.push(self.timed("on_items", &batch, now));
         }
         if let Some((_, queue)) = &mut self.messages
             && !queue.held.is_empty()
@@ -888,7 +964,7 @@ impl Running {
                 gap: std::mem::take(&mut queue.gap),
             };
             queue.next = now + queue.cadence;
-            results.push(self.timed("on_messages", &batch));
+            results.push(self.timed("on_messages", &batch, now));
         }
         if let Some((_, queue)) = &mut self.frames
             && !queue.held.is_empty()
@@ -899,7 +975,7 @@ impl Running {
                 gap: std::mem::take(&mut queue.gap),
             };
             queue.next = now + queue.cadence;
-            results.push(self.timed("on_frames", &batch));
+            results.push(self.timed("on_frames", &batch, now));
         }
         results
     }
@@ -908,6 +984,20 @@ impl Running {
 /// What hears each call of a harness run: the function, its input, and its
 /// effects or why it failed.
 pub type Hears<'a> = dyn FnMut(&str, &serde_json::Value, &Result<Effects, String>) + 'a;
+
+fn report_replay(running: &mut Running, delivered: Delivered, each: &mut Hears<'_>) -> bool {
+    let result = delivered.result.and_then(|effects| {
+        for item in &effects.items {
+            if !uxduck_core::domain::telemetry::key_says_unit(&item.key, item.unit.into()) {
+                return Err(format!("{}: the key does not say its unit", item.key));
+            }
+        }
+        running.keep(effects.store.clone())?;
+        Ok(effects)
+    });
+    each(delivered.function, &delivered.input, &result);
+    result.is_ok()
+}
 
 /// Runs a plugin as the daemon would, against a tlog on the tlog's clock:
 /// items from the daemon's own producers, decoded messages and frames at
@@ -934,30 +1024,35 @@ pub fn harness(
     register_dialect(&manifest.id, dialect.as_deref())?;
     let (plugin, description) = load(&module, manifest.script.is_some())?;
     let mut running = Running::new(plugin, &manifest.subscribe);
+    let start = Instant::now();
+    let epoch_ms = wall_ms(start);
+    let _clock = ReplayClockGuard(REPLAY_CLOCK.replace(Some(ReplayClock {
+        origin: start,
+        epoch_ms,
+        at: start,
+    })));
     // What it keeps stays in memory here; it starts with nothing kept.
-    let started = running.start(serde_json::Map::new(), None, Instant::now());
-    let start_input = serde_json::json!({ "stored": {}, "nowMs": wall_ms(Instant::now()) });
-    each("on_start", &start_input, &started);
-    match started {
-        Ok(effects) => {
-            if let Err(why) = running.keep(effects.store) {
-                each("on_start", &start_input, &Err(why));
-            }
-        }
-        Err(_) => return Ok(description),
+    let started = running.start(serde_json::Map::new(), None, start);
+    let start_input = serde_json::json!({ "stored": {}, "nowMs": epoch_ms });
+    if !report_replay(
+        &mut running,
+        Delivered {
+            function: "on_start",
+            input: start_input,
+            result: started,
+        },
+        each,
+    ) {
+        return Ok(description);
     }
     let records = uxduck_mavlink::tlog::read(tlog);
     let start_us = records.first().map_or(0, |(at, _)| *at);
-    let start = Instant::now();
+    let end_us = records.last().map_or(start_us, |(at, _)| *at);
     let at = |us: u64| start + Duration::from_micros(us.saturating_sub(start_us));
     // The session gives the daemon's vehicle ids and its telemetry items.
     let mut session = Session::new(Config::default());
     let mut vehicle = String::from("tlog-1");
     let mut next_tick = start_us;
-    let mut report = |delivered: Delivered| -> bool {
-        each(delivered.function, &delivered.input, &delivered.result);
-        delivered.result.is_ok()
-    };
     for (at_us, frame) in records {
         let Some(header) = uxduck_mavlink::framing::header(frame) else {
             continue;
@@ -987,21 +1082,29 @@ pub fn harness(
         // Ticks on the tlog's clock, at the plugin's cadence, up to now.
         while let Some(due) = running.next_tick().filter(|due| *due < at(at_us)) {
             for delivered in running.deliver(due) {
-                if !report(delivered) {
+                if !report_replay(&mut running, delivered, each) {
                     return Ok(description);
                 }
             }
         }
         for delivered in running.deliver(at(at_us)) {
-            if !report(delivered) {
+            if !report_replay(&mut running, delivered, each) {
                 return Ok(description);
             }
         }
     }
     // What is still held goes at the end, as the next cadence would; no
     // tick, which would come at a time that never was.
-    for delivered in running.deliver_held(at(u64::MAX / 2)) {
-        if !report(delivered) {
+    let flushed_at = [
+        running.items.as_ref().map(|(_, queue)| queue.next),
+        running.messages.as_ref().map(|(_, queue)| queue.next),
+        running.frames.as_ref().map(|(_, queue)| queue.next),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(at(end_us), Instant::max);
+    for delivered in running.deliver_held(flushed_at) {
+        if !report_replay(&mut running, delivered, each) {
             return Ok(description);
         }
     }
@@ -1011,14 +1114,112 @@ pub fn harness(
             vehicle_id: Some(vehicle),
             params,
         };
-        let result = running.command(&call);
-        each(
-            "on_command",
-            &serde_json::to_value(&call).unwrap_or_default(),
-            &result,
-        );
+        let delivered = running.timed("on_command", &call, flushed_at);
+        report_replay(&mut running, delivered, each);
     }
     Ok(description)
+}
+
+/// How many fetches a plugin may have out at once (S170).
+const FETCHES_AT_ONCE: usize = 4;
+/// How long a fetch may take.
+const FETCH_LIMIT: Duration = Duration::from_secs(10);
+/// The most of a page a plugin is given.
+const FETCH_BYTES: usize = 1024 * 1024;
+
+/// A plugin's URL, if it may fetch it (S170): HTTPS to a host its manifest
+/// names, on the usual port; plain HTTP only to `localhost`.
+fn fetch_url(url: &str, hosts: &[String]) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url} is not a URL: {e}"))?;
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    if !hosts.contains(&host) {
+        return Err(if hosts.is_empty() {
+            "its manifest names no hosts it may fetch from".to_owned()
+        } else {
+            format!(
+                "{host} is not one of the hosts its manifest names ({})",
+                hosts.join(", ")
+            )
+        });
+    }
+    let local = host == "localhost";
+    match parsed.scheme() {
+        "https" => {}
+        "http" if local => {}
+        other => return Err(format!("{other}: only HTTPS")),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("a URL with a user name or password".into());
+    }
+    if parsed.port().is_some() && !local {
+        return Err("only the usual port".into());
+    }
+    Ok(parsed)
+}
+
+/// What came back: status, headers and body, at most `FETCH_BYTES`.
+type Page = (u16, BTreeMap<String, String>, String);
+
+async fn fetch_page(plugin: &str, url: reqwest::Url) -> Result<Page, String> {
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_LIMIT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut response = client
+        .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("UXDuck/{} (plugin {plugin})", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("no answer in {} s", FETCH_LIMIT.as_secs())
+            } else {
+                format!("could not reach it: {e}")
+            }
+        })?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+        })
+        .collect();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > FETCH_BYTES {
+            return Err(format!("larger than {} MB", FETCH_BYTES / (1024 * 1024)));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((status, headers, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// The input to `on_fetched` for a request and its outcome.
+fn plugin_fetch_answer(request: &FetchRequest, page: Result<Page, String>) -> FetchedInput {
+    let now_ms = wall_ms(Instant::now());
+    match page {
+        Ok((status, headers, body)) => FetchedInput {
+            id: request.id.clone(),
+            url: request.url.clone(),
+            status: Some(status),
+            headers,
+            body,
+            error: None,
+            now_ms,
+        },
+        Err(why) => FetchedInput {
+            id: request.id.clone(),
+            url: request.url.clone(),
+            error: Some(why),
+            now_ms,
+            ..FetchedInput::default()
+        },
+    }
 }
 
 /// Why a call failed, in words: Extism says only "timeout" or "oom".
@@ -1061,9 +1262,10 @@ fn clock() -> extism::Function {
         [extism::ValType::I64],
         extism::UserData::new(()),
         |_plugin, _inputs, outputs, _data| {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+            let at = REPLAY_CLOCK
+                .get()
+                .map_or_else(Instant::now, |clock| clock.at);
+            let ms = i64::try_from(wall_ms(at)).unwrap_or(i64::MAX);
             outputs[0] = extism::Val::I64(ms);
             Ok(())
         },
@@ -1117,8 +1319,9 @@ pub fn effects<I: Serialize>(
 
 impl Host {
     /// Runs the host on its own thread until the channel closes.
-    pub fn start(self, engine: EngineHandle) {
+    pub fn start(mut self, engine: EngineHandle) {
         let runtime = tokio::runtime::Handle::current();
+        self.runtime = Some(runtime.clone());
         let tell = move |report: Report| {
             let engine = engine.clone();
             let _ = runtime.block_on(engine.run(move |e| match report {
@@ -1172,14 +1375,21 @@ impl Host {
                         Ok((plugin, description)) => {
                             tracing::info!(plugin = %load.id, "plugin loaded");
                             tell(Report::Described(load.id.clone(), description));
-                            let mut started = Running::new(plugin, &load.subscribe);
+                            let mut started = Running::new(plugin, &load.subscribe)
+                                .with_hosts(load.hosts.clone());
                             let file = self.storage.join(format!("{}.json", load.id));
                             let result =
                                 started.start(read_stored(&file), Some(file), Instant::now());
                             running.insert(load.id.clone(), started);
-                            Self::settle(&mut running, &load.id, result, tell);
+                            self.settle(&mut running, &load.id, result, tell);
                         }
                         Err(why) => tell(Report::Failed(load.id, why)),
+                    }
+                }
+                Ok(Message::Fetched(id, input)) => {
+                    if let Some(plugin) = running.get_mut(&id) {
+                        let result = plugin.fetched(&input);
+                        self.settle(&mut running, &id, result, tell);
                     }
                 }
                 Ok(Message::Unload(id)) => {
@@ -1189,7 +1399,7 @@ impl Host {
                 Ok(Message::Command(id, call)) => {
                     if let Some(plugin) = running.get_mut(&id) {
                         let result = plugin.command(&call);
-                        Self::settle(&mut running, &id, result, tell);
+                        self.settle(&mut running, &id, result, tell);
                     }
                 }
                 Ok(Message::Frame(frame)) => {
@@ -1222,7 +1432,7 @@ impl Host {
                     continue;
                 };
                 for delivered in plugin.deliver(now) {
-                    Self::settle(&mut running, &id, delivered.result, tell);
+                    self.settle(&mut running, &id, delivered.result, tell);
                     if !running.contains_key(&id) {
                         break;
                     }
@@ -1234,6 +1444,7 @@ impl Host {
 
     /// Passes a call's effects on, or unloads a plugin whose call failed.
     fn settle(
+        &self,
         running: &mut BTreeMap<String, Running>,
         id: &str,
         result: Result<Effects, String>,
@@ -1242,11 +1453,15 @@ impl Host {
         match result {
             Ok(mut effects) => {
                 let store = std::mem::take(&mut effects.store);
-                if let Some(plugin) = running.get_mut(id)
-                    && let Err(why) = plugin.keep(store)
-                {
-                    tracing::warn!(plugin = %id, %why, "plugin storage refused");
-                    effects.log.push(format!("storage refused: {why}"));
+                let fetch = std::mem::take(&mut effects.fetch);
+                if let Some(plugin) = running.get_mut(id) {
+                    if let Err(why) = plugin.keep(store) {
+                        tracing::warn!(plugin = %id, %why, "plugin storage refused");
+                        effects.log.push(format!("storage refused: {why}"));
+                    }
+                    for request in fetch {
+                        self.fetch(id, plugin, request);
+                    }
                 }
                 tell(Report::Effects(id.to_owned(), effects));
             }
@@ -1255,6 +1470,37 @@ impl Host {
                 tracing::warn!(plugin = %id, %why, "plugin unloaded");
                 tell(Report::Failed(id.to_owned(), why));
             }
+        }
+    }
+
+    /// Fetches a page for a plugin (S170) off this thread, from a host its
+    /// manifest names; the answer, or why there is none, comes back as
+    /// `Message::Fetched`.
+    fn fetch(&self, id: &str, plugin: &mut Running, request: FetchRequest) {
+        let refuse = |why: String| {
+            tracing::warn!(plugin = %id, url = %request.url, %why, "plugin fetch refused");
+            plugin_fetch_answer(&request, Err(why))
+        };
+        let answer = match (fetch_url(&request.url, &plugin.hosts), &self.runtime) {
+            (Err(why), _) => Some(refuse(why)),
+            (Ok(_), None) => Some(refuse("UXDuck cannot fetch here".into())),
+            (Ok(_), Some(_)) if plugin.fetching >= FETCHES_AT_ONCE => Some(refuse(format!(
+                "{FETCHES_AT_ONCE} fetches are already out; wait for an answer"
+            ))),
+            (Ok(url), Some(runtime)) => {
+                plugin.fetching += 1;
+                let (sender, id) = (self.sender.clone(), id.to_owned());
+                runtime.spawn(async move {
+                    let answer = plugin_fetch_answer(&request, fetch_page(&id, url).await);
+                    let _ = sender.send(Message::Fetched(id, answer));
+                });
+                None
+            }
+        };
+        if let Some(answer) = answer {
+            // Counted out, so the answer's arrival counts it back in.
+            plugin.fetching += 1;
+            let _ = self.sender.send(Message::Fetched(id.to_owned(), answer));
         }
     }
 
@@ -1285,6 +1531,203 @@ impl Host {
 mod tests {
     use super::*;
 
+    fn replay_script(source: &str) -> Vec<Delivered> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            serde_json::json!({
+                "abi": 2, "id": "replay-test", "name": "Replay test", "version": "1",
+                "script": "index.ts", "capabilities": ["read"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("index.ts"), source).unwrap();
+        let mut fake = uxduck_mavlink::sim::FakeVehicle::new(1, 0xAB);
+        let mut tlog = Vec::new();
+        for at_us in [0, 5_000_000] {
+            uxduck_mavlink::tlog::record(&mut tlog, at_us, &fake.heartbeat()).unwrap();
+        }
+        let mut calls = Vec::new();
+        harness(dir.path(), &tlog, None, &mut |function, input, result| {
+            calls.push(Delivered {
+                function: if function == "on_start" {
+                    "on_start"
+                } else {
+                    "on_tick"
+                },
+                input: input.clone(),
+                result: result.clone(),
+            });
+        })
+        .unwrap();
+        assert!(REPLAY_CLOCK.get().is_none(), "the replay clock leaked");
+        calls
+    }
+
+    #[test]
+    fn replay_wakeups_and_date_now_follow_the_recording() {
+        let calls = replay_script(
+            r#"
+            import { value } from "@uxduck/sdk";
+            export function onStart() { return { wakeInMs: 1000 }; }
+            export function onTick({ nowMs }) {
+                return { wakeInMs: 1000, items: [value(null, "test.clock_error", "Clock error", "none", Date.now() - nowMs)] };
+            }
+        "#,
+        );
+        assert_eq!(calls.len(), 6);
+        let started = calls[0].input["nowMs"].as_u64().unwrap();
+        for (index, call) in calls.iter().enumerate().skip(1) {
+            assert_eq!(
+                call.input["nowMs"].as_u64().unwrap() - started,
+                index as u64 * 1000
+            );
+            assert_eq!(call.result.as_ref().unwrap().items[0].value, Some(0.0));
+        }
+    }
+
+    #[test]
+    fn replay_checks_cumulative_storage_after_every_call() {
+        let calls = replay_script(
+            r#"
+            export function onStart() { return { store: { first: "x".repeat(40000) }, wakeInMs: 1000 }; }
+            export function onTick() { return { store: { second: "x".repeat(40000) }, wakeInMs: 1000 }; }
+        "#,
+        );
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].result.as_ref().unwrap_err().contains("65536"));
+    }
+
+    #[test]
+    fn replay_rejects_items_the_engine_would_drop() {
+        let calls = replay_script(
+            r#"
+            import { value } from "@uxduck/sdk";
+            export function onStart() { return { items: [value(null, "test.distance", "Distance", "meter", 10)] }; }
+        "#,
+        );
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0]
+                .result
+                .as_ref()
+                .unwrap_err()
+                .contains("key does not say its unit")
+        );
+    }
+
+    fn example(id: &str) -> extism::Plugin {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins")
+            .join(id);
+        let manifest = inspect(dir.to_str().unwrap()).unwrap();
+        load(dir.join(manifest.script.unwrap()).to_str().unwrap(), true)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn clock_placeholders_keep_the_units_their_keys_require() {
+        let mut plugin = example("clock-ts");
+        let effects: Effects = call(
+            &mut plugin,
+            "on_start",
+            &serde_json::json!({
+                "stored": {}, "nowMs": 1000
+            }),
+        )
+        .unwrap();
+        for item in &effects.items {
+            assert!(
+                uxduck_core::domain::telemetry::key_says_unit(&item.key, item.unit.into()),
+                "{}",
+                item.key
+            );
+        }
+        let unset = effects
+            .items
+            .iter()
+            .find(|item| item.key == "alarm.at_at")
+            .unwrap();
+        assert_eq!(unset.unit, uxduck_contracts::dto::telemetry::Unit::Time);
+        assert_eq!(unset.text.as_deref(), Some("—"));
+        assert!(unset.value.is_none());
+    }
+
+    #[test]
+    fn battery_watch_handles_missing_values_hysteresis_and_separate_vehicles() {
+        let mut plugin = example("battery-watch-ts");
+        let mut sample = |vehicle: &str, value: Option<f64>| {
+            call::<_, Effects>(&mut plugin, "on_items", &serde_json::json!({
+                "items": [{ "vehicleId": vehicle, "key": "battery.remaining_pct", "value": value }]
+            })).unwrap()
+        };
+        assert!(sample("a", None).items.is_empty());
+        for (value, warnings) in [(19.0, 1), (18.0, 0), (26.0, 0), (19.0, 1)] {
+            let effects = sample("a", Some(value));
+            assert_eq!(effects.notifications.len(), warnings);
+            assert_eq!(effects.items[0].value, Some(value));
+        }
+        assert_eq!(sample("b", Some(19.0)).notifications.len(), 1);
+    }
+
+    #[test]
+    fn fleet_markers_keep_each_vehicle_and_use_geojson_coordinate_order() {
+        let mut plugin = example("fleet-markers-ts");
+        let effects: Effects = call(&mut plugin, "on_messages", &serde_json::json!({
+            "messages": [
+                { "vehicleId": "a", "name": "GLOBAL_POSITION_INT", "fields": { "lat": 10_000_000, "lon": 20_000_000 } },
+                { "vehicleId": "b", "name": "GLOBAL_POSITION_INT", "fields": { "lat": 30_000_000, "lon": 40_000_000 } },
+                { "vehicleId": "a", "name": "GLOBAL_POSITION_INT", "fields": { "lat": 50_000_000, "lon": 60_000_000 } }
+            ]
+        })).unwrap();
+        assert_eq!(effects.features.len(), 2);
+        assert_eq!(effects.features[0].id, "vehicle-a");
+        assert_eq!(
+            effects.features[0].geometry["coordinates"],
+            serde_json::json!([6, 5])
+        );
+        assert_eq!(effects.features[1].id, "vehicle-b");
+    }
+
+    #[test]
+    fn session_timer_restores_state_and_reset_needs_no_vehicle() {
+        let mut plugin = example("session-timer-ts");
+        let started: Effects = call(
+            &mut plugin,
+            "on_start",
+            &serde_json::json!({
+                "stored": { "startedAt": 1000 }, "nowMs": 61_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(started.items[0].value, Some(60.0));
+        assert_eq!(started.items[0].rate_per_s, Some(1.0));
+        assert_eq!(started.items[0].vehicle_id, None);
+        assert_eq!(started.wake_in_ms, Some(60_000));
+        let mut restarted = example("session-timer-ts");
+        let resumed: Effects = call(
+            &mut restarted,
+            "on_start",
+            &serde_json::json!({
+                "stored": started.store, "nowMs": 121_000
+            }),
+        )
+        .unwrap();
+        assert_eq!(resumed.items[0].value, Some(120.0));
+        let reset: Effects = call(
+            &mut restarted,
+            "on_command",
+            &serde_json::json!({
+                "command": "reset", "params": {}
+            }),
+        )
+        .unwrap();
+        assert_eq!(reset.items[0].value, Some(0.0));
+        assert!(reset.store["startedAt"].as_f64().unwrap() > 121_000.0);
+    }
+
     fn plugin_dir(manifest: &serde_json::Value) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("plugin.json"), manifest.to_string()).unwrap();
@@ -1310,6 +1753,281 @@ mod tests {
         assert!(
             why.contains("no message GLOBAL_POSITION, NOT_A_MESSAGE"),
             "{why}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_fetches_only_over_https_from_hosts_it_names() {
+        let hosts = vec!["api.adsb.lol".to_owned(), "localhost".to_owned()];
+        assert!(fetch_url("https://api.adsb.lol/v2/point/51/0/10", &hosts).is_ok());
+        assert!(fetch_url("http://localhost:8080/data/aircraft.json", &hosts).is_ok());
+        let why = |url: &str| fetch_url(url, &hosts).unwrap_err();
+        assert!(why("https://evil.example/").contains("not one of the hosts"));
+        assert!(why("http://api.adsb.lol/").contains("only HTTPS"));
+        assert!(why("https://api.adsb.lol:8443/").contains("usual port"));
+        assert!(why("https://me:pw@api.adsb.lol/").contains("user name"));
+        assert!(why("file:///etc/passwd").contains("not one of the hosts"));
+        assert!(
+            fetch_url("https://api.adsb.lol/", &[])
+                .unwrap_err()
+                .contains("names no hosts")
+        );
+    }
+
+    /// A one-shot HTTP server on localhost answering `body` with a header.
+    async fn serve_once(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-RateLimit-Remaining: 499\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+        });
+        format!("http://localhost:{port}/v2/point")
+    }
+
+    #[tokio::test]
+    async fn a_fetch_brings_status_headers_and_body_and_no_more_than_a_megabyte() {
+        let hosts = vec!["localhost".to_owned()];
+        let url = serve_once(br#"{"ac":[]}"#.to_vec()).await;
+        let (status, headers, body) = fetch_page("test", fetch_url(&url, &hosts).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(
+            headers.get("x-ratelimit-remaining").map(String::as_str),
+            Some("499")
+        );
+        assert_eq!(body, r#"{"ac":[]}"#);
+        let url = serve_once(vec![b' '; FETCH_BYTES + 1]).await;
+        let why = fetch_page("test", fetch_url(&url, &hosts).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(why, "larger than 1 MB");
+    }
+
+    #[test]
+    fn a_script_gets_its_answer_in_on_fetched_and_reports_traffic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.ts"),
+            r"
+export function describe() { return { panels: [] }; }
+export function onFetched(input: { id: string; status?: number; body: string }) {
+  const ac = JSON.parse(input.body).ac as { hex: string; lat: number; lon: number }[];
+  return {
+    log: [`${input.id} ${input.status}`],
+    traffic: ac.map((a) => ({ address: a.hex, latitudeDeg: a.lat, longitudeDeg: a.lon })),
+  };
+}
+",
+        )
+        .unwrap();
+        let module = dir.path().join("index.ts").display().to_string();
+        let (plugin, _) = load(&module, true).unwrap();
+        let mut running =
+            Running::new(plugin, &Subscriptions::default()).with_hosts(vec!["api.adsb.lol".into()]);
+        let effects = running
+            .fetched(&FetchedInput {
+                id: "near".into(),
+                url: "https://api.adsb.lol/v2/point/51/0/10".into(),
+                status: Some(200),
+                body: r#"{"ac":[{"hex":"406bc1","lat":51.4,"lon":-0.4}]}"#.into(),
+                ..FetchedInput::default()
+            })
+            .unwrap();
+        assert_eq!(effects.log, ["near 200"]);
+        assert_eq!(effects.traffic.len(), 1);
+        assert_eq!(effects.traffic[0].address, "406bc1");
+        assert_eq!(effects.traffic[0].latitude_deg, Some(51.4));
+    }
+
+    /// The adsb.lol plugin UXDuck includes, loaded in the script host.
+    fn adsb_lol() -> (tempfile::TempDir, extism::Plugin) {
+        let dir = tempfile::tempdir().unwrap();
+        let written = write_included(dir.path());
+        let folder = written.iter().find(|d| d.ends_with("adsb-lol")).unwrap();
+        let manifest = inspect(folder).unwrap();
+        assert!(manifest.starts_off && manifest.traffic_source);
+        assert_eq!(manifest.hosts, ["api.adsb.lol"]);
+        let (plugin, _) = load(&format!("{folder}/index.ts"), true).unwrap();
+        (dir, plugin)
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one plugin's whole day, step by step"
+    )]
+    fn adsb_lol_asks_around_the_vehicles_and_reports_what_it_hears() {
+        use uxduck_contracts::dto::plugin::MessageBatch;
+        let (_dir, mut plugin) = adsb_lol();
+        let now = wall_ms(Instant::now());
+        let started: Effects = effects(
+            &mut plugin,
+            "on_start",
+            &StartInput {
+                stored: serde_json::Map::new(),
+                now_ms: now,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            started.traffic_status.unwrap().note.as_deref(),
+            Some("0 of 500 requests today")
+        );
+        // No vehicle yet: nothing asked.
+        let idle: Effects = effects(&mut plugin, "on_tick", &TickInput { now_ms: now }).unwrap();
+        assert!(idle.fetch.is_empty());
+        let message = |name: &str, fields: serde_json::Value| MessageInput {
+            vehicle_id: "alpha".into(),
+            system_id: 1,
+            component_id: 1,
+            name: name.into(),
+            fields: fields.as_object().unwrap().clone(),
+        };
+        let _: Effects = effects(
+            &mut plugin,
+            "on_messages",
+            &MessageBatch {
+                messages: vec![
+                    message(
+                        "GLOBAL_POSITION_INT",
+                        serde_json::json!({ "lat": 514_700_000, "lon": -4_500_000 }),
+                    ),
+                    message("HEARTBEAT", serde_json::json!({ "base_mode": 209 })),
+                ],
+                gap: false,
+            },
+        )
+        .unwrap();
+        let asked: Effects =
+            effects(&mut plugin, "on_tick", &TickInput { now_ms: now + 5000 }).unwrap();
+        assert_eq!(asked.fetch.len(), 1);
+        assert_eq!(
+            asked.fetch[0].url,
+            "https://api.adsb.lol/v2/point/51.4700/-0.4500/25"
+        );
+        assert_eq!(asked.store["used"], 1);
+        // Armed: again after 10 s, not before; one at a time.
+        let soon: Effects = effects(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: now + 10_000,
+            },
+        )
+        .unwrap();
+        assert!(soon.fetch.is_empty());
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-ratelimit-limit".to_owned(),
+            "4, 4;w=1, 60;w=60, 500;w=86400".to_owned(),
+        );
+        let heard: Effects = effects(
+            &mut plugin,
+            "on_fetched",
+            &FetchedInput {
+                id: "around".into(),
+                url: asked.fetch[0].url.clone(),
+                status: Some(200),
+                headers,
+                body: r#"{"ac":[{"hex":"39bdb2","type":"adsb_icao","flight":"AFR58PM ","alt_baro":3075,"alt_geom":3000,"gs":157.7,"track":264.54,"geom_rate":2048,"squawk":"2012","category":"A3","lat":51.476813,"lon":-0.524139,"seen_pos":0.4,"seen":0.2},{"hex":"~2a3b4c","lat":51.5,"lon":-0.4}]}"#.into(),
+                error: None,
+                now_ms: now + 5300,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            heard.traffic.len(),
+            1,
+            "a TIS-B track (~) has no ICAO address"
+        );
+        let afr = &heard.traffic[0];
+        assert_eq!(afr.address, "39bdb2");
+        assert_eq!(afr.callsign.as_deref(), Some("AFR58PM"));
+        assert!((afr.altitude_m.unwrap() - 914.4).abs() < 0.01);
+        assert!((afr.ground_speed_mps.unwrap() - 81.13).abs() < 0.01);
+        assert_eq!(
+            afr.category,
+            uxduck_contracts::dto::traffic::TrafficCategory::Large
+        );
+        let status = heard.traffic_status.unwrap();
+        assert_eq!(status.credit.as_deref(), Some("adsb.lol (ODbL)"));
+        assert_eq!(status.note.as_deref(), Some("1 of 500 requests today"));
+        let again: Effects = effects(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: now + 15_500,
+            },
+        )
+        .unwrap();
+        assert_eq!(again.fetch.len(), 1);
+        // Told it is over the limit: it stops and says so, as a problem.
+        let mut later = BTreeMap::new();
+        later.insert("retry-after".to_owned(), "3600".to_owned());
+        let stopped: Effects = effects(
+            &mut plugin,
+            "on_fetched",
+            &FetchedInput {
+                id: "around".into(),
+                url: again.fetch[0].url.clone(),
+                status: Some(429),
+                headers: later,
+                now_ms: now + 15_600,
+                ..FetchedInput::default()
+            },
+        )
+        .unwrap();
+        let status = stopped.traffic_status.unwrap();
+        assert!(status.problem);
+        assert!(
+            status
+                .note
+                .unwrap()
+                .starts_with("adsb.lol's free limit is used up")
+        );
+        let quiet: Effects = effects(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: now + 30_000,
+            },
+        )
+        .unwrap();
+        assert!(quiet.fetch.is_empty());
+    }
+
+    #[test]
+    fn adsb_lol_says_when_it_cannot_reach_adsb_lol() {
+        let (_dir, mut plugin) = adsb_lol();
+        let failed: Effects = effects(
+            &mut plugin,
+            "on_fetched",
+            &FetchedInput {
+                id: "around".into(),
+                url: "https://api.adsb.lol/v2/point/51/0/25".into(),
+                error: Some("no answer in 10 s".into()),
+                now_ms: wall_ms(Instant::now()),
+                ..FetchedInput::default()
+            },
+        )
+        .unwrap();
+        let status = failed.traffic_status.unwrap();
+        assert!(status.problem);
+        assert!(
+            status
+                .note
+                .unwrap()
+                .starts_with("Cannot reach adsb.lol: no answer in 10 s")
         );
     }
 

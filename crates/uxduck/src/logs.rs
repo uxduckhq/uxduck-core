@@ -19,6 +19,120 @@ const KEPT: usize = 500;
 const QUEUED: usize = 256;
 const MAX_RECORD_BYTES: usize = 16_384;
 
+/// Detached daemons retain two bounded files instead of losing stderr.
+/// The existing console worker keeps disk I/O away from the engine.
+pub fn console_writer() -> std::io::Result<Box<dyn Write + Send>> {
+    match std::env::var_os("UXDUCK_BACKGROUND_LOG") {
+        Some(path) => Ok(Box::new(FileLog::open(std::path::PathBuf::from(path))?)),
+        None => Ok(Box::new(std::io::stderr())),
+    }
+}
+
+const FILE_LIMIT: u64 = 2 * 1024 * 1024;
+
+struct FileLog {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+    size: u64,
+}
+
+impl FileLog {
+    fn open(path: std::path::PathBuf) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        let file = Self::append(&path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            path,
+            file: Some(file),
+            size,
+        })
+    }
+
+    fn append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+}
+
+impl Write for FileLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.size + bytes.len() as u64 > FILE_LIMIT {
+            self.file.take();
+            let previous = self.path.with_extension("log.1");
+            match std::fs::remove_file(&previous) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            std::fs::rename(&self.path, previous)?;
+            self.size = 0;
+        }
+        if self.file.is_none() {
+            self.file = Some(Self::append(&self.path)?);
+        }
+        let written = self
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("no log file"))?
+            .write(bytes)?;
+        self.size += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn background_logs_survive_reopen_and_rotate_with_one_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs/daemon.log");
+        let mut log = FileLog::open(path.clone()).unwrap();
+        log.write_all(b"first\n").unwrap();
+        drop(log);
+        let mut log = FileLog::open(path.clone()).unwrap();
+        log.write_all(b"second\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        // Fill the file as the console worker does, a record at a time.
+        let chunk = vec![b'x'; MAX_RECORD_BYTES];
+        for _ in 0..=(FILE_LIMIT / MAX_RECORD_BYTES as u64) {
+            log.write_all(&chunk).unwrap();
+        }
+        let previous = path.with_extension("log.1");
+        assert!(std::fs::metadata(&previous).unwrap().len() <= FILE_LIMIT);
+        assert!(std::fs::metadata(&path).unwrap().len() <= FILE_LIMIT);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+}
+
 enum Console {
     Record(Vec<u8>),
     Flush(mpsc::SyncSender<()>),

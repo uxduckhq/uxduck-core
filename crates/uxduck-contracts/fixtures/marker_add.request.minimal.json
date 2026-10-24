@@ -1,0 +1,7 @@
+{
+  "method": "marker/add",
+  "params": {
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523
+  }
+}

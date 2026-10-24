@@ -8,6 +8,7 @@
 //! ([`OwnSet`]). The host fetches, verifies and stores through a
 //! [`DefinitionsPort`] and answers through [`Engine::definitions_arrived`].
 
+pub(crate) mod baselines;
 pub mod files;
 pub(crate) mod queries;
 

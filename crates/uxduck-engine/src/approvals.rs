@@ -94,6 +94,9 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::PlaceSave(_)
         | ClientRequest::PlaceUpdate(_)
         | ClientRequest::PlaceRemove(_)
+        | ClientRequest::MarkerAdd(_)
+        | ClientRequest::MarkerUpdate(_)
+        | ClientRequest::MarkerRemove(_)
         | ClientRequest::PlanCreate(_)
         | ClientRequest::PlanUpdate(_)
         | ClientRequest::PlanUndo(_)
@@ -111,6 +114,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
+        | ClientRequest::VehicleLook(_)
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleDelete(_)
@@ -595,11 +599,25 @@ impl Engine {
                     .get(&params.id)
                     .map_or(params.id.as_str(), |s| s.name.as_str())
             ),
+            ClientRequest::MarkerAdd(params) => params.name.as_ref().map_or_else(
+                || "add a marker to the map".into(),
+                |name| format!("add the marker {name} to the map"),
+            ),
+            ClientRequest::MarkerUpdate(params) => {
+                format!("change the marker {}", self.marker_name(&params.id))
+            }
+            ClientRequest::MarkerRemove(params) => {
+                format!("remove the marker {}", self.marker_name(&params.id))
+            }
             ClientRequest::PluginInstall(_) | ClientRequest::PluginCommand(_) => {
                 self.plugin_summary(request)
             }
             other => format!("call {}", method_of(other)),
         }
+    }
+
+    fn marker_name<'a>(&'a self, id: &'a str) -> &'a str {
+        self.state.markers.get(id).map_or(id, |m| m.name.as_str())
     }
 
     fn broadcast_approval(&mut self, notification: &ServerNotification) {

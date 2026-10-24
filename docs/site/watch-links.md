@@ -1,5 +1,6 @@
 ---
 title: Watch links
+search: Share a live drone flight with a read-only link
 order: 13.5
 group: Preview features
 summary: Let anyone watch a flight in a browser, read only, with a link.

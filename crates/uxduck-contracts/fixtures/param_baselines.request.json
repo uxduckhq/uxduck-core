@@ -1,0 +1,6 @@
+{
+  "method": "param/baselines",
+  "params": {
+    "vehicleId": "vid-1"
+  }
+}

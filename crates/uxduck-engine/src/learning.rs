@@ -49,7 +49,10 @@ pub(crate) fn feedback(
         .state
         .items
         .get(&params.item_id)
-        .filter(|item| item.kind == ItemKind::AgentMessage)
+        .filter(|item| {
+            item.kind == ItemKind::AgentMessage
+                && crate::rpc::threads::sees_thread(engine, connection, &item.thread_id)
+        })
         .cloned()
         .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "no such answer"))?;
     let comment = params

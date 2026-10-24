@@ -104,6 +104,8 @@ impl From<&p::Plugin> for dto::Plugin {
             }),
             enabled: v.enabled,
             included: v.included,
+            hosts: v.hosts.clone(),
+            traffic_source: v.traffic_source,
         }
     }
 }

@@ -1,8 +1,9 @@
 ---
 title: Troubleshooting
+search: Troubleshoot ArduPilot connections, stale telemetry and pre-arm failures
 order: 5.5
 group: Debug and integrate
-summary: Diagnose missing vehicles, stale telemetry, pre-arm failures and missing descriptions.
+summary: Diagnose missing vehicles, stale telemetry, ArduPilot pre-arm failures and missing parameter descriptions.
 ---
 
 Start with the connection, then the age of the evidence, then the vehicle's messages. These checks read state without changing flight settings.

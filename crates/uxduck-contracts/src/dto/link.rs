@@ -44,6 +44,10 @@ pub enum LinkKind {
     /// Sends vehicle traffic to another program or daemon over UDP. With
     /// `read-write`, what it sends back reaches the vehicles.
     UdpForward { host: String, port: u16 },
+    /// A USB receiver stick on this computer (S173): UXDuck starts a decoder
+    /// (readsb or dump1090-fa) on it and reads its SBS-1 output. It carries
+    /// traffic, never MAVLink.
+    UsbReceiver {},
     /// A simulated vehicle this daemon runs, starting at a place. Only a
     /// daemon whose `initialize` says `simulator` accepts it.
     Simulator {
@@ -82,6 +86,11 @@ pub enum LinkKind {
         /// ready to fly. Off unless asked for: Quick start asks.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         with_mission: bool,
+        /// Hears a few simulated aircraft from ArduPilot's ADS-B simulator
+        /// (ADR-0034). Off unless asked for: beside real traffic they
+        /// would confuse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        traffic: bool,
         /// Which instance it is, for its ports and system id. The daemon
         /// assigns it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +136,27 @@ impl SimAutopilot {
     #[must_use]
     pub fn is_ardupilot(&self) -> bool {
         *self == Self::Ardupilot
+    }
+}
+
+/// What a link's bytes are (S172, ADR-0034): MAVLink from vehicles, or
+/// traffic from a receiver on the ground. A traffic link is read-only and
+/// a traffic source of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkCarries {
+    #[default]
+    Mavlink,
+    /// SBS-1 (`BaseStation`) text, as readsb serves on TCP 30003.
+    Sbs,
+    /// GDL90, as Stratux broadcasts on UDP 4000.
+    Gdl90,
+}
+
+impl LinkCarries {
+    #[must_use]
+    pub fn is_mavlink(&self) -> bool {
+        *self == Self::Mavlink
     }
 }
 
@@ -184,6 +214,9 @@ pub struct Link {
     pub from_link: Option<String>,
     /// Keeps the daemon running when the last window closes.
     pub keep_alive: bool,
+    /// MAVLink, or traffic from a receiver on the ground (S172).
+    #[serde(default, skip_serializing_if = "LinkCarries::is_mavlink")]
+    pub carries: LinkCarries,
     /// A simulated vehicle started in the air: how the take-off that its
     /// start runs is going.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +277,10 @@ pub struct LinkAddParams {
     /// Keeps the daemon running when the last window closes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_alive: bool,
+    /// MAVLink unless a receiver's traffic (S172): `sbs` on a TCP client,
+    /// `gdl90` on a UDP listener. A traffic link is read-only.
+    #[serde(default, skip_serializing_if = "LinkCarries::is_mavlink")]
+    pub carries: LinkCarries,
 }
 
 /// `link/update`: what changes on a link; everything else stays. A new

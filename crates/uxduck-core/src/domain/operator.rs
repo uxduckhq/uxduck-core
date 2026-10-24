@@ -140,6 +140,9 @@ pub enum TabKind {
     /// found only by typing "duck" in the command palette (maintainer,
     /// 2026-10-12). It follows no vehicle.
     Duck,
+    /// Other aircraft near the vehicles and the sources that report them
+    /// (S168, ADR-0034). It follows no vehicle.
+    Airspace,
 }
 
 impl TabKind {
@@ -181,6 +184,7 @@ impl TabKind {
             Self::Missions => "missions",
             Self::Profile => "profile",
             Self::Duck => "duck",
+            Self::Airspace => "airspace",
         }
     }
 
@@ -510,7 +514,8 @@ pub struct LayoutPreset {
 /// 10 (2026-10-18): the page's phone layouts keep one too; the desktop's are
 /// unchanged, the number matching the page's.
 /// 11 (2026-10-22): Simple and both phone presets include Mission as a tab.
-pub const LAYOUT_PRESET_VERSION: u32 = 11;
+/// 12 (2026-10-23): combine Mission tabs with Airspace in built-in presets.
+pub const LAYOUT_PRESET_VERSION: u32 = 12;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -934,7 +939,7 @@ impl Layout {
 
     /// The map and the 3D map (always, maintainer 2026-10-18) above
     /// Control (with Mission, Controllers, History and Parameters) beside Telemetry
-    /// (with Messages, Flight display and Instruments): four panes, with
+    /// (with Messages, Flight display Instruments and Airspace): four panes, with
     /// Advanced's everyday tools as tabs (maintainer, 2026-10-18).
     #[must_use]
     pub fn simple_dock() -> DockNode {
@@ -980,6 +985,7 @@ impl Layout {
                                     TabKind::Messages,
                                     TabKind::FlightDisplay,
                                     TabKind::Instruments,
+                                    TabKind::Airspace,
                                 ]),
                             },
                         ],
@@ -1001,7 +1007,7 @@ impl Layout {
     /// mission) and Messages (with parameters, controllers, then the MAVLink
     /// inspector and a Chart at the end; maintainer, 2026-10-12); on the
     /// right, Control short above Telemetry (with
-    /// history). No chat: it opens on request as the left column
+    /// history and Airspace, maintainer 2026-10-21). No chat: it opens on request as the left column
     /// (maintainer, 2026-10-05). "Reset layout" brings it back.
     #[must_use]
     pub fn flight_dock() -> DockNode {
@@ -1066,7 +1072,14 @@ impl Layout {
                         Direction::Column,
                         vec![
                             (400, DockNode::of(&[TabKind::Control])),
-                            (600, DockNode::of(&[TabKind::Telemetry, TabKind::History])),
+                            (
+                                600,
+                                DockNode::of(&[
+                                    TabKind::Telemetry,
+                                    TabKind::History,
+                                    TabKind::Airspace,
+                                ]),
+                            ),
                         ],
                     ),
                 ),
@@ -1275,6 +1288,27 @@ pub struct Operator {
     /// kept. A type not here shows UXDuck's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_actions: Vec<ControlActions>,
+    /// The marker that is them (ADR-0035 M12), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub me_marker_id: Option<String>,
+    /// Their display settings as the app keeps them (C1): a JSON document
+    /// with their display preferences and saved layouts, written by the
+    /// app and synced with the operator so it reaches their other
+    /// computers. Opaque here; none until the app first writes it, when
+    /// the fields above it that hold display choices are its old copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// The verified account this operator last signed in as, recorded by
+    /// UXDuck from the server's answer and never set by a client; synced
+    /// with the operator. Choosing another operator of the account signed
+    /// in keeps the sign-in (maintainer, 2026-10-23).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// The mapping they use with each controller, kept on them rather than
+    /// the controller (maintainer, 2026-10-23), so another person at the
+    /// same computer keeps theirs. Recorded when they claim one with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controller_mappings: Vec<ControllerMapping>,
     /// Bumped on every change; writes carry the version they started from.
     pub version: u64,
 }
@@ -1392,6 +1426,71 @@ pub struct ControlActions {
     pub class: crate::domain::telemetry_layout::VehicleClass,
     pub actions: Vec<String>,
 }
+
+/// The mapping an operator uses with one controller: by the controller's
+/// id on the computer where it was chosen, and its name, which finds the
+/// same kind of controller on another computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerMapping {
+    pub controller_id: String,
+    pub controller_name: String,
+    pub mapping_id: String,
+}
+
+/// The most controllers an operator keeps a mapping for; the oldest goes.
+pub const MAX_CONTROLLER_MAPPINGS: usize = 32;
+
+impl Operator {
+    /// The mapping this operator chose for a controller: for that one, else
+    /// for one of the same name.
+    #[must_use]
+    pub fn mapping_for(&self, controller_id: &str, controller_name: &str) -> Option<&str> {
+        self.controller_mappings
+            .iter()
+            .find(|m| m.controller_id == controller_id)
+            .or_else(|| {
+                self.controller_mappings
+                    .iter()
+                    .find(|m| m.controller_name == controller_name)
+            })
+            .map(|m| m.mapping_id.as_str())
+    }
+
+    /// Notes the mapping chosen for a controller, newest last; `false` if
+    /// it was already the one.
+    pub fn choose_mapping(
+        &mut self,
+        controller_id: &str,
+        controller_name: &str,
+        mapping_id: &str,
+    ) -> bool {
+        if self
+            .controller_mappings
+            .iter()
+            .any(|m| m.controller_id == controller_id && m.mapping_id == mapping_id)
+        {
+            return false;
+        }
+        self.controller_mappings
+            .retain(|m| m.controller_id != controller_id);
+        self.controller_mappings.push(ControllerMapping {
+            controller_id: controller_id.to_owned(),
+            controller_name: controller_name.to_owned(),
+            mapping_id: mapping_id.to_owned(),
+        });
+        let over = self
+            .controller_mappings
+            .len()
+            .saturating_sub(MAX_CONTROLLER_MAPPINGS);
+        self.controller_mappings.drain(..over);
+        true
+    }
+}
+
+/// The largest display document an operator carries, in bytes: well
+/// under the account's limit for one synced change.
+pub const MAX_DISPLAY_BYTES: usize = 256 * 1024;
 
 /// The most buttons on the Control tab for one type of vehicle.
 pub const MAX_CONTROL_ACTIONS: usize = 40;
@@ -2315,6 +2414,10 @@ mod tests {
                 class: crate::domain::telemetry_layout::VehicleClass::Copter,
                 actions: vec!["vehicle:mode:guided".into()],
             }],
+            me_marker_id: None,
+            display: None,
+            account_id: None,
+            controller_mappings: Vec::new(),
             version: 1,
         })
         .unwrap();

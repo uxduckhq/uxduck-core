@@ -1,8 +1,9 @@
 ---
 title: Camera video
+search: Drone camera video over RTSP or UDP, with KLV and recordings
 order: 7
 group: Use your vehicle
-summary: Receive camera video, resolve port conflicts and find recordings.
+summary: Receive H.264 or H.265 camera video over RTSP or UDP, resolve port conflicts and find recordings.
 ---
 
 Watch and record your vehicle's camera beside the map, and see on the map where it's looking.

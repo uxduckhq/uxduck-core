@@ -241,6 +241,8 @@ pub enum Feature {
     /// Ducky, the duck tab found by typing "duck" in the command palette
     /// (maintainer, 2026-10-12).
     Ducky,
+    /// The Airspace tab: other aircraft and their sources (S168).
+    Airspace,
 }
 
 /// A setting that was changed; never its value.

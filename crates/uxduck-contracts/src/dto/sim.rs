@@ -49,6 +49,11 @@ pub struct SimStartParams {
     /// ready to fly. Off unless asked for: Quick start asks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub with_mission: bool,
+    /// Hears a few simulated aircraft from ArduPilot's ADS-B simulator
+    /// (ADR-0034). Off unless asked for: beside real traffic they would
+    /// confuse. ArduPilot only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Also sends the vehicle's traffic to another program, such as another

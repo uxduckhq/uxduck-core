@@ -11,6 +11,7 @@ use crate::dto::controller::{Controller, InputMapping};
 use crate::dto::files::FileTransfer;
 use crate::dto::history::HistoryEntry;
 use crate::dto::link::Link;
+use crate::dto::marker::Marker;
 use crate::dto::mission::Mission;
 use crate::dto::notification::Notification;
 use crate::dto::operator::Operator;
@@ -55,6 +56,8 @@ pub enum EntityType {
     Plugin,
     /// A saved place.
     Place,
+    /// A marker on the map (ADR-0035).
+    Marker,
     /// A saved plan (ADR-0029).
     Plan,
     /// A simulation snapshot (S34).
@@ -129,6 +132,8 @@ pub struct Snapshot {
     pub plugins: Option<Vec<Plugin>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub places: Option<Vec<SavedPlace>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markers: Option<Vec<Marker>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plans: Option<Vec<Plan>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +216,8 @@ pub struct EntityChange {
     pub plugin: Option<Plugin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<SavedPlace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<Marker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

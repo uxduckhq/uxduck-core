@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::parameter::same_value;
+use crate::domain::parameter::show_value;
 
 /// What a note is about (H2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,12 @@ pub enum HistoryEvent {
     SnapshotSaved {
         snapshot_id: String,
         name: String,
+    },
+    /// A flight ended (C8, ADR-0022 H3): its record in `flight/list`, and
+    /// what happened in words ("Flew 12 min, highest 45 m").
+    FlightEnded {
+        flight_id: String,
+        text: String,
     },
     /// Its mission changed (S134): the record in its missions over time,
     /// and what happened in words ("Mission uploaded from Ridge survey: 38
@@ -156,7 +162,7 @@ impl HistoryEvent {
             },
             Self::TypeChanged { from, to } => format!("Type changed from {from} to {to}"),
             Self::SnapshotSaved { name, .. } => format!("Snapshot “{name}” saved"),
-            Self::MissionChanged { text, .. } => text.clone(),
+            Self::MissionChanged { text, .. } | Self::FlightEnded { text, .. } => text.clone(),
             Self::ParameterChanged {
                 name,
                 from,
@@ -166,10 +172,11 @@ impl HistoryEvent {
                 span_us,
                 ..
             } => {
-                let change = match (from, changes.unwrap_or(1)) {
+                let (from, to) = (from.map(show_value), show_value(*to));
+                let change = match (&from, changes.unwrap_or(1)) {
                     (Some(from), 1) => format!("{name} {from} → {to}"),
                     (None, 1) => format!("{name} set to {to}"),
-                    (Some(from), n) if same_value(*from, *to) => {
+                    (Some(from), n) if from == &to => {
                         let over = span(span_us.unwrap_or(0));
                         format!("{name} changed {n} times over {over} and is back at {to}")
                     }

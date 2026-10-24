@@ -1,0 +1,16 @@
+{
+  "abi": 2,
+  "id": "adsb-lol",
+  "name": "adsb.lol",
+  "version": "0.1.0",
+  "description": "Aircraft around your vehicles from adsb.lol, a free, community-run ADS-B network. When on, this computer sends adsb.lol the area your vehicles are in, every 10 seconds while one is armed and every 30 seconds otherwise, within adsb.lol's free 500 requests a day.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": {
+    "messages": { "names": ["GLOBAL_POSITION_INT", "HEARTBEAT"], "cadenceMs": 1000 },
+    "tickMs": 5000
+  },
+  "hosts": ["api.adsb.lol"],
+  "trafficSource": true,
+  "startsOff": true
+}

@@ -2,6 +2,36 @@ use uxduck_core::domain::{link as core_link, vehicle as core};
 
 use crate::dto::{link, vehicle as dto};
 
+impl From<core::VehicleLook> for dto::VehicleLook {
+    fn from(value: core::VehicleLook) -> Self {
+        match value {
+            core::VehicleLook::Plane => Self::Plane,
+            core::VehicleLook::Vtol => Self::Vtol,
+            core::VehicleLook::Multicopter => Self::Multicopter,
+            core::VehicleLook::Rover => Self::Rover,
+            core::VehicleLook::Boat => Self::Boat,
+            core::VehicleLook::Submarine => Self::Submarine,
+            core::VehicleLook::Airship => Self::Airship,
+            core::VehicleLook::Jet => Self::Jet,
+        }
+    }
+}
+
+impl From<dto::VehicleLook> for core::VehicleLook {
+    fn from(value: dto::VehicleLook) -> Self {
+        match value {
+            dto::VehicleLook::Plane => Self::Plane,
+            dto::VehicleLook::Vtol => Self::Vtol,
+            dto::VehicleLook::Multicopter => Self::Multicopter,
+            dto::VehicleLook::Rover => Self::Rover,
+            dto::VehicleLook::Boat => Self::Boat,
+            dto::VehicleLook::Submarine => Self::Submarine,
+            dto::VehicleLook::Airship => Self::Airship,
+            dto::VehicleLook::Jet => Self::Jet,
+        }
+    }
+}
+
 impl From<core::Presence> for dto::Presence {
     fn from(value: core::Presence) -> Self {
         match value {
@@ -45,6 +75,8 @@ impl From<&core::Vehicle> for dto::Vehicle {
                 })
                 .collect(),
             size_cm: v.size_cm,
+            traffic: v.traffic,
+            look: v.look.map(Into::into),
             version: v.version,
         }
     }
@@ -83,6 +115,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
             core_link::LinkKind::TcpServer { host, port } => Self::TcpServer { host, port },
             core_link::LinkKind::UdpClient { host, port } => Self::UdpClient { host, port },
             core_link::LinkKind::UdpForward { host, port } => Self::UdpForward { host, port },
+            core_link::LinkKind::UsbReceiver {} => Self::UsbReceiver {},
             core_link::LinkKind::Simulator {
                 vehicle,
                 autopilot,
@@ -97,6 +130,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 binary,
                 wipe,
                 with_mission,
+                traffic,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -112,6 +146,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 binary,
                 wipe,
                 with_mission,
+                traffic,
                 instance,
             },
         }
@@ -131,6 +166,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
             link::LinkKind::TcpServer { host, port } => Self::TcpServer { host, port },
             link::LinkKind::UdpClient { host, port } => Self::UdpClient { host, port },
             link::LinkKind::UdpForward { host, port } => Self::UdpForward { host, port },
+            link::LinkKind::UsbReceiver {} => Self::UsbReceiver {},
             link::LinkKind::Simulator {
                 vehicle,
                 autopilot,
@@ -145,6 +181,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 binary,
                 wipe,
                 with_mission,
+                traffic,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -160,6 +197,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 binary,
                 wipe,
                 with_mission,
+                traffic,
                 instance,
             },
         }
@@ -223,6 +261,26 @@ impl From<core_link::LinkPolicy> for link::LinkPolicy {
     }
 }
 
+impl From<core_link::LinkCarries> for link::LinkCarries {
+    fn from(c: core_link::LinkCarries) -> Self {
+        match c {
+            core_link::LinkCarries::Mavlink => Self::Mavlink,
+            core_link::LinkCarries::Sbs => Self::Sbs,
+            core_link::LinkCarries::Gdl90 => Self::Gdl90,
+        }
+    }
+}
+
+impl From<link::LinkCarries> for core_link::LinkCarries {
+    fn from(c: link::LinkCarries) -> Self {
+        match c {
+            link::LinkCarries::Mavlink => Self::Mavlink,
+            link::LinkCarries::Sbs => Self::Sbs,
+            link::LinkCarries::Gdl90 => Self::Gdl90,
+        }
+    }
+}
+
 impl From<link::LinkPolicy> for core_link::LinkPolicy {
     fn from(value: link::LinkPolicy) -> Self {
         match value {
@@ -280,6 +338,7 @@ impl From<&core_link::Link> for link::Link {
             vehicle_filter: l.vehicle_filter.clone(),
             from_link: l.from_link.clone(),
             keep_alive: l.keep_alive,
+            carries: l.carries.into(),
             launch: l.launch.as_ref().map(|launch| link::Launch {
                 stage: match launch.stage {
                     core_link::LaunchStage::Restoring => link::LaunchStage::Restoring,

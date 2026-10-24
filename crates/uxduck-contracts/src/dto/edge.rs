@@ -172,6 +172,9 @@ pub struct RemoteVehicle {
     /// the viewer draws it the size of the one its autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// The model the person chose to draw it as; absent, its type's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<crate::dto::vehicle::VehicleLook>,
     pub presence: crate::dto::vehicle::Presence,
     pub armed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,6 +198,25 @@ pub struct RemoteVehicle {
     pub at_ms: u64,
 }
 
+/// A marker as watchers see it (ADR-0035 M9, S182): where it is shown now,
+/// named, with its look and heading. Only markers with Watch links on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMarker {
+    pub id: String,
+    pub name: String,
+    pub look: crate::dto::marker::MarkerLook,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_deg: Option<f64>,
+    /// When its source last gave this, for a live one (milliseconds since
+    /// the Unix epoch, the computer's clock); absent when set by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub fix_at_ms: Option<u64>,
+}
+
 /// `edge/publish`, the computer to the relay: the latest of the vehicles
 /// asked for. A vehicle not in `vehicles` is unchanged.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -207,6 +229,9 @@ pub struct EdgePublish {
     /// Vehicles the computer no longer has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
+    /// Every marker watchers see, when any changed; absent, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markers: Option<Vec<RemoteMarker>>,
 }
 
 /// One point of a vehicle's trail, about once a second.
@@ -230,6 +255,9 @@ pub struct EdgeSnapshot {
     pub vehicles: Vec<RemoteVehicle>,
     /// The current flight's trail of each vehicle, oldest first.
     pub trails: Vec<VehicleTrail>,
+    /// The markers the computer shares with watchers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<RemoteMarker>,
     /// The relay's clock as it sent this.
     #[schemars(schema_with = "crate::safe::integer")]
     pub relay_at_ms: u64,
@@ -256,6 +284,9 @@ pub struct EdgeDelta {
     pub vehicles: Vec<RemoteVehicle>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
+    /// Every shared marker, when any changed; absent, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markers: Option<Vec<RemoteMarker>>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub relay_at_ms: u64,
 }
@@ -357,6 +388,9 @@ pub struct RemoteView {
     pub vehicles: Vec<RemoteVehicle>,
     /// The current flight's trail of each vehicle, oldest first.
     pub trails: Vec<VehicleTrail>,
+    /// The markers it shares with watchers (S182).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<RemoteMarker>,
     /// What this window needs to play the camera it asked for (S84).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub video: Vec<RemoteVideo>,

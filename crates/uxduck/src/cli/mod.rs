@@ -3,13 +3,16 @@
 pub mod client;
 pub mod find;
 pub mod link_spec;
+pub mod marker;
 pub mod mission;
 mod new_plugin;
 pub mod params;
 pub mod plan;
 pub mod practice;
 mod practice_replay;
+mod sim_build;
 pub mod terrain;
+mod traffic;
 pub mod vehicle;
 pub mod video;
 
@@ -136,6 +139,11 @@ pub enum Command {
         #[command(subcommand)]
         command: mission::MissionCommand,
     },
+    /// Markers on the map (S177): `uxduck marker add --lat 53.07 --lon -4.08 --look flag`.
+    Marker {
+        #[command(subcommand)]
+        command: marker::MarkerCommand,
+    },
     /// Saved plans (S125): `uxduck plan import mission.plan`.
     Plan {
         #[command(subcommand)]
@@ -145,6 +153,16 @@ pub enum Command {
     Terrain {
         #[command(subcommand)]
         command: terrain::TerrainCommand,
+    },
+    /// Other aircraft near the vehicles (S168): `uxduck traffic` lists
+    /// them, `uxduck traffic sources` lists who reports them, and `uxduck
+    /// traffic on Alpha` uses Alpha's ADS-B receiver.
+    Traffic {
+        #[command(subcommand)]
+        command: Option<traffic::TrafficCommand>,
+        /// The aircraft as JSON, for scripts.
+        #[arg(long)]
+        json: bool,
     },
     /// Looks for vehicles plugged in or on this computer, and says why
     /// anything found is not one.
@@ -252,7 +270,8 @@ impl OpenArgs {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct DaemonArgs {
-    /// Loopback port: 45000 normally, 45100 with --dev; 0 picks a free one.
+    /// Loopback port: tries 45000 normally, 45100 with --dev, then a free
+    /// port if occupied. An explicit port must be free; 0 picks a free one.
     #[arg(long, env = "UXDUCK_PORT")]
     port: Option<u16>,
     /// The dev server's origin, allowed and used as the UI address with `--dev`.
@@ -749,6 +768,10 @@ pub enum DevCommand {
         /// Shake more and more from 10 s in, past 30 and 60 m/s² (S72).
         #[arg(long)]
         vibration_high: bool,
+        /// Its ADS-B receiver hears this many aircraft circling home, sent as
+        /// `ADSB_VEHICLE` once a second (S168).
+        #[arg(long, default_value_t = 0)]
+        traffic: u8,
         /// Say "Leak Detected!" every 10 s, as `ArduSub` does (S72).
         #[arg(long)]
         leak: bool,
@@ -1022,8 +1045,10 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Vehicle { command }) => vehicle::run(&data_dir, command).await,
         Some(Command::Practice { command }) => practice::run(&data_dir, command).await,
         Some(Command::Plan { command }) => plan::run(&data_dir, command).await,
+        Some(Command::Marker { command }) => marker::run(&data_dir, command).await,
         Some(Command::Mission { command }) => mission::run(&data_dir, command).await,
         Some(Command::Terrain { command }) => terrain::run(&data_dir, command).await,
+        Some(Command::Traffic { command, json }) => traffic::run(&data_dir, command, json).await,
         Some(Command::Video { command }) => video::run(&data_dir, command).await,
         Some(Command::Find {
             network,
@@ -1096,6 +1121,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             battery,
             no_gps,
             lose_gps_at,
+            traffic,
         } => {
             let version = FakeVersion::parse(&firmware, commit.as_deref())?;
             let options = FakeOptions {
@@ -1114,6 +1140,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 terrain_shift,
                 battery,
                 gps_lost_from_s: if no_gps { Some(0.0) } else { lose_gps_at },
+                traffic,
             };
             fake_vehicle(&to, system_id, &uid, version, options).await
         }
@@ -1616,10 +1643,13 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
                 "frame": frame,
                 "speedup": speedup,
                 "inAirM": in_air,
-                "binary": binary.map(|b| b.display().to_string()),
+                "binary": binary.as_ref().map(|b| b.display().to_string()),
                 "wipe": wipe,
                 "name": name,
             });
+            if binary.is_none() {
+                sim_build::ensure(data_dir, &vehicle, &autopilot).await?;
+            }
             let params = strip_nulls(params).to_string();
             rpc_call(data_dir, "sim/start", Some(&params)).await
         }
@@ -1960,6 +1990,7 @@ pub(crate) async fn start_daemon(
     let mut command = std::process::Command::new(exe);
     let mut diagnostic = tempfile::NamedTempFile::new()?;
     command.env(crate::startup::ERROR_FILE, diagnostic.path());
+    command.env("UXDUCK_BACKGROUND_LOG", data_dir.join("logs/daemon.log"));
     if dev {
         command.arg("--dev");
     }
@@ -2199,6 +2230,11 @@ async fn plugin(data_dir: &std::path::Path, command: PluginCommand) -> Result<()
                         .join(", "))
                     .unwrap_or_default()
             );
+            // The hosts it may fetch from (S170).
+            if let Some(hosts) = plugin["hosts"].as_array().filter(|h| !h.is_empty()) {
+                let hosts: Vec<&str> = hosts.iter().filter_map(|h| h.as_str()).collect();
+                println!("It may fetch from {}.", hosts.join(", "));
+            }
         }
         PluginCommand::List => {
             let mut client = LocalClient::connect(data_dir).await?;
@@ -2313,18 +2349,38 @@ fn own_test(
     path: &std::path::Path,
     produced: &std::collections::BTreeSet<String>,
 ) -> Result<(), CliError> {
-    let Ok(text) = std::fs::read_to_string(path.join("test.json")) else {
-        return Ok(());
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Test {
+        expect: Expectations,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Expectations {
+        items: Vec<String>,
+    }
+    let file = path.join("test.json");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("No test.json: replay only; no expectations checked.");
+            return Ok(());
+        }
+        Err(error) => return Err(CliError::Usage(format!("{}: {error}", file.display()))),
     };
-    let expected: serde_json::Value =
+    let expected: Test =
         serde_json::from_str(&text).map_err(|e| CliError::Usage(format!("test.json: {e}")))?;
-    let missing: Vec<String> = expected["expect"]["items"]
-        .as_array()
+    if expected.expect.items.is_empty() {
+        return Err(CliError::Usage(
+            "test.json: expect.items must list at least one key; omit test.json for replay only"
+                .into(),
+        ));
+    }
+    let missing: Vec<String> = expected
+        .expect
+        .items
         .into_iter()
-        .flatten()
-        .filter_map(|k| k.as_str())
-        .filter(|k| !produced.contains(*k))
-        .map(str::to_owned)
+        .filter(|key| !produced.contains(key))
         .collect();
     if !missing.is_empty() {
         return Err(CliError::Usage(format!(
@@ -2350,11 +2406,20 @@ fn plugin_test(
 async fn daemon_action(data_dir: &std::path::Path, action: DaemonAction) -> Result<(), CliError> {
     match action {
         DaemonAction::Restart { yes } => restart_daemon(data_dir, yes).await,
-        DaemonAction::Start => match LocalClient::connect(data_dir).await {
-            Ok(_) => Ok(()),
-            Err(CliError::NoDaemon(_)) => start_daemon(data_dir, false).await.map(drop),
-            Err(error) => Err(error),
-        },
+        DaemonAction::Start => {
+            match LocalClient::connect(data_dir).await {
+                Ok(_) => {}
+                Err(CliError::NoDaemon(_)) => {
+                    start_daemon(data_dir, false).await?;
+                }
+                Err(error) => return Err(error),
+            }
+            let target = std::fs::read_to_string(data_dir.join(REOPEN_AFTER_UPDATE)).ok();
+            if matches!(target.as_deref(), Some("window" | "browser")) {
+                open(data_dir, false, false, target.as_deref()).await?;
+            }
+            Ok(())
+        }
         DaemonAction::Stop { for_update } => stop_daemon(data_dir, for_update).await,
     }
 }
@@ -2371,7 +2436,11 @@ async fn stop_daemon(data_dir: &std::path::Path, for_update: bool) -> Result<(),
     };
     client.initialize().await?;
     if for_update {
-        std::fs::write(data_dir.join(REOPEN_AFTER_UPDATE), b"")?;
+        if let Some(target) = open_target(&mut client).await? {
+            std::fs::write(data_dir.join(REOPEN_AFTER_UPDATE), target)?;
+        } else {
+            let _ = std::fs::remove_file(data_dir.join(REOPEN_AFTER_UPDATE));
+        }
     }
     client
         .call("daemon/stop", Value::Object(serde_json::Map::new()))
@@ -2392,6 +2461,7 @@ async fn stop_daemon(data_dir: &std::path::Path, for_update: bool) -> Result<(),
 async fn restart_daemon(data_dir: &std::path::Path, yes: bool) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
+    let target = open_target(&mut client).await?;
     let started = crate::paths::read_info(data_dir).map(|info| info.started_us);
     match client
         .call("daemon/restart", serde_json::json!({ "confirm": yes }))
@@ -2419,6 +2489,9 @@ async fn restart_daemon(data_dir: &std::path::Path, yes: bool) -> Result<(), Cli
             && client.initialize().await.is_ok()
         {
             println!("Restarted on port {}.", info.port);
+            if let Some(target) = target {
+                open(data_dir, false, false, Some(target)).await?;
+            }
             return Ok(());
         }
         if std::time::Instant::now() > deadline {
@@ -2428,6 +2501,27 @@ async fn restart_daemon(data_dir: &std::path::Path, yes: bool) -> Result<(), Cli
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// External installers can query even an older daemon before stopping it.
+/// The tray is an operator CLI; only a shell or page needs restoring.
+async fn open_target(client: &mut LocalClient) -> Result<Option<&'static str>, CliError> {
+    let result = client.call("client/list", serde_json::json!({})).await?;
+    let Some(clients) = result["clients"].as_array() else {
+        return Err(CliError::Protocol("client/list returned no clients".into()));
+    };
+    let connected = |kind| {
+        clients.iter().any(|row| {
+            row["connections"].as_u64().unwrap_or(0) > 0 && row["client"]["kind"] == kind
+        })
+    };
+    Ok(if connected("shell") {
+        Some("window")
+    } else if connected("operator-ui") {
+        Some("browser")
+    } else {
+        None
+    })
 }
 
 /// `uxduck dev replay`: a recorded tlog's frames, one datagram each, at the
@@ -2645,6 +2739,7 @@ struct FakeOptions {
     terrain_shift: i16,
     battery: f64,
     gps_lost_from_s: Option<f64>,
+    traffic: u8,
 }
 
 async fn fake_vehicle(
@@ -2670,6 +2765,7 @@ async fn fake_vehicle(
         terrain_shift,
         battery,
         gps_lost_from_s,
+        traffic,
     } = options;
     let target: std::net::SocketAddr = to
         .parse()
@@ -2704,6 +2800,7 @@ async fn fake_vehicle(
     }
     vehicle.battery_from_pct = battery.clamp(0.0, 100.0);
     vehicle.gps_lost_from_s = gps_lost_from_s;
+    vehicle.traffic = traffic;
     eprintln!("fake vehicle {system_id} (uid {uid:x}) sending to {target}; Ctrl-C to stop");
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
     // Telemetry at 5 Hz, one datagram per frame as an autopilot sends them.
@@ -2789,6 +2886,7 @@ async fn run_daemon(
         port: args
             .port
             .unwrap_or(if dev { DEV_PORT } else { DEFAULT_PORT }),
+        port_fallback: args.port.is_none(),
         dev_origin: dev.then_some(args.dev_origin),
         hosted_origins: crate::api::listeners::http::HOSTED_ORIGINS
             .iter()
@@ -3004,4 +3102,49 @@ fn spin_for_tests() {
                 crate::wakes::count("spin-for-tests (a deliberate busy loop)");
             }
         });
+}
+
+#[cfg(all(test, feature = "plugins"))]
+mod plugin_test_checks {
+    use super::*;
+
+    #[test]
+    fn malformed_expectations_never_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        for text in [
+            "{}",
+            r#"{"expect":{"itmes":["missing"]}}"#,
+            r#"{"expect":{"items":[42]}}"#,
+            r#"{"expect":{"items":[]}}"#,
+            r#"{"expect":{"items":"missing"}}"#,
+            r#"{"expect":{"items":[]},"unexpected":true}"#,
+        ] {
+            std::fs::write(dir.path().join("test.json"), text).unwrap();
+            assert!(
+                own_test(dir.path(), &std::collections::BTreeSet::new()).is_err(),
+                "{text}"
+            );
+        }
+        std::fs::remove_file(dir.path().join("test.json")).unwrap();
+        std::fs::create_dir(dir.path().join("test.json")).unwrap();
+        assert!(own_test(dir.path(), &std::collections::BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn expectations_check_every_key_and_allow_replay_without_assertions() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(own_test(dir.path(), &std::collections::BTreeSet::new()).is_ok());
+        std::fs::write(
+            dir.path().join("test.json"),
+            r#"{"expect":{"items":["test.first","test.second"]}}"#,
+        )
+        .unwrap();
+        let produced = ["test.first".into()].into_iter().collect();
+        let error = own_test(dir.path(), &produced).unwrap_err().to_string();
+        assert!(error.contains("never produced test.second"), "{error}");
+        let produced = ["test.first".into(), "test.second".into()]
+            .into_iter()
+            .collect();
+        assert!(own_test(dir.path(), &produced).is_ok());
+    }
 }

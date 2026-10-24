@@ -10,6 +10,7 @@ use crate::domain::command::Receipt;
 use crate::domain::controller::{Controller, InputMapping};
 use crate::domain::history::HistoryEntry;
 use crate::domain::link::Link;
+use crate::domain::marker::Marker;
 use crate::domain::mission::Mission;
 use crate::domain::notification::Notification;
 use crate::domain::operator::Operator;
@@ -20,7 +21,7 @@ use crate::domain::plan::{Plan, PlanRevision};
 use crate::domain::plugin::{Plugin, PublishedPlugin};
 use crate::domain::settings::Settings;
 use crate::domain::snapshot::Snapshot;
-use crate::domain::sync::{LibraryVehicle, SyncState};
+use crate::domain::sync::{LibraryLink, LibraryVehicle, SyncState};
 use crate::domain::thread::{Folder, Item, Thread};
 use crate::domain::vehicle::Vehicle;
 use crate::domain::video::{VideoPhoto, VideoRecording, VideoSource};
@@ -161,6 +162,13 @@ pub enum Change {
     PlaceRemoved {
         id: String,
     },
+    /// A marker added or changed (ADR-0035).
+    MarkerUpserted {
+        marker: Marker,
+    },
+    MarkerRemoved {
+        id: String,
+    },
     /// A saved plan made or changed (ADR-0029), with how its undo history
     /// moves.
     PlanSaved {
@@ -169,6 +177,17 @@ pub enum Change {
     },
     /// A plan deleted more than 30 days ago, gone for good.
     PlanRemoved {
+        id: String,
+    },
+    /// A flight began, or ended (C8).
+    FlightUpserted {
+        flight: crate::domain::flight::Flight,
+    },
+    /// A vehicle's parameter baseline set or changed (C7).
+    BaselineUpserted {
+        baseline: crate::domain::parameter::ParamBaseline,
+    },
+    BaselineRemoved {
         id: String,
     },
     /// A mission a vehicle holds, new to it or held again (S134).
@@ -263,6 +282,15 @@ pub enum Change {
     /// it.
     LibraryUpserted {
         vehicle: LibraryVehicle,
+    },
+    /// A connection from the account's library, as another computer
+    /// published it (C2).
+    LinkLibraryUpserted {
+        link: LibraryLink,
+    },
+    /// Another computer removed a connection it had published (C2).
+    LinkLibraryRemoved {
+        id: String,
     },
     /// A camera stream appeared, started or stopped, changed its picture,
     /// or was assigned to a vehicle (ADR-0017 V4). Its counters are written

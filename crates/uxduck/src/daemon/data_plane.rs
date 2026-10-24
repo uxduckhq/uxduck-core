@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use uxduck_contracts::dto::inspect::InspectDirection;
-use uxduck_core::domain::link::{Link, LinkKind, LinkPolicy, LinkStatus};
+use uxduck_core::domain::link::{Link, LinkCarries, LinkKind, LinkPolicy, LinkStatus};
 use uxduck_engine::plane as glue;
 use uxduck_engine::runtime::{Clock, ControlRoute, LinkPort, TransferOrder};
 use uxduck_mavlink::framing::{Reassembler, header, split};
@@ -171,6 +171,9 @@ struct Open {
     /// A simulated vehicle's build, stopped when the link closes (S17),
     /// and watched until then for stopping on its own.
     simulator: Option<crate::sim::Running>,
+    /// A USB receiver stick's decoder (S173), stopped when the link closes
+    /// and watched until then for stopping on its own.
+    decoder: Option<crate::receiver_stick::Decoder>,
     /// Whether the transport has connected (a stream) or heard anything,
     /// to tell a simulator that stopped from one that never started.
     started: bool,
@@ -181,11 +184,59 @@ struct Open {
     /// A stream's partial frames, by peer: a TCP server has a stream per
     /// connection.
     reassemblers: HashMap<String, Reassembler>,
+    /// A receiver's traffic, by peer, when the link carries it (S172).
+    traffic: Option<TrafficReaders>,
     tlog_path: PathBuf,
     tlog: Option<BufWriter<File>>,
     /// Where the tlog's next record goes, for its index; None once a write
     /// failed, after which its records are no longer indexed.
     tlog_end: Option<u64>,
+}
+
+/// Readers of a receiver's traffic, one per peer: each TCP connection or
+/// UDP sender is a stream of its own.
+enum TrafficReaders {
+    Sbs(HashMap<String, uxduck_mavlink::ground_traffic::SbsReader>),
+    Gdl90(HashMap<String, uxduck_mavlink::ground_traffic::Gdl90Reader>),
+}
+
+impl TrafficReaders {
+    fn new(carries: LinkCarries) -> Option<Self> {
+        match carries {
+            LinkCarries::Mavlink => None,
+            LinkCarries::Sbs => Some(Self::Sbs(HashMap::new())),
+            LinkCarries::Gdl90 => Some(Self::Gdl90(HashMap::new())),
+        }
+    }
+
+    fn read(
+        &mut self,
+        peer: &str,
+        bytes: &[u8],
+        now_us: u64,
+    ) -> Vec<uxduck_core::domain::traffic::TrafficReport> {
+        match self {
+            Self::Sbs(readers) => readers
+                .entry(peer.to_owned())
+                .or_default()
+                .push(bytes, now_us),
+            Self::Gdl90(readers) => readers
+                .entry(peer.to_owned())
+                .or_default()
+                .push(bytes, now_us),
+        }
+    }
+
+    fn forget(&mut self, peer: &str) {
+        match self {
+            Self::Sbs(readers) => {
+                readers.remove(peer);
+            }
+            Self::Gdl90(readers) => {
+                readers.remove(peer);
+            }
+        }
+    }
 }
 
 impl Drop for Open {
@@ -237,7 +288,11 @@ pub fn start(
             let steering = plane.controls.routed();
             let ticking = plane.session.needs_tick();
             let vehicles = !plane.session.routes().is_empty();
-            let simulating = plane.open.values().any(|open| open.simulator.is_some());
+            // Simulators' builds and receiver sticks' decoders are watched.
+            let simulating = plane
+                .open
+                .values()
+                .any(|open| open.simulator.is_some() || open.decoder.is_some());
             tokio::select! {
                 command = commands.recv() => match command {
                     None => break,
@@ -424,7 +479,12 @@ impl Plane {
         // connects to its SERIAL0, retrying while it starts (S17); PX4's
         // is UDP, and is greeted until it answers.
         let mut simulator = None;
-        let spawned = if link.kind.is_simulator() {
+        let mut decoder = None;
+        let spawned = if matches!(link.kind, LinkKind::UsbReceiver {}) {
+            let (spawned, started) = self.receiver_stick(&link, events);
+            decoder = started;
+            spawned
+        } else if link.kind.is_simulator() {
             match self.simulators.launch(&link) {
                 Ok((running, crate::sim::Endpoint::Tcp(port))) => {
                     simulator = Some(running);
@@ -465,10 +525,12 @@ impl Plane {
                         relay,
                         kind: link.kind.clone(),
                         simulator,
+                        decoder,
                         started: false,
                         writable,
                         forward,
                         reassemblers: HashMap::new(),
+                        traffic: TrafficReaders::new(link.carries),
                         tlog_path: tlog_path.clone(),
                         tlog: None,
                         tlog_end: Some(0),
@@ -508,6 +570,26 @@ impl Plane {
         }
     }
 
+    /// A USB receiver stick (S173): its decoder first, then its SBS-1 port,
+    /// retried while the decoder starts.
+    fn receiver_stick(
+        &self,
+        link: &Link,
+        events: links::Events,
+    ) -> (
+        Result<LinkHandle, (LinkStatus, String)>,
+        Option<crate::receiver_stick::Decoder>,
+    ) {
+        let log = self.tlog_dir.join(format!("{}-decoder.log", link.id));
+        match crate::receiver_stick::launch(&log) {
+            Ok(decoder) => {
+                let handle = links::tcp_client("127.0.0.1".into(), decoder.port, events);
+                (Ok(handle), Some(decoder))
+            }
+            Err(detail) => (Err((LinkStatus::Down, detail)), None),
+        }
+    }
+
     /// Simulated vehicles whose build stopped on its own (it crashed, or
     /// never started): the link closes, so it stops retrying a port nobody
     /// listens on, and says why it is down. The link and its vehicle are
@@ -524,6 +606,23 @@ impl Plane {
                 let detail = simulator.stopped_detail(open.started, status);
                 stopped.push((link_id.clone(), detail));
             }
+        }
+        // A receiver stick's decoder that stopped: no stick, or it was
+        // unplugged (S173).
+        let mut decoders = Vec::new();
+        for (link_id, open) in &mut self.open {
+            if let Some(detail) = open
+                .decoder
+                .as_mut()
+                .and_then(crate::receiver_stick::Decoder::exited)
+            {
+                decoders.push((link_id.clone(), detail));
+            }
+        }
+        for (link_id, detail) in decoders {
+            tracing::warn!(link = %link_id, %detail, "a receiver stick's decoder stopped");
+            self.close(&link_id);
+            self.report(&link_id, LinkStatus::Down, Some(detail)).await;
         }
         for (link_id, detail) in stopped {
             tracing::warn!(link = %link_id, %detail, "a simulated vehicle's build stopped by itself");
@@ -585,12 +684,28 @@ impl Plane {
             LinkEvent::Left { peer } => {
                 if let Some(open) = self.open.get_mut(link_id) {
                     open.reassemblers.remove(&peer);
+                    if let Some(traffic) = &mut open.traffic {
+                        traffic.forget(&peer);
+                    }
                 }
             }
             LinkEvent::Received { peer, bytes } => {
                 let Some(open) = self.open.get_mut(link_id) else {
                     return;
                 };
+                // A receiver's traffic, not MAVLink (S172): read, and told to
+                // the engine as the link's own source.
+                if let Some(traffic) = &mut open.traffic {
+                    let reports = traffic.read(&peer, &bytes, SystemClock.now_us());
+                    if !reports.is_empty() {
+                        let link_id = link_id.to_owned();
+                        let _ = self
+                            .engine
+                            .run(move |e| e.receiver_traffic(&link_id, reports))
+                            .await;
+                    }
+                    return;
+                }
                 let frames: Vec<Vec<u8>> = if open.handle.stream {
                     open.reassemblers
                         .entry(peer.clone())
@@ -964,6 +1079,11 @@ async fn spawn(
                 .map_err(|e| (LinkStatus::Down, e.to_string()))
         }
         LinkKind::TcpClient { host, port } => Ok(links::tcp_client(host, port, events)),
+        // Opened with its decoder, in `open`.
+        LinkKind::UsbReceiver {} => Err((
+            LinkStatus::Down,
+            "a USB receiver stick opens with its decoder".into(),
+        )),
         LinkKind::TcpServer { host, port } => {
             let address = resolve(&host, port).map_err(|e| (LinkStatus::Down, e))?;
             links::tcp_server(address, events).await.map_err(|error| {

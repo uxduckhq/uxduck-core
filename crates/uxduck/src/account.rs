@@ -49,6 +49,9 @@ struct Account {
     credentials: FileCredentials,
     /// Serializes token changes with accepting a response for that token.
     session_change: Mutex<()>,
+    /// The email the last code went to and its challenge, which the API binds
+    /// to signing in or creating the account (S158).
+    challenge: Mutex<Option<(String, String)>>,
     generation: AtomicU64,
     /// What `/v1/me` said last, for answers while offline.
     last: Mutex<AccountState>,
@@ -108,6 +111,7 @@ pub fn start(
         client: crate::online::client(Duration::from_secs(20)),
         credentials,
         session_change: Mutex::new(()),
+        challenge: Mutex::new(None),
         generation: AtomicU64::new(0),
         last: Mutex::new(initial.clone()),
         analytics_internal: Mutex::new(None),
@@ -240,6 +244,17 @@ impl Account {
         self.credentials.account_session()
     }
 
+    /// Whether `account` is the verified account of the session held now;
+    /// never when that is unknown, offline or signed out.
+    fn same_account(&self, account: Option<&str>) -> bool {
+        let state = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        account.is_some()
+            && self.token().is_some()
+            && state.signed_in
+            && !state.offline
+            && state.account_id.as_deref() == account
+    }
+
     fn cached_state(&self) -> AccountState {
         let mut state = self
             .last
@@ -307,12 +322,19 @@ impl Account {
         }
         if let AccountAction::SwitchOperator {
             operator_id,
+            account_id,
             restoring,
             device,
         } = action
         {
             return self
-                .switch_operator(operator_id.as_deref(), restoring, generation, device)
+                .switch_operator(
+                    operator_id.as_deref(),
+                    account_id.as_deref(),
+                    restoring,
+                    generation,
+                    device,
+                )
                 .await;
         }
         if self.credentials.account_operator().as_deref() != operator {
@@ -336,11 +358,28 @@ impl Account {
     async fn switch_operator(
         &self,
         operator: Option<&str>,
+        account: Option<&str>,
         restoring: bool,
         generation: u64,
         device: Option<String>,
     ) -> Result<Value, ApiError> {
         if restoring && self.credentials.account_operator().as_deref() == operator {
+            return Ok(json!({}));
+        }
+        // The same person (maintainer, 2026-10-23): an operator who last
+        // signed in as the account the server verified for the session here
+        // keeps it, as a browser profile of the same account would.
+        if self.same_account(account) {
+            let _change = self
+                .session_change
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return Err(session_changed());
+            }
+            self.credentials
+                .bind_operator(operator)
+                .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
             return Ok(json!({}));
         }
         // Upgrading/reloading an already signed-in page is not a person
@@ -383,6 +422,11 @@ impl Account {
             self.credentials
                 .bind_operator(operator)
                 .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
+            // A code asked for by the previous operator does not sign this one in.
+            *self
+                .challenge
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
             self.remember(&AccountState::default());
         }
         // Local credential removal completes the switch. Network revocation is
@@ -436,14 +480,32 @@ impl Account {
             | AccountAction::Environment
             | AccountAction::SetEnvironment { .. } => unreachable!(),
             AccountAction::Get => to_json(&self.get(api, client).await?),
+            // One way in (S158): the API emails an existing account a sign-in
+            // code and anyone else a code that creates their account.
             AccountAction::SignIn { email } => {
+                *self
+                    .challenge
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
                 let answer = client
-                    .post(format!("{api}/v1/auth/email-otp/send-verification-otp"))
-                    .json(&json!({ "email": email, "type": "sign-in" }))
+                    .post(format!("{api}/v1/auth/email-code/request"))
+                    .json(&json!({ "email": email, "intent": "continue" }))
                     .send()
                     .await
                     .map_err(|_| unreachable())?;
-                refused(answer).await?;
+                let id = refused_or(answer)
+                    .await?
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body["challengeId"].as_str().map(str::to_owned))
+                    .ok_or_else(|| {
+                        ApiError::new(ErrorKind::Internal, "the server sent no challenge")
+                    })?;
+                *self
+                    .challenge
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some((email, id));
                 Ok(json!({}))
             }
             AccountAction::Verify {
@@ -451,9 +513,22 @@ impl Account {
                 code,
                 product_updates,
             } => {
+                let challenge = self
+                    .challenge
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+                    .filter(|(sent_to, _)| *sent_to == email)
+                    .map(|(_, id)| id)
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            ErrorKind::InvalidValue,
+                            "Ask for a new code, then try again.",
+                        )
+                    })?;
                 let answer = client
-                    .post(format!("{api}/v1/auth/sign-in/email-otp"))
-                    .json(&json!({ "email": email, "otp": code }))
+                    .post(format!("{api}/v1/auth/email-code/verify"))
+                    .json(&json!({ "challengeId": challenge, "code": code }))
                     .send()
                     .await
                     .map_err(|_| unreachable())?;
@@ -463,6 +538,11 @@ impl Account {
                     .and_then(|t| t.to_str().ok())
                     .map(str::to_owned);
                 let answer = refused_or(answer).await?;
+                // Used now; a wrong code (refused above) keeps it for another try.
+                *self
+                    .challenge
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
                 // Whether this sign-in made the account (S114).
                 let created = answer
                     .json::<Value>()
@@ -664,6 +744,9 @@ impl Account {
                 }
                 answer.json::<Value>().await.map_err(|_| unreadable_reply())
             }
+            AccountAction::Versions { entity, id } => {
+                self.versions(api, client, session, &entity, &id).await
+            }
             action @ (AccountAction::SentFeedback | AccountAction::ClaimFeedback { .. }) => {
                 self.sent_feedback(api, client, action, session).await
             }
@@ -704,6 +787,29 @@ impl Account {
 
     /// Where the account is signed in, signing sessions out, and asking for
     /// the link that deletes it (S114, ADR-0013 P20 to P23).
+    /// One synced entity's copies in the account (C5).
+    async fn versions(
+        &self,
+        api: &str,
+        client: &reqwest::Client,
+        session: &SessionSnapshot,
+        entity: &str,
+        id: &str,
+    ) -> Result<Value, ApiError> {
+        let answer = client
+            .get(format!("{api}/v1/sync/versions"))
+            .query(&[("entity", entity), ("id", id)])
+            .bearer_auth(session.signed_in()?)
+            .send()
+            .await
+            .map_err(|_| unreachable())?;
+        if !answer.status().is_success() {
+            refused(answer).await?;
+            return Ok(json!({ "versions": [] }));
+        }
+        answer.json::<Value>().await.map_err(|_| unreadable_reply())
+    }
+
     async fn sessions(
         &self,
         api: &str,

@@ -4,7 +4,7 @@
 //! this module in its config; this module runs it in the same Extism
 //! sandbox, with the same memory and time limits, as any plugin, and
 //! exports the same functions. A script exports any of `describe`,
-//! `onItems`, `onMessages`, `onFrames`, `onCommand`, `onTick` and `onStart`; it may import the
+//! `onItems`, `onMessages`, `onFrames`, `onCommand`, `onTick`, `onStart` and `onFetched`; it may import the
 //! helpers of `@uxduck/sdk`, and nothing else.
 //!
 //! The engine is Boa, which builds for bare WebAssembly with no C
@@ -187,6 +187,11 @@ pub fn on_tick(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn on_start(input: String) -> FnResult<String> {
     call("onStart", &input, "{}")
+}
+
+#[plugin_fn]
+pub fn on_fetched(input: String) -> FnResult<String> {
+    call("onFetched", &input, "{}")
 }
 
 /// Random bytes for the engine (`Math.random`, hash seeds): a plugin has no

@@ -834,6 +834,53 @@ pub const FAILSAFE_S: f64 = 1.5;
 
 /// ArduPilot SITL's default home (CMAC, Canberra): degrees and metres AMSL.
 const HOME: (f64, f64, f64) = (-35.363_261, 149.165_230, 584.0);
+
+/// The `i`th aircraft the fake vehicle's receiver hears at `t_s`: circling
+/// home, each wider, higher and slower than the last.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "MAVLink's integer fields"
+)]
+fn traffic_aircraft(i: u8, t_s: f64) -> mavio::dialects::ardupilotmega::messages::AdsbVehicle {
+    use mavio::dialects::ardupilotmega::enums::{AdsbAltitudeType, AdsbEmitterType, AdsbFlags};
+    let n = f64::from(i);
+    let radius = 1_500.0 + 700.0 * n;
+    let period = 240.0 + 60.0 * n;
+    let angle = std::f64::consts::TAU * t_s / period + n;
+    let (north, east) = (radius * angle.cos(), radius * angle.sin());
+    let lat = HOME.0 + north / 111_320.0;
+    let lon = HOME.1 + east / (111_320.0 * HOME.0.to_radians().cos());
+    // Anticlockwise seen from above: the track leads the angle by 90°.
+    let track = (angle.to_degrees() + 90.0).rem_euclid(360.0);
+    let speed = std::f64::consts::TAU * radius / period;
+    let mut callsign = [0u8; 9];
+    let name = format!("TFC{:02}", i + 1);
+    callsign[..name.len()].copy_from_slice(name.as_bytes());
+    mavio::dialects::ardupilotmega::messages::AdsbVehicle {
+        icao_address: 0x00AD_F000 + u32::from(i),
+        lat: (lat * 1e7).round() as i32,
+        lon: (lon * 1e7).round() as i32,
+        altitude_type: AdsbAltitudeType::Geometric,
+        altitude: ((HOME.2 + 150.0 + 120.0 * n) * 1000.0).round() as i32,
+        heading: (track * 100.0).round() as u16,
+        hor_velocity: (speed * 100.0).round() as u16,
+        ver_velocity: 0,
+        callsign,
+        emitter_type: [
+            AdsbEmitterType::Light,
+            AdsbEmitterType::Rotocraft,
+            AdsbEmitterType::Glider,
+            AdsbEmitterType::Large,
+            AdsbEmitterType::Uav,
+        ][usize::from(i) % 5],
+        tslc: 0,
+        // Coordinates, altitude, heading, velocity, callsign, simulated and
+        // vertical velocity.
+        flags: AdsbFlags::from_bits_truncate(0x00df),
+        squawk: 7000,
+    }
+}
 /// How far the fake vehicle's terrain data puts the ground under home.
 const TERRAIN_BELOW_HOME_M: f64 = 4.0;
 
@@ -952,6 +999,11 @@ pub struct FakeVehicle {
     /// from then on, as ArduPilot sends none without one. From 0, it never
     /// has one.
     pub gps_lost_from_s: Option<f64>,
+    /// How many aircraft its ADS-B receiver hears (S168): each circles home
+    /// at its own radius and height, reported once a second as
+    /// `ADSB_VEHICLE`, as ArduPilot forwards what its receiver hears.
+    pub traffic: u8,
+    traffic_at_s: f64,
     /// Serves its storage and its parameters, with defaults, by MAVLink
     /// FTP as ArduPilot does (S74, S121); without it, only the list.
     pub ftp: bool,
@@ -1103,6 +1155,8 @@ impl FakeVehicle {
             requested: std::collections::BTreeSet::new(),
             battery_from_pct: 100.0,
             gps_lost_from_s: None,
+            traffic: 0,
+            traffic_at_s: f64::NEG_INFINITY,
             said_leak_s: None,
             ftp: true,
             terrain: None,
@@ -1172,6 +1226,20 @@ impl FakeVehicle {
     }
 
     /// Its next frame of `message` from `component`, if it streams it.
+    /// What its ADS-B receiver hears, once a second (S168).
+    fn traffic_frames(&mut self, t_s: f64) -> Vec<Vec<u8>> {
+        if self.traffic == 0 || t_s - self.traffic_at_s < 1.0 {
+            return Vec::new();
+        }
+        self.traffic_at_s = t_s;
+        (0..self.traffic)
+            .map(|i| {
+                let seq = self.next();
+                frame(self.system_id, 1, seq, &traffic_aircraft(i, t_s))
+            })
+            .collect()
+    }
+
     fn stream(&mut self, component: u8, message: &dyn Message) -> Option<Vec<u8>> {
         if self.streams_on_request && !self.requested.contains(&message.id()) {
             return None;
@@ -1877,6 +1945,7 @@ impl FakeVehicle {
         ));
         frames.extend(self.outputs(t_s));
         frames.extend(self.health(t_s, height));
+        frames.extend(self.traffic_frames(t_s));
         frames
     }
 

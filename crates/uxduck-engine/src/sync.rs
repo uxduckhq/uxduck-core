@@ -15,12 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::sync::{
-    LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncStatus,
+    LibraryLink as LibraryLinkDto, LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity,
+    SyncStatus,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
-use uxduck_core::domain::sync::{Activation, LibraryVehicle, SyncState};
+use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
+use uxduck_core::domain::plan::{Plan, PlanRevision};
+use uxduck_core::domain::sync::{Activation, LibraryLink, LibraryVehicle, SyncState};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change, Event};
 
@@ -87,6 +90,44 @@ pub fn wins(incoming: (u64, &str), current: Option<(u64, &str)>) -> bool {
     current.is_none_or(|current| incoming > current)
 }
 
+/// Whether a connection goes to the account (C2): one someone made, not a
+/// simulation's, the forward a simulation start made, or a USB receiver
+/// stick, which is this computer's alone.
+fn shared_link(link: &Link) -> bool {
+    !link.kind.is_simulator()
+        && link.from_link.is_none()
+        && !matches!(link.kind, LinkKind::UsbReceiver {})
+}
+
+/// What a connection is in the account: how to reach its vehicles, not
+/// whether it is up.
+fn recipe(link: &Link) -> Link {
+    Link {
+        status: LinkStatus::Configured,
+        status_detail: None,
+        keep_alive: false,
+        launch: None,
+        paused: false,
+        version: 0,
+        ..link.clone()
+    }
+}
+
+/// What a plan is in the account (C3): its current body, not this
+/// computer's undo history, uploads or local version.
+fn shared_plan(plan: &Plan) -> Change {
+    Change::PlanSaved {
+        plan: Plan {
+            uploads: Vec::new(),
+            undo: 0,
+            redo: 0,
+            version: 0,
+            ..plan.clone()
+        },
+        revision: PlanRevision::None,
+    }
+}
+
 /// What a vehicle is in the account: its profile, not where it was last
 /// heard.
 fn profile(vehicle: &Vehicle) -> Vehicle {
@@ -120,6 +161,17 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
         Change::OperatorUpserted { operator } => ("operator", &operator.id, Some(operator.version)),
         Change::OperatorRemoved { id } => ("operator", id, None),
         Change::VehicleUpserted { vehicle } => ("vehicle", &vehicle.id, None),
+        // A flight someone kept for the logbook (C9).
+        Change::FlightUpserted { flight } => ("flight", &flight.id, Some(flight.version)),
+        // A vehicle's approved parameters (C7).
+        Change::BaselineUpserted { baseline } => ("baseline", &baseline.id, Some(baseline.version)),
+        Change::BaselineRemoved { id } => ("baseline", id, None),
+        // The later edit wins, wherever it was made (C3).
+        Change::PlanSaved { plan, .. } => ("plan", &plan.id, Some(plan.changed_at_us)),
+        Change::PlanRemoved { id } => ("plan", id, None),
+        // A connection's version is when it changed here, as a vehicle's (C2).
+        Change::LinkUpserted { link } => ("link", &link.id, None),
+        Change::LinkRemoved { id } => ("link", id, None),
         Change::HistoryUpserted { entry } => ("history", &entry.id, Some(entry.version)),
         // Its time orders it: a plugin removed and installed again wins.
         Change::PluginPublished { plugin } => ("plugin", &plugin.id, Some(plugin.at_us)),
@@ -168,15 +220,20 @@ pub fn outgoing(event: &Event) -> Outgoing {
         }
         // A vehicle kept here keeps its history here (ADR-0022 H1).
         Change::HistoryUpserted { entry } if entry.local => return Outgoing::Ignore,
+        Change::LinkUpserted { link } if !shared_link(link) => return Outgoing::Ignore,
+        Change::PlanSaved { plan, .. } => shared_plan(plan),
+        // Flight data is off by default: only a flight someone kept goes (C9).
+        Change::FlightUpserted { flight } if !flight.keep => return Outgoing::Ignore,
+        Change::LinkUpserted { link } => Change::LinkUpserted { link: recipe(link) },
         change => change.clone(),
     };
     let Some((entity, id, version)) = identify(&change) else {
         return Outgoing::Ignore;
     };
-    let version = match (entity, version) {
-        ("vehicle", _) => event.ts_us,
-        (_, Some(version)) => version,
-        (_, None) => REMOVED,
+    let version = match (&change, entity, version) {
+        (Change::LinkUpserted { .. }, _, _) | (_, "vehicle", _) => event.ts_us,
+        (_, _, Some(version)) => version,
+        (_, _, None) => REMOVED,
     };
     Outgoing::Send(Box::new(SyncChange {
         entity: entity.to_owned(),
@@ -250,8 +307,29 @@ pub(crate) fn handle(
                 for entry in waiting {
                     engine.activate(connection, &entry);
                 }
+                engine.use_waiting_links(connection);
             }
             engine.wake_sync();
+        }
+        ClientRequest::SyncRestore(params) => {
+            let restored = engine.restore_plan(connection, &params.id, params.change)?;
+            return to_value(&uxduck_contracts::dto::plan::Plan::from(&restored));
+        }
+        ClientRequest::SyncActivate(params) if params.entity == SyncEntity::Link => {
+            let entry = engine
+                .state
+                .link_library
+                .get(&params.id)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::new(ErrorKind::NotFound, "no such connection in the account")
+                })?;
+            let actor = Actor {
+                client_id: format!("{FROM_ACCOUNT}library"),
+                operator_id: engine.actor(connection).operator_id,
+                identity: None,
+            };
+            engine.use_link_as(actor, &entry)?;
         }
         ClientRequest::SyncActivate(params) => {
             let entry = engine
@@ -350,6 +428,20 @@ impl Engine {
         if let Change::VehicleUpserted { vehicle } = &change.change {
             return self.take_library(actor, &pulled.device, vehicle, change.version);
         }
+        // A connection goes into the library, never live by itself (C2).
+        match &change.change {
+            Change::LinkUpserted { link } => {
+                return self.take_link(actor, &pulled.device, link, change.version);
+            }
+            Change::LinkRemoved { id } => {
+                if !self.state.link_library.contains_key(id) {
+                    return false;
+                }
+                self.commit_as(actor, Change::LinkLibraryRemoved { id: id.clone() });
+                return true;
+            }
+            _ => {}
+        }
         let current = self.current(entity, id);
         if change.version == REMOVED && current.is_none() {
             return false;
@@ -357,6 +449,10 @@ impl Engine {
         let current = current.as_ref().map(|(v, d)| (*v, d.as_str()));
         if !wins((change.version, &change.digest), current) {
             return false;
+        }
+        if let Change::PlanSaved { plan, .. } = &change.change {
+            self.take_plan(actor, plan);
+            return true;
         }
         self.commit_as(actor.clone(), change.change.clone());
         if let Change::PluginPublished { plugin } = &change.change {
@@ -397,6 +493,22 @@ impl Engine {
                     },
                 )
             })?,
+            "flight" => state
+                .flights
+                .get(id)
+                .map(|f| (f.version, Change::FlightUpserted { flight: f.clone() }))?,
+            "baseline" => state.baselines.get(id).map(|b| {
+                (
+                    b.version,
+                    Change::BaselineUpserted {
+                        baseline: b.clone(),
+                    },
+                )
+            })?,
+            "plan" => state
+                .plans
+                .get(id)
+                .map(|p| (p.changed_at_us, shared_plan(p)))?,
             "operator" => state.operators.get(id).map(|o| {
                 (
                     o.version,
@@ -471,6 +583,167 @@ impl Engine {
         true
     }
 
+    /// Puts back an earlier version of a plan (C6): its body as a new edit,
+    /// changed now so it wins on every computer; the body it replaces can be
+    /// undone back to.
+    fn restore_plan(
+        &mut self,
+        connection: ConnectionId,
+        id: &str,
+        change: Value,
+    ) -> Result<Plan, ApiError> {
+        let invalid = || ApiError::new(ErrorKind::InvalidValue, "not a version of this plan");
+        let Ok(Change::PlanSaved { plan: from, .. }) = serde_json::from_value::<Change>(change)
+        else {
+            return Err(invalid());
+        };
+        if from.id != id {
+            return Err(invalid());
+        }
+        let here = self
+            .state
+            .plans
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no plan {id}")))?;
+        let revision = if here.body == from.body {
+            PlanRevision::None
+        } else {
+            PlanRevision::Edit {
+                previous: Box::new(here.body.clone()),
+            }
+        };
+        let plan = Plan {
+            body: from.body,
+            deleted_at_us: None,
+            changed_at_us: self.clock.now_us().max(here.changed_at_us + 1),
+            undo: here.undo + u32::from(matches!(revision, PlanRevision::Edit { .. })),
+            redo: 0,
+            version: here.version + 1,
+            ..here
+        };
+        self.commit(
+            connection,
+            Change::PlanSaved {
+                plan: plan.clone(),
+                revision,
+            },
+        );
+        Ok(plan)
+    }
+
+    /// A plan from the account (C3): its body here, keeping this computer's
+    /// uploads and version count; the body it replaces can be undone back to.
+    fn take_plan(&mut self, actor: Actor, from: &Plan) {
+        let here = self.state.plans.get(&from.id);
+        let revision = match here {
+            Some(here) if here.body != from.body => PlanRevision::Edit {
+                previous: Box::new(here.body.clone()),
+            },
+            _ => PlanRevision::None,
+        };
+        let plan = Plan {
+            uploads: here.map(|p| p.uploads.clone()).unwrap_or_default(),
+            undo: here.map_or(0, |p| {
+                p.undo + u32::from(matches!(revision, PlanRevision::Edit { .. }))
+            }),
+            redo: 0,
+            version: here.map_or(1, |p| p.version + 1),
+            ..from.clone()
+        };
+        self.commit_as(actor, Change::PlanSaved { plan, revision });
+    }
+
+    /// A connection from the account: into the library if newer. One used
+    /// here takes its new name only: an address is never changed under a
+    /// live link from another computer. "Use them all" uses a network link
+    /// as it arrives; a serial port is chosen here, on the computer it is
+    /// plugged into.
+    fn take_link(&mut self, actor: Actor, device: &str, link: &Link, at: u64) -> bool {
+        if self
+            .state
+            .link_library
+            .get(&link.id)
+            .is_some_and(|entry| entry.updated_at_us >= at)
+        {
+            return false;
+        }
+        let entry = LibraryLink {
+            id: link.id.clone(),
+            name: link.name.clone(),
+            kind: link.kind.clone(),
+            policy: link.policy,
+            topology: link.topology,
+            vehicle_filter: link.vehicle_filter.clone(),
+            carries: link.carries,
+            device: device.to_owned(),
+            updated_at_us: at,
+        };
+        self.commit_as(
+            actor.clone(),
+            Change::LinkLibraryUpserted {
+                link: entry.clone(),
+            },
+        );
+        match self.state.links.get(&entry.id) {
+            Some(here) if here.name != entry.name => {
+                let mut here = here.clone();
+                here.name.clone_from(&entry.name);
+                here.version += 1;
+                self.commit_as(actor, Change::LinkUpserted { link: here });
+            }
+            None if self.state.sync.activation == Activation::MirrorAll
+                && !matches!(entry.kind, LinkKind::Serial { .. }) =>
+            {
+                // A port in use here says so on the next look; nothing is lost.
+                let _ = self.use_link_as(actor, &entry);
+            }
+            Some(_) | None => {}
+        }
+        true
+    }
+
+    /// "Use them all" for connections: every network one waiting in the
+    /// library; a serial port is chosen where it is plugged in. A port in
+    /// use here leaves it in the library to use by hand.
+    fn use_waiting_links(&mut self, connection: ConnectionId) {
+        let links: Vec<LibraryLink> = self
+            .state
+            .link_library
+            .values()
+            .filter(|l| {
+                !self.state.links.contains_key(&l.id) && !matches!(l.kind, LinkKind::Serial { .. })
+            })
+            .cloned()
+            .collect();
+        for entry in links {
+            let actor = Actor {
+                client_id: format!("{FROM_ACCOUNT}library"),
+                operator_id: self.actor(connection).operator_id,
+                identity: None,
+            };
+            let _ = self.use_link_as(actor, &entry);
+        }
+    }
+
+    /// Uses a connection from the account here, under its own id.
+    fn use_link_as(&mut self, actor: Actor, entry: &LibraryLink) -> Result<(), ApiError> {
+        if self.state.links.contains_key(&entry.id) {
+            return Ok(());
+        }
+        let params = uxduck_contracts::dto::link::LinkAddParams {
+            name: Some(entry.name.clone()),
+            kind: (&entry.kind).into(),
+            policy: Some(entry.policy.into()),
+            topology: Some(entry.topology.into()),
+            vehicle_filter: entry.vehicle_filter.clone(),
+            from_link: None,
+            keep_alive: false,
+            carries: entry.carries.into(),
+        };
+        crate::rpc::vehicles::create_link_as(self, actor, params, entry.id.clone()).map(|_| ())
+    }
+
     fn used_here(&self, id: &str) -> bool {
         self.state.vehicles.get(id).is_some_and(|v| v.saved)
     }
@@ -521,6 +794,9 @@ impl Engine {
                 labels: Vec::new(),
                 bookmarks: Vec::new(),
                 size_cm: entry.size_cm,
+                traffic: false,
+                // Not in the account's library: chosen on each computer.
+                look: None,
                 version: 1,
             },
         };
@@ -576,6 +852,19 @@ impl Engine {
                     device: v.device.clone(),
                     updated_at_us: v.updated_at_us,
                     active: self.used_here(&v.id),
+                })
+                .collect(),
+            links: self
+                .state
+                .link_library
+                .values()
+                .map(|l| LibraryLinkDto {
+                    id: l.id.clone(),
+                    name: l.name.clone(),
+                    kind: (&l.kind).into(),
+                    device: l.device.clone(),
+                    updated_at_us: l.updated_at_us,
+                    active: self.state.links.contains_key(&l.id),
                 })
                 .collect(),
         }

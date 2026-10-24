@@ -1,0 +1,43 @@
+{
+  "flights": [
+    {
+      "id": "fl0123456789abcdef",
+      "vehicleId": "vid-1",
+      "vehicleName": "Alpha",
+      "vehicleType": "Quadrotor",
+      "simulated": true,
+      "seenArmed": false,
+      "armedAtUs": 1792713600000000,
+      "endedAtUs": 1792714320000000,
+      "end": "disarmed",
+      "airUs": 660000000,
+      "maxHeightM": 42.5,
+      "maxSpeedMps": 8.1,
+      "modes": ["GUIDED", "LOITER", "RTL"],
+      "batteryStartPct": 98.0,
+      "batteryEndPct": 61.0,
+      "operators": [
+        {
+          "operatorId": "op1",
+          "name": "Ana",
+          "fromUs": 1792713600000000
+        }
+      ],
+      "keep": false,
+      "params": {
+        "digest": "54ef63fab15e8236074387e18732bcc53802a65f8b0b400edba888baf078442f",
+        "count": 912,
+        "baselineId": "pb0123456789abcdef",
+        "baselineName": "Approved 2026-10-01",
+        "baselineDiffer": 2
+      }
+    }
+  ],
+  "totals": {
+    "realAirUs": 0,
+    "simulatedAirUs": 660000000,
+    "realAirUsSince": 0,
+    "simulatedAirUsSince": 660000000,
+    "count": 1
+  }
+}

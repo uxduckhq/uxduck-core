@@ -62,6 +62,13 @@ pub fn check_udp_bind(host: &str, port: u16) -> Result<(), String> {
     }
 }
 
+/// Whether nothing listens on this TCP port on any address, as SITL's
+/// SERIAL0 (`tcp:0`) needs.
+#[must_use]
+pub fn tcp_port_free(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok()
+}
+
 /// Whether an address belongs to this machine: loopback, unspecified, or one
 /// of its interfaces (it can be bound).
 #[must_use]
@@ -350,6 +357,16 @@ mod tests {
             assert!(message.contains(&format!("(pid {})", std::process::id())));
             assert!(!may_stop(&found), "never ourselves");
         }
+    }
+
+    #[test]
+    fn a_tcp_port_another_program_listens_on_is_not_free() {
+        // A released ephemeral port can be claimed by a parallel test.
+        assert!(tcp_port_free(0));
+        // As SITL listens for its SERIAL0, on every address.
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!tcp_port_free(port));
     }
 
     #[test]

@@ -260,6 +260,12 @@ pub struct Plugin {
     /// updated with it, turned off rather than removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub included: bool,
+    /// The hosts it may fetch from over HTTPS (S170), from its manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// It is a traffic source, listed in Airspace on or off (S171).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traffic_source: bool,
 }
 
 const fn on() -> bool {

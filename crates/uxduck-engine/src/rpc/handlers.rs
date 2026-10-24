@@ -149,6 +149,7 @@ pub(crate) fn handle(
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
+        | ClientRequest::VehicleLook(_)
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleDelete(_)
@@ -183,6 +184,14 @@ pub(crate) fn handle(
         | ClientRequest::PlaceUpdate(_)
         | ClientRequest::PlaceRemove(_)) => {
             crate::search::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::MarkerList(_)
+        | ClientRequest::MarkerAdd(_)
+        | ClientRequest::MarkerUpdate(_)
+        | ClientRequest::MarkerRemove(_)
+        | ClientRequest::MarkerShare(_)
+        | ClientRequest::MarkerUnshare(_)) => {
+            crate::markers::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::PlaceSearch(_) | ClientRequest::PlaceLocate(_)) => {
             crate::places::handle(engine, connection, request, &granted)
@@ -267,6 +276,7 @@ pub(crate) fn handle(
         )),
         request @ (ClientRequest::AccountGet(_)
         | ClientRequest::AccountFlights(_)
+        | ClientRequest::AccountVersions(_)
         | ClientRequest::AccountEnvironment(_)
         | ClientRequest::AccountSetEnvironment(_)
         | ClientRequest::AccountSignIn(_)
@@ -317,7 +327,8 @@ pub(crate) fn handle(
         }
         request @ (ClientRequest::SyncGet(_)
         | ClientRequest::SyncSet(_)
-        | ClientRequest::SyncActivate(_)) => {
+        | ClientRequest::SyncActivate(_)
+        | ClientRequest::SyncRestore(_)) => {
             crate::sync::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::SimStart(_)
@@ -382,6 +393,29 @@ pub(crate) fn handle(
         | ClientRequest::ParamDiff(_)) => {
             crate::param_definitions::queries::handle(engine, connection, request, &granted)
         }
+        ClientRequest::FlightList(params) => {
+            if !granted.contains(&Read) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Read.denied_message(),
+                ));
+            }
+            to_value(&engine.list_flights(&params))
+        }
+        ClientRequest::FlightKeep(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            to_value(&engine.keep_flight(connection, &params.id, params.keep, params.always)?)
+        }
+        request @ (ClientRequest::ParamBaselineSet(_)
+        | ClientRequest::ParamBaselines(_)
+        | ClientRequest::ParamBaselineRemove(_)) => {
+            crate::param_definitions::baselines::handle(engine, connection, request, &granted)
+        }
         request @ (ClientRequest::ParamDefinitions(_)
         | ClientRequest::ParamDefinitionsList(_)
         | ClientRequest::ParamDefinitionsAdd(_)
@@ -398,6 +432,9 @@ pub(crate) fn handle(
         | ClientRequest::DesktopAppChoose(_)
         | ClientRequest::DesktopAppRemove(_)) => {
             crate::app::handle(engine, connection, &request, operator, &granted)
+        }
+        request @ (ClientRequest::TrafficStatus(_) | ClientRequest::VehicleTraffic(_)) => {
+            crate::traffic::handle(engine, connection, request, operator, &granted)
         }
         request @ (ClientRequest::LocationStatus(_)
         | ClientRequest::LocationStart(_)
@@ -577,6 +614,10 @@ fn set_operator(
     {
         let id = engine.ask_account(crate::account::AccountAction::SwitchOperator {
             operator_id: operator_id.clone(),
+            account_id: operator_id
+                .as_ref()
+                .and_then(|id| engine.state.operators.get(id))
+                .and_then(|o| o.account_id.clone()),
             restoring: previous.is_none(),
             device: (!engine.state.sync.device_id.is_empty())
                 .then(|| engine.state.sync.device_id.clone()),
@@ -588,6 +629,7 @@ fn set_operator(
     if let Some(state) = engine.connections.get_mut(&connection) {
         state.operator_id = operator_id;
     }
+    engine.operator_changed(connection);
     Ok(json!({}))
 }
 
@@ -614,13 +656,13 @@ fn subscribe(
             .then(|| operators(engine)),
         threads: types
             .contains(&EntityType::Thread)
-            .then(|| super::threads::threads(engine)),
+            .then(|| super::threads::threads(engine, connection)),
         items: types
             .contains(&EntityType::Item)
-            .then(|| super::threads::items(engine)),
+            .then(|| super::threads::items(engine, connection)),
         folders: types
             .contains(&EntityType::Folder)
-            .then(|| super::folders::folders(engine)),
+            .then(|| super::folders::folders(engine, connection)),
         links: types
             .contains(&EntityType::Link)
             .then(|| super::vehicles::links(engine)),
@@ -654,6 +696,9 @@ fn subscribe(
         places: types
             .contains(&EntityType::Place)
             .then(|| engine.state.places.values().map(Into::into).collect()),
+        markers: types
+            .contains(&EntityType::Marker)
+            .then(|| crate::markers::sorted(engine, connection)),
         plans: types
             .contains(&EntityType::Plan)
             .then(|| engine.state.plans.values().map(Into::into).collect()),
@@ -766,11 +811,51 @@ fn operator_create(
         parameter_groups: Vec::new(),
         inspector_pinned: Vec::new(),
         control_actions: Vec::new(),
+        me_marker_id: None,
+        display: None,
+        account_id: None,
+        controller_mappings: Vec::new(),
         version: 1,
     };
     let result = OperatorDto::from(&operator);
     engine.commit(connection, Change::OperatorUpserted { operator });
     to_value(&result)
+}
+
+/// The Control tab's buttons for every type, each type once and each
+/// action once, by action id.
+fn control_actions(
+    all: &[uxduck_contracts::dto::operator::ControlActions],
+) -> Result<Vec<operator::ControlActions>, ApiError> {
+    let all: Vec<operator::ControlActions> = all.iter().map(Into::into).collect();
+    operator::clean_control_actions(&all).ok_or_else(|| {
+        ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "each vehicle type once, with at most {} actions of up to {} characters, each vehicle: and a-z, 0-9, -, _, : or spaces",
+                operator::MAX_CONTROL_ACTIONS,
+                operator::MAX_CONTROL_ACTION_CHARS,
+            ),
+        )
+    })
+}
+
+/// An operator's display document (C1), kept as sent: the app owns its
+/// shape; here only its size and that it is a JSON object.
+fn display_document(document: &str) -> Result<String, ApiError> {
+    let object = document.len() <= operator::MAX_DISPLAY_BYTES
+        && serde_json::from_str::<Value>(document).is_ok_and(|v| v.is_object());
+    if object {
+        Ok(document.to_owned())
+    } else {
+        Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "send the display settings as a JSON object of at most {} KiB",
+                operator::MAX_DISPLAY_BYTES / 1024
+            ),
+        ))
+    }
 }
 
 fn operator_update(
@@ -852,18 +937,22 @@ fn operator_update(
             )
         })?;
     }
+    if let Some(me) = &params.me_marker_id {
+        if let Some(id) = me
+            && !engine.state.markers.contains_key(id)
+        {
+            return Err(ApiError::new(
+                ErrorKind::NotFound,
+                format!("no marker {id}"),
+            ));
+        }
+        operator.me_marker_id.clone_from(me);
+    }
     if let Some(all) = &params.control_actions {
-        let all: Vec<operator::ControlActions> = all.iter().map(Into::into).collect();
-        operator.control_actions = operator::clean_control_actions(&all).ok_or_else(|| {
-            ApiError::new(
-                ErrorKind::InvalidValue,
-                format!(
-                    "each vehicle type once, with at most {} actions of up to {} characters, each vehicle: and a-z, 0-9, -, _, : or spaces",
-                    operator::MAX_CONTROL_ACTIONS,
-                    operator::MAX_CONTROL_ACTION_CHARS,
-                ),
-            )
-        })?;
+        operator.control_actions = control_actions(all)?;
+    }
+    if let Some(document) = &params.display {
+        operator.display = Some(display_document(document)?);
     }
     operator.version += 1;
     let result = OperatorDto::from(&operator);

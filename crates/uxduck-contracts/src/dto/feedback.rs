@@ -55,6 +55,55 @@ pub struct FeedbackUi {
     /// The same bounded snapshot About copies; absent when support details are excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub support: Option<super::support::SupportDetails>,
+    /// Each map on the page and what it drew under the vehicles (FB-23).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maps: Vec<FeedbackMap>,
+    /// Where the page's map keys came from, and why the last fetch failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub map_keys: Vec<FeedbackMapKey>,
+}
+
+/// A map on the page: a blank map looks the same whether it had no key, its
+/// requests were refused or unreachable, or WebGL lost its context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMap {
+    /// `maplibre` (the 2D map) or `cesium` (the 3D map).
+    pub engine: String,
+    /// `map`, or `globe` for the home's decorative one.
+    pub variant: String,
+    /// The map's size in CSS pixels, such as `822×165`.
+    pub size: String,
+    /// What it draws under the vehicles: `esri`, `esri-loading`,
+    /// `esri-failed`, `no-key`, `google`, `tiles` or `none`.
+    pub basemap: String,
+    /// The GPU as the browser names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_lost: Option<bool>,
+    /// Drawing threw and the map stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<bool>,
+    /// The last requests refused or failed, such as `failed
+    /// basemapstyles-api.arcgis.com/arcgis/rest/services/styles/v2/styles/arcgis/imagery`:
+    /// no query, and `{n}` for tile numbers.
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+/// A map key the page fetches from the UXDuck API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMapKey {
+    /// `arcgis` or `google`.
+    pub name: String,
+    /// `fetched`, `saved` (kept from an earlier fetch), `none`,
+    /// `development` or `off`.
+    pub state: String,
+    /// The last fetch's failure, such as `503` or `unreachable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -115,10 +164,10 @@ pub struct FeedbackSendParams {
     /// Files the person attached: up to 10, 25 MB together decoded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FeedbackAttachment>,
-    /// A recorded voice note, up to 5 minutes (10 MB decoded), which the API
-    /// transcribes. The text may then be empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_note: Option<FeedbackAttachment>,
+    /// Recorded voice notes, up to 5, each up to 5 minutes (10 MB decoded).
+    /// With one, the text may be empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voice_notes: Vec<FeedbackVoiceNote>,
     /// A random key the page keeps to add words and files to the report
     /// later; the API keeps only its hash. Redacted from traces and bundles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +182,20 @@ pub struct FeedbackAttachment {
     pub name: String,
     /// The file, base64.
     pub data: String,
+}
+
+/// A voice note the person recorded, with what the app wrote down as they
+/// spoke.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackVoiceNote {
+    /// A name for the recording, such as `voice-1.wav`.
+    pub name: String,
+    /// The recording, base64: a WAV or another audio format.
+    pub data: String,
+    /// The words the app transcribed live, up to 5,000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 /// What the agent offers to suggest (S73): a card the person reads, edits

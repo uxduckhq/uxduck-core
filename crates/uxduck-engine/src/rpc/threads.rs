@@ -53,6 +53,7 @@ pub fn handle(
         }
         ClientRequest::ThreadCancel(params) => {
             require(Capability::Control)?;
+            own_thread(engine, connection, &params.thread_id)?;
             cancel(engine, &params.thread_id)
         }
         ClientRequest::ThreadDelete(params) => {
@@ -90,19 +91,50 @@ pub fn handle(
     }
 }
 
-/// Every thread, most recently updated first.
-pub fn threads(engine: &Engine) -> Vec<ThreadDto> {
-    let mut threads: Vec<ThreadDto> = engine.state.threads.values().map(ThreadDto::from).collect();
+/// Whether a connection may see a chat or folder started by `owner`
+/// (maintainer, 2026-10-23): each operator's chats are their own, like a
+/// browser profile's; one started with no operator is everyone's. Other
+/// connections are told nothing about the rest, not even that they exist.
+pub(crate) fn sees(engine: &Engine, connection: ConnectionId, owner: Option<&str>) -> bool {
+    owner.is_none_or(|owner| {
+        engine
+            .connections
+            .get(&connection)
+            .and_then(|c| c.operator_id.as_deref())
+            == Some(owner)
+    })
+}
+
+/// Whether a connection may see the chat a thread id names.
+pub(crate) fn sees_thread(engine: &Engine, connection: ConnectionId, thread_id: &str) -> bool {
+    engine
+        .state
+        .threads
+        .get(thread_id)
+        .is_some_and(|t| sees(engine, connection, t.operator_id.as_deref()))
+}
+
+/// The threads a connection may see, most recently updated first.
+pub fn threads(engine: &Engine, connection: ConnectionId) -> Vec<ThreadDto> {
+    let mut threads: Vec<ThreadDto> = engine
+        .state
+        .threads
+        .values()
+        .filter(|t| sees(engine, connection, t.operator_id.as_deref()))
+        .map(ThreadDto::from)
+        .collect();
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at_us));
     threads
 }
 
-/// Every item, by thread and position, with streamed text merged in.
-pub fn items(engine: &Engine) -> Vec<ItemDto> {
+/// The items of the threads a connection may see, by thread and position,
+/// with streamed text merged in.
+pub fn items(engine: &Engine, connection: ConnectionId) -> Vec<ItemDto> {
     let mut items: Vec<ItemDto> = engine
         .state
         .items
         .values()
+        .filter(|item| sees_thread(engine, connection, &item.thread_id))
         .map(|item| {
             let mut dto = ItemDto::from(item);
             if let Some(text) = engine.streaming.get(&item.id) {
@@ -173,6 +205,20 @@ fn scope(engine: &Engine, id: Option<&str>) -> Result<Option<String>, ApiError> 
             .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}")))
     })
     .transpose()
+}
+
+/// A live thread this connection may see; another operator's is as good as gone.
+fn own_thread(engine: &Engine, connection: ConnectionId, id: &str) -> Result<Thread, ApiError> {
+    thread(engine, id).and_then(|found| {
+        if sees(engine, connection, found.operator_id.as_deref()) {
+            Ok(found)
+        } else {
+            Err(ApiError::new(
+                ErrorKind::NotFound,
+                format!("no thread {id}"),
+            ))
+        }
+    })
 }
 
 /// A live thread; a tombstone is as good as gone.
@@ -253,7 +299,7 @@ pub fn send(
     connection: ConnectionId,
     params: &ThreadSendParams,
 ) -> Result<Value, ApiError> {
-    let found = thread(engine, &params.thread_id)?;
+    let found = own_thread(engine, connection, &params.thread_id)?;
     let text = params.text.trim().to_owned();
     if text.is_empty() {
         return Err(ApiError::new(
@@ -328,7 +374,7 @@ pub fn update(
     connection: ConnectionId,
     params: ThreadUpdateParams,
 ) -> Result<Value, ApiError> {
-    let mut found = thread(engine, &params.id)?;
+    let mut found = own_thread(engine, connection, &params.id)?;
     if found.version != params.expected_version {
         let mut error = ApiError::new(
             ErrorKind::VersionConflict,
@@ -358,7 +404,7 @@ pub fn update(
     }
     let moved = match &params.folder_id {
         Some(folder) => {
-            super::folders::live_folder(engine, folder.as_deref())?;
+            super::folders::live_folder(engine, connection, folder.as_deref())?;
             *folder != found.folder_id
         }
         None => false,
@@ -392,7 +438,7 @@ pub fn delete(
     connection: ConnectionId,
     params: &DeleteParams,
 ) -> Result<Value, ApiError> {
-    let mut found = thread(engine, &params.id)?;
+    let mut found = own_thread(engine, connection, &params.id)?;
     if found.version != params.expected_version {
         let mut error = ApiError::new(
             ErrorKind::VersionConflict,
@@ -415,11 +461,11 @@ pub fn bulk(
     params: ThreadBulkParams,
 ) -> Result<Value, ApiError> {
     if let BulkAction::Move { folder_id } = &params.action {
-        super::folders::live_folder(engine, folder_id.as_deref())?;
+        super::folders::live_folder(engine, connection, folder_id.as_deref())?;
     }
     let mut result = ThreadBulkResult::default();
     for id in params.thread_ids {
-        let Ok(mut found) = thread(engine, &id) else {
+        let Ok(mut found) = own_thread(engine, connection, &id) else {
             result.skipped.push(id);
             continue;
         };

@@ -2,7 +2,7 @@
   "abi": 2,
   "id": "clock",
   "name": "Clock",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A clock in your own time and in UTC, a stopwatch with laps, a countdown timer and an alarm that counts down to a time of day, in one tab. They keep running in UXDuck with the page closed and after it restarts, and look the same in every window.",
   "script": "index.ts",
   "capabilities": ["read"],
