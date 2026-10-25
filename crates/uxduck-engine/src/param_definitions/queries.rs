@@ -326,31 +326,16 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
         params.text.as_deref(),
         params.other_vehicle_id.as_deref(),
         params.snapshot_id.as_deref(),
-        params.baseline_id.as_deref(),
     ) {
-        (None, None, None, Some(id)) => {
-            let baseline = engine
-                .state
-                .baselines
-                .get(id)
-                .filter(|b| b.vehicle_id == described.vehicle.id)
-                .ok_or_else(|| {
-                    ApiError::new(
-                        ErrorKind::NotFound,
-                        format!("no baseline {id} for this vehicle"),
-                    )
-                })?;
-            (baseline.values.clone(), true, Vec::new())
-        }
-        (Some(text), None, None, None) => {
+        (Some(text), None, None) => {
             let (values, unread) = read_param_file(text);
             (values, false, unread)
         }
-        (None, Some(other), None, None) => {
+        (None, Some(other), None) => {
             let other = which_vehicle(engine, Some(other))?;
             (Described::of(engine, other).values, true, Vec::new())
         }
-        (None, None, Some(id), None) => {
+        (None, None, Some(id)) => {
             let snapshot =
                 engine.state.snapshots.get(id).ok_or_else(|| {
                     ApiError::new(ErrorKind::NotFound, format!("no snapshot {id}"))
@@ -363,9 +348,7 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
             (values, true, Vec::new())
         }
         _ => {
-            return Err(invalid(
-                "give one of text, otherVehicleId, snapshotId or baselineId",
-            ));
+            return Err(invalid("give one of text, otherVehicleId or snapshotId"));
         }
     };
     let mut names: BTreeSet<&str> = theirs.keys().map(String::as_str).collect();
@@ -394,6 +377,36 @@ fn diff(engine: &Engine, params: &ParamDiffParams) -> Result<ParamDiffResult, Ap
 }
 
 /// The vehicle's parameters now, by name (C7).
+/// The parameters a vehicle arms with (C7): their digest, so two flights can
+/// be told apart by the configuration they flew. None before they are read.
+pub(crate) fn armed_with(
+    engine: &Engine,
+    vehicle_id: &str,
+) -> Option<uxduck_core::domain::flight::FlightParams> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let values = vehicle_values(engine, which_vehicle(engine, Some(vehicle_id)).ok()?);
+    if values.is_empty() {
+        return None;
+    }
+    let mut lines = String::new();
+    for (name, value) in &values {
+        let _ = writeln!(lines, "{name}={value}");
+    }
+    let digest =
+        Sha256::digest(lines.as_bytes())
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+    Some(uxduck_core::domain::flight::FlightParams {
+        digest,
+        count: u32::try_from(values.len()).unwrap_or(u32::MAX),
+    })
+}
+
 pub(crate) fn vehicle_values(engine: &Engine, vehicle: Vehicle) -> BTreeMap<String, f64> {
     Described::of(engine, vehicle).values
 }

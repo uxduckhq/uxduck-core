@@ -143,7 +143,8 @@ pub struct State {
     /// Flights, by id (C8).
     #[serde(default)]
     pub flights: BTreeMap<String, uxduck_core::domain::flight::Flight>,
-    /// Vehicles' parameter baselines, by id (C7).
+    /// Vehicles' parameter baselines, by id (C7). Retired on 2026-10-24:
+    /// filled only from older journals, and read by nothing.
     #[serde(default)]
     pub baselines: BTreeMap<String, uxduck_core::domain::parameter::ParamBaseline>,
 }

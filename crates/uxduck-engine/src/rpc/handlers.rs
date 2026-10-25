@@ -420,10 +420,14 @@ pub(crate) fn handle(
             }
             to_value(&engine.end_lost_flight(&params.id)?)
         }
-        request @ (ClientRequest::ParamBaselineSet(_)
-        | ClientRequest::ParamBaselines(_)
-        | ClientRequest::ParamBaselineRemove(_)) => {
-            crate::param_definitions::baselines::handle(engine, connection, request, &granted)
+        ClientRequest::FlightUploadLog(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            to_value(&engine.ask_flight_log(connection, &params.id)?)
         }
         request @ (ClientRequest::ParamDefinitions(_)
         | ClientRequest::ParamDefinitionsList(_)

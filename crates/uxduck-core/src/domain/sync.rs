@@ -28,7 +28,7 @@ pub enum SyncCategory {
     /// Chats and their folders.
     Chats,
     Places,
-    /// Saved vehicles, their history, baselines and snapshots, connections
+    /// Saved vehicles, their history and snapshots, connections
     /// and parameter definition sets.
     Vehicles,
     Plans,
@@ -43,7 +43,7 @@ impl SyncCategory {
             "operator" | "plugin" => Self::Settings,
             "thread" | "item" | "folder" => Self::Chats,
             "place" => Self::Places,
-            "vehicle" | "history" | "baseline" | "snapshot" | "link" | "own-set" => Self::Vehicles,
+            "vehicle" | "history" | "snapshot" | "link" | "own-set" => Self::Vehicles,
             "plan" => Self::Plans,
             _ => return None,
         })

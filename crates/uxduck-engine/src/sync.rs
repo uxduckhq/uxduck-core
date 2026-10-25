@@ -177,9 +177,6 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
             ("flight", &flight.id, Some(flight.version))
         }
         Change::FlightRemoved { id } => ("flight", id, None),
-        // A vehicle's approved parameters (C7).
-        Change::BaselineUpserted { baseline } => ("baseline", &baseline.id, Some(baseline.version)),
-        Change::BaselineRemoved { id } => ("baseline", id, None),
         // The later edit wins, wherever it was made (C3).
         Change::PlanSaved { plan, .. } => ("plan", &plan.id, Some(plan.changed_at_us)),
         Change::PlanRemoved { id } => ("plan", id, None),
@@ -533,14 +530,6 @@ impl Engine {
                     f.version,
                     Change::FlightUpserted {
                         flight: shared_flight(f),
-                    },
-                )
-            })?,
-            "baseline" => state.baselines.get(id).map(|b| {
-                (
-                    b.version,
-                    Change::BaselineUpserted {
-                        baseline: b.clone(),
                     },
                 )
             })?,

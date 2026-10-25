@@ -194,7 +194,9 @@ pub enum Change {
         old_id: String,
         flight: crate::domain::flight::Flight,
     },
-    /// A vehicle's parameter baseline set or changed (C7).
+    /// A vehicle's parameter baseline set or changed (C7). Retired on
+    /// 2026-10-24 (maintainer): nothing makes these now; kept so journals
+    /// that have them still read.
     BaselineUpserted {
         baseline: crate::domain::parameter::ParamBaseline,
     },

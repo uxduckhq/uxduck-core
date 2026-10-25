@@ -156,6 +156,13 @@ impl Spool {
         if !has_source {
             db.execute_batch("alter table chunk add column source text")?;
         }
+        // 2026-10-24: one flight's log asked for while flights are not stored.
+        let has_asked = db
+            .prepare("select 1 from pragma_table_info('chunk') where name = 'asked'")?
+            .exists([])?;
+        if !has_asked {
+            db.execute_batch("alter table chunk add column asked integer not null default 0")?;
+        }
         // Every round asks for what is waiting, oldest first, and for the
         // segments among it; acknowledged chunks pile up for good, and a
         // spool that cannot upload keeps every chunk waiting.
@@ -176,7 +183,8 @@ impl Spool {
     }
 
     /// While flights are not stored in the account (signed out, no
-    /// server, or the setting off): the tlogs' chunks waiting here go, and
+    /// server, or the setting off): the tlogs' chunks waiting here go, but
+    /// not a flight's log someone asked for (`cut_flight`), and
     /// each tlog goes back to where its first one began, to be cut again
     /// once they are. The tlogs are the record; the chunks were only copies.
     /// Returns how many went.
@@ -187,7 +195,7 @@ impl Spool {
         let first: Vec<(String, u32, i64)> = {
             let mut query = self.db.prepare(
                 "select recording, min(seq), min(start_offset) from chunk
-                 where state not in ('acknowledged', 'lost') and source is null
+                 where state not in ('acknowledged', 'lost') and source is null and asked = 0
                  group by recording",
             )?;
             query
@@ -199,7 +207,8 @@ impl Spool {
         }
         let names: Vec<String> = {
             let mut query = self.db.prepare(
-                "select name from chunk where state not in ('acknowledged', 'lost') and source is null",
+                "select name from chunk
+                 where state not in ('acknowledged', 'lost') and source is null and asked = 0",
             )?;
             query
                 .query_map([], |r| r.get(0))?
@@ -348,7 +357,7 @@ impl Spool {
             let end = offset + consumed as u64;
             let tx = self.db.transaction().map_err(std::io::Error::other)?;
             tx.execute(
-                "insert or replace into chunk values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'written', null)",
+                "insert or replace into chunk (name, recording, seq, size, sha256, first_us, last_us, start_offset, end_offset, state, source) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'written', null)",
                 params![
                     name,
                     recording,
@@ -475,7 +484,7 @@ impl Spool {
         let name = format!("{}/{seq:06}-{sha256}.{}", recording.id, piece.ext);
         let tx = self.db.transaction().map_err(std::io::Error::other)?;
         tx.execute(
-            "insert or replace into chunk values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'written', ?10)",
+            "insert or replace into chunk (name, recording, seq, size, sha256, first_us, last_us, start_offset, end_offset, state, source) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'written', ?10)",
             params![
                 name,
                 recording.id,
@@ -663,6 +672,167 @@ impl Spool {
             .collect()
     }
 
+    /// The flight logs' chunks waiting, oldest first: all that goes while
+    /// every flight log is not being stored.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn waiting_asked(&self, limit: usize) -> rusqlite::Result<Vec<(Chunk, State)>> {
+        Ok(self
+            .waiting(usize::MAX)?
+            .into_iter()
+            .filter(|(chunk, _)| self.is_asked(&chunk.name))
+            .take(limit)
+            .collect())
+    }
+
+    fn is_asked(&self, name: &str) -> bool {
+        self.db
+            .query_row("select asked from chunk where name = ?1", [name], |r| {
+                r.get::<_, i64>(0)
+            })
+            .is_ok_and(|asked| asked == 1)
+    }
+
+    /// Chunks of a recording not yet kept by the account; none for one
+    /// never cut.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn unacknowledged(&self, recording: &str) -> rusqlite::Result<(u64, u64)> {
+        self.db.query_row(
+            "select count(*), coalesce(sum(state != 'acknowledged'), 0) from chunk where recording = ?1",
+            [recording],
+            |r| Ok((u(r.get(0)?), u(r.get(1)?))),
+        )
+    }
+
+    /// One flight's log (2026-10-24): the records of a connection's tlogs
+    /// between two times, as chunks of their own under `recording` (the
+    /// flight's id), marked asked so they go while every flight log is not
+    /// being stored. Cut once; returns how many chunks, zero when the
+    /// connection's tlogs here hold nothing of that time.
+    ///
+    /// # Errors
+    /// A tlog cannot be read, or a chunk or the database written.
+    pub fn cut_flight(
+        &mut self,
+        recording: &str,
+        link_id: &str,
+        from_us: u64,
+        to_us: u64,
+    ) -> std::io::Result<u32> {
+        let cut: u64 = self
+            .db
+            .query_row(
+                "select count(*) from chunk where recording = ?1",
+                [recording],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(std::io::Error::other)
+            .map(u)?;
+        if cut > 0 {
+            return Ok(u32::try_from(cut).unwrap_or(u32::MAX));
+        }
+        // `<link id>-<unix seconds>.tlog`, oldest first; none started after the flight.
+        let mut tlogs: Vec<(u64, PathBuf)> = std::fs::read_dir(&self.tlogs)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "tlog"))
+            .filter_map(|p| {
+                let stem = p.file_stem()?.to_string_lossy().into_owned();
+                let (link, secs) = stem.rsplit_once('-')?;
+                (link == link_id).then_some((secs.parse::<u64>().ok()?, p))
+            })
+            .filter(|(secs, _)| secs.saturating_mul(1_000_000) <= to_us)
+            .collect();
+        tlogs.sort();
+        let mut seq = 0u32;
+        let mut pending: Vec<u8> = Vec::new();
+        let (mut first_us, mut last_us) = (0u64, 0u64);
+        for (_, tlog) in tlogs {
+            let length = std::fs::metadata(&tlog)?.len();
+            let mut offset = 0u64;
+            while offset < length {
+                let fresh = read_range(&tlog, offset, (length - offset).min(READ_AT_MOST))?;
+                let records = uxduck_mavlink::tlog::read(&fresh);
+                let mut at = 0usize;
+                let mut past = false;
+                for (stamp, frame) in &records {
+                    let size = 8 + frame.len();
+                    if (from_us..=to_us).contains(stamp) {
+                        if pending.is_empty() {
+                            first_us = *stamp;
+                        }
+                        last_us = *stamp;
+                        pending.extend_from_slice(&fresh[at..at + size]);
+                    }
+                    past |= *stamp > to_us;
+                    at += size;
+                }
+                if at == 0 {
+                    break;
+                }
+                offset += at as u64;
+                if pending.len() as u64 >= CUT_BYTES {
+                    seq += 1;
+                    self.write_asked(recording, seq, &pending, first_us, last_us)?;
+                    pending.clear();
+                }
+                if past {
+                    break;
+                }
+            }
+        }
+        if !pending.is_empty() {
+            seq += 1;
+            self.write_asked(recording, seq, &pending, first_us, last_us)?;
+        }
+        Ok(seq)
+    }
+
+    fn write_asked(
+        &mut self,
+        recording: &str,
+        seq: u32,
+        records: &[u8],
+        first_us: u64,
+        last_us: u64,
+    ) -> std::io::Result<()> {
+        let compressed = zstd::bulk::compress(records, 3)?;
+        let sha256 = hex(&Sha256::digest(&compressed));
+        let name = format!("{recording}/{seq:06}-{sha256}.tlog.zst");
+        let path = self.path(&name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&path)?;
+            file.write_all(&compressed)?;
+            file.sync_all()?;
+        }
+        self.db
+            .execute(
+                "insert or replace into chunk
+                 (name, recording, seq, size, sha256, first_us, last_us, start_offset, end_offset, state, source, asked)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 'written', null, 1)",
+                params![
+                    name,
+                    recording,
+                    seq,
+                    i(compressed.len() as u64),
+                    sha256,
+                    i(first_us),
+                    i(last_us)
+                ],
+            )
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
     /// How much is waiting: chunks and bytes.
     ///
     /// # Errors
@@ -758,6 +928,58 @@ mod tests {
         let mut existing = std::fs::read(&path).unwrap_or_default();
         existing.extend(out);
         std::fs::write(path, existing).unwrap();
+    }
+
+    /// One flight's log asked for while flights are not stored (2026-10-24):
+    /// only its time, from its connection's tlogs, kept through a release.
+    #[test]
+    fn a_flights_log_is_cut_from_its_time_alone_and_kept_when_the_rest_is_let_go() {
+        let data = tempfile::tempdir().unwrap();
+        let tlogs = data.path().join("tlogs");
+        // The connection's log of this run started at 100 s; another link's too.
+        tlog_with(&tlogs, "udp-1-100", 60, 100_000_000);
+        tlog_with(&tlogs, "udp-2-100", 60, 100_000_000);
+        let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
+        assert_eq!(
+            spool
+                .cut_flight("fl1", "udp-1", 110_000_000, 119_000_000)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            spool
+                .cut_flight("fl1", "udp-1", 110_000_000, 119_000_000)
+                .unwrap(),
+            1,
+            "once"
+        );
+        // The rest of the tlogs, cut as usual, then let go: the flight's stays.
+        spool
+            .cut_every(u64::MAX / 2, 0, CUT_EVERY_US, usize::MAX)
+            .unwrap();
+        spool.release().unwrap();
+        let asked = spool.waiting_asked(10).unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            spool.waiting(10).unwrap().len(),
+            1,
+            "only the flight's waits"
+        );
+        let chunk = &asked[0].0;
+        assert!(chunk.name.starts_with("fl1/000001-"));
+        assert_eq!((chunk.first_us, chunk.last_us), (110_000_000, 119_000_000));
+        let records = zstd::bulk::decompress(&spool.bytes(chunk).unwrap(), 1 << 24).unwrap();
+        assert_eq!(uxduck_mavlink::tlog::read(&records).len(), 10);
+        assert_eq!(spool.unacknowledged("fl1").unwrap(), (1, 1));
+        spool.mark(&chunk.name, State::Acknowledged).unwrap();
+        assert_eq!(spool.unacknowledged("fl1").unwrap(), (1, 0));
+        // A time the logs here do not hold: nothing.
+        assert_eq!(
+            spool
+                .cut_flight("fl2", "udp-1", 500_000_000, 600_000_000)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -1,0 +1,6 @@
+{
+  "method": "flight/uploadLog",
+  "params": {
+    "id": "fl0123456789abcdef"
+  }
+}

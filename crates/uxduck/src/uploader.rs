@@ -47,6 +47,9 @@ enum Gate {
     Off(String),
     /// Stored, but not now (a vehicle is armed): nothing is cut yet.
     Wait(String),
+    /// Signed in with the setting off: only the flight logs someone asked
+    /// for go, each by itself (2026-10-24); the rest is let go as when off.
+    Asked(String),
     Ready,
 }
 
@@ -132,7 +135,7 @@ async fn run(
         let Some(gate) = gate(api.as_ref(), client.as_ref(), token.as_ref(), &engine).await else {
             return;
         };
-        if matches!(gate, Gate::Off(_))
+        if matches!(gate, Gate::Off(_) | Gate::Asked(_))
             && let Err(error) = on_spool(&spool, Spool::release).await
         {
             tracing::warn!(%error, "the flight spool could not let go of its chunks");
@@ -160,25 +163,25 @@ async fn run(
         if recordings(&spool, &video, &engine, room > 0).await.is_err() {
             return;
         }
+        if matches!(gate, Gate::Asked(_) | Gate::Ready) && !resting {
+            cut_asked(&spool, &engine).await;
+        }
         problem = match (gate, &api, &client, &token) {
-            (Gate::Off(why) | Gate::Wait(why), ..) => Some(why),
-            (Gate::Ready, ..) if resting => problem,
-            (Gate::Ready, Some(api), Some(client), Some(token)) => {
-                match round(&spool, api, client, token, &engine).await {
-                    Ok(()) => {
-                        failed = 0;
-                        rest_until = None;
-                        None
-                    }
-                    Err(why) => {
-                        failed = failed.saturating_add(1);
-                        let rounds = 2u32.saturating_pow(failed).min(MAX_REST_ROUNDS);
-                        rest_until = Some(tokio::time::Instant::now() + every.period() * rounds);
-                        Some(why)
-                    }
-                }
+            (gate @ (Gate::Asked(_) | Gate::Ready), Some(api), Some(client), Some(token))
+                if !resting =>
+            {
+                let only_asked = matches!(gate, Gate::Asked(_));
+                let outcome = round(&spool, api, client, token, &engine, only_asked).await;
+                let (problem, rest) = settle(outcome, &mut failed, every.period());
+                rest_until = rest;
+                // Off but for what was asked: still said so.
+                problem.or(match gate {
+                    Gate::Asked(why) => Some(why),
+                    _ => None,
+                })
             }
             (Gate::Ready, ..) => problem,
+            (Gate::Off(why) | Gate::Wait(why) | Gate::Asked(why), ..) => Some(why),
         };
         if problem.is_none()
             && usage_asked.is_none_or(|at: std::time::Instant| at.elapsed() >= USAGE_EVERY)
@@ -220,7 +223,7 @@ async fn gate(
             .await
             .ok()?
         {
-            (false, _) => Gate::Off("Storing flights in the account is off".into()),
+            (false, _) => Gate::Asked("Storing flights in the account is off".into()),
             (true, Err(why)) => Gate::Wait(why),
             (true, Ok(())) => Gate::Ready,
         },
@@ -347,16 +350,68 @@ async fn usage(api: &str, client: &reqwest::Client, token: &str) -> Option<u64> 
 }
 
 /// One round: grants for what is waiting, the puts, and the completion.
+/// A round's outcome: the problem to show, and how long to rest after it,
+/// longer after each failure in a row.
+fn settle(
+    outcome: Result<(), String>,
+    failed: &mut u32,
+    period: Duration,
+) -> (Option<String>, Option<tokio::time::Instant>) {
+    match outcome {
+        Ok(()) => {
+            *failed = 0;
+            (None, None)
+        }
+        Err(why) => {
+            *failed = failed.saturating_add(1);
+            let rounds = 2u32.saturating_pow(*failed).min(MAX_REST_ROUNDS);
+            (
+                Some(why),
+                Some(tokio::time::Instant::now() + period * rounds),
+            )
+        }
+    }
+}
+
+/// The flight logs asked for (2026-10-24), cut from their connections'
+/// logs here once each; one with nothing here is told back.
+async fn cut_asked(spool: &Shared, engine: &EngineHandle) {
+    let Ok(asked) = engine.run(|e| e.flight_logs_asked()).await else {
+        return;
+    };
+    for (flight, link, from_us, to_us) in asked {
+        let recording = flight.clone();
+        match on_spool(spool, move |s| {
+            s.cut_flight(&recording, &link, from_us, to_us)
+        })
+        .await
+        {
+            Ok(0) => {
+                let _ = engine.run(move |e| e.flight_log_missing(&flight)).await;
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "a flight's log could not be cut"),
+        }
+    }
+}
+
 async fn round(
     spool: &Shared,
     api: &str,
     client: &reqwest::Client,
     token: &str,
     engine: &EngineHandle,
+    only_asked: bool,
 ) -> Result<(), String> {
-    let waiting = on_spool(spool, |s| s.waiting(BATCH))
-        .await
-        .map_err(|e| e.to_string())?;
+    let waiting = on_spool(spool, move |s| {
+        if only_asked {
+            s.waiting_asked(BATCH)
+        } else {
+            s.waiting(BATCH)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     if waiting.is_empty() {
         return Ok(());
     }
@@ -365,7 +420,7 @@ async fn round(
         .await
         .map_err(|_| "UXDuck is stopping".to_owned())?;
     put_new(spool, api, client, token, &device, &waiting).await?;
-    complete(spool, api, client, token, &device, engine).await
+    complete(spool, api, client, token, &device, engine, only_asked).await
 }
 
 fn unreachable(_: reqwest::Error) -> String {
@@ -441,15 +496,22 @@ async fn complete(
     token: &str,
     device: &str,
     engine: &EngineHandle,
+    only_asked: bool,
 ) -> Result<(), String> {
     // Everything put, here or in an earlier round: does the account keep it?
-    let put: Vec<_> = on_spool(spool, |s| s.waiting(BATCH))
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|(_, state)| *state == State::Uploaded)
-        .map(|(chunk, _)| chunk)
-        .collect();
+    let put: Vec<_> = on_spool(spool, move |s| {
+        if only_asked {
+            s.waiting_asked(BATCH)
+        } else {
+            s.waiting(BATCH)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .filter(|(_, state)| *state == State::Uploaded)
+    .map(|(chunk, _)| chunk)
+    .collect();
     if put.is_empty() {
         return Ok(());
     }
@@ -492,8 +554,18 @@ async fn complete(
         }
     }
     for (recording, (chunks, bytes)) in stored {
+        // A flight's log asked for by itself: in the account once all of it is.
+        let name = recording.clone();
+        let whole = on_spool(spool, move |s| s.unacknowledged(&name))
+            .await
+            .is_ok_and(|(cut, left)| cut > 0 && left == 0);
         let _ = engine
-            .run(move |e| e.flight_stored(recording, chunks, bytes))
+            .run(move |e| {
+                if whole {
+                    e.flight_log_stored(&recording);
+                }
+                e.flight_stored(recording, chunks, bytes);
+            })
             .await;
     }
     Ok(())

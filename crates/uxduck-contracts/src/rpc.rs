@@ -365,18 +365,6 @@ pub enum ClientRequest {
     /// `read`. Result: `ParamDiffResult`.
     #[serde(rename = "param/diff")]
     ParamDiff(ParamDiffParams),
-    /// Pins the vehicle's parameters now as a named baseline (C7), with who
-    /// set it and a note; it syncs to the person's other computers. Needs
-    /// `config`. Result: `ParamBaseline`.
-    #[serde(rename = "param/baselineSet")]
-    ParamBaselineSet(crate::dto::param_definitions::ParamBaselineSetParams),
-    /// A vehicle's baselines, newest first, each with how many parameters
-    /// differ from it now. Needs `read`. Result: `ParamBaselinesResult`.
-    #[serde(rename = "param/baselines")]
-    ParamBaselines(crate::dto::param_definitions::ParamBaselinesParams),
-    /// Removes a baseline. Needs `config`. Result: `{}`.
-    #[serde(rename = "param/baselineRemove")]
-    ParamBaselineRemove(IdParams),
     /// This computer's flights (C8), newest first: arm to disarm, with time
     /// in the air, highest point, top speed, modes, battery and who acted
     /// on the vehicle. Needs `read`. Result: `FlightListResult`.
@@ -392,6 +380,12 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `Flight`.
     #[serde(rename = "flight/end")]
     FlightEnd(crate::dto::flight::FlightEndParams),
+    /// Sends one ended flight's log to the account, cut from its
+    /// connection's log here, while "Store flight logs and videos in my
+    /// account" is off. It is listed as a recording named after the flight.
+    /// Needs `config`. Result: `Flight`.
+    #[serde(rename = "flight/uploadLog")]
+    FlightUploadLog(crate::dto::flight::FlightUploadLogParams),
     /// A vehicle's history, newest first: notes people wrote about what
     /// they did to it (repairs, changes, tests) and what UXDuck recorded
     /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
@@ -1402,7 +1396,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 284] = [
+    pub const METHODS: [&'static str; 282] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1468,12 +1462,10 @@ impl ClientRequest {
         "param/search",
         "param/get",
         "param/list",
-        "param/baselineSet",
-        "param/baselines",
-        "param/baselineRemove",
         "flight/list",
         "flight/keep",
         "flight/end",
+        "flight/uploadLog",
         "param/diff",
         "vehicle/history",
         "vehicle/addNote",

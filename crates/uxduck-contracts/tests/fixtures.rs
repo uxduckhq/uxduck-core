@@ -360,16 +360,8 @@ fn check(name: &str) {
         ("result", "flight_list") => {
             round_trip::<uxduck_contracts::dto::flight::FlightListResult>(name, &json);
         }
-        ("result", "flight_keep" | "flight_end") => {
+        ("result", "flight_keep" | "flight_end" | "flight_uploadLog") => {
             round_trip::<uxduck_contracts::dto::flight::Flight>(name, &json);
-        }
-        ("result", "param_baselineSet") => {
-            round_trip::<uxduck_contracts::dto::param_definitions::ParamBaseline>(name, &json);
-        }
-        ("result", "param_baselines") => {
-            round_trip::<uxduck_contracts::dto::param_definitions::ParamBaselinesResult>(
-                name, &json,
-            );
         }
         ("result", "param_diff") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamDiffResult>(name, &json);
@@ -556,7 +548,6 @@ fn check(name: &str) {
             | "thread_delete"
             | "folder_delete"
             | "link_remove"
-            | "param_baselineRemove"
             | "controller_release"
             | "controller_keyboardInput"
             | "controller_keyboardStop"

@@ -189,8 +189,8 @@ mod tests {
 }
 
 /// A named, pinned parameter set for a vehicle (C7): "Approved
-/// 2026-10-01", who set it and why. The vehicle's parameters are compared
-/// with it; it syncs with the account so every computer sees the same.
+/// 2026-10-01", who set it and why. Retired on 2026-10-24 (maintainer):
+/// kept only so journals that have one still read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParamBaseline {

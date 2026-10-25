@@ -108,9 +108,10 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
 
+# Rust's default 16 codegen units: one unit left the last crates (engine,
+# then uxduck) to one core, about 10 of the Windows release build's 13 min.
 [profile.release]
 lto = "thin"
-codegen-units = 1
 
 # Every daemon compiles the script host (about 4 MB of WebAssembly) for the
 # Clock it comes with, one plugin at a time. Unoptimised, wasmtime's compiler
@@ -144,5 +145,6 @@ opt-level = 3
 inherits = "release"
 opt-level = "z"
 lto = "fat"
+codegen-units = 1
 panic = "abort"
 strip = true

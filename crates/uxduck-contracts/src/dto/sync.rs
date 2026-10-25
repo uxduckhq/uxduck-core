@@ -25,7 +25,7 @@ pub enum SyncCategory {
     Settings,
     Chats,
     Places,
-    /// Saved vehicles and their history, baselines, snapshots, connections.
+    /// Saved vehicles and their history, snapshots, connections.
     Vehicles,
     Plans,
 }

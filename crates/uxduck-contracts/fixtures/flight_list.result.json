@@ -26,6 +26,7 @@
       "keep": false,
       "recordedHere": true,
       "leftAccount": false,
+      "log": "none",
       "mission": {
         "planId": "pl0123456789abcdef",
         "planName": "North field survey",
@@ -34,10 +35,7 @@
       },
       "params": {
         "digest": "54ef63fab15e8236074387e18732bcc53802a65f8b0b400edba888baf078442f",
-        "count": 912,
-        "baselineId": "pb0123456789abcdef",
-        "baselineName": "Approved 2026-10-01",
-        "baselineDiffer": 2
+        "count": 912
       }
     }
   ],

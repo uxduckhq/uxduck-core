@@ -23,5 +23,6 @@
   ],
   "keep": false,
   "recordedHere": true,
-  "leftAccount": false
+  "leftAccount": false,
+  "log": "none"
 }

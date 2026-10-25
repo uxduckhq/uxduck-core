@@ -191,8 +191,10 @@ impl Engine {
             recorded_here: true,
             left_account: false,
             contact_lost_at_us: None,
+            link_id: Some(vehicle.link_id.clone()),
+            log: uxduck_core::domain::flight::FlightLog::None,
             mission: None,
-            params: crate::param_definitions::baselines::at_arm(self, &vehicle.id),
+            params: crate::param_definitions::queries::armed_with(self, &vehicle.id),
             version: 1,
         };
         if let Some(timer) = self.flight_times.0.get_mut(&vehicle.id) {
@@ -628,6 +630,103 @@ impl Engine {
             ApiError::new(ErrorKind::Internal, "the flight went missing as it ended")
         })?;
         Ok(ended.into())
+    }
+
+    /// `flight/uploadLog`: one ended flight's log to the account while every
+    /// flight log is not being stored (2026-10-24). The uploader cuts it from
+    /// the connection's log here and calls back once the account has it.
+    pub(crate) fn ask_flight_log(
+        &mut self,
+        connection: crate::ConnectionId,
+        id: &str,
+    ) -> Result<uxduck_contracts::dto::flight::Flight, uxduck_contracts::errors::ApiError> {
+        use uxduck_contracts::errors::{ApiError, ErrorKind};
+        use uxduck_core::domain::flight::FlightLog;
+        let mut flight = self
+            .state
+            .flights
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no flight {id}")))?;
+        let refuse = |why: &str| Err(ApiError::new(ErrorKind::InvalidValue, why));
+        if !flight.recorded_here || flight.link_id.is_none() {
+            return refuse("Its flight log is on the computer that recorded it.");
+        }
+        if flight.end == FlightEnd::Open {
+            return refuse("Send its flight log once the flight has ended.");
+        }
+        if self.state.settings.store_flights {
+            return refuse("Flight logs already go to your account as they are recorded.");
+        }
+        if flight.log == FlightLog::None {
+            flight.log = FlightLog::Asked;
+            flight.version += 1;
+            self.commit(
+                connection,
+                Change::FlightUpserted {
+                    flight: flight.clone(),
+                },
+            );
+        }
+        Ok((&flight).into())
+    }
+
+    /// The flight logs asked for and not in the account yet: each one's
+    /// connection and its time, for the uploader to cut.
+    #[must_use]
+    pub fn flight_logs_asked(&self) -> Vec<(String, String, u64, u64)> {
+        self.state
+            .flights
+            .values()
+            .filter(|f| f.log == uxduck_core::domain::flight::FlightLog::Asked)
+            .filter_map(|f| {
+                Some((
+                    f.id.clone(),
+                    f.link_id.clone()?,
+                    f.armed_at_us,
+                    f.ended_at_us?,
+                ))
+            })
+            .collect()
+    }
+
+    /// A flight's log is all in the account. Not one that was not asked for:
+    /// any recording's chunks come here.
+    pub fn flight_log_stored(&mut self, id: &str) {
+        let Some(mut flight) = self.state.flights.get(id).cloned() else {
+            return;
+        };
+        if flight.log != uxduck_core::domain::flight::FlightLog::Asked {
+            return;
+        }
+        flight.log = uxduck_core::domain::flight::FlightLog::Stored;
+        flight.version += 1;
+        self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+    }
+
+    /// A flight's log asked for, but its connection's logs here hold
+    /// nothing of its time (deleted to make room, or never recorded).
+    pub fn flight_log_missing(&mut self, id: &str) {
+        let Some(mut flight) = self.state.flights.get(id).cloned() else {
+            return;
+        };
+        if flight.log != uxduck_core::domain::flight::FlightLog::Asked {
+            return;
+        }
+        flight.log = uxduck_core::domain::flight::FlightLog::None;
+        flight.version += 1;
+        let (vehicle, name) = (flight.vehicle_id.clone(), flight.vehicle_name.clone());
+        self.commit_as(flight_actor(), Change::FlightUpserted { flight });
+        self.raise(crate::commands::Raise {
+            severity: uxduck_core::domain::notification::Severity::Info,
+            kind: uxduck_core::domain::notification::NotificationKind::Transient,
+            subject: uxduck_core::domain::notification::Subject::Vehicle { id: vehicle },
+            title: format!("{name}'s flight log is not on this computer"),
+            body: Some("Its time is not in the logs kept here, so nothing was sent.".into()),
+            actions: Vec::new(),
+            condition: None,
+            report: None,
+        });
     }
 
     /// The offline alarm's End flight button goes once the flight has ended.

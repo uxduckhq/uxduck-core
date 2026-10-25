@@ -1,7 +1,15 @@
 /** Build the isolated capture runtime from pinned, verified corresponding source. */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -83,9 +91,28 @@ try {
     for (const source of sources) {
       const archive = join(base, source.name);
       if (!existsSync(archive)) {
-        const response = await fetch(source.url);
-        if (!response.ok) throw new Error(`Cannot download ${source.url}: ${response.status}`);
-        writeFileSync(archive, Buffer.from(await response.arrayBuffer()));
+        // curl, not fetch: ffmpeg.org can take longer to connect than fetch's
+        // fixed 10 s, and it retries. Forward slashes for MSYS2's curl.
+        const partial = `${archive}.part`;
+        execFileSync(
+          "curl",
+          [
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "60",
+            "--retry",
+            "5",
+            "--retry-all-errors",
+            "--output",
+            partial.replaceAll("\\", "/"),
+            source.url,
+          ],
+          { stdio: "inherit" },
+        );
+        renameSync(partial, archive);
       }
       if (createHash("sha256").update(readFileSync(archive)).digest("hex") !== source.sha)
         throw new Error(`Capture source hash mismatch: remove ${archive} and rebuild.`);

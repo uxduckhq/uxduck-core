@@ -20,6 +20,26 @@ pub enum FlightEnd {
     ContactLost,
 }
 
+/// A flight's log sent to the account by itself, rather than with every
+/// flight log while "Store flight logs and videos" is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlightLog {
+    #[default]
+    None,
+    /// Asked for: on its way, cut from the connection's log here.
+    Asked,
+    /// In the account, as a recording named after the flight.
+    Stored,
+}
+
+impl FlightLog {
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+}
+
 /// A mission a flight flew (C8). One mission can take several flights, a
 /// battery swap apart: they share a run, and UXDuck asks about saving once
 /// the run's mission is finished, not at each landing.
@@ -43,22 +63,13 @@ pub struct FlightMission {
 }
 
 /// The parameters a flight armed with (C7): enough to tell later whether
-/// two flights flew the same configuration, and how far it was from the
-/// vehicle's approved baseline.
+/// two flights flew the same configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlightParams {
     /// SHA-256 of every parameter, one `NAME=value` line each, by name.
     pub digest: String,
     pub count: u32,
-    /// The vehicle's newest baseline then, and how many parameters
-    /// differed from it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_differ: Option<u32>,
 }
 
 /// Someone who acted on the vehicle during a flight, from their first
@@ -127,6 +138,13 @@ pub struct Flight {
     /// offline since. Cleared when it is heard again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_lost_at_us: Option<u64>,
+    /// The connection it was heard on, for its flight log here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+    /// Its flight log in the account on its own (2026-10-24): asked for
+    /// while "Store flight logs and videos" is off, then stored.
+    #[serde(default, skip_serializing_if = "FlightLog::is_none")]
+    pub log: FlightLog,
     /// The mission it flew, if it flew one (C8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<FlightMission>,

@@ -77,12 +77,34 @@ pub struct Flight {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub contact_lost_at_us: Option<u64>,
+    /// Its flight log in the account on its own: `asked` while on its way,
+    /// `stored` once there, as a recording named after the flight.
+    #[serde(default)]
+    pub log: FlightLog,
     /// The mission it flew, if it flew one (C8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<FlightMission>,
     /// The parameters it armed with (C7), when UXDuck had them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FlightParams>,
+}
+
+/// A flight's log sent to the account by itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlightLog {
+    #[default]
+    None,
+    Asked,
+    Stored,
+}
+
+/// `flight/uploadLog`: sends one flight's log to the account while "Store
+/// flight logs and videos" is off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightUploadLogParams {
+    pub id: String,
 }
 
 /// A mission a flight flew (C8): flights of one mission share a run.
@@ -119,14 +141,6 @@ pub struct FlightParams {
     /// the same digest is the same configuration.
     pub digest: String,
     pub count: u32,
-    /// The vehicle's newest baseline then, and how many parameters
-    /// differed from it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_differ: Option<u32>,
 }
 
 /// `flight/keep`: saves a flight to the account, or with `keep: false`
@@ -223,6 +237,11 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
             recorded_here: f.recorded_here,
             left_account: f.left_account,
             contact_lost_at_us: f.contact_lost_at_us,
+            log: match f.log {
+                uxduck_core::domain::flight::FlightLog::None => FlightLog::None,
+                uxduck_core::domain::flight::FlightLog::Asked => FlightLog::Asked,
+                uxduck_core::domain::flight::FlightLog::Stored => FlightLog::Stored,
+            },
             mission: f.mission.as_ref().map(|m| FlightMission {
                 mission_id: m.mission_id.clone(),
                 plan_id: m.plan_id.clone(),
@@ -233,9 +252,6 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
             params: f.params.as_ref().map(|p| FlightParams {
                 digest: p.digest.clone(),
                 count: p.count,
-                baseline_id: p.baseline_id.clone(),
-                baseline_name: p.baseline_name.clone(),
-                baseline_differ: p.baseline_differ,
             }),
         }
     }
