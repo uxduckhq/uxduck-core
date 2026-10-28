@@ -18,6 +18,11 @@ serialport = { workspace = true, optional = true }
 mavinspect = { workspace = true, optional = true }
 # Messages decoded by name (`dialect`), in the browser too.
 serde_json.workspace = true
+# Firmware files and ArduPilot's manifest (S189): JSON with a zlib image in
+# base64, and the manifest gzipped.
+serde.workspace = true
+flate2.workspace = true
+base64.workspace = true
 quick-xml = { workspace = true, optional = true }
 
 [features]

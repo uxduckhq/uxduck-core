@@ -154,6 +154,10 @@ fn wake_command() -> Option<Command> {
 }
 
 impl System for Host {
+    fn process_usage(&self) -> Option<uxduck_contracts::dto::settings::CoreProcessUsage> {
+        super::process_usage::snapshot()
+    }
+
     fn start_at_login(
         &mut self,
         on: bool,
@@ -250,7 +254,7 @@ impl System for Host {
     }
 
     fn sim_instance_free(&self, instance: u8) -> bool {
-        crate::sim::instance_free(instance)
+        crate::sim::claim_instance(instance)
     }
 
     fn is_local_address(&self, host: &str) -> bool {

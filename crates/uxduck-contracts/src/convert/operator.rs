@@ -22,6 +22,59 @@ impl From<dto::UnitSystem> for core::UnitSystem {
     }
 }
 
+/// A unit enum the same in both: each variant to its namesake.
+macro_rules! same_units {
+    ($($name:ident { $($variant:ident),+ $(,)? })+) => {$(
+        impl From<core::$name> for dto::$name {
+            fn from(value: core::$name) -> Self {
+                match value {
+                    $(core::$name::$variant => Self::$variant,)+
+                }
+            }
+        }
+
+        impl From<dto::$name> for core::$name {
+            fn from(value: dto::$name) -> Self {
+                match value {
+                    $(dto::$name::$variant => Self::$variant,)+
+                }
+            }
+        }
+    )+};
+}
+
+same_units! {
+    DistanceUnit { Kilometers, Miles }
+    AltitudeUnit { Meters, Feet }
+    SpeedUnit { MetersPerSecond, KilometersPerHour, Knots, MilesPerHour }
+    VerticalSpeedUnit { MetersPerSecond, FeetPerMinute }
+    TemperatureUnit { Celsius, Fahrenheit }
+}
+
+impl From<core::QuantityUnits> for dto::QuantityUnits {
+    fn from(value: core::QuantityUnits) -> Self {
+        Self {
+            distance: value.distance.into(),
+            altitude: value.altitude.into(),
+            speed: value.speed.into(),
+            vertical_speed: value.vertical_speed.into(),
+            temperature: value.temperature.into(),
+        }
+    }
+}
+
+impl From<dto::QuantityUnits> for core::QuantityUnits {
+    fn from(value: dto::QuantityUnits) -> Self {
+        Self {
+            distance: value.distance.into(),
+            altitude: value.altitude.into(),
+            speed: value.speed.into(),
+            vertical_speed: value.vertical_speed.into(),
+            temperature: value.temperature.into(),
+        }
+    }
+}
+
 impl From<core::CoordinateFormat> for dto::CoordinateFormat {
     fn from(value: core::CoordinateFormat) -> Self {
         match value {
@@ -68,6 +121,7 @@ impl From<&core::Operator> for dto::Operator {
             id: value.id.clone(),
             name: value.name.clone(),
             units: value.units.into(),
+            quantity_units: value.quantity_units().into(),
             coordinate_format: value.coordinate_format.into(),
             altitude_frame: value.altitude_frame.into(),
             layout: (&value.layout).into(),
@@ -178,6 +232,8 @@ fn tab_to_dto(kind: core::TabKind) -> dto::TabKind {
         core::TabKind::Profile => dto::TabKind::Profile,
         core::TabKind::Duck => dto::TabKind::Duck,
         core::TabKind::Airspace => dto::TabKind::Airspace,
+        core::TabKind::Setup => dto::TabKind::Setup,
+        core::TabKind::Checklist => dto::TabKind::Checklist,
     }
 }
 
@@ -220,6 +276,8 @@ fn tab_from_dto(kind: dto::TabKind) -> core::TabKind {
         dto::TabKind::Profile => core::TabKind::Profile,
         dto::TabKind::Duck => core::TabKind::Duck,
         dto::TabKind::Airspace => core::TabKind::Airspace,
+        dto::TabKind::Setup => core::TabKind::Setup,
+        dto::TabKind::Checklist => core::TabKind::Checklist,
     }
 }
 

@@ -29,8 +29,9 @@ use super::engine_task::EngineHandle;
 
 /// A plugin's memory, at most: 256 pages of 64 KiB, 16 MiB.
 const MEMORY_PAGES: u32 = 256;
-/// How long one call may run.
-const CALL_LIMIT: Duration = Duration::from_secs(1);
+/// Work allowed per call, including initialization. Fuel counts executed
+/// WebAssembly instructions, so host suspension cannot exhaust the budget.
+const CALL_FUEL: u64 = 100_000_000;
 
 /// The shortest tick a plugin may ask for (S101): ten calls a second.
 const MIN_TICK_MS: u32 = 100;
@@ -401,6 +402,8 @@ fn write_draft(drafts: &Path, order: DraftOrder) -> Result<PluginDraft, String> 
         hosts: Vec::new(),
         traffic_source: false,
         starts_off: false,
+        // A person adds checks (S194), as hosts.
+        checks: Vec::new(),
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -466,6 +469,7 @@ fn run_test(order: &TestOrder, tlogs: &Path) -> Result<PluginTestResult, String>
         ..PluginTestResult::default()
     };
     let mut items: BTreeMap<String, TestedItem> = BTreeMap::new();
+    let mut checks: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut log = VecDeque::new();
     let command = order.command.clone().map(|c| {
         (
@@ -503,6 +507,22 @@ fn run_test(order: &TestOrder, tlogs: &Path) -> Result<PluginTestResult, String>
                         }
                     }
                     result.features += u32::try_from(effects.features.len()).unwrap_or(u32::MAX);
+                    // The latest report of each check (S194).
+                    for check in &effects.checks {
+                        let status = serde_json::to_value(check.status)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_default();
+                        let words = check
+                            .detail
+                            .as_deref()
+                            .map(|d| format!(": {d}"))
+                            .unwrap_or_default();
+                        checks.insert(
+                            (check.id.clone(), check.vehicle_id.clone()),
+                            format!("{} on {}: {status}{words}", check.id, check.vehicle_id),
+                        );
+                    }
                     for line in &effects.log {
                         log.push_back(line.clone());
                         if log.len() > MOST {
@@ -516,6 +536,7 @@ fn run_test(order: &TestOrder, tlogs: &Path) -> Result<PluginTestResult, String>
     )?;
     result.panels = description.panels;
     result.items = items.into_values().collect();
+    result.checks = checks.into_values().take(MOST).collect();
     result.log = log.into_iter().collect();
     Ok(result)
 }
@@ -684,6 +705,10 @@ pub struct Running {
     /// The hosts it may fetch from (S170), and how many fetches are out.
     hosts: Vec<String>,
     fetching: usize,
+    /// The checks its manifest declares (S194), for the harness to refuse
+    /// a report of any other, as the engine ignores it.
+    checks: Vec<String>,
+    traffic: Option<uxduck_contracts::dto::traffic::TrafficFeedContext>,
 }
 
 impl Running {
@@ -714,7 +739,17 @@ impl Running {
             wake: None,
             hosts: Vec::new(),
             fetching: 0,
+            checks: Vec::new(),
+            traffic: None,
         }
+    }
+
+    /// With the checks its manifest declares (S194), which the harness
+    /// holds its reports to.
+    #[must_use]
+    pub fn declaring(mut self, checks: &[uxduck_contracts::dto::plugin::DeclaredCheck]) -> Self {
+        self.checks = checks.iter().map(|c| c.id.clone()).collect();
+        self
     }
 
     /// The hosts it may fetch from, from its manifest (S170).
@@ -936,6 +971,7 @@ impl Running {
             }
             let input = TickInput {
                 now_ms: wall_ms(now),
+                traffic: self.traffic.clone(),
             };
             results.push(self.timed("on_tick", &input, now));
         }
@@ -992,6 +1028,17 @@ fn report_replay(running: &mut Running, delivered: Delivered, each: &mut Hears<'
                 return Err(format!("{}: the key does not say its unit", item.key));
             }
         }
+        // Only the checks it declares (S194): the daemon ignores the rest.
+        if let Some(check) = effects
+            .checks
+            .iter()
+            .find(|c| !running.checks.contains(&c.id))
+        {
+            return Err(format!(
+                "check {}: not in plugin.json's checks, so UXDuck ignores it",
+                check.id
+            ));
+        }
         running.keep(effects.store.clone())?;
         Ok(effects)
     });
@@ -1023,7 +1070,7 @@ pub fn harness(
         .map(|d| path.join(d).display().to_string());
     register_dialect(&manifest.id, dialect.as_deref())?;
     let (plugin, description) = load(&module, manifest.script.is_some())?;
-    let mut running = Running::new(plugin, &manifest.subscribe);
+    let mut running = Running::new(plugin, &manifest.subscribe).declaring(&manifest.checks);
     let start = Instant::now();
     let epoch_ms = wall_ms(start);
     let _clock = ReplayClockGuard(REPLAY_CLOCK.replace(Some(ReplayClock {
@@ -1222,13 +1269,12 @@ fn plugin_fetch_answer(request: &FetchRequest, page: Result<Page, String>) -> Fe
     }
 }
 
-/// Why a call failed, in words: Extism says only "timeout" or "oom".
+/// Why a call failed, in words.
 fn explain(function: &str, error: &str) -> String {
     match error {
-        "timeout" => format!(
-            "{function} ran for more than {} s and was stopped",
-            CALL_LIMIT.as_secs()
-        ),
+        "plugin ran out of fuel" => {
+            format!("{function} exceeded its execution budget and was stopped")
+        }
         "oom" => format!(
             "{function} ran out of its {} MiB of memory",
             MEMORY_PAGES / 16
@@ -1278,6 +1324,14 @@ fn clock() -> extism::Function {
 /// # Errors
 /// When it does not load, or `describe` fails.
 pub fn load(module: &str, script: bool) -> Result<(extism::Plugin, Description), String> {
+    load_with_clock(module, script, clock())
+}
+
+fn load_with_clock(
+    module: &str,
+    script: bool,
+    clock: extism::Function,
+) -> Result<(extism::Plugin, Description), String> {
     // Read here, not by Extism: its file access stays off.
     let (bytes, config) = if script {
         let source = std::fs::read_to_string(module).map_err(|e| format!("{module}: {e}"))?;
@@ -1289,13 +1343,15 @@ pub fn load(module: &str, script: bool) -> Result<(extism::Plugin, Description),
             None,
         )
     };
-    let mut manifest = extism::Manifest::new([extism::Wasm::data(bytes)])
-        .with_memory_max(MEMORY_PAGES)
-        .with_timeout(CALL_LIMIT);
+    let mut manifest =
+        extism::Manifest::new([extism::Wasm::data(bytes)]).with_memory_max(MEMORY_PAGES);
     if let Some(javascript) = config {
         manifest = manifest.with_config_key("script", javascript);
     }
-    let mut plugin = extism::Plugin::new(&manifest, [clock()], false)
+    let mut plugin = extism::PluginBuilder::new(&manifest)
+        .with_functions([clock])
+        .with_fuel_limit(CALL_FUEL)
+        .build()
         .map_err(|e| format!("{module} does not load: {e}"))?;
     let description = call(&mut plugin, "describe", &serde_json::json!({}))?;
     Ok((plugin, description))
@@ -1322,6 +1378,15 @@ impl Host {
     pub fn start(mut self, engine: EngineHandle) {
         let runtime = tokio::runtime::Handle::current();
         self.runtime = Some(runtime.clone());
+        let feed_engine = engine.clone();
+        let feed_runtime = runtime.clone();
+        let read_traffic = move |id: &str| {
+            let id = id.to_owned();
+            feed_runtime
+                .block_on(feed_engine.run(move |e| e.traffic_feed_for(&id)))
+                .ok()
+                .flatten()
+        };
         let tell = move |report: Report| {
             let engine = engine.clone();
             let _ = runtime.block_on(engine.run(move |e| match report {
@@ -1336,13 +1401,17 @@ impl Host {
         };
         let spawned = std::thread::Builder::new()
             .name("plugins".into())
-            .spawn(move || self.run(&tell));
+            .spawn(move || self.run(&tell, &read_traffic));
         if let Err(error) = spawned {
             tracing::error!(%error, code = "plugin-host", "could not start the plugin host");
         }
     }
 
-    fn run(self, tell: &dyn Fn(Report)) {
+    fn run(
+        self,
+        tell: &dyn Fn(Report),
+        read_traffic: &dyn Fn(&str) -> Option<uxduck_contracts::dto::traffic::TrafficFeedContext>,
+    ) {
         let mut running: BTreeMap<String, Running> = BTreeMap::new();
         let mut reported = Instant::now();
         loop {
@@ -1431,6 +1500,7 @@ impl Host {
                 let Some(plugin) = running.get_mut(&id) else {
                     continue;
                 };
+                plugin.traffic = read_traffic(&id);
                 for delivered in plugin.deliver(now) {
                     self.settle(&mut running, &id, delivered.result, tell);
                     if !running.contains_key(&id) {
@@ -1530,6 +1600,84 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paused_call_resumes_without_spending_its_execution_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("index.ts");
+        std::fs::write(
+            &source,
+            "let calls = 0; export function onTick() { Date.now(); return { store: { calls: ++calls } }; }",
+        )
+        .unwrap();
+        let pause = Arc::new(AtomicBool::new(false));
+        let paused = pause.clone();
+        let clock = extism::Function::new(
+            "uxduck_now_ms",
+            [],
+            [extism::ValType::I64],
+            extism::UserData::new(()),
+            move |_plugin, _inputs, outputs, _data| {
+                // Hold an active call longer than the old deadline, without
+                // executing guest instructions. No machine sleep is required.
+                if paused.swap(false, Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1100));
+                }
+                outputs[0] = extism::Val::I64(2000);
+                Ok(())
+            },
+        );
+        let (mut plugin, _) = load_with_clock(source.to_str().unwrap(), true, clock).unwrap();
+        pause.store(true, Ordering::SeqCst);
+        for expected in 1..=3 {
+            let result: Effects = call(
+                &mut plugin,
+                "on_tick",
+                &TickInput {
+                    now_ms: 2000,
+                    ..TickInput::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.store["calls"], expected);
+        }
+        assert!(!pause.load(Ordering::SeqCst), "the pause was not exercised");
+    }
+
+    #[test]
+    fn execution_budgets_stop_infinite_scripts_during_loading_and_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("index.ts");
+        for script in [
+            "while (true) {}",
+            "export function describe() { while (true) {} }",
+        ] {
+            std::fs::write(&source, script).unwrap();
+            let error = load(source.to_str().unwrap(), true).err().unwrap();
+            assert_eq!(
+                error,
+                "describe exceeded its execution budget and was stopped"
+            );
+        }
+        std::fs::write(&source, "export function onTick() { while (true) {} }").unwrap();
+        let (mut plugin, _) = load(source.to_str().unwrap(), true).unwrap();
+        let error = call::<_, Effects>(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: 2000,
+                ..TickInput::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "on_tick exceeded its execution budget and was stopped"
+        );
+    }
 
     fn replay_script(source: &str) -> Vec<Delivered> {
         let dir = tempfile::tempdir().unwrap();
@@ -1728,6 +1876,144 @@ mod tests {
         assert!(reset.store["startedAt"].as_f64().unwrap() > 121_000.0);
     }
 
+    /// The sample wind check (S194): the vehicle's estimate per vehicle, a
+    /// speed set by hand instead, words without live numbers, a wake-up to
+    /// report again before its 30 s run out, and only its declared check.
+    #[test]
+    fn wind_check_reports_each_vehicle_from_its_estimate_or_by_hand() {
+        use uxduck_contracts::dto::plugin::ReportedStatus;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/wind-check-ts");
+        let manifest = inspect(dir.to_str().unwrap()).unwrap();
+        assert_eq!(manifest.checks.len(), 1);
+        assert_eq!(manifest.checks[0].id, "wind");
+        assert_eq!(manifest.checks[0].stale_ms, 30_000);
+        assert_eq!(
+            manifest.checks[0].severity,
+            uxduck_contracts::dto::preflight::CheckSeverity::Block
+        );
+        let mut plugin = example("wind-check-ts");
+        let mut items = |batch: serde_json::Value| -> Effects {
+            call(
+                &mut plugin,
+                "on_items",
+                &serde_json::json!({ "items": batch }),
+            )
+            .unwrap()
+        };
+        let calm = items(serde_json::json!([
+            { "vehicleId": "a", "key": "wind.speed_mps", "label": "Wind", "unit": "meter-per-second", "value": 4.2, "timeUs": 1 },
+            { "vehicleId": "b", "key": "wind.speed_mps", "label": "Wind", "unit": "meter-per-second", "value": 9.5, "timeUs": 1 },
+            { "vehicleId": "b", "key": "battery.voltage_v", "label": "Battery", "unit": "volt", "value": 12.0, "timeUs": 1 }
+        ]));
+        let status = |effects: &Effects, vehicle: &str| {
+            effects
+                .checks
+                .iter()
+                .find(|c| c.vehicle_id == vehicle)
+                .map(|c| (c.status, c.detail.clone().unwrap_or_default()))
+        };
+        assert_eq!(calm.checks.len(), 2);
+        assert!(calm.checks.iter().all(|c| c.id == "wind"));
+        assert_eq!(
+            status(&calm, "a"),
+            Some((ReportedStatus::Pass, "Under 8 m/s.".into()))
+        );
+        assert_eq!(
+            status(&calm, "b"),
+            Some((ReportedStatus::Fail, "8 m/s or more.".into()))
+        );
+        assert_eq!(
+            calm.wake_in_ms,
+            Some(10_000),
+            "reports again before it goes stale"
+        );
+        let speed = calm
+            .items
+            .iter()
+            .find(|i| i.key == "wind_check.speed_mps" && i.vehicle_id.as_deref() == Some("a"))
+            .unwrap();
+        assert_eq!(speed.value, Some(4.2));
+        assert!(
+            uxduck_core::domain::telemetry::key_says_unit(&speed.key, speed.unit.into()),
+            "its key says its unit"
+        );
+        // The words stay as the wind changes within the same side of 8 m/s.
+        let breezier = items(serde_json::json!([
+            { "vehicleId": "a", "key": "wind.speed_mps", "label": "Wind", "unit": "meter-per-second", "value": 6.0, "timeUs": 2 }
+        ]));
+        assert_eq!(status(&breezier, "a"), status(&calm, "a"));
+
+        // Set by hand, it counts instead of the estimate; and back.
+        let by_hand: Effects = call(
+            &mut plugin,
+            "on_command",
+            &serde_json::json!({ "command": "set-wind", "vehicleId": "a", "params": { "speedMps": 12 } }),
+        )
+        .unwrap();
+        assert_eq!(status(&by_hand, "a").unwrap().0, ReportedStatus::Fail);
+        let woken: Effects =
+            call(&mut plugin, "on_tick", &serde_json::json!({ "nowMs": 1 })).unwrap();
+        assert_eq!(woken.checks.len(), 2, "every vehicle again");
+        assert_eq!(status(&woken, "a").unwrap().0, ReportedStatus::Fail);
+        let estimate: Effects = call(
+            &mut plugin,
+            "on_command",
+            &serde_json::json!({ "command": "use-estimate", "vehicleId": "a", "params": {} }),
+        )
+        .unwrap();
+        assert_eq!(status(&estimate, "a").unwrap().0, ReportedStatus::Pass);
+        // A vehicle with no estimate, set by hand only: no estimate is
+        // waited for until a speed is set.
+        let fresh: Effects = call(
+            &mut plugin,
+            "on_command",
+            &serde_json::json!({ "command": "use-estimate", "vehicleId": "c", "params": {} }),
+        )
+        .unwrap();
+        assert_eq!(
+            status(&fresh, "c"),
+            Some((
+                ReportedStatus::Waiting,
+                "No wind estimate from the vehicle yet.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn replay_refuses_a_check_the_manifest_does_not_declare() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            serde_json::json!({
+                "abi": 2, "id": "checks", "name": "Checks", "version": "0.1.0",
+                "script": "index.ts", "capabilities": ["read"],
+                "checks": [{ "id": "wind", "title": "Wind under 8 m/s", "severity": "block" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("index.ts"),
+            r#"
+            import { check } from "@uxduck/sdk";
+            export function onStart() { return { checks: [check("v", "rain", "pass")] }; }
+        "#,
+        )
+        .unwrap();
+        let mut outcomes = Vec::new();
+        harness(dir.path(), &[], None, &mut |_, _, result| {
+            outcomes.push(result.clone());
+        })
+        .unwrap();
+        assert!(
+            outcomes[0]
+                .as_ref()
+                .unwrap_err()
+                .contains("check rain: not in plugin.json's checks"),
+            "{outcomes:?}"
+        );
+    }
+
     fn plugin_dir(manifest: &serde_json::Value) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("plugin.json"), manifest.to_string()).unwrap();
@@ -1884,7 +2170,15 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
             Some("0 of 500 requests today")
         );
         // No vehicle yet: nothing asked.
-        let idle: Effects = effects(&mut plugin, "on_tick", &TickInput { now_ms: now }).unwrap();
+        let idle: Effects = effects(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: now,
+                ..TickInput::default()
+            },
+        )
+        .unwrap();
         assert!(idle.fetch.is_empty());
         let message = |name: &str, fields: serde_json::Value| MessageInput {
             vehicle_id: "alpha".into(),
@@ -1908,20 +2202,28 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
             },
         )
         .unwrap();
-        let asked: Effects =
-            effects(&mut plugin, "on_tick", &TickInput { now_ms: now + 5000 }).unwrap();
+        let asked: Effects = effects(
+            &mut plugin,
+            "on_tick",
+            &TickInput {
+                now_ms: now + 5000,
+                ..TickInput::default()
+            },
+        )
+        .unwrap();
         assert_eq!(asked.fetch.len(), 1);
         assert_eq!(
             asked.fetch[0].url,
             "https://api.adsb.lol/v2/point/51.4700/-0.4500/25"
         );
         assert_eq!(asked.store["used"], 1);
-        // Armed: again after 10 s, not before; one at a time.
+        // Arming does not change the explicit 30-second interval; one at a time.
         let soon: Effects = effects(
             &mut plugin,
             "on_tick",
             &TickInput {
                 now_ms: now + 10_000,
+                ..TickInput::default()
             },
         )
         .unwrap();
@@ -1966,7 +2268,8 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
             &mut plugin,
             "on_tick",
             &TickInput {
-                now_ms: now + 15_500,
+                now_ms: now + 35_500,
+                ..TickInput::default()
             },
         )
         .unwrap();
@@ -1982,7 +2285,7 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
                 url: again.fetch[0].url.clone(),
                 status: Some(429),
                 headers: later,
-                now_ms: now + 15_600,
+                now_ms: now + 35_600,
                 ..FetchedInput::default()
             },
         )
@@ -1999,7 +2302,8 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
             &mut plugin,
             "on_tick",
             &TickInput {
-                now_ms: now + 30_000,
+                now_ms: now + 60_000,
+                ..TickInput::default()
             },
         )
         .unwrap();

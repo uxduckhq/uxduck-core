@@ -1,0 +1,23 @@
+{
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "row": "accelerometer",
+  "kind": "accelerometer",
+  "step": "running",
+  "progress": 33,
+  "instruction": "hold-still",
+  "position": "nose-down",
+  "sides": {
+    "needed": ["level", "left", "right", "nose-down", "nose-up", "back"],
+    "done": ["level", "nose-up"]
+  },
+  "startedBy": {
+    "clientName": "uxduck-web",
+    "clientKind": "operator-ui",
+    "operatorId": "op5f1c0a91b2d3e4f5",
+    "operatorName": "Ben"
+  },
+  "receiptId": "rc1a2b3c4d5e6f7a8b",
+  "startedAtUs": 1790669300000000,
+  "updatedAtUs": 1790669305000000,
+  "version": 7
+}

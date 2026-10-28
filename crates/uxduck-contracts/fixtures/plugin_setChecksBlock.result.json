@@ -1,0 +1,29 @@
+{
+  "id": "wind-check",
+  "name": "Wind check",
+  "version": "0.1.0",
+  "description": "A preflight check that the wind is under 8 m/s, from the vehicle's own wind estimate or a speed set by hand.",
+  "path": "/Users/ana/plugins/wind-check-ts",
+  "capabilities": ["read"],
+  "subscribe": {
+    "items": { "keys": ["wind.speed_mps"], "cadenceMs": 1000 }
+  },
+  "sends": [],
+  "commands": [
+    {
+      "name": "set-wind",
+      "title": "Set the wind by hand",
+      "parameters": {
+        "type": "object",
+        "properties": { "speedMps": { "type": "number", "minimum": 0, "maximum": 100 } },
+        "required": ["speedMps"]
+      },
+      "risk": "none"
+    }
+  ],
+  "status": "running",
+  "panels": [],
+  "clientId": "plugin:wind-check",
+  "checks": [{ "id": "wind", "title": "Wind under 8 m/s", "severity": "block", "staleMs": 30000 }],
+  "checksBlock": true
+}

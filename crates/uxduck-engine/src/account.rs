@@ -57,6 +57,10 @@ pub enum AccountAction {
     SetUsername {
         username: String,
     },
+    /// Sets the account's name.
+    SetName {
+        name: String,
+    },
     /// Where the account is signed in (S114): an `AccountSessions`.
     Sessions,
     /// Signs out one session; this computer's own signs out as `SignOut`
@@ -196,6 +200,9 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
         },
         ClientRequest::AccountSetUsername(p) => AccountAction::SetUsername {
             username: p.username.trim().to_lowercase(),
+        },
+        ClientRequest::AccountSetName(p) => AccountAction::SetName {
+            name: p.name.trim().to_owned(),
         },
         ClientRequest::AccountSessions(_) => AccountAction::Sessions,
         ClientRequest::AccountSignOutSession(p) => AccountAction::SignOutSession {

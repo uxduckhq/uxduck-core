@@ -1,0 +1,97 @@
+{
+  "aircraft": [
+    {
+      "address": "4CA2D1",
+      "callsign": "EIN154",
+      "squawk": "2012",
+      "category": "large",
+      "protocol": "adsb",
+      "latitudeDeg": 51.476813,
+      "longitudeDeg": -0.524139,
+      "altitudeM": 960.4,
+      "altitudeFrame": "ellipsoid",
+      "trackDeg": 264.54,
+      "groundSpeedMps": 81.1,
+      "climbMps": -5.2,
+      "heardAtMs": 1790668800123,
+      "sources": ["vehicle:12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+      "amslM": 914.4,
+      "ellipsoidM": 960.4,
+      "relative": [
+        {
+          "referenceId": "vehicle:alpha",
+          "distanceM": 800.0,
+          "aboveM": 114.4,
+          "marginM": 12.0
+        }
+      ],
+      "alertVehicleIds": ["alpha"]
+    },
+    {
+      "address": "000003",
+      "category": "light",
+      "protocol": "uat",
+      "altitudeM": 600.0,
+      "altitudeFrame": "pressure",
+      "simulated": true,
+      "heardAtMs": 1790668789000,
+      "stale": true,
+      "sources": ["vehicle:12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"]
+    },
+    {
+      "address": "ABCDEF",
+      "category": "uav",
+      "protocol": "adsb",
+      "latitudeDeg": 51.52,
+      "longitudeDeg": -0.1,
+      "altitudeM": 650.0,
+      "altitudeFrame": "geometric",
+      "heardAtMs": 1790668800120,
+      "sources": ["vehicle:12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+      "vehicleId": "7a1e5b2c-0d43-5f6e-8b9a-1c2d3e4f5a6b",
+      "own": "address"
+    }
+  ],
+  "sources": [
+    {
+      "id": "vehicle:12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "kind": "vehicle",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "on": true,
+      "state": "hearing",
+      "aircraft": 2,
+      "lastHeardAtMs": 1790668800123
+    },
+    {
+      "id": "vehicle:7a1e5b2c-0d43-5f6e-8b9a-1c2d3e4f5a6b",
+      "kind": "vehicle",
+      "vehicleId": "7a1e5b2c-0d43-5f6e-8b9a-1c2d3e4f5a6b",
+      "on": false,
+      "state": "paused",
+      "aircraft": 0,
+      "lastHeardAtMs": 1790668800100,
+      "refused": [
+        {
+          "reason": "jump",
+          "count": 3
+        },
+        {
+          "reason": "paused",
+          "count": 18240
+        }
+      ]
+    }
+  ],
+  "controlsVersion": 1,
+  "references": [
+    {
+      "id": "vehicle:alpha",
+      "vehicleId": "alpha",
+      "name": "Alpha",
+      "latitudeDeg": 51.47,
+      "longitudeDeg": -0.52,
+      "amslM": 800.0,
+      "verticalAccuracyM": 10.0
+    }
+  ]
+}

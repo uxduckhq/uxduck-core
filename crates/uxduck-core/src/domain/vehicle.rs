@@ -96,6 +96,13 @@ pub struct Vehicle {
     /// The model it is drawn as, as the person chose; absent, its type's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// How its preflight checks are set and the plan chosen for its next
+    /// flight (ADR-0038 K6): only what a person changed.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::preflight::PreflightSettings::is_default"
+    )]
+    pub preflight: crate::domain::preflight::PreflightSettings,
     pub version: u64,
 }
 

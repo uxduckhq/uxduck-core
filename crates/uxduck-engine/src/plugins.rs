@@ -12,8 +12,9 @@ use uxduck_contracts::dto::plugin::{
     CommandCall, Description, Effects, FoundTool, MapFeature, PLUGIN_ABI, Plugin as PluginDto,
     PluginCommandParams, PluginDraftParams, PluginDraftsResult, PluginFeaturesResult,
     PluginInstallParams, PluginItems, PluginItemsResult, PluginLayer, PluginManifest,
-    PluginSetEnabledParams, PluginTestParams, PluginTestResult, PluginUsage, PluginUsageResult,
-    ProducedItem, SendMessage, ToolSearchParams, ToolSearchResult, WrittenBy,
+    PluginSetChecksBlockParams, PluginSetEnabledParams, PluginTestParams, PluginTestResult,
+    PluginUsage, PluginUsageResult, ProducedItem, SendMessage, ToolSearchParams, ToolSearchResult,
+    WrittenBy,
 };
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::dto::trace::Transport;
@@ -64,6 +65,15 @@ pub(crate) fn handle(
         ClientRequest::PluginSetEnabled(_) if !operator => {
             denied("only an operator client may turn plugins off and on")
         }
+        // A person's answer (S194, ADR-0038 K13): never an agent's or a
+        // plugin's.
+        ClientRequest::PluginSetChecksBlock(_) if !operator => {
+            denied("only a person can let a plugin's checks stop arming, from UXDuck or its CLI")
+        }
+        ClientRequest::PluginSetChecksBlock(PluginSetChecksBlockParams { id, block }) => {
+            let plugin = engine.set_checks_block(connection, &id, block)?;
+            to_value(&PluginDto::from(&plugin))
+        }
         ClientRequest::PluginSetEnabled(PluginSetEnabledParams { id, enabled }) => {
             let plugin = engine.set_plugin_enabled(connection, &id, enabled)?;
             to_value(&PluginDto::from(&plugin))
@@ -76,8 +86,10 @@ pub(crate) fn handle(
             drafts: engine.plugin_host.drafts(),
         }),
         ClientRequest::PluginTest(params) => test(engine, connection, params),
-        ClientRequest::PluginInstall(PluginInstallParams { path }) => {
-            install(engine, connection, &path)
+        ClientRequest::PluginInstall(PluginInstallParams { path, checks_block }) => {
+            // Only a person answers whether its checks may stop arming
+            // (K13): an agent's install leaves it to be asked.
+            install(engine, connection, &path, checks_block.filter(|_| operator))
         }
         ClientRequest::PluginRemove(IdParams { id }) => {
             if !engine.state.plugins.contains_key(&id) {
@@ -96,6 +108,8 @@ pub(crate) fn handle(
             engine.stop_plugin(&id);
             engine.commit(connection, Change::PluginRemoved { id: id.clone() });
             engine.resolve(&failed_condition(&id));
+            engine
+                .plugin_checks_changed(&id, removed.as_ref().is_some_and(|p| !p.checks.is_empty()));
             if let Some(removed) = removed {
                 engine.plugin_removed_here(connection, &removed);
             }
@@ -462,10 +476,15 @@ fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
             bad.name
         ));
     }
-    Ok(())
+    crate::plugin_checks::check_declared(manifest)
 }
 
-fn install(engine: &mut Engine, connection: ConnectionId, path: &str) -> Result<Value, ApiError> {
+fn install(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    path: &str,
+    checks_block: Option<bool>,
+) -> Result<Value, ApiError> {
     let actor = engine.actor(connection);
     if engine.plugin_host.included().iter().any(|p| p == path) {
         return Err(ApiError::new(
@@ -473,19 +492,23 @@ fn install(engine: &mut Engine, connection: ConnectionId, path: &str) -> Result<
             "that is UXDuck's own copy of a plugin it comes with",
         ));
     }
-    let plugin = install_as(engine, actor, path, None, false)?;
+    let plugin = install_as(engine, actor, path, None, false, checks_block)?;
     to_value(&PluginDto::from(&plugin))
 }
 
 /// Installs the plugin in `path` and starts it. With `hold_back`, it gets
 /// only `read`, and the rest of what its manifest asks for waits for an
-/// operator here (X13).
+/// operator here (X13). `checks_block` is a person's answer to whether its
+/// blocking checks may stop arming (S194, K13); without one, installing
+/// again from a folder here keeps the last answer, and a plugin from
+/// another computer or a link is asked again.
 pub(crate) fn install_as(
     engine: &mut Engine,
     actor: Actor,
     path: &str,
     origin: Option<PluginOrigin>,
     hold_back: bool,
+    checks_block: Option<bool>,
 ) -> Result<Plugin, ApiError> {
     let manifest = engine
         .plugin_host
@@ -499,6 +522,13 @@ pub(crate) fn install_as(
         .plugins
         .get(&manifest.id)
         .map_or(!manifest.starts_off, |p| p.enabled);
+    let previous = engine.state.plugins.get(&manifest.id);
+    let had_checks = previous.is_some_and(|p| !p.checks.is_empty());
+    let checks_block = checks_block.or_else(|| {
+        previous
+            .filter(|p| origin.is_none() && p.origin.is_none())
+            .and_then(|p| p.checks_block)
+    });
     // Installing again replaces it.
     if engine.state.plugins.contains_key(&manifest.id) {
         engine.stop_plugin(&manifest.id);
@@ -565,6 +595,8 @@ pub(crate) fn install_as(
         included: engine.plugin_host.included().iter().any(|p| p == path),
         hosts: manifest.hosts,
         traffic_source: manifest.traffic_source,
+        checks: manifest.checks.iter().map(Into::into).collect(),
+        checks_block,
     };
     engine.commit_as(
         actor,
@@ -575,6 +607,7 @@ pub(crate) fn install_as(
     if plugin.enabled {
         engine.start_plugin(&plugin);
     }
+    engine.plugin_checks_changed(&plugin.id, had_checks);
     Ok(plugin)
 }
 
@@ -622,6 +655,7 @@ impl Engine {
     pub(crate) fn stop_plugin(&mut self, id: &str) {
         self.clear_features(id);
         self.clear_own_items(id);
+        self.forget_plugin_reports(id);
         self.plugin_host.unload(id);
         if let Some(connection) = self.plugin_connections.remove(id) {
             self.disconnect(connection);
@@ -683,7 +717,7 @@ impl Engine {
             if current {
                 continue;
             }
-            match install_as(self, daemon(), &path, None, false) {
+            match install_as(self, daemon(), &path, None, false, None) {
                 Ok(plugin) => installed.push(plugin.id),
                 Err(error) => tracing_line(&manifest.id, &error.message),
             }
@@ -731,6 +765,8 @@ impl Engine {
         }
         // A plugin's traffic is in the picture while it is on (S170).
         self.traffic_sources_changed();
+        // Its checks are unknown while it is off (S194).
+        self.plugin_checks_changed(id, false);
         Ok(plugin)
     }
 
@@ -763,6 +799,8 @@ impl Engine {
         plugin.revision += 1;
         self.commit_as(daemon(), Change::PluginUpserted { plugin });
         self.resolve(&failed_condition(id));
+        // Its checks are waited for, no longer "starting" (S194).
+        self.plugin_checks_changed(id, false);
     }
 
     /// The host stopped a plugin: it would not load, trapped, or ran out of
@@ -776,6 +814,7 @@ impl Engine {
         }
         self.clear_features(id);
         self.clear_own_items(id);
+        self.forget_plugin_reports(id);
         plugin.status = PluginStatus::Failed;
         plugin.detail = Some(reason.to_owned());
         plugin.revision += 1;
@@ -791,6 +830,8 @@ impl Engine {
             condition: Some(failed_condition(id)),
             report: Some("plugin-stopped".into()),
         });
+        // Its checks are unknown while it is stopped (S194).
+        self.plugin_checks_changed(id, false);
     }
 
     /// What a plugin function returned: its commands go through the
@@ -824,6 +865,8 @@ impl Engine {
         if let Some(status) = effects.traffic_status {
             self.plugin_traffic_status(&plugin.id, status);
         }
+        // Its checks, for vehicles' preflight lists (S194).
+        self.plugin_checks_reported(&plugin, effects.checks);
         for notification in effects
             .notifications
             .into_iter()
@@ -864,6 +907,18 @@ impl Engine {
             let Some(vehicle_id) = self.vehicle(&message.vehicle_id).map(|v| v.id.clone()) else {
                 continue;
             };
+            // Arming by a raw command passes the preflight gate too
+            // (S192, ADR-0038 K3): refused while a blocking check fails.
+            if self.raw_message_arms(&vehicle_id, &message.name, &message.fields) {
+                tracing_line(
+                    &plugin.id,
+                    &format!(
+                        "{} would arm the vehicle while a blocking preflight check does not pass; not sent. Use command/send, which asks an operator",
+                        message.name
+                    ),
+                );
+                continue;
+            }
             self.links.message(MessageOrder {
                 vehicle_id,
                 name: message.name,
@@ -1058,7 +1113,7 @@ const OWN_ITEMS: usize = 64;
 /// A plugin raises at most this many notifications in one call.
 const NOTIFICATIONS_PER_CALL: usize = 4;
 
-fn tracing_line(id: &str, line: &str) {
+pub(crate) fn tracing_line(id: &str, line: &str) {
     // The engine has no logger of its own; plugin lines are rare and short.
     let _ = (id, line);
 }

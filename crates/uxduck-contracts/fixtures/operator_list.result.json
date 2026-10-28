@@ -4,6 +4,13 @@
       "id": "op5f1c0a91b2d3e4f5",
       "name": "Ana",
       "units": "metric",
+      "quantityUnits": {
+        "distance": "kilometers",
+        "altitude": "meters",
+        "speed": "meters-per-second",
+        "verticalSpeed": "meters-per-second",
+        "temperature": "celsius"
+      },
       "coordinateFormat": "decimal",
       "altitudeFrame": "above-home",
       "layout": {

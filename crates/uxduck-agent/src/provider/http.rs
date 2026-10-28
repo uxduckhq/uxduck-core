@@ -85,13 +85,18 @@ pub fn explain(status: u16, retry_after: Option<Duration>, text: &str) -> Provid
     }
     let value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     let kind = value.pointer("/error/type").and_then(Value::as_str);
+    let code = value.pointer("/error/code").and_then(Value::as_str);
     let message = value
         .pointer("/error/message")
         .and_then(Value::as_str)
         .map(str::to_owned);
     let busy = matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
         || matches!(kind, Some("overloaded_error" | "rate_limit_error"));
-    if busy && (kind != Some("uxduck") || status == 429) {
+    // Hosted budget/request/round limits are durable admission decisions.
+    // Only explicitly temporary hosted 429s are worth retrying or falling back.
+    let hosted_retryable =
+        status == 429 && matches!(code, Some("rate-limited" | "in-flight" | "provider"));
+    if busy && (kind != Some("uxduck") || hosted_retryable) {
         return ProviderError::Busy {
             message: message.unwrap_or_else(|| format!("HTTP {status}")),
             retry_after,
@@ -174,7 +179,7 @@ mod tests {
         let limited = explain(
             429,
             None,
-            r#"{"error":{"type":"uxduck","message":"Too many requests at once."}}"#,
+            r#"{"error":{"type":"uxduck","code":"rate-limited","message":"Too many requests at once."}}"#,
         );
         assert!(
             limited.retryable(),
@@ -193,5 +198,37 @@ mod tests {
             explain(200, None, "<html>sign in to the Wi-Fi</html>"),
             ProviderError::Network(_)
         ));
+    }
+
+    #[test]
+    fn hosted_budget_and_round_limits_are_shown_without_busy_or_retries() {
+        for code in ["daily-cap", "global-cap", "request-cap", "rounds"] {
+            let message = "This request would exceed your remaining hosted AI allowance.";
+            let body = serde_json::json!({
+                "error": { "type": "uxduck", "code": code, "message": message }
+            });
+            let error = explain(429, None, &body.to_string());
+            assert_eq!(error, ProviderError::Account(message.into()));
+            assert_eq!(error.to_string(), message);
+            assert!(!error.retryable(), "{code} cannot be fixed by retrying");
+        }
+    }
+
+    #[test]
+    fn temporary_hosted_limits_and_provider_overload_still_retry() {
+        for code in ["rate-limited", "in-flight", "provider"] {
+            let body = serde_json::json!({
+                "error": { "type": "uxduck", "code": code, "message": "Try again shortly." }
+            });
+            assert!(explain(429, Some(Duration::from_secs(1)), &body.to_string()).retryable());
+        }
+        assert!(
+            explain(
+                429,
+                None,
+                r#"{"error":{"type":"rate_limit_error","message":"Busy"}}"#
+            )
+            .retryable()
+        );
     }
 }

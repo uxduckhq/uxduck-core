@@ -1,0 +1,43 @@
+{
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "vehicleType": "copter",
+  "vehicleTypes": [
+    { "id": "copter", "name": "Copter" },
+    { "id": "heli", "name": "Helicopter" },
+    { "id": "plane", "name": "Plane" },
+    { "id": "rover", "name": "Rover" },
+    { "id": "sub", "name": "Sub" },
+    { "id": "blimp", "name": "Blimp" },
+    { "id": "tracker", "name": "Antenna tracker" }
+  ],
+  "installed": "4.6.2",
+  "boardId": 140,
+  "platform": "CubeOrange",
+  "platforms": ["CubeOrange", "CubeOrange-bdshot"],
+  "brand": "Cube Orange",
+  "releases": [
+    {
+      "channel": "stable",
+      "version": "4.7.2",
+      "url": "https://firmware.ardupilot.org/Copter/stable/CubeOrange/arducopter.apj",
+      "boardId": 140,
+      "platform": "CubeOrange",
+      "imageSize": 1645036
+    },
+    {
+      "channel": "beta",
+      "version": "4.8.0-beta1",
+      "url": "https://firmware.ardupilot.org/Copter/beta/CubeOrange/arducopter.apj",
+      "boardId": 140,
+      "platform": "CubeOrange"
+    },
+    {
+      "channel": "older",
+      "version": "4.6.3",
+      "url": "https://firmware.ardupilot.org/Copter/stable-4.6.3/CubeOrange/arducopter.apj",
+      "boardId": 140,
+      "platform": "CubeOrange"
+    }
+  ],
+  "fetchedAtUs": 1790669000000000
+}

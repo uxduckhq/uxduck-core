@@ -84,6 +84,22 @@ pub enum HistoryEvent {
     },
     /// Someone supervises it again, and the heartbeat is back (S81).
     SupervisionResumed,
+    /// A calibration finished or failed (S184): each sensor's fitness and
+    /// offsets, or why it failed, in words.
+    Calibrated {
+        kind: crate::dto::setup::SetupKind,
+        succeeded: bool,
+        text: String,
+    },
+    /// It armed (S193): its checklist as it stood, who ticked what and
+    /// when, each rule's value, and every override, with the flight it
+    /// began.
+    Armed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flight_id: Option<String>,
+        text: String,
+        record: crate::dto::checklist::ChecklistRecord,
+    },
 }
 
 /// Who or what changed a parameter (S74).

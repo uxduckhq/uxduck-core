@@ -282,6 +282,14 @@ pub enum Effect {
         severity: u8,
         text: String,
     },
+    /// A compass calibration's progress or result (S184).
+    MagCal { vehicle_id: String, report: MagCal },
+    /// The vehicle's accelerometer calibration asks this ground station to
+    /// hold it in a position (S186): `MAV_CMD_ACCELCAL_VEHICLE_POS`'s
+    /// `ACCELCAL_VEHICLE_POS`, 1 to 6, or 16777215 for success and 16777216
+    /// for failure, which `ArduPilot` repeats once a second until it
+    /// restarts.
+    AccelCalPosition { vehicle_id: String, position: u32 },
     /// A vehicle's camera named a video stream (S39).
     VideoStream {
         vehicle_id: String,
@@ -312,6 +320,57 @@ fn part_effect(
         }
     }
 }
+
+/// A vehicle's compass calibration as it reports it (S184, ADR-0037 V5):
+/// `MAG_CAL_PROGRESS` while a compass is being calibrated, then
+/// `MAG_CAL_REPORT`, which `ArduPilot` repeats until it restarts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MagCal {
+    Progress {
+        compass_id: u8,
+        /// The compasses being calibrated, a bit each.
+        cal_mask: u8,
+        /// `MAG_CAL_STATUS`.
+        cal_status: u8,
+        attempt: u8,
+        completion_pct: u8,
+        completion_mask: [u8; 10],
+        direction: [f32; 3],
+    },
+    Report {
+        compass_id: u8,
+        cal_mask: u8,
+        /// `MAG_CAL_STATUS`: 4 is success, 5 and on a failure.
+        cal_status: u8,
+        autosaved: bool,
+        /// Milligauss, lower being better.
+        fitness: f32,
+        offsets: [f32; 3],
+    },
+}
+
+/// `MAV_CMD_ACCELCAL_VEHICLE_POS` (S186): a vehicle asks for a position
+/// with it, and the ground station answers with it.
+const MAV_CMD_ACCELCAL_VEHICLE_POS: u16 = 42429;
+
+/// `MAV_CMD_DO_START_MAG_CAL`: its progress and report are asked for with
+/// it, since `ArduCopter` streams nothing it is not asked for.
+const MAV_CMD_DO_START_MAG_CAL: u16 = 42424;
+/// `MAV_CMD_DO_MOTOR_TEST` (S188): renewed every 0.5 s while a person holds
+/// a motor's press. Each is sent once: a newer one replaces one still
+/// waiting for its answer, and none is sent again, so a stop is never held
+/// back by a renewal and a renewal never spins a motor after it was let go.
+const MAV_CMD_DO_MOTOR_TEST: u16 = 209;
+/// PX4's motor test, `MAV_CMD_ACTUATOR_TEST` (S191): renewed and sent the
+/// same way.
+const MAV_CMD_ACTUATOR_TEST: u16 = 310;
+
+/// A motor test of either autopilot's kind.
+const fn motor_test(command: u16) -> bool {
+    command == MAV_CMD_DO_MOTOR_TEST || command == MAV_CMD_ACTUATOR_TEST
+}
+/// `MAG_CAL_PROGRESS` four times a second, and `MAG_CAL_REPORT` once.
+const MAG_CAL_STREAMS: [(u32, u32); 2] = [(191, 250_000), (192, 1_000_000)];
 
 /// Which transfer a progress report or a cancel is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,6 +659,27 @@ struct PendingCommand {
     follow_up: Option<(u16, crate::commands::Wire)>,
     first_command: u16,
     completed_attempts: u8,
+}
+
+/// A newer motor test replaces one still waiting for its answer (S188):
+/// the older is done, not sent again.
+fn replace_motor_test(
+    commands: &mut Vec<PendingCommand>,
+    key: &(String, String, u8),
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    commands.retain(|p| {
+        if p.key != *key || !motor_test(p.command) {
+            return true;
+        }
+        effects.push(Effect::CommandDone {
+            receipt_id: p.order.receipt_id.clone(),
+            outcome: CommandOutcome::NotSent("a newer motor test replaced it".into()),
+            attempts: p.attempts,
+        });
+        false
+    });
+    effects
 }
 
 /// Initial great-circle bearing. A destination within one metre keeps the
@@ -907,6 +987,78 @@ impl Session {
                     }
                 }
                 Message::Other { .. } => {}
+                // Asked by the vehicle (S186): ArduPilot sends it to no one
+                // in particular (target 0) on the link of the ground station
+                // that started the calibration.
+                Message::CommandLong {
+                    target_system,
+                    command: MAV_CMD_ACCELCAL_VEHICLE_POS,
+                    param1,
+                    ..
+                } if target_system == self.config.gcs_system_id || target_system == 0 => {
+                    if let Some(vehicle) = self.vehicles.get(&key)
+                        && vehicle.autopilot_component == decoded.component_id
+                        && param1.is_finite()
+                        && param1 >= 0.0
+                    {
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "a position number, exact in a float up to 2^24"
+                        )]
+                        let position = param1.round() as u32;
+                        effects.push(Effect::AccelCalPosition {
+                            vehicle_id: vehicle.observation.id.clone(),
+                            position,
+                        });
+                    }
+                }
+                Message::MagCalProgress {
+                    compass_id,
+                    cal_mask,
+                    cal_status,
+                    attempt,
+                    completion_pct,
+                    completion_mask,
+                    direction,
+                } => {
+                    if let Some(vehicle) = self.vehicles.get(&key) {
+                        effects.push(Effect::MagCal {
+                            vehicle_id: vehicle.observation.id.clone(),
+                            report: MagCal::Progress {
+                                compass_id,
+                                cal_mask,
+                                cal_status,
+                                attempt,
+                                completion_pct,
+                                completion_mask,
+                                direction,
+                            },
+                        });
+                    }
+                }
+                Message::MagCalReport {
+                    compass_id,
+                    cal_mask,
+                    cal_status,
+                    autosaved,
+                    fitness,
+                    offsets,
+                } => {
+                    if let Some(vehicle) = self.vehicles.get(&key) {
+                        effects.push(Effect::MagCal {
+                            vehicle_id: vehicle.observation.id.clone(),
+                            report: MagCal::Report {
+                                compass_id,
+                                cal_mask,
+                                cal_status,
+                                autosaved,
+                                fitness,
+                                offsets,
+                            },
+                        });
+                    }
+                }
                 ref message @ Message::AdsbVehicle { .. } => {
                     if let (Some(vehicle), Some(report)) = (
                         self.vehicles.get(&key),
@@ -1749,6 +1901,12 @@ impl Session {
         } else {
             None
         };
+        // A motor test replaces its own kind still waiting (S188).
+        let mut effects = if motor_test(command) {
+            replace_motor_test(&mut self.commands, key)
+        } else {
+            Vec::new()
+        };
         // One command of a kind at a time per vehicle: an ack cannot say
         // which of two identical commands it answers.
         if self.commands.iter().any(|p| {
@@ -1782,15 +1940,38 @@ impl Session {
                 | uxduck_core::domain::command::Command::Rtl
                 | uxduck_core::domain::command::Command::Land
         );
-        let mut effects = if takes_over {
-            self.cancel_heading(&pending.key)
-        } else {
-            Vec::new()
-        };
+        if takes_over {
+            effects.extend(self.cancel_heading(&pending.key));
+        }
+        if command == MAV_CMD_DO_START_MAG_CAL {
+            effects.extend(self.mag_cal_streams(&pending.key, pending.component));
+        }
         self.commands.push(pending);
         let index = self.commands.len() - 1;
         effects.push(self.transmit(index, now_us));
         effects
+    }
+
+    /// Asks for a compass calibration's progress and report (S184), before
+    /// the command that starts it so none is missed.
+    fn mag_cal_streams(&mut self, key: &(String, String, u8), component: u8) -> Vec<Effect> {
+        let (link_id, peer, system_id) = key;
+        let gcs = self.config.gcs_system_id;
+        MAG_CAL_STREAMS
+            .iter()
+            .map(|&(message_id, interval_us)| Effect::Send {
+                link_id: link_id.clone(),
+                peer: peer.clone(),
+                bytes: set_message_interval_frame(
+                    gcs,
+                    *system_id,
+                    component,
+                    self.next_sequence(),
+                    message_id,
+                    interval_us,
+                ),
+            })
+            .collect()
     }
 
     /// Cancel the automatic heading when an explicit mode or disarm command
@@ -1918,9 +2099,15 @@ impl Session {
         let mut index = 0;
         while index < self.commands.len() {
             let pending = &self.commands[index];
+            // A motor test is sent once (S188).
+            let attempts = if motor_test(pending.command) {
+                1
+            } else {
+                config.command_attempts
+            };
             if now_us.saturating_sub(pending.sent_us) < config.command_timeout_us {
                 index += 1;
-            } else if pending.attempts < config.command_attempts {
+            } else if pending.attempts < attempts {
                 effects.push(self.transmit(index, now_us));
                 index += 1;
             } else {
@@ -3303,6 +3490,359 @@ mod tests {
     }
 
     #[test]
+    fn a_compass_calibration_asks_for_its_progress_and_reports_it() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.add_compasses(2, false);
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let id = vehicles(&effects)[0].id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        // Not calibrated: it says so, and will not arm.
+        let said: Vec<String> = fake
+            .status_texts(2.0)
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 2_000))
+            .filter_map(|effect| match effect {
+                Effect::StatusText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["PreArm: Compass not calibrated"]);
+        let order = CommandOrder {
+            receipt_id: "r1".into(),
+            vehicle_id: id.clone(),
+            command: Command::Long {
+                command: 42424,
+                params: vec![0.0, 0.0, 1.0, 0.0, 0.0],
+            },
+            force: false,
+        };
+        let sent = session.command(order, 3_000);
+        // Its progress and report are asked for along with it.
+        assert_eq!(sends(&sent).len(), 3);
+        let mut replies = Vec::new();
+        for bytes in sends(&sent) {
+            replies.extend(fake.answer(bytes));
+        }
+        let acked: Vec<Effect> = replies
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 3_100))
+            .collect();
+        assert!(acked.iter().any(|e| matches!(
+            e,
+            Effect::CommandDone {
+                outcome: CommandOutcome::Accepted,
+                ..
+            }
+        )));
+        let reported = |session: &mut Session, fake: &mut FakeVehicle, t_s: f64| -> Vec<MagCal> {
+            fake.telemetry(t_s)
+                .iter()
+                .flat_map(|frame| session.ingest("l1", PEER, frame, 4_000))
+                .filter_map(|effect| match effect {
+                    Effect::MagCal { vehicle_id, report } if vehicle_id == id => Some(report),
+                    _ => None,
+                })
+                .collect()
+        };
+        let halfway = reported(&mut session, &mut fake, 5.0);
+        assert_eq!(halfway.len(), 2, "one progress per compass: {halfway:?}");
+        assert!(matches!(
+            halfway[0],
+            MagCal::Progress {
+                compass_id: 0,
+                cal_mask: 3,
+                completion_pct: 50,
+                ..
+            }
+        ));
+        let done = reported(&mut session, &mut fake, 14.0);
+        let results: Vec<(u8, u8)> = done
+            .iter()
+            .filter_map(|r| match r {
+                MagCal::Report {
+                    compass_id,
+                    cal_status,
+                    ..
+                } => Some((*compass_id, *cal_status)),
+                MagCal::Progress { .. } => None,
+            })
+            .collect();
+        assert_eq!(results, [(0, 4), (1, 4)]);
+        // Calibrated, it needs a restart, and arms once restarted.
+        assert_eq!(
+            fake.compasses.as_ref().map(|c| c.restart_needed),
+            Some(true)
+        );
+        fake.reboot();
+        assert!(fake.compasses.as_ref().is_some_and(|c| c.calibrated));
+        let offset = fake
+            .parameters
+            .iter()
+            .find(|p| p.0 == "COMPASS_OFS2_X")
+            .map(|p| p.1);
+        assert_eq!(offset, Some(22.5));
+    }
+
+    #[test]
+    fn a_compass_calibration_from_a_heading_is_answered_at_once() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.add_compasses(2, false);
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let id = vehicles(&effects)[0].id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        let send = |session: &mut Session,
+                    fake: &mut FakeVehicle,
+                    receipt: &str,
+                    params: Vec<f32>,
+                    at_us: u64|
+         -> Vec<Effect> {
+            let order = CommandOrder {
+                receipt_id: receipt.into(),
+                vehicle_id: id.clone(),
+                command: Command::Long {
+                    command: 42006,
+                    params,
+                },
+                force: false,
+            };
+            let sent = session.command(order, at_us);
+            // Nothing streams for it: one command.
+            assert_eq!(sends(&sent).len(), 1);
+            let replies: Vec<Vec<u8>> = sends(&sent)
+                .into_iter()
+                .flat_map(|bytes| fake.answer(bytes))
+                .collect();
+            replies
+                .iter()
+                .flat_map(|frame| session.ingest("l1", PEER, frame, at_us + 100))
+                .collect()
+        };
+        let outcome = |effects: &[Effect]| {
+            effects.iter().find_map(|e| match e {
+                Effect::CommandDone { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            })
+        };
+        let said = |effects: &[Effect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::StatusText { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // No fix and no position: refused, and it says why.
+        fake.gps_lost_from_s = Some(0.0);
+        let refused = send(
+            &mut session,
+            &mut fake,
+            "r1",
+            vec![270.0, 0.0, 0.0, 0.0],
+            2_000,
+        );
+        assert!(
+            matches!(outcome(&refused), Some(CommandOutcome::Rejected(why)) if why == "Failed")
+        );
+        assert_eq!(said(&refused), ["Mag: no position available"]);
+        assert!(fake.compasses.as_ref().is_some_and(|c| !c.calibrated));
+        // Its position given: calibrated and in use, with no restart.
+        let given = send(
+            &mut session,
+            &mut fake,
+            "r2",
+            vec![270.0, 0.0, -35.363_26, 149.165_23],
+            3_000,
+        );
+        assert_eq!(outcome(&given), Some(CommandOutcome::Accepted));
+        assert!(said(&given).is_empty());
+        let compasses = fake.compasses.clone().unwrap_or_default();
+        assert!(compasses.calibrated && !compasses.restart_needed);
+        // It now reports the heading it was given.
+        fake.streams_on_request = false;
+        let heading = fake.telemetry(5.0).iter().find_map(|frame| {
+            match crate::decode::decode(frame).map(|d| d.message) {
+                Some(crate::decode::Message::VfrHud { heading, .. }) => Some(heading),
+                _ => None,
+            }
+        });
+        assert_eq!(heading, Some(270));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one calibration from start to end")]
+    fn the_vehicle_asks_for_each_accelerometer_position_and_takes_the_answer() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.add_accel(false);
+        fake.streams_on_request = false;
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let id = vehicles(&effects)[0].id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        let said = |frames: &[Vec<u8>], session: &mut Session, at_us: u64| -> Vec<Effect> {
+            frames
+                .iter()
+                .flat_map(|frame| session.ingest("l1", PEER, frame, at_us))
+                .collect()
+        };
+        let command = |session: &mut Session,
+                       fake: &mut FakeVehicle,
+                       receipt: &str,
+                       command: u16,
+                       params: Vec<f32>,
+                       at_us: u64|
+         -> Vec<Effect> {
+            let order = CommandOrder {
+                receipt_id: receipt.into(),
+                vehicle_id: id.clone(),
+                command: Command::Long { command, params },
+                force: false,
+            };
+            let replies: Vec<Vec<u8>> = sends(&session.command(order, at_us))
+                .into_iter()
+                .flat_map(|bytes| fake.answer(bytes))
+                .collect();
+            replies
+                .iter()
+                .flat_map(|frame| session.ingest("l1", PEER, frame, at_us + 100))
+                .collect()
+        };
+        let accepted = |effects: &[Effect]| {
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::CommandDone {
+                        outcome: CommandOutcome::Accepted,
+                        ..
+                    }
+                )
+            })
+        };
+        let asked = |effects: &[Effect]| -> Vec<u32> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::AccelCalPosition {
+                        vehicle_id,
+                        position,
+                    } if *vehicle_id == id => Some(*position),
+                    _ => None,
+                })
+                .collect()
+        };
+        let started = command(
+            &mut session,
+            &mut fake,
+            "r0",
+            241,
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            2_000,
+        );
+        assert!(accepted(&started));
+        let mut t = 3.0;
+        for position in 1..=6u32 {
+            let frames = fake.telemetry(t);
+            let effects = said(&frames, &mut session, 3_000);
+            assert_eq!(asked(&effects), [position]);
+            #[allow(clippy::cast_precision_loss, reason = "1 to 6")]
+            let answer = vec![position as f32];
+            let taken = command(
+                &mut session,
+                &mut fake,
+                &format!("r{position}"),
+                42429,
+                answer,
+                4_000,
+            );
+            assert!(accepted(&taken), "position {position}");
+            t += 1.5;
+        }
+        let frames = fake.telemetry(t);
+        let ended: Vec<String> = said(&frames, &mut session, 5_000)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::StatusText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, ["Calibration successful"]);
+        let frames = fake.telemetry(t + 1.0);
+        assert_eq!(
+            asked(&said(&frames, &mut session, 6_000)),
+            [crate::fake_accel::ACCELCAL_SUCCESS]
+        );
+        // Level: answered at once, saying the trim first.
+        let levelled = command(
+            &mut session,
+            &mut fake,
+            "r9",
+            241,
+            vec![0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            7_000,
+        );
+        assert!(accepted(&levelled));
+        assert!(
+            levelled.iter().any(
+                |e| matches!(e, Effect::StatusText { text, .. } if text.starts_with("Trim OK"))
+            )
+        );
+    }
+
+    #[test]
+    fn a_failure_past_the_dialects_enum_is_reported() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.add_compasses(2, false);
+        if let Some(compasses) = &mut fake.compasses {
+            compasses.fails_with = Some(9);
+        }
+        fake.streams_on_request = false;
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let id = vehicles(&effects)[0].id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        let order = CommandOrder {
+            receipt_id: "r1".into(),
+            vehicle_id: id.clone(),
+            command: Command::Long {
+                command: 42424,
+                params: vec![0.0, 0.0, 1.0, 0.0, 0.0],
+            },
+            force: false,
+        };
+        for bytes in sends(&session.command(order, 2_000)) {
+            fake.answer(bytes);
+        }
+        let results: Vec<(u8, u8)> = fake
+            .telemetry(14.0)
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 3_000))
+            .filter_map(|effect| match effect {
+                Effect::MagCal {
+                    report:
+                        MagCal::Report {
+                            compass_id,
+                            cal_status,
+                            ..
+                        },
+                    ..
+                } => Some((compass_id, cal_status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [(0, 4), (1, 9)]);
+    }
+
+    #[test]
     fn a_vehicles_messages_come_whole_and_a_long_one_in_one_piece() {
         let mut session = Session::new(Config::default());
         let mut fake = FakeVehicle::new(1, 0xABCD);
@@ -4440,6 +4980,62 @@ mod tests {
         ));
     }
 
+    /// S188: a motor test is sent once, never again after its timeout, and
+    /// a newer one (a renewal, or the stop) replaces one still waiting.
+    #[test]
+    fn a_motor_test_is_sent_once_and_replaced_by_a_newer_one() {
+        let config = Config::default();
+        let mut session = Session::new(config);
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let order = |receipt: &str, throttle: f32| CommandOrder {
+            receipt_id: receipt.into(),
+            vehicle_id: vid.clone(),
+            command: Command::Long {
+                command: 209,
+                params: vec![1.0, 0.0, throttle, 1.0, 0.0, 1.0],
+            },
+            force: false,
+        };
+        let sent = session.command(order("spin", 5.0), 100);
+        assert!(matches!(sent.as_slice(), [Effect::Send { .. }]));
+        // The stop, while the spin waits for its answer: the spin is
+        // dropped, the stop sent at once.
+        let stop = session.command(order("stop", 0.0), 200);
+        assert!(
+            matches!(
+                stop.as_slice(),
+                [
+                    Effect::CommandDone { receipt_id, outcome: CommandOutcome::NotSent(_), .. },
+                    Effect::Send { .. },
+                ] if receipt_id == "spin"
+            ),
+            "{stop:?}"
+        );
+        // Never sent again: one timeout, after one try.
+        let mut transmissions = 0;
+        let mut outcome = None;
+        for step in 1..=10u64 {
+            for effect in session.tick(200 + step * config.command_timeout_us) {
+                match effect {
+                    Effect::Send { .. } => transmissions += 1,
+                    Effect::CommandDone {
+                        receipt_id,
+                        outcome: o,
+                        attempts,
+                    } => outcome = Some((receipt_id, o, attempts)),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(transmissions, 0);
+        assert_eq!(
+            outcome,
+            Some(("stop".to_owned(), CommandOutcome::Timeout, 1))
+        );
+    }
+
     #[test]
     fn telemetry_is_produced_and_coalesced_per_tick() {
         let mut session = Session::new(Config::default());
@@ -5340,6 +5936,73 @@ mod tests {
         assert!(calibrated.iter().any(|effect| matches!(effect, Effect::Send {bytes,..} if matches!(decode(bytes).map(|d|d.message),Some(Message::RcChannelsOverride {..})))));
     }
 
+    /// A radio calibration's values reach the overrides as the vehicle
+    /// echoes them (S187, ADR-0005): a controller driving the vehicle, or
+    /// one starting later, scales its sticks by the new ranges.
+    #[test]
+    fn written_rc_ranges_rescale_the_overrides_at_once() {
+        let mut fake = FakeVehicle::new(1, 0xABC);
+        fake.add_radio(false);
+        let (mut session, vid) = identified(&mut fake);
+        let download = session.download_parameters(&vid, 0);
+        converse(&mut session, &mut fake, download, 1);
+        let roll = |session: &mut Session| {
+            let sent = session.pilot_control(&vid, [0, -1000, 0, 0], &[]);
+            let [Effect::Send { bytes, .. }] = sent.as_slice() else {
+                panic!("no pilot frame");
+            };
+            let Message::RcChannelsOverride { channels, .. } = decode(bytes).unwrap().message
+            else {
+                panic!("wrong pilot message");
+            };
+            channels[0]
+        };
+        // ArduPilot's defaults first.
+        assert_eq!(roll(&mut session), 1100);
+        for (n, (name, value)) in [("RC1_MIN", 1004.0), ("RC1_TRIM", 1498.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let write = session.set_parameter(
+                &format!("w{n}"),
+                &vid,
+                Param {
+                    name: name.into(),
+                    value,
+                    kind: crate::sim::INT16,
+                },
+                false,
+                2 + n as u64,
+            );
+            converse(&mut session, &mut fake, write, 2 + n as u64);
+        }
+        assert_eq!(roll(&mut session), 1004);
+    }
+
+    /// `RC_CHANNELS` is telemetry, `rc.1` and on, for the radio's bars
+    /// (S187); unused channels are left out.
+    #[test]
+    fn the_radio_channels_are_telemetry() {
+        let mut fake = FakeVehicle::new(1, 0xABC);
+        fake.add_radio(false);
+        fake.streams_on_request = false;
+        let (mut session, vid) = identified(&mut fake);
+        let mut effects = session.ingest("l1", PEER, &fake.telemetry(1.0).concat(), 1_000_000);
+        effects.extend(session.tick(1_000_000));
+        let items: Vec<(String, f64)> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Telemetry(update) if update.vehicle_id == vid => Some(update),
+                _ => None,
+            })
+            .flat_map(|update| update.items.iter())
+            .filter(|item| item.key.starts_with("rc."))
+            .map(|item| (item.key.clone(), item.value.unwrap_or_default()))
+            .collect();
+        assert_eq!(items.len(), 8, "{items:?}");
+        assert!(items.contains(&("rc.3".into(), 1000.0)));
+    }
+
     #[test]
     fn px4_keeps_normalized_manual_control() {
         let mut session = Session::new(Config::default());
@@ -5518,5 +6181,203 @@ mod tests {
         ] {
             assert!(keys.contains(key), "{key} not produced: {keys:?}");
         }
+    }
+
+    /// The fake plane's airspeed sensor (S190) through the session: zeroed
+    /// with the ground pressure as `ArduPlane` does it (in progress, then
+    /// accepted once done), its reading near 0 after, and once armed with
+    /// `ARSPD_AUTOCAL` on, its ratio estimate as `airspeed.ratio`.
+    #[test]
+    fn the_fake_planes_airspeed_is_zeroed_and_its_ratio_estimated() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.add_airspeed(false);
+        fake.streams_on_request = false;
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let vehicle = &vehicles(&effects)[0];
+        assert_eq!(vehicle.vehicle_type, "FixedWing");
+        let id = vehicle.id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        let airspeed = |frames: &[Vec<u8>]| {
+            frames.iter().find_map(
+                |frame| match crate::decode::decode(frame).map(|d| d.message) {
+                    Some(crate::decode::Message::VfrHud { airspeed, .. }) => Some(airspeed),
+                    _ => None,
+                },
+            )
+        };
+        assert!(airspeed(&fake.telemetry(1.0)).is_some_and(|a| (a - 3.58).abs() < 0.01));
+        let order = CommandOrder {
+            receipt_id: "r0".into(),
+            vehicle_id: id.clone(),
+            command: Command::Long {
+                command: 241,
+                params: vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            force: false,
+        };
+        let replies: Vec<Vec<u8>> = sends(&session.command(order, 2_000))
+            .into_iter()
+            .flat_map(|bytes| fake.answer(bytes))
+            .collect();
+        let early: Vec<Effect> = replies
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 2_100))
+            .collect();
+        assert!(
+            !early
+                .iter()
+                .any(|e| matches!(e, Effect::CommandDone { .. })),
+            "in progress: still waiting"
+        );
+        let texts = |effects: &[Effect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::StatusText { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(texts(&early)[2], "Airspeed 1 calibration started");
+        let frames = fake.telemetry(3.5);
+        let done: Vec<Effect> = frames
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 3_500_000))
+            .collect();
+        assert!(texts(&done).contains(&"Airspeed 1 calibrated".to_owned()));
+        assert!(done.iter().any(|e| matches!(
+            e,
+            Effect::CommandDone {
+                outcome: CommandOutcome::Accepted,
+                ..
+            }
+        )));
+        assert!(airspeed(&fake.telemetry(4.0)).is_some_and(|a| a < 0.1));
+        // Armed with autocal on: circling, it estimates the ratio.
+        fake.armed = true;
+        for p in fake
+            .parameters
+            .iter_mut()
+            .filter(|p| p.0 == "ARSPD_AUTOCAL")
+        {
+            p.1 = 1.0;
+        }
+        let frames = fake.telemetry(10.0);
+        for frame in &frames {
+            session.ingest("l1", PEER, frame, 10_000_000);
+        }
+        // Telemetry goes out on the session's tick.
+        let ratios: Vec<f64> = session
+            .tick(10_500_000)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Telemetry(update) => update
+                    .items
+                    .iter()
+                    .find(|i| i.key == "airspeed.ratio")
+                    .and_then(|i| i.value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ratios.len(), 1, "{ratios:?}");
+        assert!(ratios[0] > 1.6 && ratios[0] < 1.99, "{ratios:?}");
+    }
+
+    /// The fake PX4 (S191) through the session: a PX4 vehicle whose
+    /// accelerometer calibration is answered at once and then said in
+    /// `[cal]` lines as it goes, and whose actuator test is sent once, a
+    /// newer one replacing one still waiting, driving the motor's output.
+    #[test]
+    fn the_fake_px4_calibrates_in_status_text_and_tests_its_motors() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.make_px4(false, false);
+        fake.streams_on_request = false;
+        let effects = session.ingest("l1", PEER, &fake.heartbeat(), 1_000);
+        let vehicle = &vehicles(&effects)[0];
+        assert_eq!(vehicle.autopilot, "Px4");
+        let id = vehicle.id.clone();
+        for bytes in sends(&effects) {
+            fake.answer(bytes);
+        }
+        let texts = |effects: &[Effect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::StatusText { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let order = CommandOrder {
+            receipt_id: "r0".into(),
+            vehicle_id: id.clone(),
+            command: Command::Long {
+                command: 241,
+                params: vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            },
+            force: false,
+        };
+        let answered: Vec<Effect> = sends(&session.command(order, 2_000))
+            .into_iter()
+            .flat_map(|bytes| fake.answer(bytes))
+            .collect::<Vec<_>>()
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 2_100))
+            .collect();
+        assert!(answered.iter().any(|e| matches!(
+            e,
+            Effect::CommandDone {
+                outcome: CommandOutcome::Accepted,
+                ..
+            }
+        )));
+        assert_eq!(texts(&answered), ["[cal] calibration started: 2 accel"]);
+        let later: Vec<Effect> = fake
+            .telemetry(1.0)
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, 3_000_000))
+            .collect();
+        assert!(
+            texts(&later).contains(&"[cal] down orientation detected".to_owned()),
+            "{:?}",
+            texts(&later)
+        );
+        // Two actuator tests in a row: the first is replaced, not sent.
+        let test = |receipt: &str, value: f32| CommandOrder {
+            receipt_id: receipt.into(),
+            vehicle_id: id.clone(),
+            command: Command::Long {
+                command: 310,
+                params: vec![value, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            },
+            force: false,
+        };
+        let first = session.command(test("r1", 0.05), 4_000_000);
+        let second = session.command(test("r2", 0.3), 4_000_100);
+        assert!(second.iter().any(|e| matches!(
+            e,
+            Effect::CommandDone {
+                receipt_id,
+                outcome: CommandOutcome::NotSent(_),
+                ..
+            } if receipt_id == "r1"
+        )));
+        for bytes in sends(&first).into_iter().chain(sends(&second)) {
+            fake.answer(bytes);
+        }
+        let servos = fake.telemetry(1.5).iter().find_map(|frame| {
+            match crate::decode::decode(frame).map(|d| d.message) {
+                Some(crate::decode::Message::ServoOutputs { servos }) => Some(servos),
+                _ => None,
+            }
+        });
+        assert_eq!(servos.map(|s| s[1]), Some(1300), "motor 2 at 30%");
+        // Not sent again when it times out.
+        let retried = session.tick(9_000_000);
+        assert!(sends(&retried).is_empty());
     }
 }

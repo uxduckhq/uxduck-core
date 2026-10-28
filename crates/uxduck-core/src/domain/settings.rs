@@ -241,6 +241,8 @@ pub struct Settings {
     pub traffic_alert_m: u32,
     #[serde(default = "traffic_alert_up_m")]
     pub traffic_alert_up_m: u32,
+    #[serde(default)]
+    pub traffic_controls: TrafficControls,
     /// Settings › Terrain (S23, ADR-0026 T4): the dataset the map reads
     /// and vehicles are answered from, unless one is chosen for a vehicle.
     #[serde(default)]
@@ -330,6 +332,7 @@ impl Default for Settings {
             recreate_simulations: false,
             traffic_alert_m: traffic_alert_m(),
             traffic_alert_up_m: traffic_alert_up_m(),
+            traffic_controls: TrafficControls::default(),
             terrain_dataset: TerrainDataset::Alos,
             vehicle_terrain_datasets: BTreeMap::new(),
             terrain_areas: Vec::new(),
@@ -386,4 +389,53 @@ mod simulator_retention_tests {
         assert_eq!(reloaded.simulator_log_retention_days, None);
         assert_eq!(reloaded.simulator_log_max_bytes, 0);
     }
+}
+
+/// Traffic choices are explicit and never depend on arming.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent operator-selected switches"
+)]
+pub struct TrafficControls {
+    pub range_m: u32,
+    pub limit_range: bool,
+    pub height_m: u32,
+    pub limit_height: bool,
+    pub all_vehicles: bool,
+    pub vehicle_ids: Vec<String>,
+    pub device_location: bool,
+    pub sites: Vec<TrafficSite>,
+    pub always_label: bool,
+    pub refresh_s: u32,
+    pub alerts_enabled: bool,
+}
+impl Default for TrafficControls {
+    fn default() -> Self {
+        Self {
+            range_m: 10_000,
+            limit_range: true,
+            height_m: 1_000,
+            limit_height: true,
+            all_vehicles: true,
+            vehicle_ids: Vec::new(),
+            device_location: false,
+            sites: Vec::new(),
+            always_label: false,
+            refresh_s: 30,
+            alerts_enabled: true,
+        }
+    }
+}
+/// A chosen fixed ground location; altitude is optional, in metres above sea level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficSite {
+    pub id: String,
+    pub name: String,
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_m: Option<i32>,
 }

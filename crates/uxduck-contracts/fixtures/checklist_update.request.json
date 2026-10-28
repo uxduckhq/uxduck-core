@@ -1,0 +1,21 @@
+{
+  "method": "checklist/update",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "add": [
+      {
+        "kind": "manual",
+        "title": "Propellers tight"
+      },
+      {
+        "kind": "rule",
+        "title": "Battery at least 22.2 V",
+        "item": "battery.voltage_v",
+        "op": ">=",
+        "value": 22.2,
+        "holdS": 3.0,
+        "severity": "block"
+      }
+    ]
+  }
+}

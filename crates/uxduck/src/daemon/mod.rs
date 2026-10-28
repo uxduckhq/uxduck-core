@@ -551,6 +551,12 @@ async fn start_online(
     let _ = engine
         .run(move |e| e.set_definitions(Box::new(definitions)))
         .await;
+    // Firmware (S189): ArduPilot's list and releases fetched when asked,
+    // and the board's bootloader on USB.
+    let firmware = crate::firmware::Host::new(data_dir, engine.clone());
+    let _ = engine
+        .run(move |e| e.set_firmware(Box::new(firmware)))
+        .await;
     // Terrain heights (S23): the manifest is read and fetched at once.
     if let Some(source) = terrain {
         let terrain = crate::terrain::Host::new(data_dir, source.base_url, engine.clone());
@@ -737,6 +743,16 @@ async fn expire_approvals(engine: EngineHandle) {
         if engine
             .run(move |e| {
                 e.expire_approvals(now);
+                // Motors whose press stopped coming (S188).
+                e.expire_spins(now);
+                // Firmware installs waiting for the vehicle (S189).
+                e.expire_firmware(now);
+                // Airspeed checks and ratios, and autocal left on (S190).
+                e.expire_airspeed(now);
+                // PX4 calibrations gone silent (S191).
+                e.expire_setups(now);
+                // Preflight checks that change with time alone (S192).
+                e.review_preflights();
                 e.expire_display_pulls(now);
                 e.expire_video_watches(now);
                 e.expire_pairings();

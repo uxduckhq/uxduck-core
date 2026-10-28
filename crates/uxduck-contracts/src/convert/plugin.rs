@@ -106,6 +106,30 @@ impl From<&p::Plugin> for dto::Plugin {
             included: v.included,
             hosts: v.hosts.clone(),
             traffic_source: v.traffic_source,
+            checks: v.checks.iter().map(Into::into).collect(),
+            checks_block: v.checks_block,
+        }
+    }
+}
+
+impl From<&p::DeclaredCheck> for dto::DeclaredCheck {
+    fn from(v: &p::DeclaredCheck) -> Self {
+        Self {
+            id: v.id.clone(),
+            title: v.title.clone(),
+            severity: v.severity.into(),
+            stale_ms: v.stale_ms,
+        }
+    }
+}
+
+impl From<&dto::DeclaredCheck> for p::DeclaredCheck {
+    fn from(v: &dto::DeclaredCheck) -> Self {
+        Self {
+            id: v.id.clone(),
+            title: v.title.clone(),
+            severity: v.severity.into(),
+            stale_ms: v.stale_ms,
         }
     }
 }

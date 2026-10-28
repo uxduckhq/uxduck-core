@@ -87,6 +87,9 @@ pub struct Flight {
     /// The parameters it armed with (C7), when UXDuck had them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FlightParams>,
+    /// Its checklist as it stood when it armed, and every override (S193).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist: Option<crate::dto::checklist::ChecklistRecord>,
 }
 
 /// A flight's log sent to the account by itself.
@@ -253,6 +256,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 digest: p.digest.clone(),
                 count: p.count,
             }),
+            checklist: f.checklist.as_ref().map(Into::into),
         }
     }
 }

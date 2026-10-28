@@ -634,6 +634,18 @@ impl Account {
                 refused(answer).await?;
                 to_json(&self.get(api, client).await?)
             }
+            AccountAction::SetName { name } => {
+                let token = session.signed_in()?;
+                let answer = client
+                    .put(format!("{api}/v1/me/name"))
+                    .bearer_auth(&token)
+                    .json(&json!({ "name": name }))
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                refused(answer).await?;
+                to_json(&self.get(api, client).await?)
+            }
             action => self.learning(api, client, action, session).await,
         }
     }

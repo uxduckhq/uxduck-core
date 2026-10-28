@@ -1,0 +1,56 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "vehicleName": "Copter 1",
+  "entries": [
+    {
+      "id": "hi5d2e7f1a9c0b3e48",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "kind": {
+        "type": "event",
+        "event": {
+          "type": "armed",
+          "flightId": "fl0123456789abcdef",
+          "text": "Armed with its checklist: 2 of 2 steps passed",
+          "record": {
+            "steps": [
+              {
+                "title": "Propellers tight",
+                "kind": "manual",
+                "severity": "block",
+                "status": "pass",
+                "tick": {
+                  "by": {
+                    "clientName": "uxduck-web",
+                    "clientKind": "operator-ui",
+                    "operatorId": "op1",
+                    "operatorName": "Ben"
+                  },
+                  "atUs": 1790669190000000
+                }
+              },
+              {
+                "title": "Battery at least 22.2 V",
+                "kind": "rule",
+                "severity": "block",
+                "status": "pass",
+                "item": "battery.voltage_v",
+                "op": ">=",
+                "target": 22.2,
+                "unit": "V",
+                "holdS": 3.0,
+                "value": 22.7
+              }
+            ]
+          }
+        }
+      },
+      "happenedAtUs": 1790669310000000,
+      "writtenAtUs": 1790669310000000,
+      "author": {
+        "clientName": "UXDuck"
+      },
+      "version": 1
+    }
+  ],
+  "total": 1
+}

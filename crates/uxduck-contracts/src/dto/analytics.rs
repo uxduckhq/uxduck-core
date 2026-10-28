@@ -80,6 +80,25 @@ pub struct AnalyticsActiveTimeParams {
     pub daemon: DaemonPresence,
 }
 
+/// Foreground input interval for a selected simulator. IDs and timestamps are
+/// local RPC context only; only the deduplicated duration enters analytics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnalyticsEngagedSimTimeParams {
+    pub vehicle_id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub start_ms: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub end_ms: u64,
+    pub surface: Surface,
+}
+
+/// Browser workers return the accepted delta to the originating page only.
+/// Installed daemons deliver directly and return zero to avoid a second sender.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EngagedSimTimeResult {
+    pub engaged_ms: u32,
+}
+
 /// A visible map's trail choice, or differing choices across visible 3D maps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -326,6 +345,13 @@ pub enum AppEvent {
     /// A delta, never a cumulative counter or a visit identifier.
     AppActiveTime {
         active_ms: u32,
+        surface: Surface,
+        daemon: DaemonPresence,
+    },
+    /// Foreground input with a selected online simulator, deduplicated across
+    /// windows by the engine. Includes ground setup; not manual flight proof.
+    EngagedSimTime {
+        engaged_ms: u32,
         surface: Surface,
         daemon: DaemonPresence,
     },

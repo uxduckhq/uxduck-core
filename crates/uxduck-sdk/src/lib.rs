@@ -20,7 +20,8 @@
 //! through the ordinary command path; messages by name ([`Message::send_to`]),
 //! only those its manifest lists in `sends`; telemetry items with a unit,
 //! whose key ends in the unit's suffix (`home.distance_m`); notifications;
-//! and log lines. The types are the contracts' own.
+//! where the preflight checks its manifest declares stand for a vehicle
+//! ([`check`]); and log lines. The types are the contracts' own.
 //!
 //! ```ignore
 //! use extism_pdk::{FnResult, Json, plugin_fn};
@@ -47,9 +48,9 @@ pub use extism_pdk;
 pub use uxduck_contracts::dto::command::{Command, Risk};
 pub use uxduck_contracts::dto::notification::Severity;
 pub use uxduck_contracts::dto::plugin::{
-    CommandCall, Description, Effects, Frame, FrameBatch, ItemBatch, ItemInput, MapFeature,
-    MessageBatch, MessageInput, Panel, PluginNotification, ProducedItem, SendCommand, SendMessage,
-    Tone, Widget,
+    CommandCall, DeclaredCheck, Description, Effects, Frame, FrameBatch, ItemBatch, ItemInput,
+    MapFeature, MessageBatch, MessageInput, Panel, PluginNotification, ProducedItem, ReportedCheck,
+    ReportedStatus, SendCommand, SendMessage, Tone, Widget,
 };
 pub use uxduck_contracts::dto::telemetry::Unit;
 
@@ -247,6 +248,21 @@ pub fn circle(id: &str, latitude_deg: f64, longitude_deg: f64, radius_m: f64) ->
     }
 }
 
+/// Where one of the checks its `plugin.json` declares stands for a vehicle
+/// (S194), for `Effects.checks`: `detail` in a few words without live
+/// numbers ("Over 8 m/s."), since the vehicle's list is kept each time they
+/// change. Report again before the check's `staleMs` runs out, or it is
+/// unknown.
+#[must_use]
+pub fn check(vehicle_id: &str, id: &str, status: ReportedStatus, detail: &str) -> ReportedCheck {
+    ReportedCheck {
+        vehicle_id: vehicle_id.to_owned(),
+        id: id.to_owned(),
+        status,
+        detail: (!detail.is_empty()).then(|| detail.to_owned()),
+    }
+}
+
 /// A notification about a vehicle, under the plugin's name.
 #[must_use]
 pub fn notify(vehicle_id: &str, severity: Severity, title: &str) -> PluginNotification {
@@ -313,6 +329,29 @@ mod tests {
         assert!((north - 0.000_899).abs() < 0.000_001, "{north}");
         let rows = table("v", "home.marks", "Marks", &[vec!["1".into(), "A".into()]]);
         assert_eq!(rows.text.as_deref(), Some(r#"[["1","A"]]"#));
+    }
+
+    #[test]
+    fn a_check_report_is_what_the_host_reads() {
+        let effects = Effects {
+            checks: vec![
+                check("v", "wind", ReportedStatus::Fail, "Over 8 m/s."),
+                check("v", "wind", ReportedStatus::Waiting, ""),
+            ],
+            ..Effects::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&effects).unwrap(),
+            serde_json::json!({ "checks": [
+                { "vehicleId": "v", "id": "wind", "status": "fail", "detail": "Over 8 m/s." },
+                { "vehicleId": "v", "id": "wind", "status": "waiting" }
+            ] })
+        );
+        let declared: DeclaredCheck = serde_json::from_value(
+            serde_json::json!({ "id": "wind", "title": "Wind under 8 m/s", "severity": "block" }),
+        )
+        .unwrap();
+        assert_eq!(declared.stale_ms, 60_000, "a minute unless it says");
     }
 
     #[test]

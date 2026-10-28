@@ -229,13 +229,13 @@ mod tests {
     fn calls_cannot_escape_the_vehicle_tool_allowlist_or_hide_invalid_arguments() {
         let catalogue = tools();
         for arguments in [
-            json!({ "name": "settings_update" }),
+            json!({ "name": "daemon_stop" }),
             json!({ "name": "vehicle/list" }),
             json!({ "name": SEARCH }),
             json!({ "name": CALL }),
             json!({ "name": "vehicle_list", "arguments": null }),
             json!({ "name": "vehicle_list", "arguments": [] }),
-            json!({ "name": "vehicle_list", "method": "settings/update" }),
+            json!({ "name": "vehicle_list", "method": "daemon/stop" }),
         ] {
             assert!(invocation(&catalogue, arguments).is_err());
         }

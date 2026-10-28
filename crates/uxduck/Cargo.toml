@@ -34,6 +34,7 @@ reqwest = { workspace = true, features = ["json", "query", "stream"] }
 rust-embed = { workspace = true, optional = true }
 gilrs = { workspace = true, optional = true }
 fs4.workspace = true
+sysinfo.workspace = true
 extism = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 semver.workspace = true
@@ -89,6 +90,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
   "CFNumber",
   "CFString",
   "CFSet",
+  "CFRunLoop",
 ], optional = true }
 
 [features]

@@ -46,6 +46,7 @@ impl From<&a::Approval> for dto::Approval {
             capability: v.capability.into(),
             method: v.method.clone(),
             summary: v.summary.clone(),
+            preflight: v.preflight.iter().map(Into::into).collect(),
             state: match v.state {
                 a::ApprovalState::Pending => dto::ApprovalState::Pending,
                 a::ApprovalState::Allowed => dto::ApprovalState::Allowed,

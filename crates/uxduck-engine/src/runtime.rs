@@ -158,6 +158,16 @@ pub trait LinkPort: Send {
         self.close(&link.id);
         self.open(link);
     }
+    /// Releases a serial link's port while firmware is installed through
+    /// it (S189), and opens it again after. The default closes the link and
+    /// opens it again, so the vehicle is heard afresh with its new version.
+    fn pause(&mut self, link: &uxduck_core::domain::link::Link, paused: bool) {
+        if paused {
+            self.close(&link.id);
+        } else {
+            self.open(link);
+        }
+    }
     /// Sends a command to a vehicle; the data plane reports how it ended
     /// through `Engine::command_result`.
     fn command(&mut self, order: CommandOrder);
@@ -345,6 +355,11 @@ pub struct HistoryOf<'a> {
 /// What only the host can answer: binding ports, its own addresses, serial
 /// devices, keeping the machine awake (ADR-0004 port ownership, wake lock).
 pub trait System: Send {
+    /// A bounded native process read; unsupported browser hosts return none.
+    fn process_usage(&self) -> Option<uxduck_contracts::dto::settings::CoreProcessUsage> {
+        None
+    }
+
     fn last_router_incident(
         &self,
         link: &str,
@@ -547,7 +562,9 @@ pub trait System: Send {
     }
     /// Whether a SITL instance's ports can be opened on this computer now
     /// (S71): another UXDuck's simulator, or another ground station's,
-    /// may hold them. Free by default.
+    /// may hold them. A host that answers yes claims the instance, so
+    /// another UXDuck starting a simulator at the same time skips it. Free
+    /// by default.
     fn sim_instance_free(&self, instance: u8) -> bool {
         let _ = instance;
         true

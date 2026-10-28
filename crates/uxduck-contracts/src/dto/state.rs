@@ -20,8 +20,10 @@ use crate::dto::parameter::{Parameter, ParameterSet};
 use crate::dto::plan::Plan;
 use crate::dto::plugin::Plugin;
 use crate::dto::practice::PracticeAttempt;
+use crate::dto::preflight::Preflight;
 use crate::dto::search::SavedPlace;
 use crate::dto::settings::Settings;
+use crate::dto::setup::Setup;
 use crate::dto::sim::SimSnapshot;
 use crate::dto::thread::{Folder, Item, Thread};
 use crate::dto::vehicle::Vehicle;
@@ -77,6 +79,11 @@ pub enum EntityType {
     PracticeAttempt,
     /// A download from a vehicle or an upload to it (S121).
     FileTransfer,
+    /// A vehicle's setup procedure, running or the last, keyed by vehicle
+    /// id (S184).
+    Setup,
+    /// A vehicle's preflight checks, keyed by vehicle id (S192).
+    Preflight,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -153,6 +160,12 @@ pub struct Snapshot {
     pub practice_attempts: Option<Vec<PracticeAttempt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_transfers: Option<Vec<FileTransfer>>,
+    /// Each vehicle's setup procedure, running or the last (S184).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setups: Option<Vec<Setup>>,
+    /// Each vehicle's preflight checks (S192).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflights: Option<Vec<Preflight>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -236,6 +249,10 @@ pub struct EntityChange {
     pub practice_attempt: Option<PracticeAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_transfer: Option<FileTransfer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight: Option<Preflight>,
 }
 
 /// Immutable identity at the time an action began.

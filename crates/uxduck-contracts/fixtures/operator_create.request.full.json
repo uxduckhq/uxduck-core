@@ -3,6 +3,13 @@
   "params": {
     "name": "Ben",
     "units": "imperial",
+    "quantityUnits": {
+      "distance": "miles",
+      "altitude": "feet",
+      "speed": "knots",
+      "verticalSpeed": "feet-per-minute",
+      "temperature": "fahrenheit"
+    },
     "coordinateFormat": "mgrs",
     "altitudeFrame": "amsl"
   }

@@ -268,6 +268,7 @@ mod tests {
                     id: format!("op{seq}"),
                     name: name.into(),
                     units: UnitSystem::Metric,
+                    quantity_units: None,
                     coordinate_format: CoordinateFormat::Decimal,
                     altitude_frame: uxduck_core::domain::telemetry::AltitudeFrame::default(),
                     layout: uxduck_core::domain::operator::Layout::initial(),

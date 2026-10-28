@@ -314,6 +314,49 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
 }
 
 impl Engine {
+    /// Keeps a file UXDuck made for a vehicle among its copies, as a
+    /// finished download that Files lists and saves: the parameters saved
+    /// before installing firmware (S189).
+    ///
+    /// # Errors
+    /// With no files port (UXDuck Web), or when the disk refuses.
+    pub(crate) fn keep_copy(
+        &mut self,
+        vehicle_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let path = format!("/UXDuck/{name}");
+        let local = local_for(vehicle_id, &path);
+        let port = self
+            .files
+            .port
+            .as_mut()
+            .ok_or_else(|| "this UXDuck keeps no copies".to_owned())?;
+        port.discard(&local);
+        port.write(&local, 0, bytes)?;
+        port.finish(&local)?;
+        let now = self.clock.now_us();
+        let size = bytes.len() as u64;
+        let transfer = FileTransfer {
+            id: self.file_id("fd"),
+            vehicle_id: vehicle_id.to_owned(),
+            direction: TransferDirection::Download,
+            name: name.to_owned(),
+            path,
+            local: Some(local),
+            size: Some(size),
+            done: size,
+            state: TransferState::Done,
+            detail: None,
+            rate_bps: None,
+            started_at_us: now,
+            updated_at_us: now,
+        };
+        self.commit_as(actor(), Change::FileTransferUpserted { transfer });
+        Ok(())
+    }
+
     /// Gives the engine its files port (the daemon's "Vehicle files"), and
     /// sets transfers UXDuck was running when it stopped to wait for their
     /// vehicles. An upload's bytes did not survive: it failed.

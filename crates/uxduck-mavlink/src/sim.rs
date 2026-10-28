@@ -11,8 +11,8 @@ use mavio::dialects::ardupilotmega::enums::{
 use mavio::dialects::ardupilotmega::messages::{
     Attitude, AutopilotVersion, AvailableModes, AvailableModesMonitor, BatteryStatus, CommandLong,
     DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat, MissionCurrent,
-    NavControllerOutput, PositionTargetGlobalInt, RadioStatus, ServoOutputRaw, SysStatus,
-    TerrainReport, VfrHud, Vibration, VideoStreamInformation, Wind,
+    NavControllerOutput, PositionTargetGlobalInt, RadioStatus, RcChannels, ServoOutputRaw,
+    SysStatus, TerrainReport, VfrHud, Vibration, VideoStreamInformation, Wind,
 };
 use mavio::protocol::{V2, Versionless};
 use mavio::{Frame, Message};
@@ -52,13 +52,46 @@ pub fn armed_heartbeat_frame(
     armed: bool,
     custom_mode: u32,
 ) -> Vec<u8> {
+    typed_heartbeat_frame(
+        (system_id, component_id, sequence),
+        MavType::Quadrotor,
+        armed,
+        custom_mode,
+    )
+}
+
+/// An ArduPilot heartbeat of a type, with its armed flag and mode: a
+/// plane's is `FixedWing` (S190).
+fn typed_heartbeat_frame(
+    route: (u8, u8, u8),
+    type_: MavType,
+    armed: bool,
+    custom_mode: u32,
+) -> Vec<u8> {
+    autopilot_heartbeat_frame(
+        route,
+        MavAutopilot::Ardupilotmega,
+        type_,
+        armed,
+        custom_mode,
+    )
+}
+
+/// A heartbeat of an autopilot and a type (S191: PX4's fake).
+fn autopilot_heartbeat_frame(
+    (system_id, component_id, sequence): (u8, u8, u8),
+    autopilot: MavAutopilot,
+    type_: MavType,
+    armed: bool,
+    custom_mode: u32,
+) -> Vec<u8> {
     let mut base_mode = MavModeFlag::CUSTOM_MODE_ENABLED;
     if armed {
         base_mode |= MavModeFlag::SAFETY_ARMED;
     }
     let heartbeat = Heartbeat {
-        type_: MavType::Quadrotor,
-        autopilot: MavAutopilot::Ardupilotmega,
+        type_,
+        autopilot,
         base_mode,
         custom_mode,
         system_status: MavState::Standby,
@@ -406,6 +439,48 @@ pub fn status_text_frame(
         chunk_seq,
     };
     frame(system_id, 1, sequence, &message)
+}
+
+/// A `MAG_CAL_REPORT` built from its bytes (S185), so it can carry a
+/// `cal_status` the dialect's enum lacks (8 to 10, from current `MAVLink`).
+#[must_use]
+#[allow(clippy::too_many_arguments, reason = "the message's own fields")]
+pub fn mag_cal_report_frame(
+    system_id: u8,
+    component_id: u8,
+    sequence: u8,
+    compass_id: u8,
+    cal_mask: u8,
+    cal_status: u8,
+    fitness: f32,
+    offsets: [f32; 3],
+) -> Vec<u8> {
+    use mavio::dialects::ardupilotmega::messages::MagCalReport;
+    let mut payload = [0u8; 44];
+    let floats = [
+        fitness, offsets[0], offsets[1], offsets[2], 1.0, 1.0, 1.0, 0.0, 0.0, 0.0,
+    ];
+    for (i, value) in floats.iter().enumerate() {
+        payload[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    payload[40] = compass_id;
+    payload[41] = cal_mask;
+    payload[42] = cal_status;
+    payload[43] = u8::from(cal_status == 4);
+    let frame: Frame<Versionless> = Frame::builder()
+        .version(V2)
+        .system_id(system_id)
+        .component_id(component_id)
+        .sequence(sequence)
+        .message_id(192)
+        .payload(&payload)
+        .crc_extra(MagCalReport::crc_extra())
+        .build()
+        .into_versionless();
+    let mut buf = vec![0u8; frame.size()];
+    let written = frame.serialize(&mut buf).unwrap_or(0);
+    buf.truncate(written);
+    buf
 }
 
 /// `MAV_CMD_SET_MESSAGE_INTERVAL`: stream `message_id` every `interval_us`.
@@ -797,7 +872,7 @@ pub const INT32: u8 = 6;
 
 /// A few of `ArduCopter`'s parameters, with their types, as the fake
 /// vehicle's table.
-pub const FAKE_PARAMETERS: [(&str, f32, u8); 24] = [
+pub const FAKE_PARAMETERS: [(&str, f32, u8); 25] = [
     ("FORMAT_VERSION", 120.0, INT16),
     ("SYSID_THISMAV", 1.0, INT16),
     ("SYSID_MYGCS", 255.0, INT16),
@@ -822,6 +897,9 @@ pub const FAKE_PARAMETERS: [(&str, f32, u8); 24] = [
     ("WPNAV_ACCEL", 250.0, REAL32),
     ("SERIAL0_BAUD", 115.0, INT32),
     ("SR0_POSITION", 4.0, INT16),
+    // Last, so the ranges tests write keep their place: the battery a
+    // checklist rule can have the vehicle hold itself (S193).
+    ("BATT_ARM_VOLT", 0.0, REAL32),
 ];
 
 /// `MAV_SYS_STATUS_PREARM_CHECK`, set or not.
@@ -1015,7 +1093,30 @@ pub struct FakeVehicle {
     /// The modes it lists itself when asked (`AVAILABLE_MODES`); none means
     /// older firmware, which does not answer.
     pub modes: Vec<AvailableMode>,
+    /// Its compasses (S184), listed in its parameters by `add_compasses`;
+    /// none lists none.
+    pub compasses: Option<FakeCompasses>,
+    /// Its accelerometers (S186): calibrated unless `add_accel` says not,
+    /// and calibrated or levelled as `ArduPilot` does it.
+    pub accel: crate::fake_accel::FakeAccel,
+    /// Its radio (S187): listed by `add_radio`, its sticks moving as a
+    /// person calibrating it would.
+    pub radio: crate::fake_radio::FakeRadio,
+    /// Its motor test (S188): answered always, its frame listed by
+    /// `add_motors`.
+    pub motors: crate::fake_motors::FakeMotors,
+    /// Its airspeed sensor (S190): listed by `add_airspeed`, which makes it
+    /// a plane that sits on the ground until armed.
+    pub airspeed: crate::fake_airspeed::FakeAirspeed,
+    /// PX4 (S191): set by `make_px4`, it heartbeats, lists its parameters
+    /// and calibrates as PX4 does.
+    pub px4: Option<crate::fake_px4::FakePx4>,
+    /// The true heading a calibration from a heading was given (S185):
+    /// reported while it is disarmed, as a vehicle standing still facing
+    /// that way would.
+    held_heading: Option<f64>,
     said_leak_s: Option<f64>,
+    said_compass_s: Option<f64>,
     /// When it last said each, in `telemetry` time.
     said_burst: bool,
     said_prearm_s: Option<f64>,
@@ -1061,6 +1162,145 @@ struct GoTo {
 
 /// How fast the fake vehicle flies to a place.
 const GO_TO_MPS: f64 = 10.0;
+
+/// The fake vehicle's compasses' `COMPASS_DEV_ID`s: a QMC5883L on I2C, as
+/// in a GPS module, then an AK09916 and an LIS3MDL on SPI.
+const FAKE_COMPASS_IDS: [f32; 3] = [97_539.0, 590_114.0, 263_178.0];
+
+/// How long the fake vehicle takes to calibrate its first compass; each
+/// other takes 3 s more, so their percentages differ.
+const COMPASS_CAL_S: f64 = 10.0;
+
+/// The fake vehicle's compasses (S184): whether they are calibrated, and a
+/// calibration running, reported as `ArduPilot` reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FakeCompasses {
+    pub count: u8,
+    /// Calibrated and in use.
+    pub calibrated: bool,
+    /// Calibrated since it booted: it uses the result once restarted.
+    pub restart_needed: bool,
+    /// The last compass fails its calibration with this `MAG_CAL_STATUS`,
+    /// such as 6 for a bad orientation.
+    pub fails_with: Option<u8>,
+    /// When the calibration running started, in `telemetry` time.
+    running_from_s: Option<f64>,
+    /// It finished and reports its result until it restarts.
+    reporting: bool,
+    reported_at_s: Option<f64>,
+}
+
+impl FakeCompasses {
+    /// What its pre-arm check says, if it fails.
+    fn prearm(&self) -> Option<&'static str> {
+        if self.running_from_s.is_some() {
+            None
+        } else if self.restart_needed {
+            Some("Compass calibrated requires reboot")
+        } else if !self.calibrated {
+            Some("Compass not calibrated")
+        } else {
+            None
+        }
+    }
+
+    /// Calibrated and nothing waiting on a restart: it may arm.
+    fn in_use(&self) -> bool {
+        self.calibrated && !self.restart_needed
+    }
+
+    fn restarted(&mut self) {
+        if self.restart_needed {
+            self.calibrated = true;
+            self.restart_needed = false;
+        }
+        self.running_from_s = None;
+        self.reporting = false;
+        self.reported_at_s = None;
+    }
+
+    /// The offsets a calibration finds for a compass, milligauss.
+    fn offsets(index: u8) -> [f32; 3] {
+        let i = f32::from(index);
+        [42.5 - 20.0 * i, -17.25 + 8.0 * i, 63.0 - 11.5 * i]
+    }
+
+    /// Percent done after `elapsed` seconds.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a percentage"
+    )]
+    fn progress(index: u8, elapsed: f64) -> u8 {
+        let takes = COMPASS_CAL_S + 3.0 * f64::from(index);
+        (elapsed / takes * 100.0).clamp(0.0, 100.0) as u8
+    }
+
+    fn mask(&self) -> u8 {
+        u8::MAX >> (8 - self.count.min(8))
+    }
+
+    #[allow(clippy::cast_possible_truncation, reason = "small simulated values")]
+    fn progress_message(
+        &self,
+        index: u8,
+        elapsed: f64,
+    ) -> mavio::dialects::ardupilotmega::messages::MagCalProgress {
+        use mavio::dialects::ardupilotmega::enums::MagCalStatus;
+        let pct = Self::progress(index, elapsed);
+        // The sections fill in a scattered order, as turning it does.
+        let seen = usize::from(pct) * 80 / 100;
+        let mut completion_mask = [0u8; 10];
+        for n in 0..seen {
+            let section = (n * 37 + usize::from(index) * 11) % 80;
+            completion_mask[section / 8] |= 1 << (section % 8);
+        }
+        let turn = elapsed * 0.8;
+        mavio::dialects::ardupilotmega::messages::MagCalProgress {
+            compass_id: index,
+            cal_mask: self.mask(),
+            cal_status: if pct < 50 {
+                MagCalStatus::MagCalRunningStepOne
+            } else {
+                MagCalStatus::MagCalRunningStepTwo
+            },
+            attempt: 1,
+            completion_pct: pct,
+            completion_mask,
+            direction_x: turn.cos() as f32,
+            direction_y: turn.sin() as f32,
+            direction_z: (turn * 0.5).sin() as f32,
+        }
+    }
+
+    fn report(&self, index: u8) -> mavio::dialects::ardupilotmega::messages::MagCalReport {
+        use mavio::dialects::ardupilotmega::enums::MagCalStatus;
+        let failed = self
+            .fails_with
+            .filter(|_| index + 1 == self.count)
+            .and_then(|status| MagCalStatus::try_from(status).ok());
+        let [ofs_x, ofs_y, ofs_z] = Self::offsets(index);
+        mavio::dialects::ardupilotmega::messages::MagCalReport {
+            compass_id: index,
+            cal_mask: self.mask(),
+            cal_status: failed.unwrap_or(MagCalStatus::MagCalSuccess),
+            autosaved: u8::from(failed.is_none()),
+            fitness: if failed.is_some() {
+                31.5
+            } else {
+                3.5 + 1.25 * f32::from(index)
+            },
+            ofs_x,
+            ofs_y,
+            ofs_z,
+            diag_x: 1.0,
+            diag_y: 1.0,
+            diag_z: 1.0,
+            scale_factor: 1.0,
+            ..Default::default()
+        }
+    }
+}
 
 /// Where the fake vehicle is and how it moves: degrees, metres above home,
 /// metres per second, degrees clockwise from north, and its velocity north
@@ -1162,6 +1402,14 @@ impl FakeVehicle {
             terrain: None,
             files: crate::fake_files::FakeFiles::default(),
             modes: Vec::new(),
+            compasses: None,
+            accel: crate::fake_accel::FakeAccel::default(),
+            radio: crate::fake_radio::FakeRadio::default(),
+            motors: crate::fake_motors::FakeMotors::default(),
+            airspeed: crate::fake_airspeed::FakeAirspeed::default(),
+            px4: None,
+            held_heading: None,
+            said_compass_s: None,
             said_burst: false,
             said_prearm_s: None,
             said_repeat_s: None,
@@ -1209,6 +1457,45 @@ impl FakeVehicle {
             self.said_leak_s = Some(t_s);
             said.push((2, "Leak Detected!".into(), (0, 0)));
         }
+        // Its compasses' pre-arm check, every 30 s while disarmed, as
+        // ArduPilot says it; nothing while it calibrates (S184).
+        if let Some(reason) = self.compasses.as_ref().and_then(FakeCompasses::prearm)
+            && !self.armed
+            && self.said_compass_s.is_none_or(|at| t_s - at >= 30.0)
+        {
+            self.said_compass_s = Some(t_s);
+            said.push((3, format!("PreArm: {reason}"), (0, 0)));
+        }
+        // Its radio's (S187), the same way.
+        if self.radio.listed
+            && !crate::fake_radio::FakeRadio::calibrated(&self.parameters)
+            && !self.armed
+            && self.radio.said_prearm_s.is_none_or(|at| t_s - at >= 30.0)
+        {
+            self.radio.said_prearm_s = Some(t_s);
+            said.push((3, "PreArm: RC not calibrated".into(), (0, 0)));
+        }
+        // PX4's (S191): an accelerometer with no `CAL_ACC0_ID`, as PX4's
+        // arming checks say it, while nothing calibrates.
+        if self.px4.as_ref().is_some_and(|p| !p.calibrating())
+            && self
+                .parameters
+                .iter()
+                .any(|(n, v, _)| n == "CAL_ACC0_ID" && *v == 0.0)
+            && !self.armed
+            && self.accel.said_prearm_s.is_none_or(|at| t_s - at >= 30.0)
+        {
+            self.accel.said_prearm_s = Some(t_s);
+            said.push((2, "Preflight Fail: Accel 0 uncalibrated".into(), (0, 0)));
+        }
+        // Its accelerometers' (S186), the same way.
+        if let Some(reason) = self.accel.prearm()
+            && !self.armed
+            && self.accel.said_prearm_s.is_none_or(|at| t_s - at >= 30.0)
+        {
+            self.accel.said_prearm_s = Some(t_s);
+            said.push((3, format!("PreArm: {reason}"), (0, 0)));
+        }
         said.into_iter()
             .map(|(severity, text, part)| {
                 self.sequence = self.sequence.wrapping_add(1);
@@ -1223,6 +1510,770 @@ impl FakeVehicle {
         self.booted_at_s = self.last_t_s;
         self.armed = false;
         self.requested.clear();
+        if let Some(compasses) = &mut self.compasses {
+            compasses.restarted();
+        }
+        self.accel.restarted();
+        self.airspeed.restarted();
+        if let Some(px4) = &mut self.px4 {
+            px4.restarted();
+        }
+        self.said_compass_s = None;
+    }
+
+    /// Makes it PX4 1.17 (S191): a quad X, or with `plane` a plane with an
+    /// airspeed sensor, with PX4's parameters (its control allocation's
+    /// rotors, its compass and accelerometer, its radio at PX4's defaults,
+    /// `COM_MOT_TEST_EN` on), sent as PX4 sends them (an integer's bits).
+    /// Its accelerometer is uncalibrated (`CAL_ACC0_ID` 0) unless
+    /// `accel_calibrated`.
+    pub fn make_px4(&mut self, plane: bool, accel_calibrated: bool) {
+        let mut parameters: Vec<(String, f32, u8)> = vec![
+            (
+                "SYS_AUTOSTART".into(),
+                if plane { 10041.0 } else { 10040.0 },
+                INT32,
+            ),
+            ("CAL_MAG0_ID".into(), 197_388.0, INT32),
+            ("CAL_MAG0_PRIO".into(), 50.0, INT32),
+            ("CAL_MAG0_ROT".into(), -1.0, INT32),
+            ("CAL_MAG0_XOFF".into(), 0.0, REAL32),
+            ("CAL_MAG0_YOFF".into(), 0.0, REAL32),
+            ("CAL_MAG0_ZOFF".into(), 0.0, REAL32),
+            ("CAL_MAG_SIDES".into(), 63.0, INT32),
+            (
+                "CAL_ACC0_ID".into(),
+                if accel_calibrated {
+                    crate::fake_px4::ACCEL_ID
+                } else {
+                    0.0
+                },
+                INT32,
+            ),
+            ("CAL_ACC0_XOFF".into(), 0.0, REAL32),
+            ("SENS_BOARD_X_OFF".into(), 0.0, REAL32),
+            ("COM_MOT_TEST_EN".into(), 1.0, INT32),
+            ("RC_MAP_ROLL".into(), 0.0, INT32),
+            ("RC_MAP_PITCH".into(), 0.0, INT32),
+            ("RC_MAP_THROTTLE".into(), 0.0, INT32),
+            ("RC_MAP_YAW".into(), 0.0, INT32),
+            ("RC_FAILS_THR".into(), 0.0, INT32),
+        ];
+        for n in 1..=8 {
+            parameters.push((format!("RC{n}_MIN"), 1000.0, REAL32));
+            parameters.push((format!("RC{n}_MAX"), 2000.0, REAL32));
+            parameters.push((format!("RC{n}_TRIM"), 1500.0, REAL32));
+            parameters.push((format!("RC{n}_REV"), 1.0, REAL32));
+        }
+        if plane {
+            parameters.extend([
+                ("CA_AIRFRAME".into(), 1.0, INT32),
+                ("CA_ROTOR_COUNT".into(), 1.0, INT32),
+                ("CA_ROTOR0_PX".into(), 0.3, REAL32),
+                ("CA_ROTOR0_PY".into(), 0.0, REAL32),
+                ("CA_ROTOR0_KM".into(), 0.05, REAL32),
+                ("SYS_HAS_NUM_ASPD".into(), 1.0, INT32),
+                ("ASPD_PRIMARY".into(), 1.0, INT32),
+                ("SENS_DPRES_OFF".into(), 0.001, REAL32),
+            ]);
+        } else {
+            parameters.extend([
+                ("CA_AIRFRAME".into(), 0.0, INT32),
+                ("CA_ROTOR_COUNT".into(), 4.0, INT32),
+            ]);
+            // PX4's quad X: 1 front right and 2 back left counter-clockwise,
+            // 3 front left and 4 back right clockwise.
+            for (i, (px, py, km)) in [
+                (1.0, 1.0, 0.05),
+                (-1.0, -1.0, 0.05),
+                (1.0, -1.0, -0.05),
+                (-1.0, 1.0, -0.05),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                parameters.push((format!("CA_ROTOR{i}_PX"), px, REAL32));
+                parameters.push((format!("CA_ROTOR{i}_PY"), py, REAL32));
+                parameters.push((format!("CA_ROTOR{i}_KM"), km, REAL32));
+            }
+            parameters.push(("SYS_HAS_NUM_ASPD".into(), 0.0, INT32));
+        }
+        self.parameters = parameters;
+        let mut px4 = crate::fake_px4::FakePx4::default();
+        px4.plane = plane;
+        self.px4 = Some(px4);
+        // 1.17.0, official.
+        self.flight_sw_version = 0x0111_00ff;
+        // AUTO.LOITER, as PX4 holds on the ground.
+        self.mode = 0x0304_0000;
+        self.ftp = false;
+        self.on_ground = true;
+    }
+
+    /// PX4's answers to its calibrations and actuator test (S191).
+    fn answer_px4(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        use crate::fake_px4::FakePx4;
+        let Some(Decoded::CommandLong {
+            command,
+            param1,
+            param2,
+            param3,
+            param4,
+            param5,
+            param6,
+            param7,
+            ..
+        }) = decode(frame).map(|d| d.message)
+        else {
+            return Vec::new();
+        };
+        let armed = self.armed;
+        let enabled = self
+            .parameters
+            .iter()
+            .any(|(n, v, _)| n == "COM_MOT_TEST_EN" && *v != 0.0);
+        let t_s = self.last_t_s;
+        let Some(px4) = self.px4.as_mut() else {
+            return Vec::new();
+        };
+        let (result, out) = match command {
+            241 => px4.calibrate(
+                t_s,
+                armed,
+                [param1, param2, param3, param4, param5, param6, param7],
+            ),
+            42006 => FakePx4::quick_mag(armed, param1),
+            310 => (
+                px4.actuator_test(t_s, armed, enabled, (param1, param2, param5)),
+                Vec::new(),
+            ),
+            _ => return Vec::new(),
+        };
+        let sequence = self.next();
+        let mut replies = vec![command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            command,
+            result,
+        )];
+        replies.extend(self.px4_out(out));
+        replies
+    }
+
+    /// What PX4's calibrations said and set, as frames.
+    fn px4_out(&mut self, out: Vec<crate::fake_px4::Out>) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        for one in out {
+            match one {
+                crate::fake_px4::Out::Say(severity, text) => {
+                    let sequence = self.next();
+                    frames.push(status_text_frame(
+                        self.system_id,
+                        sequence,
+                        severity,
+                        &text,
+                        (0, 0),
+                    ));
+                }
+                crate::fake_px4::Out::Set(name, value) => self.set_parameter(name, value),
+            }
+        }
+        frames
+    }
+
+    /// Lists its accelerometers' offsets and its level trim in its
+    /// parameters (S186): calibrated, or with zero offsets and its pre-arm
+    /// checks failing with "3D Accel calibration needed" until they are.
+    pub fn add_accel(&mut self, calibrated: bool) {
+        let offsets = if calibrated {
+            crate::fake_accel::OFFSETS
+        } else {
+            [0.0; 3]
+        };
+        for (axis, value) in ["X", "Y", "Z"].iter().zip(offsets) {
+            self.parameters
+                .push((format!("INS_ACCOFFS_{axis}"), value, REAL32));
+        }
+        for axis in ["X", "Y"] {
+            self.parameters
+                .push((format!("AHRS_TRIM_{axis}"), 0.0, REAL32));
+        }
+        self.accel.listed = true;
+        self.accel.calibrated = calibrated;
+    }
+
+    /// Lists its radio's parameters at `ArduPilot`'s defaults, with the
+    /// throttle failsafe's value (S187): its pre-arm checks fail with "RC
+    /// not calibrated" until channels 1 to 4 have their own ranges, and it
+    /// gives its channels when asked.
+    pub fn add_radio(&mut self, roll_reversed: bool) {
+        use crate::fake_radio::{DEFAULT_MAX, DEFAULT_MIN, DEFAULT_TRIM, FAILSAFE_US};
+        for n in 1..=crate::fake_radio::CHANNELS {
+            for (name, value) in [
+                ("MIN", DEFAULT_MIN),
+                ("MAX", DEFAULT_MAX),
+                ("TRIM", DEFAULT_TRIM),
+            ] {
+                self.parameters
+                    .push((format!("RC{n}_{name}"), value, INT16));
+            }
+            self.parameters.push((format!("RC{n}_REVERSED"), 0.0, INT8));
+        }
+        for (name, channel) in [
+            ("RCMAP_ROLL", 1.0),
+            ("RCMAP_PITCH", 2.0),
+            ("RCMAP_THROTTLE", 3.0),
+            ("RCMAP_YAW", 4.0),
+        ] {
+            self.parameters.push((name.to_owned(), channel, INT8));
+        }
+        self.parameters
+            .push(("FS_THR_VALUE".to_owned(), FAILSAFE_US, INT16));
+        self.radio.listed = true;
+        self.radio.roll_reversed = roll_reversed;
+    }
+
+    /// Lists a quad X's `FRAME_CLASS` and `FRAME_TYPE` (S188), so its
+    /// motors can be drawn for the motor test.
+    pub fn add_motors(&mut self) {
+        self.parameters.push(("FRAME_CLASS".to_owned(), 1.0, INT8));
+        self.parameters.push(("FRAME_TYPE".to_owned(), 1.0, INT8));
+        self.motors.listed = true;
+    }
+
+    /// Makes it a plane with an airspeed sensor (S190): `ARSPD_*` listed,
+    /// with a ratio the automatic calibration corrects, zeroed or reading
+    /// 4 m/s at rest until it is, and SITL's `SIM_ARSPD_*` to blow into
+    /// its pitot (`SIM_ARSPD_OFS` + 60) or block it (`SIM_ARSPD_FAIL`). It
+    /// sits on the ground while disarmed, and circles once armed.
+    pub fn add_airspeed(&mut self, zeroed: bool) {
+        use crate::fake_airspeed::{LISTED_RATIO, SIM_OFFSET_PA, TRUE_RATIO, UNZEROED_PA};
+        for (name, value, kind) in [
+            ("ARSPD_TYPE", 1.0, INT8),
+            ("ARSPD_USE", 1.0, INT8),
+            (
+                "ARSPD_OFFSET",
+                if zeroed { SIM_OFFSET_PA } else { UNZEROED_PA },
+                REAL32,
+            ),
+            ("ARSPD_RATIO", LISTED_RATIO, REAL32),
+            ("ARSPD_AUTOCAL", 0.0, INT8),
+            ("SIM_ARSPD_OFS", SIM_OFFSET_PA, REAL32),
+            ("SIM_ARSPD_RATIO", TRUE_RATIO, REAL32),
+            ("SIM_ARSPD_FAIL", 0.0, REAL32),
+        ] {
+            self.parameters.push((name.to_owned(), value, kind));
+        }
+        self.airspeed.listed = true;
+    }
+
+    /// Its answer to `MAV_CMD_PREFLIGHT_CALIBRATION` for its airspeed
+    /// sensor (S190), and what it says first; nothing for any other frame.
+    fn answer_airspeed(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let Some(Decoded::CommandLong {
+            command: 241,
+            param3,
+            param6,
+            ..
+        }) = decode(frame).map(|d| d.message)
+        else {
+            return Vec::new();
+        };
+        let Some((result, said)) = self
+            .airspeed
+            .zero(self.last_t_s, self.armed, (param3, param6))
+        else {
+            return Vec::new();
+        };
+        let mut replies = Vec::new();
+        for text in said {
+            let sequence = self.next();
+            replies.push(status_text_frame(
+                self.system_id,
+                sequence,
+                6,
+                &text,
+                (0, 0),
+            ));
+        }
+        let sequence = self.next();
+        replies.push(command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            241,
+            result,
+        ));
+        replies
+    }
+
+    /// What its airspeed sensor reads at a true airspeed (S190); without
+    /// one, the true airspeed.
+    #[allow(clippy::cast_possible_truncation, reason = "VFR_HUD carries an f32")]
+    fn airspeed_reading(&self, true_mps: f64) -> f32 {
+        if self.airspeed.listed {
+            crate::fake_airspeed::FakeAirspeed::reading(&self.parameters, true_mps) as f32
+        } else {
+            true_mps as f32
+        }
+    }
+
+    /// Its airspeed sensor as it goes (S190): a zero finishing, and the
+    /// automatic calibration while it flies.
+    fn airspeed_sensor(&mut self, t_s: f64, true_mps: f64) -> Vec<Vec<u8>> {
+        use crate::fake_airspeed::Out;
+        if !self.airspeed.listed {
+            return Vec::new();
+        }
+        let flying = self.armed;
+        let outs = self
+            .airspeed
+            .tick(t_s, &mut self.parameters, flying, true_mps);
+        let mut frames = Vec::new();
+        for out in outs {
+            match out {
+                Out::Say(severity, text) => {
+                    let sequence = self.next();
+                    frames.push(status_text_frame(
+                        self.system_id,
+                        sequence,
+                        severity,
+                        &text,
+                        (0, 0),
+                    ));
+                }
+                Out::Ack(result) => {
+                    let sequence = self.next();
+                    frames.push(command_ack_frame(
+                        self.system_id,
+                        1,
+                        self.gcs,
+                        sequence,
+                        241,
+                        result,
+                    ));
+                }
+                Out::Changed(name) => {
+                    if let Some(index) = self.parameters.iter().position(|p| p.0 == name) {
+                        frames.extend(self.param_frame(index));
+                    }
+                }
+                // Sent whatever the streams, as ArduPlane does.
+                Out::Autocal(ratio) => {
+                    let message = mavio::dialects::ardupilotmega::messages::AirspeedAutocal {
+                        ratio,
+                        ..Default::default()
+                    };
+                    let sequence = self.next();
+                    frames.push(frame(self.system_id, 1, sequence, &message));
+                }
+            }
+        }
+        frames
+    }
+
+    /// Its answer to `MAV_CMD_DO_MOTOR_TEST` (S188), and what it says.
+    fn answer_motors(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let Some(Decoded::CommandLong {
+            command: 209,
+            param1,
+            param2,
+            param3,
+            param4,
+            ..
+        }) = decode(frame).map(|d| d.message)
+        else {
+            return Vec::new();
+        };
+        let answer = self
+            .motors
+            .test(self.last_t_s, self.armed, (param1, param2, param3, param4));
+        let mut replies = Vec::new();
+        for (severity, text) in answer.said {
+            let sequence = self.next();
+            replies.push(status_text_frame(
+                self.system_id,
+                sequence,
+                severity,
+                &text,
+                (0, 0),
+            ));
+        }
+        let sequence = self.next();
+        replies.push(command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            209,
+            answer.result,
+        ));
+        replies
+    }
+
+    /// Its motor test running out of time (S188).
+    fn motor_test(&mut self, t_s: f64) -> Option<Vec<u8>> {
+        let text = self.motors.tick(t_s)?;
+        let sequence = self.next();
+        Some(status_text_frame(
+            self.system_id,
+            sequence,
+            6,
+            &text,
+            (0, 0),
+        ))
+    }
+
+    /// Its radio's channels (S187), when asked for.
+    fn radio_channels(&mut self, t_s: f64) -> Option<Vec<u8>> {
+        if !self.radio.listed {
+            return None;
+        }
+        let c = self.radio.channels(t_s);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "milliseconds since it booted"
+        )]
+        let time_boot_ms = ((t_s - self.booted_at_s).max(0.0) * 1000.0) as u32;
+        let message = RcChannels {
+            time_boot_ms,
+            chancount: 8,
+            chan1_raw: c[0],
+            chan2_raw: c[1],
+            chan3_raw: c[2],
+            chan4_raw: c[3],
+            chan5_raw: c[4],
+            chan6_raw: c[5],
+            chan7_raw: c[6],
+            chan8_raw: c[7],
+            chan9_raw: u16::MAX,
+            chan10_raw: u16::MAX,
+            chan11_raw: u16::MAX,
+            chan12_raw: u16::MAX,
+            chan13_raw: u16::MAX,
+            chan14_raw: u16::MAX,
+            chan15_raw: u16::MAX,
+            chan16_raw: u16::MAX,
+            chan17_raw: u16::MAX,
+            chan18_raw: u16::MAX,
+            rssi: 200,
+        };
+        self.stream(1, &message)
+    }
+
+    /// Its answer to a request for its radio's channels at a rate (S187),
+    /// which starts its sticks moving; `obey` keeps the request.
+    fn answer_radio(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let Some(Decoded::CommandLong {
+            command: 511,
+            param1,
+            param2,
+            ..
+        }) = decode(frame).map(|d| d.message)
+        else {
+            return Vec::new();
+        };
+        if !self.radio.listed || (param1 - 65.0).abs() > 0.5 {
+            return Vec::new();
+        }
+        if param2 > 0.0 {
+            self.radio.asked(self.last_t_s);
+        }
+        let sequence = self.next();
+        vec![command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            511,
+            0,
+        )]
+    }
+
+    /// Keeps a parameter's new value, if it lists it.
+    fn set_parameter(&mut self, name: &str, value: f32) {
+        if let Some(kept) = self.parameters.iter_mut().find(|p| p.0 == name) {
+            kept.1 = value;
+        }
+    }
+
+    /// Its accelerometer calibration as it goes (S186): its requests for a
+    /// position and its result, addressed to no one in particular as
+    /// `ArduPilot`'s are, and what it says.
+    fn accel_calibration(&mut self, t_s: f64) -> Vec<Vec<u8>> {
+        use crate::fake_accel::Out;
+        let mut frames = Vec::new();
+        for out in self.accel.tick(t_s) {
+            match out {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a position number, exact in a float up to 2^24"
+                )]
+                Out::Ask(position) => {
+                    // To no one in particular, as ArduPilot sends it.
+                    let ask = CommandLong {
+                        target_system: 0,
+                        target_component: 0,
+                        command: MavCmd::AccelcalVehiclePos,
+                        param1: position as f32,
+                        ..CommandLong::default()
+                    };
+                    let sequence = self.next();
+                    frames.push(frame(self.system_id, 1, sequence, &ask));
+                }
+                Out::Say(severity, text) => {
+                    let sequence = self.next();
+                    frames.push(status_text_frame(
+                        self.system_id,
+                        sequence,
+                        severity,
+                        &text,
+                        (0, 0),
+                    ));
+                }
+                Out::Saved => {
+                    for (axis, value) in ["X", "Y", "Z"].iter().zip(crate::fake_accel::OFFSETS) {
+                        self.set_parameter(&format!("INS_ACCOFFS_{axis}"), value);
+                    }
+                }
+            }
+        }
+        frames
+    }
+
+    /// Its answer to `MAV_CMD_PREFLIGHT_CALIBRATION` for its
+    /// accelerometers, or to a position confirmed, in `frame` (S186), and
+    /// what it says; nothing for any other frame.
+    fn answer_accel(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let (command, result, said) = match decode(frame).map(|d| d.message) {
+            Some(Decoded::CommandLong {
+                command: 241,
+                param5,
+                ..
+            }) => {
+                let Some((result, said)) = self.accel.calibrate(param5, self.armed) else {
+                    return Vec::new();
+                };
+                if result == 0 && said.is_some() {
+                    let (roll, pitch) = crate::fake_accel::LEVEL_TRIM;
+                    self.set_parameter("AHRS_TRIM_X", roll);
+                    self.set_parameter("AHRS_TRIM_Y", pitch);
+                }
+                (241, result, said)
+            }
+            Some(Decoded::CommandLong {
+                command: 42429,
+                param1,
+                ..
+            }) => (42429, self.accel.placed(param1, self.last_t_s), None),
+            _ => return Vec::new(),
+        };
+        // ArduPilot says how level went before it answers.
+        let mut replies = Vec::new();
+        if let Some(text) = said {
+            let sequence = self.next();
+            replies.push(status_text_frame(
+                self.system_id,
+                sequence,
+                6,
+                &text,
+                (0, 0),
+            ));
+        }
+        let sequence = self.next();
+        replies.push(command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            command,
+            result,
+        ));
+        replies
+    }
+
+    /// Lists `count` compasses in its parameters (S184), the first external
+    /// as in a GPS module and the others inside the flight controller, all
+    /// used; calibrated, or with zero offsets and its pre-arm checks failing
+    /// with "Compass not calibrated" until they are.
+    pub fn add_compasses(&mut self, count: u8, calibrated: bool) {
+        let count = count.clamp(1, 3);
+        for index in 0..count {
+            let n = if index == 0 {
+                String::new()
+            } else {
+                (index + 1).to_string()
+            };
+            let external = if index == 0 {
+                "COMPASS_EXTERNAL".to_owned()
+            } else {
+                format!("COMPASS_EXTERN{n}")
+            };
+            let offsets = FakeCompasses::offsets(index);
+            for (name, value, kind) in [
+                (
+                    format!("COMPASS_DEV_ID{n}"),
+                    FAKE_COMPASS_IDS[usize::from(index)],
+                    INT32,
+                ),
+                (format!("COMPASS_USE{n}"), 1.0, INT8),
+                (external, if index == 0 { 1.0 } else { 0.0 }, INT8),
+            ] {
+                self.parameters.push((name, value, kind));
+            }
+            for (axis, value) in ["X", "Y", "Z"].iter().zip(offsets) {
+                let value = if calibrated { value } else { 0.0 };
+                self.parameters
+                    .push((format!("COMPASS_OFS{n}_{axis}"), value, REAL32));
+            }
+        }
+        self.compasses = Some(FakeCompasses {
+            count,
+            calibrated,
+            ..FakeCompasses::default()
+        });
+    }
+
+    /// Its compass calibration (S184): `MAG_CAL_PROGRESS` for each compass
+    /// while it runs, then `MAG_CAL_REPORT` for each once a second until it
+    /// restarts, as `ArduPilot` does; both only when asked for. A success
+    /// saves the offsets in its parameters.
+    fn compass_calibration(&mut self, t_s: f64) -> Vec<Vec<u8>> {
+        let Some(compasses) = self.compasses.clone() else {
+            return Vec::new();
+        };
+        let mut frames = Vec::new();
+        if let Some(from) = compasses.running_from_s {
+            let elapsed = (t_s - from).max(0.0);
+            for index in 0..compasses.count {
+                frames.extend(self.stream(1, &compasses.progress_message(index, elapsed)));
+            }
+            if (0..compasses.count).all(|index| FakeCompasses::progress(index, elapsed) >= 100) {
+                let succeeded = compasses.fails_with.is_none();
+                if succeeded {
+                    self.save_compass_offsets(compasses.count);
+                }
+                if let Some(kept) = &mut self.compasses {
+                    kept.running_from_s = None;
+                    kept.reporting = true;
+                    kept.restart_needed = succeeded;
+                }
+            }
+        }
+        let reporting = self.compasses.as_ref().is_some_and(|c| c.reporting);
+        let due = self
+            .compasses
+            .as_ref()
+            .is_some_and(|c| c.reported_at_s.is_none_or(|at| t_s - at >= 1.0));
+        if reporting && due {
+            let count = compasses.count;
+            for index in 0..count {
+                // A failure newer than the dialect's enum goes as bytes.
+                if let Some(status) = compasses
+                    .fails_with
+                    .filter(|status| *status > 7 && index + 1 == count)
+                {
+                    if !self.streams_on_request || self.requested.contains(&192) {
+                        let sequence = self.next();
+                        frames.push(mag_cal_report_frame(
+                            self.system_id,
+                            1,
+                            sequence,
+                            index,
+                            compasses.mask(),
+                            status,
+                            31.5,
+                            FakeCompasses::offsets(index),
+                        ));
+                    }
+                    continue;
+                }
+                let report = compasses.report(index);
+                frames.extend(self.stream(1, &report));
+            }
+            if let Some(kept) = &mut self.compasses {
+                kept.reported_at_s = Some(t_s);
+            }
+        }
+        frames
+    }
+
+    /// Keeps the offsets a calibration found for its first `count`
+    /// compasses in its parameters.
+    fn save_compass_offsets(&mut self, count: u8) {
+        for index in 0..count {
+            let n = if index == 0 {
+                String::new()
+            } else {
+                (index + 1).to_string()
+            };
+            let offsets = FakeCompasses::offsets(index);
+            for (axis, value) in ["X", "Y", "Z"].iter().zip(offsets) {
+                let name = format!("COMPASS_OFS{n}_{axis}");
+                if let Some(kept) = self.parameters.iter_mut().find(|p| p.0 == name) {
+                    kept.1 = value;
+                }
+            }
+        }
+    }
+
+    /// `MAV_CMD_FIXED_MAG_CAL_YAW` (S185), as `ArduPilot` answers it: with
+    /// a latitude and longitude of 0 it needs a 3D fix of its own, and
+    /// says "Mag: no position available" after refusing without one;
+    /// otherwise every compass is calibrated and in use at once, with no
+    /// restart. Its result, and what it says after.
+    fn fixed_yaw(&mut self, yaw_deg: f32, lat: f32, lon: f32) -> (u8, Option<&'static str>) {
+        let fix = self.gps_lost_from_s.is_none_or(|from| self.last_t_s < from);
+        let Some(count) = self.compasses.as_ref().map(|c| c.count) else {
+            return (3, None);
+        };
+        if self.armed {
+            return (4, None);
+        }
+        if lat == 0.0 && lon == 0.0 && !fix {
+            return (4, Some("Mag: no position available"));
+        }
+        self.save_compass_offsets(count);
+        if let Some(compasses) = &mut self.compasses {
+            compasses.calibrated = true;
+            compasses.restart_needed = false;
+        }
+        self.held_heading = Some(f64::from(yaw_deg).rem_euclid(360.0));
+        (0, None)
+    }
+
+    /// Its answer to a `FIXED_MAG_CAL_YAW` in `frame`, and what it says
+    /// after a refusal; nothing for any other frame.
+    fn answer_fixed_yaw(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let Some(Decoded::CommandLong {
+            command: 42006,
+            param1,
+            param3,
+            param4,
+            ..
+        }) = decode(frame).map(|d| d.message)
+        else {
+            return Vec::new();
+        };
+        let (result, said) = self.fixed_yaw(param1, param3, param4);
+        let sequence = self.next();
+        let mut replies = vec![command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            42006,
+            result,
+        )];
+        if let Some(text) = said {
+            let sequence = self.next();
+            replies.push(status_text_frame(self.system_id, sequence, 3, text, (0, 0)));
+        }
+        replies
     }
 
     /// Its next frame of `message` from `component`, if it streams it.
@@ -1254,6 +2305,12 @@ impl FakeVehicle {
 
     fn param_frame(&mut self, index: usize) -> Option<Vec<u8>> {
         let (name, value, kind) = self.parameters.get(index)?.clone();
+        // PX4 sends an integer's bits (S191).
+        let value = if self.px4.is_some() {
+            crate::transfers::to_bytewise(value, kind)
+        } else {
+            value
+        };
         let count = u16::try_from(self.parameters.len()).unwrap_or(u16::MAX);
         let sequence = self.next();
         Some(param_value_frame(
@@ -1386,6 +2443,12 @@ impl FakeVehicle {
                 ..
             } => {
                 if let Some(index) = self.parameters.iter().position(|(n, _, _)| *n == name) {
+                    // PX4 takes an integer's bits (S191).
+                    let value = if self.px4.is_some() {
+                        crate::transfers::from_bytewise(value, self.parameters[index].2)
+                    } else {
+                        value
+                    };
                     // FORMAT_VERSION is read-only: the old value comes back.
                     if name != "FORMAT_VERSION" {
                         self.parameters[index].1 = value;
@@ -1515,7 +2578,10 @@ impl FakeVehicle {
         reason = "a percentage"
     )]
     fn status(&self, remaining: f64) -> SysStatus {
-        let reports = self.prearm_from_s.is_some();
+        let reports = self.prearm_from_s.is_some()
+            || self.compasses.is_some()
+            || self.accel.listed
+            || self.radio.listed;
         SysStatus {
             voltage_battery: (12_600.0 - 12.0 * (100.0 - remaining)) as u16,
             current_battery: 1450,
@@ -1528,12 +2594,33 @@ impl FakeVehicle {
 
     fn ready(&self) -> bool {
         self.prearm_from_s.is_none_or(|from| self.last_t_s >= from)
+            && self.compasses.as_ref().is_none_or(FakeCompasses::in_use)
+            && self.accel.in_use()
+            && (!self.radio.listed || crate::fake_radio::FakeRadio::calibrated(&self.parameters))
     }
 
     /// The frame to send once a second.
     pub fn heartbeat(&mut self) -> Vec<u8> {
         let sequence = self.next();
-        armed_heartbeat_frame(self.system_id, 1, sequence, self.armed, self.mode)
+        // A motor test arms it, as ArduCopter arms its motors for one.
+        let armed = self.armed || self.motors.running();
+        let type_ = if self.airspeed.listed || self.px4.as_ref().is_some_and(|p| p.plane) {
+            MavType::FixedWing
+        } else {
+            MavType::Quadrotor
+        };
+        let autopilot = if self.px4.is_some() {
+            MavAutopilot::Px4
+        } else {
+            MavAutopilot::Ardupilotmega
+        };
+        autopilot_heartbeat_frame(
+            (self.system_id, 1, sequence),
+            autopilot,
+            type_,
+            armed,
+            self.mode,
+        )
     }
 
     /// The camera component's heartbeat, when it has a camera.
@@ -1613,7 +2700,32 @@ impl FakeVehicle {
             }
             // The camera protocol: take photos, start and stop video, zoom.
             2000 | 2001 | 2500 | 2501 | 531 => Some(0),
-            246 if (param1 - 1.0).abs() < f32::EPSILON => {
+            // MAV_CMD_DO_START_MAG_CAL (S184): refused armed, as ArduPilot
+            // does, and unsupported with no compass.
+            42424 => {
+                let armed = self.armed;
+                let Some(compasses) = self.compasses.as_mut() else {
+                    return Some(3);
+                };
+                if armed {
+                    return Some(4);
+                }
+                compasses.running_from_s = Some(self.last_t_s);
+                compasses.reporting = false;
+                compasses.reported_at_s = None;
+                Some(0)
+            }
+            // MAV_CMD_DO_CANCEL_MAG_CAL.
+            42426 => {
+                let Some(compasses) = self.compasses.as_mut() else {
+                    return Some(3);
+                };
+                compasses.running_from_s = None;
+                Some(0)
+            }
+            // Restart, or restart into the bootloader (S189), which a
+            // `FakeBoard` runs.
+            246 if (param1 - 1.0).abs() < f32::EPSILON || (param1 - 3.0).abs() < f32::EPSILON => {
                 if self.armed {
                     return Some(4);
                 }
@@ -1733,6 +2845,9 @@ impl FakeVehicle {
                     result,
                 ));
             }
+            if !self.ignores_commands {
+                replies.extend(self.answer_calibrations(frame));
+            }
             if let Some(Decoded::CommandLong {
                 command,
                 param1,
@@ -1831,6 +2946,10 @@ impl FakeVehicle {
                 east,
             };
         }
+        // Facing the heading it was calibrated from, while disarmed (S185).
+        if let Some(held) = self.held_heading.filter(|_| !self.armed) {
+            flight.heading = held;
+        }
         self.last_position = (flight.lat, flight.lon, flight.height);
         flight
     }
@@ -1849,13 +2968,13 @@ impl FakeVehicle {
         const PERIOD_S: f64 = 60.0;
         const HEIGHT_M: f64 = 30.0;
         self.climb(t_s);
+        // A plane with an airspeed sensor (S190) sits on the ground until
+        // armed, then circles faster.
+        let grounded = self.on_ground || (self.airspeed.listed && !self.armed);
+        let period_s = if self.airspeed.listed { 25.0 } else { PERIOD_S };
         // On the ground or climbing, it stays over home.
-        let radius = if self.on_ground { 0.0 } else { RADIUS_M };
-        let height = if self.on_ground {
-            self.height_m
-        } else {
-            HEIGHT_M
-        };
+        let radius = if grounded { 0.0 } else { RADIUS_M };
+        let height = if grounded { self.height_m } else { HEIGHT_M };
         let Flight {
             lat,
             lon,
@@ -1864,7 +2983,7 @@ impl FakeVehicle {
             heading,
             north,
             east,
-        } = self.flight_at(t_s, radius, height, PERIOD_S);
+        } = self.flight_at(t_s, radius, height, period_s);
         let mm = |metres: f64| (metres * 1000.0).round() as i32;
         self.last_t_s = t_s;
         // The pilot's sticks went quiet: ArduPilot's failsafe returns home.
@@ -1935,7 +3054,7 @@ impl FakeVehicle {
         frames.extend(self.stream(
             id,
             &VfrHud {
-                airspeed: speed as f32,
+                airspeed: self.airspeed_reading(speed),
                 groundspeed: speed as f32,
                 heading: heading as i16,
                 throttle: 42,
@@ -1946,7 +3065,36 @@ impl FakeVehicle {
         frames.extend(self.outputs(t_s));
         frames.extend(self.health(t_s, height));
         frames.extend(self.traffic_frames(t_s));
+        frames.extend(self.calibrations(t_s));
+        frames.extend(self.airspeed_sensor(t_s, speed));
         frames
+    }
+
+    /// Its compass and accelerometer calibrations as they go (S184, S186).
+    fn calibrations(&mut self, t_s: f64) -> Vec<Vec<u8>> {
+        if let Some(px4) = self.px4.as_mut() {
+            let out = px4.tick(t_s);
+            return self.px4_out(out);
+        }
+        let mut frames = self.compass_calibration(t_s);
+        frames.extend(self.accel_calibration(t_s));
+        frames.extend(self.radio_channels(t_s));
+        frames.extend(self.motor_test(t_s));
+        frames
+    }
+
+    /// Its answers to the calibrations answered at once: from a known
+    /// heading (S185), the accelerometers', level and a position (S186).
+    fn answer_calibrations(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        if self.px4.is_some() {
+            return self.answer_px4(frame);
+        }
+        let mut replies = self.answer_fixed_yaw(frame);
+        replies.extend(self.answer_accel(frame));
+        replies.extend(self.answer_radio(frame));
+        replies.extend(self.answer_motors(frame));
+        replies.extend(self.answer_airspeed(frame));
+        replies
     }
 
     /// The health and environment values (S72): its radio, EKF, vibration,
@@ -2178,15 +3326,28 @@ impl FakeVehicle {
     }
 
     /// A quad's four motors: idle when disarmed, around hover when armed,
-    /// a little uneven so a 3D view has something to spin.
+    /// a little uneven so a 3D view has something to spin; during a motor
+    /// test (S188), the one tested at its throttle and the others idle.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "pulses in microseconds"
     )]
     fn servos(&self, t_s: f64) -> ServoOutputRaw {
+        // PX4's actuator test drives motor n on output n (S191).
+        let tested = self
+            .px4
+            .as_ref()
+            .map_or_else(|| self.motors.output(), |px4| px4.output(t_s));
         let motor = |phase: f64| {
-            if self.armed {
+            if let Some((output, pwm)) = tested {
+                // Outputs 1 to 4 have phases 0 to 3.
+                if (phase as usize) + 1 == output {
+                    pwm
+                } else {
+                    1000
+                }
+            } else if self.armed {
                 (1500.0 + 40.0 * (t_s + phase).sin()) as u16
             } else {
                 1000

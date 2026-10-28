@@ -1197,7 +1197,10 @@ impl Engine {
     }
 
     /// No missing/non-finite input may become a neutral fallback during handover.
-    fn mapped_controller_input(&self, controller: &Controller) -> Option<(Sticks, bool)> {
+    pub(crate) fn mapped_controller_input(
+        &self,
+        controller: &Controller,
+    ) -> Option<(Sticks, bool)> {
         let inputs = self.system.controller_inputs();
         let raw = inputs.controllers.iter().find(|c| c.id == controller.id)?;
         let mapping = mapping(self, &controller.mapping_id)?;
@@ -1920,6 +1923,7 @@ impl Engine {
             command: command.into(),
             confirm: false,
             force: false,
+            override_preflight: Vec::new(),
             command_id: None,
             sent_at_ms: None,
         });

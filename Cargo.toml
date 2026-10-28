@@ -2,10 +2,10 @@
 resolver = "3"
 members = ["crates/uxduck","crates/uxduck-core","crates/uxduck-contracts","crates/uxduck-engine","crates/uxduck-mavlink","crates/uxduck-agent","crates/uxduck-media","crates/uxduck-sdk","crates/uxduck-terrain","crates/uxduck-web"]
 # Plugins build for WebAssembly in a workspace of their own.
-exclude = ["plugins", "vendor/tray-icon"]
+exclude = ["plugins", "vendor/tray-icon", "vendor/wasmtime-internal-cache"]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0-beta.1"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -148,3 +148,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Extism 1.41 requires Wasmtime 49; its cache still pins vulnerable zstd 0.13.
+# See the vendored README for the single dependency change and removal condition.
+[patch.crates-io]
+wasmtime-internal-cache = { path = "vendor/wasmtime-internal-cache" }

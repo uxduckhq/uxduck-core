@@ -131,6 +131,14 @@ pub(crate) fn handle(
         }
         ClientRequest::OperatorUpdate(params) => {
             require(Config)?;
+            // Agents may change an operator's preferences when asked, but
+            // never skip the confirmations that guard commands (ADR-0005).
+            if !operator && params.skipped_confirmations.is_some() {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    "only the operator may choose which confirmations to skip",
+                ));
+            }
             operator_update(engine, connection, &params)
         }
         ClientRequest::OperatorRemove(params) => {
@@ -218,6 +226,7 @@ pub(crate) fn handle(
         | ClientRequest::PluginFeatures(_)
         | ClientRequest::PluginItems(_)
         | ClientRequest::PluginSetEnabled(_)
+        | ClientRequest::PluginSetChecksBlock(_)
         | ClientRequest::PluginUsage(_)
         | ClientRequest::ToolSearch(_)
         | ClientRequest::PluginDraft(_)
@@ -256,6 +265,7 @@ pub(crate) fn handle(
         request @ (ClientRequest::AnalyticsTrack(_)
         | ClientRequest::AnalyticsFeedback(_)
         | ClientRequest::AnalyticsActiveTime(_)
+        | ClientRequest::AnalyticsEngagedSimTime(_)
         | ClientRequest::AnalyticsTakeFlightTime(_)
         | ClientRequest::AnalyticsTakeEngagement(_)
         | ClientRequest::AnalyticsPerformance(_)
@@ -269,7 +279,9 @@ pub(crate) fn handle(
         request @ ClientRequest::FeedbackSend(_) => {
             crate::feedback::handle(engine, connection, request, operator)
         }
-        ClientRequest::JournalImport(params) => crate::import::handle(engine, params, operator),
+        ClientRequest::JournalImport(params) => {
+            crate::import::handle(engine, connection, params, operator)
+        }
         ClientRequest::AccountSetEnvironment(_) if !operator => Err(ApiError::new(
             ErrorKind::CapabilityDenied,
             "only an operator client may change the daemon's server",
@@ -284,6 +296,7 @@ pub(crate) fn handle(
         | ClientRequest::AccountSignOut(_)
         | ClientRequest::AccountSetUpdates(_)
         | ClientRequest::AccountSetUsername(_)
+        | ClientRequest::AccountSetName(_)
         | ClientRequest::AccountSessions(_)
         | ClientRequest::AccountSignOutSession(_)
         | ClientRequest::AccountSignOutOthers(_)
@@ -307,6 +320,25 @@ pub(crate) fn handle(
         | ClientRequest::FilesCancel(_)
         | ClientRequest::FilesSave(_)) => {
             crate::vehicle_files::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::PreflightState(_) | ClientRequest::PreflightConfigure(_)) => {
+            crate::preflight::handle(engine, connection, request, &granted, operator)
+        }
+        request @ (ClientRequest::ChecklistUpdate(_)
+        | ClientRequest::ChecklistCopy(_)
+        | ClientRequest::ChecklistTick(_)
+        | ClientRequest::ChecklistReset(_)
+        | ClientRequest::ChecklistExport(_)) => {
+            crate::checklist::handle(engine, connection, request, &granted, operator)
+        }
+        request @ (ClientRequest::SetupState(_)
+        | ClientRequest::SetupStart(_)
+        | ClientRequest::SetupCancel(_)
+        | ClientRequest::SetupConfirm(_)
+        | ClientRequest::SetupSpin(_)
+        | ClientRequest::SetupFirmware(_)
+        | ClientRequest::SetupFirmwareReleases(_)) => {
+            crate::setup::handle(engine, connection, request, &granted, operator)
         }
         request @ (ClientRequest::PracticeList(_)
         | ClientRequest::PracticeStart(_)
@@ -472,6 +504,7 @@ pub(crate) fn handle(
         | ClientRequest::DaemonStop(_)
         | ClientRequest::DebugPanic(_)
         | ClientRequest::SettingsUpdate(_)
+        | ClientRequest::SettingsGet(_)
         | ClientRequest::StorageUsage(_)
         | ClientRequest::StorageClearSimulatorLogs(_)
         | ClientRequest::StorageReveal(_)
@@ -657,6 +690,7 @@ fn each<'a, T: 'a, U: From<&'a T>>(map: &'a std::collections::BTreeMap<String, T
     map.values().map(Into::into).collect()
 }
 
+#[allow(clippy::too_many_lines, reason = "one field per entity type")]
 fn subscribe(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -733,6 +767,12 @@ fn subscribe(
         practice_attempts: types
             .contains(&EntityType::PracticeAttempt)
             .then(|| engine.state.practice.values().map(Into::into).collect()),
+        preflights: types
+            .contains(&EntityType::Preflight)
+            .then(|| engine.state.preflights.values().map(Into::into).collect()),
+        setups: types
+            .contains(&EntityType::Setup)
+            .then(|| engine.state.setups.values().map(Into::into).collect()),
         file_transfers: types.contains(&EntityType::FileTransfer).then(|| {
             engine
                 .state
@@ -808,10 +848,11 @@ fn operator_create(
     connection: ConnectionId,
     params: &OperatorCreateParams,
 ) -> Result<Value, ApiError> {
-    let operator = Operator {
+    let mut operator = Operator {
         id: format!("op{}", &engine.random.token()[..16]),
         name: clean_name(&params.name)?,
         units: params.units.map(Into::into).unwrap_or_default(),
+        quantity_units: None,
         coordinate_format: params.coordinate_format.map(Into::into).unwrap_or_default(),
         altitude_frame: params.altitude_frame.map(Into::into).unwrap_or_default(),
         layout: operator::Layout::default(),
@@ -830,6 +871,11 @@ fn operator_create(
         controller_mappings: Vec::new(),
         version: 1,
     };
+    if let Some(units) = params.quantity_units {
+        operator.set_quantity_units(units.into());
+    } else if let Some(units) = params.units {
+        operator.set_quantity_units(operator::UnitSystem::from(units).quantity_units());
+    }
     let result = OperatorDto::from(&operator);
     engine.commit(connection, Change::OperatorUpserted { operator });
     to_value(&result)
@@ -880,8 +926,10 @@ fn operator_update(
     if let Some(name) = &params.name {
         operator.name = clean_name(name)?;
     }
-    if let Some(units) = params.units {
-        operator.units = units.into();
+    if let Some(units) = params.quantity_units {
+        operator.set_quantity_units(units.into());
+    } else if let Some(units) = params.units {
+        operator.set_quantity_units(operator::UnitSystem::from(units).quantity_units());
     }
     if let Some(format) = params.coordinate_format {
         operator.coordinate_format = format.into();

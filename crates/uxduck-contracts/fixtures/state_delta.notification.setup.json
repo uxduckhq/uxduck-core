@@ -1,0 +1,38 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1802,
+    "tsUs": 1790669310000000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "setup",
+        "id": "v9b1c2d3e4f5a6b7c/compass",
+        "op": "upsert",
+        "setup": {
+          "vehicleId": "v9b1c2d3e4f5a6b7c",
+          "row": "compass",
+          "kind": "compass",
+          "step": "running",
+          "progress": 18,
+          "sensors": [
+            {
+              "index": 0,
+              "state": "running",
+              "progress": 18,
+              "sections": [255, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+              "direction": [1.0, 0.0, 0.0],
+              "attempt": 1
+            }
+          ],
+          "instruction": "turn-around",
+          "startedAtUs": 1790669300000000,
+          "updatedAtUs": 1790669310000000,
+          "version": 4
+        }
+      }
+    ]
+  }
+}

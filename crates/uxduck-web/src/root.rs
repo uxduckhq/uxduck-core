@@ -1208,6 +1208,12 @@ impl Browser {
             self.engine.expire_display_pulls(now);
             self.engine.expire_detached_claims(now);
             self.engine.expire_traffic(now);
+            // Airspeed checks and ratios, and autocal left on (S190).
+            self.engine.expire_airspeed(now);
+            // PX4 calibrations gone silent (S191).
+            self.engine.expire_setups(now);
+            // Preflight checks that change with time alone (S192).
+            self.engine.review_preflights();
         }
         let gone = self.controls.stale_keyboard_inputs(now);
         self.controller_input(gone, &mut outputs);

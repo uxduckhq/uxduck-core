@@ -154,7 +154,7 @@ impl Engine {
         self.review_flight_time(vehicle_id);
     }
 
-    fn telemetry_value(&self, vehicle_id: &str, key: &str) -> Option<f64> {
+    pub(crate) fn telemetry_value(&self, vehicle_id: &str, key: &str) -> Option<f64> {
         self.telemetry(vehicle_id)
             .and_then(|t| t.items.iter().find(|i| i.key == key))
             .and_then(|i| i.value)
@@ -195,6 +195,7 @@ impl Engine {
             log: uxduck_core::domain::flight::FlightLog::None,
             mission: None,
             params: crate::param_definitions::queries::armed_with(self, &vehicle.id),
+            checklist: None,
             version: 1,
         };
         if let Some(timer) = self.flight_times.0.get_mut(&vehicle.id) {
@@ -795,6 +796,10 @@ impl Engine {
 
     /// Telemetry arrived, or the vehicle armed or disarmed: start or stop
     /// its time in the air, and send its times when a second has passed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one pass over a vehicle's flight state"
+    )]
     pub(crate) fn review_flight_time(&mut self, vehicle_id: &str) {
         let Some(vehicle) = self.vehicle(vehicle_id) else {
             return;
@@ -804,6 +809,8 @@ impl Engine {
             vehicle.armed,
             flies(&vehicle.vehicle_type),
         );
+        // Armed by itself for a motor test is no flight (S188).
+        let armed = armed && !self.armed_by_motor_test(&id);
         let now = self.clock.now_us();
         // Armed when UXDuck first heard it: from then, a flight seen already armed.
         if armed

@@ -11,11 +11,82 @@ use crate::dto::telemetry::AltitudeFrame;
 /// operator leaves this stand-in behind, or every move would add one.
 pub const DEFAULT_OPERATOR_NAME: &str = "Operator";
 
+/// The single units choice operators had before ADR-0036: now only a
+/// summary of `quantityUnits` (metric when altitudes are in metres) for
+/// apps that know only it. Show values by `quantityUnits`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnitSystem {
     Metric,
     Imperial,
+}
+
+/// Horizontal distances: short ones in the first unit, long ones in the
+/// second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum DistanceUnit {
+    /// Metres, then kilometres.
+    Kilometers,
+    /// Feet, then statute miles.
+    Miles,
+}
+
+/// Altitudes and heights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AltitudeUnit {
+    Meters,
+    Feet,
+}
+
+/// Horizontal speeds: ground speed, airspeed, wind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeedUnit {
+    MetersPerSecond,
+    KilometersPerHour,
+    Knots,
+    MilesPerHour,
+}
+
+/// Climb and descent rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerticalSpeedUnit {
+    MetersPerSecond,
+    FeetPerMinute,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TemperatureUnit {
+    Celsius,
+    Fahrenheit,
+}
+
+/// The unit the operator reads each kind of quantity in (ADR-0036).
+/// Presentation only: every value in a contract stays SI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QuantityUnits {
+    pub distance: DistanceUnit,
+    pub altitude: AltitudeUnit,
+    pub speed: SpeedUnit,
+    pub vertical_speed: VerticalSpeedUnit,
+    pub temperature: TemperatureUnit,
+}
+
+impl Default for QuantityUnits {
+    fn default() -> Self {
+        Self {
+            distance: DistanceUnit::Kilometers,
+            altitude: AltitudeUnit::Meters,
+            speed: SpeedUnit::MetersPerSecond,
+            vertical_speed: VerticalSpeedUnit::MetersPerSecond,
+            temperature: TemperatureUnit::Celsius,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +198,12 @@ pub enum TabKind {
     /// Other aircraft near the vehicles and the sources that report them
     /// (S168, ADR-0034). It follows no vehicle.
     Airspace,
+    /// The focused vehicle's setup (S184, ADR-0037): a row per procedure,
+    /// such as calibrating its compasses.
+    Setup,
+    /// The focused vehicle's checklist with its other preflight checks
+    /// (S193, ADR-0038), as a tab of its own.
+    Checklist,
 }
 
 /// One tab: what it shows and, when pinned, the vehicle it shows instead of
@@ -370,7 +447,13 @@ pub struct ParameterGroup {
 pub struct Operator {
     pub id: String,
     pub name: String,
+    /// The old single units choice, a summary of `quantity_units` kept for
+    /// older apps.
     pub units: UnitSystem,
+    /// The unit for each kind of quantity (ADR-0036). An operator saved
+    /// with only `units` has the ones that choice meant.
+    #[serde(default)]
+    pub quantity_units: QuantityUnits,
     pub coordinate_format: CoordinateFormat,
     /// The altitude the instruments show: above home unless chosen
     /// otherwise. Telemetry tiles name their own frame.
@@ -440,6 +523,9 @@ pub struct OperatorCreateParams {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub units: Option<UnitSystem>,
+    /// The unit for each quantity; wins over `units` when both are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_units: Option<QuantityUnits>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinate_format: Option<CoordinateFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,8 +542,12 @@ pub struct OperatorUpdateParams {
     pub expected_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Sets every quantity's unit to this system's (ADR-0036 U3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub units: Option<UnitSystem>,
+    /// The unit for each quantity; wins over `units` when both are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_units: Option<QuantityUnits>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinate_format: Option<CoordinateFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

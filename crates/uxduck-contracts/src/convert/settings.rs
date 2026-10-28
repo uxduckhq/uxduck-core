@@ -174,6 +174,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         recreate_simulations: settings.recreate_simulations,
         traffic_alert_m: settings.traffic_alert_m,
         traffic_alert_up_m: settings.traffic_alert_up_m,
+        traffic_controls: settings.traffic_controls.clone().into(),
         terrain_dataset: settings.terrain_dataset.into(),
         terrain_areas: settings
             .terrain_areas
@@ -206,5 +207,63 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
                 method: (*method).into(),
             })
             .collect(),
+    }
+}
+
+impl From<s::TrafficControls> for dto::TrafficControls {
+    fn from(v: s::TrafficControls) -> Self {
+        Self {
+            range_m: v.range_m,
+            limit_range: v.limit_range,
+            height_m: v.height_m,
+            limit_height: v.limit_height,
+            all_vehicles: v.all_vehicles,
+            vehicle_ids: v.vehicle_ids,
+            device_location: v.device_location,
+            sites: v.sites.into_iter().map(Into::into).collect(),
+            always_label: v.always_label,
+            refresh_s: v.refresh_s,
+            alerts_enabled: v.alerts_enabled,
+        }
+    }
+}
+impl From<s::TrafficSite> for dto::TrafficSite {
+    fn from(v: s::TrafficSite) -> Self {
+        Self {
+            id: v.id,
+            name: v.name,
+            latitude_e7: v.latitude_e7,
+            longitude_e7: v.longitude_e7,
+            altitude_m: v.altitude_m,
+        }
+    }
+}
+
+impl From<dto::TrafficControls> for s::TrafficControls {
+    fn from(v: dto::TrafficControls) -> Self {
+        Self {
+            range_m: v.range_m,
+            limit_range: v.limit_range,
+            height_m: v.height_m,
+            limit_height: v.limit_height,
+            all_vehicles: v.all_vehicles,
+            vehicle_ids: v.vehicle_ids,
+            device_location: v.device_location,
+            sites: v.sites.into_iter().map(Into::into).collect(),
+            always_label: v.always_label,
+            refresh_s: v.refresh_s,
+            alerts_enabled: v.alerts_enabled,
+        }
+    }
+}
+impl From<dto::TrafficSite> for s::TrafficSite {
+    fn from(v: dto::TrafficSite) -> Self {
+        Self {
+            id: v.id,
+            name: v.name,
+            latitude_e7: v.latitude_e7,
+            longitude_e7: v.longitude_e7,
+            altitude_m: v.altitude_m,
+        }
     }
 }

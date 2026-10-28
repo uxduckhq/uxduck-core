@@ -26,6 +26,8 @@ Altitude is three tiles: **Altitude above home** in every flying type's defaults
 
 Everything that acts on the vehicle: its mode, arming, take-off, landing, return and the rest, each with its receipt, and, in preview builds, plugins' buttons. A simulated vehicle also has **Pause**, **Save snapshot** and **Stop simulation**. **Pause** freezes it where it is until you choose **Resume**; **Shift+P** does the same. A real vehicle can't pause, so the Cockpit says what holds one in place instead. A practice exercise can't be paused. The **…** beside its name is the same menu as in the sidebar.
 
+For sticks, switches and gamepad buttons, follow [Controllers and radio transmitters](/docs/controllers).
+
 ## Messages
 
 Everything the vehicle says, such as `PreArm: Throttle below failsafe`, in the order it came. Filter by severity, or search.

@@ -1,0 +1,1 @@
+{ "method": "plugin/setChecksBlock", "params": { "id": "wind-check", "block": true } }

@@ -6,13 +6,21 @@
 //! The only crate that sees MAVLink library types (`mavio` today, Maviola
 //! for serial and TCP links from S7).
 
+pub mod bootloader;
 pub mod camera;
 pub mod commands;
 pub mod decode;
 pub mod dialect;
+pub mod fake_accel;
+pub mod fake_airspeed;
+pub mod fake_bootloader;
 pub mod fake_files;
+pub mod fake_motors;
+pub mod fake_px4;
+pub mod fake_radio;
 pub mod fake_terrain;
 pub mod files;
+pub mod firmware;
 pub mod framing;
 pub mod ground_traffic;
 pub mod identity;
@@ -21,6 +29,7 @@ pub mod named;
 /// ArduPilot modes, shared with the engine.
 pub use uxduck_core::domain::modes;
 pub mod producers;
+pub mod px4_cal;
 mod rc_input;
 pub mod router;
 pub mod session;

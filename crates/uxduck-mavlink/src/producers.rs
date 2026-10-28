@@ -69,6 +69,7 @@ pub fn core_producers() -> Vec<Box<dyn Producer>> {
         Box::new(Navigation),
         Box::new(Home),
         Box::new(Servos),
+        Box::new(RcInputs),
         Box::new(Health),
         Box::new(Terrain),
         Box::new(Gimbal),
@@ -604,6 +605,41 @@ impl Producer for Servos {
     }
 }
 
+/// `RC_CHANNELS`: the receiver's channels as the autopilot reads them, as
+/// `rc.1` to `rc.18` in microseconds before any reversal, for the radio
+/// calibration's bars (S187). Channels it does not give, or gives as unused
+/// (0 or `UINT16_MAX`), are left out.
+#[derive(Debug)]
+pub struct RcInputs;
+
+impl Producer for RcInputs {
+    fn id(&self) -> &'static str {
+        "rc"
+    }
+
+    fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let Message::RcChannels { count, channels } = message else {
+            return;
+        };
+        let from = (self.id(), component_id, now_us);
+        for (index, pulse) in channels
+            .iter()
+            .enumerate()
+            .take(usize::from(*count))
+            .filter(|(_, p)| **p > 0 && **p < u16::MAX)
+        {
+            let n = index + 1;
+            out.item(
+                &format!("rc.{n}"),
+                &format!("RC {n}"),
+                Unit::None,
+                f64::from(*pulse),
+                from,
+            );
+        }
+    }
+}
+
 /// `TERRAIN_REPORT`: the ground's height above mean sea level under the
 /// vehicle, from the autopilot's terrain data (maintainer, 2026-10-05).
 /// The vehicle's own height above it joins the fused position as its
@@ -741,6 +777,17 @@ impl Producer for Health {
                     "Vertical wind",
                     Unit::MeterPerSecond,
                     f64::from(speed_z),
+                    from,
+                );
+            }
+            // The automatic airspeed calibration's ratio (S190), while it
+            // runs; the Setup tab's Airspeed row follows it.
+            &Message::AirspeedAutocal { ratio } if ratio.is_finite() => {
+                out.item(
+                    "airspeed.ratio",
+                    "Airspeed ratio estimate",
+                    Unit::None,
+                    f64::from(ratio),
                     from,
                 );
             }
@@ -1354,6 +1401,9 @@ mod tests {
             speed_z: 0.5,
         });
         assert_eq!(wind[1], ("wind.direction_deg".to_owned(), 270.0));
+        let ratio = produced(&Message::AirspeedAutocal { ratio: 1.5 });
+        assert_eq!(ratio, [("airspeed.ratio".to_owned(), 1.5)]);
+        assert!(produced(&Message::AirspeedAutocal { ratio: f32::NAN }).is_empty());
         let water = produced(&Message::ScaledPressure2 {
             temperature_cdeg: 1475,
         });
@@ -1405,6 +1455,7 @@ mod tests {
             Message::ScaledPressure2 {
                 temperature_cdeg: 0,
             },
+            Message::AirspeedAutocal { ratio: 2.0 },
         ] {
             Health.consume(1, &message, 0, &mut out);
         }

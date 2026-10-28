@@ -332,6 +332,23 @@ pub enum Change {
     VideoPhotoRemoved {
         id: String,
     },
+    /// A vehicle's setup procedure started, moved on or ended (S184,
+    /// ADR-0037 V2). Its progress is journaled about once a second while it
+    /// runs.
+    SetupUpdated {
+        setup: crate::domain::setup::Setup,
+    },
+    /// A vehicle's preflight checks changed (S192, ADR-0038 K2): journaled
+    /// only when a check's status, detail or setting does, never for the
+    /// same list evaluated again.
+    PreflightUpdated {
+        preflight: crate::domain::preflight::Preflight,
+    },
+    /// A vehicle's checklist changed (S193, ADR-0038 K7 to K9): a step
+    /// added, changed, removed or copied in, ticked or cleared by a person.
+    ChecklistUpdated {
+        checklist: crate::domain::checklist::Checklist,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

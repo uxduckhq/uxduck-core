@@ -1,0 +1,23 @@
+{
+  "method": "approval/requested",
+  "params": {
+    "id": "ap2a2b3c4d5e6f7a8b",
+    "clientId": "cl9f3a1c2b4d5e6f70",
+    "clientName": "Claude Code",
+    "capability": "control",
+    "method": "command/send",
+    "summary": "arm Alpha past 1 failing preflight check: Plan on the vehicle",
+    "state": "pending",
+    "deadlineUs": 1790668960000000,
+    "createdAtUs": 1790668900000000,
+    "version": 1,
+    "preflight": [
+      {
+        "id": "uxduck:plan",
+        "title": "Plan on the vehicle",
+        "status": "fail",
+        "detail": "Ridge survey is chosen, but Alpha has Field loop."
+      }
+    ]
+  }
+}

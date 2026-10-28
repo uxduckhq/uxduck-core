@@ -181,6 +181,8 @@ pub struct Settings {
     /// And this near up or down: 300 m when left out.
     #[serde(default = "traffic_alert_up_m")]
     pub traffic_alert_up_m: u32,
+    #[serde(default)]
+    pub traffic_controls: TrafficControls,
     /// Settings › Terrain: the dataset the map reads and vehicles are
     /// answered from, unless one is chosen for a vehicle (S23).
     #[serde(default)]
@@ -293,6 +295,8 @@ pub struct SettingsUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_alert_up_m: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_controls: Option<TrafficControls>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terrain_dataset: Option<crate::dto::terrain::TerrainDataset>,
     /// Chooses one vehicle's dataset, or gives it back to the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,6 +405,22 @@ pub struct DaemonAbout {
     /// Microseconds since it started.
     #[schemars(schema_with = "crate::safe::integer")]
     pub uptime_us: u64,
+    /// Native core only; absent in browser engines and older cores. Excludes simulators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_usage: Option<CoreProcessUsage>,
+}
+
+/// Native core's resident memory and interval CPU (100% is one core).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreProcessUsage {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub resident_bytes: u64,
+    /// Absent until two samples, at least two seconds apart, are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_window_ms: Option<u32>,
 }
 
 /// Restarts the daemon: a final checkpoint, then the same program starts
@@ -455,4 +475,53 @@ const fn traffic_alert_m() -> u32 {
 
 const fn traffic_alert_up_m() -> u32 {
     300
+}
+
+/// Traffic choices are explicit and never depend on arming.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent operator-selected switches"
+)]
+pub struct TrafficControls {
+    pub range_m: u32,
+    pub limit_range: bool,
+    pub height_m: u32,
+    pub limit_height: bool,
+    pub all_vehicles: bool,
+    pub vehicle_ids: Vec<String>,
+    pub device_location: bool,
+    pub sites: Vec<TrafficSite>,
+    pub always_label: bool,
+    pub refresh_s: u32,
+    pub alerts_enabled: bool,
+}
+impl Default for TrafficControls {
+    fn default() -> Self {
+        Self {
+            range_m: 10_000,
+            limit_range: true,
+            height_m: 1_000,
+            limit_height: true,
+            all_vehicles: true,
+            vehicle_ids: Vec::new(),
+            device_location: false,
+            sites: Vec::new(),
+            always_label: false,
+            refresh_s: 30,
+            alerts_enabled: true,
+        }
+    }
+}
+/// A chosen fixed ground location; altitude is optional, in metres above sea level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficSite {
+    pub id: String,
+    pub name: String,
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_m: Option<i32>,
 }

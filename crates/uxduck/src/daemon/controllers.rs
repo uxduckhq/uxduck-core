@@ -135,10 +135,35 @@ fn fake_events(message: &serde_json::Value, known: &mut BTreeSet<String>) -> Vec
     events
 }
 
+#[cfg(feature = "gamepad")]
+fn gamepad_id(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
+    let uuid = gilrs.gamepad(id).uuid();
+    if uuid == [0; 16] {
+        format!("gp-{}", usize::from(id))
+    } else {
+        uuid.iter().fold(String::from("gp-"), |mut out, byte| {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId) -> InputEvent {
+    let gamepad = gilrs.gamepad(pad);
+    // Otherwise gilrs guesses gamepad names, wrong for a radio in joystick mode.
+    InputEvent::Connected {
+        id: gamepad_id(gilrs, pad),
+        name: gamepad.name().to_owned(),
+        layout_known: gamepad.mapping_source() == gilrs::MappingSource::SdlMappings,
+    }
+}
+
 /// Gamepads through gilrs, on a thread of their own. Without a gamepad
 /// backend (no permission, no libudev) it logs once and does nothing.
 #[cfg(feature = "gamepad")]
-pub fn gamepads(events: impl Fn(InputEvent) + Send + 'static) {
+pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
     let spawned = std::thread::Builder::new()
         .name("gamepads".into())
         .spawn(move || {
@@ -159,39 +184,17 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + 'static) {
                     return;
                 }
             };
-            let id_of = |gilrs: &gilrs::Gilrs, id: gilrs::GamepadId| {
-                let pad = gilrs.gamepad(id);
-                let uuid = pad.uuid();
-                if uuid == [0; 16] {
-                    format!("gp-{}", usize::from(id))
-                } else {
-                    uuid.iter().fold(String::from("gp-"), |mut out, byte| {
-                        use std::fmt::Write;
-                        let _ = write!(out, "{byte:02x}");
-                        out
-                    })
-                }
-            };
-            // Known when an SDL mapping names its inputs; otherwise gilrs
-            // guesses gamepad names, wrong for a radio in joystick mode.
-            let connected = |gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId| {
-                let gamepad = gilrs.gamepad(pad);
-                InputEvent::Connected {
-                    id: id_of(gilrs, pad),
-                    name: gamepad.name().to_owned(),
-                    layout_known: gamepad.mapping_source() == gilrs::MappingSource::SdlMappings,
-                }
-            };
-            let announce = |gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId| {
-                events(connected(gilrs, pad));
-                #[cfg(target_os = "macos")]
-                if let Some(present) = present(gilrs, pad, id_of(gilrs, pad)) {
-                    events(present);
-                }
-            };
+            #[cfg(target_os = "macos")]
+            let mut duplicates = std::collections::HashMap::new();
             let pads: Vec<gilrs::GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
             for pad in pads {
-                announce(&gilrs, pad);
+                events(gamepad_connected(&gilrs, pad));
+                #[cfg(target_os = "macos")]
+                if let Some(observer) =
+                    announce_native(&gilrs, pad, gamepad_id(&gilrs, pad), events.clone())
+                {
+                    duplicates.insert(pad, observer);
+                }
             }
             let mut steady = Steady::default();
             loop {
@@ -199,11 +202,33 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + 'static) {
                     || gilrs.next_event_blocking(None),
                     std::thread::sleep,
                 );
-                let id = id_of(&gilrs, event.id);
+                let id = gamepad_id(&gilrs, event.id);
                 match event.event {
-                    gilrs::EventType::Connected => announce(&gilrs, event.id),
-                    gilrs::EventType::Disconnected => events(InputEvent::Disconnected { id }),
+                    gilrs::EventType::Connected => {
+                        #[cfg(target_os = "macos")]
+                        duplicates.remove(&event.id);
+                        events(gamepad_connected(&gilrs, event.id));
+                        #[cfg(target_os = "macos")]
+                        if let Some(observer) =
+                            announce_native(&gilrs, event.id, id.clone(), events.clone())
+                        {
+                            duplicates.insert(event.id, observer);
+                        }
+                    }
+                    gilrs::EventType::Disconnected => {
+                        #[cfg(target_os = "macos")]
+                        duplicates.remove(&event.id);
+                        steady.last.retain(|(device, _), _| device != &id);
+                        events(InputEvent::Disconnected { id });
+                    }
                     gilrs::EventType::AxisChanged(axis, value, code) => {
+                        #[cfg(target_os = "macos")]
+                        if duplicates
+                            .get(&event.id)
+                            .is_some_and(|observer| observer.handles(code.into_u32()))
+                        {
+                            continue;
+                        }
                         let known = gilrs.gamepad(event.id).mapping_source()
                             == gilrs::MappingSource::SdlMappings;
                         let value = as_sent(known, axis, f64::from(value));
@@ -244,14 +269,44 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + 'static) {
     }
 }
 
+/// Native snapshots and repeated-axis events must use exactly the same codes.
+#[cfg(all(feature = "gamepad", target_os = "macos"))]
+fn announce_native(
+    gilrs: &gilrs::Gilrs,
+    pad: gilrs::GamepadId,
+    id: String,
+    events: impl Fn(InputEvent) + Send + Clone + 'static,
+) -> Option<super::hid::Duplicates> {
+    let gamepad = gilrs.gamepad(pad);
+    let (vendor, product) = (gamepad.vendor_id()?, gamepad.product_id()?);
+    let mut observer = (gamepad.mapping_source() != gilrs::MappingSource::SdlMappings)
+        .then(|| super::hid::observe_duplicates(vendor, product, id.clone(), events.clone()))
+        .flatten();
+    let elements = observer.as_ref().map_or_else(
+        || super::hid::elements(vendor, product),
+        |observer| observer.initial.clone(),
+    );
+    if let Some(snapshot) = present(gilrs, pad, id, elements) {
+        events(snapshot);
+    }
+    if let Some(observer) = &mut observer {
+        observer.activate();
+    }
+    observer
+}
+
 /// Every input of the pad and its value now, from `IOKit`, named and scaled
 /// as gilrs names and scales them so later events agree.
 #[cfg(all(feature = "gamepad", target_os = "macos"))]
-fn present(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId, id: String) -> Option<InputEvent> {
+fn present(
+    gilrs: &gilrs::Gilrs,
+    pad: gilrs::GamepadId,
+    id: String,
+    elements: Vec<super::hid::Element>,
+) -> Option<InputEvent> {
     use gilrs::{Axis as A, Button as B};
     let gamepad = gilrs.gamepad(pad);
     let known = gamepad.mapping_source() == gilrs::MappingSource::SdlMappings;
-    let elements = super::hid::elements(gamepad.vendor_id()?, gamepad.product_id()?);
     if elements.is_empty() {
         return None;
     }
@@ -325,7 +380,7 @@ fn present(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId, id: String) -> Option<In
 /// filter would, judged against the last value passed on for that input.
 #[cfg(any(feature = "gamepad", test))]
 #[derive(Debug, Default)]
-struct Steady {
+pub(super) struct Steady {
     last: std::collections::HashMap<(String, u32), f64>,
 }
 
@@ -335,7 +390,7 @@ const JITTER: f64 = 0.01;
 
 #[cfg(any(feature = "gamepad", test))]
 impl Steady {
-    fn changed(&mut self, id: &str, code: u32, value: f64) -> bool {
+    pub(super) fn changed(&mut self, id: &str, code: u32, value: f64) -> bool {
         let key = (id.to_owned(), code);
         let moved = self.last.get(&key).is_none_or(|last| {
             let change = (value - last).abs();

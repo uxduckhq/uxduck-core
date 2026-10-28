@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(windows, test))]
+mod windows;
 
 /// Where the Mac app is installed and updated; only Unix builds use it.
 #[cfg(unix)]
@@ -46,16 +48,23 @@ pub(super) fn preflight(package: &Path) -> Result<(), String> {
 
 /// Mac updates run as the user; native Windows/Linux installers own elevation.
 /// Never reboot a computer.
-pub(super) fn install(package: &Path, kind: &str, version: &str) -> Result<(), String> {
+pub(super) fn install(
+    package: &Path,
+    kind: &str,
+    version: &str,
+    installed: &Path,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if kind == "pkg" {
         return macos::install(package, Path::new(INSTALLED_APP), version);
     }
-    let _ = version;
+    let _ = (version, installed);
     let (program, args) = command(std::env::consts::OS, kind)?;
-    let status = Command::new(program)
-        .args(args)
-        .arg(package)
+    let mut command = Command::new(program);
+    command.args(args).arg(package);
+    #[cfg(windows)]
+    command.args(windows::update_properties(installed)?);
+    let status = command
         // The worker's stdout is a one-line readiness pipe whose reader exits
         // before installation. Installer output must not hit that closed pipe.
         .stdout(Stdio::null())
@@ -121,20 +130,21 @@ fn command(os: &str, kind: &str) -> Result<(&'static str, Vec<&'static str>), St
     }
 }
 
-/// The full installer owns the product's standard location, including when the
-/// running executable came from a portable archive. On failure the old path is
-/// retained for recovery instead of launching a stale archive after success.
-pub(super) fn installed_executable() -> Result<PathBuf, String> {
+/// Keep a Windows personal installation in its user-owned location. Otherwise
+/// use the full installer's standard shared location, including for portable
+/// archives. On failure the old path is retained for recovery.
+pub(super) fn installed_executable(current: &Path) -> Result<PathBuf, String> {
+    let _ = current;
+    #[cfg(windows)]
+    {
+        windows::installed_executable(current)
+    }
+    #[cfg(not(windows))]
     match std::env::consts::OS {
         "macos" => Ok(PathBuf::from(
             "/Applications/UXDuck.app/Contents/MacOS/uxduck",
         )),
         "linux" => Ok(PathBuf::from("/usr/bin/uxduck")),
-        "windows" => std::env::var_os("ProgramFiles")
-            .map(|dir| PathBuf::from(dir).join("UXDuck/uxduck.exe"))
-            .ok_or_else(|| {
-                "Windows did not provide its Program Files folder. Install UXDuck manually.".into()
-            }),
         _ => Err("No installer is supported on this platform.".into()),
     }
 }

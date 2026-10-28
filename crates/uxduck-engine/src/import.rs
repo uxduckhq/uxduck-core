@@ -8,6 +8,11 @@
 //! So does the stand-in operator the page made for a browser with none,
 //! when UXDuck here already has an operator: a browser's work moved in
 //! after each visit without an installed UXDuck would add one every time.
+//! What it owned (chats, folders, places) becomes the operator moving it in,
+//! or everyone's: never an operator who is not here, as whom nobody could
+//! see it (S167).
+
+use std::collections::BTreeSet;
 
 use serde_json::Value;
 use uxduck_contracts::dto::initialize::RunsIn;
@@ -16,14 +21,15 @@ use uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::events::{Actor, Change};
 
-use crate::Engine;
 use crate::rpc::handlers::to_value;
+use crate::{ConnectionId, Engine};
 
 /// The longest `source` kept on the changes.
 const MAX_SOURCE: usize = 100;
 
 pub(crate) fn handle(
     engine: &mut Engine,
+    connection: ConnectionId,
     params: JournalImportParams,
     operator: bool,
 ) -> Result<Value, ApiError> {
@@ -55,9 +61,16 @@ pub(crate) fn handle(
         imported: 0,
         skipped: 0,
     };
+    let mover = engine
+        .connections
+        .get(&connection)
+        .and_then(|c| c.operator_id.clone());
+    // Stand-ins left behind; an operator comes before what it owns.
+    let mut left_behind = BTreeSet::new();
     for value in params.changes {
-        let taken = serde_json::from_value::<Change>(value)
-            .is_ok_and(|change| engine.import_change(&actor, change));
+        let taken = serde_json::from_value::<Change>(value).is_ok_and(|change| {
+            engine.import_change(&actor, change, &mut left_behind, mover.as_deref())
+        });
         if taken {
             result.imported += 1;
         } else {
@@ -70,19 +83,37 @@ pub(crate) fn handle(
 impl Engine {
     /// One change from elsewhere, taken if its entity moves and is new here
     /// or newer. Returns whether it was taken.
-    fn import_change(&mut self, actor: &Actor, change: Change) -> bool {
+    fn import_change(
+        &mut self,
+        actor: &Actor,
+        mut change: Change,
+        left_behind: &mut BTreeSet<String>,
+        mover: Option<&str>,
+    ) -> bool {
+        // The page's stand-in stays behind when there is an operator here
+        // already, unless it is the same one (moved in before).
+        if let Change::OperatorUpserted { operator } = &change
+            && operator.name == DEFAULT_OPERATOR_NAME
+            && !self.state.operators.is_empty()
+            && !self.state.operators.contains_key(&operator.id)
+        {
+            left_behind.insert(operator.id.clone());
+            return false;
+        }
+        let owner = match &mut change {
+            Change::ThreadUpserted { thread } => Some(&mut thread.operator_id),
+            Change::FolderUpserted { folder } => Some(&mut folder.operator_id),
+            Change::PlaceUpserted { place } => Some(&mut place.operator_id),
+            _ => None,
+        };
+        if let Some(owner) = owner
+            && owner.as_ref().is_some_and(|id| left_behind.contains(id))
+        {
+            *owner = mover.map(str::to_owned);
+        }
         let newer = |here: Option<u64>, there: u64| here.is_none_or(|version| version < there);
         let state = &self.state;
         let take = match &change {
-            // The page's stand-in stays behind when there is an operator
-            // here already, unless it is the same one (moved in before).
-            Change::OperatorUpserted { operator }
-                if operator.name == DEFAULT_OPERATOR_NAME
-                    && !state.operators.is_empty()
-                    && !state.operators.contains_key(&operator.id) =>
-            {
-                false
-            }
             Change::OperatorUpserted { operator } => newer(
                 state.operators.get(&operator.id).map(|o| o.version),
                 operator.version,

@@ -38,13 +38,14 @@ pub enum TrafficProtocol {
     Uat,
 }
 
-/// `pressure` from its altimeter, `geometric` from its GNSS above mean sea
-/// level.
+/// Reported height reference: pressure, GNSS above sea level (MAVLink),
+/// or GNSS above the WGS84 ellipsoid (readsb).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrafficAltitudeFrame {
     Pressure,
     Geometric,
+    Ellipsoid,
 }
 
 /// One aircraft: its freshest report from the sources that are on.
@@ -69,6 +70,17 @@ pub struct TrafficAircraft {
     pub altitude_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub altitude_frame: Option<TrafficAltitudeFrame>,
+    /// Normalized EGM96 sea-level height; absent for incomparable/unknown altitude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amsl_m: Option<f64>,
+    /// WGS84 height for globe placement; absent when altitude is incomparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ellipsoid_m: Option<f64>,
+    /// Comparisons against the named locations. Old daemons omit these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relative: Vec<TrafficRelative>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alert_vehicle_ids: Vec<String>,
     /// Degrees from true north.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_deg: Option<f64>,
@@ -203,8 +215,13 @@ pub struct TrafficSource {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TrafficStatus {
+    /// Explicit controls and normalized altitude comparisons are supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls_version: Option<u32>,
     pub aircraft: Vec<TrafficAircraft>,
     pub sources: Vec<TrafficSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<TrafficReference>,
 }
 
 /// `vehicle/traffic`: whether the traffic a vehicle reports is used.
@@ -214,4 +231,38 @@ pub struct VehicleTrafficParams {
     /// The vehicle, by id or an earlier alias.
     pub id: String,
     pub on: bool,
+}
+
+/// A reference used by display filters and by the independent alert comparisons.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficReference {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amsl_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_accuracy_m: Option<f64>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficRelative {
+    pub reference_id: String,
+    pub distance_m: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub above_m: Option<f64>,
+    /// Comparison margin from reported own-vehicle accuracy and geoid interpolation.
+    pub margin_m: f64,
+}
+/// Coverage requested from a traffic feed, independent of vehicle arming.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficFeedContext {
+    pub references: Vec<TrafficReference>,
+    pub radius_m: u32,
+    pub refresh_s: u32,
 }

@@ -32,10 +32,13 @@ use uxduck_contracts::dto::messages::{
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
+use uxduck_core::domain::command::Command;
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
 };
+use uxduck_core::domain::setup::{Fix, SetupRow, fix_for};
+use uxduck_core::domain::telemetry::{TelemetryItem, Unit};
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::Change;
 
@@ -54,6 +57,12 @@ pub const STARTUP_US: u64 = 10_000_000;
 /// A pre-arm reason not repeated for this long has cleared. ArduPilot
 /// repeats them about every 30 s while disarmed.
 pub const PREARM_US: u64 = 75_000_000;
+/// For this long after someone asks a vehicle to arm, or to take off,
+/// which arms it first, its pre-arm reasons are a warning. Otherwise they
+/// are said quietly beside Arm (`arming.checks`): after a landing,
+/// `ArduPilot` repeats "`QLand` mode not armable" every 30 s to nobody who
+/// asked (QA 2026-10-24, maintainer).
+pub const ARM_ASKED_US: u64 = 30_000_000;
 
 /// One vehicle's log and what its notifications are made of.
 #[derive(Default)]
@@ -263,6 +272,11 @@ impl Engine {
             log.startup_boot_us = boot;
         }
         self.push_message(&shown);
+        // Why a calibration from a heading just failed (S185); a setup
+        // procedure's own prompts and results show on its row (S186).
+        if self.setup_said(&vehicle.id, text) {
+            return;
+        }
         if self.kept_in_the_log(&vehicle, text, prearm.is_some()) {
             return;
         }
@@ -274,6 +288,9 @@ impl Engine {
                 let log = self.messages.logs.entry(vehicle.id.clone()).or_default();
                 log.startup.push(text.to_owned());
                 let warnings = log.startup.clone();
+                let mut actions =
+                    self.setup_actions(&vehicle.id, warnings.iter().map(String::as_str));
+                actions.push(show_in_messages(&vehicle.id, shown.id));
                 self.raise_or_update(Raise {
                     severity: Severity::Warning,
                     kind: NotificationKind::Persistent,
@@ -286,7 +303,7 @@ impl Engine {
                         plural(warnings.len(), "warning")
                     ),
                     body: Some(warnings.join("\n")),
-                    actions: vec![show_in_messages(&vehicle.id, shown.id)],
+                    actions,
                     condition: Some(format!(
                         "startup:{}:{}",
                         vehicle.id,
@@ -360,13 +377,15 @@ impl Engine {
                 );
             }
         }
+        let mut actions = self.setup_actions(&vehicle.id, [text]);
+        actions.push(show_in_messages(&vehicle.id, message_id));
         self.raise_or_update(Raise {
             severity,
             kind: NotificationKind::Persistent,
             subject,
             title,
             body: None,
-            actions: vec![show_in_messages(&vehicle.id, message_id)],
+            actions,
             condition: Some(condition),
             report: None,
         });
@@ -396,19 +415,97 @@ impl Engine {
             .is_some_and(|link| matches!(link.kind, LinkKind::Simulator { .. }))
     }
 
-    /// The pre-arm notice: one per vehicle, listing the reasons now.
-    fn prearm_notice(&mut self, vehicle_id: &str, name: &str, message_id: u64) {
-        let reasons: Vec<String> = self
-            .messages
+    /// The vehicle's pre-arm reasons now, without their prefix.
+    pub(crate) fn prearm_reasons(&self, vehicle_id: &str) -> Vec<String> {
+        self.messages
             .logs
             .get(vehicle_id)
             .map(|log| log.prearm.keys().cloned().collect())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// Calibrate or Restart for messages a Setup row fixes (S184, ADR-0037
+    /// V12), one per row, in the order said.
+    fn setup_actions<'a>(
+        &self,
+        vehicle_id: &str,
+        texts: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<NotificationAction> {
+        let Some(vehicle) = self.vehicle(vehicle_id) else {
+            return Vec::new();
+        };
+        let mut actions: Vec<NotificationAction> = Vec::new();
+        for text in texts {
+            let Some((row, fix)) = uxduck_core::domain::setup::fix_for(&vehicle.autopilot, text)
+            else {
+                continue;
+            };
+            let action = Action::OpenSetup {
+                vehicle_id: vehicle.id.clone(),
+                row,
+            };
+            if !uxduck_core::domain::setup::offered(&vehicle.autopilot, row)
+                || actions.iter().any(|a| a.action == action)
+            {
+                continue;
+            }
+            actions.push(NotificationAction {
+                label: match fix {
+                    Fix::Calibrate => "Calibrate".into(),
+                    Fix::Restart => "Restart".into(),
+                },
+                action,
+            });
+        }
+        // Two Calibrates side by side say which (S187): "Calibrate radio".
+        let calibrates = actions.iter().filter(|a| a.label == "Calibrate").count();
+        if calibrates > 1 {
+            for action in &mut actions {
+                if let (Action::OpenSetup { row, .. }, "Calibrate") =
+                    (&action.action, action.label.as_str())
+                {
+                    action.label = format!("Calibrate {}", row_word(*row));
+                }
+            }
+        }
+        actions
+    }
+
+    /// The reasons now, as the `arming.checks` item, and the pre-arm notice:
+    /// one per vehicle, raised once someone asked it to arm (`ARM_ASKED_US`)
+    /// and kept up to date until the reasons clear, with a way to each fix
+    /// UXDuck has (S184).
+    fn prearm_notice(&mut self, vehicle_id: &str, name: &str, message_id: u64) {
+        let reasons = self.prearm_reasons(vehicle_id);
+        let now = self.clock.now_us();
+        self.telemetry_said(
+            vehicle_id,
+            TelemetryItem {
+                key: "arming.checks".into(),
+                label: "Pre-arm checks".into(),
+                unit: Unit::None,
+                value: None,
+                text: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                source: "messages".into(),
+                component_id: 1,
+                time_us: now,
+            },
+        );
         let condition = format!("prearm:{vehicle_id}");
         if reasons.is_empty() {
             self.resolve(&condition);
             return;
         }
+        let shown = self
+            .state
+            .notifications
+            .values()
+            .any(|n| n.condition.as_deref() == Some(condition.as_str()));
+        if !shown && !self.asked_to_arm(vehicle_id, now) {
+            return;
+        }
+        let mut actions = self.setup_actions(vehicle_id, reasons.iter().map(String::as_str));
+        actions.push(show_in_messages(vehicle_id, message_id));
         self.raise_or_update(Raise {
             severity: Severity::Warning,
             kind: NotificationKind::Persistent,
@@ -417,10 +514,50 @@ impl Engine {
             },
             title: format!("{name} cannot arm"),
             body: Some(reasons.join("\n")),
-            actions: vec![show_in_messages(vehicle_id, message_id)],
+            actions,
             condition: Some(condition),
             report: None,
         });
+    }
+
+    /// A row was calibrated and the vehicle uses it at once (S185): its
+    /// "not calibrated" reasons are forgotten now rather than when the
+    /// vehicle stops repeating them. Said again, they come back.
+    pub(crate) fn forget_prearm(&mut self, vehicle_id: &str, row: SetupRow) {
+        let Some(vehicle) = self.state.vehicles.get(vehicle_id) else {
+            return;
+        };
+        let (autopilot, name) = (vehicle.autopilot.clone(), vehicle.name.clone());
+        let Some(log) = self.messages.logs.get_mut(vehicle_id) else {
+            return;
+        };
+        let before = log.prearm.len();
+        log.prearm
+            .retain(|reason, _| fix_for(&autopilot, reason) != Some((row, Fix::Calibrate)));
+        if log.prearm.len() == before {
+            return;
+        }
+        let last = log.folded.back().map_or(0, |m| m.id);
+        self.prearm_notice(vehicle_id, &name, last);
+    }
+
+    /// Whether someone asked the vehicle to arm, or to take off, lately:
+    /// a person, the agent or a script, not a simulation's own start.
+    fn asked_to_arm(&self, vehicle_id: &str, now: u64) -> bool {
+        self.state.receipts.values().any(|r| {
+            r.vehicle_id == vehicle_id
+                && now.saturating_sub(r.created_at_us) < ARM_ASKED_US
+                && ![crate::launch::ACTOR, crate::practice::ACTOR].contains(&r.client_id.as_str())
+                && match &r.command {
+                    Command::Arm => true,
+                    // COMPONENT_ARM_DISARM, arming.
+                    Command::Long {
+                        command: 400,
+                        params,
+                    } => params.first().is_some_and(|p| *p >= 0.5),
+                    command => command.is_take_off(),
+                }
+        })
     }
 
     /// Pre-arm reasons clear when the vehicle arms, reports its checks
@@ -534,10 +671,23 @@ impl Engine {
 
 fn show_in_messages(vehicle_id: &str, message_id: u64) -> NotificationAction {
     NotificationAction {
-        label: "Show in messages".into(),
+        // Short enough for an alert's button (QA 2026-10-24: "Show in me…").
+        label: "Messages".into(),
         action: Action::OpenMessages {
             vehicle_id: vehicle_id.to_owned(),
             message_id,
         },
+    }
+}
+
+/// A Setup row in a button: "radio".
+const fn row_word(row: SetupRow) -> &'static str {
+    match row {
+        SetupRow::Firmware => "firmware",
+        SetupRow::Accelerometer => "accelerometer",
+        SetupRow::Compass => "compass",
+        SetupRow::Radio => "radio",
+        SetupRow::Airspeed => "airspeed",
+        SetupRow::Motors => "motors",
     }
 }

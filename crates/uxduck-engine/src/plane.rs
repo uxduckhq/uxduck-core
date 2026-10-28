@@ -67,6 +67,15 @@ pub fn route(effect: Effect) -> Routed {
         Effect::Traffic { vehicle_id, report } => {
             Routed::Engine(Box::new(move |e| e.vehicle_traffic(&vehicle_id, report)))
         }
+        Effect::MagCal { vehicle_id, report } => {
+            Routed::Engine(Box::new(move |e| e.mag_cal(&vehicle_id, report)))
+        }
+        Effect::AccelCalPosition {
+            vehicle_id,
+            position,
+        } => Routed::Engine(Box::new(move |e| {
+            e.accel_cal_position(&vehicle_id, position);
+        })),
         Effect::CommandDone {
             receipt_id,
             outcome,
@@ -322,6 +331,8 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         Effect::Vehicle(_)
         | Effect::Telemetry(_)
         | Effect::Traffic { .. }
+        | Effect::MagCal { .. }
+        | Effect::AccelCalPosition { .. }
         | Effect::CommandDone { .. }
         | Effect::Send { .. } => {
             return None;

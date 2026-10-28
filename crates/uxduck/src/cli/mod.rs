@@ -1,6 +1,8 @@
 //! The command line (ADR-0001, Deployable shape).
 
+pub mod checklist;
 pub mod client;
+mod fake_board;
 pub mod find;
 pub mod link_spec;
 pub mod marker;
@@ -10,6 +12,8 @@ pub mod params;
 pub mod plan;
 pub mod practice;
 mod practice_replay;
+pub mod preflight;
+pub mod setup;
 mod sim_build;
 pub mod terrain;
 mod traffic;
@@ -144,6 +148,21 @@ pub enum Command {
         #[command(subcommand)]
         command: marker::MarkerCommand,
     },
+    /// A vehicle's setup (S184): `uxduck setup status Alpha`, and `uxduck
+    /// setup compass Alpha` to calibrate its compasses while it is turned.
+    Setup {
+        #[command(subcommand)]
+        command: setup::SetupCommand,
+    },
+    /// A vehicle's preflight checks (S192): `uxduck preflight Alpha`, and
+    /// `uxduck preflight Alpha --check plan --severity block` to change one
+    /// of UXDuck's own.
+    Preflight(preflight::PreflightArgs),
+    /// A vehicle's own checklist (S193): `uxduck checklist Alpha`, `add
+    /// "Propellers tight"`, `add "Battery" --rule "battery.voltage_v >=
+    /// 22.2" --hold 3`, `tick 1`, `reset`, `export`, `import list.md`,
+    /// `copy --from Bravo`.
+    Checklist(checklist::ChecklistArgs),
     /// Saved plans (S125): `uxduck plan import mission.plan`.
     Plan {
         #[command(subcommand)]
@@ -212,6 +231,10 @@ pub enum Command {
         /// but a dangerous command needs this.
         #[arg(long, short = 'y', global = true)]
         yes: bool,
+        /// Arm past UXDuck's failing blocking preflight checks
+        /// (`uxduck preflight`), naming them; asks first unless `--yes`.
+        #[arg(long, global = true)]
+        arm_anyway: bool,
     },
     /// Call one API method and print the result as JSON.
     Rpc {
@@ -374,9 +397,24 @@ pub enum PluginCommand {
         dir: Option<PathBuf>,
     },
     /// Install from a directory holding `plugin.json` and its module. The
-    /// plugin gets the capabilities its manifest asks for.
+    /// plugin gets the capabilities its manifest asks for. A plugin whose
+    /// checks ask to stop arming only warns until you allow it, here with
+    /// `--checks-block` or later with `uxduck plugin checks`.
     Install {
         path: PathBuf,
+        /// Let its blocking checks stop arming while they don't pass.
+        #[arg(long, conflicts_with = "checks_warn")]
+        checks_block: bool,
+        /// Keep its checks as warnings only, and stop asking.
+        #[arg(long)]
+        checks_warn: bool,
+    },
+    /// Whether a plugin's blocking checks may stop arming (`block`) or
+    /// only warn (`warn`): your answer, kept on this computer.
+    Checks {
+        id: String,
+        #[arg(value_enum)]
+        may: ChecksMay,
     },
     List,
     /// Run a plugin against a tlog as the daemon would: the telemetry items,
@@ -395,6 +433,15 @@ pub enum PluginCommand {
         #[arg(long)]
         params: Option<String>,
     },
+}
+
+/// What a plugin's blocking checks may do.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum ChecksMay {
+    /// Stop arming while they don't pass.
+    Block,
+    /// Only warn.
+    Warn,
 }
 
 #[derive(Debug, Subcommand)]
@@ -729,6 +776,42 @@ pub enum ServiceCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum DevCommand {
+    /// A fake vehicle on a serial port of its own (a pseudo-terminal whose
+    /// path it prints) that restarts into a fake bootloader when asked and
+    /// back into its firmware once installed, reporting the version
+    /// written (S189). Add a serial link to the path, then install.
+    FakeBoard {
+        #[arg(long, default_value_t = 1)]
+        system_id: u8,
+        /// The autopilot UID, in hex.
+        #[arg(long, default_value = "b0a2d140")]
+        uid: String,
+        /// The firmware version it reports before an install.
+        #[arg(long, default_value = "4.6.2")]
+        firmware: String,
+        /// Its board id, as firmware files name boards (140: Cube Orange).
+        #[arg(long, default_value_t = 140)]
+        board_id: u32,
+        /// Its flash for firmware, KB.
+        #[arg(long, default_value_t = 2016)]
+        flash_kb: u32,
+        /// Starts in its bootloader, as a board with no firmware.
+        #[arg(long)]
+        bootloader: bool,
+        /// Writes a fake .apj for this board first, to install from a file.
+        #[arg(long)]
+        write_apj: Option<PathBuf>,
+        /// The version in the fake .apj.
+        #[arg(long, default_value = "4.7.2")]
+        apj_version: String,
+        /// The fake .apj's image, KB.
+        #[arg(long, default_value_t = 64)]
+        apj_kb: u32,
+        /// Milliseconds per chunk written (and a hundred times it to
+        /// erase), so each stage can be seen.
+        #[arg(long, default_value_t = 0)]
+        pace_ms: u64,
+    },
     /// A vehicle that sends heartbeats over UDP, answers the request for its
     /// UID like an autopilot, and flies a circle at SITL's default home so
     /// there is telemetry to show. Not a flight simulator.
@@ -806,6 +889,71 @@ pub enum DevCommand {
         /// Lose the GPS fix, and with it the position, this many seconds in.
         #[arg(long)]
         lose_gps_at: Option<f64>,
+        /// List this many compasses (1 to 3), not calibrated: its pre-arm
+        /// checks fail with "Compass not calibrated" until they are, and it
+        /// answers a compass calibration as ArduPilot does (S184).
+        #[arg(long, default_value_t = 0)]
+        compasses: u8,
+        /// With `--compasses`, start calibrated.
+        #[arg(long, requires = "compasses")]
+        compasses_calibrated: bool,
+        /// With `--compasses`, fail the last compass's calibration with this
+        /// `MAG_CAL_STATUS`, such as 6 for a bad orientation.
+        #[arg(long, requires = "compasses")]
+        compass_fails: Option<u8>,
+        /// List its accelerometers' offsets, all zero: its pre-arm checks
+        /// fail with "3D Accel calibration needed" until it is calibrated
+        /// in six positions, which it asks for as ArduPilot does (S186).
+        #[arg(long)]
+        accel_uncalibrated: bool,
+        /// Fail the accelerometer calibration after its last position.
+        #[arg(long)]
+        accel_fails: bool,
+        /// List its radio's parameters at ArduPilot's defaults: its pre-arm
+        /// checks fail with "RC not calibrated" until it is calibrated. Asked
+        /// for its channels, its sticks move as a person calibrating it would
+        /// (S187): centred for 8 s, swept to their ends until 16 s, centred
+        /// until 24 s, then roll right, pitch forward, throttle up and yaw
+        /// right in turn.
+        #[arg(long)]
+        radio: bool,
+        /// With `--radio`, rolling right lowers channel 1, so a calibration
+        /// offers to reverse it.
+        #[arg(long, requires = "radio")]
+        radio_reversed_roll: bool,
+        /// With `--radio`, how fast its sticks move compared with the times
+        /// above: 0.25 gives four times as long for each step.
+        #[arg(long, requires = "radio", default_value_t = 1.0)]
+        radio_pace: f64,
+        /// List a quad X's frame class and type, so the Setup tab
+        /// draws its motors (S188). Every fake vehicle answers a motor test,
+        /// listed or not: armed for it, the motor tested shows in its
+        /// outputs until the test's time runs out.
+        #[arg(long)]
+        motors: bool,
+        /// Be a plane with an airspeed sensor (S190): it sits on the ground
+        /// until armed and circles once armed; it zeroes its sensor as
+        /// `ArduPlane` does, and with `ARSPD_AUTOCAL` on in flight its ratio
+        /// settles. Raise `SIM_ARSPD_OFS` by 60 to blow into its pitot, or
+        /// set `SIM_ARSPD_FAIL` to stick the reading, as in SITL.
+        #[arg(long)]
+        airspeed: bool,
+        /// With `--airspeed`, its sensor not zeroed: it reads 4 m/s at rest
+        /// until it is.
+        #[arg(long, requires = "airspeed")]
+        airspeed_unzeroed: bool,
+        /// Be PX4 1.17 (S191): a quad X with PX4's parameters, calibrating
+        /// as PX4 does and saying how in its `[cal]` status text, turned
+        /// onto each side by itself; it answers `MAV_CMD_ACTUATOR_TEST`.
+        /// With `--accel-uncalibrated` its accelerometer is not calibrated
+        /// (`CAL_ACC0_ID` 0), with `--accel-fails` its calibration times
+        /// out after two sides.
+        #[arg(long, conflicts_with_all = ["airspeed", "compasses", "radio", "motors"])]
+        px4: bool,
+        /// With `--px4`, a plane with an airspeed sensor, which PX4 zeroes
+        /// and then asks to be blown into.
+        #[arg(long, requires = "px4")]
+        px4_plane: bool,
     },
     /// Runs a SITL build and stops it when standard input closes: the
     /// simulation manager's guard, so no build outlives the daemon (S17).
@@ -887,7 +1035,8 @@ pub enum VehicleAction {
     Mode {
         name: String,
     },
-    /// `MAV_CMD_NAV_TAKEOFF` to an altitude in metres.
+    /// `MAV_CMD_NAV_TAKEOFF` to an altitude in metres. A disarmed copter or
+    /// VTOL is switched to GUIDED and armed first.
     Takeoff {
         #[arg(long, default_value_t = 10.0)]
         altitude: f32,
@@ -1033,7 +1182,10 @@ async fn run_command(cli: Cli) -> ExitCode {
             vehicle,
             confirm,
             yes,
-        }) => vehicle_command(&data_dir, action, vehicle, confirm, yes).await,
+            arm_anyway,
+        }) => vehicle_command(&data_dir, action, vehicle, confirm, (yes, arm_anyway)).await,
+        Some(Command::Preflight(args)) => preflight::run(&data_dir, args).await,
+        Some(Command::Checklist(args)) => checklist::run(&data_dir, args).await,
         Some(Command::Trace) => trace(&data_dir).await,
         Some(Command::Debug {
             command: DebugCommand::Panic,
@@ -1046,6 +1198,7 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Practice { command }) => practice::run(&data_dir, command).await,
         Some(Command::Plan { command }) => plan::run(&data_dir, command).await,
         Some(Command::Marker { command }) => marker::run(&data_dir, command).await,
+        Some(Command::Setup { command }) => setup::run(&data_dir, command).await,
         Some(Command::Mission { command }) => mission::run(&data_dir, command).await,
         Some(Command::Terrain { command }) => terrain::run(&data_dir, command).await,
         Some(Command::Traffic { command, json }) => traffic::run(&data_dir, command, json).await,
@@ -1097,8 +1250,38 @@ fn exit_code(result: Result<(), CliError>) -> ExitCode {
 }
 
 /// `uxduck dev`: tools for development and tests.
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
 async fn dev(command: DevCommand) -> Result<(), CliError> {
     match command {
+        DevCommand::FakeBoard {
+            system_id,
+            uid,
+            firmware,
+            board_id,
+            flash_kb,
+            bootloader,
+            write_apj,
+            apj_version,
+            apj_kb,
+            pace_ms,
+        } => {
+            let version = FakeVersion::parse(&firmware, None)?;
+            let uid = u64::from_str_radix(uid.trim_start_matches("0x"), 16)
+                .map_err(|e| CliError::Usage(format!("--uid: {e}")))?;
+            let options = fake_board::BoardOptions {
+                system_id,
+                uid,
+                flight_sw_version: version.flight_sw_version,
+                board_id,
+                flash_kb,
+                in_bootloader: bootloader,
+                write_apj: write_apj.map(|path| (path, apj_version, apj_kb)),
+                pace_ms,
+            };
+            tokio::task::spawn_blocking(move || fake_board::run(options))
+                .await
+                .map_err(|e| CliError::Usage(e.to_string()))?
+        }
         DevCommand::FakeVehicle {
             to,
             system_id,
@@ -1122,6 +1305,19 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             no_gps,
             lose_gps_at,
             traffic,
+            compasses,
+            compasses_calibrated,
+            compass_fails,
+            accel_uncalibrated,
+            accel_fails,
+            radio,
+            radio_reversed_roll,
+            radio_pace,
+            motors,
+            airspeed,
+            airspeed_unzeroed,
+            px4,
+            px4_plane,
         } => {
             let version = FakeVersion::parse(&firmware, commit.as_deref())?;
             let options = FakeOptions {
@@ -1141,6 +1337,16 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 battery,
                 gps_lost_from_s: if no_gps { Some(0.0) } else { lose_gps_at },
                 traffic,
+                compasses: (compasses > 0).then_some((
+                    compasses,
+                    compasses_calibrated,
+                    compass_fails,
+                )),
+                accel: (accel_uncalibrated, accel_fails),
+                radio: radio.then_some((radio_reversed_roll, radio_pace)),
+                motors,
+                airspeed: airspeed.then_some(!airspeed_unzeroed),
+                px4: px4.then_some(px4_plane),
             };
             fake_vehicle(&to, system_id, &uid, version, options).await
         }
@@ -1768,7 +1974,7 @@ async fn vehicle_command(
     action: VehicleAction,
     vehicle: Option<String>,
     confirm: bool,
-    yes: bool,
+    (yes, arm_anyway): (bool, bool),
 ) -> Result<(), CliError> {
     let command = action_json(&action);
     let mut client = LocalClient::connect(data_dir).await?;
@@ -1791,16 +1997,36 @@ async fn vehicle_command(
     if !yes {
         ask_first(&mut client, &vehicle_id, &command).await?;
     }
-    let receipt = client
-        .call(
-            "command/send",
-            serde_json::json!({
-                "vehicleId": vehicle_id,
-                "command": command,
-                "confirm": confirm,
-            }),
-        )
-        .await?;
+    // Arming anyway names the checks it arms past (ADR-0038 K4).
+    let mut past: Vec<Value> = Vec::new();
+    if arm_anyway {
+        let gating = preflight::gating(&mut client, &vehicle_id).await?;
+        if !gating.is_empty() {
+            let titles: Vec<&str> = gating.iter().filter_map(|c| c["title"].as_str()).collect();
+            eprintln!("Past failing preflight checks: {}.", titles.join(", "));
+            if !yes {
+                if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    return Err(CliError::Usage(
+                        "not sent: run it again with --yes to arm past them".into(),
+                    ));
+                }
+                let answer = prompt("Arm past them? [y/N] ")?;
+                if !(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")) {
+                    return Err(CliError::Usage("not sent".into()));
+                }
+            }
+        }
+        past = gating.iter().map(|c| c["id"].clone()).collect();
+    }
+    let mut params = serde_json::json!({
+        "vehicleId": vehicle_id,
+        "command": command,
+        "confirm": confirm,
+    });
+    if !past.is_empty() {
+        params["overridePreflight"] = Value::Array(past);
+    }
+    let receipt = client.call("command/send", params).await?;
     let status = receipt["status"].as_str().unwrap_or("unknown");
     match receipt["detail"].as_str() {
         Some(detail) => println!("{status}: {detail}"),
@@ -2205,36 +2431,84 @@ async fn config_set(
     Ok(())
 }
 
+/// `uxduck plugin install`: what it may do, and what its checks do.
+async fn plugin_install(
+    data_dir: &std::path::Path,
+    path: &std::path::Path,
+    checks_block: bool,
+    checks_warn: bool,
+) -> Result<(), CliError> {
+    let path = std::fs::canonicalize(path)?;
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let mut params = serde_json::json!({ "path": path.display().to_string() });
+    if checks_block || checks_warn {
+        params["checksBlock"] = serde_json::json!(checks_block);
+    }
+    let plugin = client.call("plugin/install", params).await?;
+    println!(
+        "Installed {} {}, which may: {}.",
+        plugin["name"].as_str().unwrap_or(""),
+        plugin["version"].as_str().unwrap_or(""),
+        plugin["capabilities"]
+            .as_array()
+            .map(|c| c
+                .iter()
+                .filter_map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", "))
+            .unwrap_or_default()
+    );
+    // The hosts it may fetch from (S170).
+    if let Some(hosts) = plugin["hosts"].as_array().filter(|h| !h.is_empty()) {
+        let hosts: Vec<&str> = hosts.iter().filter_map(|h| h.as_str()).collect();
+        println!("It may fetch from {}.", hosts.join(", "));
+    }
+    if let Some(words) = checks_words(&plugin) {
+        println!("{words}");
+    }
+    Ok(())
+}
+
+/// What a plugin's checks do, in words (S194, ADR-0038 K13).
+fn checks_words(plugin: &serde_json::Value) -> Option<String> {
+    let checks = plugin["checks"].as_array().cloned().unwrap_or_default();
+    if checks.is_empty() {
+        return None;
+    }
+    let titles: Vec<&str> = checks.iter().filter_map(|c| c["title"].as_str()).collect();
+    let asks = checks.iter().any(|c| c["severity"] == "block");
+    let doing = match (asks, plugin["checksBlock"].as_bool()) {
+        (false, _) | (true, Some(false)) => "They only warn.".to_owned(),
+        (true, Some(true)) => "They stop arming while they don't pass.".to_owned(),
+        (true, None) => format!(
+            "They ask to stop arming, and only warn until you allow it: uxduck plugin checks {} block",
+            plugin["id"].as_str().unwrap_or_default()
+        ),
+    };
+    Some(format!(
+        "Its preflight checks: {}. {doing}",
+        titles.join(", ")
+    ))
+}
+
 async fn plugin(data_dir: &std::path::Path, command: PluginCommand) -> Result<(), CliError> {
     match command {
-        PluginCommand::Install { path } => {
-            let path = std::fs::canonicalize(&path)?;
+        PluginCommand::Install {
+            path,
+            checks_block,
+            checks_warn,
+        } => plugin_install(data_dir, &path, checks_block, checks_warn).await?,
+        PluginCommand::Checks { id, may } => {
             let mut client = LocalClient::connect(data_dir).await?;
             client.initialize().await?;
             let plugin = client
                 .call(
-                    "plugin/install",
-                    serde_json::json!({ "path": path.display().to_string() }),
+                    "plugin/setChecksBlock",
+                    serde_json::json!({ "id": id, "block": matches!(may, ChecksMay::Block) }),
                 )
                 .await?;
-            println!(
-                "Installed {} {}, which may: {}.",
-                plugin["name"].as_str().unwrap_or(""),
-                plugin["version"].as_str().unwrap_or(""),
-                plugin["capabilities"]
-                    .as_array()
-                    .map(|c| c
-                        .iter()
-                        .filter_map(|c| c.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_default()
-            );
-            // The hosts it may fetch from (S170).
-            if let Some(hosts) = plugin["hosts"].as_array().filter(|h| !h.is_empty()) {
-                let hosts: Vec<&str> = hosts.iter().filter_map(|h| h.as_str()).collect();
-                println!("It may fetch from {}.", hosts.join(", "));
-            }
+            println!("{}", checks_words(&plugin).unwrap_or_default());
         }
         PluginCommand::List => {
             let mut client = LocalClient::connect(data_dir).await?;
@@ -2740,8 +3014,54 @@ struct FakeOptions {
     battery: f64,
     gps_lost_from_s: Option<f64>,
     traffic: u8,
+    /// How many compasses, calibrated or not, and a failure to report.
+    compasses: Option<(u8, bool, Option<u8>)>,
+    /// Its accelerometers not calibrated, and failing their calibration.
+    accel: (bool, bool),
+    /// Its radio (S187), uncalibrated: whether its roll runs backwards, and
+    /// its sticks' pace.
+    radio: Option<(bool, f64)>,
+    /// Its frame listed for the motor test (S188).
+    motors: bool,
+    /// A plane with an airspeed sensor (S190), zeroed or not.
+    airspeed: Option<bool>,
+    /// PX4 (S191): a plane, or a quad.
+    px4: Option<bool>,
 }
 
+/// The fake vehicle's compasses (S184), accelerometers (S186), radio
+/// (S187), frame (S188) and airspeed sensor (S190), as the flags ask.
+fn fake_sensors(
+    vehicle: &mut uxduck_mavlink::sim::FakeVehicle,
+    compasses: Option<(u8, bool, Option<u8>)>,
+    (accel_uncalibrated, accel_fails): (bool, bool),
+    (radio, motors, airspeed): (Option<(bool, f64)>, bool, Option<bool>),
+) {
+    if let Some(zeroed) = airspeed {
+        vehicle.add_airspeed(zeroed);
+    }
+    if motors {
+        vehicle.add_motors();
+    }
+    if let Some((roll_reversed, pace)) = radio {
+        vehicle.add_radio(roll_reversed);
+        vehicle.radio.pace = if pace > 0.0 { pace } else { 1.0 };
+    }
+    if let Some((count, calibrated, fails)) = compasses {
+        vehicle.add_compasses(count, calibrated);
+        if let Some(compasses) = &mut vehicle.compasses {
+            compasses.fails_with = fails;
+        }
+    }
+    // Listed whenever its calibration is asked about; calibrated otherwise,
+    // and answering a calibration either way.
+    if accel_uncalibrated || accel_fails {
+        vehicle.add_accel(!accel_uncalibrated);
+    }
+    vehicle.accel.fails = accel_fails;
+}
+
+#[allow(clippy::too_many_lines, reason = "one line per fake-vehicle option")]
 async fn fake_vehicle(
     to: &str,
     system_id: u8,
@@ -2766,6 +3086,12 @@ async fn fake_vehicle(
         battery,
         gps_lost_from_s,
         traffic,
+        compasses,
+        accel: (accel_uncalibrated, accel_fails),
+        radio,
+        motors,
+        airspeed,
+        px4,
     } = options;
     let target: std::net::SocketAddr = to
         .parse()
@@ -2801,6 +3127,18 @@ async fn fake_vehicle(
     vehicle.battery_from_pct = battery.clamp(0.0, 100.0);
     vehicle.gps_lost_from_s = gps_lost_from_s;
     vehicle.traffic = traffic;
+    fake_sensors(
+        &mut vehicle,
+        compasses,
+        (accel_uncalibrated, accel_fails),
+        (radio, motors, airspeed),
+    );
+    if let Some(plane) = px4 {
+        vehicle.make_px4(plane, !accel_uncalibrated);
+        if let Some(px4) = &mut vehicle.px4 {
+            px4.accel_fails = accel_fails;
+        }
+    }
     eprintln!("fake vehicle {system_id} (uid {uid:x}) sending to {target}; Ctrl-C to stop");
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
     // Telemetry at 5 Hz, one datagram per frame as an autopilot sends them.

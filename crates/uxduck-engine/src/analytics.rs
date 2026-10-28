@@ -55,6 +55,12 @@ fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
 }
 
 fn validate_event(event: &AppEvent) -> Result<(), ApiError> {
+    if matches!(event, AppEvent::EngagedSimTime { .. }) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "engaged sim time must use analytics/engagedSimTime for validation and deduplication",
+        ));
+    }
     if let AppEvent::ControllerInputInterrupted {
         interruption,
         sample,
@@ -130,6 +136,54 @@ fn validate_event(event: &AppEvent) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn engaged_sim_time(
+    engine: &mut Engine,
+    params: &uxduck_contracts::dto::analytics::AnalyticsEngagedSimTimeParams,
+) -> Result<Value, ApiError> {
+    use uxduck_contracts::dto::analytics::{DaemonPresence, EngagedSimTimeResult};
+    use uxduck_contracts::dto::initialize::RunsIn;
+    let now = engine.clock.now_us() / 1000;
+    if params.end_ms <= params.start_ms
+        || params.end_ms - params.start_ms > 60_000
+        || params.start_ms < now.saturating_sub(120_000)
+        || params.end_ms > now.saturating_add(1000)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "engaged sim time must be a recent interval of 1 to 60000 milliseconds",
+        ));
+    }
+    let eligible = engine.state.settings.usage_analytics
+        && !engine.analytics_internal
+        && engine
+            .vehicle(&params.vehicle_id)
+            .is_some_and(|v| v.presence == uxduck_core::domain::vehicle::Presence::Online)
+        && engine.analytics_vehicle_kind(&params.vehicle_id)
+            == uxduck_contracts::dto::analytics::AnalyticsVehicleKind::Simulated;
+    let engaged_ms = if eligible {
+        engine
+            .engaged_sim_usage
+            .accept(params.start_ms, params.end_ms, now)
+    } else {
+        0
+    };
+    if engine.config.capabilities.runs_in == RunsIn::Browser {
+        Ok(json!(EngagedSimTimeResult { engaged_ms }))
+    } else {
+        if engaged_ms > 0 {
+            engine.analytics.track(
+                AnalyticsEvent::App(AppEvent::EngagedSimTime {
+                    engaged_ms,
+                    surface: params.surface,
+                    daemon: DaemonPresence::Installed,
+                }),
+                "daemon",
+            );
+        }
+        Ok(json!(EngagedSimTimeResult::default()))
+    }
+}
+
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -157,6 +211,7 @@ pub(crate) fn handle(
         other => other,
     };
     match request {
+        ClientRequest::AnalyticsEngagedSimTime(params) => engaged_sim_time(engine, &params),
         ClientRequest::AnalyticsTakeFlightTime(_) => Ok(json!(engine.take_flight_usage())),
         ClientRequest::AnalyticsTakeEngagement(_) => {
             let events = std::mem::take(&mut engine.engagement);
@@ -259,12 +314,17 @@ impl Engine {
     }
 
     pub(crate) fn reset_analytics_session(&mut self) {
+        self.engaged_sim_usage.reset(self.clock.now_us() / 1000);
         self.engagement.clear();
         self.flight_usage = crate::flight_usage::FlightUsage::default();
         self.analytics.reset_session();
     }
 
     pub fn set_analytics_internal(&mut self, internal: bool) {
+        if self.analytics_internal != internal {
+            self.engaged_sim_usage.reset(self.clock.now_us() / 1000);
+            self.analytics_internal = internal;
+        }
         self.analytics.set_internal(internal);
     }
 
@@ -279,6 +339,7 @@ impl Engine {
     /// Switches usage analytics off, as `--no-analytics` does at start, so
     /// an install can begin with nothing sent (ADR-0016 O15).
     pub fn turn_analytics_off(&mut self) {
+        self.engaged_sim_usage.reset(self.clock.now_us() / 1000);
         self.engagement.clear();
         self.flight_usage = crate::flight_usage::FlightUsage::default();
         if !self.state.settings.usage_analytics {
@@ -303,6 +364,7 @@ impl Engine {
     pub(crate) fn analytics_settings_changed(&mut self, before: &Settings) {
         let on = self.state.settings.usage_analytics;
         if before.usage_analytics != on {
+            self.engaged_sim_usage.reset(self.clock.now_us() / 1000);
             self.engagement.clear();
             self.flight_usage = crate::flight_usage::FlightUsage::default();
             self.analytics.set_enabled(on);

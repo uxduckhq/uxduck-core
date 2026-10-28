@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::Empty;
 use crate::dto::account::{
-    AccountEnvironmentParams, AccountSessionParams, AccountSignInParams, AccountUpdatesParams,
-    AccountUsernameParams, AccountVerifyParams,
+    AccountEnvironmentParams, AccountNameParams, AccountSessionParams, AccountSignInParams,
+    AccountUpdatesParams, AccountUsernameParams, AccountVerifyParams,
 };
 use crate::dto::analytics::{
-    AnalyticsActiveTimeParams, AnalyticsAliasParams, AnalyticsPerformanceParams, AppEvent,
+    AnalyticsActiveTimeParams, AnalyticsAliasParams, AnalyticsEngagedSimTimeParams,
+    AnalyticsPerformanceParams, AppEvent,
 };
 use crate::dto::app::{
     AppOpenParams, ClientVisibilityParams, DesktopAppChooseParams, DesktopAppStatusParams,
@@ -701,6 +702,11 @@ pub enum ClientRequest {
     /// `config`. Result: `Settings`.
     #[serde(rename = "settings/update")]
     SettingsUpdate(SettingsUpdateParams),
+    /// The daemon's settings, as Settings shows them for this device; change
+    /// them with `settings/update` from their `version`. Needs `read`.
+    /// Result: `Settings`.
+    #[serde(rename = "settings/get")]
+    SettingsGet(Empty),
     /// Disk space by category, and what is free. Needs `read`. Result:
     /// `StorageUsage`.
     #[serde(rename = "storage/usage")]
@@ -898,6 +904,11 @@ pub enum ClientRequest {
     /// left. Operators only. Result: `Plugin`.
     #[serde(rename = "plugin/setEnabled")]
     PluginSetEnabled(crate::dto::plugin::PluginSetEnabledParams),
+    /// Whether a plugin's blocking checks may stop arming (`block: true`)
+    /// or only warn (S194, ADR-0038 K13): a person's answer, kept on this
+    /// computer and journaled. Operators only. Result: `Plugin`.
+    #[serde(rename = "plugin/setChecksBlock")]
+    PluginSetChecksBlock(crate::dto::plugin::PluginSetChecksBlockParams),
     /// What each running plugin has used in the last minute (S104), for
     /// the Plugins page; asked again to refresh. Result: `PluginUsageResult`.
     #[serde(rename = "plugin/usage")]
@@ -915,6 +926,10 @@ pub enum ClientRequest {
     /// method-not-found. Same analytics switch as analytics/track. Result: `Empty`.
     #[serde(rename = "analytics/activeTime")]
     AnalyticsActiveTime(AnalyticsActiveTimeParams),
+    /// Deduplicates a foreground input interval for a selected simulator.
+    /// Optional on older daemons. Operators only. Result: `EngagedSimTimeResult`.
+    #[serde(rename = "analytics/engagedSimTime")]
+    AnalyticsEngagedSimTime(AnalyticsEngagedSimTimeParams),
     /// Consumes coarse browser-daemon flight-time totals once across tabs.
     /// Installed daemons send them directly. Operators only. Result: `FlightTimeUsage`.
     #[serde(rename = "analytics/takeFlightTime")]
@@ -1049,6 +1064,10 @@ pub enum ClientRequest {
     /// suggestions show (S73). Needs `config`. Result: `AccountState`.
     #[serde(rename = "account/setUsername")]
     AccountSetUsername(AccountUsernameParams),
+    /// Sets the account's name, which the team sees with its feedback.
+    /// Needs `config`. Result: `AccountState`.
+    #[serde(rename = "account/setName")]
+    AccountSetName(AccountNameParams),
     /// Where the account is signed in (S114): each computer and browser,
     /// this one marked. Needs `read`. Result: `AccountSessions`.
     #[serde(rename = "account/sessions")]
@@ -1168,6 +1187,123 @@ pub enum ClientRequest {
     /// Needs `read`. Result: `FileSaveResult`.
     #[serde(rename = "files/save")]
     FilesSave(crate::dto::files::FileTransferParams),
+    /// A vehicle's preflight checks (S192, ADR-0038): its own pre-arm
+    /// reasons first, then UXDuck's checks, each with its source, severity
+    /// (block or warn), status and detail in words, and how UXDuck's are
+    /// set. While a blocking check does not pass, arming, a take-off and a
+    /// mission started from the ground are refused `not-sent` with reason
+    /// `preflight`, for every client; an agent's arming is put to an
+    /// operator listing them. The vehicle's own reasons never stop it in
+    /// UXDuck (the vehicle refuses by itself). Changes nothing. Needs
+    /// `read`. Result: `Preflight`.
+    #[serde(rename = "preflight/state")]
+    PreflightState(crate::dto::preflight::PreflightParams),
+    /// Turns one of UXDuck's own checks on or off for a vehicle, or sets
+    /// its severity or threshold, or chooses the plan for the next flight.
+    /// Journaled with the vehicle. Only a person changes them, from an
+    /// operator client. Result: `Preflight`.
+    #[serde(rename = "preflight/configure")]
+    PreflightConfigure(crate::dto::preflight::PreflightConfigureParams),
+    /// Adds, changes, removes or reorders steps of one vehicle's checklist
+    /// (S193, ADR-0038 K8, K11), all or none. A manual step is ticked by a
+    /// person ("Propellers tight"); a rule compares one telemetry item or
+    /// parameter with a value and passes once it has held for `holdS`
+    /// seconds: `{ "kind": "rule", "title": "Battery at least 22.2 V",
+    /// "item": "battery.voltage_v", "op": ">=", "value": 22.2, "holdS": 3 }`.
+    /// Use `battery.cell_v` (the lowest cell, or the pack over its cell
+    /// count) so one rule reads the same on 4S and 6S. A step blocks arming
+    /// until it passes unless its severity is `warn`. The checklist is this
+    /// vehicle's alone: nothing changes on any other vehicle. Needs
+    /// `config`; an agent without it is asked for by the operator first.
+    /// Ticking and overriding are a person's, never an agent's. Result:
+    /// `Preflight`, with the checklist and each step's check.
+    #[serde(rename = "checklist/update")]
+    ChecklistUpdate(crate::dto::checklist::ChecklistUpdateParams),
+    /// Copies steps into one vehicle's checklist (S193, ADR-0038 K7, K11)
+    /// from one source: another vehicle's checklist (`fromVehicleId`), a
+    /// checklist file (`file`, `uxduck.checklist/1`) or a pasted Markdown or
+    /// Notion checklist (`markdown`: each line, `- [ ]` item or numbered
+    /// item a manual step; headings left out). A copy, independent from
+    /// then on; ticks are never copied. After pasting a list, tell the
+    /// person which steps could be rules over telemetry or a parameter
+    /// (such as "Battery charged" as `battery.cell_v >= 4.1`) and change
+    /// them only if they agree. Needs `config`; an agent without it is
+    /// asked for by the operator first. Result: `Preflight`.
+    #[serde(rename = "checklist/copy")]
+    ChecklistCopy(crate::dto::checklist::ChecklistCopyParams),
+    /// A person ticks a manual step of a vehicle's checklist, or clears its
+    /// tick (S193, ADR-0038 K9), recorded with who and when. A tick stays
+    /// until a person clears it. Only from an operator client: an agent,
+    /// MCP client or plugin cannot tick. Result: `Preflight`.
+    #[serde(rename = "checklist/tick")]
+    ChecklistTick(crate::dto::checklist::ChecklistTickParams),
+    /// A person clears every tick of a vehicle's checklist (Reset, S193).
+    /// Only from an operator client. Result: `Preflight`.
+    #[serde(rename = "checklist/reset")]
+    ChecklistReset(crate::dto::preflight::PreflightParams),
+    /// A vehicle's checklist as a file (`uxduck.checklist/1`): its steps
+    /// without ticks, to keep or to copy into another vehicle with
+    /// `checklist/copy`. Changes nothing. Needs `read`. Result:
+    /// `ChecklistFile`.
+    #[serde(rename = "checklist/export")]
+    ChecklistExport(crate::dto::preflight::PreflightParams),
+    /// A vehicle's setup (S184, ADR-0037): the Setup tab's rows for what
+    /// it has (calibrated or not, needing a restart), its compasses, and
+    /// the procedure running or the last one with its progress and result.
+    /// Changes nothing. Needs `read`. Result: `SetupStateResult`.
+    #[serde(rename = "setup/state")]
+    SetupState(crate::dto::setup::SetupParams),
+    /// Starts a procedure on a disarmed vehicle, such as calibrating its
+    /// compasses; one per vehicle at a time. A person does it with the
+    /// vehicle in their hands, so it is not for agents. `compass-heading`
+    /// takes `heading`: the vehicle's true heading, and its position when
+    /// it has no 3D GPS fix. Needs `config`. Result: `Setup`.
+    #[serde(rename = "setup/start")]
+    SetupStart(crate::dto::setup::SetupStartParams),
+    /// Cancels the vehicle's running procedure; for a motor test, stops the
+    /// motor. Needs `config` (`control` for a motor test). Result: `Setup`.
+    #[serde(rename = "setup/cancel")]
+    SetupCancel(crate::dto::setup::SetupParams),
+    /// The person did what the vehicle's running procedure asks (S186):
+    /// for `accelerometer`, it is in the `position` asked for, which UXDuck
+    /// tells the vehicle. Refused when the vehicle asks for another
+    /// position, or for nothing yet. Needs `config`. Result: `Setup`.
+    #[serde(rename = "setup/confirm")]
+    SetupConfirm(crate::dto::setup::SetupConfirmParams),
+    /// Spins one motor while a person holds its press (S188, ADR-0037 V9),
+    /// propellers off: `held` true starts it at `throttle` percent (30 at
+    /// most) and, sent again every 0.25 s with `keep` while held, keeps it
+    /// spinning (a `keep` never starts one);
+    /// UXDuck renews the vehicle's 1 s motor test every 0.5 s while they
+    /// come. It stops when `held` is false, when they stop for 0.6 s, or
+    /// when this connection closes. One motor per vehicle at a time.
+    /// Refused while the vehicle is armed or offline, during another
+    /// procedure, while a controller drives it or someone away has its
+    /// lease. Only an operator's window or the CLI, never an agent or from
+    /// away. Needs `control`. Result: `Setup`.
+    #[serde(rename = "setup/spin")]
+    SetupSpin(crate::dto::setup::SetupSpinParams),
+    /// Installs firmware on a vehicle whose board is on a USB port of the
+    /// computer running UXDuck Desktop (S189, ADR-0037 V10): `release`
+    /// (`stable`, `beta`, `dev` or an earlier stable's version) of
+    /// `vehicleType` from ArduPilot's firmware server, for the board its
+    /// bootloader names, or a `.apj`/`.px4` `file`. The vehicle's
+    /// parameters are saved to its Files first; a running vehicle is
+    /// restarted into its bootloader, otherwise the person replugs it.
+    /// Progress is the procedure's `firmware`; `setup/cancel` stops it only
+    /// before erasing. Refused while armed, for a board on another
+    /// computer, a file for another board or too large for it, and STM32
+    /// DFU boards. Only an operator's window or the CLI, never an agent or
+    /// from away. Needs `config`. Result: `Setup`.
+    #[serde(rename = "setup/firmware")]
+    SetupFirmware(crate::dto::setup::SetupFirmwareParams),
+    /// What can be installed on a vehicle (S189): ArduPilot's releases of
+    /// its type (or `vehicleType`) for its board, stable, beta and dev
+    /// first, from the firmware server's list, fetched at most once a day
+    /// unless `refresh`, and the version it runs now. Changes nothing.
+    /// Needs `read`. Result: `SetupReleasesResult`.
+    #[serde(rename = "setup/firmwareReleases")]
+    SetupFirmwareReleases(crate::dto::setup::SetupReleasesParams),
     /// Gives up the vehicle's running attempt; the vehicle stays where it
     /// is. Needs `control`. Result: `PracticeAttempt`.
     #[serde(rename = "practice/stop")]
@@ -1396,7 +1532,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 282] = [
+    pub const METHODS: [&'static str; 300] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1489,6 +1625,7 @@ impl ClientRequest {
         "mapping/create",
         "daemon/restart",
         "settings/update",
+        "settings/get",
         "storage/usage",
         "storage/clearSimulatorLogs",
         "storage/reveal",
@@ -1498,6 +1635,7 @@ impl ClientRequest {
         "plugin/features",
         "plugin/items",
         "plugin/setEnabled",
+        "plugin/setChecksBlock",
         "plugin/usage",
         "tool/search",
         "plugin/draft",
@@ -1549,6 +1687,7 @@ impl ClientRequest {
         "analytics/track",
         "analytics/feedback",
         "analytics/activeTime",
+        "analytics/engagedSimTime",
         "analytics/takeFlightTime",
         "analytics/takeEngagement",
         "analytics/performance",
@@ -1602,6 +1741,20 @@ impl ClientRequest {
         "files/resume",
         "files/cancel",
         "files/save",
+        "preflight/state",
+        "preflight/configure",
+        "checklist/update",
+        "checklist/copy",
+        "checklist/tick",
+        "checklist/reset",
+        "checklist/export",
+        "setup/state",
+        "setup/start",
+        "setup/cancel",
+        "setup/confirm",
+        "setup/spin",
+        "setup/firmware",
+        "setup/firmwareReleases",
         "terrain/at",
         "terrain/check",
         "terrain/status",
@@ -1662,6 +1815,7 @@ impl ClientRequest {
         "layout/open",
         "feedback/suggest",
         "account/setUsername",
+        "account/setName",
         "account/sessions",
         "account/signOutSession",
         "account/signOutOthers",

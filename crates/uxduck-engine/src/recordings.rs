@@ -97,6 +97,8 @@ impl Engine {
             status: ReceiptStatus::Sent,
             detail: None,
             reason: None,
+            preflight: Vec::new(),
+            preflight_override: None,
             sent_without_recent_heartbeat: false,
             forced: false,
             attempts: 0,

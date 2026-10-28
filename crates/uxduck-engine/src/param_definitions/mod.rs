@@ -763,11 +763,17 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
 
 /// A removed vehicle, and its definitions with it.
 pub(crate) fn removed_with_vehicle(id: &str) -> Vec<EntityChange> {
-    [EntityType::Vehicle, EntityType::ParamDefinitions]
-        .into_iter()
-        .map(|entity| EntityChange {
-            op: ChangeOp::Remove,
-            ..upsert(entity, id)
-        })
-        .collect()
+    // Its preflight checks go too (S192): heard again, they are evaluated
+    // again.
+    [
+        EntityType::Vehicle,
+        EntityType::ParamDefinitions,
+        EntityType::Preflight,
+    ]
+    .into_iter()
+    .map(|entity| EntityChange {
+        op: ChangeOp::Remove,
+        ..upsert(entity, id)
+    })
+    .collect()
 }

@@ -1,0 +1,22 @@
+{
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "row": "compass",
+  "kind": "compass",
+  "step": "cancelled",
+  "progress": 42,
+  "sensors": [
+    {
+      "index": 0,
+      "state": "running",
+      "progress": 42,
+      "sections": [255, 255, 255, 15, 0, 0, 0, 0, 0, 0],
+      "direction": [0.5, -0.25, 0.75],
+      "attempt": 1
+    }
+  ],
+  "instruction": "try-again",
+  "startedAtUs": 1790669300000000,
+  "updatedAtUs": 1790669330000000,
+  "finishedAtUs": 1790669330000000,
+  "version": 9
+}

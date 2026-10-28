@@ -181,6 +181,7 @@ impl Engine {
             size_cm: None,
             traffic: false,
             look: None,
+            preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
             version: 0,
         });
         if known_as.is_none() {
@@ -281,17 +282,26 @@ impl Engine {
         self.observe_flight_usage(&after.id);
         self.hold_when_identified(before, after);
         if before.is_none_or(|b| b.armed != after.armed) {
-            if after.armed {
+            // ArduPilot arms itself for a motor test: no flight (S188).
+            let testing = self.armed_for_motor_test(&after.id, after.armed);
+            // Landed during an airspeed ratio (S190).
+            self.airspeed_armed(&after.id, after.armed);
+            if after.armed && !testing {
                 self.video_vehicle_arming(&after.id);
             }
             self.review_recordings();
             self.review_prearm(&after.id);
-            if after.armed {
+            if testing {
+            } else if after.armed {
                 self.vehicle_armed(after);
                 self.flight_armed(&after.id);
+                // Its checklist as it stood, in its history and flight
+                // (S193, ADR-0038 K14).
+                self.checklist_armed(after);
             } else if before.is_some() {
                 self.vehicle_disarmed(after);
                 self.flight_disarmed(&after.id);
+                self.checklist_disarmed(&after.id);
             }
         }
         // A simulated vehicle offline is no alarm: it stops with the
@@ -308,6 +318,10 @@ impl Engine {
         self.drive_launch_of_vehicle(&after.id);
         self.review_practice(&after.id);
         self.choose_definitions(&after.id);
+        // An install waiting for the vehicle's new version (S189).
+        self.review_reconnect(&after.id);
+        // Its checks: armed, heard, set (S192).
+        self.review_preflight(&after.id);
     }
 
     /// Resolves the "is a real vehicle" notices an older UXDuck raised

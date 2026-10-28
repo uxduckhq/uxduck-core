@@ -64,6 +64,57 @@ pub fn instance_free(instance: u8) -> bool {
     })
 }
 
+/// How long an instance stays claimed while its ports are still free: its
+/// simulator may still be downloading or starting.
+const CLAIM_GRACE: Duration = Duration::from_secs(300);
+
+/// The instances this process has claimed, each by an exclusive lock on a
+/// file of its own, and when.
+static CLAIMS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<u8, (std::fs::File, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Mutex::default);
+
+/// Claims an instance whose ports are free, for a simulator this process is
+/// about to start: an exclusive lock on its file in the system's temporary
+/// folder, so another UXDuck starting one at the same time (tests start many)
+/// skips it instead of finding its ports free too and both opening them. The
+/// system drops a claim with the process; this process drops one whose ports
+/// are free again after `CLAIM_GRACE`, when its simulator has stopped.
+#[must_use]
+pub fn claim_instance(instance: u8) -> bool {
+    let mut claims = CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
+    claims.retain(|held, (_, at)| {
+        *held == instance || at.elapsed() < CLAIM_GRACE || !instance_free(*held)
+    });
+    if !instance_free(instance) {
+        return false;
+    }
+    if claims.contains_key(&instance) {
+        return true;
+    }
+    let claimed = claim_file(instance)
+        .ok()
+        .filter(|file| file.try_lock().is_ok());
+    match claimed {
+        Some(file) => {
+            claims.insert(instance, (file, std::time::Instant::now()));
+            true
+        }
+        None => false,
+    }
+}
+
+/// An instance's claim file, shared by every UXDuck on this computer.
+fn claim_file(instance: u8) -> std::io::Result<std::fs::File> {
+    let dir = std::env::temp_dir().join("uxduck-simulator-instances");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("{instance}.lock")))
+}
+
 /// Where a running simulated vehicle's MAVLink is, on this computer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Endpoint {
@@ -1439,6 +1490,25 @@ mod tests {
         text.push_str("Smoothing reset\tat 0\n\n  \n");
         std::fs::write(&log, text).expect("log");
         assert_eq!(last_line(&log).as_deref(), Some("Smoothing reset at 0"));
+    }
+
+    #[test]
+    fn an_instance_claimed_by_another_process_is_not_claimed_again() {
+        // An instance the other tests here leave alone.
+        let instance: u8 = 30;
+        assert!(
+            instance_free(instance),
+            "instance {instance}'s ports are free"
+        );
+        // A second open of the file locks as another process would.
+        let elsewhere = claim_file(instance).expect("the claim file");
+        elsewhere.try_lock().expect("nobody holds the claim yet");
+        assert!(!claim_instance(instance), "held elsewhere: skipped");
+        drop(elsewhere);
+        assert!(claim_instance(instance), "free and unclaimed: ours");
+        assert!(claim_instance(instance), "ours already: still ours");
+        let later = claim_file(instance).expect("the claim file");
+        assert!(later.try_lock().is_err(), "while ours, nobody else's");
     }
 
     #[test]

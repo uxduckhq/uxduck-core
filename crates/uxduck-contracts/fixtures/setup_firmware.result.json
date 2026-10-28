@@ -1,0 +1,41 @@
+{
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "row": "firmware",
+  "kind": "firmware",
+  "step": "running",
+  "progress": 55,
+  "instruction": "keep-plugged",
+  "firmware": {
+    "stage": "writing",
+    "done": 904000,
+    "total": 1645036,
+    "source": {
+      "type": "release",
+      "vehicleType": "copter",
+      "release": "stable"
+    },
+    "before": "4.6.2",
+    "beforeType": "Quadrotor",
+    "board": {
+      "boardId": 140,
+      "boardRev": 0,
+      "bootloader": 5,
+      "flashSize": 2064384
+    },
+    "fileBoardId": 140,
+    "platform": "CubeOrange",
+    "version": "4.7.2",
+    "url": "https://firmware.ardupilot.org/Copter/stable/CubeOrange/arducopter.apj",
+    "parameters": "Alpha-2026-10-25-120000-before-firmware.param"
+  },
+  "startedBy": {
+    "clientName": "uxduck-web",
+    "clientKind": "operator-ui",
+    "operatorId": "op5f1c0a91b2d3e4f5",
+    "operatorName": "Ben"
+  },
+  "receiptId": "rc1a2b3c4d5e6f7a8b",
+  "startedAtUs": 1790669300000000,
+  "updatedAtUs": 1790669330000000,
+  "version": 14
+}

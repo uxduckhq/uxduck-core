@@ -236,6 +236,7 @@ impl Sender {
             "fromAgent": order.from_agent,
             "text": order.text,
             "email": order.reply_email,
+            "name": order.reporter_name,
             "surface": order.surface,
             "via": "daemon",
             "context": format!("{} · {}", platform_name(), order.context),

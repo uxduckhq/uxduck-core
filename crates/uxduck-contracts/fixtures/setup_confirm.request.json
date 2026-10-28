@@ -1,0 +1,7 @@
+{
+  "method": "setup/confirm",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "position": "nose-down"
+  }
+}

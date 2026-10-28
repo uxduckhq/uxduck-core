@@ -41,6 +41,10 @@ Run `uxduck params definitions list` and follow [Missing descriptions](/docs/par
 
 Run `uxduck video list`. Use `uxduck video probe --port 5600` to inspect the arriving stream, replacing `5600` with its port; `uxduck video probe --help` lists the options. Check its transport and codec against [Camera video](/docs/camera-video). QGroundControl and UXDuck cannot both listen on the same UDP port on this computer.
 
+## A controller input is missing or shared
+
+Check the active radio model's channel monitor and USB joystick mode, then compare individual inputs in UXDuck's controller setup. [Controllers and radio transmitters](/docs/controllers) covers Tango 2 CH7/CH8 on macOS, rear E/F button mixes, EdgeTX USB modes and Xbox layouts. Native support requires the app to be connected to **Computer**.
+
 ## Prepare a useful report
 
 Include the running version and release stage from `uxduck rpc call daemon/about`, the vehicle's firmware version, the link type, the exact symptom and when it happened. Add the recent message or command receipt and whether telemetry was fresh. For an MCP investigation, include the requested interval, actual coverage, missing keys and truncation flags.

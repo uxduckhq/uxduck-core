@@ -151,5 +151,9 @@ pub struct Flight {
     /// The parameters it armed with (C7), when UXDuck had them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FlightParams>,
+    /// Its checklist as it stood when it armed, and every override
+    /// (S193, ADR-0038 K14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist: Option<crate::domain::checklist::ChecklistRecord>,
     pub version: u64,
 }

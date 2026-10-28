@@ -30,5 +30,18 @@
   "recreateSimulations": false,
   "terrainDataset": "alos",
   "trafficAlertM": 2000,
-  "trafficAlertUpM": 300
+  "trafficAlertUpM": 300,
+  "trafficControls": {
+    "rangeM": 10000,
+    "limitRange": true,
+    "heightM": 1000,
+    "limitHeight": true,
+    "allVehicles": true,
+    "vehicleIds": [],
+    "deviceLocation": false,
+    "sites": [],
+    "alwaysLabel": false,
+    "refreshS": 30,
+    "alertsEnabled": true
+  }
 }

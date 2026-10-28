@@ -1,0 +1,204 @@
+{
+  "checklist": {
+    "offers": [
+      {
+        "current": 0.0,
+        "held": false,
+        "name": "BATT_ARM_VOLT",
+        "stepId": "st81d04e6a2c",
+        "value": 22.2
+      }
+    ],
+    "steps": [
+      {
+        "id": "st3f9a2c71be",
+        "kind": "manual",
+        "severity": "block",
+        "title": "Propellers tight"
+      },
+      {
+        "holdS": 3.0,
+        "id": "st81d04e6a2c",
+        "item": "battery.voltage_v",
+        "kind": "rule",
+        "op": ">=",
+        "severity": "block",
+        "title": "Battery at least 22.2 V",
+        "unit": "V",
+        "value": 22.2
+      }
+    ],
+    "version": 1,
+    "copiedFrom": "Alpha's checklist"
+  },
+  "checks": [
+    {
+      "detail": "It hasn't said whether it is ready to arm.",
+      "gates": false,
+      "id": "vehicle:ready",
+      "severity": "block",
+      "source": "vehicle",
+      "status": "unknown",
+      "title": "Bravo's own checks"
+    },
+    {
+      "detail": "None running.",
+      "gates": false,
+      "id": "uxduck:setup",
+      "severity": "block",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "No setup procedure running"
+    },
+    {
+      "detail": "Nothing waits for a restart.",
+      "gates": false,
+      "id": "uxduck:restart",
+      "severity": "block",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "No restart due"
+    },
+    {
+      "detail": "Heard just now.",
+      "gates": false,
+      "id": "uxduck:link",
+      "severity": "warn",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "Link"
+    },
+    {
+      "detail": "No controller drives Bravo.",
+      "gates": false,
+      "id": "uxduck:controller",
+      "severity": "warn",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "Controller at neutral"
+    },
+    {
+      "detail": "No plan chosen for Bravo.",
+      "gates": false,
+      "id": "uxduck:plan",
+      "severity": "warn",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "Plan on the vehicle"
+    },
+    {
+      "detail": "Bravo's mission doesn't fly above terrain.",
+      "gates": false,
+      "id": "uxduck:terrain",
+      "severity": "warn",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "Terrain loaded"
+    },
+    {
+      "detail": "No camera records with Bravo.",
+      "gates": false,
+      "id": "uxduck:recording",
+      "severity": "warn",
+      "source": "uxduck",
+      "status": "pass",
+      "title": "Cameras ready to record"
+    },
+    {
+      "detail": "For a person to tick.",
+      "gates": true,
+      "id": "checklist:st3f9a2c71be",
+      "severity": "block",
+      "source": "checklist",
+      "status": "to-do",
+      "title": "Propellers tight"
+    },
+    {
+      "detail": "Bravo isn't reporting battery.voltage_v now.",
+      "gates": true,
+      "id": "checklist:st81d04e6a2c",
+      "severity": "block",
+      "source": "checklist",
+      "status": "unknown",
+      "title": "Battery at least 22.2 V"
+    }
+  ],
+  "evaluating": true,
+  "settings": [
+    {
+      "check": "setup",
+      "defaultSeverity": "block",
+      "id": "uxduck:setup",
+      "on": true,
+      "severity": "block",
+      "title": "No setup procedure running"
+    },
+    {
+      "check": "restart",
+      "defaultSeverity": "block",
+      "id": "uxduck:restart",
+      "on": true,
+      "severity": "block",
+      "title": "No restart due"
+    },
+    {
+      "check": "link",
+      "defaultSeverity": "warn",
+      "id": "uxduck:link",
+      "on": true,
+      "severity": "warn",
+      "threshold": {
+        "default": 30.0,
+        "label": "Least radio signal",
+        "max": 100.0,
+        "min": 0.0,
+        "unit": "%",
+        "value": 30.0
+      },
+      "title": "Link"
+    },
+    {
+      "check": "controller",
+      "defaultSeverity": "warn",
+      "id": "uxduck:controller",
+      "on": true,
+      "severity": "warn",
+      "threshold": {
+        "default": 10.0,
+        "label": "Sticks within",
+        "max": 50.0,
+        "min": 1.0,
+        "unit": "%",
+        "value": 10.0
+      },
+      "title": "Controller at neutral"
+    },
+    {
+      "check": "plan",
+      "defaultSeverity": "warn",
+      "id": "uxduck:plan",
+      "on": true,
+      "severity": "warn",
+      "title": "Plan on the vehicle"
+    },
+    {
+      "check": "terrain",
+      "defaultSeverity": "warn",
+      "id": "uxduck:terrain",
+      "on": true,
+      "severity": "warn",
+      "title": "Terrain loaded"
+    },
+    {
+      "check": "recording",
+      "defaultSeverity": "warn",
+      "id": "uxduck:recording",
+      "on": true,
+      "severity": "warn",
+      "title": "Cameras ready to record"
+    }
+  ],
+  "updatedAtUs": 1790669310000000,
+  "vehicleId": "vb2c3d4e5f6a7b8c9",
+  "version": 12
+}

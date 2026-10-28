@@ -266,6 +266,25 @@ pub struct Plugin {
     /// It is a traffic source, listed in Airspace on or off (S171).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub traffic_source: bool,
+    /// Its preflight checks, from its manifest (S194, ADR-0038 K12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<DeclaredCheck>,
+    /// Whether its blocking checks may stop arming (K13): a person's
+    /// answer on this computer. None until someone answers; until `true`
+    /// they only warn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_block: Option<bool>,
+}
+
+/// A preflight check a plugin declares (S194).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclaredCheck {
+    pub id: String,
+    pub title: String,
+    pub severity: crate::domain::preflight::CheckSeverity,
+    /// A report older than this no longer counts.
+    pub stale_ms: u32,
 }
 
 const fn on() -> bool {
@@ -277,6 +296,20 @@ const fn abi_one() -> u32 {
 }
 
 impl Plugin {
+    /// Whether it declares a check that asks to stop arming (K13).
+    #[must_use]
+    pub fn asks_to_block(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.severity == crate::domain::preflight::CheckSeverity::Block)
+    }
+
+    /// Whether its blocking checks stop arming: a person allowed it (K13).
+    #[must_use]
+    pub fn checks_may_block(&self) -> bool {
+        self.checks_block == Some(true)
+    }
+
     /// The client id its actions are journaled under.
     #[must_use]
     pub fn client_id(&self) -> String {

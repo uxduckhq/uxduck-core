@@ -6,12 +6,117 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The single units choice operators had before ADR-0036. Kept as a
+/// summary of `quantity_units` for older apps, and read for an operator
+/// saved before them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UnitSystem {
     #[default]
     Metric,
     Imperial,
+}
+
+impl UnitSystem {
+    /// Every quantity in this system (ADR-0036 U3): what an operator
+    /// saved with only this choice shows, and what the helper sets.
+    #[must_use]
+    pub const fn quantity_units(self) -> QuantityUnits {
+        match self {
+            Self::Metric => QuantityUnits {
+                distance: DistanceUnit::Kilometers,
+                altitude: AltitudeUnit::Meters,
+                speed: SpeedUnit::MetersPerSecond,
+                vertical_speed: VerticalSpeedUnit::MetersPerSecond,
+                temperature: TemperatureUnit::Celsius,
+            },
+            Self::Imperial => QuantityUnits {
+                distance: DistanceUnit::Miles,
+                altitude: AltitudeUnit::Feet,
+                speed: SpeedUnit::Knots,
+                vertical_speed: VerticalSpeedUnit::FeetPerMinute,
+                temperature: TemperatureUnit::Fahrenheit,
+            },
+        }
+    }
+}
+
+/// Horizontal distances (ADR-0036): short ones in the first unit, long
+/// ones in the second.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DistanceUnit {
+    /// Metres, then kilometres.
+    #[default]
+    Kilometers,
+    /// Feet, then statute miles.
+    Miles,
+}
+
+/// Altitudes and heights.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AltitudeUnit {
+    #[default]
+    Meters,
+    Feet,
+}
+
+/// Horizontal speeds: ground speed, airspeed, wind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeedUnit {
+    #[default]
+    MetersPerSecond,
+    KilometersPerHour,
+    Knots,
+    MilesPerHour,
+}
+
+/// Climb and descent rates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerticalSpeedUnit {
+    #[default]
+    MetersPerSecond,
+    FeetPerMinute,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TemperatureUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+/// The unit an operator reads each kind of quantity in (ADR-0036): the
+/// stored choice, one per quantity. Presentation only; contracts stay SI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuantityUnits {
+    #[serde(default)]
+    pub distance: DistanceUnit,
+    #[serde(default)]
+    pub altitude: AltitudeUnit,
+    #[serde(default)]
+    pub speed: SpeedUnit,
+    #[serde(default)]
+    pub vertical_speed: VerticalSpeedUnit,
+    #[serde(default)]
+    pub temperature: TemperatureUnit,
+}
+
+impl QuantityUnits {
+    /// The old single choice these read as, for apps that know only it
+    /// (ADR-0036 U4): by the altitude unit, the one a pilot flies by.
+    #[must_use]
+    pub const fn system(self) -> UnitSystem {
+        match self.altitude {
+            AltitudeUnit::Meters => UnitSystem::Metric,
+            AltitudeUnit::Feet => UnitSystem::Imperial,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +248,14 @@ pub enum TabKind {
     /// Other aircraft near the vehicles and the sources that report them
     /// (S168, ADR-0034). It follows no vehicle.
     Airspace,
+    /// The focused vehicle's setup (S184, ADR-0037 V1): a row per
+    /// procedure, such as calibrating its compasses. It follows the selected
+    /// vehicle, or the one it is pinned to.
+    Setup,
+    /// The focused vehicle's checklist (S193, ADR-0038), with its other
+    /// preflight checks, as a tab of its own when it is long. It follows
+    /// the selected vehicle, or the one it is pinned to.
+    Checklist,
 }
 
 impl TabKind {
@@ -185,17 +298,22 @@ impl TabKind {
             Self::Profile => "profile",
             Self::Duck => "duck",
             Self::Airspace => "airspace",
+            Self::Setup => "setup",
+            Self::Checklist => "checklist",
         }
     }
 
     /// The kind whose group a new tab of this kind opens in, when there is
-    /// one: the inspector beside Messages, and the camera below the maps
-    /// with Parameters (maintainer, 2026-10-16). The web's `JOINS`.
+    /// one: the inspector beside Messages, the camera below the maps with
+    /// Parameters (maintainer, 2026-10-16), and Setup beside Parameters
+    /// (S184), and the checklist beside the Cockpit, where Arm is (S193).
+    /// The web's `JOINS`.
     #[must_use]
     pub const fn joins(self) -> Option<Self> {
         match self {
             Self::Inspector => Some(Self::Messages),
-            Self::Camera => Some(Self::Parameters),
+            Self::Camera | Self::Setup => Some(Self::Parameters),
+            Self::Checklist => Some(Self::Control),
             _ => None,
         }
     }
@@ -1241,7 +1359,13 @@ pub fn clean_layout_name(name: &str) -> Option<String> {
 pub struct Operator {
     pub id: String,
     pub name: String,
+    /// The old single units choice: a summary of `quantity_units`, read
+    /// only for an operator saved before them (ADR-0036 U4).
     pub units: UnitSystem,
+    /// The unit for each kind of quantity (ADR-0036). None on an operator
+    /// saved before them, which reads as `units` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_units: Option<QuantityUnits>,
     pub coordinate_format: CoordinateFormat,
     /// The altitude the instruments show (maintainer, 2026-10-05): above
     /// home unless chosen otherwise. Telemetry tiles name their own frame.
@@ -1315,6 +1439,24 @@ pub struct Operator {
 
 const fn place_search_default() -> bool {
     true
+}
+
+impl Operator {
+    /// The unit for each quantity: the stored ones, else as the old
+    /// single choice says.
+    #[must_use]
+    pub const fn quantity_units(&self) -> QuantityUnits {
+        match self.quantity_units {
+            Some(units) => units,
+            None => self.units.quantity_units(),
+        }
+    }
+
+    /// Sets every quantity's unit, keeping the old choice as their summary.
+    pub const fn set_quantity_units(&mut self, units: QuantityUnits) {
+        self.quantity_units = Some(units);
+        self.units = units.system();
+    }
 }
 
 /// The longest operator name, in characters.
@@ -2396,6 +2538,7 @@ mod tests {
             id: "op1".into(),
             name: "Ana".into(),
             units: UnitSystem::Metric,
+            quantity_units: None,
             coordinate_format: CoordinateFormat::Decimal,
             altitude_frame: crate::domain::telemetry::AltitudeFrame::default(),
             layout: Layout::initial(),
@@ -2431,6 +2574,35 @@ mod tests {
         assert!(old.parameter_groups.is_empty());
         assert!(old.inspector_pinned.is_empty());
         assert!(old.control_actions.is_empty());
+    }
+
+    #[test]
+    fn an_operator_saved_with_one_units_choice_reads_it_for_every_quantity() {
+        let stored = serde_json::json!({
+            "id": "op1", "name": "Ana", "units": "imperial", "coordinateFormat": "decimal",
+            "version": 1,
+        });
+        let mut old: Operator = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.quantity_units, None);
+        let imperial = old.quantity_units();
+        assert_eq!(imperial.altitude, AltitudeUnit::Feet);
+        assert_eq!(imperial.speed, SpeedUnit::Knots);
+        assert_eq!(imperial.vertical_speed, VerticalSpeedUnit::FeetPerMinute);
+        assert_eq!(imperial.temperature, TemperatureUnit::Fahrenheit);
+        assert_eq!(imperial.distance, DistanceUnit::Miles);
+
+        // Mixed units keep the old choice as their altitude's system.
+        old.set_quantity_units(QuantityUnits {
+            altitude: AltitudeUnit::Meters,
+            ..imperial
+        });
+        assert_eq!(old.units, UnitSystem::Metric);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert_eq!(saved["quantityUnits"]["verticalSpeed"], "feet-per-minute");
+        assert_eq!(saved["quantityUnits"]["distance"], "miles");
+        let back: Operator = serde_json::from_value(saved).unwrap();
+        assert_eq!(back.quantity_units().speed, SpeedUnit::Knots);
+        assert_eq!(back.quantity_units().altitude, AltitudeUnit::Meters);
     }
 
     #[test]

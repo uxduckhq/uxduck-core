@@ -826,7 +826,7 @@ fn prepare_worker(
             .into(),
         kind: staged.kind().to_owned(),
         executable: executable.clone(),
-        installed_executable: Some(installer::installed_executable()?),
+        installed_executable: Some(installer::installed_executable(&executable)?),
         data_dir: data_dir.into(),
         port,
         reopen: reopen_target.is_some(),
@@ -950,7 +950,7 @@ pub fn worker(dir: &Path) -> Result<(), String> {
                 Staged::Package(artifact) => {
                     let package = dir.join(format!("package.{}", artifact.kind));
                     installer::preflight(&package)?;
-                    installer::install(&package, &artifact.kind, &plan.version)?;
+                    installer::install(&package, &artifact.kind, &plan.version, installed)?;
                 }
                 // A failure leaves the previous app in place; the next attempt
                 // downloads this version's full package.

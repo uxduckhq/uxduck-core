@@ -51,6 +51,8 @@ pub struct FeedbackOrder {
     pub kind: FeedbackKind,
     pub text: String,
     pub reply_email: Option<String>,
+    /// Signed in, the name the person goes by here.
+    pub reporter_name: Option<String>,
     pub surface: Surface,
     /// One line for people, without the platform, which the root adds.
     pub context: String,
@@ -483,6 +485,12 @@ pub(crate) fn handle(
         kind: params.kind,
         text,
         reply_email: params.reply_email.clone(),
+        reporter_name: params
+            .reporter_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned),
         surface: params.surface,
         context: engine.context(&params),
         screenshot: params.screenshot.clone(),
@@ -642,8 +650,8 @@ impl Engine {
     }
 
     /// "UXDuck 0.4.1 · Chrome 141 tab on UXDuck Desktop · window 1512×945 ·
-    /// map open · 1 vehicle (ArduPilot Copter, udp-listen)". The root puts
-    /// the platform first.
+    /// 1 vehicle (ArduPilot Copter, udp-listen) · not signed in · map open".
+    /// The root puts the platform first.
     fn context(&self, params: &FeedbackSendParams) -> String {
         // The page's own words: kept short, they are not checked.
         let short = |s: &str| s.chars().take(40).collect::<String>();
@@ -661,9 +669,6 @@ impl Engine {
         let mut parts = vec![format!("UXDuck {}", ui.app_version), surface];
         if let Some(window) = &ui.window {
             parts.push(format!("window {}", short(window)));
-        }
-        if !params.ui.panes.is_empty() {
-            parts.push(format!("{} open", params.ui.panes.join(", ")));
         }
         let vehicles: Vec<String> = self
             .state
@@ -686,9 +691,25 @@ impl Engine {
             n => format!("{n} vehicles ({})", vehicles.join(", ")),
         });
         parts.push("not signed in".to_owned());
-        let line = parts.join(" · ");
-        line.chars().take(250).collect()
+        fitted(&parts, &params.ui.panes)
     }
+}
+
+/// The context line in 250 characters, with what is open last: listed while
+/// it fits, else counted, so the vehicles are never what is cut off.
+fn fitted(parts: &[String], panes: &[String]) -> String {
+    const MAX: usize = 250;
+    let mut line = parts.join(" · ");
+    if !panes.is_empty() {
+        let listed = format!(" · {} open", panes.join(", "));
+        let tail = if line.chars().count() + listed.chars().count() <= MAX {
+            listed
+        } else {
+            format!(" · {} tabs open", panes.len())
+        };
+        line.push_str(&tail);
+    }
+    line.chars().take(MAX).collect()
 }
 
 #[cfg(test)]
@@ -696,6 +717,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_long_tab_list_is_counted_and_never_cuts_off_the_vehicles() {
+        let parts = [
+            "UXDuck 0.7.2".to_owned(),
+            "Chrome 156 tab on UXDuck Desktop".to_owned(),
+            "1 vehicle (Ardupilotmega Quadrotor, udp-listen)".to_owned(),
+            "not signed in".to_owned(),
+        ];
+        let few = ["map".to_owned(), "control".to_owned()];
+        assert_eq!(
+            fitted(&parts, &few),
+            "UXDuck 0.7.2 · Chrome 156 tab on UXDuck Desktop · 1 vehicle \
+             (Ardupilotmega Quadrotor, udp-listen) · not signed in · map, control open"
+        );
+        let many: Vec<String> = (0..40).map(|i| format!("pane-{i}")).collect();
+        let line = fitted(&parts, &many);
+        assert!(
+            line.contains("1 vehicle (Ardupilotmega Quadrotor, udp-listen)"),
+            "{line}"
+        );
+        assert!(line.ends_with(" · 40 tabs open"), "{line}");
+        assert!(line.chars().count() <= 250);
+        assert_eq!(fitted(&parts, &[]), parts.join(" · "));
+    }
 
     #[test]
     fn scrubbing_rounds_places_and_removes_secrets_addresses_and_devices() {

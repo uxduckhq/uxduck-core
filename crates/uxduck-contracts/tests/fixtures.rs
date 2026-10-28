@@ -172,6 +172,9 @@ fn check(name: &str) {
         ("result", "analytics_takeEngagement") => {
             round_trip::<uxduck_contracts::dto::analytics::EngagementUsage>(name, &json);
         }
+        ("result", "analytics_engagedSimTime") => {
+            round_trip::<uxduck_contracts::dto::analytics::EngagedSimTimeResult>(name, &json);
+        }
         ("result", "vehicle_messages") => {
             round_trip::<uxduck_contracts::dto::messages::VehicleMessagesResult>(name, &json);
         }
@@ -204,7 +207,11 @@ fn check(name: &str) {
         }
         (
             "result",
-            "plugin_install" | "plugin_allow" | "plugin_installShared" | "plugin_setEnabled",
+            "plugin_install"
+            | "plugin_allow"
+            | "plugin_installShared"
+            | "plugin_setEnabled"
+            | "plugin_setChecksBlock",
         ) => {
             round_trip::<uxduck_contracts::dto::plugin::Plugin>(name, &json);
         }
@@ -247,7 +254,7 @@ fn check(name: &str) {
         ("bundle", "feedback") => {
             round_trip::<uxduck_contracts::dto::feedback::FeedbackBundle>(name, &json);
         }
-        ("result", "settings_update") => {
+        ("result", "settings_update" | "settings_get") => {
             round_trip::<uxduck_contracts::dto::settings::Settings>(name, &json);
         }
         ("result", "daemon_wakeups") => {
@@ -437,6 +444,7 @@ fn check(name: &str) {
             | "account_verify"
             | "account_setUpdates"
             | "account_setUsername"
+            | "account_setName"
             | "account_signOutSession"
             | "account_signOutOthers",
         ) => {
@@ -471,6 +479,32 @@ fn check(name: &str) {
         }
         ("result", "files_save") => {
             round_trip::<uxduck_contracts::dto::files::FileSaveResult>(name, &json);
+        }
+        (
+            "result",
+            "preflight_state"
+            | "preflight_configure"
+            | "checklist_update"
+            | "checklist_copy"
+            | "checklist_tick"
+            | "checklist_reset",
+        ) => {
+            round_trip::<uxduck_contracts::dto::preflight::Preflight>(name, &json);
+        }
+        ("result", "checklist_export") => {
+            round_trip::<uxduck_contracts::dto::checklist::ChecklistFile>(name, &json);
+        }
+        ("result", "setup_state") => {
+            round_trip::<uxduck_contracts::dto::setup::SetupStateResult>(name, &json);
+        }
+        ("result", "setup_firmwareReleases") => {
+            round_trip::<uxduck_contracts::dto::setup::SetupReleasesResult>(name, &json);
+        }
+        (
+            "result",
+            "setup_start" | "setup_cancel" | "setup_confirm" | "setup_spin" | "setup_firmware",
+        ) => {
+            round_trip::<uxduck_contracts::dto::setup::Setup>(name, &json);
         }
         ("result", "practice_list") => {
             round_trip::<uxduck_contracts::dto::practice::PracticeListResult>(name, &json);

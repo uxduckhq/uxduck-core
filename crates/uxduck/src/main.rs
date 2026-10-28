@@ -15,6 +15,7 @@ mod edge;
 mod errors;
 mod feedback;
 mod find;
+mod firmware;
 mod grants;
 mod inspect;
 mod interface;

@@ -161,7 +161,7 @@ fn aircraft(address: u32, lat: f64, lon: f64, heard_us: u64) -> TrafficReport {
         protocol: TrafficProtocol::Adsb,
         position: Some((lat, lon)),
         altitude_m: Some(600.0),
-        altitude_frame: None,
+        altitude_frame: Some(uxduck_core::domain::traffic::AltitudeFrame::Geometric),
         track_deg: Some(90.0),
         ground_speed_mps: Some(50.0),
         climb_mps: None,
@@ -420,7 +420,7 @@ fn at(engine: &mut Engine, id: &str, lat: f64, lon: f64, amsl_m: f64) {
             climb_mps: None,
             horizontal_accuracy_m: None,
             vertical_accuracy_m: None,
-            time_us: 1,
+            time_us: START_US,
         }],
         items: vec![],
     });
@@ -567,7 +567,7 @@ fn a_usb_receiver_stick_is_one_read_only_sbs_receiver() {
 }
 
 #[test]
-fn traffic_near_an_armed_vehicle_warns_and_clears_once_past() {
+fn traffic_alerts_ignore_arming_and_clear_once_past() {
     let (mut engine, clock) = engine();
     let mut ui = join(&mut engine, "operator-ui");
     two_vehicles(&mut engine, &mut ui);
@@ -590,13 +590,13 @@ fn traffic_near_an_armed_vehicle_warns_and_clears_once_past() {
             .map(|n| (n.title.clone(), n.body.clone().unwrap_or_default()))
             .collect::<Vec<_>>()
     };
-    // Close, but Alpha is on the ground and disarmed: no warning.
+    // Close while disarmed: warn according to the explicit settings.
     let mut near = aircraft(5, 51.51, -0.1, clock.now());
     near.altitude_m = Some(720.0);
     engine.vehicle_traffic("alpha", near.clone());
     clock.advance(300_000);
     engine.expire_traffic(clock.now());
-    assert!(warned(&engine).is_empty());
+    assert_eq!(warned(&engine).len(), 1);
 
     let mut armed = engine.state().vehicles["alpha"].clone();
     armed.armed = true;
@@ -630,6 +630,16 @@ fn traffic_near_an_armed_vehicle_warns_and_clears_once_past() {
     clock.advance(300_000);
     engine.expire_traffic(clock.now());
     assert!(warned(&engine).is_empty(), "cleared once past");
+    clock.advance(4_000_000); // Return at a plausible speed, not a refused jump.
+    near.heard_us = clock.now();
+    engine.vehicle_traffic("alpha", near);
+    clock.advance(300_000);
+    engine.expire_traffic(clock.now());
+    assert_eq!(
+        warned(&engine).len(),
+        1,
+        "the same aircraft warns again on re-entry"
+    );
 }
 
 fn observation_of(v: &uxduck_core::domain::vehicle::Vehicle) -> Observation {
@@ -649,5 +659,155 @@ fn observation_of(v: &uxduck_core::domain::vehicle::Vehicle) -> Observation {
         last_heartbeat_us: v.last_heartbeat_us,
         armed: v.armed,
         mode: v.mode.clone(),
+    }
+}
+
+#[test]
+fn traffic_settings_preserve_explicit_choices_and_reject_invalid_ranges() {
+    let (mut engine, _) = engine();
+    let mut ui = join(&mut engine, "operator-ui");
+    let settings = serde_json::to_value(uxduck_contracts::convert::settings::settings_dto(
+        &engine.state().settings,
+        uxduck_core::domain::settings::ClosePolicy::KeepRunning,
+    ))
+    .unwrap();
+    assert_eq!(settings["trafficControls"]["rangeM"], 10000);
+    assert_eq!(settings["trafficControls"]["heightM"], 1000);
+    assert_eq!(settings["trafficControls"]["refreshS"], 30);
+    let changed = call(
+        &mut engine,
+        &mut ui,
+        "settings/update",
+        json!({
+            "expectedVersion": settings["version"],
+            "trafficControls": {"rangeM": 15000, "heightM": 1500, "limitHeight": false,
+                "allVehicles": false, "vehicleIds": ["bravo"], "deviceLocation": true,
+                "sites": [{"id":"ground", "name":"Launch", "latitudeE7":515_000_000, "longitudeE7":-1_000_000, "altitudeM":40}],
+                "alertsEnabled": false, "refreshS": 45}
+        }),
+    );
+    assert!(changed.get("error").is_none(), "{changed}");
+    let saved = serde_json::to_value(uxduck_contracts::convert::settings::settings_dto(
+        &engine.state().settings,
+        uxduck_core::domain::settings::ClosePolicy::KeepRunning,
+    ))
+    .unwrap();
+    assert_eq!(saved["trafficControls"]["heightM"], 1500);
+    assert_eq!(saved["trafficControls"]["limitHeight"], false);
+    assert_eq!(saved["trafficControls"]["sites"][0]["name"], "Launch");
+    for bad in [
+        json!({"rangeM":0}),
+        json!({"refreshS":0}),
+        json!({"heightM":20001}),
+        json!({"sites":[{"id":"x","name":"X","latitudeE7":910_000_000,"longitudeE7":0}]}),
+    ] {
+        let answer = call(
+            &mut engine,
+            &mut ui,
+            "settings/update",
+            json!({"expectedVersion":saved["version"],"trafficControls":bad}),
+        );
+        assert_eq!(answer["error"]["data"]["kind"], "invalid-value", "{answer}");
+    }
+    assert_eq!(
+        serde_json::to_value(uxduck_contracts::convert::settings::settings_dto(
+            &engine.state().settings,
+            uxduck_core::domain::settings::ClosePolicy::KeepRunning
+        ))
+        .unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn pressure_height_stays_uncertain_and_alerts_are_independent_of_display_filters() {
+    let (mut engine, clock) = engine();
+    let mut ui = join(&mut engine, "operator-ui");
+    two_vehicles(&mut engine, &mut ui);
+    call(
+        &mut engine,
+        &mut ui,
+        "vehicle/traffic",
+        json!({"id":"alpha","on":true}),
+    );
+    at(&mut engine, "alpha", 51.5, -0.1, 600.0);
+    let mut near = aircraft(5, 51.51, -0.1, clock.now());
+    near.altitude_m = Some(9000.0);
+    near.altitude_frame = Some(uxduck_core::domain::traffic::AltitudeFrame::Pressure);
+    engine.vehicle_traffic("alpha", near);
+    clock.advance(300_000);
+    engine.expire_traffic(clock.now());
+    let picture = status(&mut engine, &mut ui);
+    assert!(picture["aircraft"][0]["amslM"].is_null());
+    assert!(picture["aircraft"][0]["ellipsoidM"].is_null());
+    assert_eq!(picture["aircraft"][0]["alertVehicleIds"], json!(["alpha"]));
+    assert!(engine.state().notifications.values().any(|n| {
+        n.body
+            .as_deref()
+            .is_some_and(|body| body.contains("altitude uncertain"))
+    }));
+    let version = engine.state().settings.version;
+    let saved = call(
+        &mut engine,
+        &mut ui,
+        "settings/update",
+        json!({"expectedVersion":version,"trafficControls":{"rangeM":100,"heightM":30,"allVehicles":false}}),
+    );
+    assert!(saved.get("error").is_none(), "{saved}");
+    assert_eq!(
+        status(&mut engine, &mut ui)["aircraft"][0]["alertVehicleIds"],
+        json!(["alpha"])
+    );
+    let version = engine.state().settings.version;
+    call(
+        &mut engine,
+        &mut ui,
+        "settings/update",
+        json!({"expectedVersion":version,"trafficControls":{"alertsEnabled":false}}),
+    );
+    assert!(status(&mut engine, &mut ui)["aircraft"][0]["alertVehicleIds"].is_null());
+    assert!(
+        !engine
+            .state()
+            .notifications
+            .values()
+            .any(
+                |n| n.condition.as_deref() == Some("traffic-near:alpha:000005")
+                    && serde_json::to_value(n.state).unwrap() == json!("active")
+            )
+    );
+    clock.advance(61_000_000);
+    assert!(
+        status(&mut engine, &mut ui)["references"].is_null(),
+        "stale vehicle locations are not used"
+    );
+}
+
+#[test]
+fn ellipsoid_and_mavlink_sea_level_reports_compare_at_the_same_height() {
+    use uxduck_core::domain::traffic::{AltitudeFrame, geoid_height};
+    let (mut engine, clock) = engine();
+    let mut ui = join(&mut engine, "operator-ui");
+    two_vehicles(&mut engine, &mut ui);
+    call(
+        &mut engine,
+        &mut ui,
+        "vehicle/traffic",
+        json!({"id":"alpha","on":true}),
+    );
+    at(&mut engine, "alpha", 51.5, -0.1, 600.0);
+    let mut msl = aircraft(5, 51.51, -0.1, clock.now());
+    msl.altitude_m = Some(720.0);
+    let mut ellipsoid = msl.clone();
+    ellipsoid.address = 6;
+    ellipsoid.altitude_frame = Some(AltitudeFrame::Ellipsoid);
+    ellipsoid.altitude_m = Some(720.0 + geoid_height(51.51, -0.1).unwrap());
+    engine.vehicle_traffic("alpha", msl);
+    engine.vehicle_traffic("alpha", ellipsoid);
+    let picture = status(&mut engine, &mut ui);
+    for a in picture["aircraft"].as_array().unwrap() {
+        assert!((a["amslM"].as_f64().unwrap() - 720.0).abs() < 0.01);
+        assert!((a["relative"][0]["aboveM"].as_f64().unwrap() - 120.0).abs() < 0.01);
+        assert_eq!(a["alertVehicleIds"], json!(["alpha"]));
     }
 }

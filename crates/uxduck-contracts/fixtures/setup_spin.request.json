@@ -1,0 +1,11 @@
+{
+  "method": "setup/spin",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "motor": 1,
+    "throttle": 5.0,
+    "held": true,
+    "keep": true,
+    "propellersOff": true
+  }
+}

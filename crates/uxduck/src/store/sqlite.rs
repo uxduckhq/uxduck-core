@@ -314,6 +314,9 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::PracticeAttemptUpserted { .. }
             | Change::FileTransferUpserted { .. }
             | Change::FileTransferRemoved { .. }
+            | Change::SetupUpdated { .. }
+            | Change::PreflightUpdated { .. }
+            | Change::ChecklistUpdated { .. }
             | Change::WatchLinkCreated { .. }
             | Change::WatchLinkRevoked { .. }
             | Change::FlightStored { .. }

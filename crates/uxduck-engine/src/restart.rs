@@ -103,6 +103,12 @@ pub(crate) fn handle(
             }
             update_settings(engine, connection, params)
         }
+        ClientRequest::SettingsGet(_) => {
+            if !granted.contains(&Capability::Read) {
+                return denied(&Capability::Read.denied_message());
+            }
+            to_value(&engine.settings_dto(&engine.state.settings))
+        }
         ClientRequest::StorageUsage(_) => {
             if !granted.contains(&Capability::Read) {
                 return denied(&Capability::Read.denied_message());
@@ -175,6 +181,7 @@ fn about(engine: &Engine) -> DaemonAbout {
         data_dir: config.about.data_dir.clone(),
         port: config.about.port,
         uptime_us: engine.clock.now_us().saturating_sub(engine.started_us),
+        process_usage: engine.system.process_usage(),
     }
 }
 
@@ -612,6 +619,7 @@ fn update_settings(
     );
     engine.app_update_settings_changed(before.include_beta);
     engine.analytics_settings_changed(&before);
+    engine.traffic_sources_changed();
     engine.listen_video_ports(&before.video_ports, &settings.video_ports);
     gcs_system_id_changed(engine, before.gcs_system_id, settings.gcs_system_id);
     if before.video_recording != settings.video_recording {
@@ -900,6 +908,36 @@ fn simulations_and_traffic(
     params: &uxduck_contracts::dto::settings::SettingsUpdateParams,
     settings: &mut uxduck_core::domain::settings::Settings,
 ) -> Result<(), ApiError> {
+    if let Some(c) = &params.traffic_controls {
+        if !(100..=463_000).contains(&c.range_m)
+            || !(30..=20_000).contains(&c.height_m)
+            || !(10..=300).contains(&c.refresh_s)
+            || c.sites.len() > 16
+            || c.vehicle_ids.len() > 128
+            || c.sites.iter().any(|s| {
+                s.id.is_empty()
+                    || s.id.len() > 80
+                    || s.name.trim().is_empty()
+                    || s.name.len() > 80
+                    || !(-900_000_000..=900_000_000).contains(&s.latitude_e7)
+                    || !(-1_800_000_000..=1_800_000_000).contains(&s.longitude_e7)
+                    || s.altitude_m.is_some_and(|m| !(-500..=20_000).contains(&m))
+            })
+        {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Traffic needs a range of 100 m to 463 km, height of 30 m to 20 km, refresh of 10 to 300 s and valid locations",
+            ));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if c.sites.iter().any(|s| !ids.insert(&s.id)) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Traffic site identifiers must be unique",
+            ));
+        }
+        settings.traffic_controls = c.clone().into();
+    }
     if let Some(on) = params.recreate_simulations {
         settings.recreate_simulations = on;
     }

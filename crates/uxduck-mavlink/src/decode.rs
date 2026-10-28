@@ -136,6 +136,13 @@ pub enum Message {
     ServoOutputs {
         servos: [u16; 8],
     },
+    /// The receiver's channels as the autopilot reads them (`RC_CHANNELS`),
+    /// in microseconds, before any reversal: the first `count` are given,
+    /// `UINT16_MAX` for one unused (S187).
+    RcChannels {
+        count: u8,
+        channels: [u16; 18],
+    },
     /// The mission item the vehicle is flying to.
     MissionCurrent {
         seq: u16,
@@ -233,6 +240,11 @@ pub enum Message {
         speed: f32,
         speed_z: f32,
     },
+    /// ArduPilot's `AIRSPEED_AUTOCAL` (S190): its automatic airspeed
+    /// calibration's estimate of the ratio, sent while it runs in flight.
+    AirspeedAutocal {
+        ratio: f32,
+    },
     /// `SCALED_PRESSURE2` (S72): the second barometer's centi-degrees,
     /// which on a submarine is the water's.
     ScaledPressure2 {
@@ -268,6 +280,13 @@ pub enum Message {
         command: u16,
         param1: f32,
         param2: f32,
+        /// `FIXED_MAG_CAL_YAW`'s latitude and longitude (S185).
+        param3: f32,
+        param4: f32,
+        /// `PREFLIGHT_CALIBRATION`'s accelerometer (S186).
+        param5: f32,
+        /// `PREFLIGHT_CALIBRATION`'s airspeed (S190, in the fake vehicle).
+        param6: f32,
         param7: f32,
     },
     /// A command with a place: `DO_REPOSITION` from Go to.
@@ -402,6 +421,29 @@ pub enum Message {
         tslc: u8,
         flags: u16,
         squawk: u16,
+    },
+    /// ArduPilot's `MAG_CAL_PROGRESS` (S184): one compass's calibration as
+    /// it runs. `cal_status` is `MAG_CAL_STATUS`; `completion_mask` holds
+    /// the 80 sections of the sphere seen so far; `direction` is where to
+    /// turn the vehicle next, in its body frame.
+    MagCalProgress {
+        compass_id: u8,
+        cal_mask: u8,
+        cal_status: u8,
+        attempt: u8,
+        completion_pct: u8,
+        completion_mask: [u8; 10],
+        direction: [f32; 3],
+    },
+    /// `MAG_CAL_REPORT` (S184): one compass's result, sent until the
+    /// vehicle restarts. `fitness` and the offsets in milligauss.
+    MagCalReport {
+        compass_id: u8,
+        cal_mask: u8,
+        cal_status: u8,
+        autosaved: bool,
+        fitness: f32,
+        offsets: [f32; 3],
     },
     Other {
         message_id: u32,
@@ -578,6 +620,12 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
         Ok(other) => command(&other)
             .or_else(|| transfer(other))
             .unwrap_or(Message::Other { message_id }),
+        // A `MAG_CAL_REPORT` with a status newer than the dialect's enum
+        // (8 to 10: offsets, scaling, residuals) does not decode: read it
+        // from its bytes (S185).
+        Err(_) if message_id == MAG_CAL_REPORT => {
+            mag_cal_report(frame.payload().bytes()).unwrap_or(Message::Other { message_id })
+        }
         Err(_) => Message::Other { message_id },
     };
     Some(Decoded {
@@ -597,6 +645,10 @@ fn command(message: &Ardupilotmega) -> Option<Message> {
             command: m.command as u16,
             param1: m.param1,
             param2: m.param2,
+            param3: m.param3,
+            param4: m.param4,
+            param5: m.param5,
+            param6: m.param6,
             param7: m.param7,
         },
         Ardupilotmega::CommandInt(m) => Message::CommandInt {
@@ -617,6 +669,8 @@ fn command(message: &Ardupilotmega) -> Option<Message> {
 /// The health and environment messages (S72).
 fn health(message: &Ardupilotmega) -> Option<Message> {
     Some(match message {
+        // The receiver's channels, for the radio calibration (S187).
+        Ardupilotmega::RcChannels(m) => rc_channels(m),
         Ardupilotmega::RadioStatus(m) => Message::RadioStatus {
             rssi: m.rssi,
             remrssi: m.remrssi,
@@ -688,10 +742,58 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
             speed: m.speed,
             speed_z: m.speed_z,
         },
+        Ardupilotmega::AirspeedAutocal(m) => Message::AirspeedAutocal { ratio: m.ratio },
         Ardupilotmega::ScaledPressure2(m) => Message::ScaledPressure2 {
             temperature_cdeg: m.temperature,
         },
+        Ardupilotmega::MagCalProgress(m) => Message::MagCalProgress {
+            compass_id: m.compass_id,
+            cal_mask: m.cal_mask,
+            cal_status: m.cal_status as u8,
+            attempt: m.attempt,
+            completion_pct: m.completion_pct,
+            completion_mask: m.completion_mask,
+            direction: [m.direction_x, m.direction_y, m.direction_z],
+        },
+        Ardupilotmega::MagCalReport(m) => Message::MagCalReport {
+            compass_id: m.compass_id,
+            cal_mask: m.cal_mask,
+            cal_status: m.cal_status as u8,
+            autosaved: m.autosaved != 0,
+            fitness: m.fitness,
+            offsets: [m.ofs_x, m.ofs_y, m.ofs_z],
+        },
         _ => return None,
+    })
+}
+
+/// `MAG_CAL_REPORT`'s message id.
+const MAG_CAL_REPORT: u32 = 192;
+
+/// A `MAG_CAL_REPORT` from its payload: ten floats (fitness, the offsets,
+/// the diagonal and off-diagonal), then `compass_id`, `cal_mask`,
+/// `cal_status` and `autosaved`; `MAVLink` 2 drops trailing zeros.
+fn mag_cal_report(payload: &[u8]) -> Option<Message> {
+    let mut bytes = [0u8; 44];
+    let length = payload.len().min(bytes.len());
+    bytes[..length].copy_from_slice(&payload[..length]);
+    let float = |at: usize| {
+        let mut four = [0u8; 4];
+        four.copy_from_slice(&bytes[at..at + 4]);
+        f32::from_le_bytes(four)
+    };
+    let cal_status = bytes[42];
+    // Only what the enum lacks; anything else decoded already or is wrong.
+    if !(8..=10).contains(&cal_status) {
+        return None;
+    }
+    Some(Message::MagCalReport {
+        compass_id: bytes[40],
+        cal_mask: bytes[41],
+        cal_status,
+        autosaved: bytes[43] != 0,
+        fitness: float(0),
+        offsets: [float(4), float(8), float(12)],
     })
 }
 
@@ -850,6 +952,33 @@ fn prearm(enabled: u32, health: u32) -> Option<bool> {
     (enabled & PREARM_CHECK != 0).then_some(health & PREARM_CHECK != 0)
 }
 
+/// `RC_CHANNELS` (S187).
+const fn rc_channels(m: &mavio::dialects::ardupilotmega::messages::RcChannels) -> Message {
+    Message::RcChannels {
+        count: m.chancount,
+        channels: [
+            m.chan1_raw,
+            m.chan2_raw,
+            m.chan3_raw,
+            m.chan4_raw,
+            m.chan5_raw,
+            m.chan6_raw,
+            m.chan7_raw,
+            m.chan8_raw,
+            m.chan9_raw,
+            m.chan10_raw,
+            m.chan11_raw,
+            m.chan12_raw,
+            m.chan13_raw,
+            m.chan14_raw,
+            m.chan15_raw,
+            m.chan16_raw,
+            m.chan17_raw,
+            m.chan18_raw,
+        ],
+    }
+}
+
 fn rc_override(m: &mavio::dialects::ardupilotmega::messages::RcChannelsOverride) -> Message {
     Message::RcChannelsOverride {
         target: m.target_system,
@@ -897,6 +1026,37 @@ mod tests {
             Message::AutopilotVersion { uid: 0x1234, .. }
         ));
         assert_eq!(firmware_version(0x0405_01ff), "4.5.1");
+    }
+
+    #[test]
+    fn a_mag_cal_report_with_a_newer_failure_still_decodes() {
+        // 9 (bad scaling) is past the dialect's MAG_CAL_STATUS enum.
+        for status in [8u8, 9, 10] {
+            let frame =
+                sim::mag_cal_report_frame(1, 1, 0, 1, 3, status, 31.5, [42.5, -17.25, 63.0]);
+            let decoded = decode(&frame).unwrap_or_else(|| panic!("report {status}"));
+            assert_eq!(
+                decoded.message,
+                Message::MagCalReport {
+                    compass_id: 1,
+                    cal_mask: 3,
+                    cal_status: status,
+                    autosaved: false,
+                    fitness: 31.5,
+                    offsets: [42.5, -17.25, 63.0],
+                },
+            );
+        }
+        // One the enum has goes the usual way, and gives the same.
+        let frame = sim::mag_cal_report_frame(1, 1, 0, 0, 1, 4, 3.5, [1.0, 2.0, 3.0]);
+        assert!(matches!(
+            decode(&frame).map(|d| d.message),
+            Some(Message::MagCalReport {
+                cal_status: 4,
+                autosaved: true,
+                ..
+            })
+        ));
     }
 
     /// A frame of any message, as `sim::frame` builds one.

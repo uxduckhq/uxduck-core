@@ -1,0 +1,9 @@
+{
+  "method": "checklist/copy",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "markdown": "## At the field\n- [ ] Payload latched\n- [ ] Area clear",
+    "sourceName": "Field checklist (Notion)",
+    "replace": true
+  }
+}

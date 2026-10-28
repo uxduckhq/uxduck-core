@@ -21,6 +21,7 @@ use uxduck_core::domain::notification::{
     Subject,
 };
 use uxduck_core::domain::parameter::parameter_id;
+use uxduck_core::domain::preflight::PreflightOverride;
 use uxduck_core::domain::telemetry::AltitudeFrame;
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change};
@@ -86,12 +87,20 @@ pub(crate) fn handle(
                     "only an operator may force a command",
                 ));
             }
+            // Arming past failing preflight checks is a person's (ADR-0038
+            // K4): an agent's or a plugin's arming is put to an operator.
+            if !params.override_preflight.is_empty() && !operator {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    "only an operator may arm past failing preflight checks",
+                ));
+            }
             if let Some(vehicle) = engine.vehicle(&params.vehicle_id)
                 && let Some(why) = unsafe_place(&params.command.clone().into(), flies(vehicle))
             {
                 return Err(ApiError::new(ErrorKind::InvalidValue, why));
             }
-            send(engine, connection, params)
+            send(engine, connection, params, operator)
         }
         ClientRequest::CommandList(IdParams { id }) => {
             require(Capability::Read)?;
@@ -173,6 +182,7 @@ fn send(
     engine: &mut Engine,
     connection: ConnectionId,
     params: CommandSendParams,
+    operator: bool,
 ) -> Result<Value, ApiError> {
     let vehicle = engine.vehicle(&params.vehicle_id).cloned().ok_or_else(|| {
         ApiError::new(
@@ -181,6 +191,14 @@ fn send(
         )
     })?;
     let command: Command = params.command.into();
+    // A disarmed vehicle's take-off goes after the steps it needs, the
+    // first of them now (`TakeOff`).
+    let mut steps = take_off_steps(engine, &vehicle, &command).unwrap_or_default();
+    let command = if steps.is_empty() {
+        command
+    } else {
+        steps.remove(0)
+    };
     let actor = engine.actor(connection);
     let now = engine.clock.now_us();
     let mut receipt = Receipt {
@@ -190,6 +208,8 @@ fn send(
         status: ReceiptStatus::Sent,
         detail: None,
         reason: None,
+        preflight: Vec::new(),
+        preflight_override: None,
         sent_without_recent_heartbeat: vehicle.presence != Presence::Online,
         forced: params.force,
         attempts: 0,
@@ -220,38 +240,20 @@ fn send(
     {
         not_sent(&mut receipt, why);
     }
-    if receipt.status == ReceiptStatus::Sent && vehicle.presence != Presence::Online {
-        let presence = format!("{:?}", vehicle.presence).to_lowercase();
-        match command.offline_behaviour() {
-            OfflineBehaviour::Allow => {}
-            OfflineBehaviour::Warn if params.confirm || params.force => {}
-            OfflineBehaviour::Warn => {
-                return Err(ApiError::new(
-                    ErrorKind::ConfirmationRequired,
-                    format!(
-                        "{} needs confirming: {} is {presence}",
-                        command.label(),
-                        vehicle.name
-                    ),
-                ));
-            }
-            OfflineBehaviour::Block if params.force => {}
-            OfflineBehaviour::Block => not_sent(
-                &mut receipt,
-                format!(
-                    "Can't send {} while UXDuck can't hear {}.",
-                    command.label(),
-                    vehicle.name
-                ),
-            ),
-        }
-    }
-
+    offline_check(
+        &command,
+        &vehicle,
+        (params.confirm, params.force),
+        &mut receipt,
+    )?;
+    // The preflight gate, for every client (S192).
+    let (ids, away) = (&params.override_preflight, remote.is_some());
+    preflight_gate(engine, &vehicle, ids, (operator, away), &mut receipt);
     let result = ReceiptDto::from(&receipt);
     let id = receipt.id.clone();
     let sent = receipt.status == ReceiptStatus::Sent;
     let status = receipt.status;
-    engine.commit_as(actor, Change::ReceiptUpserted { receipt });
+    engine.commit_as(actor.clone(), Change::ReceiptUpserted { receipt });
     if let Some(by) = &remote {
         engine.remember_remote(by, &id);
     }
@@ -267,9 +269,168 @@ fn send(
     });
     // Answered when the command ends (`command_result`).
     if let Some(waiting) = engine.replying_to.take() {
-        engine.awaiting.insert(id, waiting);
+        engine.awaiting.insert(id.clone(), waiting);
+    }
+    if !steps.is_empty() {
+        engine.take_offs.insert(id, TakeOff { actor, rest: steps });
     }
     Ok(Value::Null)
+}
+
+/// A command for a vehicle UXDuck can't hear: sent, confirmed first, or
+/// not sent, by the command's offline behaviour (ADR-0005).
+fn offline_check(
+    command: &Command,
+    vehicle: &Vehicle,
+    (confirm, force): (bool, bool),
+    receipt: &mut Receipt,
+) -> Result<(), ApiError> {
+    if receipt.status != ReceiptStatus::Sent || vehicle.presence == Presence::Online {
+        return Ok(());
+    }
+    let presence = format!("{:?}", vehicle.presence).to_lowercase();
+    match command.offline_behaviour() {
+        OfflineBehaviour::Allow => {}
+        OfflineBehaviour::Warn if confirm || force => {}
+        OfflineBehaviour::Warn => {
+            return Err(ApiError::new(
+                ErrorKind::ConfirmationRequired,
+                format!(
+                    "{} needs confirming: {} is {presence}",
+                    command.label(),
+                    vehicle.name
+                ),
+            ));
+        }
+        OfflineBehaviour::Block if force => {}
+        OfflineBehaviour::Block => {
+            receipt.status = ReceiptStatus::NotSent;
+            receipt.detail = Some(format!(
+                "Can't send {} while UXDuck can't hear {}.",
+                command.label(),
+                vehicle.name
+            ));
+            receipt.completed_at_us = Some(receipt.created_at_us);
+        }
+    }
+    Ok(())
+}
+
+/// Holds a command that arms on the ground while a blocking preflight check
+/// does not pass: `not-sent` with reason `preflight`, listing them; or sent
+/// past them by an operator naming every one, never from away, or by an
+/// approval that listed them (ADR-0038 K3, K4).
+fn preflight_gate(
+    engine: &Engine,
+    vehicle: &Vehicle,
+    named_ids: &[String],
+    (operator, away): (bool, bool),
+    receipt: &mut Receipt,
+) {
+    if receipt.status != ReceiptStatus::Sent
+        || vehicle.armed
+        || !receipt.command.arms_on_the_ground()
+    {
+        return;
+    }
+    let gating = engine.preflight_gating(&vehicle.id);
+    if gating.is_empty() {
+        return;
+    }
+    let named = |ids: &[String]| gating.iter().all(|c| ids.contains(&c.id));
+    let by = if away {
+        None
+    } else if operator && named(named_ids) {
+        Some(PreflightOverride::Operator)
+    } else {
+        engine
+            .approving_preflight
+            .as_ref()
+            .filter(|(_, listed)| named(listed))
+            .map(|(approval_id, _)| PreflightOverride::Approval {
+                approval_id: approval_id.clone(),
+            })
+    };
+    receipt.preflight.clone_from(&gating);
+    if by.is_some() {
+        receipt.preflight_override = by;
+        return;
+    }
+    let label = receipt.command.label();
+    receipt.status = ReceiptStatus::NotSent;
+    receipt.detail = Some(crate::preflight::refusal(
+        &label,
+        &vehicle.name,
+        &gating,
+        operator && !away,
+    ));
+    receipt.completed_at_us = Some(receipt.created_at_us);
+    receipt.reason = Some(RefusalReason::Preflight);
+}
+
+/// The rest of a take-off from the ground (QA 2026-10-24), sent once the
+/// command before it is accepted: each its own receipt from the same
+/// sender, so the history says what was done. The first refusal ends it,
+/// and that command's receipt answers the request.
+pub(crate) struct TakeOff {
+    actor: Actor,
+    rest: Vec<Command>,
+}
+
+/// What a take-off asked of a disarmed vehicle sends: `ArduPilot` lifts a
+/// copter or a quadplane off only armed in GUIDED, so it is switched to
+/// GUIDED and armed first, and PX4 is armed first. GUIDED climbs where it
+/// stands and holds; the mission stays unstarted. None when the take-off
+/// goes alone: the vehicle is armed (in the air, or on the ground in
+/// another mode, which `take_off_refusal` explains), not heard, or does
+/// not lift off straight up.
+fn take_off_steps(engine: &Engine, vehicle: &Vehicle, command: &Command) -> Option<Vec<Command>> {
+    if !command.is_take_off()
+        || vehicle.armed
+        || vehicle.presence != Presence::Online
+        || !lifts_off(engine, vehicle)
+    {
+        return None;
+    }
+    let ardupilot = matches!(
+        Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type),
+        Some(Family::Copter | Family::Plane)
+    );
+    let guided = vehicle
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("GUIDED"));
+    let mut steps = Vec::new();
+    if ardupilot && !guided {
+        steps.push(Command::SetMode {
+            mode: "GUIDED".into(),
+        });
+    }
+    steps.push(Command::Arm);
+    steps.push(command.clone());
+    Some(steps)
+}
+
+/// Whether the vehicle is offered Take off: a copter, PX4's multicopters
+/// and VTOLs, and a quadplane, which `ArduPlane` lifts straight up in
+/// GUIDED once armed (maintainer, 2026-10-07: a VTOL on the ground had no
+/// way up). A plane that can't hover takes off through a mission.
+fn lifts_off(engine: &Engine, vehicle: &Vehicle) -> bool {
+    let family = Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type);
+    match family {
+        Some(Family::Copter) => true,
+        Some(Family::Px4) => {
+            matches!(Family::of(&vehicle.vehicle_type), Some(Family::Copter))
+                || vehicle.vehicle_type.starts_with("Vtol")
+        }
+        Some(Family::Plane) => is_vtol(mode_airframe(
+            engine,
+            vehicle,
+            family,
+            engine.listed_modes(vehicle),
+        )),
+        _ => false,
+    }
 }
 
 /// A command from away (S80): names who sent it on its receipt, and makes it
@@ -391,14 +552,7 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             advanced.push(mode.clone());
         }
     }
-    // PX4 takes off a multicopter or a VTOL from any mode.
-    let px4_lifts = family == Some(Family::Px4)
-        && (matches!(Family::of(&vehicle.vehicle_type), Some(Family::Copter))
-            || vehicle.vehicle_type.starts_with("Vtol"));
-    // ArduPlane lifts a quadplane straight up in GUIDED once it is armed
-    // (maintainer, 2026-10-07: a VTOL on the ground had no way up).
-    let quadplane_lifts = family == Some(Family::Plane) && is_vtol(airframe);
-    if matches!(family, Some(Family::Copter)) || px4_lifts || quadplane_lifts {
+    if lifts_off(engine, vehicle) {
         commands.push(Command::take_off(TAKE_OFF_HEIGHT_M));
     }
     // Go to: offered with no place, for its risk and
@@ -480,15 +634,20 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
         (Command::Long { command: 186, .. }, Some(Family::Plane)) => Some(
             "Changes the height while keeping the current horizontal destination".to_owned(),
         ),
-        (Command::Long { command: 22, .. }, Some(Family::Plane)) => Some(
-            "Lifts off straight up and hovers. Choose GUIDED and arm it first."
-                .to_owned(),
-        ),
         // In plain words, for someone who has never flown
         // (maintainer, 2026-10-10): the button's tooltip and the
-        // agent's reading of it.
+        // agent's reading of it. Disarmed, it is switched and armed
+        // first (`take_off_steps`).
+        (Command::Long { command: 22, .. }, Some(Family::Plane)) => Some(
+            "Lifts off straight up and hovers. On the ground, it switches to GUIDED and arms first. It doesn't start the mission"
+                .to_owned(),
+        ),
+        (Command::Long { command: 22, .. }, Some(Family::Px4)) => Some(
+            "Climbs straight up to a set height and holds there. On the ground, it arms first. It doesn't start the mission"
+                .to_owned(),
+        ),
         (Command::Long { command: 22, .. }, _) => Some(
-            "Climbs straight up to a set height and holds there. Arm it first."
+            "Climbs straight up to a set height and holds there. On the ground, it switches to GUIDED and arms first. It doesn't start the mission"
                 .to_owned(),
         ),
         (Command::Arm, _) => Some(
@@ -573,8 +732,9 @@ fn set_state(
 
 impl Engine {
     /// ArduPilot refuses a take-off with a bare "Failed" unless the vehicle
-    /// is armed in GUIDED, as it is not after a landing (QA 2026-10-24):
-    /// say what it needs instead. PX4 takes off from any mode.
+    /// is armed in GUIDED: say what it needs instead. Disarmed, it was
+    /// switched and armed first (`take_off_steps`), unless it was not
+    /// heard. PX4 takes off from any mode.
     fn take_off_refusal(&self, receipt: &Receipt) -> Option<String> {
         if !receipt.command.is_take_off() {
             return None;
@@ -591,7 +751,8 @@ impl Engine {
         match (vehicle.armed, guided) {
             (true, true) => None,
             (false, true) => Some("It takes off once armed: arm it, then Take off.".into()),
-            _ => Some(
+            (true, false) => Some("It takes off from GUIDED: choose GUIDED, then Take off.".into()),
+            (false, false) => Some(
                 "It takes off from GUIDED once armed: choose GUIDED, arm it, then Take off.".into(),
             ),
         }
@@ -600,6 +761,10 @@ impl Engine {
     /// The data plane finished a command: complete its receipt, answer the
     /// request that sent it, and tell people when it did not go through.
     pub fn command_result(&mut self, receipt_id: &str, outcome: Outcome, attempts: u8) {
+        // A motor test's renewal, which has no receipt (S188).
+        if self.renewal_done(receipt_id, &outcome) {
+            return;
+        }
         let Some(mut receipt) = self.state.receipts.get(receipt_id).cloned() else {
             return;
         };
@@ -639,9 +804,20 @@ impl Engine {
                 receipt: receipt.clone(),
             },
         );
+        // A take-off's next step, which answers in its place.
+        if let Some(take_off) = self.take_offs.remove(receipt_id)
+            && status == ReceiptStatus::Accepted
+        {
+            self.take_off_step(&receipt, take_off);
+            return;
+        }
         if let Some((connection, request_id)) = self.awaiting.remove(receipt_id) {
             let frame = json!({ "jsonrpc": "2.0", "id": request_id, "result": result });
             self.send(connection, &frame);
+        }
+        // A setup procedure's: its row says how it went (S184).
+        if self.setup_order_done(&receipt) {
+            return;
         }
         if self.is_launch_order(receipt_id) {
             let accepted = status == ReceiptStatus::Accepted;
@@ -679,6 +855,53 @@ impl Engine {
                 report: Some(report.into()),
             });
         }
+    }
+
+    /// Sends a take-off's next command after `after`, as the same sender.
+    fn take_off_step(&mut self, after: &Receipt, take_off: TakeOff) {
+        let TakeOff { actor, mut rest } = take_off;
+        let command = rest.remove(0);
+        let online = self
+            .vehicle(&after.vehicle_id)
+            .is_some_and(|v| v.presence == Presence::Online);
+        let receipt = Receipt {
+            id: format!("rc{}", &self.random.token()[..16]),
+            command: command.clone(),
+            status: ReceiptStatus::Sent,
+            detail: None,
+            reason: None,
+            sent_without_recent_heartbeat: !online,
+            forced: false,
+            attempts: 0,
+            created_at_us: self.clock.now_us(),
+            completed_at_us: None,
+            version: 1,
+            ..after.clone()
+        };
+        let id = receipt.id.clone();
+        let link = self.vehicle(&after.vehicle_id).map(|v| v.link_id.clone());
+        self.commit_as(actor.clone(), Change::ReceiptUpserted { receipt });
+        if let Some(waiting) = self.awaiting.remove(&after.id) {
+            self.awaiting.insert(id.clone(), waiting);
+        }
+        // Paused or gone since the step before: said as any command is.
+        let why = match &link {
+            Some(link) => self.not_writable(link),
+            None => Some("the vehicle is gone".into()),
+        };
+        if let Some(why) = why {
+            self.command_result(&id, Outcome::NotSent(why), 0);
+            return;
+        }
+        if !rest.is_empty() {
+            self.take_offs.insert(id.clone(), TakeOff { actor, rest });
+        }
+        self.links.command(CommandOrder {
+            receipt_id: id,
+            vehicle_id: after.vehicle_id.clone(),
+            command,
+            force: false,
+        });
     }
 
     /// Raises a notification, unless one with the same condition is active.

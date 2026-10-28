@@ -1,6 +1,7 @@
 //! Conversions between `uxduck-core` and the wire DTOs; the only place both
 //! are imported.
 
+pub mod checklist;
 mod client;
 mod command;
 mod controller;
@@ -15,7 +16,9 @@ mod place;
 mod plan;
 mod plugin;
 mod practice;
+pub mod preflight;
 pub mod settings;
+mod setup;
 mod snapshot;
 mod telemetry;
 mod thread;

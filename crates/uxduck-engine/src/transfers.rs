@@ -448,17 +448,37 @@ impl Engine {
         value: f64,
         kind: ParamKind,
     ) -> String {
+        self.write_parameter_for(
+            actor,
+            uxduck_core::domain::history::Author {
+                client_name: "UXDuck".into(),
+                ..Default::default()
+            },
+            "starting the simulation",
+            (vehicle_id, name, value),
+            kind,
+        )
+    }
+
+    /// Writes a parameter for someone, with a reason, as a person's write
+    /// is kept (S74): the radio calibration's values (S187). Ends in
+    /// `parameter_written`, answering no one.
+    pub(crate) fn write_parameter_for(
+        &mut self,
+        actor: Actor,
+        author: uxduck_core::domain::history::Author,
+        reason: &str,
+        (vehicle_id, name, value): (&str, &str, f64),
+        kind: ParamKind,
+    ) -> String {
         let order_id = format!("pw{}", &self.random.token()[..16]);
         self.transfers.writes.insert(
             order_id.clone(),
             Write {
                 reply: None,
                 actor,
-                author: uxduck_core::domain::history::Author {
-                    client_name: "UXDuck".into(),
-                    ..Default::default()
-                },
-                reason: Some("starting the simulation".into()),
+                author,
+                reason: Some(reason.to_owned()),
                 vehicle_id: vehicle_id.to_owned(),
                 name: name.to_owned(),
                 requested: value,
@@ -566,7 +586,7 @@ impl Engine {
             })
     }
 
-    fn download_parameters(&mut self, vehicle_id: &str) {
+    pub(crate) fn download_parameters(&mut self, vehicle_id: &str) {
         let mut set = self.parameter_set(vehicle_id);
         set.status = TransferStatus::Downloading;
         set.detail = None;
@@ -621,6 +641,8 @@ impl Engine {
                 .boot_instant_us
                 .is_some_and(|known| !same_boot(Some(known), boot_instant_us));
         if restarted {
+            self.setup_restarted(&vehicle.id);
+            self.preflight_restarted(&vehicle.id);
             self.raise(Raise {
                 severity: Severity::Info,
                 kind: NotificationKind::Persistent,
@@ -967,6 +989,13 @@ impl Engine {
             self.launch_order_done(order_id, status == WriteStatus::Accepted, detail);
             return;
         }
+        // One of the radio calibration's values (S187).
+        self.radio_written(order_id, status == WriteStatus::Accepted);
+        // One of the airspeed ratio's (S190).
+        self.airspeed_written(order_id, status == WriteStatus::Accepted);
+        // A change that takes effect on restarting makes a restart due (S192).
+        let asked = write.reply.is_some() && status == WriteStatus::Accepted;
+        self.preflight_written(&write.vehicle_id, &write.name, asked);
         if write.reply.is_some() {
             self.track_task(
                 &write.vehicle_id,

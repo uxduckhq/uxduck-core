@@ -1,0 +1,7 @@
+{
+  "method": "plugin/install",
+  "params": {
+    "path": "/Users/ana/plugins/wind-check-ts",
+    "checksBlock": true
+  }
+}

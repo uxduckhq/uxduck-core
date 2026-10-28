@@ -1,0 +1,28 @@
+{
+  "method": "checklist/copy",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "file": {
+      "format": "uxduck.checklist/1",
+      "name": "Alpha's checklist",
+      "steps": [
+        {
+          "kind": "manual",
+          "severity": "block",
+          "title": "Propellers tight"
+        },
+        {
+          "holdS": 3.0,
+          "item": "battery.voltage_v",
+          "kind": "rule",
+          "op": ">=",
+          "severity": "block",
+          "title": "Battery at least 22.2 V",
+          "unit": "V",
+          "value": 22.2
+        }
+      ]
+    },
+    "sourceName": "alpha.checklist.json"
+  }
+}

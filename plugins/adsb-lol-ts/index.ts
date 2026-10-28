@@ -23,9 +23,8 @@ const API = "https://api.adsb.lol/v2/point";
 const CREDIT = "adsb.lol (ODbL)";
 /** Requests a day without a key, unless adsb.lol says otherwise. */
 const DAY_LIMIT = 500;
-/** How often to ask while a vehicle is armed, and otherwise. */
-const ARMED_EVERY_MS = 10_000;
-const IDLE_EVERY_MS = 30_000;
+/** The default explicit polling interval; arming never changes it. */
+const DEFAULT_REFRESH_S = 30;
 /** A vehicle not heard for this long is not looked around. */
 const POSITION_FRESH_MS = 60_000;
 /** Beyond the vehicles, and at most, as adsb.lol allows. */
@@ -37,7 +36,6 @@ const KNOTS = 0.514_444;
 interface Seen {
   lat: number;
   lon: number;
-  armed: boolean;
   atMs: number;
 }
 
@@ -68,7 +66,7 @@ export function onStart(input: StartInput): Effects {
 
 export function onMessages(batch: MessageBatch): Effects {
   for (const m of batch.messages) {
-    const seen = vehicles.get(m.vehicleId) ?? { lat: 0, lon: 0, armed: false, atMs: 0 };
+    const seen = vehicles.get(m.vehicleId) ?? { lat: 0, lon: 0, atMs: 0 };
     if (m.name === "GLOBAL_POSITION_INT") {
       const lat = Number(m.fields.lat) / 1e7;
       const lon = Number(m.fields.lon) / 1e7;
@@ -78,8 +76,6 @@ export function onMessages(batch: MessageBatch): Effects {
         seen.lon = lon;
         seen.atMs = nowMs || Date.now();
       }
-    } else if (m.name === "HEARTBEAT") {
-      seen.armed = (Number(m.fields.base_mode) & 0x80) !== 0;
     }
     vehicles.set(m.vehicleId, seen);
   }
@@ -89,17 +85,31 @@ export function onMessages(batch: MessageBatch): Effects {
 export function onTick(input: TickInput): Effects {
   nowMs = input.nowMs;
   newDay();
-  const around = [...vehicles.values()].filter((v) => v.atMs && nowMs - v.atMs < POSITION_FRESH_MS);
-  if (around.length === 0) return { trafficStatus: status("Waiting for a vehicle's position") };
+  const around = input.traffic
+    ? input.traffic.references.map((r) => ({
+        lat: r.latitudeDeg,
+        lon: r.longitudeDeg,
+        atMs: nowMs,
+      }))
+    : [...vehicles.values()].filter((v) => v.atMs && nowMs - v.atMs < POSITION_FRESH_MS);
+  if (around.length === 0)
+    return { trafficStatus: status("Waiting for a selected location's position") };
   if (nowMs < blockedUntilMs) return { trafficStatus: status() };
-  const armed = around.some((v) => v.armed);
-  // Slower once two thirds of the day is used, so it lasts.
-  const every = (armed ? ARMED_EVERY_MS : IDLE_EVERY_MS) * (used >= (limit * 2) / 3 ? 3 : 1);
+  const every = (input.traffic?.refreshS ?? DEFAULT_REFRESH_S) * 1000;
   if (asking || nowMs - lastAskedMs < every) return {};
+  const coverage = area(around, input.traffic ? input.traffic.radiusM / 1852 : MARGIN_NM);
+  if (coverage.radiusNm > MOST_NM) {
+    return {
+      trafficStatus: status(
+        "Selected areas exceed the feed's 250 NM request radius; coverage unavailable. Reduce the range or choose closer locations.",
+        true,
+      ),
+    };
+  }
   asking = true;
   lastAskedMs = nowMs;
   used += 1;
-  const { lat, lon, radiusNm } = area(around);
+  const { lat, lon, radiusNm } = coverage;
   return {
     fetch: [{ id: "around", url: `${API}/${lat.toFixed(4)}/${lon.toFixed(4)}/${radiusNm}` }],
     store: kept(),
@@ -164,7 +174,7 @@ function traffic(a: Aircraft): PluginTraffic {
     latitudeDeg: a.lat,
     longitudeDeg: a.lon,
     altitudeM: feet === undefined ? undefined : feet * FEET,
-    altitudeFrame: feet === undefined ? undefined : geometric ? "geometric" : "pressure",
+    altitudeFrame: feet === undefined ? undefined : geometric ? "ellipsoid" : "pressure",
     trackDeg: a.track,
     groundSpeedMps: a.gs === undefined ? undefined : a.gs * KNOTS,
     climbMps: rate === undefined ? undefined : (rate * FEET) / 60,
@@ -196,11 +206,17 @@ function category(code: string | undefined): PluginTraffic["category"] {
 }
 
 /** A circle round every vehicle, MARGIN_NM beyond the farthest, at most MOST_NM. */
-function area(around: Seen[]): { lat: number; lon: number; radiusNm: number } {
-  const lat = around.reduce((sum, v) => sum + v.lat, 0) / around.length;
-  const lon = around.reduce((sum, v) => sum + v.lon, 0) / around.length;
+export function area(
+  around: Seen[],
+  marginNm = MARGIN_NM,
+): { lat: number; lon: number; radiusNm: number } {
+  const lat = Number((around.reduce((sum, v) => sum + v.lat, 0) / around.length).toFixed(4));
+  // Circular longitude mean handles locations either side of the date line.
+  const sin = around.reduce((sum, v) => sum + Math.sin((v.lon * Math.PI) / 180), 0);
+  const cos = around.reduce((sum, v) => sum + Math.cos((v.lon * Math.PI) / 180), 0);
+  const lon = Number(((Math.atan2(sin, cos) * 180) / Math.PI).toFixed(4));
   const farthest = Math.max(...around.map((v) => nauticalMiles(lat, lon, v.lat, v.lon)));
-  return { lat, lon, radiusNm: Math.min(MOST_NM, Math.ceil(farthest + MARGIN_NM)) };
+  return { lat, lon, radiusNm: Math.ceil(farthest + marginNm) };
 }
 
 function nauticalMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -208,7 +224,7 @@ function nauticalMiles(lat1: number, lon1: number, lat2: number, lon2: number): 
   const h =
     Math.sin(((lat2 - lat1) * rad) / 2) ** 2 +
     Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(((lon2 - lon1) * rad) / 2) ** 2;
-  return 2 * 3440.065 * Math.asin(Math.sqrt(h));
+  return 2 * 3440.065 * Math.asin(Math.sqrt(Math.min(1, h)));
 }
 
 /** A new UTC day starts the count again. */

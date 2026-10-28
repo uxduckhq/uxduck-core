@@ -187,6 +187,9 @@ pub enum RefusalReason {
     /// From away, and older than its class allows when it reached the
     /// computer (ADR-0003 C10).
     Expired,
+    /// It would arm the vehicle while a blocking preflight check does not
+    /// pass (ADR-0038 K3); the receipt lists them.
+    Preflight,
 }
 
 const MAV_CMD_DO_SET_MODE: u16 = 176;
@@ -294,6 +297,33 @@ impl Command {
         }
     }
 
+    /// Whether it arms a vehicle that is on the ground and disarmed
+    /// (ADR-0038 K3): arming, forced or not; a take-off and a mission's
+    /// start, which some autopilots arm for; and `DO_SET_MODE` with the
+    /// armed flag in its base mode.
+    #[must_use]
+    pub fn arms_on_the_ground(&self) -> bool {
+        const ARMED_FLAG: u32 = 128;
+        match self {
+            Self::Arm => true,
+            Self::Long { command, params } => {
+                let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
+                match *command {
+                    MAV_CMD_COMPONENT_ARM_DISARM => param(0) >= 0.5,
+                    MAV_CMD_NAV_TAKEOFF | MAV_CMD_MISSION_START => true,
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a base mode's flags, 0 to 255"
+                    )]
+                    MAV_CMD_DO_SET_MODE => (param(0).clamp(0.0, 255.0) as u32) & ARMED_FLAG != 0,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this is a take-off (`NAV_TAKEOFF`).
     #[must_use]
     pub fn is_take_off(&self) -> bool {
@@ -308,6 +338,7 @@ impl Command {
 
     /// For people: "Arm", "Set mode LOITER".
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "one arm per command")]
     pub fn label(&self) -> String {
         match self {
             Self::Arm => "Arm".into(),
@@ -330,6 +361,109 @@ impl Command {
             Self::Long { command: 2000, .. } => "Take a photo".into(),
             Self::Long { command: 2500, .. } => "Start recording".into(),
             Self::Long { command: 2501, .. } => "Stop recording".into(),
+            // The Setup tab's compass calibration (S184).
+            Self::Long { command: 42424, .. } => "Calibrate the compasses".into(),
+            Self::Long { command: 42426, .. } => "Cancel the compass calibration".into(),
+            // From a known heading (S185).
+            Self::Long { command: 42006, .. } => "Calibrate the compasses from a heading".into(),
+            // The accelerometers and level (S186): 241's parameter 5.
+            Self::Long {
+                command: 241,
+                params,
+            } if params.get(4).is_some_and(|p| (*p - 2.0).abs() < 0.5) => "Level".into(),
+            // The airspeed's zero (S190): `ArduPlane` zeroes its airspeed
+            // sensors with the ground pressure (parameter 3).
+            Self::Long {
+                command: 241,
+                params,
+            } if params.get(2).is_some_and(|p| (*p - 1.0).abs() < 0.5) => {
+                "Zero the airspeed sensor".into()
+            }
+            // PX4's calibrations (S191): the compasses (parameter 2), the
+            // radio (4), the airspeed sensor (6), and all 0 to stop one.
+            Self::Long {
+                command: 241,
+                params,
+            } if params.get(1).is_some_and(|p| (*p - 1.0).abs() < 0.5) => {
+                "Calibrate the compasses".into()
+            }
+            Self::Long {
+                command: 241,
+                params,
+            } if params.get(3).is_some_and(|p| (*p - 1.0).abs() < 0.5) => {
+                "Start the radio calibration".into()
+            }
+            Self::Long {
+                command: 241,
+                params,
+            } if params.get(5).is_some_and(|p| (*p - 2.0).abs() < 0.5) => {
+                "Calibrate the airspeed sensor".into()
+            }
+            Self::Long {
+                command: 241,
+                params,
+            } if params.iter().all(|p| p.abs() < 0.5) => "Stop the calibration".into(),
+            Self::Long { command: 241, .. } => "Calibrate the accelerometers".into(),
+            Self::Long { command: 42429, .. } => "Confirm the vehicle's position".into(),
+            // Installing firmware (S189): restart and stay in the bootloader.
+            Self::Long {
+                command: 246,
+                params,
+            } if params.first().is_some_and(|p| (*p - 3.0).abs() < 0.5) => {
+                "Restart into the bootloader".into()
+            }
+            // The radio calibration's channels (S187): `RC_CHANNELS` at a
+            // rate, or at their usual rate again.
+            Self::Long {
+                command: 511,
+                params,
+            } if params.first().is_some_and(|p| (*p - 65.0).abs() < 0.5) => {
+                if params.get(1).is_some_and(|p| *p > 0.0) {
+                    "Send the radio's channels".into()
+                } else {
+                    "Send the radio's channels at their usual rate".into()
+                }
+            }
+            // The motor test (S188): one motor at a throttle, or stopped
+            // with a throttle and time of 0.
+            Self::Long {
+                command: 209,
+                params,
+            } => {
+                let at = |i: usize| params.get(i).copied().unwrap_or(0.0);
+                if at(2) <= 0.0 && at(3) <= 0.0 {
+                    "Stop the motor test".into()
+                } else {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a motor's place in the test's order, 1 to 12"
+                    )]
+                    let order = at(0).round().clamp(0.0, 255.0) as u8;
+                    format!(
+                        "Spin motor {} at {}%",
+                        crate::domain::frames::letter(order),
+                        at(2).round()
+                    )
+                }
+            }
+            // PX4's motor test (S191): motor n (`ACTUATOR_OUTPUT_FUNCTION`
+            // n) at a value from 0 to 1, or stopped with a time of 0.
+            Self::Long {
+                command: 310,
+                params,
+            } => {
+                let at = |i: usize| params.get(i).copied().unwrap_or(0.0);
+                if at(1) <= 0.0 {
+                    "Stop the motor test".into()
+                } else {
+                    format!(
+                        "Spin motor {} at {}%",
+                        at(4).round(),
+                        (at(0) * 100.0).round()
+                    )
+                }
+            }
             Self::Long { command, .. } => format!("Command {command}"),
         }
     }
@@ -365,6 +499,13 @@ pub struct Receipt {
     /// Set when the daemon refused it for a reason a client can act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RefusalReason>,
+    /// The blocking preflight checks that did not pass (ADR-0038): why it
+    /// was refused (`reason` preflight), or what it was sent past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<crate::domain::preflight::CheckRef>,
+    /// Sent although blocking checks did not pass (K4): by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_override: Option<crate::domain::preflight::PreflightOverride>,
     /// Sent while the vehicle was stale or offline (ADR-0004).
     pub sent_without_recent_heartbeat: bool,
     /// An operator overrode the offline table.
@@ -504,6 +645,35 @@ mod tests {
             assert!(risk.reason.is_some(), "{command:?}");
         }
         assert_eq!(Command::take_off(10.0).label(), "Take off");
+    }
+
+    #[test]
+    fn what_arms_on_the_ground() {
+        let long = |command: u16, params: Vec<f32>| Command::Long { command, params };
+        for arms in [
+            Command::Arm,
+            Command::take_off(10.0),
+            long(400, vec![1.0]),
+            long(400, vec![1.0, 21196.0]),
+            long(300, vec![0.0, 0.0]),
+            long(176, vec![217.0, 4.0]),
+        ] {
+            assert!(arms.arms_on_the_ground(), "{arms:?}");
+        }
+        for not in [
+            Command::Disarm,
+            Command::Rtl,
+            Command::Land,
+            Command::Reboot,
+            Command::SetMode {
+                mode: "AUTO".into(),
+            },
+            long(400, vec![0.0]),
+            long(176, vec![89.0, 4.0]),
+            long(2000, vec![]),
+        ] {
+            assert!(!not.arms_on_the_ground(), "{not:?}");
+        }
     }
 
     #[test]

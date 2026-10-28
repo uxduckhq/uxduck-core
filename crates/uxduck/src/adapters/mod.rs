@@ -7,3 +7,5 @@ pub mod host;
 pub mod login_item;
 pub mod storage;
 pub mod system;
+
+pub mod process_usage;

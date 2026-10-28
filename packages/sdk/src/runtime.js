@@ -31,6 +31,17 @@ export function notify(vehicleId, severity, title, body) {
   return body === undefined ? notice : { ...notice, body };
 }
 
+/**
+ * Where one of the checks `plugin.json` declares stands for a vehicle, for
+ * `Effects.checks`: `pass`, `fail` or `waiting`, with a few words and no
+ * live numbers ("Over 8 m/s."), since the vehicle's list is kept each time
+ * they change. Report again before the check's `staleMs` runs out.
+ */
+export function check(vehicleId, id, status, detail) {
+  const report = { vehicleId, id, status };
+  return detail === undefined || detail === "" ? report : { ...report, detail };
+}
+
 /** A `MAV_CMD` for a vehicle, by number. */
 export function commandLong(vehicleId, command, params) {
   return { vehicleId, command: { type: "long", command, params } };

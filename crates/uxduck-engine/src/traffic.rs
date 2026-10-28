@@ -11,16 +11,17 @@ use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::plugin::{PluginTraffic, PluginTrafficStatus};
 use uxduck_contracts::dto::traffic::{
-    TrafficAircraft, TrafficAltitudeFrame, TrafficCategory as CategoryDto, TrafficOwnMatch,
-    TrafficProtocol, TrafficRefusal, TrafficRefusalReason as Reason, TrafficSource,
-    TrafficSourceKind, TrafficSourceState, TrafficStatus, VehicleTrafficParams,
+    TrafficAircraft, TrafficAltitudeFrame, TrafficCategory as CategoryDto, TrafficFeedContext,
+    TrafficOwnMatch, TrafficProtocol, TrafficReference, TrafficRefusal,
+    TrafficRefusalReason as Reason, TrafficRelative, TrafficSource, TrafficSourceKind,
+    TrafficSourceState, TrafficStatus, VehicleTrafficParams,
 };
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::{LinkKind, LinkStatus};
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::notification::{NotificationKind, NotificationState, Severity, Subject};
 use uxduck_core::domain::telemetry::AltitudeFrame as TelemetryFrame;
 use uxduck_core::domain::traffic::{AltitudeFrame, TrafficCategory, TrafficReport};
 
@@ -285,6 +286,7 @@ impl Engine {
     /// Forgets aircraft not heard for a minute, ends pauses, and tells
     /// watchers what aged. Called once a second.
     pub fn expire_traffic(&mut self, now_us: u64) {
+        self.traffic.dirty = !self.traffic.sources.is_empty() || !self.traffic.watchers.is_empty();
         let mut resumed = Vec::new();
         for (id, source) in &mut self.traffic.sources {
             let before = source.records.len();
@@ -338,10 +340,45 @@ impl Engine {
             }
         }
         let ours = self.own_vehicles();
+        let references: Vec<_> = self
+            .traffic_references()
+            .into_iter()
+            .filter(|r| r.id != "device")
+            .collect();
         let aircraft = merged
             .into_values()
             .map(|(report, sources)| {
                 let mut seen = aircraft(report, sources, now);
+                if let Some(at) = report.position {
+                    seen.relative = references
+                        .iter()
+                        .map(|r| TrafficRelative {
+                            reference_id: r.id.clone(),
+                            distance_m: metres_between(at, (r.latitude_deg, r.longitude_deg)),
+                            above_m: seen.amsl_m.zip(r.amsl_m).map(|(a, b)| a - b),
+                            margin_m: r.vertical_accuracy_m.unwrap_or(0.0) + 2.0,
+                        })
+                        .collect();
+                    if self.state.settings.traffic_controls.alerts_enabled && !seen.stale {
+                        seen.alert_vehicle_ids = references
+                            .iter()
+                            .zip(&seen.relative)
+                            .filter(|(r, c)| {
+                                let holding = r.vehicle_id.as_ref().is_some_and(|id| {
+                                    self.traffic
+                                        .alerts
+                                        .contains(&(id.clone(), seen.address.clone()))
+                                });
+                                alert_near(
+                                    c,
+                                    &self.state.settings,
+                                    if holding { 1.25 } else { 1.0 },
+                                )
+                            })
+                            .filter_map(|(r, _)| r.vehicle_id.clone())
+                            .collect();
+                    }
+                }
                 if let Some((vehicle_id, how)) = own(report, &ours) {
                     seen.vehicle_id = Some(vehicle_id);
                     seen.own = Some(how);
@@ -477,7 +514,117 @@ impl Engine {
                 });
             }
         }
-        TrafficStatus { aircraft, sources }
+        TrafficStatus {
+            aircraft,
+            sources,
+            references,
+            controls_version: Some(1),
+        }
+    }
+
+    /// Every usable reference; display selection is separate from alert evaluation.
+    pub fn traffic_references(&self) -> Vec<TrafficReference> {
+        let now = self.clock.now_us();
+        let mut references = Vec::new();
+        for vehicle in self.state.vehicles.values() {
+            let Some(t) = self.telemetry.get(&vehicle.id) else {
+                continue;
+            };
+            let Some(p) = t
+                .positions
+                .iter()
+                .filter(|p| now.saturating_sub(p.time_us) < GONE_US)
+                .find(|p| p.source == "fused")
+                .or_else(|| {
+                    t.positions
+                        .iter()
+                        .find(|p| now.saturating_sub(p.time_us) < GONE_US)
+                })
+            else {
+                continue;
+            };
+            let amsl = p
+                .altitudes
+                .iter()
+                .find(|a| a.frame == TelemetryFrame::Amsl)
+                .map(|a| a.meters)
+                .or_else(|| {
+                    p.altitudes
+                        .iter()
+                        .find(|a| a.frame == TelemetryFrame::Ellipsoid)
+                        .and_then(|a| {
+                            uxduck_core::domain::traffic::geoid_height(
+                                p.latitude_deg,
+                                p.longitude_deg,
+                            )
+                            .map(|n| a.meters - n)
+                        })
+                });
+            references.push(TrafficReference {
+                id: format!("vehicle:{}", vehicle.id),
+                name: vehicle.name.clone(),
+                vehicle_id: Some(vehicle.id.clone()),
+                latitude_deg: p.latitude_deg,
+                longitude_deg: p.longitude_deg,
+                amsl_m: amsl,
+                vertical_accuracy_m: p.vertical_accuracy_m.filter(|m| m.is_finite() && *m >= 0.0),
+            });
+        }
+        let controls = &self.state.settings.traffic_controls;
+        for site in &controls.sites {
+            references.push(TrafficReference {
+                id: format!("site:{}", site.id),
+                name: site.name.clone(),
+                vehicle_id: None,
+                latitude_deg: f64::from(site.latitude_e7) / 1e7,
+                longitude_deg: f64::from(site.longitude_e7) / 1e7,
+                amsl_m: site.altitude_m.map(f64::from),
+                vertical_accuracy_m: None,
+            });
+        }
+        if controls.device_location
+            && self.location.status.state == uxduck_contracts::dto::location::LocationState::On
+            && let Some(fix) = &self.location.status.fix
+        {
+            references.push(TrafficReference {
+                id: "device".into(),
+                name: "You".into(),
+                vehicle_id: None,
+                latitude_deg: fix.latitude_deg,
+                longitude_deg: fix.longitude_deg,
+                amsl_m: None,
+                vertical_accuracy_m: None,
+            });
+        }
+        references
+    }
+
+    /// Only enabled traffic-source plugins receive the explicitly selected locations.
+    #[must_use]
+    pub fn traffic_feed_for(&self, plugin_id: &str) -> Option<TrafficFeedContext> {
+        let plugin = self.state.plugins.get(plugin_id)?;
+        if !plugin.enabled || !plugin.traffic_source {
+            return None;
+        }
+        let c = &self.state.settings.traffic_controls;
+        let references = self
+            .traffic_references()
+            .into_iter()
+            .filter(|r| {
+                r.vehicle_id.as_ref().is_none_or(|id| {
+                    c.all_vehicles || c.vehicle_ids.contains(id) || c.alerts_enabled
+                })
+            })
+            .collect();
+        Some(TrafficFeedContext {
+            references,
+            radius_m: c.range_m.max(46_300).max(if c.alerts_enabled {
+                self.state.settings.traffic_alert_m
+            } else {
+                0
+            }),
+            refresh_s: c.refresh_s,
+        })
     }
 
     /// Our vehicles as a receiver may hear them: the address they send
@@ -506,8 +653,13 @@ impl Engine {
                     let p = t
                         .positions
                         .iter()
+                        .filter(|p| self.clock.now_us().saturating_sub(p.time_us) < GONE_US)
                         .find(|p| p.source == "fused")
-                        .or_else(|| t.positions.first())?;
+                        .or_else(|| {
+                            t.positions
+                                .iter()
+                                .find(|p| self.clock.now_us().saturating_sub(p.time_us) < GONE_US)
+                        })?;
                     let amsl = p
                         .altitudes
                         .iter()
@@ -546,47 +698,44 @@ impl Engine {
         }
     }
 
-    /// Warns of traffic within Settings › Airspace's distances of an armed
-    /// vehicle (S174), and clears the warning once it is a quarter beyond
+    /// Warns of traffic within Settings › Airspace's distances of a
+    /// vehicle, independently of arming and display settings (S174), and clears the warning once it is a quarter beyond
     /// them, gone or not heard lately. Never for our own vehicles.
     fn review_alerts(&mut self, status: &TrafficStatus) {
-        let (across, up) = (
-            f64::from(self.state.settings.traffic_alert_m),
-            f64::from(self.state.settings.traffic_alert_up_m),
-        );
-        let mut near: BTreeMap<(String, String), (String, f64, f64)> = BTreeMap::new();
+        let mut near: BTreeMap<(String, String), (String, f64, Option<f64>)> = BTreeMap::new();
         let mut still: BTreeSet<(String, String)> = BTreeSet::new();
-        for ours in self.own_vehicles() {
-            let armed = self
-                .state
-                .vehicles
-                .get(&ours.vehicle_id)
-                .is_some_and(|v| v.armed);
-            let Some((at_lat, at_lon, amsl)) = ours.at.filter(|_| armed) else {
-                continue;
-            };
+        if self.state.settings.traffic_controls.alerts_enabled {
             for aircraft in &status.aircraft {
-                let (Some(plane_lat), Some(plane_lon), Some(alt)) = (
-                    aircraft.latitude_deg,
-                    aircraft.longitude_deg,
-                    aircraft.altitude_m,
-                ) else {
-                    continue;
-                };
                 if aircraft.vehicle_id.is_some() || aircraft.stale {
                     continue;
                 }
-                let distance = metres_between((at_lat, at_lon), (plane_lat, plane_lon));
-                let above = alt - amsl;
-                let key = (ours.vehicle_id.clone(), aircraft.address.clone());
-                if distance <= across && above.abs() <= up {
-                    let name = aircraft
-                        .callsign
-                        .clone()
-                        .unwrap_or_else(|| aircraft.address.clone());
-                    near.insert(key, (name, distance, above));
-                } else if distance <= across * 1.25 && above.abs() <= up * 1.25 {
-                    still.insert(key);
+                for reference in &status.references {
+                    let Some(vehicle_id) = &reference.vehicle_id else {
+                        continue;
+                    };
+                    let Some(c) = aircraft
+                        .relative
+                        .iter()
+                        .find(|c| c.reference_id == reference.id)
+                    else {
+                        continue;
+                    };
+                    let key = (vehicle_id.clone(), aircraft.address.clone());
+                    if alert_near(c, &self.state.settings, 1.0) {
+                        near.insert(
+                            key,
+                            (
+                                aircraft
+                                    .callsign
+                                    .clone()
+                                    .unwrap_or_else(|| aircraft.address.clone()),
+                                c.distance_m,
+                                c.above_m,
+                            ),
+                        );
+                    } else if alert_near(c, &self.state.settings, 1.25) {
+                        still.insert(key);
+                    }
                 }
             }
         }
@@ -602,7 +751,17 @@ impl Engine {
             self.resolve(&alert_condition(&key.0, &key.1));
         }
         for (key, (name, distance, above)) in near {
-            if !self.traffic.alerts.insert(key.clone()) {
+            let entered = self.traffic.alerts.insert(key.clone());
+            if !entered
+                && self.state.notifications.values().any(|n| {
+                    n.condition.as_deref() == Some(&alert_condition(&key.0, &key.1))
+                        && n.body.as_ref().is_some_and(|body| {
+                            body.contains("altitude uncertain") == above.is_none()
+                        })
+                })
+            {
+                // Update a warning when certainty changes, not on every metre
+                // of movement: telemetry must not become a notification journal.
                 continue;
             }
             let vehicle = self
@@ -610,13 +769,19 @@ impl Engine {
                 .vehicles
                 .get(&key.0)
                 .map_or_else(|| "the vehicle".to_owned(), |v| v.name.clone());
-            let height = if above.abs() < 15.0 {
+            let height = if above.is_none() {
+                "altitude uncertain".to_owned()
+            } else if above.is_some_and(|m| m.abs() < 15.0) {
                 "at the same height".to_owned()
             } else {
                 format!(
                     "{:.0} m {}",
-                    above.abs(),
-                    if above > 0.0 { "above" } else { "below" }
+                    above.unwrap_or_default().abs(),
+                    if above.unwrap_or_default() > 0.0 {
+                        "above"
+                    } else {
+                        "below"
+                    }
                 )
             };
             let away = if distance < 1_000.0 {
@@ -624,7 +789,11 @@ impl Engine {
             } else {
                 format!("{:.1} km", distance / 1_000.0)
             };
-            self.raise(Raise {
+            // A resolved condition remains in history. Re-entering its range
+            // must make it active again, including after alerts are re-enabled.
+            let condition = alert_condition(&key.0, &key.1);
+            self.reactivate_traffic_alert(&condition);
+            self.raise_or_update(Raise {
                 severity: Severity::Warning,
                 kind: NotificationKind::Persistent,
                 subject: Subject::Vehicle { id: key.0.clone() },
@@ -636,6 +805,29 @@ impl Engine {
                 condition: Some(alert_condition(&key.0, &key.1)),
                 report: None,
             });
+        }
+    }
+
+    /// Restore a resolved traffic condition before refreshing its notice.
+    fn reactivate_traffic_alert(&mut self, condition: &str) {
+        if let Some(mut previous) = self
+            .state
+            .notifications
+            .values()
+            .find(|n| {
+                n.condition.as_deref() == Some(condition) && n.state == NotificationState::Resolved
+            })
+            .cloned()
+        {
+            previous.state = NotificationState::Active;
+            previous.created_at_us = self.clock.now_us();
+            previous.version += 1;
+            self.commit_as(
+                crate::plugins::daemon(),
+                Change::NotificationUpserted {
+                    notification: previous,
+                },
+            );
         }
     }
 
@@ -693,8 +885,6 @@ struct Ours {
 /// Across, and up or down, within which an aircraft is probably the vehicle.
 const NEARBY_M: f64 = 30.0;
 const NEARBY_UP_M: f64 = 15.0;
-/// Up or down for a pressure altitude, which differs from GNSS by the weather.
-const NEARBY_UP_PRESSURE_M: f64 = 50.0;
 
 /// Which of our vehicles an aircraft is, if it is one (S169, ADR-0034).
 fn own(report: &TrafficReport, ours: &[Ours]) -> Option<(String, TrafficOwnMatch)> {
@@ -702,16 +892,15 @@ fn own(report: &TrafficReport, ours: &[Ours]) -> Option<(String, TrafficOwnMatch
     if let Some(vehicle) = ours.iter().find(|v| v.address == Some(address)) {
         return Some((vehicle.vehicle_id.clone(), TrafficOwnMatch::Address));
     }
-    let (position, altitude) = (report.position?, report.altitude_m?);
-    let up = if report.altitude_frame == Some(AltitudeFrame::Pressure) {
-        NEARBY_UP_PRESSURE_M
-    } else {
-        NEARBY_UP_M
-    };
+    let (position, altitude) = (
+        report.position?,
+        uxduck_core::domain::traffic::sea_level_height(report)?,
+    );
     ours.iter()
         .find(|v| {
             v.at.is_some_and(|(lat, lon, amsl)| {
-                metres_between(position, (lat, lon)) <= NEARBY_M && (altitude - amsl).abs() <= up
+                metres_between(position, (lat, lon)) <= NEARBY_M
+                    && (altitude - amsl).abs() <= NEARBY_UP_M
             })
         })
         .map(|v| (v.vehicle_id.clone(), TrafficOwnMatch::Nearby))
@@ -751,6 +940,7 @@ fn plugin_report(report: PluginTraffic, now_us: u64) -> Result<TrafficReport, Re
         altitude_frame: report.altitude_frame.map(|frame| match frame {
             TrafficAltitudeFrame::Pressure => AltitudeFrame::Pressure,
             TrafficAltitudeFrame::Geometric => AltitudeFrame::Geometric,
+            TrafficAltitudeFrame::Ellipsoid => AltitudeFrame::Ellipsoid,
         }),
         track_deg: report.track_deg.map(|t| t.rem_euclid(360.0)),
         ground_speed_mps: report.ground_speed_mps,
@@ -823,7 +1013,7 @@ fn metres_between((lat1, lon1): (f64, f64), (lat2, lon2): (f64, f64)) -> f64 {
     let dp = p2 - p1;
     let dl = (lon2 - lon1).to_radians();
     let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
-    2.0 * EARTH_M * a.sqrt().asin()
+    2.0 * EARTH_M * a.clamp(0.0, 1.0).sqrt().asin()
 }
 
 fn aircraft(report: &TrafficReport, sources: Vec<String>, now_us: u64) -> TrafficAircraft {
@@ -839,9 +1029,15 @@ fn aircraft(report: &TrafficReport, sources: Vec<String>, now_us: u64) -> Traffi
         latitude_deg: report.position.map(|(lat, _)| lat),
         longitude_deg: report.position.map(|(_, lon)| lon),
         altitude_m: report.altitude_m,
+        amsl_m: uxduck_core::domain::traffic::sea_level_height(report),
+        ellipsoid_m: uxduck_core::domain::traffic::ellipsoid_height(report),
+        relative: Vec::new(),
+        alert_vehicle_ids: Vec::new(),
+
         altitude_frame: report.altitude_frame.map(|frame| match frame {
             AltitudeFrame::Pressure => TrafficAltitudeFrame::Pressure,
             AltitudeFrame::Geometric => TrafficAltitudeFrame::Geometric,
+            AltitudeFrame::Ellipsoid => TrafficAltitudeFrame::Ellipsoid,
         }),
         track_deg: report.track_deg,
         ground_speed_mps: report.ground_speed_mps,
@@ -873,4 +1069,14 @@ fn category(category: TrafficCategory) -> CategoryDto {
         TrafficCategory::Surface => CategoryDto::Surface,
         TrafficCategory::Obstacle => CategoryDto::Obstacle,
     }
+}
+
+fn alert_near(
+    c: &TrafficRelative,
+    settings: &uxduck_core::domain::settings::Settings,
+    factor: f64,
+) -> bool {
+    c.distance_m <= f64::from(settings.traffic_alert_m) * factor
+        && c.above_m
+            .is_none_or(|m| m.abs() <= f64::from(settings.traffic_alert_up_m) * factor + c.margin_m)
 }

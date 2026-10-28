@@ -714,7 +714,7 @@ impl Engine {
                 false
             }
             Step::Arm => {
-                self.launch_command(link_id, vehicle, Command::Arm);
+                self.launch_arm(link_id, vehicle);
                 false
             }
             Step::Armed => {
@@ -987,6 +987,18 @@ impl Engine {
 
     /// Sends a command as the simulation start: journaled with a receipt
     /// like any other, attributed to `simulation-start`.
+    /// UXDuck's own take-off arms too: never past a blocking preflight
+    /// check (S192, ADR-0038 K3).
+    fn launch_arm(&mut self, link_id: &str, vehicle: &Vehicle) {
+        let gating = self.preflight_gating(&vehicle.id);
+        if gating.is_empty() {
+            self.launch_command(link_id, vehicle, Command::Arm);
+        } else {
+            let why = crate::preflight::refusal("Arm", &vehicle.name, &gating, false);
+            self.fail_launch(link_id, why);
+        }
+    }
+
     fn launch_command(&mut self, link_id: &str, vehicle: &Vehicle, command: Command) {
         let id = self.send_as_simulation_start(vehicle, command);
         self.await_launch_order(link_id, id);
@@ -1020,6 +1032,8 @@ impl Engine {
             status: ReceiptStatus::Sent,
             detail: None,
             reason: None,
+            preflight: Vec::new(),
+            preflight_override: None,
             sent_without_recent_heartbeat: false,
             forced: false,
             attempts: 0,

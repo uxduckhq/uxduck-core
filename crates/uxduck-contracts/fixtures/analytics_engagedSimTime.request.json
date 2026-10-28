@@ -1,0 +1,9 @@
+{
+  "method": "analytics/engagedSimTime",
+  "params": {
+    "vehicle_id": "sim-1",
+    "start_ms": 1700000000000,
+    "end_ms": 1700000030000,
+    "surface": "browser"
+  }
+}

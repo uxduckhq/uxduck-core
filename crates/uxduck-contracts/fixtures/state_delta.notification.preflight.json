@@ -1,0 +1,189 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1803,
+    "tsUs": 1790669310000000,
+    "actor": {
+      "clientId": "daemon"
+    },
+    "changes": [
+      {
+        "entity": "preflight",
+        "id": "v9b1c2d3e4f5a6b7c",
+        "op": "upsert",
+        "preflight": {
+          "vehicleId": "v9b1c2d3e4f5a6b7c",
+          "checks": [
+            {
+              "id": "vehicle:GPS: Bad fix",
+              "source": "vehicle",
+              "title": "GPS: Bad fix",
+              "severity": "block",
+              "status": "fail",
+              "detail": "Alpha says it can't arm until this clears.",
+              "fix": {
+                "type": "messages"
+              },
+              "gates": false
+            },
+            {
+              "id": "uxduck:setup",
+              "source": "uxduck",
+              "title": "No setup procedure running",
+              "severity": "block",
+              "status": "pass",
+              "gates": false
+            },
+            {
+              "id": "uxduck:restart",
+              "source": "uxduck",
+              "title": "No restart due",
+              "severity": "block",
+              "status": "fail",
+              "detail": "The compass calibration takes effect once Alpha restarts.",
+              "fix": {
+                "type": "setup",
+                "row": "compass"
+              },
+              "gates": true
+            },
+            {
+              "id": "uxduck:link",
+              "source": "uxduck",
+              "title": "Link",
+              "severity": "warn",
+              "status": "pass",
+              "detail": "Heard just now; the radio signal is at least 30 %.",
+              "gates": false
+            },
+            {
+              "id": "uxduck:controller",
+              "source": "uxduck",
+              "title": "Controller at neutral",
+              "severity": "warn",
+              "status": "pass",
+              "detail": "No controller drives Alpha.",
+              "gates": false
+            },
+            {
+              "id": "uxduck:plan",
+              "source": "uxduck",
+              "title": "Plan on the vehicle",
+              "severity": "block",
+              "status": "fail",
+              "detail": "Ridge survey is chosen, but Alpha has Field loop.",
+              "fix": {
+                "type": "plan",
+                "planId": "pl4a1b2c3d4e5f6a7"
+              },
+              "gates": true
+            },
+            {
+              "id": "uxduck:terrain",
+              "source": "uxduck",
+              "title": "Terrain loaded",
+              "severity": "warn",
+              "status": "waiting",
+              "detail": "Alpha is loading terrain: 12 tiles to go.",
+              "fix": {
+                "type": "mission"
+              },
+              "gates": false
+            },
+            {
+              "id": "uxduck:recording",
+              "source": "uxduck",
+              "title": "Cameras ready to record",
+              "severity": "warn",
+              "status": "pass",
+              "detail": "No camera records with Alpha.",
+              "gates": false
+            }
+          ],
+          "settings": [
+            {
+              "check": "setup",
+              "id": "uxduck:setup",
+              "title": "No setup procedure running",
+              "on": true,
+              "severity": "block",
+              "defaultSeverity": "block"
+            },
+            {
+              "check": "restart",
+              "id": "uxduck:restart",
+              "title": "No restart due",
+              "on": true,
+              "severity": "block",
+              "defaultSeverity": "block"
+            },
+            {
+              "check": "link",
+              "id": "uxduck:link",
+              "title": "Link",
+              "on": true,
+              "severity": "warn",
+              "defaultSeverity": "warn",
+              "threshold": {
+                "value": 30.0,
+                "default": 30.0,
+                "min": 0.0,
+                "max": 100.0,
+                "unit": "%",
+                "label": "Least radio signal"
+              }
+            },
+            {
+              "check": "controller",
+              "id": "uxduck:controller",
+              "title": "Controller at neutral",
+              "on": true,
+              "severity": "warn",
+              "defaultSeverity": "warn",
+              "threshold": {
+                "value": 10.0,
+                "default": 10.0,
+                "min": 1.0,
+                "max": 50.0,
+                "unit": "%",
+                "label": "Sticks within"
+              }
+            },
+            {
+              "check": "plan",
+              "id": "uxduck:plan",
+              "title": "Plan on the vehicle",
+              "on": true,
+              "severity": "block",
+              "defaultSeverity": "warn"
+            },
+            {
+              "check": "terrain",
+              "id": "uxduck:terrain",
+              "title": "Terrain loaded",
+              "on": true,
+              "severity": "warn",
+              "defaultSeverity": "warn"
+            },
+            {
+              "check": "recording",
+              "id": "uxduck:recording",
+              "title": "Cameras ready to record",
+              "on": true,
+              "severity": "warn",
+              "defaultSeverity": "warn"
+            }
+          ],
+          "planId": "pl4a1b2c3d4e5f6a7",
+          "evaluating": true,
+          "checklist": {
+            "steps": [],
+            "version": 0
+          },
+          "updatedAtUs": 1790669310000000,
+          "version": 7
+        }
+      }
+    ]
+  }
+}

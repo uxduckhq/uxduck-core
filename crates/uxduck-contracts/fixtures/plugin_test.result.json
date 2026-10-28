@@ -19,5 +19,6 @@
   ],
   "notifications": [],
   "features": 0,
+  "checks": ["wind on tlog-1: pass: Under 8 m/s."],
   "log": []
 }

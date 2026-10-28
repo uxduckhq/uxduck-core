@@ -71,6 +71,10 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::PracticeGuide(_)
         | ClientRequest::SimPause(_) => Some(Capability::Control),
         ClientRequest::ParamSet(_)
+        // A vehicle's checklist steps (S193, ADR-0038 K11): an agent asks
+        // first; ticking is a person's and never asked for.
+        | ClientRequest::ChecklistUpdate(_)
+        | ClientRequest::ChecklistCopy(_)
         | ClientRequest::PluginInstall(_)
         | ClientRequest::VehicleAddNote(_)
         | ClientRequest::VideoAssign(_)
@@ -140,6 +144,9 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         request @ (ClientRequest::FindStart(_) | ClientRequest::FindVehicles(_)) => {
             crate::finds::needed(request).filter(|c| *c == Capability::Config)
         }
+        // Everything else, setup procedures among them (`setup/start`,
+        // `setup/cancel`): one needs a person at the vehicle (ADR-0037 V4),
+        // so it is never asked for on a client's behalf.
         _ => None,
     }
 }
@@ -215,9 +222,13 @@ impl Engine {
         // plugin's command it declares dangerous: "always allow" for the
         // `control` it needs must not let every later one through unasked.
         let install = matches!(request, ClientRequest::PluginInstall(_));
+        // Arming past failing preflight checks always asks (ADR-0038 K4),
+        // listing them: a client never overrides them on its own.
+        let preflight = self.preflight_asks(connection, request);
         let always = install
             || self.remote_critical_asks(connection, request)
-            || self.dangerous_plugin_command(request);
+            || self.dangerous_plugin_command(request)
+            || !preflight.is_empty();
         if always {
             if self.running_approved {
                 return false;
@@ -243,13 +254,15 @@ impl Engine {
             return false;
         };
         let now = self.clock.now_us();
+        let (summary, body) = self.approval_words(request, capability, &preflight);
         let approval = Approval {
             id: format!("ap{}", &self.random.token()[..16]),
             client_id: record.clone(),
             client_name: name.clone(),
             capability,
             method: method_of(request),
-            summary: self.summary(request),
+            summary,
+            preflight,
             state: ApprovalState::Pending,
             remember: None,
             deadline_us: now + APPROVAL_DEADLINE_US,
@@ -283,11 +296,7 @@ impl Engine {
             kind: NotificationKind::Persistent,
             subject: Subject::Client { id: record },
             title,
-            body: Some(format!(
-                "It needs the {} capability. Denied in {} s if nobody answers.",
-                format!("{capability:?}").to_lowercase(),
-                APPROVAL_DEADLINE_US / 1_000_000
-            )),
+            body: Some(body),
             actions: if always {
                 vec![
                     action(
@@ -309,6 +318,50 @@ impl Engine {
             report: None,
         });
         true
+    }
+
+    /// An approval's summary and its notice's words: with failing preflight
+    /// checks, which, and that allowing it arms past them (ADR-0038 K4).
+    fn approval_words(
+        &self,
+        request: &ClientRequest,
+        capability: Capability,
+        preflight: &[uxduck_core::domain::preflight::CheckRef],
+    ) -> (String, String) {
+        let deadline = APPROVAL_DEADLINE_US / 1_000_000;
+        if preflight.is_empty() {
+            return (
+                self.summary(request),
+                format!(
+                    "It needs the {} capability. Denied in {deadline} s if nobody answers.",
+                    format!("{capability:?}").to_lowercase()
+                ),
+            );
+        }
+        let titles: Vec<&str> = preflight.iter().map(|c| c.title.as_str()).collect();
+        let summary = format!(
+            "{} past {} failing preflight {}: {}",
+            self.summary(request),
+            preflight.len(),
+            if preflight.len() == 1 {
+                "check"
+            } else {
+                "checks"
+            },
+            titles.join(", ")
+        );
+        let list: Vec<String> = preflight
+            .iter()
+            .map(|c| match &c.detail {
+                Some(detail) => format!("{}: {detail}", c.title),
+                None => c.title.clone(),
+            })
+            .collect();
+        let body = format!(
+            "{}\nAllowing it arms past them. Denied in {deadline} s if nobody answers.",
+            list.join("\n")
+        );
+        (summary, body)
     }
 
     /// A plugin's command that the plugin itself declares dangerous.
@@ -643,6 +696,7 @@ impl Engine {
         approval.remember = remember;
         approval.version += 1;
         let dto = ApprovalDto::from(&approval);
+        let listed: Vec<String> = approval.preflight.iter().map(|c| c.id.clone()).collect();
         let record = approval.client_id.clone();
         self.commit_as(daemon(), Change::ApprovalUpserted { approval });
         self.track(DaemonEvent::ApprovalResolved {
@@ -704,7 +758,11 @@ impl Engine {
         // operator's own `approval/resolve` keeps its reply slot.
         let outer = self.replying_to.replace((held.connection, held.request_id));
         self.running_approved = true;
+        // An approval that listed failing preflight checks arms past them
+        // (ADR-0038 K4), recorded on the receipt as the operator's.
+        self.approving_preflight = (!listed.is_empty()).then(|| (id.to_owned(), listed));
         let result = rpc::handlers::handle(self, held.connection, held.request);
+        self.approving_preflight = None;
         self.running_approved = false;
         self.one_shot = None;
         if let Some((connection, request_id)) = self.replying_to.take() {

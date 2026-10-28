@@ -825,6 +825,7 @@ impl Engine {
                 traffic: false,
                 // Not in the account's library: chosen on each computer.
                 look: None,
+                preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
                 version: 1,
             },
         };

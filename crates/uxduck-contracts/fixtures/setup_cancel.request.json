@@ -1,0 +1,6 @@
+{
+  "method": "setup/cancel",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c"
+  }
+}

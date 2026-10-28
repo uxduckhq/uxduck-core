@@ -1,0 +1,8 @@
+{
+  "method": "checklist/tick",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "stepId": "st3f9a2c71be",
+    "ticked": true
+  }
+}

@@ -72,6 +72,61 @@ pub struct PluginManifest {
     /// UXDuck includes that sends anything from this computer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starts_off: bool,
+    /// Its preflight checks (S194, ADR-0038 K12): reported per vehicle with
+    /// `Effects.checks`, listed in each vehicle's checks under its name. A
+    /// `block` check stops arming only if a person allowed it (K13);
+    /// otherwise it warns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<DeclaredCheck>,
+}
+
+/// A preflight check a plugin declares (S194, ADR-0038 K12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclaredCheck {
+    /// Lower case, digits and dashes, unique in the plugin, such as `wind`.
+    pub id: String,
+    /// What passing means, for people: "Wind under 8 m/s".
+    pub title: String,
+    /// `block` asks to stop arming while it does not pass; it does only
+    /// once a person allows the plugin's checks to (K13), and warns until
+    /// then.
+    pub severity: crate::dto::preflight::CheckSeverity,
+    /// A report older than this many milliseconds no longer counts: the
+    /// check is unknown until the plugin reports again. 1 s to a day; a
+    /// minute if left out.
+    #[serde(default = "default_stale_ms")]
+    pub stale_ms: u32,
+}
+
+const fn default_stale_ms() -> u32 {
+    60_000
+}
+
+/// Where a plugin says one of its checks stands for a vehicle (S194).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReportedStatus {
+    Pass,
+    Fail,
+    /// Something under way that ends by itself, such as a first reading.
+    Waiting,
+}
+
+/// One of a plugin's declared checks for a vehicle, as it stands now
+/// (S194). The latest report of each counts until its `staleMs` runs out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedCheck {
+    pub vehicle_id: String,
+    /// The id it declares in `plugin.json`'s `checks`; any other is
+    /// ignored.
+    pub id: String,
+    pub status: ReportedStatus,
+    /// What it found, in a few words without live numbers ("Over 8 m/s."):
+    /// the vehicle's list is kept each time its words change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// An agent's draft: which agent wrote it, and in which chat.
@@ -179,7 +234,7 @@ pub struct PluginTraffic {
     pub latitude_deg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub longitude_deg: Option<f64>,
-    /// Metres above sea level.
+    /// Metres in the stated altitude reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub altitude_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,9 +253,12 @@ pub struct PluginTraffic {
 }
 
 /// What `on_tick` receives (S101).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TickInput {
+    /// Present only for traffic sources, when the user selected locations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<crate::dto::traffic::TrafficFeedContext>,
     /// The daemon's clock, in milliseconds since 1970: `Date.now()`.
     #[schemars(schema_with = "crate::safe::integer")]
     pub now_ms: u64,
@@ -676,6 +734,11 @@ pub struct Effects {
     /// until it says otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_status: Option<PluginTrafficStatus>,
+    /// Where its declared checks stand, per vehicle (S194, ADR-0038 K12):
+    /// the latest of each counts until its `staleMs` runs out. A check it
+    /// does not declare is ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<ReportedCheck>,
 }
 
 /// How a plugin's traffic source is doing (S171).
@@ -751,6 +814,14 @@ pub struct Plugin {
     /// It is a traffic source (S171).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub traffic_source: bool,
+    /// Its preflight checks (S194).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<DeclaredCheck>,
+    /// Whether its `block` checks may stop arming (K13): a person's answer
+    /// on this computer, asked at install or on the Plugins page. Absent
+    /// until someone answers; until `true` they only warn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_block: Option<bool>,
 }
 
 const fn on() -> bool {
@@ -763,6 +834,15 @@ const fn on() -> bool {
 pub struct PluginSetEnabledParams {
     pub id: String,
     pub enabled: bool,
+}
+
+/// `plugin/setChecksBlock` (S194, ADR-0038 K13): whether a plugin's
+/// blocking checks may stop arming, or only warn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSetChecksBlockParams {
+    pub id: String,
+    pub block: bool,
 }
 
 /// What a running plugin has used lately (S104), as the Plugins page
@@ -940,6 +1020,10 @@ pub struct PluginTestResult {
     /// Titles of its notifications, in order, at most 20.
     pub notifications: Vec<String>,
     pub features: u32,
+    /// The last report of each check it declares, by vehicle, at most 20,
+    /// such as "wind on tlog-1: fail: Over 8 m/s." (S194).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
     /// Its last log lines, at most 20.
     pub log: Vec<String>,
     /// Why it stopped, if it did: a syntax error, a throw, too long.
@@ -952,6 +1036,10 @@ pub struct PluginTestResult {
 pub struct PluginInstallParams {
     /// A directory holding `plugin.json` and the module it names.
     pub path: String,
+    /// A person's answer: may its blocking checks stop arming (S194)?
+    /// Only an operator's counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_block: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

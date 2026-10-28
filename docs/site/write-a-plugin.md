@@ -150,6 +150,12 @@ A plugin can bring its vendor's MAVLink messages as a dialect file: MAVLink's XM
 
 Each command in `plugin.json` has a `name`, a `title`, a `description`, its `parameters` as JSON Schema and a `risk` (`none`, `confirm` or `dangerous`). A `none` command may suggest a `shortcut`, such as `Alt+C`; it is left unbound when it clashes with one of UXDuck's own. Commands appear in the input (type `>` and their title) and the agent runs them after an operator allows it.
 
+## Preflight checks
+
+A plugin can add checks to each vehicle's preflight list, such as the wind from a forecast or a payload's SD card. Declare them in `plugin.json`: `"checks": [{ "id": "wind", "title": "Wind under 8 m/s", "severity": "block", "staleMs": 30000 }]`. Report where each stands for a vehicle in `checks`, with the SDK's `check(vehicleId, "wind", "pass" | "fail" | "waiting", "Under 8 m/s.")`. Keep the words short and without live numbers, and show a value as an item instead.
+
+The latest report counts until `staleMs` runs out (a minute if left out). After that the check is unknown. It is also unknown while the plugin is off or stopped. A `block` check stops arming only after the person allows it, when installing the plugin or on the **Plugins** page. Until then it only warns. Reports of checks you did not declare are ignored. [wind-check-ts](../../plugins/wind-check-ts) is an example.
+
 ## Ask the agent to write one
 
 Ask in a chat for a value or a panel UXDuck does not have, such as "show the distance from home". The agent drafts a TypeScript plugin, tests it against the vehicle's last five minutes and says what it produced. Say "install it" when you want it: you are always asked to approve an install, with what the plugin may do and the chat it came from. Drafts are listed on the **Plugins** page with their chat.
@@ -179,18 +185,18 @@ another's marker. GeoJSON coordinates are `[longitude, latitude]`; the SDK's
 
 ## When nothing appears
 
-| Symptom                        | Check                                                                                     |
-| ------------------------------ | ----------------------------------------------------------------------------------------- |
-| Missing test.tlog              | Run the scaffold, or pass `--tlog <recording>`; no live vehicle is recorded automatically |
-| No handler calls or values     | Verify keys/message names in the manifest and whether the recording contains those inputs |
-| Value discarded or a dash      | Match the key's unit suffix, widget item key and vehicle; guard absent values             |
-| No plugin tab                  | Add `tab: true`, reinstall, then open it from **+** › **Plugins**                         |
-| Map markers replace each other | Give every vehicle a distinct feature id                                                  |
-| State disappears on restart    | Return `store` and restore it in onStart; module variables alone are temporary            |
-| Import fails                   | Use only `@uxduck/sdk`; local files and npm dependencies are unavailable                  |
-| Plugin stopped                 | Read its status detail on Plugins; test again for syntax, memory, time or storage errors  |
-| Agent test returns no data     | Inspect error, flightS and calls; zero flightS does not verify a telemetry calculation    |
+| Symptom                        | Check                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| Missing test.tlog              | Run the scaffold, or pass `--tlog <recording>`; no live vehicle is recorded automatically     |
+| No handler calls or values     | Verify keys/message names in the manifest and whether the recording contains those inputs     |
+| Value discarded or a dash      | Match the key's unit suffix, widget item key and vehicle; guard absent values                 |
+| No plugin tab                  | Add `tab: true`, reinstall, then open it from **+** › **Plugins**                             |
+| Map markers replace each other | Give every vehicle a distinct feature id                                                      |
+| State disappears on restart    | Return `store` and restore it in onStart; module variables alone are temporary                |
+| Import fails                   | Use only `@uxduck/sdk`; local files and npm dependencies are unavailable                      |
+| Plugin stopped                 | Read its status detail on Plugins; test again for syntax, memory, execution or storage errors |
+| Agent test returns no data     | Inspect error, flightS and calls; zero flightS does not verify a telemetry calculation        |
 
 ## Limits
 
-Each plugin gets 16 MiB of memory and one second per call. A plugin that runs out of either is stopped, and UXDuck says why. The **Plugins** page shows what each one is using, and turns it off without removing it.
+Each plugin gets 16 MiB of memory and a budget of 100 million WebAssembly fuel units per call, including initialization. Fuel measures executed work, so sleeping or pausing the computer does not spend the budget. A plugin that runs out of memory or exhausts its execution budget is stopped, and UXDuck says why. The **Plugins** page shows what each one is using, and turns it off without removing it.

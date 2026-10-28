@@ -19,12 +19,14 @@ pub mod analytics;
 mod app;
 mod app_update;
 pub mod approvals;
+mod checklist;
 pub mod commands;
 pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
 mod display;
 pub mod edge;
+mod engaged_sim_usage;
 pub mod feedback;
 pub mod finds;
 mod flight_time;
@@ -54,9 +56,11 @@ pub mod plan_files;
 pub mod plan_patterns;
 pub mod plane;
 mod plans;
+mod plugin_checks;
 pub mod plugin_sync;
 pub mod plugins;
 pub mod practice;
+mod preflight;
 mod recordings;
 mod remote;
 pub mod remote_view;
@@ -65,6 +69,13 @@ pub(crate) mod rpc;
 pub mod runtime;
 pub mod schema;
 pub mod search;
+mod setup;
+/// Installing firmware (S189): the port UXDuck Desktop gives the engine.
+pub mod firmware {
+    pub use crate::setup::{
+        FirmwarePort, FirmwareReport, InstallOrder, InstallSource, ReleasesFound, ReleasesOrder,
+    };
+}
 pub mod sim;
 mod snapshots;
 pub mod state;
@@ -267,6 +278,8 @@ pub struct Engine {
     replying_to: Option<(ConnectionId, Value)>,
     /// Requests answered when their command ends, by receipt id.
     awaiting: BTreeMap<String, (ConnectionId, Value)>,
+    /// Take-offs waiting on the command before their next step, by its receipt id.
+    take_offs: BTreeMap<String, commands::TakeOff>,
     /// Requests held for an approval, by approval id.
     held: BTreeMap<String, approvals::Held>,
     /// A capability allowed once, for the replay of one held request.
@@ -274,6 +287,9 @@ pub struct Engine {
     /// True while an operator's approval runs the request it allowed, which
     /// must not ask again (an install always asks otherwise).
     running_approved: bool,
+    /// While an approval that listed failing preflight checks runs its
+    /// request: its id and the checks' ids, which it may arm past (S192).
+    approving_preflight: Option<(String, Vec<String>)>,
     /// Parameter writes and mission uploads waiting for the vehicle.
     transfers: transfers::Pending,
     /// Simulated vehicles taking off to start in the air (S33).
@@ -306,6 +322,7 @@ pub struct Engine {
     plugin_host: Box<dyn runtime::PluginPort>,
     /// Product analytics; nothing until the composition root sets it.
     analytics: Box<dyn runtime::AnalyticsPort>,
+    analytics_internal: bool,
     /// Bounded, transient browser task outcomes, drained once across windows.
     engagement: Vec<uxduck_contracts::dto::analytics::AppEvent>,
     /// Feedback reports; nothing until the composition root sets it.
@@ -336,6 +353,10 @@ pub struct Engine {
     /// A vehicle's files: requests waiting for it, and the copies' port
     /// (S121).
     files: vehicle_files::Files,
+    /// Setup procedures' commands and progress not journaled yet (S184).
+    setup: setup::Setups,
+    /// What preflight checks need between evaluations (S192).
+    preflight: preflight::Preflights,
     /// Terrain heights (S23): the cache and requests waiting for data.
     terrain: terrain::TerrainState,
     /// The modes each vehicle lists itself (`AVAILABLE_MODES`), by its id,
@@ -388,6 +409,7 @@ pub struct Engine {
     /// Each vehicle's time armed and in the air (S103).
     flight_times: flight_time::FlightTimes,
     flight_usage: flight_usage::FlightUsage,
+    engaged_sim_usage: engaged_sim_usage::EngagedSimUsage,
     state: State,
     since_checkpoint: u64,
     /// Threads with a turn in progress, and that turn's id.
@@ -459,9 +481,11 @@ impl Engine {
             opened: Opened::default(),
             replying_to: None,
             awaiting: BTreeMap::new(),
+            take_offs: BTreeMap::new(),
             held: BTreeMap::new(),
             one_shot: None,
             running_approved: false,
+            approving_preflight: None,
             transfers: transfers::Pending::default(),
             launches: launch::Launches::default(),
             definitions: param_definitions::Definitions::default(),
@@ -480,6 +504,7 @@ impl Engine {
             panic: false,
             plugin_host: ports.plugins,
             analytics: Box::new(runtime::NoAnalytics),
+            analytics_internal: false,
             feedback: Box::new(feedback::NoFeedback),
             awaiting_feedback: BTreeMap::new(),
             awaiting_account: BTreeMap::new(),
@@ -495,6 +520,8 @@ impl Engine {
             supervision: supervision::Supervision::default(),
             practice: practice::Practice::default(),
             files: vehicle_files::Files::default(),
+            setup: setup::Setups::default(),
+            preflight: preflight::Preflights::default(),
             terrain: terrain::TerrainState::default(),
             available_modes: BTreeMap::new(),
             upload_status: None,
@@ -519,6 +546,7 @@ impl Engine {
             flights: grounded::Flights::default(),
             flight_times: flight_time::FlightTimes::default(),
             flight_usage: flight_usage::FlightUsage::default(),
+            engaged_sim_usage: engaged_sim_usage::EngagedSimUsage::default(),
             engagement: Vec::new(),
             state: loaded.state,
             since_checkpoint: 0,
@@ -662,6 +690,8 @@ impl Engine {
     }
 
     pub fn disconnect(&mut self, id: ConnectionId) {
+        // A motor it held stops (S188).
+        self.spins_disconnected(id);
         self.disconnect_places(id);
         self.disconnect_display(id);
         self.abandon_approvals(id);
@@ -1160,6 +1190,8 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         video_photo: None,
         practice_attempt: None,
         file_transfer: None,
+        setup: None,
+        preflight: None,
     }
 }
 
@@ -1237,6 +1269,14 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         change @ (Change::FileTransferUpserted { .. } | Change::FileTransferRemoved { .. }) => {
             vehicle_files::entity_changes(change)
         }
+        Change::PreflightUpdated { preflight } => vec![EntityChange {
+            preflight: Some(preflight.into()),
+            ..upsert(EntityType::Preflight, &preflight.vehicle_id)
+        }],
+        Change::SetupUpdated { setup } => vec![EntityChange {
+            setup: Some(setup.into()),
+            ..upsert(EntityType::Setup, &setup.id())
+        }],
         Change::PracticeAttemptUpserted { attempt } => vec![EntityChange {
             practice_attempt: Some(attempt.into()),
             ..upsert(EntityType::PracticeAttempt, &attempt.vehicle_id)
@@ -1257,8 +1297,10 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
             photos::entity_changes(change)
         }
         // Settings need the engine's default close policy, so `broadcast`
-        // builds them; sync is read with `sync/get`, not pushed (S16).
+        // builds them; sync is read with `sync/get`, not pushed (S16). A
+        // checklist is pushed with the vehicle's preflight checks (S193).
         Change::SettingsChanged { .. }
+        | Change::ChecklistUpdated { .. }
         | Change::SyncChanged { .. }
         | Change::EdgeConnection { .. }
         | Change::WatchLinkCreated { .. }

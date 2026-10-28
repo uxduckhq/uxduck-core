@@ -40,6 +40,10 @@ pub struct Approval {
     pub method: String,
     /// For people: "arm Copter 1".
     pub summary: String,
+    /// Arming past these blocking preflight checks (ADR-0038 K4): allowing
+    /// it is an operator's override, recorded on the receipt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<crate::domain::preflight::CheckRef>,
     pub state: ApprovalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember: Option<Remember>,

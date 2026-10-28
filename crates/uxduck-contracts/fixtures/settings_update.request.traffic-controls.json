@@ -1,0 +1,27 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 3,
+    "trafficControls": {
+      "rangeM": 10000,
+      "limitRange": true,
+      "heightM": 1500,
+      "limitHeight": false,
+      "allVehicles": false,
+      "vehicleIds": ["alpha"],
+      "deviceLocation": true,
+      "sites": [
+        {
+          "id": "launch",
+          "name": "Launch",
+          "latitudeE7": 515000000,
+          "longitudeE7": -1000000,
+          "altitudeM": 20
+        }
+      ],
+      "alwaysLabel": false,
+      "refreshS": 30,
+      "alertsEnabled": true
+    }
+  }
+}

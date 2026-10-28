@@ -125,6 +125,12 @@ pub enum Action {
         vehicle_id: String,
         dataset: crate::domain::settings::TerrainDataset,
     },
+    /// The vehicle's Setup tab at a row (S184, ADR-0037 V12), for a message
+    /// that a calibration or a restart fixes.
+    OpenSetup {
+        vehicle_id: String,
+        row: crate::domain::setup::SetupRow,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

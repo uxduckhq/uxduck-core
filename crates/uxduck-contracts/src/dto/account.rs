@@ -124,6 +124,14 @@ pub struct AccountUsernameParams {
     pub username: String,
 }
 
+/// Sets the account's name, which the team sees with its feedback: spaces
+/// collapsed, up to 80 characters; empty removes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountNameParams {
+    pub name: String,
+}
+
 /// Joins or leaves the product updates list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

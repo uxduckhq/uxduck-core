@@ -1,6 +1,7 @@
 //! One module per entity.
 
 pub mod approval;
+pub mod checklist;
 pub mod client;
 pub mod command;
 pub mod controller;
@@ -8,6 +9,7 @@ pub mod failsafe;
 pub mod files;
 pub mod find;
 pub mod flight;
+pub mod frames;
 pub mod history;
 pub mod link;
 pub mod marker;
@@ -21,7 +23,9 @@ pub mod place;
 pub mod plan;
 pub mod plugin;
 pub mod practice;
+pub mod preflight;
 pub mod settings;
+pub mod setup;
 pub mod snapshot;
 pub mod sync;
 pub mod telemetry;

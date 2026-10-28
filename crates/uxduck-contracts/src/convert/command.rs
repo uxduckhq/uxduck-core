@@ -111,7 +111,10 @@ impl From<&core::Receipt> for dto::Receipt {
             detail: r.detail.clone(),
             reason: r.reason.map(|reason| match reason {
                 core::RefusalReason::Expired => dto::RefusalReason::Expired,
+                core::RefusalReason::Preflight => dto::RefusalReason::Preflight,
             }),
+            preflight: r.preflight.iter().map(Into::into).collect(),
+            preflight_override: r.preflight_override.as_ref().map(Into::into),
             sent_without_recent_heartbeat: r.sent_without_recent_heartbeat,
             forced: r.forced,
             attempts: r.attempts,
@@ -211,6 +214,10 @@ impl From<&n::Notification> for nd::Notification {
                         } => nd::Action::UseTerrainDataset {
                             vehicle_id,
                             dataset: dataset.into(),
+                        },
+                        n::Action::OpenSetup { vehicle_id, row } => nd::Action::OpenSetup {
+                            vehicle_id,
+                            row: row.into(),
                         },
                     },
                 })

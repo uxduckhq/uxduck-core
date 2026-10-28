@@ -147,9 +147,14 @@ pub struct FeedbackSendParams {
     /// This chat's messages, when opened from it and ticked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_thread_id: Option<String>,
-    /// For a reply, when not signed in.
+    /// For a reply. Signed in, the API replies at the account's own address
+    /// whatever this says; it only tells it that a reply is wanted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_email: Option<String>,
+    /// The name the signed-in person goes by here, as Settings shows it, for
+    /// the issue; the API cuts it at 80 characters and ignores it signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter_name: Option<String>,
     pub surface: Surface,
     pub ui: FeedbackUi,
     #[serde(default)]

@@ -171,6 +171,7 @@ fn allow(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Valu
         );
         engine.start_plugin(&plugin);
         engine.resolve(&waiting_condition(id));
+        engine.plugin_checks_changed(id, false);
     }
     to_value(&PluginDto::from(&plugin))
 }
@@ -275,7 +276,7 @@ impl Engine {
             operator_id: None,
             identity: None,
         };
-        match install_as(self, actor, path, origin, true) {
+        match install_as(self, actor, path, origin, true, None) {
             Ok(plugin) if !plugin.waiting.is_empty() => {
                 let wants: Vec<&str> = plugin.waiting.iter().map(|c| words(*c)).collect();
                 self.raise(Raise {
@@ -377,7 +378,7 @@ impl Engine {
                 token: fetched.token,
             });
             let actor = self.actor(connection);
-            let plugin = install_as(self, actor, &fetched.path, origin, false)?;
+            let plugin = install_as(self, actor, &fetched.path, origin, false, None)?;
             to_value(&PluginDto::from(&plugin))
         });
         let frame = match installed {

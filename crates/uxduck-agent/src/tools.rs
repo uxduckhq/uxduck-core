@@ -112,6 +112,22 @@ pub const AGENT_METHODS: &[&str] = &[
     "files/read",
     "files/upload",
     "files/remove",
+    // A vehicle's setup (S184, ADR-0037 V4): what is calibrated, and a
+    // procedure's progress and result, freely. Starting or cancelling one
+    // needs a person at the vehicle, so they are not here.
+    "setup/state",
+    // A vehicle's preflight checks (S192, ADR-0038 K2), freely: the same
+    // list the window and the CLI read. Arming past a failing blocking one
+    // is put to an operator; changing the checks is a person's.
+    "preflight/state",
+    // A vehicle's checklist (S193, ADR-0038 K11): writing steps and rules,
+    // or copying them in from another vehicle, a file or a pasted list,
+    // asks the operator first without `config`. Ticking a step and arming
+    // past one are a person's, so `checklist/tick` and `checklist/reset`
+    // are not here.
+    "checklist/update",
+    "checklist/copy",
+    "checklist/export",
     // Opening a tab when asked (S43), in the chat's operator's layout.
     "layout/open",
     // A suggestion card for what UXDuck cannot do (S73): the person reads
@@ -140,6 +156,235 @@ pub const AGENT_METHODS: &[&str] = &[
     "plugin/test",
     "plugin/drafts",
     "plugin/install",
+    // Settings (maintainer, 2026-10-26): this device's and each operator's
+    // preferences, read freely and changed only with `config`, which asks
+    // the operator first. Skipped confirmations stay the operator's.
+    "settings/get",
+    "settings/update",
+    "operator/list",
+    "operator/update",
+];
+
+/// Methods agents are not offered, each on purpose. With [`AGENT_METHODS`]
+/// they cover every method, so a new one (a new setting's, say) must be
+/// placed in one or the other, and is not forgotten from MCP.
+pub const KEPT_FROM_AGENTS: &[&str] = &[
+    // Protocol, sessions, streams and window plumbing: not tools.
+    "initialize",
+    "trace/subscribe",
+    "session/createBootstrap",
+    "state/subscribe",
+    "client/setOperator",
+    "telemetry/subscribe",
+    "client/list",
+    "client/displayRegister",
+    "client/displayList",
+    "client/displayPull",
+    "client/displayReply",
+    "client/setCapabilities",
+    "client/forget",
+    "client/select",
+    "client/visibility",
+    "app/focus",
+    "app/open",
+    "lease/take",
+    "lease/release",
+    "remote/watch",
+    "video/watch",
+    "video/metadata/watch",
+    "video/unwatch",
+    "tray/menu",
+    "tray/activate",
+    "tray/location",
+    "interface/status",
+    "interface/check",
+    // The operator's own: pairing, approvals, people, accounts, keys,
+    // sharing, updates, analytics and stopping UXDuck.
+    "pairing/list",
+    "pairing/approve",
+    "pairing/deny",
+    "operator/profile",
+    "operator/create",
+    "operator/remove",
+    "operator/switch",
+    "agent/config",
+    "credentials/set",
+    "approval/list",
+    "approval/resolve",
+    "daemon/restart",
+    "plugin/remove",
+    "plugin/features",
+    "plugin/items",
+    "plugin/setEnabled",
+    "plugin/usage",
+    "daemon/stop",
+    "daemon/stopPreview",
+    "update/status",
+    "update/check",
+    "update/install",
+    "update/later",
+    "desktopApp/status",
+    "network/status",
+    "desktopApp/download",
+    "desktopApp/choose",
+    "desktopApp/remove",
+    "daemon/wakeups",
+    "analytics/track",
+    "analytics/feedback",
+    "analytics/activeTime",
+    "analytics/engagedSimTime",
+    "analytics/takeFlightTime",
+    "analytics/takeEngagement",
+    "analytics/performance",
+    "analytics/alias",
+    "feedback/send",
+    "debug/panic",
+    "journal/import",
+    "account/get",
+    "account/flights",
+    "account/versions",
+    "account/environment",
+    "account/setEnvironment",
+    "account/signIn",
+    "account/verify",
+    "account/signOut",
+    "account/setUpdates",
+    "sync/get",
+    "sync/set",
+    "sync/activate",
+    "sync/restore",
+    "account/shared",
+    "account/computers",
+    "watchLink/create",
+    "watchLink/list",
+    "watchLink/viewers",
+    "watchLink/revoke",
+    "account/deleteShared",
+    "plugin/allow",
+    "plugin/share",
+    "plugin/shares",
+    "plugin/unshare",
+    "plugin/shared",
+    "plugin/installShared",
+    "feedback/screenshot",
+    "account/setUsername",
+    // The account's name is the person's own, like the username.
+    "account/setName",
+    // A vehicle's setup, preflight and checklist actions (S184 to S194):
+    // starting, confirming or cancelling a procedure, spinning motors,
+    // installing firmware, changing the checks and ticking a step need a
+    // person at the vehicle, as the comments above on `setup/state`,
+    // `preflight/state` and `checklist/update` say. So does a plugin's
+    // check blocking arming.
+    "setup/start",
+    "setup/cancel",
+    "setup/confirm",
+    "setup/spin",
+    "setup/firmware",
+    "setup/firmwareReleases",
+    "preflight/configure",
+    "checklist/tick",
+    "checklist/reset",
+    "plugin/setChecksBlock",
+    "account/sessions",
+    "account/signOutSession",
+    "account/signOutOthers",
+    "account/requestDeletion",
+    "account/feedback",
+    "account/claimFeedback",
+    // The agent's own conversations, which the person manages.
+    "thread/create",
+    "thread/send",
+    "thread/update",
+    "thread/cancel",
+    "thread/delete",
+    "thread/bulk",
+    "folder/create",
+    "folder/update",
+    "folder/delete",
+    "thread/feedback",
+    // Not offered to agents yet: review before adding to AGENT_METHODS.
+    "vehicle/save",
+    "vehicle/traffic",
+    "vehicle/bookmarks",
+    "vehicle/dismiss",
+    "link/add",
+    "link/remove",
+    "link/enable",
+    "link/disable",
+    "link/update",
+    "serial/list",
+    "command/modes",
+    "notification/acknowledge",
+    "notification/dismiss",
+    "param/refresh",
+    "param/definitions",
+    "param/definitions/list",
+    "param/definitions/add",
+    "param/definitions/remove",
+    "flight/list",
+    "flight/keep",
+    "flight/end",
+    "flight/uploadLog",
+    "vehicle/editNote",
+    "vehicle/deleteNote",
+    "mission/upload",
+    "controller/claim",
+    "controller/keyboardStart",
+    "controller/keyboardInput",
+    "controller/keyboardStop",
+    "controller/release",
+    "controller/takeOver",
+    "controller/forget",
+    "controller/setTarget",
+    "controller/inputs",
+    "mapping/update",
+    "mapping/create",
+    "storage/usage",
+    "storage/clearSimulatorLogs",
+    "storage/reveal",
+    "place/save",
+    "place/update",
+    "place/remove",
+    "marker/share",
+    "marker/unshare",
+    "plan/undo",
+    "plan/redo",
+    "plan/place",
+    "plan/delete",
+    "plan/restore",
+    "transfer/cancel",
+    "snapshot/rename",
+    "snapshot/delete",
+    "sim/catalogue",
+    "sim/download",
+    "sim/delete",
+    "practice/answer",
+    "practice/stop",
+    "files/download",
+    "files/mkdir",
+    "files/rename",
+    "files/pause",
+    "files/resume",
+    "files/cancel",
+    "files/save",
+    "terrain/removeArea",
+    "vehicle/delete",
+    "video/capture/settings",
+    "video/file",
+    "video/demos",
+    "video/remove",
+    "video/recordWithOthers",
+    "video/playback",
+    "video/track",
+    "video/reveal",
+    "video/photo",
+    "video/photo/show",
+    "video/vehicleCamera",
+    "find/start",
+    "find/stop",
+    "location/start",
+    "location/stop",
 ];
 
 /// Methods the model is not sent each turn (maintainer, 2026-10-16: the
@@ -207,6 +452,10 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "files/remove",
     "video/rename",
     "plugin/drafts",
+    "settings/get",
+    "settings/update",
+    "operator/list",
+    "operator/update",
 ];
 
 /// The tool that runs a deferred one by name.
@@ -416,6 +665,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn every_method_is_offered_to_agents_or_kept_from_them_on_purpose() {
+        let offered: std::collections::BTreeSet<_> = AGENT_METHODS.iter().collect();
+        let kept: std::collections::BTreeSet<_> = KEPT_FROM_AGENTS.iter().collect();
+        assert!(
+            offered.is_disjoint(&kept),
+            "{:?}",
+            offered.intersection(&kept)
+        );
+        let unplaced: Vec<_> = ClientRequest::METHODS
+            .iter()
+            .filter(|method| !offered.contains(method) && !kept.contains(method))
+            .collect();
+        assert!(
+            unplaced.is_empty(),
+            "add each to AGENT_METHODS or KEPT_FROM_AGENTS: {unplaced:?}"
+        );
+        let unknown: Vec<_> = kept
+            .iter()
+            .filter(|method| !ClientRequest::METHODS.contains(method))
+            .collect();
+        assert!(unknown.is_empty(), "no such methods: {unknown:?}");
+    }
 
     #[test]
     fn names_are_lowercase_with_underscores() {

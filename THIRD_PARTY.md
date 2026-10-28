@@ -8,7 +8,10 @@ third-party licenses or notices.
   message definitions are MIT-licensed. See `licenses/MAVLink-COPYING.txt` and
   [MAVLink's licensing explanation](https://github.com/mavlink/mavlink-devguide/blob/master/en/index.md#license).
   The SDK also generates Rust message types from those definitions during builds.
-- Cargo dependencies are downloaded separately, not vendored in this source
+- `vendor/wasmtime-internal-cache` contains Wasmtime cache 49.0.4 under
+  Apache-2.0 WITH LLVM-exception, with only its zstd dependency updated. See its
+  `LICENSE` and `README.md` for upstream provenance and the local patch.
+- Other Cargo dependencies are downloaded separately, not vendored in this source
   export. Their package manifests and license files govern those components.
   `Cargo.lock` pins the versions. Binary distributors must preserve the notices
   required by the dependencies they distribute.

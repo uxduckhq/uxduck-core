@@ -108,6 +108,22 @@ pub struct State {
     /// Downloads from vehicles and uploads to them, by id (S121).
     #[serde(default)]
     pub file_transfers: BTreeMap<String, uxduck_core::domain::files::FileTransfer>,
+    /// Each vehicle's setup procedures, the one running or the last of
+    /// each row, by `<vehicle id>/<row>` (S184, S189).
+    #[serde(default)]
+    pub setups: BTreeMap<String, uxduck_core::domain::setup::Setup>,
+    /// Each vehicle's preflight checks as last evaluated, by vehicle id
+    /// (S192).
+    #[serde(default)]
+    pub preflights: BTreeMap<String, uxduck_core::domain::preflight::Preflight>,
+    /// Each vehicle's checklist, by vehicle id (S193): kept with the
+    /// vehicle, removed with it.
+    #[serde(default)]
+    pub checklists: BTreeMap<String, uxduck_core::domain::checklist::Checklist>,
+    /// The procedure each vehicle changed last, by vehicle id: its key in
+    /// `setups` (S189).
+    #[serde(default)]
+    pub setup_latest: BTreeMap<String, String>,
     /// The best attempt at each exercise, by `<operator id>/<exercise id>`
     /// (an empty operator for attempts made with none).
     #[serde(default)]
@@ -203,6 +219,8 @@ impl State {
                 self.vehicles.remove(id);
                 // Its definitions go with it; heard again, they are chosen again.
                 self.param_definitions.remove(id);
+                self.preflights.remove(id);
+                self.checklists.remove(id);
             }
             Change::ReceiptUpserted { receipt } => {
                 self.receipts.insert(receipt.id.clone(), receipt.clone());
@@ -315,6 +333,20 @@ impl State {
             }
             Change::FileTransferRemoved { id } => {
                 self.file_transfers.remove(id);
+            }
+            Change::PreflightUpdated { preflight } => {
+                self.preflights
+                    .insert(preflight.vehicle_id.clone(), preflight.clone());
+            }
+            Change::ChecklistUpdated { checklist } => {
+                self.checklists
+                    .insert(checklist.vehicle_id.clone(), checklist.clone());
+            }
+            Change::SetupUpdated { setup } => {
+                let id = setup.id();
+                self.setup_latest
+                    .insert(setup.vehicle_id.clone(), id.clone());
+                self.setups.insert(id, setup.clone());
             }
             Change::PracticeAttemptUpserted { attempt } => {
                 self.practice
@@ -495,6 +527,7 @@ mod tests {
                     id: id.into(),
                     name: name.into(),
                     units: UnitSystem::Metric,
+                    quantity_units: None,
                     coordinate_format: CoordinateFormat::Decimal,
                     altitude_frame: uxduck_core::domain::telemetry::AltitudeFrame::default(),
                     layout: uxduck_core::domain::operator::Layout::initial(),

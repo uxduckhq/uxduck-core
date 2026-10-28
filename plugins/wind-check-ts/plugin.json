@@ -1,0 +1,30 @@
+{
+  "abi": 2,
+  "id": "wind-check",
+  "name": "Wind check",
+  "version": "0.1.0",
+  "description": "A preflight check that the wind is under 8 m/s, from the vehicle's own wind estimate or a speed set by hand.",
+  "script": "index.ts",
+  "capabilities": ["read"],
+  "subscribe": { "items": { "keys": ["wind.speed_mps"], "cadenceMs": 1000 } },
+  "commands": [
+    {
+      "name": "set-wind",
+      "title": "Set the wind by hand",
+      "description": "Uses this wind speed for the check instead of the vehicle's estimate, such as one read from a handheld anemometer.",
+      "parameters": {
+        "type": "object",
+        "properties": { "speedMps": { "type": "number", "minimum": 0, "maximum": 100 } },
+        "required": ["speedMps"]
+      },
+      "risk": "none"
+    },
+    {
+      "name": "use-estimate",
+      "title": "Use the vehicle's wind estimate",
+      "description": "Goes back to the wind the vehicle estimates for the check.",
+      "risk": "none"
+    }
+  ],
+  "checks": [{ "id": "wind", "title": "Wind under 8 m/s", "severity": "block", "staleMs": 30000 }]
+}

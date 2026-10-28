@@ -1,0 +1,19 @@
+{
+  "method": "checklist/update",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "change": [
+      {
+        "id": "st81d04e6a2c",
+        "value": 16.0,
+        "holdS": null
+      },
+      {
+        "id": "st3f9a2c71be",
+        "severity": "warn"
+      }
+    ],
+    "remove": ["st5b7e19c0d4"],
+    "order": ["st81d04e6a2c", "st3f9a2c71be"]
+  }
+}

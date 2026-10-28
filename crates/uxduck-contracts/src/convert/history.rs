@@ -75,6 +75,24 @@ impl From<&core::HistoryEvent> for dto::HistoryEvent {
             },
             core::HistoryEvent::SupervisionLost { failsafe } => Self::SupervisionLost { failsafe },
             core::HistoryEvent::SupervisionResumed => Self::SupervisionResumed,
+            core::HistoryEvent::Calibrated {
+                kind,
+                succeeded,
+                text,
+            } => Self::Calibrated {
+                kind: kind.into(),
+                succeeded,
+                text,
+            },
+            core::HistoryEvent::Armed {
+                flight_id,
+                text,
+                record,
+            } => Self::Armed {
+                flight_id,
+                text,
+                record: (&record).into(),
+            },
         }
     }
 }

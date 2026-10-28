@@ -2046,7 +2046,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uxduck-contracts"
-version = "0.7.2"
+version = "0.8.0-beta.1"
 dependencies = [
  "quick-xml 0.42.0",
  "schemars",
@@ -2057,14 +2057,14 @@ dependencies = [
 
 [[package]]
 name = "uxduck-core"
-version = "0.7.2"
+version = "0.8.0-beta.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "uxduck-sdk"
-version = "0.7.2"
+version = "0.8.0-beta.1"
 dependencies = [
  "base64 0.23.1",
  "extism-pdk",

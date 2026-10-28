@@ -488,11 +488,29 @@ fn kebab(input: Option<impl serde::Serialize>) -> String {
         .unwrap_or_default()
 }
 
+/// macOS duplicate HID axes use a reserved page and their one-based descriptor
+/// order. Ordinary axes retain their usage codes, so existing mappings survive.
+/// The raw HID reader excludes vendor-defined pages, including this one.
+#[must_use]
+pub const fn macos_hid_axis_code(number: u16) -> u32 {
+    0xFFFF_0000 | number as u32
+}
+
+fn macos_hid_axis_number(code: u32) -> Option<u32> {
+    (code >> 16 == 0xFFFF && code & 0xFFFF != 0).then_some(code & 0xFFFF)
+}
+
 /// What the device calls an input, from the platform's code for it: on
 /// macOS a HID usage page and usage (`X`, `Rz`, `Slider`, `Button 3`), on
 /// Linux an evdev code. A radio in joystick mode sends its channels on these
 /// in order, so the names are what someone setting one up needs.
 fn input_name(code: u32, axis: bool) -> String {
+    if cfg!(target_os = "macos")
+        && axis
+        && let Some(number) = macos_hid_axis_number(code)
+    {
+        return format!("Axis {number}");
+    }
     let (high, low) = (code >> 16, code & 0xFFFF);
     let named = if cfg!(target_os = "macos") {
         match (high, low) {
@@ -531,6 +549,12 @@ fn input_name(code: u32, axis: bool) -> String {
 /// Slider 7, Dial 8, Wheel 9) and its buttons' own numbers; on Linux the
 /// evdev order.
 fn input_number(code: u32, axis: bool) -> Option<u32> {
+    if cfg!(target_os = "macos")
+        && axis
+        && let Some(number) = macos_hid_axis_number(code)
+    {
+        return Some(number);
+    }
     let (high, low) = (code >> 16, code & 0xFFFF);
     if cfg!(target_os = "macos") {
         match (high, low) {
@@ -608,6 +632,95 @@ mod tests {
             id: "keyboard:1".into(),
         });
         assert!(controls.outputs().is_empty());
+    }
+
+    #[test]
+    fn repeated_hid_axes_survive_saved_mapping_and_drive_separate_rc_channels() {
+        let codes = [0x1_0036, macos_hid_axis_code(8)];
+        let mut mapping = InputMapping::mode_2();
+        mapping.roll.code = Some(0x1_0030);
+        mapping.pitch.code = Some(0x1_0031);
+        mapping.throttle.code = Some(0x1_0032);
+        mapping.yaw.code = Some(0x1_0033);
+        for (channel, code) in [(7, codes[0]), (8, codes[1])] {
+            mapping
+                .rc_channels
+                .push(uxduck_core::domain::controller::RcAxisBinding {
+                    channel,
+                    input: AxisBinding {
+                        axis: GamepadAxis::LeftZ,
+                        code: Some(code),
+                        inverted: false,
+                        calibration: None,
+                    },
+                });
+        }
+        // Exercise the persisted mapping, including a code above signed i32.
+        let saved = serde_json::to_string(&mapping).unwrap();
+        let mut controls = Controls::default();
+        for _ in 0..2 {
+            controls.input(InputEvent::Connected {
+                id: "r".into(),
+                name: "TBS Joystick".into(),
+                layout_known: false,
+            });
+            controls.input(InputEvent::Present {
+                id: "r".into(),
+                axes: vec![
+                    (0x1_0030, None, 0.0),
+                    (0x1_0031, None, 0.0),
+                    (0x1_0032, None, -1.0),
+                    (0x1_0033, None, 0.0),
+                    (codes[0], None, -1.0),
+                    (codes[1], None, -1.0),
+                ],
+                buttons: vec![],
+            });
+            controls.route(
+                "r",
+                Some(ControlRoute {
+                    pilot_input_method: PilotInputMethod::Automatic,
+                    vehicle_id: "v".into(),
+                    mapping: serde_json::from_str(&saved).unwrap(),
+                }),
+            );
+            for (code, value, expected) in [
+                (codes[0], 1.0, vec![(7, 1000), (8, -1000)]),
+                (codes[1], 1.0, vec![(7, 1000), (8, 1000)]),
+                (codes[0], 0.0, vec![(7, 0), (8, 1000)]),
+            ] {
+                controls.input(InputEvent::Axis {
+                    id: "r".into(),
+                    axis: None,
+                    code: Some(code),
+                    value,
+                });
+                assert_eq!(
+                    controls.pilot_outputs(),
+                    [(
+                        "v".into(),
+                        [0, 0, 0, 0],
+                        expected,
+                        PilotInputMethod::Automatic
+                    )]
+                );
+            }
+            let snapshot = controls.snapshot();
+            let axes = &snapshot.controllers[0].axes;
+            for (code, expected) in [(codes[0], 0.0), (codes[1], 1.0)] {
+                let value = axes.iter().find(|a| a.code == Some(code)).unwrap().value;
+                assert!((value - expected).abs() < f64::EPSILON);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let eighth = axes.iter().find(|a| a.code == Some(codes[1])).unwrap();
+                assert_eq!(eighth.name, "Axis 8");
+                assert_eq!(eighth.number, Some(8));
+            }
+            controls.input(InputEvent::Disconnected { id: "r".into() });
+            assert!(controls.pilot_outputs().is_empty());
+            assert!(controls.snapshot().controllers.is_empty());
+        }
     }
 
     #[test]

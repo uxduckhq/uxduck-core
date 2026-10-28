@@ -94,6 +94,22 @@ pub enum HistoryEvent {
     },
     /// Someone supervises it again, and the heartbeat is back (S81).
     SupervisionResumed,
+    /// A calibration finished or failed (S184, ADR-0037 V13), with its
+    /// result in words: each sensor's fitness and offsets, or why it failed.
+    Calibrated {
+        kind: crate::domain::setup::SetupKind,
+        succeeded: bool,
+        text: String,
+    },
+    /// It armed (S193, ADR-0038 K14): its checklist as it stood, who
+    /// ticked what and when, each rule's value, and every override, with
+    /// the flight it began.
+    Armed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flight_id: Option<String>,
+        text: String,
+        record: crate::domain::checklist::ChecklistRecord,
+    },
 }
 
 /// Who or what changed a parameter (S74).
@@ -162,7 +178,10 @@ impl HistoryEvent {
             },
             Self::TypeChanged { from, to } => format!("Type changed from {from} to {to}"),
             Self::SnapshotSaved { name, .. } => format!("Snapshot “{name}” saved"),
-            Self::MissionChanged { text, .. } | Self::FlightEnded { text, .. } => text.clone(),
+            Self::MissionChanged { text, .. }
+            | Self::FlightEnded { text, .. }
+            | Self::Calibrated { text, .. }
+            | Self::Armed { text, .. } => text.clone(),
             Self::ParameterChanged {
                 name,
                 from,

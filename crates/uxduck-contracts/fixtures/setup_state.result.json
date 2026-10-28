@@ -1,0 +1,188 @@
+{
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "rows": [
+    {
+      "row": "firmware",
+      "state": "installed",
+      "detail": "4.5.1"
+    },
+    {
+      "row": "accelerometer",
+      "state": "not-calibrated",
+      "detail": "3D Accel calibration needed"
+    },
+    {
+      "row": "compass",
+      "state": "needs-restart",
+      "calibratedAtUs": 1790669360000000,
+      "procedure": "compass"
+    },
+    {
+      "row": "radio",
+      "state": "unknown"
+    },
+    {
+      "row": "airspeed",
+      "state": "calibrated",
+      "calibratedAtUs": 1790669500000000,
+      "procedure": "airspeed-zero"
+    },
+    {
+      "row": "motors",
+      "state": "unknown",
+      "procedure": "motors"
+    }
+  ],
+  "compasses": [
+    {
+      "index": 0,
+      "deviceId": 97539,
+      "used": true,
+      "external": true,
+      "offsets": [12.5, -30.0, 41.25]
+    },
+    {
+      "index": 1,
+      "deviceId": 590114,
+      "used": false,
+      "external": false,
+      "offsets": [0.0, 0.0, 0.0]
+    }
+  ],
+  "motors": {
+    "frame": "Quad X",
+    "motors": [
+      {
+        "order": 1,
+        "label": "A",
+        "motor": 1,
+        "right": 0.707,
+        "forward": 0.707,
+        "spin": "counter-clockwise"
+      },
+      {
+        "order": 2,
+        "label": "B",
+        "motor": 4,
+        "right": 0.707,
+        "forward": -0.707,
+        "spin": "clockwise"
+      },
+      {
+        "order": 3,
+        "label": "C",
+        "motor": 2,
+        "right": -0.707,
+        "forward": -0.707,
+        "spin": "counter-clockwise"
+      },
+      {
+        "order": 4,
+        "label": "D",
+        "motor": 3,
+        "right": -0.707,
+        "forward": 0.707,
+        "spin": "clockwise",
+        "stack": 1
+      }
+    ]
+  },
+  "procedure": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "row": "compass",
+    "kind": "compass",
+    "step": "succeeded",
+    "progress": 100,
+    "sensors": [
+      {
+        "index": 0,
+        "state": "succeeded",
+        "progress": 100,
+        "attempt": 1,
+        "fitness": 4.25,
+        "quality": "good",
+        "offsets": [12.5, -30.0, 41.25],
+        "autosaved": true
+      },
+      {
+        "index": 1,
+        "state": "failed",
+        "progress": 100,
+        "attempt": 2,
+        "fitness": 31.5,
+        "quality": "poor",
+        "failure": "bad-orientation"
+      }
+    ],
+    "instruction": "restart",
+    "restartNeeded": true,
+    "startedBy": {
+      "clientName": "uxduck-web",
+      "operatorName": "Ben"
+    },
+    "receiptId": "rc1a2b3c4d5e6f7a8b",
+    "startedAtUs": 1790669300000000,
+    "updatedAtUs": 1790669360000000,
+    "finishedAtUs": 1790669360000000,
+    "version": 23
+  },
+  "procedures": [
+    {
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "row": "compass",
+      "kind": "compass",
+      "step": "succeeded",
+      "progress": 100,
+      "instruction": "restart",
+      "restartNeeded": true,
+      "receiptId": "rc1a2b3c4d5e6f7a8b",
+      "startedAtUs": 1790669300000000,
+      "updatedAtUs": 1790669360000000,
+      "finishedAtUs": 1790669360000000,
+      "version": 23
+    },
+    {
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "row": "airspeed",
+      "kind": "airspeed-ratio",
+      "step": "succeeded",
+      "progress": 100,
+      "airspeed": {
+        "startMps": 21.4,
+        "readingMps": 21.8,
+        "ratioParam": "ARSPD_RATIO",
+        "autocalParam": "ARSPD_AUTOCAL",
+        "ratioBefore": 1.6,
+        "ratio": 1.989,
+        "spreadPct": 1.42,
+        "gatheredS": 60,
+        "settled": true,
+        "writes": [
+          { "name": "ARSPD_AUTOCAL", "from": 0.0, "to": 1.0, "state": "written" },
+          { "name": "ARSPD_AUTOCAL", "from": 1.0, "to": 0.0, "state": "written" },
+          { "name": "ARSPD_RATIO", "from": 1.6, "to": 1.989, "state": "written" }
+        ]
+      },
+      "startedBy": {
+        "clientName": "uxduck-web",
+        "operatorName": "Ben"
+      },
+      "startedAtUs": 1790669400000000,
+      "updatedAtUs": 1790669500000000,
+      "finishedAtUs": 1790669500000000,
+      "version": 41
+    },
+    {
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "row": "motors",
+      "kind": "motors",
+      "step": "succeeded",
+      "progress": 0,
+      "motor": { "order": 1, "label": "A", "throttle": 5.0 },
+      "startedAtUs": 1790669370000000,
+      "updatedAtUs": 1790669372000000,
+      "finishedAtUs": 1790669372000000,
+      "version": 3
+    }
+  ]
+}

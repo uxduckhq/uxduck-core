@@ -86,6 +86,13 @@ pub struct CommandSendParams {
     /// autopilot's checks. Operators only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
+    /// Arms past UXDuck's failing blocking preflight checks (ADR-0038 K4):
+    /// the ids of the checks the operator held Arm anyway for, from
+    /// `preflight/state`. Refused unless every check holding arming is
+    /// named. Operators only, never from away; it does not force past the
+    /// vehicle's own checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub override_preflight: Vec<String>,
     /// From away (S80): the id the sender's app gave it, so a command sent
     /// twice is carried out once and its receipt found again by this id.
     /// Only the relay's connections set it.
@@ -137,6 +144,10 @@ pub enum RefusalReason {
     GroundTestingOnly,
     /// From away, and older than its `maxAgeMs` when it reached the computer.
     Expired,
+    /// It would arm the vehicle while a blocking preflight check does not
+    /// pass; `preflight` lists them. An operator may arm anyway with
+    /// `overridePreflight`.
+    Preflight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -169,6 +180,13 @@ pub struct Receipt {
     /// Set when the daemon refused it for a reason a client can act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RefusalReason>,
+    /// The blocking preflight checks that did not pass: why it was refused,
+    /// or what it was sent past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<crate::dto::preflight::CheckRef>,
+    /// Sent although blocking checks did not pass: by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_override: Option<crate::dto::preflight::PreflightOverride>,
     /// Sent while the vehicle was stale or offline.
     pub sent_without_recent_heartbeat: bool,
     pub forced: bool,
