@@ -59,6 +59,8 @@ pub const AGENT_METHODS: &[&str] = &[
     // Simulated vehicles (S17): starting and stopping one asks the operator
     // first, unless the agent was given the configuration capability.
     "sim/binaries",
+    "sim/catalogue",
+    "sim/download",
     "sim/start",
     "sim/stop",
     // Starting one again after a crash asks too, and so does pausing one.
@@ -79,6 +81,7 @@ pub const AGENT_METHODS: &[&str] = &[
     // Parameters (S68, ADR-0021 P8): reading them and their definitions;
     // setting one asks the operator first.
     "param/search",
+    "param/refresh",
     "param/get",
     "param/list",
     "param/diff",
@@ -86,6 +89,7 @@ pub const AGENT_METHODS: &[&str] = &[
     // A vehicle's history (S69, ADR-0022): reading it freely; offer useful
     // notes for completed work, write only with consent and config permission.
     "vehicle/history",
+    "flight/list",
     "vehicle/addNote",
     // Labels (S106): putting them on and off asks the operator first.
     "vehicle/label",
@@ -317,12 +321,10 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "command/modes",
     "notification/acknowledge",
     "notification/dismiss",
-    "param/refresh",
     "param/definitions",
     "param/definitions/list",
     "param/definitions/add",
     "param/definitions/remove",
-    "flight/list",
     "flight/keep",
     "flight/end",
     "flight/uploadLog",
@@ -356,8 +358,6 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "transfer/cancel",
     "snapshot/rename",
     "snapshot/delete",
-    "sim/catalogue",
-    "sim/download",
     "sim/delete",
     "practice/answer",
     "practice/stop",
@@ -426,6 +426,8 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "mission/history",
     "mission/restore",
     "sim/binaries",
+    "sim/catalogue",
+    "sim/download",
     "sim/start",
     "sim/stop",
     "sim/restart",
@@ -435,6 +437,8 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "snapshot/start",
     "practice/guide",
     "param/list",
+    "param/refresh",
+    "flight/list",
     "param/diff",
     "param/history",
     "vehicle/label",
@@ -644,6 +648,27 @@ pub fn tools() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
+
+    #[test]
+    fn recovery_tools_are_discovered_without_growing_the_initial_context() {
+        for (query, expected) in [
+            ("flight logs", "flight_list"),
+            ("download simulator", "sim_download"),
+            ("param_refresh", "param_refresh"),
+            ("sim_catalogue", "sim_catalogue"),
+        ] {
+            let found = super::find_deferred(query, 5);
+            assert!(
+                found.iter().any(|tool| tool.name == expected),
+                "{query}: {found:?}"
+            );
+            assert!(
+                !super::model_tools()
+                    .iter()
+                    .any(|tool| tool.name == expected)
+            );
+        }
+    }
 
     #[test]
     fn plugin_authors_get_the_runtime_contract_when_they_discover_drafting() {

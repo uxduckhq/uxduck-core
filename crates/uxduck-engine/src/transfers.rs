@@ -1574,7 +1574,7 @@ pub fn compare_missions(
     for (index, (a, b)) in sent.iter().zip(read).enumerate().skip(skip) {
         let number = index + 1 - skip;
         if a.command != b.command
-            || frame_of(a.frame) != frame_of(b.frame)
+            || (a.command != 20 && frame_of(a.frame) != frame_of(b.frame))
             || !close(a.latitude_deg, b.latitude_deg, 2e-7)
             || !close(a.longitude_deg, b.longitude_deg, 2e-7)
             || !close(a.altitude_m, b.altitude_m, 0.02)

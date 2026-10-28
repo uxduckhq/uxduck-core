@@ -366,7 +366,7 @@ pub enum ClientRequest {
     /// `read`. Result: `ParamDiffResult`.
     #[serde(rename = "param/diff")]
     ParamDiff(ParamDiffParams),
-    /// This computer's flights (C8), newest first: arm to disarm, with time
+    /// This computer's flight logs summarized (C8), newest first: arm to disarm, with time
     /// in the air, highest point, top speed, modes, battery and who acted
     /// on the vehicle. Needs `read`. Result: `FlightListResult`.
     #[serde(rename = "flight/list")]
@@ -1016,7 +1016,7 @@ pub enum ClientRequest {
     /// are installed or downloading. Result: `SimCatalogueResult`.
     #[serde(rename = "sim/catalogue")]
     SimCatalogue(SimCatalogueParams),
-    /// Downloads and installs a catalogue build, checked against the signed
+    /// Downloads and installs a simulator build, checked against the signed
     /// catalogue's checksums; it shows in `sim/catalogue` as it goes.
     /// Configuration capability. Result: `Empty`.
     #[serde(rename = "sim/download")]
@@ -1866,6 +1866,8 @@ pub enum ServerNotification {
     /// Invalidate private account views; contains no identity or credentials.
     #[serde(rename = "account/changed")]
     AccountChanged(Empty),
+    #[serde(rename = "agent/configChanged")]
+    AgentConfigChanged(Empty),
     /// One requester explicitly wants this connection's current display settings.
     #[serde(rename = "client/displayRequested")]
     ClientDisplayRequested(DisplayRequested),

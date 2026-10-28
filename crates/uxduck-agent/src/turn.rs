@@ -199,20 +199,23 @@ async fn round(
                 stats.usage.add(&usage);
                 out.response_id = Some(response_id);
                 out.output = output;
+                break None;
             }
             Ok(ProviderEvent::Retried) => stats.retries += 1,
             Ok(ProviderEvent::FellBack { .. }) => stats.fell_back = true,
         }
     };
-    if let Some(item) = message {
-        host.message_finish(item, out.response_id.clone()).await;
-    }
     match failure {
         Some(error) => Err(error),
         None if out.response_id.is_none() => Err(ProviderError::Transport(
             "the answer stopped before it ended".into(),
         )),
-        None => Ok(out),
+        None => {
+            if let Some(item) = message {
+                host.message_finish(item, out.response_id.clone()).await;
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -230,6 +233,19 @@ fn capped(output: String) -> String {
     }
 }
 
+fn tool_arguments(name: String, arguments: &str) -> Option<(String, Value)> {
+    let params: Value = serde_json::from_str(arguments).ok()?;
+    if !params.is_object() {
+        return None;
+    }
+    if name != TOOL_CALL {
+        return Some((name, params));
+    }
+    let name = params["name"].as_str()?.to_owned();
+    let params = params.get("params").cloned().unwrap_or_else(|| json!({}));
+    params.is_object().then_some((name, params))
+}
+
 /// Calls the tools a round asked for, in order, recording each in the chat.
 async fn run_tools(
     host: &dyn Host,
@@ -239,16 +255,15 @@ async fn run_tools(
 ) -> Vec<ToolResult> {
     let mut results = Vec::new();
     for (call_id, name, arguments) in calls {
-        let params: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| json!({}));
         stats.tool_calls += 1;
-        // A deferred tool, run by name with `tool_call` (or called as itself).
-        let (name, params) = if name == TOOL_CALL {
-            (
-                params["name"].as_str().unwrap_or_default().to_owned(),
-                params.get("params").cloned().unwrap_or_else(|| json!({})),
-            )
-        } else {
-            (name, params)
+        let Some((name, params)) = tool_arguments(name, &arguments) else {
+            stats.tool_errors += 1;
+            results.push(ToolResult {
+                call_id,
+                output: json!({ "error": "Tool arguments must be a valid JSON object. For tool_call, provide a tool name and a JSON object for params. No action was taken; correct the arguments before retrying." }).to_string(),
+                failed: true,
+            });
+            continue;
         };
         let (output, failed) = match Tool::method_for(tools, &name) {
             Some(method) => {
@@ -274,9 +289,7 @@ async fn run_tools(
                 }
             }
             None => (
-                format!(
-                    r#"{{"error":"No tool named {name}. Find UXDuck's tools and plugins' commands with tool_search"}}"#
-                ),
+                json!({ "error": format!("No tool named {name}. Find UXDuck's tools and plugins' commands with tool_search") }).to_string(),
                 true,
             ),
         };
@@ -344,9 +357,10 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
     }
 
     conversation.extend(conversation::user(wire, &turn.text));
-    if let Some(context) = &turn.context
-        && !context_sent
-    {
+    if !context_sent {
+        let context = turn.context.as_deref().unwrap_or(
+            "No vehicle is currently selected for this thread. Do not treat an earlier selection as the current target. Use vehicle_list to inspect available vehicles and ask which one when the intended target is unclear.",
+        );
         conversation.extend(conversation::context(wire, &turn.model, context));
         context_sent = true;
     }
@@ -447,6 +461,88 @@ mod tests {
         }
     }
 
+    struct StreamProvider {
+        events: Vec<Result<ProviderEvent, ProviderError>>,
+        leave_open: bool,
+    }
+
+    impl Provider for StreamProvider {
+        fn wire(&self) -> conversation::Wire {
+            conversation::Wire::OpenAi
+        }
+
+        fn respond(
+            &self,
+            _: ProviderRequest,
+        ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+            let events = futures::stream::iter(self.events.clone());
+            if self.leave_open {
+                events.chain(futures::stream::pending()).boxed()
+            } else {
+                events.boxed()
+            }
+        }
+    }
+
+    #[test]
+    fn a_completed_response_does_not_wait_for_the_connection_to_close() {
+        let provider = StreamProvider {
+            events: vec![
+                Ok(ProviderEvent::TextDelta("All done".into())),
+                Ok(ProviderEvent::Completed {
+                    response_id: "complete".into(),
+                    output: vec![],
+                    usage: Usage::default(),
+                }),
+            ],
+            leave_open: true,
+        };
+        let host = Recorder::default();
+        let outcome = run_turn(&provider, &host, turn("read only"))
+            .now_or_never()
+            .expect("response.completed is terminal even on an open connection");
+        assert_eq!(outcome.result, Ok(()));
+        assert_eq!(outcome.stats.rounds, 1);
+        assert_eq!(host.0.lock().unwrap().last().unwrap(), "done complete");
+    }
+
+    #[test]
+    fn an_interrupted_response_never_completes_its_message_or_executes_its_tools() {
+        for failure in [
+            None,
+            Some(ProviderError::Transport("stream interrupted".into())),
+            Some(ProviderError::Account("allowance exhausted".into())),
+        ] {
+            let mut events = vec![
+                Ok(ProviderEvent::TextDelta("Partial answer".into())),
+                Ok(ProviderEvent::ToolCall {
+                    call_id: "unfinished".into(),
+                    name: "plan_create".into(),
+                    arguments: "{}".into(),
+                }),
+            ];
+            if let Some(error) = failure {
+                events.push(Err(error));
+            }
+            let provider = StreamProvider {
+                events,
+                leave_open: false,
+            };
+            let host = Recorder::default();
+            let outcome = run_turn(&provider, &host, turn("read only"))
+                .now_or_never()
+                .unwrap();
+            assert!(outcome.result.is_err());
+            assert_eq!(outcome.stats.rounds, 0);
+            assert_eq!(outcome.stats.tool_calls, 0);
+            assert_eq!(
+                *host.0.lock().unwrap(),
+                ["start", "text Partial answer"],
+                "partial text stays open for the host to mark failed"
+            );
+        }
+    }
+
     #[test]
     fn a_tool_round_then_an_answer_and_the_conversation_to_keep() {
         let host = Recorder::default();
@@ -515,6 +611,50 @@ mod tests {
     }
 
     #[test]
+    fn clearing_vehicle_scope_supersedes_the_previous_context() {
+        let host = Recorder::default();
+        let mut unscoped = turn("what vehicles do I have");
+        unscoped.context = None;
+        unscoped.conversation = conversation::context(
+            conversation::Wire::OpenAi,
+            "gpt-6-sol",
+            "This thread is about Copter Alpha, id alpha.",
+        );
+        let outcome = run_turn(&FakeProvider::new(), &host, unscoped)
+            .now_or_never()
+            .unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        let context = outcome
+            .conversation
+            .iter()
+            .rfind(|item| item["role"] == "developer")
+            .unwrap();
+        assert!(
+            context["content"]
+                .as_str()
+                .unwrap()
+                .contains("No vehicle is currently selected")
+        );
+        assert!(outcome.context_sent);
+
+        let mut next = turn("what vehicles do I have now");
+        next.context = None;
+        next.context_sent = outcome.context_sent;
+        next.conversation = outcome.conversation;
+        let continued = run_turn(&FakeProvider::new(), &host, next)
+            .now_or_never()
+            .unwrap();
+        assert_eq!(
+            continued
+                .conversation
+                .iter()
+                .filter(|item| item["role"] == "developer")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn a_deferred_tool_runs_by_name_and_tool_search_finds_uxduck_s_own() {
         let host = Recorder::default();
         let mut stats = TurnStats::default();
@@ -563,5 +703,93 @@ mod tests {
             "[cut: 5 more characters. Ask for less, such as one vehicle or fewer fields.]"
         ));
         assert_eq!(capped("short".into()), "short");
+    }
+
+    #[test]
+    fn malformed_tool_arguments_never_reach_the_host() {
+        for (name, arguments) in [
+            ("plan_create", r#"{"name":"unfinished"#),
+            ("plan_create", "null"),
+            ("plan_create", "[]"),
+            ("plan_create", ""),
+            (TOOL_CALL, r#"{"params":{}}"#),
+            (TOOL_CALL, r#"{"name":17,"params":{}}"#),
+            (TOOL_CALL, r#"{"name":"plan_create","params":null}"#),
+            (TOOL_CALL, r#"{"name":"plan_create","params":"wrong type"}"#),
+        ] {
+            let host = Recorder::default();
+            let mut stats = TurnStats::default();
+            let results = run_tools(
+                &host,
+                &tools(),
+                vec![("bad-call".into(), name.into(), arguments.into())],
+                &mut stats,
+            )
+            .now_or_never()
+            .unwrap();
+            assert!(host.0.lock().unwrap().is_empty(), "{arguments}");
+            assert!(results[0].failed);
+            assert_eq!(stats.tool_calls, 1);
+            assert_eq!(stats.tool_errors, 1);
+            let error: Value = serde_json::from_str(&results[0].output).unwrap();
+            assert!(error["error"].as_str().unwrap().contains("JSON object"));
+        }
+    }
+
+    #[test]
+    fn repeated_tool_calls_stop_at_the_existing_round_limit() {
+        struct LoopingProvider;
+
+        impl Provider for LoopingProvider {
+            fn wire(&self) -> conversation::Wire {
+                conversation::Wire::OpenAi
+            }
+
+            fn respond(
+                &self,
+                request: ProviderRequest,
+            ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>>
+            {
+                let call_id = format!("read-{}", request.conversation.len());
+                futures::stream::iter([
+                    Ok(ProviderEvent::ToolCall {
+                        call_id: call_id.clone(),
+                        name: "vehicle_list".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ProviderEvent::Completed {
+                        response_id: call_id.clone(),
+                        output: vec![json!({
+                            "type": "function_call", "call_id": call_id,
+                            "name": "vehicle_list", "arguments": "{}"
+                        })],
+                        usage: Usage::default(),
+                    }),
+                ])
+                .boxed()
+            }
+        }
+
+        let host = Recorder::default();
+        let outcome = run_turn(&LoopingProvider, &host, turn("read repeatedly"))
+            .now_or_never()
+            .unwrap();
+        assert_eq!(outcome.result, Err(TurnError::TooManyRounds));
+        assert_eq!(outcome.stats.rounds as usize, MAX_ROUNDS);
+        assert_eq!(outcome.stats.tool_calls as usize, MAX_ROUNDS);
+        assert_eq!(outcome.stats.tool_errors, 0);
+        assert_eq!(
+            host.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.starts_with("call "))
+                .count(),
+            MAX_ROUNDS
+        );
+        let recovered = run_turn(&FakeProvider::new(), &host, turn("what vehicles do I have"))
+            .now_or_never()
+            .unwrap();
+        assert_eq!(recovered.result, Ok(()));
     }
 }

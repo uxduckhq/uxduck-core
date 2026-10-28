@@ -128,6 +128,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::SimStart(_)
         | ClientRequest::SimStop(_)
         | ClientRequest::SimRestart(_)
+        | ClientRequest::SimDownload(_)
         | ClientRequest::SimSnapshot(_)
         | ClientRequest::SnapshotStart(_)
         | ClientRequest::SnapshotRename(_)
@@ -623,6 +624,9 @@ impl Engine {
                 }
             ),
             ClientRequest::SimStop(_) => "stop a simulated vehicle".into(),
+            ClientRequest::SimDownload(params) => {
+                format!("download and install simulator build {}", params.id)
+            }
             ClientRequest::PracticeStart(params) => format!(
                 "start the practice exercise \"{}\" on {}",
                 crate::practice::exercise(&params.exercise_id)
@@ -835,6 +839,24 @@ impl Engine {
         for id in gone {
             self.held.remove(&id);
             self.finish(&id, ApprovalState::Expired, None, "the client disconnected");
+        }
+    }
+
+    pub(crate) fn cancel_approval(&mut self, connection: ConnectionId, request_id: &Value) {
+        let cancelled: Vec<String> = self
+            .held
+            .iter()
+            .filter(|(_, held)| held.connection == connection && held.request_id == *request_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in cancelled {
+            self.held.remove(&id);
+            self.finish(
+                &id,
+                ApprovalState::Expired,
+                None,
+                "the client cancelled the request",
+            );
         }
     }
 

@@ -1116,13 +1116,18 @@ fn clean_skipped(skipped: &[String]) -> Result<Vec<String>, ApiError> {
 }
 
 pub(crate) fn notify(
-    _engine: &mut Engine,
-    _connection: ConnectionId,
+    engine: &mut Engine,
+    connection: ConnectionId,
     notification: &ClientNotification,
 ) {
     match notification {
-        // Every S1 handler answers immediately, so there is nothing to cancel.
-        ClientNotification::Cancel(_) => {}
+        ClientNotification::Cancel(params) => {
+            engine.cancel_approval(connection, &json!(params.id));
+            if let Some(client) = engine.connections.get_mut(&connection) {
+                client.pending.remove(&params.id);
+                client.private_requests.remove(&params.id);
+            }
+        }
     }
 }
 

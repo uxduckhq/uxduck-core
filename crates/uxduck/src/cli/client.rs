@@ -118,12 +118,7 @@ impl LocalClient {
     /// # Errors
     /// The daemon's error object as `CliError::Api`, or a transport failure.
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, CliError> {
-        self.next_id += 1;
-        let id = self.next_id;
-        let mut frame =
-            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
-        frame.push('\n');
-        self.writer.write_all(frame.as_bytes()).await?;
+        let id = self.send_request(method, params).await?;
         loop {
             let Some(message) = self.read().await? else {
                 return Err(CliError::Protocol(
@@ -142,6 +137,30 @@ impl LocalClient {
         }
     }
 
+    pub(crate) async fn send_request(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<i64, CliError> {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+            .await?;
+        Ok(id)
+    }
+
+    pub(crate) async fn cancel_request(&mut self, id: i64) -> Result<(), CliError> {
+        self.write(json!({ "jsonrpc": "2.0", "method": "cancel", "params": { "id": id } }))
+            .await
+    }
+
+    async fn write(&mut self, frame: Value) -> Result<(), CliError> {
+        let mut line = frame.to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await?;
+        Ok(())
+    }
+
     /// The next notification, or `None` when the daemon closes the connection.
     ///
     /// # Errors
@@ -153,7 +172,7 @@ impl LocalClient {
         self.read().await
     }
 
-    async fn read(&mut self) -> Result<Option<Value>, CliError> {
+    pub(crate) async fn read(&mut self) -> Result<Option<Value>, CliError> {
         let Some(line) = self.lines.next_line().await? else {
             return Ok(None);
         };

@@ -6,6 +6,7 @@
 //! as to the in-app agent: reading needs nothing, control waits for an
 //! operator's answer.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -37,17 +38,80 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     let catalogue = tools();
-    let mut daemon: Option<LocalClient> = None;
-    while let Some(line) = lines.next_line().await? {
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
+    let mut session = Session::default();
+    loop {
+        let answer = tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else { break };
+                let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+                session.dispatch(data_dir, &catalogue, all_tools, message).await?
+            }
+            frame = daemon_frame(&mut session.daemon) => {
+                let frame = frame?.ok_or_else(|| CliError::Protocol("the daemon closed the connection".into()))?;
+                frame["id"].as_i64().and_then(|id| session.pending.remove(&id)).map(|id| {
+                    let result = frame.get("error").map_or_else(
+                        || tool_result(frame.get("result").cloned().unwrap_or(Value::Null)),
+                        api_error,
+                    );
+                    reply(&id, &result)
+                })
+            }
         };
-        // Notifications (no id) need no answer.
-        let Some(id) = message.get("id").cloned() else {
-            continue;
-        };
+        if let Some(answer) = answer {
+            let mut text = answer.to_string();
+            text.push('\n');
+            stdout.write_all(text.as_bytes()).await?;
+            stdout.flush().await?;
+        }
+    }
+    Ok(())
+}
+
+async fn daemon_frame(daemon: &mut Option<LocalClient>) -> Result<Option<Value>, CliError> {
+    match daemon {
+        Some(client) => client.read().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[derive(Default)]
+struct Session {
+    daemon: Option<LocalClient>,
+    pending: BTreeMap<i64, Value>,
+}
+
+impl Session {
+    async fn dispatch(
+        &mut self,
+        data_dir: &Path,
+        catalogue: &[Tool],
+        all_tools: bool,
+        message: Value,
+    ) -> Result<Option<Value>, CliError> {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        let Some(id) = message.get("id").cloned() else {
+            if message["method"] == "notifications/cancelled"
+                && let Some(request_id) = params.get("requestId")
+                && let Some(daemon_id) = self
+                    .pending
+                    .iter()
+                    .find_map(|(daemon_id, pending)| (pending == request_id).then_some(*daemon_id))
+                && let Some(client) = self.daemon.as_mut()
+            {
+                client.cancel_request(daemon_id).await?;
+                self.pending.remove(&daemon_id);
+            }
+            return Ok(None);
+        };
+        if !(id.is_string() || id.is_i64()) || self.pending.values().any(|pending| pending == &id) {
+            return Ok(Some(failure(
+                &id,
+                -32600,
+                "request id must be a unique string or integer",
+            )));
+        }
         let answer = match message["method"].as_str().unwrap_or_default() {
+            "initialize" if self.daemon.is_some() => failure(&id, -32600, "already initialized"),
             "initialize" => {
                 let name = params["clientInfo"]["name"]
                     .as_str()
@@ -56,7 +120,7 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
                     .to_owned();
                 match connect(data_dir, &name).await {
                     Ok(client) => {
-                        daemon = Some(client);
+                        self.daemon = Some(client);
                         reply(
                             &id,
                             &json!({
@@ -75,36 +139,55 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
                 }
             }
             "ping" => reply(&id, &json!({})),
-            "tools/list" => reply(&id, &catalogue::list(&catalogue, all_tools)),
-            "tools/call" => match (daemon.as_mut(), params["name"].as_str()) {
-                (None, _) => failure(&id, -32002, "call initialize first"),
-                (_, None) => failure(&id, -32602, "tools/call needs a name"),
-                (Some(_), Some(catalogue::SEARCH)) => {
-                    let result = catalogue::search(&catalogue, arguments(&params))
-                        .map_or_else(|error| invalid_arguments(&error), tool_result);
-                    reply(&id, &result)
-                }
-                (Some(client), Some(catalogue::CALL)) => {
-                    let result = match catalogue::invocation(&catalogue, arguments(&params)) {
-                        Ok((method, arguments)) => call(client, &method, arguments).await,
-                        Err(error) => invalid_arguments(&error),
-                    };
-                    reply(&id, &result)
-                }
-                // Keep direct names callable for existing clients and scripts.
-                (Some(client), Some(name)) => match Tool::method_for(&catalogue, name) {
-                    None => failure(&id, -32602, &format!("no tool named {name}")),
-                    Some(method) => reply(&id, &call(client, &method, arguments(&params)).await),
-                },
-            },
+            "tools/list" => reply(&id, &catalogue::list(catalogue, all_tools)),
+            "tools/call" => return self.invoke(catalogue, id, params).await,
             other => failure(&id, -32601, &format!("unknown method {other}")),
         };
-        let mut text = answer.to_string();
-        text.push('\n');
-        stdout.write_all(text.as_bytes()).await?;
-        stdout.flush().await?;
+        Ok(Some(answer))
     }
-    Ok(())
+
+    async fn invoke(
+        &mut self,
+        catalogue: &[Tool],
+        id: Value,
+        params: Value,
+    ) -> Result<Option<Value>, CliError> {
+        let Some(client) = self.daemon.as_mut() else {
+            return Ok(Some(failure(&id, -32002, "call initialize first")));
+        };
+        let Some(name) = params["name"].as_str() else {
+            return Ok(Some(failure(&id, -32602, "tools/call needs a name")));
+        };
+        if name == catalogue::SEARCH {
+            let result = catalogue::search(catalogue, arguments(&params))
+                .map_or_else(|error| invalid_arguments(&error), tool_result);
+            return Ok(Some(reply(&id, &result)));
+        }
+        let (method, arguments) = if name == catalogue::CALL {
+            match catalogue::invocation(catalogue, arguments(&params)) {
+                Ok(invocation) => invocation,
+                Err(error) => return Ok(Some(reply(&id, &invalid_arguments(&error)))),
+            }
+        } else {
+            let Some(method) = Tool::method_for(catalogue, name) else {
+                return Ok(Some(failure(&id, -32602, &format!("no tool named {name}"))));
+            };
+            (method, arguments(&params))
+        };
+        if let Some(error) = tool_arguments_error(&method, &arguments) {
+            return Ok(Some(reply(&id, &error)));
+        }
+        if self.pending.len() >= 64 {
+            return Ok(Some(failure(
+                &id,
+                -32000,
+                "too many pending tool calls; wait or cancel one",
+            )));
+        }
+        let daemon_id = client.send_request(&method, arguments).await?;
+        self.pending.insert(daemon_id, id);
+        Ok(None)
+    }
 }
 
 fn arguments(params: &Value) -> Value {
@@ -143,24 +226,15 @@ async fn connect(data_dir: &Path, name: &str) -> Result<LocalClient, CliError> {
     Ok(client)
 }
 
-/// One tool call as a daemon request; an API error is a tool error the
-/// model can read and explain, not a protocol failure.
-async fn call(client: &mut LocalClient, method: &str, arguments: Value) -> Value {
+fn tool_arguments_error(method: &str, arguments: &Value) -> Option<Value> {
     if method == "vehicle/messages" && arguments["subscribe"] == true {
-        return api_error(&json!({
+        return Some(api_error(&json!({
             "code": -32602,
             "message": "MCP returns a bounded vehicle message snapshot; call vehicle_messages again for newer messages. subscribe:true is not supported.",
             "data": { "kind": "invalid-value", "field": "subscribe" }
-        }));
+        })));
     }
-    match client.call(method, arguments).await {
-        Ok(result) => tool_result(result),
-        Err(CliError::Api(error)) => api_error(&error),
-        Err(error) => json!({
-            "content": [{ "type": "text", "text": error.to_string() }],
-            "isError": true
-        }),
-    }
+    None
 }
 
 /// Keep the complete daemon error in both representations: clients that

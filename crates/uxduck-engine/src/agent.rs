@@ -208,13 +208,33 @@ impl Engine {
 
     /// Records why a turn could not run, such as a missing key.
     pub fn agent_error(&mut self, agent: Option<ConnectionId>, thread_id: &str, message: &str) {
+        self.end_open_items(thread_id, ItemStatus::Failed);
         let actor = self.agent_actor(agent);
+        let mut completed: Vec<_> = self
+            .state
+            .items_of(thread_id)
+            .into_iter()
+            .rev()
+            .take_while(|item| item.kind != ItemKind::UserMessage)
+            .filter(|item| item.kind == ItemKind::ToolCall && item.status == ItemStatus::Completed)
+            .filter_map(|item| item.tool_call.as_ref().map(|call| call.method.as_str()))
+            .take(8)
+            .collect();
+        completed.reverse();
+        let text = if completed.is_empty() {
+            message.to_owned()
+        } else {
+            format!(
+                "{message}\n\nRecent tool calls completed before this error: {}. Their results are saved above. Completed actions were not undone; check the current state before retrying.",
+                completed.join(", ")
+            )
+        };
         self.add_item(
             actor,
             thread_id,
             ItemKind::Error,
             ItemStatus::Failed,
-            message.to_owned(),
+            text,
             None,
         );
     }

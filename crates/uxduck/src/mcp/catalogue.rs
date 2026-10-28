@@ -240,4 +240,18 @@ mod tests {
             assert!(invocation(&catalogue, arguments).is_err());
         }
     }
+
+    #[test]
+    fn common_recovery_workflows_find_their_specific_tools() {
+        let catalogue = tools();
+        for (query, expected) in [
+            ("flight logs", "flight_list"),
+            ("download simulator", "sim_download"),
+            ("param_refresh", "param_refresh"),
+            ("sim_catalogue", "sim_catalogue"),
+        ] {
+            let result = search(&catalogue, json!({"query":query})).unwrap();
+            assert_eq!(result["tools"][0]["name"], expected, "{query}: {result}");
+        }
+    }
 }

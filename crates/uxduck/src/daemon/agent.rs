@@ -135,6 +135,7 @@ impl Rpc {
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, reply);
         }
+        let _request = PendingRequest { rpc: self, id };
         let frame = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         self.engine.receive(self.connection, frame.to_string());
         let stopped = || json!({ "code": -32603, "message": "the daemon is stopping", "data": { "kind": "internal" } });
@@ -142,6 +143,28 @@ impl Rpc {
         match frame.get("error") {
             Some(error) => Err(error.clone()),
             None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
+        }
+    }
+}
+
+struct PendingRequest<'a> {
+    rpc: &'a Rpc,
+    id: i64,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        if self
+            .rpc
+            .pending
+            .lock()
+            .is_ok_and(|mut pending| pending.remove(&self.id).is_some())
+        {
+            self.rpc.engine.receive(
+                self.rpc.connection,
+                json!({ "jsonrpc": "2.0", "method": "cancel", "params": { "id": self.id } })
+                    .to_string(),
+            );
         }
     }
 }

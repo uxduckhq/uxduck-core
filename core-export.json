@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "0dda012a42c66bad4486fb65219f2b1fc47f41c8",
+  "sourceCommit": "5f1954461742eb0356a5c30a08bdbeb45923619f",
   "licenseReady": true,
   "files": [
     {
@@ -111,12 +111,12 @@
     },
     {
       "path": "crates/uxduck-agent/src/tools.rs",
-      "sha256": "ea5f6e2ca7bdecdc2ed3c7f8f0474f467ed5ea836fac0266d2d071c4ea740318",
+      "sha256": "a42faca1b3b48c5c3a71d48af236831c1cb798820c559a96789d2234f58ce6ef",
       "executable": false
     },
     {
       "path": "crates/uxduck-agent/src/turn.rs",
-      "sha256": "a6f7167f9bb5b6ac106f8af46136a10a1d63296bcaa04810edb05cf58b89463a",
+      "sha256": "7b2db9dbd16fd71ccd15ad967e62e308af1e855dd07c3b4db55af3f31f1d1fc2",
       "executable": false
     },
     {
@@ -4261,7 +4261,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "edd082641aba7fbbd8c58856d0bd3b6591d8c2772629711b63c61c8587399b09",
+      "sha256": "d253e45b0fd1fca26d6ebdbd0d94c93ee9a367b9018880038e7a825a6c87a5a8",
       "executable": false
     },
     {
@@ -4521,7 +4521,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/agent.rs",
-      "sha256": "97c7af5a5fae85c7050b05daa16b8a681d84ac63d5f2aa2a8c17fc7ce8d7b83b",
+      "sha256": "eef47640ff8b4be1daed982ff0faa3a17a5114cc039a3187b88356d34cfcc348",
       "executable": false
     },
     {
@@ -4541,7 +4541,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/approvals.rs",
-      "sha256": "b5ab4f6f267ce586abbaf9ac63db913cae516a48e157cbb848876b8b4354cfef",
+      "sha256": "c006aff94e622acfb11100524d4a161e2c618a34ce08a74159ac9620482ccf5e",
       "executable": false
     },
     {
@@ -4941,7 +4941,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/rpc/handlers.rs",
-      "sha256": "a3c4412b95bf0bee7fbb11670d119fca65a88c73f54bb0ad2f756f3661d56faa",
+      "sha256": "b5d8f1e7999a8af907ceeabe5185d43c9e198b6f2d82efada9e5051a5f55d574",
       "executable": false
     },
     {
@@ -4956,7 +4956,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/rpc/threads.rs",
-      "sha256": "37c6bfb8633ac14fdcdf925b1c4059bcb5d95ce51091c5462ff631c114bd92ce",
+      "sha256": "01acd6f3b8d8c8aed26b1927c3c8c04815bbe28a41aa04895a303bb192734b73",
       "executable": false
     },
     {
@@ -5071,7 +5071,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/transfers.rs",
-      "sha256": "b21ba655c0f7215f05cced942308150bb8160900fb4cbc1346e88620f4110595",
+      "sha256": "ec3c8ff85b7172330a6efe44dfe5d1697ebeb5b33101231ba0837459647242ea",
       "executable": false
     },
     {
@@ -5671,7 +5671,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/client.rs",
-      "sha256": "274ebd7d95c418ed5f67e9ed5cdde3bf45826c71897618d611279b26a4c27d1a",
+      "sha256": "390f738ab2f975af521888b4c493bbdeecaecf983f09e836d3c5e69ae260f618",
       "executable": false
     },
     {
@@ -5766,7 +5766,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/agent.rs",
-      "sha256": "3d83a9b8d0192a2f9c5acc85f0f55261dde87637c2ed67b2fc2801369b72d038",
+      "sha256": "d1aff207309e4bd0dddd5956743fe627ba146150b0f5929d91b2d7cca49110a0",
       "executable": false
     },
     {
@@ -5936,12 +5936,12 @@
     },
     {
       "path": "crates/uxduck/src/mcp.rs",
-      "sha256": "e1f1f48b6e8de02231f1bfb49e415d57f607cf747d9dbe8879318fcb1c85f219",
+      "sha256": "c22c703637aa402ed8d3126d7194048ccd43643f5106ef7afdea596870859ec7",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/mcp/catalogue.rs",
-      "sha256": "cb501b78be59f2689b362c3523fcb289d86672c8a8698fe887a62d0902b0d058",
+      "sha256": "836514afac15a97996c961d2e4962b6d1dd36d6fec9b0c224c01d1da8907ff8e",
       "executable": false
     },
     {
@@ -6301,7 +6301,7 @@
     },
     {
       "path": "docs/site/mcp.md",
-      "sha256": "a4a1124ecbde36cd07e2b1d3cfb18860d4732fe4dac344acef6b785fc1f8159f",
+      "sha256": "25d4535922cfdd17950452e4eba9894b6efb5a25f8d1a291df1f493cd0b859f3",
       "executable": false
     },
     {

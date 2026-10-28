@@ -7,7 +7,7 @@ use uxduck_contracts::dto::thread::{
 };
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
-use uxduck_contracts::rpc::ClientRequest;
+use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::thread::{self, ItemKind, ItemStatus, Thread};
 use uxduck_core::events::Change;
@@ -85,9 +85,35 @@ pub fn handle(
                 .credentials
                 .set(&params.name, &params.value)
                 .map_err(|message| ApiError::new(ErrorKind::Internal, message))?;
+            if matches!(
+                params.name.as_str(),
+                OPENAI_KEY | ANTHROPIC_KEY | ACCOUNT_TOKEN
+            ) {
+                config_changed(engine);
+            }
             Ok(json!({}))
         }
         _ => Err(ApiError::new(ErrorKind::Internal, "not a thread method")),
+    }
+}
+
+fn config_changed(engine: &mut Engine) {
+    let frame = super::router::notification(&ServerNotification::AgentConfigChanged(
+        uxduck_contracts::dto::Empty {},
+    ));
+    let readers: Vec<_> = engine
+        .connections
+        .iter()
+        .filter(|(_, connection)| {
+            connection
+                .admitted
+                .as_ref()
+                .is_some_and(|admitted| admitted.granted.contains(&Capability::Read))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for connection in readers {
+        engine.send(connection, &frame);
     }
 }
 

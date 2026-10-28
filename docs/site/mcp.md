@@ -6,7 +6,7 @@ group: Debug and integrate
 summary: Connect Claude Desktop, Claude Code, Codex or Cursor over MCP and investigate a vehicle's telemetry over time.
 ---
 
-Connect an AI agent to UXDuck on this computer to read vehicle telemetry, parameters and messages. The in-app AI chat is currently hidden in production; MCP works through your external agent.
+Connect an AI agent to UXDuck on this computer to read vehicle telemetry, parameters and messages. In-app AI chat is also available with an eligible signed-in account and available AI allowance; MCP uses your external agent's model.
 
 <!-- mcp-setup -->
 
@@ -47,6 +47,17 @@ For a client or integration that needs every tool listed individually, including
 client-side per-tool allow/deny rules, run `uxduck mcp --all-tools` instead.
 Existing direct tool names remain callable in
 both modes. Reconnect the MCP client after changing modes or updating UXDuck.
+
+MCP keeps reads and health checks responsive while another tool awaits approval.
+Cancelling a request withdraws its pending approval, not other requests' approvals.
+An action already sent to a vehicle is not rolled back by cancelling its MCP
+request; inspect the vehicle and the operation's result before retrying.
+
+Use `flight_list` for this computer's summarized flight logbook, `param_refresh`
+to request fresh vehicle parameters, and `sim_catalogue` for available builds and
+download progress. `sim_download` downloads a signed-catalogue build after the
+ordinary configuration approval; it does not start a vehicle. Raw vehicle files
+remain available through the bounded file tools.
 Exact token savings depend on the client and model; discovered schemas and tool
 results also consume context. Use filters, bounded time windows and small page
 sizes when investigating a flight.
