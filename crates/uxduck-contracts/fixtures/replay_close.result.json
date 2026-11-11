@@ -1,0 +1,14 @@
+{
+  "open": false,
+  "clock": "wall",
+  "startUs": 0,
+  "endUs": 0,
+  "timeUs": 0,
+  "atUs": 0,
+  "speed": 0.0,
+  "playing": false,
+  "generation": 0,
+  "sources": [],
+  "vehicles": [],
+  "marks": []
+}

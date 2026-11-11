@@ -20,6 +20,22 @@ const EARTH_M: f64 = 6_371_008.8;
 /// throttle rests at the bottom with nobody on the sticks.
 const AUTO_OPTIONS: f64 = 3.0;
 
+/// `RTL_AUTOLAND` for a simulated `ArduPlane` whose mission has a landing
+/// sequence: Return to launch flies it (2). Left at 0, `ArduPlane` refuses
+/// to arm with a `DO_LAND_START` in its mission, saying
+/// "`DO_LAND_START` set and `RTL_AUTOLAND` disabled".
+pub(crate) const RTL_AUTOLAND: f64 = 2.0;
+/// `MAV_CMD_DO_LAND_START`.
+const DO_LAND_START: u16 = 189;
+
+/// Whether a plane's plan ends in a landing sequence `ArduPlane` only
+/// arms with when `RTL_AUTOLAND` is set.
+pub(crate) fn needs_autoland(body: &PlanBody) -> bool {
+    body.vehicle_type == PlanVehicleType::Plane
+        && body.autopilot != PlanAutopilot::Px4
+        && body.items.iter().any(|i| i.command == DO_LAND_START)
+}
+
 /// The place `east_m` and `north_m` from `home`, turned by `heading_deg`
 /// (so "north" is the way the vehicle faces).
 fn place(home: LatLon, heading_deg: f64, east_m: f64, north_m: f64) -> LatLon {
@@ -225,12 +241,18 @@ impl Engine {
             },
             heading_deg,
         );
-        let mut job = crate::plans::plan_job(self, &body, vehicle_id.to_owned());
+        let Ok(mut job) = crate::plans::plan_job(self, &body, vehicle_id.to_owned()) else {
+            return;
+        };
         // A simulation's fence is left as it starts.
         job.fence_settings.clear();
         if vehicle_type == PlanVehicleType::Multicopter && !px4 {
             job.fence_settings
                 .push(("AUTO_OPTIONS".into(), AUTO_OPTIONS, ParamKind::Int32));
+        }
+        if needs_autoland(&body) {
+            job.fence_settings
+                .push(("RTL_AUTOLAND".into(), RTL_AUTOLAND, ParamKind::Int8));
         }
         let actor = Actor {
             client_id: crate::launch::ACTOR.into(),
@@ -279,10 +301,38 @@ mod tests {
     }
 
     #[test]
+    fn a_px4_example_never_flies_to_0_0() {
+        for vehicle_type in [
+            PlanVehicleType::Multicopter,
+            PlanVehicleType::Plane,
+            PlanVehicleType::Vtol,
+            PlanVehicleType::Rover,
+        ] {
+            let body = example(vehicle_type, PlanAutopilot::Px4, HOME, 0.0);
+            let items = crate::plans::mission_items(&body, false, None).unwrap();
+            for item in items.iter().filter(|i| i.frame != 2) {
+                let at = LatLon {
+                    latitude_deg: item.latitude_deg,
+                    longitude_deg: item.longitude_deg,
+                };
+                assert!(distance_m(HOME, at) < 1_000.0, "{vehicle_type:?} {item:?}");
+            }
+        }
+    }
+
+    #[test]
     fn a_plane_s_circuit_ends_in_a_landing_sequence() {
         let body = example(PlanVehicleType::Plane, PlanAutopilot::Ardupilot, HOME, 90.0);
         let commands: Vec<u16> = body.items.iter().map(|i| i.command).collect();
         assert_eq!(commands, [22, 16, 16, 16, 189, 16, 21]);
+        // So ArduPlane arms with it only once RTL_AUTOLAND is set.
+        assert!(needs_autoland(&body));
+        assert!(!needs_autoland(&example(
+            PlanVehicleType::Plane,
+            PlanAutopilot::Px4,
+            HOME,
+            90.0
+        )));
         // Facing east, the first leg goes east.
         assert!(body.items[1].longitude_deg > HOME.longitude_deg + 0.005);
         let land = body.items.last().unwrap();

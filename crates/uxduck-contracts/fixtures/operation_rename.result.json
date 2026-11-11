@@ -1,0 +1,10 @@
+{
+  "id": "op3c9a1e7b2d4f6a80",
+  "name": "Night survey",
+  "flightIds": ["fl3c9a1e7b2d4f6a80", "fl4d0b2f8c3e5a7b91", "fl5e1c3a9d4f6b8c02"],
+  "fromUs": 1790000000000000,
+  "toUs": 1790007200000000,
+  "vehicles": 2,
+  "kept": 1,
+  "version": 3
+}

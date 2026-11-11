@@ -1,0 +1,6 @@
+{
+  "method": "param/definitions/list",
+  "params": {
+    "firmware": "ArduCopter"
+  }
+}

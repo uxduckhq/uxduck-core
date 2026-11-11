@@ -145,6 +145,18 @@ fn project_dir(application: &str, temporary: &str) -> PathBuf {
     )
 }
 
+/// This program's file, with links resolved. macOS reports the path it was
+/// started by, so a daemon started as `/usr/local/bin/uxduck` would look
+/// beside the link, not in the UXDuck.app it links into, for the desktop
+/// window, capture tools and updater installed with it.
+///
+/// # Errors
+/// When the system cannot say where this program is.
+pub fn executable() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    Ok(dunce::canonicalize(&exe).unwrap_or(exe))
+}
+
 /// Where photos and recordings are kept (S150, ADR-0017 V21 revised): the
 /// app folder's `media`, together, beside the tlogs.
 #[must_use]

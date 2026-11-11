@@ -195,6 +195,44 @@ impl VehicleTelemetry {
     }
 }
 
+/// How the link to a vehicle is doing (S261, ADR-0004 2026-11-01): what the
+/// data plane measures once a second, kept in memory beside the vehicle's
+/// telemetry and never journaled.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LinkHealth {
+    /// MAVLink's own ping, `TIMESYNC`: the median round trip of the
+    /// replies to UXDuck's requests in the last few seconds, in
+    /// milliseconds. Absent when there is none, with why.
+    pub round_trip_ms: Option<f64>,
+    /// Why there is no round trip.
+    pub round_trip_missing: Option<RoundTripMissing>,
+    /// Of the messages the vehicle sent in the last 10 s, the share lost on
+    /// the way, from gaps in their sequence numbers, in percent. Absent
+    /// when nothing was heard in that time.
+    pub loss_percent: Option<f64>,
+    /// Since the vehicle was last heard, any message, in milliseconds.
+    pub age_ms: Option<u64>,
+}
+
+/// Why a vehicle has no round trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundTripMissing {
+    /// Asked, and its first reply has not come yet.
+    Waiting,
+    /// Asked, and no reply in the last few seconds: it does not answer
+    /// `TIMESYNC`, or the replies are lost.
+    NoReply,
+    /// Its link is read-only: UXDuck sends nothing on it.
+    ReadOnly,
+    /// Nobody supervises it, so its ground station heartbeat is withheld
+    /// (S81), and so is the ping.
+    Unsupervised,
+    /// Its simulation is paused.
+    Paused,
+    /// UXDuck sends it nothing where it is heard.
+    NotSent,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

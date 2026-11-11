@@ -2,6 +2,7 @@ use uxduck_core::domain::mission as m;
 use uxduck_core::domain::parameter as p;
 
 use crate::dto::mission as dm;
+use crate::dto::mission_read::ReadMissionItem;
 use crate::dto::parameter as dto;
 
 impl From<p::ParamKind> for dto::ParamKind {
@@ -117,6 +118,23 @@ impl From<&m::Mission> for dm::Mission {
             progress: v.progress.map(progress),
             fence: v.fence.iter().map(Into::into).collect(),
             rally: v.rally.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&m::MissionItem> for ReadMissionItem {
+    fn from(value: &m::MissionItem) -> Self {
+        Self {
+            command: value.command,
+            frame: value.frame,
+            param1: value.param1.into(),
+            param2: value.param2.into(),
+            param3: value.param3.into(),
+            param4: value.param4.into(),
+            latitude_deg: value.latitude_deg.into(),
+            longitude_deg: value.longitude_deg.into(),
+            altitude_m: value.altitude_m.into(),
+            autocontinue: value.autocontinue,
         }
     }
 }

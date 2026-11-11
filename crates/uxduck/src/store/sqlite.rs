@@ -134,21 +134,27 @@ fn open_with(path: &Path, migrations: &[(&str, &str)]) -> Result<Connection, Sql
     Ok(db)
 }
 
-/// The last checkpoint, if one was written.
+/// The last checkpoint as it was written: its `seq` and its JSON.
 ///
 /// # Errors
-/// When the row cannot be read or parsed.
-pub fn load_checkpoint(db: &Connection) -> Result<Option<State>, SqliteError> {
-    let text: Option<String> = db
-        .query_row("SELECT state FROM checkpoint WHERE id = 1", [], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    let Some(text) = text else {
-        return Ok(None);
-    };
-    let (state, _, repaired) =
-        super::finite::read::<State>(&text).map_err(SqliteError::Checkpoint)?;
+/// When the row cannot be read.
+pub fn checkpoint_row(db: &Connection) -> Result<Option<(u64, String)>, SqliteError> {
+    Ok(db
+        .query_row(
+            "SELECT seq, state FROM checkpoint WHERE id = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .map(|(seq, text)| (u64::try_from(seq).unwrap_or(0), text)))
+}
+
+/// Reads a checkpoint's JSON.
+///
+/// # Errors
+/// When it does not read as the state.
+pub fn parse_checkpoint(text: &str) -> Result<State, serde_json::Error> {
+    let (state, _, repaired) = super::finite::read::<State>(text)?;
     if repaired > 0 {
         tracing::warn!(
             floats = repaired,
@@ -156,7 +162,7 @@ pub fn load_checkpoint(db: &Connection) -> Result<Option<State>, SqliteError> {
             "read NaN or infinite numbers in the checkpoint as 0"
         );
     }
-    Ok(Some(state))
+    Ok(state)
 }
 
 /// # Errors
@@ -326,12 +332,21 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::LinkLibraryRemoved { .. }
             | Change::BaselineUpserted { .. }
             | Change::BaselineRemoved { .. }
+            | Change::SavedParamsUpserted { .. }
+            | Change::SavedParamsRemoved { .. }
             | Change::FlightUpserted { .. }
+            | Change::OperationUpserted { .. }
+            | Change::OperationRemoved { .. }
             | Change::FlightRemoved { .. }
+            | Change::FlightForgotten { .. }
             | Change::FlightReplaced { .. }
             | Change::ParamDefinitionsChosen { .. }
             | Change::OwnSetUpserted { .. }
             | Change::OwnSetRemoved { .. }
+            | Change::DialectUpserted { .. }
+            | Change::DialectRemoved { .. }
+            | Change::FirmwareProfileUpserted { .. }
+            | Change::FirmwareProfileRemoved { .. }
             | Change::HistoryUpserted { .. }
             | Change::HistoryCleared { .. }
             | Change::VideoSourceUpserted { .. }
@@ -890,11 +905,13 @@ mod tests {
             deleted_at_us: None,
         };
         let thread = Thread {
+            title_state: uxduck_core::domain::thread::TitleState::Fixed,
             id: "t1".into(),
             title: "hello".into(),
             operator_id: None,
             vehicle_id: None,
             model: "m".into(),
+            effort: None,
             auto_approve: false,
             last_response_id: None,
             created_at_us: 1,
@@ -904,7 +921,6 @@ mod tests {
             sort_key: "W".into(),
             pinned: true,
             archived: false,
-            exclude_from_learning: false,
             deleted_at_us: Some(9),
         };
         let events = [
@@ -954,6 +970,7 @@ mod tests {
             mode: TargetMode::FollowsSelection,
             target: None,
             input_pause: None,
+            holding: None,
             pending_target: None,
             mapping_id: "mode-2".into(),
             version: 1,

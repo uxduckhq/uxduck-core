@@ -16,6 +16,10 @@ use crate::domain::telemetry::AltitudeFrame;
 pub enum Command {
     Arm,
     Disarm,
+    /// Arm when disarmed, disarm when armed: one controller button or
+    /// switch for both. Never sent as such: [`Command::resolved`] turns it
+    /// into the one the vehicle needs, so receipts say which.
+    ArmToggle,
     /// An ArduPilot mode by name, such as `LOITER` or `GUIDED`.
     SetMode {
         mode: String,
@@ -38,9 +42,26 @@ pub enum Command {
         /// The ellipsoid is refused; `DO_REPOSITION` has no such frame.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
+        /// `ArduPlane` loiter radius in metres: positive clockwise, negative
+        /// counterclockwise. Omitted: keep the autopilot's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loiter_radius_m: Option<f64>,
         /// Submarine heading. Omitted commands retain the existing default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<GoToHeading>,
+    },
+    /// Moves home, where the vehicle returns to and its heights are
+    /// measured from: `DO_SET_HOME` in a `COMMAND_INT`. To a place, or,
+    /// with none, to where the vehicle is now.
+    SetHome {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<PlaceAmsl>,
+    },
+    /// Sets the EKF origin, the point the vehicle's position estimate is
+    /// measured from: `DO_SET_GLOBAL_ORIGIN` in a `COMMAND_INT`. ArduPilot
+    /// takes it only while it has none, as when it flies without GPS.
+    SetEkfOrigin {
+        place: PlaceAmsl,
     },
     /// Any `MAV_CMD` by number, with up to seven parameters: what plugins
     /// use for protocols the core does not name, such as the camera's.
@@ -48,6 +69,16 @@ pub enum Command {
         command: u16,
         params: Vec<f32>,
     },
+}
+
+/// A place with its height above mean sea level, as home and the EKF
+/// origin are given.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAmsl {
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    pub altitude_amsl_m: f64,
 }
 
 /// How a submarine faces while going to a location. Bearings are degrees
@@ -113,12 +144,34 @@ pub const FLYING_ABOVE_HOME_M: f64 = 2.0;
 
 const FORCED_ARM: &str =
     "Forcing skips the pre-arm checks that stop a vehicle arming when something is wrong.";
+// Shown whatever the vehicle is, so "falls" is only for one that flies.
+// The in-flight texts below show only while the app thinks it is flying,
+// which a rover, boat or submarine never is.
 const FORCED_DISARM: &str =
-    "Forcing disarms even in the air: the motors stop, and the vehicle falls.";
+    "Forcing disarms even while it moves: the motors stop at once, and in the air it falls.";
 const DISARM_IN_FLIGHT: &str = "Disarming in flight stops the motors, and the vehicle falls.";
 const REBOOT_IN_FLIGHT: &str =
     "Rebooting in flight stops the flight controller, and the vehicle falls.";
 const TERMINATE: &str = "Flight termination stops the vehicle at once, and it falls.";
+const SCRIPTS_IN_FLIGHT: &str =
+    "Restarting scripts in flight stops whatever they control until they start again.";
+const HOME_IN_FLIGHT: &str = "Moving home in flight changes where it returns to and lands, and what its height is measured from.";
+const ORIGIN_IN_FLIGHT: &str =
+    "Setting the EKF origin in flight moves every position it reports from then on.";
+const RESTART_MISSION_IN_FLIGHT: &str = "Restarting the mission in flight sends it back to the first step, and the steps flown so far are flown again.";
+/// `DO_SET_MISSION_CURRENT`: param 1 the item, param 2 1 to reset the
+/// mission (its `DO_JUMP` repeats, and a finished mission runs again).
+pub const MAV_CMD_DO_SET_MISSION_CURRENT: u16 = 224;
+/// `DO_PAUSE_CONTINUE`: param 1 0 to pause the mission where it is, 1 to
+/// continue it (S340). `ArduCopter` takes it in AUTO and GUIDED.
+pub const MAV_CMD_DO_PAUSE_CONTINUE: u16 = 193;
+/// `DO_LAND_START` as a command: fly to the mission's landing sequence, the
+/// nearest of its `DO_LAND_START` items, and land along it in AUTO (S345).
+pub const MAV_CMD_DO_LAND_START: u16 = 189;
+/// ArduPilot's `MAV_CMD_SCRIPTING` (S259, ADR-0027 F16).
+pub const MAV_CMD_SCRIPTING: u16 = 42701;
+/// Its `SCRIPTING_CMD_STOP_AND_RESTART`.
+const SCRIPTING_CMD_STOP_AND_RESTART: f32 = 3.0;
 const MAV_CMD_DO_FLIGHTTERMINATION: u16 = 185;
 const MAV_CMD_NAV_TAKEOFF: u16 = 22;
 /// `param2` of `COMPONENT_ARM_DISARM` that forces it.
@@ -160,14 +213,6 @@ pub enum CommandClass {
     Critical,
 }
 
-impl CommandClass {
-    /// Whether someone away needs the vehicle's control lease to send it.
-    #[must_use]
-    pub const fn needs_lease(self) -> bool {
-        matches!(self, Self::Mission | Self::Critical)
-    }
-}
-
 /// `MAV_CMD`s for cameras and gimbals: `DO_DIGICAM_CONTROL`,
 /// `DO_MOUNT_CONTROL`, `SET_CAMERA_ZOOM`, `SET_CAMERA_FOCUS`,
 /// `DO_GIMBAL_MANAGER_PITCHYAW`, `IMAGE_START_CAPTURE`,
@@ -176,8 +221,12 @@ const PAYLOAD_COMMANDS: [u16; 9] = [203, 205, 531, 532, 1000, 2000, 2001, 2500, 
 /// `MAV_CMD`s that send a vehicle somewhere now: `NAV_WAYPOINT`,
 /// `DO_CHANGE_ALTITUDE`, `DO_REPOSITION`. They go stale fastest.
 const TARGET_COMMANDS: [u16; 3] = [16, 186, 192];
-/// `MISSION_START`.
-const MAV_CMD_MISSION_START: u16 = 300;
+/// `MISSION_START`: param 1 the first item to fly, param 2 the last.
+/// ArduPilot refuses either unless 0, so the engine makes the first item
+/// current before it (S341).
+pub const MAV_CMD_MISSION_START: u16 = 300;
+/// `DO_CHANGE_SPEED`: param 1 the kind (0 airspeed, 1 ground speed), param 2 m/s.
+pub const MAV_CMD_DO_CHANGE_SPEED: u16 = 178;
 
 /// Why a command was refused before it was sent, for clients and agents to
 /// act on without parsing `detail`.
@@ -190,6 +239,11 @@ pub enum RefusalReason {
     /// It would arm the vehicle while a blocking preflight check does not
     /// pass (ADR-0038 K3); the receipt lists them.
     Preflight,
+    /// The vehicle is a replay (ADR-0039 R3): nothing is sent to it.
+    Replay,
+    /// It would arm a real vehicle before the sender's operator agreed to
+    /// the current Terms of Service (ADR-0047).
+    Terms,
 }
 
 const MAV_CMD_DO_SET_MODE: u16 = 176;
@@ -203,8 +257,15 @@ impl Command {
             Self::SetMode { mode } if SAFE_MODES.iter().any(|m| m.eq_ignore_ascii_case(mode)) => {
                 OfflineBehaviour::Allow
             }
-            Self::SetMode { .. } | Self::GoTo { .. } | Self::Long { .. } => OfflineBehaviour::Warn,
-            Self::Arm | Self::Reboot => OfflineBehaviour::Block,
+            Self::Long { .. } if self.pauses() || self.lands_via_the_mission() => {
+                OfflineBehaviour::Allow
+            }
+            Self::SetMode { .. }
+            | Self::GoTo { .. }
+            | Self::SetHome { .. }
+            | Self::SetEkfOrigin { .. }
+            | Self::Long { .. } => OfflineBehaviour::Warn,
+            Self::Arm | Self::ArmToggle | Self::Reboot => OfflineBehaviour::Block,
         }
     }
 
@@ -230,18 +291,32 @@ impl Command {
             }
         };
         match self {
-            Self::Arm => arm(forced),
+            // A flying vehicle is armed, so a toggle would disarm it.
             Self::Disarm => disarm(forced),
+            Self::ArmToggle if flying => disarm(forced),
+            Self::Arm | Self::ArmToggle => arm(forced),
             Self::Rtl | Self::Land => RiskOf::NONE,
             Self::SetMode { mode } if SAFE_MODES.iter().any(|m| m.eq_ignore_ascii_case(mode)) => {
                 RiskOf::NONE
             }
             Self::Reboot if flying => RiskOf::dangerous(REBOOT_IN_FLIGHT),
-            Self::SetMode { .. } | Self::GoTo { .. } | Self::Reboot => RiskOf::CONFIRM,
+            Self::SetHome { .. } if flying => RiskOf::dangerous(HOME_IN_FLIGHT),
+            Self::SetEkfOrigin { .. } if flying => RiskOf::dangerous(ORIGIN_IN_FLIGHT),
+            Self::SetHome { .. }
+            | Self::SetEkfOrigin { .. }
+            | Self::SetMode { .. }
+            | Self::GoTo { .. }
+            | Self::Reboot => RiskOf::CONFIRM,
             Self::Long { command, params } => {
                 let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
                 match *command {
                     MAV_CMD_DO_FLIGHTTERMINATION => RiskOf::dangerous(TERMINATE),
+                    MAV_CMD_DO_PAUSE_CONTINUE if param(0) < 0.5 => RiskOf::NONE,
+                    MAV_CMD_DO_LAND_START => RiskOf::NONE,
+                    MAV_CMD_SCRIPTING if flying => RiskOf::dangerous(SCRIPTS_IN_FLIGHT),
+                    MAV_CMD_DO_SET_MISSION_CURRENT if flying && param(1) >= 0.5 => {
+                        RiskOf::dangerous(RESTART_MISSION_IN_FLIGHT)
+                    }
                     MAV_CMD_COMPONENT_ARM_DISARM if param(0) >= 0.5 => {
                         arm(forced || (param(1) - FORCE_MAGIC).abs() < 0.5)
                     }
@@ -260,15 +335,25 @@ impl Command {
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Rtl | Self::Land => CommandClass::Safety,
+            Self::Long { .. } if self.pauses() || self.lands_via_the_mission() => {
+                CommandClass::Safety
+            }
             Self::SetMode { mode } if SAFE_MODES.iter().any(|m| m.eq_ignore_ascii_case(mode)) => {
                 CommandClass::Safety
             }
-            Self::SetMode { .. } | Self::GoTo { .. } => CommandClass::Mission,
-            Self::Arm | Self::Disarm | Self::Reboot => CommandClass::Critical,
+            Self::SetMode { .. }
+            | Self::GoTo { .. }
+            | Self::SetHome { .. }
+            | Self::SetEkfOrigin { .. } => CommandClass::Mission,
+            Self::Arm | Self::Disarm | Self::ArmToggle | Self::Reboot => CommandClass::Critical,
             Self::Long { command, .. } => match *command {
                 c if PAYLOAD_COMMANDS.contains(&c) => CommandClass::Payload,
                 c if TARGET_COMMANDS.contains(&c) => CommandClass::Mission,
-                MAV_CMD_MISSION_START | MAV_CMD_DO_SET_MODE => CommandClass::Mission,
+                MAV_CMD_MISSION_START
+                | MAV_CMD_DO_SET_MODE
+                | MAV_CMD_DO_CHANGE_SPEED
+                | MAV_CMD_DO_SET_MISSION_CURRENT
+                | MAV_CMD_DO_PAUSE_CONTINUE => CommandClass::Mission,
                 _ => CommandClass::Critical,
             },
         }
@@ -288,6 +373,17 @@ impl Command {
         }
     }
 
+    /// The command to send to a vehicle that is `armed` or not: a toggle
+    /// becomes the one it needs, anything else is itself.
+    #[must_use]
+    pub fn resolved(self, armed: bool) -> Self {
+        match self {
+            Self::ArmToggle if armed => Self::Disarm,
+            Self::ArmToggle => Self::Arm,
+            other => other,
+        }
+    }
+
     /// Take-off to `height_m` above home: `NAV_TAKEOFF`, its height in `param7`.
     #[must_use]
     pub fn take_off(height_m: f32) -> Self {
@@ -295,6 +391,136 @@ impl Command {
             command: MAV_CMD_NAV_TAKEOFF,
             params: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, height_m],
         }
+    }
+
+    /// Restarts ArduPilot's Lua scripts, reading them again from its
+    /// scripts folder (S259, ADR-0027 F16).
+    #[must_use]
+    pub fn restart_scripts() -> Self {
+        Self::Long {
+            command: MAV_CMD_SCRIPTING,
+            params: vec![SCRIPTING_CMD_STOP_AND_RESTART],
+        }
+    }
+
+    /// Starts the mission again from `first`, its first item (1 on
+    /// ArduPilot, whose item 0 is home; 0 on PX4), with its `DO_JUMP`
+    /// repeats reset: `DO_SET_MISSION_CURRENT` with param 2 at 1.
+    #[must_use]
+    pub fn restart_mission(first: u16) -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_SET_MISSION_CURRENT,
+            params: vec![f32::from(first), 1.0],
+        }
+    }
+
+    /// Makes mission item `seq` the current one: in a mission mode the
+    /// vehicle goes on to it now, otherwise it is where the mission goes
+    /// on from. `DO_SET_MISSION_CURRENT` with param 2 at 0.
+    #[must_use]
+    pub fn go_to_mission_item(seq: u16) -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_SET_MISSION_CURRENT,
+            params: vec![f32::from(seq), 0.0],
+        }
+    }
+
+    /// Flies the mission in its mission mode from item `first`, or with
+    /// none from its current item (param 1 at -1, as PX4 reads it):
+    /// `MISSION_START`. On the ground it arms the vehicle, which the engine
+    /// does first (S341).
+    #[must_use]
+    pub fn start_mission(first: Option<u16>) -> Self {
+        Self::Long {
+            command: MAV_CMD_MISSION_START,
+            params: vec![first.map_or(-1.0, f32::from), 0.0],
+        }
+    }
+
+    /// The item a mission's start flies from, when it names one: its
+    /// param 1, 0 or more. None for anything but `MISSION_START`.
+    #[must_use]
+    pub fn mission_start_item(&self) -> Option<u16> {
+        match self {
+            Self::Long {
+                command: MAV_CMD_MISSION_START,
+                params,
+            } => {
+                let first = params.first().copied().unwrap_or(0.0).round();
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "checked to be a mission item number"
+                )]
+                (first >= 0.0 && first <= f32::from(u16::MAX)).then_some(first as u16)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether it starts the mission (`MISSION_START`).
+    #[must_use]
+    pub fn starts_mission(&self) -> bool {
+        matches!(
+            self,
+            Self::Long {
+                command: MAV_CMD_MISSION_START,
+                ..
+            }
+        )
+    }
+
+    /// Lands via the mission: flies to its landing sequence and lands
+    /// along it, in AUTO (`DO_LAND_START`). Safe like Land and RTL.
+    #[must_use]
+    pub fn land_via_the_mission() -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_LAND_START,
+            params: Vec::new(),
+        }
+    }
+
+    /// Whether it lands via the mission (`DO_LAND_START`).
+    #[must_use]
+    pub fn lands_via_the_mission(&self) -> bool {
+        matches!(
+            self,
+            Self::Long {
+                command: MAV_CMD_DO_LAND_START,
+                ..
+            }
+        )
+    }
+
+    /// Pauses the mission where the vehicle is: it holds there, on its
+    /// current step (`DO_PAUSE_CONTINUE` 0).
+    #[must_use]
+    pub fn pause_mission() -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_PAUSE_CONTINUE,
+            params: vec![0.0],
+        }
+    }
+
+    /// Continues a paused mission from where it paused
+    /// (`DO_PAUSE_CONTINUE` 1).
+    #[must_use]
+    pub fn continue_mission() -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_PAUSE_CONTINUE,
+            params: vec![1.0],
+        }
+    }
+
+    /// Whether it pauses: `DO_PAUSE_CONTINUE` with param 1 at 0, which
+    /// only makes the vehicle hold, so it is safe like LOITER.
+    #[must_use]
+    pub fn pauses(&self) -> bool {
+        matches!(
+            self,
+            Self::Long { command: MAV_CMD_DO_PAUSE_CONTINUE, params }
+                if params.first().copied().unwrap_or(0.0) < 0.5
+        )
     }
 
     /// Whether it arms a vehicle that is on the ground and disarmed
@@ -343,11 +569,14 @@ impl Command {
         match self {
             Self::Arm => "Arm".into(),
             Self::Disarm => "Disarm".into(),
+            Self::ArmToggle => "Arm or disarm".into(),
             Self::SetMode { mode } => format!("Set mode {mode}"),
             Self::Rtl => "Return to launch".into(),
             Self::Land => "Land".into(),
             Self::Reboot => "Reboot".into(),
             Self::GoTo { .. } => "Go to".into(),
+            Self::SetHome { .. } => "Set home".into(),
+            Self::SetEkfOrigin { .. } => "Set the EKF origin".into(),
             Self::Long {
                 command: MAV_CMD_NAV_TAKEOFF,
                 ..
@@ -357,10 +586,48 @@ impl Command {
                 ..
             } => "Terminate the flight".into(),
             Self::Long { command: 186, .. } => "Change height".into(),
+            Self::Long { .. } if self.pauses() => "Pause the mission".into(),
+            Self::Long { .. } if self.lands_via_the_mission() => "Land via the mission".into(),
+            Self::Long { .. } if self.starts_mission() => match self.mission_start_item() {
+                Some(first) if first > 0 => format!("Fly the mission from item {first}"),
+                _ => "Start the mission".into(),
+            },
+            Self::Long {
+                command: MAV_CMD_DO_PAUSE_CONTINUE,
+                ..
+            } => "Continue the mission".into(),
+            Self::Long {
+                command: MAV_CMD_DO_SET_MISSION_CURRENT,
+                params,
+            } if params.get(1).is_some_and(|p| *p >= 0.5) => "Restart the mission".into(),
+            Self::Long {
+                command: MAV_CMD_DO_SET_MISSION_CURRENT,
+                params,
+            } => format!(
+                "Go to mission item {}",
+                params.first().copied().unwrap_or(0.0).round()
+            ),
+            Self::Long {
+                command: MAV_CMD_DO_CHANGE_SPEED,
+                params,
+            } if params.first().copied().unwrap_or(0.0) < 0.5 => "Change airspeed".into(),
+            Self::Long {
+                command: MAV_CMD_DO_CHANGE_SPEED,
+                ..
+            } => "Change speed".into(),
             // The camera protocol, as the Camera tab sends it (S145).
             Self::Long { command: 2000, .. } => "Take a photo".into(),
             Self::Long { command: 2500, .. } => "Start recording".into(),
             Self::Long { command: 2501, .. } => "Stop recording".into(),
+            Self::Long {
+                command: MAV_CMD_SCRIPTING,
+                params,
+            } if params
+                .first()
+                .is_some_and(|p| (*p - SCRIPTING_CMD_STOP_AND_RESTART).abs() < 0.5) =>
+            {
+                "Restart scripts".into()
+            }
             // The Setup tab's compass calibration (S184).
             Self::Long { command: 42424, .. } => "Calibrate the compasses".into(),
             Self::Long { command: 42426, .. } => "Cancel the compass calibration".into(),
@@ -515,8 +782,13 @@ pub struct Receipt {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_id: Option<String>,
+    /// The person who sent it, as they were named then (ADR-0033): never
+    /// looked up again from `operator_id`, so a rename or switch keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_by: Option<crate::events::ActorIdentity>,
     /// Sent from away, through the account's relay (S80): who, and the id
-    /// their app gave it.
+    /// their app gave it. Only on receipts from before remote control was
+    /// removed (ADR-0048).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteBy>,
     pub created_at_us: u64,
@@ -547,6 +819,29 @@ impl ReceiptStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restarting_scripts_is_named_and_dangerous_only_in_flight() {
+        let restart = Command::restart_scripts();
+        assert_eq!(restart.label(), "Restart scripts");
+        assert_eq!(restart.risk(false, false).level, Risk::Confirm);
+        let flying = restart.risk(true, false);
+        assert_eq!(flying.level, Risk::Dangerous);
+        assert!(
+            flying
+                .reason
+                .unwrap()
+                .contains("stops whatever they control")
+        );
+    }
+
+    #[test]
+    fn a_toggle_is_sent_as_what_the_vehicle_needs() {
+        assert_eq!(Command::ArmToggle.resolved(false), Command::Arm);
+        assert_eq!(Command::ArmToggle.resolved(true), Command::Disarm);
+        assert_eq!(Command::Land.resolved(true), Command::Land);
+        assert_eq!(Command::ArmToggle.risk(true, false).level, Risk::Dangerous);
+    }
 
     #[test]
     fn the_risk_table() {
@@ -584,6 +879,7 @@ mod tests {
             longitude_deg: 149.16,
             altitude_m: 30.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            loiter_radius_m: None,
             heading: None,
         };
         assert_eq!(level(&go_to, false, false), Risk::Confirm);
@@ -645,6 +941,152 @@ mod tests {
             assert!(risk.reason.is_some(), "{command:?}");
         }
         assert_eq!(Command::take_off(10.0).label(), "Take off");
+    }
+
+    #[test]
+    fn changing_speed_is_a_mission_command_named_for_its_kind() {
+        let speed = |kind: f32| Command::Long {
+            command: MAV_CMD_DO_CHANGE_SPEED,
+            params: vec![kind, 18.0, -1.0],
+        };
+        assert_eq!(speed(0.0).risk(true, false).level, Risk::Confirm);
+        assert_eq!(speed(0.0).class(), CommandClass::Mission);
+        assert_eq!(speed(0.0).offline_behaviour(), OfflineBehaviour::Warn);
+        assert_eq!(speed(0.0).label(), "Change airspeed");
+        assert_eq!(speed(1.0).label(), "Change speed");
+    }
+
+    #[test]
+    fn restarting_the_mission_is_held_in_flight_and_going_to_an_item_is_not() {
+        let restart = Command::restart_mission(1);
+        let item = Command::go_to_mission_item(4);
+        assert_eq!(
+            restart,
+            Command::Long {
+                command: 224,
+                params: vec![1.0, 1.0]
+            }
+        );
+        assert_eq!(
+            item,
+            Command::Long {
+                command: 224,
+                params: vec![4.0, 0.0]
+            }
+        );
+        assert_eq!(restart.label(), "Restart the mission");
+        assert_eq!(item.label(), "Go to mission item 4");
+        assert_eq!(restart.risk(false, false).level, Risk::Confirm);
+        let flying = restart.risk(true, false);
+        assert_eq!(flying.level, Risk::Dangerous);
+        assert!(flying.reason.is_some());
+        assert_eq!(item.risk(true, false).level, Risk::Confirm);
+        for command in [&restart, &item] {
+            assert_eq!(command.class(), CommandClass::Mission);
+            assert_eq!(command.offline_behaviour(), OfflineBehaviour::Warn);
+            assert!(!command.arms_on_the_ground());
+        }
+    }
+
+    #[test]
+    fn starting_the_mission_arms_and_may_name_its_first_item() {
+        let start = Command::start_mission(None);
+        let from = Command::start_mission(Some(3));
+        assert_eq!(
+            from,
+            Command::Long {
+                command: 300,
+                params: vec![3.0, 0.0]
+            }
+        );
+        assert_eq!(
+            start,
+            Command::Long {
+                command: 300,
+                params: vec![-1.0, 0.0]
+            }
+        );
+        assert_eq!(start.label(), "Start the mission");
+        assert_eq!(Command::start_mission(Some(0)).label(), "Start the mission");
+        assert_eq!(from.label(), "Fly the mission from item 3");
+        assert_eq!(start.mission_start_item(), None);
+        assert_eq!(from.mission_start_item(), Some(3));
+        assert_eq!(Command::restart_mission(1).mission_start_item(), None);
+        for command in [&start, &from] {
+            assert!(command.starts_mission());
+            assert!(command.arms_on_the_ground());
+            assert_eq!(command.class(), CommandClass::Mission);
+            assert_eq!(command.risk(true, false).level, Risk::Confirm);
+        }
+    }
+
+    #[test]
+    fn landing_via_the_mission_is_safe_like_land() {
+        let land = Command::land_via_the_mission();
+        assert!(land.lands_via_the_mission());
+        assert_eq!(land.label(), "Land via the mission");
+        assert_eq!(land.risk(true, false).level, Risk::None);
+        assert_eq!(land.class(), CommandClass::Safety);
+        assert_eq!(land.offline_behaviour(), OfflineBehaviour::Allow);
+        assert!(!land.arms_on_the_ground());
+    }
+
+    #[test]
+    fn pausing_the_mission_is_safe_and_continuing_it_is_confirmed() {
+        let pause = Command::pause_mission();
+        let resume = Command::continue_mission();
+        assert_eq!(
+            pause,
+            Command::Long {
+                command: 193,
+                params: vec![0.0]
+            }
+        );
+        assert_eq!(
+            resume,
+            Command::Long {
+                command: 193,
+                params: vec![1.0]
+            }
+        );
+        assert_eq!(pause.label(), "Pause the mission");
+        assert_eq!(resume.label(), "Continue the mission");
+        assert!(pause.pauses());
+        assert!(!resume.pauses());
+        assert_eq!(pause.risk(true, false).level, Risk::None);
+        assert_eq!(pause.class(), CommandClass::Safety);
+        assert_eq!(pause.offline_behaviour(), OfflineBehaviour::Allow);
+        assert_eq!(resume.risk(true, false).level, Risk::Confirm);
+        assert_eq!(resume.class(), CommandClass::Mission);
+        assert_eq!(resume.offline_behaviour(), OfflineBehaviour::Warn);
+        assert!(!pause.arms_on_the_ground() && !resume.arms_on_the_ground());
+    }
+
+    #[test]
+    fn moving_home_or_the_origin_is_held_in_flight() {
+        let place = PlaceAmsl {
+            latitude_deg: -35.36,
+            longitude_deg: 149.16,
+            altitude_amsl_m: 584.0,
+        };
+        let here = Command::SetHome { place: None };
+        let there = Command::SetHome { place: Some(place) };
+        let origin = Command::SetEkfOrigin { place };
+        for command in [&here, &there, &origin] {
+            assert_eq!(
+                command.risk(false, false).level,
+                Risk::Confirm,
+                "{command:?}"
+            );
+            let flying = command.risk(true, false);
+            assert_eq!(flying.level, Risk::Dangerous, "{command:?}");
+            assert!(flying.reason.is_some(), "{command:?}");
+            assert_eq!(command.class(), CommandClass::Mission);
+            assert_eq!(command.offline_behaviour(), OfflineBehaviour::Warn);
+            assert!(!command.arms_on_the_ground());
+        }
+        assert_eq!(there.label(), "Set home");
+        assert_eq!(origin.label(), "Set the EKF origin");
     }
 
     #[test]

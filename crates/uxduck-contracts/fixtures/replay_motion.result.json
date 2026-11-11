@@ -1,0 +1,33 @@
+{
+  "generation": 2,
+  "fromUs": 1790000020000000,
+  "toUs": 1790000021000000,
+  "vehicles": [
+    {
+      "vehicleId": "628ba57e-c939-55f1-9a07-d6bf56506f82",
+      "samples": [
+        {
+          "timeUs": 1790000019800000,
+          "latitudeDeg": 51.50002,
+          "longitudeDeg": -0.1,
+          "altitudes": [
+            { "meters": 113.3, "frame": "amsl" },
+            { "meters": 13.3, "frame": "above-home" }
+          ],
+          "headingDeg": 92.5,
+          "attitude": { "w": 0.7, "x": 0.1, "y": -0.02, "z": 0.7 }
+        },
+        {
+          "timeUs": 1790000020000000,
+          "latitudeDeg": 51.5000201,
+          "longitudeDeg": -0.0999,
+          "altitudes": [
+            { "meters": 113.6, "frame": "amsl" },
+            { "meters": 13.6, "frame": "above-home" }
+          ],
+          "headingDeg": 93.1
+        }
+      ]
+    }
+  ]
+}

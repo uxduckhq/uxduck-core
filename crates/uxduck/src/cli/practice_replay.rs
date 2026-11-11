@@ -158,6 +158,7 @@ impl Replay {
                             longitude_deg: lon,
                             altitude_m: float(f, "z").unwrap_or_default(),
                             altitude_frame: AltitudeFrame::AboveHome,
+                            loiter_radius_m: None,
                             heading: None,
                         })
                 }
@@ -177,6 +178,7 @@ impl Replay {
                         longitude_deg: lon,
                         altitude_m: float(f, "z").unwrap_or_default(),
                         altitude_frame: AltitudeFrame::AboveHome,
+                        loiter_radius_m: None,
                         heading: None,
                     })
                 } else {

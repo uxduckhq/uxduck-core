@@ -1,0 +1,28 @@
+{
+  "startUs": 1790000000000000,
+  "endUs": 1790000060000000,
+  "series": [
+    {
+      "key": "battery.voltage_v",
+      "samples": [
+        {
+          "timeUs": 1790000001000000,
+          "value": 16.4
+        },
+        {
+          "timeUs": 1790000030000000,
+          "value": 15.1
+        }
+      ],
+      "min": {
+        "timeUs": 1790000030000000,
+        "value": 15.1
+      },
+      "max": {
+        "timeUs": 1790000001000000,
+        "value": 16.4
+      }
+    }
+  ],
+  "missingKeys": ["position.fused.above-home"]
+}

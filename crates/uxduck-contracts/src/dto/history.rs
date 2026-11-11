@@ -100,6 +100,30 @@ pub enum HistoryEvent {
         text: String,
         record: crate::dto::checklist::ChecklistRecord,
     },
+    /// A saved parameter set applied (S217): how many were written,
+    /// refused and skipped, in words.
+    ParametersApplied {
+        set_id: String,
+        name: String,
+        text: String,
+    },
+    /// An AutoTune ended (S332): what it tuned, whether the firmware kept
+    /// it, and each gain it changed, before and after.
+    AutoTuned {
+        text: String,
+        kept: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        gains: Vec<TunedGain>,
+    },
+}
+
+/// A gain AutoTune changed (S332).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TunedGain {
+    pub name: String,
+    pub from: f64,
+    pub to: f64,
 }
 
 /// Who or what changed a parameter (S74).

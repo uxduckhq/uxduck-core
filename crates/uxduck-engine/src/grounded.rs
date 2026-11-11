@@ -10,14 +10,18 @@
 //! same notice at once and names the crash. The notice clears when the
 //! vehicle arms again, or its simulation starts again or stops. Real
 //! vehicles get none of this: a landing is theirs to judge, and nothing
-//! starts them again.
+//! starts them again. A rover, boat or submarine never flies, however high
+//! above home it goes, so only a crash raises the notice for one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use uxduck_core::domain::link::{SCENERY_CLEAR_M, SceneryHit};
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
+use uxduck_core::domain::telemetry_layout::VehicleClass;
 use uxduck_core::domain::vehicle::Vehicle;
+use uxduck_core::events::Change;
 
 use crate::Engine;
 use crate::commands::Raise;
@@ -60,13 +64,20 @@ fn condition(vehicle_id: &str) -> String {
     format!("grounded:{vehicle_id}")
 }
 
+fn scenery_condition(link_id: &str) -> String {
+    format!("scenery-hit:{link_id}")
+}
+
 impl Engine {
     /// Telemetry arrived: note a simulated vehicle flying.
     pub(crate) fn review_flight(&mut self, vehicle_id: &str) {
         let Some(vehicle) = self.vehicle(vehicle_id) else {
             return;
         };
-        if !vehicle.armed || !self.is_simulated(vehicle) {
+        if !vehicle.armed
+            || !self.is_simulated(vehicle)
+            || VehicleClass::of(&vehicle.vehicle_type).never_flies()
+        {
             return;
         }
         let id = vehicle.id.clone();
@@ -80,6 +91,27 @@ impl Engine {
         let now = self.clock.now_us();
         self.flights.crashed_us.insert(vehicle.id.clone(), now);
         self.on_the_ground(vehicle, true);
+    }
+
+    /// Same crash UI as an autopilot report, with the actual scenery cause
+    /// and where, for a simulation the scenery stopped (PX4's).
+    pub(crate) fn scenery_crash_reported(&mut self, vehicle: &Vehicle, at: Option<SceneryHit>) {
+        self.flights
+            .crashed_us
+            .insert(vehicle.id.clone(), self.clock.now_us());
+        let deg = |e7: i32| f64::from(e7) / 1e7;
+        let place = at.map_or_else(String::new, |at| {
+            format!(
+                " at {:.5}, {:.5}",
+                deg(at.latitude_e7),
+                deg(at.longitude_e7)
+            )
+        });
+        let body = format!(
+            "It hit the 3D scenery{place} and the simulation has stopped. Start again puts it \
+             back where it started."
+        );
+        self.grounded_notice(vehicle, true, Some(&body));
     }
 
     /// A vehicle disarmed: a simulated one that had flown is on the ground,
@@ -117,13 +149,124 @@ impl Engine {
             self.flights.crashed_us.remove(&id);
             self.resolve(&condition(&id));
         }
+        self.resolve(&scenery_condition(link_id));
+    }
+
+    /// Where a vehicle is over the ground now, by the autopilot's estimate.
+    pub(crate) fn ground_position(&self, vehicle_id: &str) -> Option<SceneryHit> {
+        let at = self
+            .telemetry(vehicle_id)?
+            .positions
+            .iter()
+            .find(|p| p.source == "fused")?;
+        #[allow(clippy::cast_possible_truncation, reason = "±180° × 1e7 fits an i32")]
+        let e7 = |deg: f64| (deg * 1e7).round() as i32;
+        Some(SceneryHit {
+            latitude_e7: e7(at.latitude_deg),
+            longitude_e7: e7(at.longitude_deg),
+        })
+    }
+
+    /// How far a vehicle is from a spot across the ground, in metres; none
+    /// without a position.
+    pub(crate) fn metres_from(&self, vehicle_id: &str, spot: SceneryHit) -> Option<f64> {
+        let at = self.ground_position(vehicle_id)?;
+        let deg = |e7: i32| f64::from(e7) / 1e7;
+        let mid = deg(at.latitude_e7.midpoint(spot.latitude_e7)).to_radians();
+        let north = (deg(at.latitude_e7) - deg(spot.latitude_e7)).to_radians();
+        let east = (deg(at.longitude_e7) - deg(spot.longitude_e7)).to_radians() * mid.cos();
+        Some(6_371_000.0 * north.hypot(east))
+    }
+
+    /// A simulated vehicle paused where it touched the 3D scenery (`sim/crash`):
+    /// say where, with Continue anyway, Start again and "Not a real crash",
+    /// which reports the spot so wrong scenery can be found.
+    pub(crate) fn scenery_hit_reported(&mut self, vehicle: &Vehicle, at: SceneryHit) {
+        let deg = |e7: i32| f64::from(e7) / 1e7;
+        self.raise_or_update(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Persistent,
+            subject: Subject::Vehicle {
+                id: vehicle.id.clone(),
+            },
+            title: format!("{} touched the 3D scenery", vehicle.name),
+            body: Some(format!(
+                "It's paused where it touched, at {:.5}, {:.5}. If the scenery is wrong \
+                 there, continue anyway: contact nearby is ignored until it's clear. Or \
+                 start again from where it started.",
+                deg(at.latitude_e7),
+                deg(at.longitude_e7),
+            )),
+            actions: vec![
+                NotificationAction {
+                    label: "Continue anyway".into(),
+                    action: Action::ResumeSimulation {
+                        link_id: vehicle.link_id.clone(),
+                    },
+                },
+                NotificationAction {
+                    label: "Start again".into(),
+                    action: Action::RestartSimulation {
+                        link_id: vehicle.link_id.clone(),
+                    },
+                },
+            ],
+            condition: Some(scenery_condition(&vehicle.link_id)),
+            report: Some("scenery-hit".into()),
+        });
+    }
+
+    /// A simulation paused by the scenery resumed: its notice is answered.
+    pub(crate) fn scenery_hit_answered(&mut self, link_id: &str) {
+        self.resolve(&scenery_condition(link_id));
+    }
+
+    /// Telemetry arrived: a vehicle that carried on past the scenery and is
+    /// now clear of the spot counts contact again.
+    pub(crate) fn review_scenery_hit(&mut self, vehicle_id: &str) {
+        let Some(vehicle) = self.vehicle(vehicle_id) else {
+            return;
+        };
+        let Some(link) = self.state.links.get(&vehicle.link_id) else {
+            return;
+        };
+        let Some(hit) = link.scenery_hit else {
+            return;
+        };
+        if link.paused
+            || self
+                .metres_from(vehicle_id, hit)
+                .is_none_or(|m| m < SCENERY_CLEAR_M)
+        {
+            return;
+        }
+        let mut link = link.clone();
+        link.scenery_hit = None;
+        link.version += 1;
+        self.commit_as(
+            uxduck_core::events::Actor {
+                client_id: "data-plane".into(),
+                operator_id: None,
+                identity: None,
+            },
+            Change::LinkUpserted { link },
+        );
     }
 
     fn on_the_ground(&mut self, vehicle: &Vehicle, crashed: bool) {
+        self.grounded_notice(vehicle, crashed, None);
+    }
+
+    fn grounded_notice(&mut self, vehicle: &Vehicle, crashed: bool, body_override: Option<&str>) {
         if !self.is_simulated(vehicle) || self.is_launching(&vehicle.link_id) {
             return;
         }
-        let (title, body) = if crashed {
+        let (title, body) = if crashed && VehicleClass::of(&vehicle.vehicle_type).never_flies() {
+            (
+                format!("{} crashed", vehicle.name),
+                "It stopped where it crashed. Start again puts it back where it started.",
+            )
+        } else if crashed {
             (
                 format!("{} crashed", vehicle.name),
                 "It's on the ground where it came down. Start again puts it back where it started.",
@@ -151,7 +294,7 @@ impl Engine {
                 id: vehicle.id.clone(),
             },
             title,
-            body: Some(body.into()),
+            body: Some(body_override.unwrap_or(body).into()),
             actions: vec![NotificationAction {
                 label: "Start again".into(),
                 action: Action::RestartSimulation {
@@ -159,7 +302,8 @@ impl Engine {
                 },
             }],
             condition: Some(condition(&vehicle.id)),
-            report: None,
+            // Only the scenery's say-so (a PX4 simulation it stopped) may be wrong.
+            report: body_override.map(|_| "scenery-hit".into()),
         });
     }
 }

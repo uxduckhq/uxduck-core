@@ -20,7 +20,7 @@ use uxduck_core::domain::mission::MissionItem;
 use uxduck_core::domain::parameter::{ParamKind, parameter_id};
 use uxduck_core::domain::plan::{
     DELETED_KEPT_US, FenceAction, LatLon, PatternShape, Plan, PlanAuthor, PlanAutopilot, PlanBody,
-    PlanFrame, PlanRevision, PlanVehicleType,
+    PlanFrame, PlanRevision, PlanVehicleType, VehicleCopy,
 };
 use uxduck_core::events::Change;
 
@@ -59,6 +59,8 @@ pub(crate) fn handle(
                 .state
                 .plans
                 .values()
+                // A vehicle's copy of its mission is not one of the plans (P17).
+                .filter(|plan| plan.vehicle_copy.is_none())
                 .filter(|plan| deleted || plan.deleted_at_us.is_none())
                 .collect();
             plans.sort_by_key(|plan| std::cmp::Reverse(plan.changed_at_us));
@@ -72,8 +74,9 @@ pub(crate) fn handle(
         }
         ClientRequest::PlanCreate(params) => {
             require(Capability::Config)?;
+            let copy = params.vehicle_copy.clone();
             let body = new_body(params)?;
-            let plan = create(engine, connection, body);
+            let plan = create(engine, connection, body, copy);
             to_value(&PlanDto::from(&plan))
         }
         ClientRequest::PlanUpdate(PlanUpdateParams {
@@ -164,6 +167,12 @@ pub(crate) fn handle(
         ClientRequest::PlanDelete(IdParams { id }) => {
             require(Capability::Config)?;
             let mut plan = plan(engine, &id)?.clone();
+            // A vehicle copy is discarded, not kept in Deleted (P17).
+            if plan.vehicle_copy.is_some() {
+                engine.commit(connection, Change::PlanRemoved { id });
+                plan.deleted_at_us = Some(engine.clock.now_us());
+                return to_value(&PlanDto::from(&plan));
+            }
             if plan.deleted_at_us.is_none() {
                 plan.deleted_at_us = Some(engine.clock.now_us());
                 plan.version += 1;
@@ -217,7 +226,7 @@ pub(crate) fn handle(
             let imported = plan_files::import(&files, default_type)
                 .map_err(|message| ApiError::new(ErrorKind::InvalidValue, message))?;
             let body = valid_body(imported.body)?;
-            let plan = create(engine, connection, body);
+            let plan = create(engine, connection, body, None);
             to_value(&PlanImportResult {
                 plan: PlanDto::from(&plan),
                 skipped: imported.skipped,
@@ -339,7 +348,7 @@ pub(crate) fn handle(
             } else {
                 plan.body.clone()
             };
-            let mut job = plan_job(engine, &body, vehicle_id);
+            let mut job = plan_job(engine, &body, vehicle_id)?;
             job.reply = engine.replying_to.take();
             job.plan_id.clone_from(&plan.id);
             job.plan_version = plan.version;
@@ -353,11 +362,16 @@ pub(crate) fn handle(
 /// What uploading a body to a vehicle sends: the mission, and on ArduPilot
 /// the fence, rally points and fence settings after it. Not tied to a saved
 /// plan until `plan_id` is set.
+///
+/// # Errors
+///
+/// When a PX4 take-off or landing has no place and nothing gives it one
+/// (`mission_items`).
 pub(crate) fn plan_job(
     engine: &Engine,
     body: &PlanBody,
     vehicle_id: String,
-) -> crate::transfers::PlanJob {
+) -> Result<crate::transfers::PlanJob, ApiError> {
     let ardupilot = engine
         .vehicle(&vehicle_id)
         .is_none_or(|v| v.autopilot.to_lowercase().contains("ardupilot"));
@@ -377,7 +391,25 @@ pub(crate) fn plan_job(
     } else {
         px4_fence_settings(engine, &vehicle_id, body)
     };
-    crate::transfers::PlanJob {
+    let fused = engine.telemetry(&vehicle_id).and_then(|telemetry| {
+        telemetry
+            .positions
+            .iter()
+            .filter(|p| {
+                p.source == "fused"
+                    && p.latitude_deg.is_finite()
+                    && p.longitude_deg.is_finite()
+                    && (p.latitude_deg != 0.0 || p.longitude_deg != 0.0)
+            })
+            .max_by_key(|p| p.time_us)
+            .map(|p| LatLon {
+                latitude_deg: p.latitude_deg,
+                longitude_deg: p.longitude_deg,
+            })
+    });
+    let items = mission_items(body, ardupilot, fused)
+        .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+    Ok(crate::transfers::PlanJob {
         reply: None,
         parts: if blimp {
             Vec::new()
@@ -390,9 +422,10 @@ pub(crate) fn plan_job(
         plan_id: String::new(),
         plan_version: 0,
         vehicle_id,
-        items: mission_items(body, ardupilot),
+        items,
         home_first: ardupilot,
-    }
+        placeless: Vec::new(),
+    })
 }
 
 fn plan<'a>(engine: &'a Engine, id: &str) -> Result<&'a Plan, ApiError> {
@@ -472,10 +505,17 @@ fn valid_patterns(body: &PlanBody) -> Result<(), ApiError> {
                 angle_deg,
                 turnaround_m,
                 altitude_m,
+                margin_m,
                 ..
             } => (
                 area.iter().collect(),
-                vec![*spacing_m, *angle_deg, *turnaround_m, *altitude_m],
+                vec![
+                    *spacing_m,
+                    *angle_deg,
+                    *turnaround_m,
+                    *altitude_m,
+                    *margin_m,
+                ],
             ),
             PatternShape::Corridor {
                 line,
@@ -524,6 +564,15 @@ fn valid_body(mut body: PlanBody) -> Result<PlanBody, ApiError> {
     valid_patterns(&body)?;
     // A pattern's items are made again from it (P11).
     crate::plan_patterns::expand(&mut body);
+    // A survey's margin or the exclusion zones can leave it nothing to fly,
+    // or a leg with no way round a zone, so the change is refused.
+    if let Some(refusal) = body
+        .patterns
+        .iter()
+        .find_map(|p| crate::plan_patterns::survey_refusal(p, &body))
+    {
+        return Err(ApiError::new(ErrorKind::InvalidValue, refusal));
+    }
     if body.items.len() > MAX_ITEMS {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
@@ -598,8 +647,35 @@ fn touch(engine: &Engine, connection: ConnectionId, plan: &mut Plan) {
     plan.version += 1;
 }
 
-fn create(engine: &mut Engine, connection: ConnectionId, body: PlanBody) -> Plan {
+fn create(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    body: PlanBody,
+    copy: Option<uxduck_contracts::dto::plan::VehicleCopy>,
+) -> Plan {
     let now = engine.clock.now_us();
+    let vehicle_copy = copy.map(|copy| VehicleCopy {
+        vehicle_id: copy.vehicle_id,
+        mission_version: copy.mission_version,
+        plan_id: copy.plan_id,
+    });
+    // A vehicle has one copy at a time: a new one replaces it.
+    if let Some(copy) = &vehicle_copy {
+        let older: Vec<String> = engine
+            .state
+            .plans
+            .values()
+            .filter(|p| {
+                p.vehicle_copy
+                    .as_ref()
+                    .is_some_and(|c| c.vehicle_id == copy.vehicle_id)
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        for id in older {
+            engine.commit(connection, Change::PlanRemoved { id });
+        }
+    }
     let plan = Plan {
         id: format!("plan{}", &engine.random.token()[..16]),
         bounds: body.bounds(),
@@ -614,6 +690,7 @@ fn create(engine: &mut Engine, connection: ConnectionId, body: PlanBody) -> Plan
         undo: 0,
         redo: 0,
         version: 1,
+        vehicle_copy,
     };
     engine.commit(
         connection,
@@ -712,12 +789,28 @@ pub fn px4_frame(command: u16, frame: u8) -> u8 {
     }
 }
 
+/// PX4's navigation commands, which it flies to the latitude and longitude
+/// of as given.
+const PX4_GOES_TO: [u16; 9] = [16, 17, 18, 19, 21, 22, 31, 84, 85];
+
 /// A plan's items as the vehicle's mission (S127): on ArduPilot item 0 is
 /// home, the planned home where there is one; a parameter left open is
 /// sent as 0, as Mission Planner sends it; on PX4 each command is in a
 /// frame it takes (`px4_frame`).
-#[must_use]
-pub fn mission_items(body: &PlanBody, ardupilot: bool) -> Vec<MissionItem> {
+///
+/// A take-off or landing without a place is 0°, 0° in the plan, which
+/// ArduPilot takes as where the vehicle is and PX4 flies to. On PX4 it
+/// takes the place of the navigation item before it, else `fused` (where
+/// the vehicle is), else the plan's home.
+///
+/// # Errors
+///
+/// When a PX4 take-off or landing has no place and none of those is known.
+pub fn mission_items(
+    body: &PlanBody,
+    ardupilot: bool,
+    fused: Option<LatLon>,
+) -> Result<Vec<MissionItem>, String> {
     let mut items = Vec::with_capacity(body.items.len() + 1);
     if ardupilot {
         let home = body.planned_home;
@@ -734,9 +827,30 @@ pub fn mission_items(body: &PlanBody, ardupilot: bool) -> Vec<MissionItem> {
             autocontinue: true,
         });
     }
-    items.extend(body.items.iter().map(|item| {
+    let mut here = fused.or(body.planned_home.map(|home| LatLon {
+        latitude_deg: home.latitude_deg,
+        longitude_deg: home.longitude_deg,
+    }));
+    for (i, item) in body.items.iter().enumerate() {
         let [p1, p2, p3, p4] = item.params.map(|p| p.unwrap_or(0.0));
-        MissionItem {
+        let mut place = LatLon {
+            latitude_deg: item.latitude_deg,
+            longitude_deg: item.longitude_deg,
+        };
+        if !ardupilot && PX4_GOES_TO.contains(&item.command) {
+            if uxduck_core::domain::plan::has_position(item) {
+                here = Some(place);
+            } else if matches!(item.command, 21 | 22 | 84 | 85) {
+                place = here.ok_or_else(|| {
+                    format!(
+                        "item {} is a {} without a place, and PX4 would fly it at 0°, 0°. The vehicle hasn't said where it is and the plan has no home. Give the item a place or the plan a home, or try again once the vehicle has a position",
+                        i + 1,
+                        if matches!(item.command, 22 | 84) { "take-off" } else { "landing" }
+                    )
+                })?;
+            }
+        }
+        items.push(MissionItem {
             command: item.command,
             frame: if ardupilot {
                 item.frame
@@ -747,13 +861,13 @@ pub fn mission_items(body: &PlanBody, ardupilot: bool) -> Vec<MissionItem> {
             param2: p2,
             param3: p3,
             param4: p4,
-            latitude_deg: item.latitude_deg,
-            longitude_deg: item.longitude_deg,
+            latitude_deg: place.latitude_deg,
+            longitude_deg: place.longitude_deg,
             altitude_m: item.altitude_m,
             autocontinue: item.autocontinue,
-        }
-    }));
-    items
+        });
+    }
+    Ok(items)
 }
 
 fn as_mission_item(item: &uxduck_core::domain::plan::PlanItem) -> MissionItem {

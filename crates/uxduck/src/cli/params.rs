@@ -1,5 +1,6 @@
 //! `uxduck params definitions`: parameter definition sets for a fork's own
-//! parameters (S67, ADR-0021 P5).
+//! parameters (S67, ADR-0021 P5). `uxduck params sets|save|apply|export`:
+//! a vehicle's saved parameter sets (S217, ADR-0037 V19).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,7 +9,9 @@ use clap::Subcommand;
 use uxduck_contracts::pdef;
 use uxduck_core::domain::param_definitions::{DefinitionSet, DefinitionSource, Firmware};
 
-use super::client::CliError;
+use serde_json::{Value, json};
+
+use super::client::{CliError, LocalClient};
 
 #[derive(Debug, Subcommand)]
 pub enum ParamsCommand {
@@ -17,6 +20,46 @@ pub enum ParamsCommand {
     Definitions {
         #[command(subcommand)]
         command: DefinitionsCommand,
+    },
+    /// A vehicle's saved parameter sets, newest first, with how many of its
+    /// parameters differ from each now.
+    Sets {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Saves the vehicle's parameters as they are now under a name, or
+    /// keeps a .param file as a set (nothing is written until you apply it).
+    Save {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        /// Its name; "Saved <date>", or the file's name, by default.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        /// A .param file to keep as a set instead.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Applies a saved set: the vehicle's values are saved as "Before
+    /// <set>" first, then every parameter that differs is written.
+    Apply {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        /// The set, by name or id.
+        set: String,
+    },
+    /// Writes a saved set as a .param file.
+    Export {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        /// The set, by name or id.
+        set: String,
+        /// Where to write it; the terminal by default.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -52,6 +95,19 @@ pub enum DefinitionsCommand {
     },
     /// Removes a set you added, by its id.
     Remove { id: String },
+    /// Chooses which descriptions a vehicle uses (yours are read over
+    /// ArduPilot's); without --ardupilot or --own, says which it uses now.
+    Use {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        /// `automatic`, `none`, or one of the catalogue's versions for its
+        /// firmware, such as `4.5.6` or `latest` (or a set's id).
+        #[arg(long)]
+        ardupilot: Option<String>,
+        /// `automatic`, `none`, or one of your sets, by label or id.
+        #[arg(long)]
+        own: Option<String>,
+    },
 }
 
 /// What a set describes, and what it is called.
@@ -75,7 +131,10 @@ pub struct Bind {
 }
 
 pub async fn run(data_dir: &Path, command: ParamsCommand) -> Result<(), CliError> {
-    let ParamsCommand::Definitions { command } = command;
+    let command = match command {
+        ParamsCommand::Definitions { command } => command,
+        sets => return run_sets(data_dir, sets).await,
+    };
     match command {
         DefinitionsCommand::List { refresh } => {
             let params = serde_json::json!({ "refresh": refresh }).to_string();
@@ -112,7 +171,118 @@ pub async fn run(data_dir: &Path, command: ParamsCommand) -> Result<(), CliError
             let params = serde_json::json!({ "id": id }).to_string();
             super::rpc_call(data_dir, "param/definitions/remove", Some(&params)).await
         }
+        DefinitionsCommand::Use {
+            vehicle,
+            ardupilot,
+            own,
+        } => use_sets(data_dir, &vehicle, ardupilot.as_deref(), own.as_deref()).await,
     }
+}
+
+/// `automatic` or `none`, else the set `find` names.
+fn choice(text: &str, find: impl FnOnce() -> Result<String, CliError>) -> Result<Value, CliError> {
+    Ok(match text.to_ascii_lowercase().as_str() {
+        "automatic" | "auto" => json!({ "type": "automatic" }),
+        "none" | "off" => json!({ "type": "none" }),
+        _ => json!({ "type": "set", "id": find()? }),
+    })
+}
+
+/// Which descriptions a vehicle uses, as the Parameters tab says it.
+fn sets_line(status: &Value) -> String {
+    if let Some(detail) = status["detail"].as_str() {
+        return detail.to_owned();
+    }
+    let loading = status["status"] == "loading";
+    match status["title"].as_str() {
+        Some(title) if loading => format!("Loading descriptions from {title}."),
+        Some(title) => format!("Descriptions from {title}."),
+        None if loading => "Loading descriptions.".to_owned(),
+        None => "No descriptions: names and values only.".to_owned(),
+    }
+}
+
+async fn use_sets(
+    data_dir: &Path,
+    vehicle: &str,
+    ardupilot: Option<&str>,
+    own: Option<&str>,
+) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let id = super::vehicle::resolve(&mut client, vehicle).await?;
+    if ardupilot.is_none() && own.is_none() {
+        let now = client
+            .call("param/definitions", json!({ "vehicleId": id }))
+            .await?;
+        println!("{}", sets_line(&now["status"]));
+        return Ok(());
+    }
+    let about = client.call("vehicle/get", json!({ "id": id })).await?;
+    let firmware = about["vehicleType"]
+        .as_str()
+        .and_then(Firmware::of)
+        .ok_or_else(|| {
+            CliError::Usage(format!("{vehicle} has no parameter descriptions to choose"))
+        })?;
+    let listed = client
+        .call(
+            "param/definitions/list",
+            json!({ "firmware": firmware.name() }),
+        )
+        .await?;
+    let ardupilot = ardupilot
+        .map(|text| {
+            choice(text, || {
+                listed["sets"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|s| s["version"] == text || s["id"] == text)
+                    .and_then(|s| s["id"].as_str().map(str::to_owned))
+                    .ok_or_else(|| {
+                        CliError::Usage(if listed["catalogue"] == "ready" {
+                            format!(
+                                "The catalogue has no {} {text}: see uxduck params definitions list.",
+                                firmware.tag_prefix()
+                            )
+                        } else {
+                            "The catalogue is not here yet; try again in a moment.".to_owned()
+                        })
+                    })
+            })
+        })
+        .transpose()?;
+    let own = own
+        .map(|text| {
+            choice(text, || {
+                listed["own"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|s| {
+                        s["id"] == text
+                            || s["label"]
+                                .as_str()
+                                .is_some_and(|l| l.eq_ignore_ascii_case(text))
+                    })
+                    .and_then(|s| s["id"].as_str().map(str::to_owned))
+                    .ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "You have no set called {text:?}: see uxduck params definitions list."
+                        ))
+                    })
+            })
+        })
+        .transpose()?;
+    let params = super::strip_nulls(json!({
+        "vehicleId": id,
+        "ardupilot": ardupilot,
+        "own": own,
+    }));
+    let status = client.call("param/definitions/use", params).await?;
+    println!("{}", sets_line(&status));
+    Ok(())
 }
 
 async fn add_url(data_dir: &Path, url: &str, bind: Bind) -> Result<(), CliError> {
@@ -233,6 +403,165 @@ fn generate(checkout: &Path, firmware: Firmware) -> Result<DefinitionSet, CliErr
         commit,
         parameters,
     })
+}
+
+/// A set in one line, as `param/sets` lists it.
+fn set_line(set: &Value) -> String {
+    let differ = match set["differ"].as_u64() {
+        Some(0) => "matches the vehicle".to_owned(),
+        Some(1) => "1 parameter differs".to_owned(),
+        Some(n) => format!("{n} parameters differ"),
+        None => "parameters not read".to_owned(),
+    };
+    format!(
+        "{}  {} parameters, {differ}  ({})",
+        set["name"].as_str().unwrap_or_default(),
+        set["count"],
+        set["id"].as_str().unwrap_or_default()
+    )
+}
+
+/// A set of the vehicle's by name or id.
+async fn find_set(client: &mut LocalClient, vehicle: &str, set: &str) -> Result<Value, CliError> {
+    let sets = client
+        .call("param/sets", json!({ "vehicleId": vehicle }))
+        .await?;
+    let all = sets["sets"].as_array().cloned().unwrap_or_default();
+    all.iter()
+        .find(|s| s["id"] == set)
+        .or_else(|| all.iter().find(|s| s["name"] == set))
+        .or_else(|| {
+            all.iter().find(|s| {
+                s["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(set))
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "No saved set named {set:?}: see uxduck params sets."
+            ))
+        })
+}
+
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
+async fn run_sets(data_dir: &Path, command: ParamsCommand) -> Result<(), CliError> {
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    match command {
+        ParamsCommand::Definitions { .. } => unreachable!("run handles definitions"),
+        ParamsCommand::Sets { vehicle, json } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            let sets = client
+                .call("param/sets", json!({ "vehicleId": id }))
+                .await?;
+            if json {
+                println!("{sets}");
+            } else if sets["sets"].as_array().is_none_or(Vec::is_empty) {
+                println!("No saved parameter sets yet.");
+            } else {
+                for set in sets["sets"].as_array().into_iter().flatten() {
+                    println!("{}", set_line(set));
+                }
+            }
+        }
+        ParamsCommand::Save {
+            vehicle,
+            name,
+            note,
+            file,
+        } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            let text = file
+                .as_ref()
+                .map(|f| {
+                    std::fs::read_to_string(f)
+                        .map_err(|e| CliError::Usage(format!("{}: {e}", f.display())))
+                })
+                .transpose()?;
+            let name = name.or_else(|| {
+                file.as_ref()
+                    .and_then(|f| f.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
+            let params = super::strip_nulls(json!({
+                "vehicleId": id,
+                "name": name,
+                "note": note,
+                "text": text,
+            }));
+            let set = client.call("param/setSave", params).await?;
+            println!("Saved {}", set_line(&set));
+        }
+        ParamsCommand::Apply { vehicle, set } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            let set = find_set(&mut client, &id, &set).await?;
+            let result = client
+                .call(
+                    "param/setApply",
+                    json!({ "vehicleId": id, "id": set["id"], "confirm": true }),
+                )
+                .await?;
+            let list = |key: &str| -> Vec<String> {
+                result[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|v| {
+                        v.as_str()
+                            .map_or_else(|| v["name"].to_string(), str::to_owned)
+                    })
+                    .collect()
+            };
+            let written = list("written");
+            if result.get("before").is_none() {
+                println!("Nothing to write: the vehicle already has {}.", set["name"]);
+            } else {
+                println!(
+                    "Wrote {} change{}; the values before are saved as {}.",
+                    written.len(),
+                    if written.len() == 1 { "" } else { "s" },
+                    result["before"]["name"]
+                );
+            }
+            for refused in result["refused"].as_array().into_iter().flatten() {
+                println!(
+                    "Not written: {}: {}",
+                    refused["name"].as_str().unwrap_or_default(),
+                    refused["detail"].as_str().unwrap_or_default()
+                );
+            }
+            let skipped = list("skipped");
+            if !skipped.is_empty() {
+                println!("Skipped: {}", skipped.join(", "));
+            }
+            let reboot = list("rebootRequired");
+            if !reboot.is_empty() {
+                println!(
+                    "{} take effect once the vehicle restarts: uxduck setup restart {vehicle}",
+                    reboot.join(", ")
+                );
+            }
+        }
+        ParamsCommand::Export { vehicle, set, out } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            let set = find_set(&mut client, &id, &set).await?;
+            let file = client
+                .call("param/setExport", json!({ "id": set["id"] }))
+                .await?;
+            let text = file["text"].as_str().unwrap_or_default();
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text)
+                        .map_err(|e| CliError::Usage(format!("{}: {e}", path.display())))?;
+                    println!("Wrote {}", path.display());
+                }
+                None => print!("{text}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

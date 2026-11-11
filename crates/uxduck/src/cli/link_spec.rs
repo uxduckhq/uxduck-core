@@ -1,11 +1,13 @@
-//! Links on the command line, for `uxduck forward`:
+//! Links on the command line, for `uxduck forward`, as pymavlink and
+//! MAVProxy write them (the link form reads the same, `linkSpec.ts`):
 //!
-//! - `udp:0.0.0.0:15010` listens on UDP;
+//! - `udp:0.0.0.0:15010` or `udpin:0.0.0.0:15010` listens on UDP;
 //! - `udpout:192.168.4.1:14550` sends to a UDP server and hears its vehicles;
-//! - `serial:/dev/ttyACM0` or `serial:/dev/ttyACM0@115200` opens a serial device;
+//! - `serial:/dev/ttyACM0`, `serial:/dev/ttyACM0@115200`, `/dev/ttyACM0,115200`
+//!   or `COM3,57600` opens a serial device;
 //! - `tcp:127.0.0.1:5760` connects to a TCP server;
 //! - `tcpin:0.0.0.0:5760` listens for TCP connections;
-//! - as `--out`, `udp:192.168.1.20:15010` forwards to that address.
+//! - as `--out`, `udp:192.168.1.20:15010` or `udpout:…` forwards to that address.
 
 use uxduck_contracts::dto::link::{LinkAddParams, LinkKind, LinkPolicy};
 
@@ -28,16 +30,51 @@ fn host_port(rest: &str, spec: &str) -> Result<(String, u16), String> {
     Ok((host.to_owned(), port))
 }
 
+/// A device path as MAVProxy takes it, without `serial:`: `/dev/…` or `COM3`.
+fn is_device(spec: &str) -> bool {
+    let com = spec.get(..3).is_some_and(|c| c.eq_ignore_ascii_case("com"))
+        && spec[3..]
+            .split([',', '@'])
+            .next()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    spec.starts_with('/') || com
+}
+
+/// A serial device with its baud rate after `@` or `,`, or the default.
+fn serial(rest: &str, spec: &str) -> Result<LinkKind, String> {
+    let (device, baud) = match rest.rsplit_once(['@', ',']) {
+        Some((device, baud)) => (
+            device,
+            baud.parse()
+                .ok()
+                .filter(|b| *b > 0)
+                .ok_or_else(|| format!("{spec}: {baud} is not a baud rate"))?,
+        ),
+        None => (rest, DEFAULT_BAUD),
+    };
+    if device.is_empty() {
+        return Err(format!("{spec}: no device"));
+    }
+    Ok(LinkKind::Serial {
+        device: device.to_owned(),
+        baud,
+        usb: None,
+    })
+}
+
 /// A link vehicles are heard on (`--in`).
 ///
 /// # Errors
 /// A message naming what is wrong with the spec.
 pub fn input(spec: &str) -> Result<LinkKind, String> {
-    let (scheme, rest) = spec
-        .split_once(':')
-        .ok_or_else(|| format!("{spec}: expected udp:, udpout:, serial:, tcp: or tcpin:"))?;
+    if is_device(spec) {
+        return serial(spec, spec);
+    }
+    let (scheme, rest) = spec.split_once(':').ok_or_else(|| {
+        format!("{spec}: expected udp:, udpin:, udpout:, serial:, tcp:, tcpin: or a device path")
+    })?;
     match scheme {
-        "udp" => {
+        "udp" | "udpin" => {
             let (host, port) = host_port(rest, spec)?;
             Ok(LinkKind::UdpListen { host, port })
         }
@@ -53,28 +90,9 @@ pub fn input(spec: &str) -> Result<LinkKind, String> {
             let (host, port) = host_port(rest, spec)?;
             Ok(LinkKind::TcpServer { host, port })
         }
-        "serial" => {
-            let (device, baud) = match rest.rsplit_once('@') {
-                Some((device, baud)) => (
-                    device,
-                    baud.parse()
-                        .ok()
-                        .filter(|b| *b > 0)
-                        .ok_or_else(|| format!("{spec}: {baud} is not a baud rate"))?,
-                ),
-                None => (rest, DEFAULT_BAUD),
-            };
-            if device.is_empty() {
-                return Err(format!("{spec}: no device"));
-            }
-            Ok(LinkKind::Serial {
-                device: device.to_owned(),
-                baud,
-                usb: None,
-            })
-        }
+        "serial" => serial(rest, spec),
         other => Err(format!(
-            "{spec}: unknown link type {other}; use udp, udpout, serial, tcp or tcpin"
+            "{spec}: unknown link type {other}; use udp, udpin, udpout, serial, tcp or tcpin"
         )),
     }
 }
@@ -87,7 +105,7 @@ pub fn output(spec: &str) -> Result<LinkKind, String> {
     let (scheme, rest) = spec
         .split_once(':')
         .ok_or_else(|| format!("{spec}: expected udp:HOST:PORT"))?;
-    if scheme != "udp" {
+    if !matches!(scheme, "udp" | "udpout") {
         return Err(format!("{spec}: forwards are UDP for now (udp:HOST:PORT)"));
     }
     let (host, port) = host_port(rest, spec)?;
@@ -194,7 +212,38 @@ mod tests {
                 port: 5760
             })
         );
+        assert_eq!(input("udpin:0.0.0.0:14550"), input("udp:0.0.0.0:14550"));
+        // MAVProxy's device forms, without `serial:`.
+        assert_eq!(
+            input("/dev/ttyUSB0,57600"),
+            Ok(LinkKind::Serial {
+                device: "/dev/ttyUSB0".into(),
+                baud: 57600,
+                usb: None
+            })
+        );
+        assert_eq!(
+            input("com3,57600"),
+            Ok(LinkKind::Serial {
+                device: "com3".into(),
+                baud: 57600,
+                usb: None
+            })
+        );
+        assert_eq!(
+            input("serial:/dev/ttyUSB0,57600"),
+            input("/dev/ttyUSB0@57600")
+        );
+        assert_eq!(
+            output("udpout:192.168.1.20:14550"),
+            output("udp:192.168.1.20:14550")
+        );
         assert!(input("udp:14550").is_err());
+        assert!(
+            input("compass:1")
+                .unwrap_err()
+                .contains("unknown link type")
+        );
         assert!(input("serial:/dev/x@fast").is_err());
         assert!(output("tcp:1.2.3.4:5").unwrap_err().contains("UDP for now"));
         assert!(input("radio:x").unwrap_err().contains("unknown link type"));

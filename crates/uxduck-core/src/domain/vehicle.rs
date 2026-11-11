@@ -20,6 +20,57 @@ pub enum VehicleLook {
     Jet,
 }
 
+/// A vehicle's colour on the maps, in the sidebar and on its mission
+/// (ADR-0029 P19). None is green, red, amber, orange or grey, which mean
+/// inside and outside a fence, connected, lost and offline, so a colour
+/// never reads as a vehicle's state (maintainer, 2026-10-29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleColour {
+    Blue,
+    Pink,
+    Teal,
+    Purple,
+    Lilac,
+    Orchid,
+    Violet,
+    Sky,
+    Magenta,
+}
+
+impl VehicleColour {
+    /// In the order they are given: each as far as it can be from those
+    /// before it, so the first few vehicles are told apart at a glance.
+    pub const ALL: [Self; 9] = [
+        Self::Blue,
+        Self::Pink,
+        Self::Teal,
+        Self::Purple,
+        Self::Lilac,
+        Self::Orchid,
+        Self::Violet,
+        Self::Sky,
+        Self::Magenta,
+    ];
+
+    /// The colour for a vehicle heard for the first time: the first that no
+    /// vehicle heard now has, else the one fewest vehicles have.
+    /// `in_use` is every other vehicle's colour, with whether it is heard.
+    #[must_use]
+    pub fn given<'a>(in_use: impl IntoIterator<Item = (&'a Self, bool)>) -> Self {
+        let mut heard = [false; Self::ALL.len()];
+        let mut count = [0usize; Self::ALL.len()];
+        for (colour, now) in in_use {
+            let index = Self::ALL.iter().position(|c| c == colour).unwrap_or(0);
+            heard[index] |= now;
+            count[index] += 1;
+        }
+        (0..Self::ALL.len())
+            .min_by_key(|&i| (heard[i], count[i], i))
+            .map_or(Self::Blue, |i| Self::ALL[i])
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Presence {
@@ -70,6 +121,16 @@ pub struct Vehicle {
     pub saved: bool,
     /// Hidden for the rest of the session (a neighbour's vehicle).
     pub dismissed: bool,
+    /// Hidden by the person, once offline, until it is seen again or they
+    /// unhide it (S247):
+    /// out of every list, kept with its name, flights and history. Kept on
+    /// this computer only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Met only in a log someone opened, never heard live (S248): a real
+    /// board's UID, kept so its name sticks. Cleared when it is heard.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen_in_log: bool,
     /// Kept out of the account's library although sync is on (ADR-0001 D9,
     /// "publication").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -88,6 +149,14 @@ pub struct Vehicle {
     /// one its autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// Its gripper, as the operator identified it (S263): which actuator
+    /// and which end opens it. Kept on this computer with the vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper: Option<crate::domain::gripper::GripperSetup>,
+    /// Its companion computers, as the person added them (S296, ADR-0049
+    /// O7). Kept on this computer with the vehicle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<crate::domain::companion::CompanionComputer>,
     /// Whether the traffic its ADS-B receiver reports is used (S168,
     /// ADR-0034): off until a person turns it on, so one vehicle's faulty
     /// receiver never puts aircraft in front of the whole fleet.
@@ -96,6 +165,11 @@ pub struct Vehicle {
     /// The model it is drawn as, as the person chose; absent, its type's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// Its colour: given when it is first heard and kept with its id, so it
+    /// is the same whichever order vehicles connect in, or chosen in its
+    /// menu. Absent only on a record from before colours were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<VehicleColour>,
     /// How its preflight checks are set and the plan chosen for its next
     /// flight (ADR-0038 K6): only what a person changed.
     #[serde(
@@ -103,6 +177,41 @@ pub struct Vehicle {
         skip_serializing_if = "crate::domain::preflight::PreflightSettings::is_default"
     )]
     pub preflight: crate::domain::preflight::PreflightSettings,
+    /// Which parameter descriptions it uses (ADR-0044 F10): only what a
+    /// person chose.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::param_definitions::DefinitionsChoice::is_automatic"
+    )]
+    pub definitions: crate::domain::param_definitions::DefinitionsChoice,
+    /// Which MAVLink dialects it uses (ADR-0044 F13): only what a person
+    /// chose.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::dialect::DialectChoice::is_automatic"
+    )]
+    pub dialects: crate::domain::dialect::DialectChoice,
+    /// Heard in a replay (ADR-0039 R3), not live: nothing can be sent to
+    /// it and nothing is recorded of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
+    /// A replay vehicle's original, when it is here: the vehicle it shows,
+    /// whose name, look and size it follows and which a rename of it
+    /// renames (ADR-0039 R3, S238).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_of: Option<String>,
+    /// When its source begins, for a replay vehicle shown twice at once (two
+    /// sources with the same vehicle, ADR-0039 R20): each copy says when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_at_us: Option<u64>,
+    /// It said it is simulated (ADR-0039 R14): ArduPilot's and PX4's SITL
+    /// have `SIM_` parameters. A simulation of UXDuck's own is simulated by
+    /// its link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sim_evidence: bool,
+    /// What the person said, over the evidence: simulated or real.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated: Option<bool>,
     pub version: u64,
 }
 
@@ -167,6 +276,39 @@ pub fn callsign<'a>(taken: impl IntoIterator<Item = &'a str>) -> String {
         .unwrap_or_else(|| CALLSIGNS[0].to_owned())
 }
 
+/// Whether UXDuck gave this name: a callsign, alone or with a round
+/// ("Alpha 2").
+#[must_use]
+pub fn is_callsign(name: &str) -> bool {
+    let (word, round) = name.split_once(' ').unwrap_or((name, ""));
+    CALLSIGNS.contains(&word)
+        && (round.is_empty()
+            || round
+                .parse::<u32>()
+                .is_ok_and(|n| n >= 2 && !round.starts_with('0')))
+}
+
+/// A name for a simulation nobody has named: "Sim" and its instance
+/// counted from 1, so simulations started together are named the same
+/// each time, or the first free "Sim n" when that one is taken or the
+/// instance is unknown. Callsigns are for real vehicles, so a simulation
+/// never looks like one (maintainer, 2026-10-28).
+#[must_use]
+pub fn simulation_name<'a>(
+    instance: Option<usize>,
+    taken: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let taken: std::collections::HashSet<&str> = taken.into_iter().collect();
+    // One more number than names are taken, so one is free.
+    instance
+        .map(|i| i + 1)
+        .into_iter()
+        .chain(1..=taken.len() + 1)
+        .map(|n| format!("Sim {n}"))
+        .find(|name| !taken.contains(name.as_str()))
+        .unwrap_or_else(|| "Sim 1".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +321,23 @@ mod tests {
         let all: Vec<&str> = CALLSIGNS.to_vec();
         assert_eq!(callsign(all.iter().copied()), "Alpha 2");
         assert_eq!(callsign(all.iter().copied().chain(["Alpha 2"])), "Bravo 2");
+    }
+
+    #[test]
+    fn callsigns_are_words_with_an_optional_round() {
+        assert!(is_callsign("Alpha"));
+        assert!(is_callsign("X-ray 3"));
+        assert!(!is_callsign("Alpha 1"));
+        assert!(!is_callsign("Alpha 02"));
+        assert!(!is_callsign("Alpha quad"));
+        assert!(!is_callsign("Sim 1"));
+    }
+
+    #[test]
+    fn simulations_are_named_by_instance_then_the_first_free_number() {
+        assert_eq!(simulation_name(Some(0), []), "Sim 1");
+        assert_eq!(simulation_name(Some(2), ["Sim 1"]), "Sim 3");
+        assert_eq!(simulation_name(Some(0), ["Sim 1", "Sim 2"]), "Sim 3");
+        assert_eq!(simulation_name(None, ["Sim 1"]), "Sim 2");
     }
 }

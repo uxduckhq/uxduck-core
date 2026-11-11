@@ -27,6 +27,30 @@ use super::{BUILD_FILE, Simulators};
 
 /// Where the catalogue is published (R2, `docs/plan/review.md` S18).
 pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/catalogue.json";
+/// Beta builds of UXDuck read the beta catalogue: simulators beta testers
+/// try before everyone (maintainer, 2026-10-30). The stable one serves
+/// until a beta catalogue has been published.
+pub const BETA_URL: &str = "https://simulators.uxduck.com/catalogue-beta.json";
+
+/// The catalogue this build reads by default: the beta one for a beta.
+#[must_use]
+pub fn default_url(version: &str) -> &'static str {
+    if version.contains("-beta.") {
+        BETA_URL
+    } else {
+        DEFAULT_URL
+    }
+}
+
+/// Each catalogue keeps its own newest-seen date, so moving between the
+/// stable and beta catalogues never refuses one as a replay.
+fn seen_file(url: &str) -> &'static str {
+    if url == BETA_URL {
+        "seen-beta.json"
+    } else {
+        "seen.json"
+    }
+}
 
 /// Beside the installed builds once one was downloaded unasked; it names
 /// that build.
@@ -86,7 +110,7 @@ impl Catalogue {
         let url = match crate::update::url_override("UXDUCK_SIM_CATALOGUE_URL") {
             Some(url) if url == "none" => None,
             Some(url) => Some(url),
-            None => Some(DEFAULT_URL.to_owned()),
+            None => Some(default_url(env!("CARGO_PKG_VERSION")).to_owned()),
         };
         let key = std::env::var("UXDUCK_SIM_CATALOGUE_KEY")
             .ok()
@@ -250,12 +274,16 @@ impl Catalogue {
                     .map_err(|e| format!("cannot fetch {url}: {e}"))
             }
         };
-        let bytes = get(url.to_owned()).await?;
+        // The beta catalogue, else the stable one until a beta one is published.
+        let (url, bytes) = match get(url.to_owned()).await {
+            Err(_) if url == BETA_URL => (DEFAULT_URL, get(DEFAULT_URL.to_owned()).await?),
+            other => (url, other?),
+        };
         let signature = get(format!("{url}.minisig")).await?;
         let catalogue = verify(&bytes, &String::from_utf8_lossy(&signature), key)?;
         // Refuse a manifest older than the newest seen: an old signed one
         // could list builds since withdrawn.
-        let seen_path = self.simulators.catalogue_dir().join("seen.json");
+        let seen_path = self.simulators.catalogue_dir().join(seen_file(url));
         let seen: Seen = std::fs::read(&seen_path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -528,12 +556,31 @@ impl std::io::Write for Decompress {
 
 /// Compares versions by their numbers: 4.7.10 is newer than 4.7.9.
 fn by_version(a: &str, b: &str) -> std::cmp::Ordering {
-    let numbers = |v: &str| -> Vec<u64> {
-        v.split(|c: char| !c.is_ascii_digit())
-            .filter_map(|n| n.parse().ok())
-            .collect()
-    };
-    numbers(a).cmp(&numbers(b))
+    build_order(a).cmp(&build_order(b))
+}
+
+/// What makes one build newer than another, from its version or its folder's
+/// name. UXDuck's own builds (`<source>-uxduck-<digest>[-beta]-<run>.<attempt>`)
+/// are ordered by their CI run, which only grows, and come after ArduPilot's
+/// releases (`4.7.2`), ordered by their numbers. The digest's digits never
+/// count: by them a week-old build could beat the newest.
+pub(crate) fn build_order(name: &str) -> (u8, Vec<u64>) {
+    if name.contains("-uxduck-") {
+        let run = name.split('-').rev().find_map(|part| {
+            let (run, attempt) = part.split_once('.')?;
+            (run.len() >= 6 && run.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| Some(vec![run.parse().ok()?, attempt.parse().ok()?]))
+                .flatten()
+        });
+        if let Some(run) = run {
+            return (1, run);
+        }
+    }
+    let numbers = name
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    (0, numbers)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -650,6 +697,28 @@ fn valid(build: &CatalogueBuild) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_newest_build_is_the_latest_run_whatever_its_digest() {
+        let beta = "d5420ff97c84-uxduck-9e35f22765db-beta-41178375248.1";
+        let older = "d5420ff97c84-uxduck-5595e8ee8c50-40438362054.1";
+        let rerun = "d5420ff97c84-uxduck-5595e8ee8c50-40438362054.2";
+        assert_eq!(by_version(beta, older), std::cmp::Ordering::Greater);
+        assert_eq!(by_version(rerun, older), std::cmp::Ordering::Greater);
+        assert_eq!(by_version(older, "4.7.2"), std::cmp::Ordering::Greater);
+        assert_eq!(by_version("4.7.2", "4.6.9"), std::cmp::Ordering::Greater);
+        // An installed build's folder: program first, platform last.
+        let folder = |v: &str| format!("ardupilot-ardusub-{v}-aarch64-macos");
+        assert!(build_order(&folder(beta)) > build_order(&folder(older)));
+    }
+
+    #[test]
+    fn a_beta_reads_the_beta_catalogue_and_keeps_its_own_replay_guard() {
+        assert_eq!(default_url("0.8.1-beta.1"), BETA_URL);
+        assert_eq!(default_url("0.8.1"), DEFAULT_URL);
+        assert_eq!(seen_file(BETA_URL), "seen-beta.json");
+        assert_eq!(seen_file(DEFAULT_URL), "seen.json");
+    }
     use super::*;
     use uxduck_contracts::dto::sim::CatalogueFile;
 

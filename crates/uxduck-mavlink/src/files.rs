@@ -63,6 +63,15 @@ pub enum Op {
         path: String,
         bytes: Vec<u8>,
     },
+    /// Writes pieces at their offsets in a file (`OpenFileWO`, which never
+    /// truncates), creating it when it is missing and keeping every other
+    /// byte, as a vehicle's terrain blocks are written (ADR-0051 A6). Done
+    /// once the vehicle closed the file, so what it acknowledged is on its
+    /// card.
+    Patch {
+        path: String,
+        pieces: Vec<(u64, Vec<u8>)>,
+    },
     Remove {
         path: String,
     },
@@ -84,7 +93,10 @@ pub enum Op {
 impl Op {
     /// Whether it holds the vehicle's FTP session while it runs.
     const fn needs_session(&self) -> bool {
-        matches!(self, Self::Read { .. } | Self::Write { .. })
+        matches!(
+            self,
+            Self::Read { .. } | Self::Write { .. } | Self::Patch { .. }
+        )
     }
 }
 
@@ -171,6 +183,8 @@ enum Step {
     /// Creating to write.
     Create,
     Write,
+    /// Closing a patched file, waiting for the vehicle to say it closed.
+    Close,
 }
 
 /// A file being read: what has come in order, and pieces that came early.
@@ -242,6 +256,8 @@ struct Active {
     /// What a write sends, and how much the vehicle has taken.
     upload: Vec<u8>,
     written: usize,
+    /// Where each piece of a patch starts in `upload`, and in the file.
+    segments: Vec<(usize, u64)>,
     /// Parameters by file: the file is written and is now read back.
     reading_back: bool,
     /// A refused open was answered by resetting sessions once.
@@ -383,6 +399,7 @@ impl FtpClient {
             Op::List { path }
             | Op::Read { path, .. }
             | Op::Write { path, .. }
+            | Op::Patch { path, .. }
             | Op::Remove { path }
             | Op::MakeDir { path }
             | Op::RemoveDir { path }
@@ -523,6 +540,31 @@ impl FtpClient {
                 op: Op::Write { bytes, .. },
                 ..
             } => bytes.clone(),
+            Job::File {
+                op: Op::Patch { pieces, .. },
+                ..
+            } => pieces
+                .iter()
+                .flat_map(|(_, bytes)| bytes.iter().copied())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let segments = match &job {
+            Job::File {
+                op: Op::Patch { pieces, .. },
+                ..
+            } => {
+                let mut start = 0;
+                pieces
+                    .iter()
+                    .filter(|(_, bytes)| !bytes.is_empty())
+                    .map(|(offset, bytes)| {
+                        let at = start;
+                        start += bytes.len();
+                        (at, *offset)
+                    })
+                    .collect()
+            }
             _ => Vec::new(),
         };
         let from = match &job {
@@ -546,6 +588,7 @@ impl FtpClient {
             },
             upload,
             written: 0,
+            segments,
             reading_back: false,
             reset_again: false,
             burst_seq: None,
@@ -570,8 +613,9 @@ impl FtpClient {
             active.step = match request.opcode {
                 ftp::RESET_SESSIONS => Step::Reset,
                 ftp::OPEN_FILE_RO => Step::Open,
-                ftp::CREATE_FILE => Step::Create,
+                ftp::CREATE_FILE | ftp::OPEN_FILE_WO => Step::Create,
                 ftp::WRITE_FILE => Step::Write,
+                ftp::TERMINATE_SESSION => Step::Close,
                 _ => Step::Read,
             };
         }
@@ -601,6 +645,10 @@ impl FtpClient {
                 op: Op::Write { path, .. },
                 ..
             } => (ftp::CREATE_FILE, path.clone()),
+            Job::File {
+                op: Op::Patch { path, .. },
+                ..
+            } => (ftp::OPEN_FILE_WO, path.clone()),
             Job::File { .. } => return Output::default(),
         };
         let data = path.into_bytes();
@@ -707,7 +755,7 @@ impl FtpClient {
                 self.begin(now_us)
             }
             ftp::OPEN_FILE_RO => self.opened(answer, now_us),
-            ftp::CREATE_FILE => {
+            ftp::CREATE_FILE | ftp::OPEN_FILE_WO => {
                 if let Some(active) = self.active.as_mut() {
                     active.session = answer.session;
                     active.open = true;
@@ -731,6 +779,7 @@ impl FtpClient {
                 out
             }
             ftp::READ_FILE | ftp::BURST_READ_FILE => self.read_answer(answer, now_us),
+            ftp::TERMINATE_SESSION if active.step == Step::Close => self.finish(Ok(()), now_us),
             _ => Output::default(),
         }
     }
@@ -774,11 +823,48 @@ impl FtpClient {
                 out.extend(self.begin(now_us));
                 return out;
             }
+            if matches!(
+                active.job,
+                Job::File {
+                    op: Op::Patch { .. },
+                    ..
+                }
+            ) {
+                // Closed before it is done: ArduPilot's card has the bytes
+                // once the file is closed.
+                let session = active.session;
+                if let Some(active) = self.active.as_mut() {
+                    active.open = false;
+                }
+                let close = self.request(session, ftp::TERMINATE_SESSION, 0, 0, Vec::new());
+                return self.sent(close, now_us);
+            }
             return self.finish(Ok(()), now_us);
         }
-        let end = (active.written + ftp::DATA_MAX).min(active.upload.len());
+        // A piece of a patch goes at its own offset, never across the next.
+        let (end, offset) = match active
+            .segments
+            .iter()
+            .rposition(|(start, _)| *start <= active.written)
+        {
+            Some(i) => {
+                let (start, at) = active.segments[i];
+                let segment_end = active
+                    .segments
+                    .get(i + 1)
+                    .map_or(active.upload.len(), |(next, _)| *next);
+                (
+                    (active.written + ftp::DATA_MAX).min(segment_end),
+                    at + (active.written - start) as u64,
+                )
+            }
+            None => (
+                (active.written + ftp::DATA_MAX).min(active.upload.len()),
+                active.written as u64,
+            ),
+        };
         let data = active.upload[active.written..end].to_vec();
-        let offset = u32::try_from(active.written).unwrap_or(u32::MAX);
+        let offset = u32::try_from(offset).unwrap_or(u32::MAX);
         let session = active.session;
         let request = self.request(session, ftp::WRITE_FILE, data_size(&data), offset, data);
         self.sent(request, now_us)
@@ -870,7 +956,7 @@ impl FtpClient {
             }
             // Our last close never arrived, or another station's session
             // is open: reset once and open again.
-            ftp::OPEN_FILE_RO | ftp::CREATE_FILE
+            ftp::OPEN_FILE_RO | ftp::CREATE_FILE | ftp::OPEN_FILE_WO
                 if matches!(error, ftp::NO_SESSIONS_AVAILABLE | ftp::FAIL)
                     && !active.reset_again =>
             {
@@ -926,7 +1012,9 @@ impl FtpClient {
                 data.extend_from_slice(to.as_bytes());
                 (ftp::RENAME, data)
             }
-            Op::Read { .. } | Op::Write { .. } => (ftp::LIST_DIRECTORY, Vec::new()),
+            Op::Read { .. } | Op::Write { .. } | Op::Patch { .. } => {
+                (ftp::LIST_DIRECTORY, Vec::new())
+            }
         };
         self.request(0, opcode, data_size(&data), listed, data)
     }

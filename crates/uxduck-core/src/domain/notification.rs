@@ -77,7 +77,7 @@ pub enum Action {
     OpenVideo {
         source_id: String,
     },
-    /// The Controllers tab, for a controller just plugged in.
+    /// The Cockpit's controllers, for a controller just plugged in.
     OpenControllers {
         controller_id: String,
     },
@@ -110,14 +110,20 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access: Option<crate::domain::client::NetworkAccess>,
     },
-    /// `lease/release` at the computer: takes control of a vehicle back
-    /// from someone away (S80).
+    /// Took control of a vehicle back from someone away (S80). Remote
+    /// control is gone (ADR-0048): kept so older notifications read, never
+    /// raised, and left out of what clients are sent.
     TakeBack {
         vehicle_id: String,
     },
     /// `sim/restart`: a simulated vehicle started again from where it
     /// started, after a crash.
     RestartSimulation {
+        link_id: String,
+    },
+    /// `sim/pause` with `paused` false: a simulated vehicle paused where it
+    /// touched the 3D scenery carries on from there.
+    ResumeSimulation {
         link_id: String,
     },
     /// `settings/update` with a vehicle's dataset (S119).
@@ -130,6 +136,11 @@ pub enum Action {
     OpenSetup {
         vehicle_id: String,
         row: crate::domain::setup::SetupRow,
+    },
+    /// `terrain/putArea`: puts the areas on a vehicle that asks first
+    /// (ADR-0051 A7).
+    PutTerrainAreas {
+        vehicle_id: String,
     },
 }
 

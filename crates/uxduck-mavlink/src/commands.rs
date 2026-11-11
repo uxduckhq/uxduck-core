@@ -2,7 +2,7 @@
 //! which `MAV_CMD` and parameters each command is on ArduPilot and on PX4,
 //! and the acknowledgement's result in words.
 
-use uxduck_core::domain::command::Command;
+use uxduck_core::domain::command::{Command, PlaceAmsl};
 use uxduck_core::domain::telemetry::AltitudeFrame;
 
 use crate::modes::{AvailableMode, Family};
@@ -13,6 +13,10 @@ const FORCE: f32 = 21196.0;
 
 /// `MAV_CMD_DO_REPOSITION`: go to a place now.
 const MAV_CMD_DO_REPOSITION: u16 = 192;
+/// `MAV_CMD_DO_SET_HOME`: param 1 is 1 for where the vehicle is now.
+const MAV_CMD_DO_SET_HOME: u16 = 179;
+/// `MAV_CMD_DO_SET_GLOBAL_ORIGIN`: the EKF origin.
+const MAV_CMD_DO_SET_GLOBAL_ORIGIN: u16 = 611;
 /// `MAV_FRAME_GLOBAL_INT`: latitude and longitude in degrees times 1e7,
 /// the height above mean sea level.
 const MAV_FRAME_GLOBAL_INT: u8 = 5;
@@ -81,6 +85,18 @@ pub fn encode_listed(
     force: bool,
 ) -> Result<(u16, Wire), String> {
     if let Command::GoTo {
+        loiter_radius_m: Some(radius),
+        ..
+    } = command
+        && (family != Some(Family::Plane)
+            || !radius.is_finite()
+            || !(1.0..=65535.0).contains(&radius.abs()))
+    {
+        return Err(
+            "loiter radius needs an ArduPlane and a magnitude from 1 to 65535 metres".into(),
+        );
+    }
+    if let Command::GoTo {
         heading: Some(heading),
         ..
     } = command
@@ -102,20 +118,41 @@ pub fn encode_listed(
                 longitude_deg,
                 altitude_m,
                 altitude_frame,
+                loiter_radius_m,
                 ..
-            } => go_to(*latitude_deg, *longitude_deg, *altitude_m, *altitude_frame),
+            } => go_to(
+                *latitude_deg,
+                *longitude_deg,
+                *altitude_m,
+                *altitude_frame,
+                *loiter_radius_m,
+            ),
+            // Where the vehicle is now: param 1, and no place.
+            Command::SetHome { place: None } => Ok((
+                MAV_CMD_DO_SET_HOME,
+                Wire::Int {
+                    frame: MAV_FRAME_GLOBAL_INT,
+                    params: [1.0, 0.0, 0.0, 0.0],
+                    x: 0,
+                    y: 0,
+                    z: 0.0,
+                },
+            )),
+            Command::SetHome { place: Some(place) } => amsl_place(MAV_CMD_DO_SET_HOME, place),
+            Command::SetEkfOrigin { place } => amsl_place(MAV_CMD_DO_SET_GLOBAL_ORIGIN, place),
             _ => Err(first),
         })
 }
 
 /// `DO_REPOSITION` in a `COMMAND_INT`: the vehicle's own speed (-1),
-/// changing to GUIDED if it is not there, no loiter radius, the heading
-/// left as it is (NaN), and the place, its height in the frame asked for.
+/// changing to GUIDED if it is not there, an optional plane loiter radius
+/// and direction (otherwise 0/NaN), and the place at the requested height.
 fn go_to(
     latitude_deg: f64,
     longitude_deg: f64,
     altitude_m: f64,
     altitude_frame: AltitudeFrame,
+    loiter_radius_m: Option<f64>,
 ) -> Result<(u16, Wire), String> {
     if !(-90.0..=90.0).contains(&latitude_deg)
         || !(-180.0..=180.0).contains(&longitude_deg)
@@ -130,7 +167,7 @@ fn go_to(
         AltitudeFrame::Amsl => MAV_FRAME_GLOBAL_INT,
         AltitudeFrame::AboveGround => MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
         AltitudeFrame::Ellipsoid => {
-            return Err("a height above the ellipsoid cannot be flown to".into());
+            return Err("a destination cannot be given as a height above the ellipsoid".into());
         }
     };
     #[allow(clippy::cast_possible_truncation, reason = "within ±1.8e9")]
@@ -139,13 +176,112 @@ fn go_to(
         MAV_CMD_DO_REPOSITION,
         Wire::Int {
             frame,
-            params: [-1.0, CHANGE_MODE, 0.0, f32::NAN],
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "validated ArduPlane radius"
+            )]
+            params: [
+                -1.0,
+                CHANGE_MODE,
+                loiter_radius_m.map_or(0.0, |r| r.abs() as f32),
+                loiter_radius_m.map_or(f32::NAN, |r| if r < 0.0 { 1.0 } else { 0.0 }),
+            ],
             x: e7(latitude_deg),
             y: e7(longitude_deg),
             #[allow(clippy::cast_possible_truncation, reason = "a height in metres")]
             z: altitude_m as f32,
         },
     ))
+}
+
+/// A place above mean sea level in a `COMMAND_INT`, its other parameters
+/// 0: home's or the EKF origin's. 0, 0 is refused, since ArduPilot reads
+/// it as "where the vehicle is now" for home.
+fn amsl_place(command: u16, place: &PlaceAmsl) -> Result<(u16, Wire), String> {
+    let PlaceAmsl {
+        latitude_deg,
+        longitude_deg,
+        altitude_amsl_m,
+    } = *place;
+    if !(-90.0..=90.0).contains(&latitude_deg)
+        || !(-180.0..=180.0).contains(&longitude_deg)
+        || !altitude_amsl_m.is_finite()
+    {
+        return Err(
+            "a place needs a latitude within 90°, a longitude within 180° and a height".into(),
+        );
+    }
+    if latitude_deg == 0.0 && longitude_deg == 0.0 {
+        return Err("0, 0 is where a missing position reads. Choose the place again".into());
+    }
+    #[allow(clippy::cast_possible_truncation, reason = "within ±1.8e9")]
+    let e7 = |degrees: f64| (degrees * 1e7).round() as i32;
+    Ok((
+        command,
+        Wire::Int {
+            frame: MAV_FRAME_GLOBAL_INT,
+            params: [0.0; 4],
+            x: e7(latitude_deg),
+            y: e7(longitude_deg),
+            #[allow(clippy::cast_possible_truncation, reason = "a height in metres")]
+            z: altitude_amsl_m as f32,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod loiter_tests {
+    use super::*;
+
+    #[test]
+    fn reposition_radius_and_direction_are_separate_and_position_stays_precise() {
+        for radius in [75.0, -120.0] {
+            let command = Command::GoTo {
+                latitude_deg: 37.763_932_1,
+                longitude_deg: -122.385_804_3,
+                altitude_m: 100.0,
+                altitude_frame: AltitudeFrame::AboveHome,
+                loiter_radius_m: Some(radius),
+                heading: None,
+            };
+            let (id, wire) = encode(&command, Some(Family::Plane), false).unwrap();
+            let Wire::Int { params, x, y, .. } = wire else {
+                panic!("Go to must retain integer position")
+            };
+            assert_eq!(id, 192);
+            assert_eq!(
+                params,
+                [
+                    -1.0,
+                    1.0,
+                    #[allow(clippy::cast_possible_truncation, reason = "75 and 120 m are exact")]
+                    {
+                        radius.abs() as f32
+                    },
+                    if radius < 0.0 { 1.0 } else { 0.0 }
+                ]
+            );
+            assert_eq!((x, y), (377_639_321, -1_223_858_043));
+            for family in [Family::Copter, Family::Rover, Family::Sub, Family::Px4] {
+                assert!(encode(&command, Some(family), false).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_radii_are_refused_before_a_packet_is_created() {
+        for radius in [0.0, 0.5, -0.5, 65536.0, f64::NAN, f64::INFINITY] {
+            let command = Command::GoTo {
+                latitude_deg: 37.7,
+                longitude_deg: -122.4,
+                altitude_m: 100.0,
+                altitude_frame: AltitudeFrame::AboveHome,
+                loiter_radius_m: Some(radius),
+                heading: None,
+            };
+            assert!(encode(&command, Some(Family::Plane), false).is_err());
+        }
+    }
 }
 
 /// The `MAV_CMD` and its seven parameters, for commands that are a `COMMAND_LONG`.
@@ -174,6 +310,8 @@ fn encode_long(
     match command {
         Command::Arm => Ok((400, [1.0, force, 0.0, 0.0, 0.0, 0.0, 0.0])),
         Command::Disarm => Ok((400, [0.0, force, 0.0, 0.0, 0.0, 0.0, 0.0])),
+        // The engine sends it as Arm or Disarm (`Command::resolved`).
+        Command::ArmToggle => Err("a toggle goes as Arm or Disarm".into()),
         Command::SetMode { mode } => set_mode(mode),
         // MAV_CMD_NAV_RETURN_TO_LAUNCH: every ArduPilot vehicle, and PX4.
         Command::Rtl if family == Some(Family::Blimp) => set_mode("RTL"),
@@ -191,7 +329,9 @@ fn encode_long(
         // MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN: restart the autopilot.
         Command::Reboot => Ok((246, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])),
         // A `COMMAND_INT` (`go_to`), not a `COMMAND_LONG`.
-        Command::GoTo { .. } => Err("a place goes as a COMMAND_INT".into()),
+        Command::GoTo { .. } | Command::SetHome { .. } | Command::SetEkfOrigin { .. } => {
+            Err("a place goes as a COMMAND_INT".into())
+        }
         Command::Long { command, params } => {
             if params.len() > 7 || !params.iter().all(|p| p.is_finite()) {
                 return Err("a command has at most seven numeric parameters".into());
@@ -312,6 +452,7 @@ mod tests {
             longitude_deg: 149.165_230,
             altitude_m: 30.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            loiter_radius_m: None,
             heading: None,
         };
         let (command, wire) = encode(&go_to, Some(Family::Copter), false).unwrap();
@@ -337,6 +478,7 @@ mod tests {
                     longitude_deg: 0.0,
                     altitude_m: 10.0,
                     altitude_frame: AltitudeFrame::AboveHome,
+                    loiter_radius_m: None,
                     heading: None,
                 },
                 None,
@@ -347,12 +489,58 @@ mod tests {
     }
 
     #[test]
+    fn home_and_the_ekf_origin_go_as_a_command_int_above_sea_level() {
+        let place = PlaceAmsl {
+            latitude_deg: -35.363_261,
+            longitude_deg: 149.165_230,
+            altitude_amsl_m: 584.25,
+        };
+        for (command, id) in [
+            (Command::SetHome { place: Some(place) }, 179),
+            (Command::SetEkfOrigin { place }, 611),
+        ] {
+            for family in [Family::Copter, Family::Plane, Family::Px4] {
+                let (sent, wire) = encode(&command, Some(family), false).unwrap();
+                assert_eq!(sent, id);
+                assert_eq!(
+                    wire,
+                    Wire::Int {
+                        frame: 5,
+                        params: [0.0; 4],
+                        x: -353_632_610,
+                        y: 1_491_652_300,
+                        z: 584.25,
+                    }
+                );
+            }
+        }
+        // Where it is now: param 1, no place.
+        let (sent, wire) = encode(&Command::SetHome { place: None }, None, false).unwrap();
+        assert_eq!(sent, 179);
+        let Wire::Int { params, x, y, .. } = wire else {
+            panic!("{wire:?}")
+        };
+        assert_eq!((params[0], x, y), (1.0, 0, 0));
+        // 0, 0 would read as "where it is now"; off the Earth, or no height.
+        for (lat, lon, alt) in [(0.0, 0.0, 10.0), (91.0, 0.0, 10.0), (10.0, 10.0, f64::NAN)] {
+            let bad = PlaceAmsl {
+                latitude_deg: lat,
+                longitude_deg: lon,
+                altitude_amsl_m: alt,
+            };
+            assert!(encode(&Command::SetHome { place: Some(bad) }, None, false).is_err());
+            assert!(encode(&Command::SetEkfOrigin { place: bad }, None, false).is_err());
+        }
+    }
+
+    #[test]
     fn a_submarine_destination_keeps_its_negative_height_and_changes_to_guided() {
         let go_to = Command::GoTo {
             latitude_deg: -35.363_261,
             longitude_deg: 149.165_230,
             altitude_m: -12.3,
             altitude_frame: AltitudeFrame::AboveHome,
+            loiter_radius_m: None,
             heading: None,
         };
         let (command, wire) = encode(&go_to, Some(Family::Sub), false).unwrap();
@@ -379,6 +567,8 @@ mod tests {
                 longitude_deg: 149.0,
                 altitude_m: 600.0,
                 altitude_frame,
+
+                loiter_radius_m: None,
 
                 heading: None,
             };

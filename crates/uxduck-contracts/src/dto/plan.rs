@@ -81,6 +81,17 @@ pub enum PatternShape {
         altitude_m: f64,
         #[serde(default)]
         crosshatch: bool,
+        /// Kept from the area's edge and from the plan's exclusion zones,
+        /// which the lanes stop short of and the flight goes round.
+        #[serde(default)]
+        margin_m: f64,
+        /// Where the first lane starts; as drawn when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<SurveyStart>,
+        /// UXDuck picks the angle with the fewest lanes, then the shortest
+        /// flight, and keeps it in `angleDeg`.
+        #[serde(default)]
+        shortest: bool,
     },
     /// Lanes along a line, `widthM` wide in all.
     #[serde(rename_all = "camelCase")]
@@ -108,6 +119,18 @@ pub enum PatternShape {
         approach_from: LatLon,
         approach_altitude_m: f64,
     },
+}
+
+/// Where a survey's first lane starts: the lane end nearest a corner of
+/// the area, or nearest the plan's home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SurveyStart {
+    NorthWest,
+    NorthEast,
+    SouthEast,
+    SouthWest,
+    Home,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -218,6 +241,11 @@ pub struct PlanBody {
     pub min_clearance_m: f64,
     pub labels: Vec<String>,
     pub notes: String,
+    /// The MAVLink dialects whose commands it offers, by id, beside those
+    /// for every vehicle (ADR-0044 F14). A vehicle using others is told so
+    /// when the plan is about to go to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialects: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -244,6 +272,20 @@ pub struct PlanUpload {
     #[schemars(schema_with = "crate::safe::integer")]
     #[serde(default)]
     pub mission_version: u64,
+}
+
+/// A vehicle's copy of its mission (ADR-0029 P17): changed before it is
+/// written, never listed with the plans.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleCopy {
+    pub vehicle_id: String,
+    /// The vehicle's mission version the copy was made from.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub mission_version: u64,
+    /// The plan the mission came from, which Save to plan writes to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
 }
 
 /// A saved plan. Never uploaded by itself: it reaches a vehicle only when
@@ -277,6 +319,10 @@ pub struct Plan {
     pub redo: u32,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+    /// Set on a vehicle's copy of its mission, which is not one of the
+    /// library's plans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_copy: Option<VehicleCopy>,
 }
 
 /// `plan/create`: a new plan, at once, named "Untitled plan" unless named.
@@ -293,6 +339,10 @@ pub struct PlanCreateParams {
     /// `vehicleType` and `autopilot` override its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<PlanBody>,
+    /// Makes it a vehicle's copy of its mission (ADR-0029 P17), replacing
+    /// any copy that vehicle already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_copy: Option<VehicleCopy>,
 }
 
 /// `plan/update`: the plan's whole body as edited from `expectedVersion`.
@@ -456,7 +506,7 @@ pub struct PlanCheck {
     /// `below-ground`, `low-clearance`, `terrain-missing`, `outside-fence`,
     /// `home-outside-fence`, `fence-shape`, `command-unfit`, `no-take-off`,
     /// `no-end`, `no-landing-sequence`, `rally-outside-fence`, `high`,
-    /// `above-ceiling`, `lands-early`.
+    /// `above-ceiling`, `lands-early`, `home-nowhere`.
     pub code: String,
     /// The item it is about, numbered from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]

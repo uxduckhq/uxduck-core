@@ -104,7 +104,8 @@ impl DefinitionsPort for Host {
                     let _ = std::fs::remove_file(own_path(&dir, &id));
                     None
                 }
-                DefinitionsOrder::FetchOwn { id, url } => {
+                DefinitionsOrder::FetchOwn { id, url }
+                | DefinitionsOrder::FetchProfile { id, url } => {
                     let result = get(&url).await.and_then(|bytes| {
                         String::from_utf8(bytes).map_err(|_| format!("{url} is not text"))
                     });

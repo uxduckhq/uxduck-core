@@ -12,7 +12,8 @@ pub enum FlightEnd {
     Open,
     /// It disarmed.
     Disarmed,
-    /// UXDuck stopped while it was armed; ended when UXDuck last heard it.
+    /// UXDuck stopped while it was armed, ended when UXDuck last heard it;
+    /// or its simulation was stopped or started again, ended then.
     Interrupted,
     /// Someone ended it while UXDuck could not hear the vehicle (`flight/end`),
     /// at when it was last heard. Never ended so by itself: a link can drop
@@ -62,6 +63,15 @@ pub struct FlightMission {
     pub run_id: String,
 }
 
+/// Where a flight's log begins: the tlog's file name and the offset of its
+/// first record after arming.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightTlog {
+    pub file: String,
+    pub offset: u64,
+}
+
 /// The parameters a flight armed with (C7): enough to tell later whether
 /// two flights flew the same configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +105,9 @@ pub struct Flight {
     /// The vehicle's name and type when it flew.
     pub vehicle_name: String,
     pub vehicle_type: String,
+    /// A person's name for it, shown in the flight list and its replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// A simulation's, by its link.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub simulated: bool,
@@ -141,10 +154,19 @@ pub struct Flight {
     /// The connection it was heard on, for its flight log here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_id: Option<String>,
+    /// The connection's tlog it began in and where (ADR-0039 R10), for its
+    /// replay; absent for flights from before, found by the times in the
+    /// files' names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tlog: Option<FlightTlog>,
     /// Its flight log in the account on its own (2026-10-24): asked for
     /// while "Store flight logs and videos" is off, then stored.
     #[serde(default, skip_serializing_if = "FlightLog::is_none")]
     pub log: FlightLog,
+    /// Its camera video goes to the account with it (ADR-0046 B11): synced
+    /// with "What to sync" at video, or its video added by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync_video: bool,
     /// The mission it flew, if it flew one (C8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<FlightMission>,

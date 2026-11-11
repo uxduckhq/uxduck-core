@@ -30,6 +30,12 @@ const POSITION_FRESH_MS = 60_000;
 /** Beyond the vehicles, and at most, as adsb.lol allows. */
 const MARGIN_NM = 25;
 const MOST_NM = 250;
+/**
+ * The most of an answer it reads, in characters: about 940 aircraft,
+ * within a call's execution budget and memory with room to spare. Beyond
+ * it, a smaller range is asked for rather than the plugin being stopped.
+ */
+const MOST_BODY = 750_000;
 const FEET = 0.3048;
 const KNOTS = 0.514_444;
 
@@ -108,11 +114,9 @@ export function onTick(input: TickInput): Effects {
   }
   asking = true;
   lastAskedMs = nowMs;
-  used += 1;
   const { lat, lon, radiusNm } = coverage;
   return {
     fetch: [{ id: "around", url: `${API}/${lat.toFixed(4)}/${lon.toFixed(4)}/${radiusNm}` }],
-    store: kept(),
     trafficStatus: status(),
   };
 }
@@ -121,6 +125,8 @@ export function onFetched(input: FetchedInput): Effects {
   asking = false;
   nowMs = input.nowMs;
   if (input.error) return { trafficStatus: status(`Cannot reach adsb.lol: ${input.error}`, true) };
+  // An answer, whatever its status, means the request reached adsb.lol and counts.
+  used += 1;
   const headers = input.headers ?? {};
   const daily = /(\d+);w=86400/.exec(headers["x-ratelimit-limit"] ?? "");
   if (daily) limit = Number(daily[1]);
@@ -131,17 +137,27 @@ export function onFetched(input: FetchedInput): Effects {
     return { store: kept(), trafficStatus: status() };
   }
   if (input.status !== 200)
-    return { trafficStatus: status(`adsb.lol answered ${input.status}`, true) };
+    return { store: kept(), trafficStatus: status(`adsb.lol answered ${input.status}`, true) };
+  if ((input.body ?? "").length > MOST_BODY)
+    return {
+      store: kept(),
+      trafficStatus: status(
+        "Too many aircraft in range for one answer. Reduce the range or choose fewer locations.",
+        true,
+      ),
+    };
   let aircraft: Aircraft[];
   try {
     aircraft = (JSON.parse(input.body ?? "") as { ac?: Aircraft[] }).ac ?? [];
   } catch {
-    return { trafficStatus: status("adsb.lol sent something that is not JSON", true) };
+    return {
+      store: kept(),
+      trafficStatus: status("adsb.lol sent something that is not JSON", true),
+    };
   }
-  return {
-    traffic: aircraft.filter((a) => /^[0-9a-f]{6}$/i.test(a.hex)).map(traffic),
-    trafficStatus: status(),
-  };
+  const heard: PluginTraffic[] = [];
+  for (const a of aircraft) if (ICAO.test(a.hex)) heard.push(traffic(a));
+  return { traffic: heard, store: kept(), trafficStatus: status() };
 }
 
 /** One aircraft as adsb.lol (readsb) gives it. */
@@ -182,27 +198,34 @@ function traffic(a: Aircraft): PluginTraffic {
   };
 }
 
-/** ADS-B's emitter category, as letters and a digit. */
+/** A 24-bit ICAO address; TIS-B tracks (`~`) have none. */
+const ICAO = /^[0-9a-f]{6}$/i;
+
+/**
+ * ADS-B's emitter category, as letters and a digit. Made once: a busy
+ * answer runs this for every aircraft within one call's budget.
+ */
+const CATEGORIES: Record<string, PluginTraffic["category"]> = {
+  A1: "light",
+  A2: "small",
+  A3: "large",
+  A4: "large",
+  A5: "heavy",
+  A6: "fast",
+  A7: "rotorcraft",
+  B1: "glider",
+  B2: "balloon",
+  B3: "parachute",
+  B4: "ultralight",
+  B6: "uav",
+  B7: "space",
+  C1: "surface",
+  C2: "surface",
+  C3: "obstacle",
+};
+
 function category(code: string | undefined): PluginTraffic["category"] {
-  const names: Record<string, PluginTraffic["category"]> = {
-    A1: "light",
-    A2: "small",
-    A3: "large",
-    A4: "large",
-    A5: "heavy",
-    A6: "fast",
-    A7: "rotorcraft",
-    B1: "glider",
-    B2: "balloon",
-    B3: "parachute",
-    B4: "ultralight",
-    B6: "uav",
-    B7: "space",
-    C1: "surface",
-    C2: "surface",
-    C3: "obstacle",
-  };
-  return (code && names[code]) || "unknown";
+  return (code && CATEGORIES[code]) || "unknown";
 }
 
 /** A circle round every vehicle, MARGIN_NM beyond the farthest, at most MOST_NM. */

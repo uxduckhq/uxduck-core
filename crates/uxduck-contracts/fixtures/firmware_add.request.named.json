@@ -1,0 +1,7 @@
+{
+  "method": "firmware/add",
+  "params": {
+    "url": "https://ci.acme.example/firmware/acme-r12/profile.json",
+    "name": "Acme r12"
+  }
+}

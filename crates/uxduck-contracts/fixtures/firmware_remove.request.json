@@ -1,0 +1,6 @@
+{
+  "method": "firmware/remove",
+  "params": {
+    "id": "firmware-5c0e2a91d7b3"
+  }
+}

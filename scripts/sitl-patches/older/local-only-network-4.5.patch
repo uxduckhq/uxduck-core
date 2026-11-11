@@ -1,0 +1,271 @@
+diff --git a/libraries/AP_HAL/utility/SITL_Network.h b/libraries/AP_HAL/utility/SITL_Network.h
+new file mode 100644
+--- /dev/null
++++ b/libraries/AP_HAL/utility/SITL_Network.h
+@@ -0,0 +1,53 @@
++// UXDuck builds stay local even when started by an older installed daemon.
++#pragma once
++#include <arpa/inet.h>
++#include <errno.h>
++#include <sys/socket.h>
++
++namespace SITLNetwork {
++inline bool &local_only()
++{
++    static bool enabled = true;
++    return enabled;
++}
++
++inline bool allow_destination(uint32_t network_address)
++{
++    if (!local_only() || (ntohl(network_address) & 0xff000000U) == 0x7f000000U) {
++        return true;
++    }
++    errno = EACCES;
++    return false;
++}
++
++inline bool bind_address(struct sockaddr_in &address)
++{
++    if (local_only() && address.sin_addr.s_addr == htonl(INADDR_ANY)) {
++        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    }
++    return allow_destination(address.sin_addr.s_addr);
++}
++
++// Windows can leave even a connected UDP socket bound to INADDR_ANY.
++// Bind clients before connect/sendto, without rebinding an explicit RC port.
++inline bool bind_client(int fd)
++{
++    if (!local_only()) {
++        return true;
++    }
++    struct sockaddr_in address {};
++    socklen_t length = sizeof(address);
++    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0 && errno != EINVAL) {
++        return false;
++    }
++    if (address.sin_port != 0) {
++        return allow_destination(address.sin_addr.s_addr);
++    }
++    address.sin_family = AF_INET;
++#ifdef HAVE_SOCK_SIN_LEN
++    address.sin_len = sizeof(address);
++#endif
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    return bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
++}
++}
+diff --git a/libraries/AP_HAL/utility/Socket.cpp b/libraries/AP_HAL/utility/Socket.cpp
+--- a/libraries/AP_HAL/utility/Socket.cpp
++++ b/libraries/AP_HAL/utility/Socket.cpp
+@@ -44,6 +44,13 @@
+ 
+ #include <errno.h>
+ 
++#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && !AP_NETWORKING_BACKEND_CHIBIOS && !AP_NETWORKING_BACKEND_PPP
++#include "SITL_Network.h"
++#define UXDUCK_LOCAL_NETWORK 1
++#else
++#define UXDUCK_LOCAL_NETWORK 0
++#endif
++
+ #if AP_NETWORKING_BACKEND_CHIBIOS || AP_NETWORKING_BACKEND_PPP
+ #define CALL_PREFIX(x) ::lwip_##x
+ #else
+@@ -112,6 +119,12 @@ bool SOCKET_CLASS_NAME::connect(const char *address, uint16_t port)
+     int ret;
+     int one = 1;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        (datagram && !SITLNetwork::bind_client(fd))) {
++        return false;
++    }
++#endif
+ 
+     if (datagram && is_multicast_address(sockaddr)) {
+         /*
+@@ -198,6 +211,12 @@ bool SOCKET_CLASS_NAME::connect_timeout(const char *address, uint16_t port, uint
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        (datagram && !SITLNetwork::bind_client(fd))) {
++        return false;
++    }
++#endif
+ 
+     set_blocking(false);
+ 
+@@ -232,6 +251,11 @@ bool SOCKET_CLASS_NAME::bind(const char *address, uint16_t port)
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::bind_address(sockaddr)) {
++        return false;
++    }
++#endif
+ 
+     reuseaddress();
+     if (CALL_PREFIX(bind)(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) != 0) {
+@@ -312,6 +336,12 @@ ssize_t SOCKET_CLASS_NAME::sendto(const void *buf, size_t size, const char *addr
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        !SITLNetwork::bind_client(fd)) {
++        return -1;
++    }
++#endif
+     return CALL_PREFIX(sendto)(fd, buf, size, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+ }
+ 
+diff --git a/libraries/AP_HAL_SITL/SITL_State.cpp b/libraries/AP_HAL_SITL/SITL_State.cpp
+--- a/libraries/AP_HAL_SITL/SITL_State.cpp
++++ b/libraries/AP_HAL_SITL/SITL_State.cpp
+@@ -6,6 +6,7 @@
+ #include "AP_HAL_SITL_Namespace.h"
+ #include "HAL_SITL_Class.h"
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include "Scheduler.h"
+ #include "CANSocketIface.h"
+ 
+@@ -678,6 +679,10 @@ void SITL_State::multicast_state_open(void)
+  */
+ void SITL_State::multicast_state_send(void)
+ {
++    // Built-in physics needs no AP_Periph multicast.
++    if (SITLNetwork::local_only()) {
++        return;
++    }
+     if (_sitl == nullptr) {
+         return;
+     }
+diff --git a/libraries/AP_HAL_SITL/SITL_cmdline.cpp b/libraries/AP_HAL_SITL/SITL_cmdline.cpp
+--- a/libraries/AP_HAL_SITL/SITL_cmdline.cpp
++++ b/libraries/AP_HAL_SITL/SITL_cmdline.cpp
+@@ -6,6 +6,7 @@
+ #include "AP_HAL_SITL_Namespace.h"
+ #include "HAL_SITL_Class.h"
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include <AP_HAL/utility/getopt_cpp.h>
+ #include <AP_HAL_SITL/Storage.h>
+ #include <AP_Param/AP_Param.h>
+@@ -92,6 +93,7 @@ void SITL_State::_usage(void)
+            "\t--gimbal                 enable simulated MAVLink gimbal\n"
+            "\t--autotest-dir DIR       set directory for additional files\n"
+            "\t--defaults path          set path to defaults file\n"
++           "\t--local-only             restrict native simulation sockets to localhost\n"
+            "\t--uartA device           (deprecated) set device string for SERIAL0\n"
+            "\t--uartC device           (deprecated) set device string for SERIAL1\n" // ordering captures the historical use of uartB as SERIAL3
+            "\t--uartD device           (deprecated) set device string for SERIAL2\n"
+@@ -276,6 +278,7 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
+         CMDLINE_START_TIME,
+         CMDLINE_SYSID,
+         CMDLINE_SLAVE,
++        CMDLINE_LOCAL_ONLY,
+ #if STORAGE_USE_FLASH
+         CMDLINE_SET_STORAGE_FLASH_ENABLED,
+ #endif
+@@ -335,6 +338,7 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
+         {"start-time",      true,   0, CMDLINE_START_TIME},
+         {"sysid",           true,   0, CMDLINE_SYSID},
+         {"slave",           true,   0, CMDLINE_SLAVE},
++        {"local-only",      false,  0, CMDLINE_LOCAL_ONLY},
+ #if STORAGE_USE_FLASH
+         {"set-storage-flash-enabled", true,   0, CMDLINE_SET_STORAGE_FLASH_ENABLED},
+ #endif
+@@ -535,6 +539,10 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
+         case 'h':
+             _usage();
+             exit(0);
++        case CMDLINE_LOCAL_ONLY:
++            SITLNetwork::local_only() = true;
++            break;
++
+         case CMDLINE_SLAVE: {
+ #if HAL_SIM_JSON_MASTER_ENABLED
+             const int32_t slaves = atoi(gopt.optarg);
+diff --git a/libraries/AP_HAL_SITL/UARTDriver.cpp b/libraries/AP_HAL_SITL/UARTDriver.cpp
+--- a/libraries/AP_HAL_SITL/UARTDriver.cpp
++++ b/libraries/AP_HAL_SITL/UARTDriver.cpp
+@@ -39,6 +39,7 @@
+ #include <arpa/inet.h>
+ 
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include "SITL_State.h"
+ #if HAL_GCS_ENABLED
+ #include <AP_HAL/utility/packetise.h>
+@@ -356,6 +357,10 @@ void UARTDriver::_tcp_start_connection(uint16_t port, bool wait_for_connection)
+                 (unsigned)ntohs(_listen_sockaddr.sin_port),
+                 (unsigned)_portNumber);
+ 
++        if (!SITLNetwork::bind_address(_listen_sockaddr)) {
++            fprintf(stderr, "Local-only simulation cannot listen outside localhost\n");
++            exit(1);
++        }
+         ret = bind(_listen_fd, (struct sockaddr *)&_listen_sockaddr, sizeof(_listen_sockaddr));
+         if (ret == -1) {
+             fprintf(stderr, "bind failed on port %u - %s\n",
+@@ -419,6 +424,10 @@ void UARTDriver::_tcp_start_client(const char *address, uint16_t port)
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     _fd = socket(AF_INET, SOCK_STREAM, 0);
+     if (_fd == -1) {
+@@ -475,6 +484,10 @@ void UARTDriver::_udp_start_client(const char *address, uint16_t port)
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     _fd = socket(AF_INET, SOCK_DGRAM, 0);
+     if (_fd == -1) {
+@@ -491,6 +504,10 @@ void UARTDriver::_udp_start_client(const char *address, uint16_t port)
+     int one = 1;
+     setsockopt(_fd,SOL_SOCKET,SO_BROADCAST,(char *)&one,sizeof(one));
+ 
++    if (!SITLNetwork::bind_client(_fd)) {
++        fprintf(stderr, "Local-only simulation cannot bind its UDP client to localhost\n");
++        exit(1);
++    }
+     ret = connect(_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+     if (ret == -1) {
+         fprintf(stderr, "udp connect failed on port %u - %s\n",
+@@ -511,6 +528,10 @@ void UARTDriver::_udp_start_client(const char *address, uint16_t port)
+  */
+ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
+ {
++    if (SITLNetwork::local_only()) {
++        fprintf(stderr, "Local-only simulation does not support multicast serial ports\n");
++        exit(1);
++    }
+     if (_connected) {
+         return;
+     }
+@@ -527,6 +548,10 @@ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     _mc_fd = socket(AF_INET, SOCK_DGRAM, 0);
+     if (_mc_fd == -1) {

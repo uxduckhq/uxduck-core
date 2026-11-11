@@ -14,31 +14,36 @@
     "arducopter-heli": { "frames": {} },
     "arduplane": {
       "frames": {
+        "plane-catapult": { "TKOFF_THR_MINACC": 3 },
+        "plane-bungee": { "TKOFF_THR_MINACC": 3 },
+        "plane-throw": { "TKOFF_THR_MINACC": 3 },
         "plane-jet": {
-          "AIRSPEED_CRUISE": 50,
-          "AIRSPEED_MAX": 80,
+          "AIRSPEED_CRUISE": 200,
+          "AIRSPEED_MAX": 220,
           "AIRSPEED_MIN": 25,
-          "TRIM_THROTTLE": 45,
+          "BATT_CAPACITY": 45000,
+          "TRIM_THROTTLE": 80,
           "THR_MAX": 100,
           "THR_SLEWRATE": 100,
           "TKOFF_THR_MAX": 100,
           "TKOFF_ROTATE_SPD": 20,
-          "TKOFF_DIST": 1500,
+          "TKOFF_DIST": 6000,
           "TKOFF_LVL_ALT": 3,
           "TKOFF_OPTIONS": 1,
-          "PTCH_LIM_MAX_DEG": 20,
+          "PTCH_LIM_MAX_DEG": 45,
           "PTCH_LIM_MIN_DEG": -25,
-          "ROLL_LIMIT_DEG": 55,
+          "ROLL_LIMIT_DEG": 70,
           "LEVEL_ROLL_LIMIT": 0,
           "SCALING_SPEED": 40,
           "NAVL1_PERIOD": 25,
-          "WP_LOITER_RAD": 400,
-          "WP_RADIUS": 220,
+          "WP_LOITER_RAD": 4000,
+          "WP_RADIUS": 1000,
           "RTL_ALTITUDE": 200,
           "FBWB_CLIMB_RATE": 5,
-          "TECS_CLMB_MAX": 15,
-          "TECS_SINK_MAX": 8.5,
+          "TECS_CLMB_MAX": 100,
+          "TECS_SINK_MAX": 30,
           "TECS_SINK_MIN": 2,
+          "TECS_SPDWEIGHT": 0,
           "TECS_RLL2THR": 5,
           "TECS_TIME_CONST": 7,
           "TECS_PTCH_DAMP": 0.8,
@@ -82,7 +87,28 @@
         }
       }
     },
-    "ardusub": { "frames": {} },
+    "ardusub": {
+      "frames": {
+        "vectored": {
+          "RNGFND1_MAX": 50,
+          "RNGFND1_PIN": 0,
+          "RNGFND1_SCALING": 12.12,
+          "RNGFND1_TYPE": 1,
+          "TERRAIN_ENABLE": 1,
+          "TERRAIN_OFS_MAX": 0,
+          "TERRAIN_SPACING": 30
+        },
+        "vectored_6dof": {
+          "RNGFND1_MAX": 50,
+          "RNGFND1_PIN": 0,
+          "RNGFND1_SCALING": 12.12,
+          "RNGFND1_TYPE": 1,
+          "TERRAIN_ENABLE": 1,
+          "TERRAIN_OFS_MAX": 0,
+          "TERRAIN_SPACING": 30
+        }
+      }
+    },
     "blimp": {
       "frames": {
         "blimp-motor": {
@@ -127,6 +153,13 @@
           "LOIT_VELYAW_D": 0,
           "LOIT_VELYAW_IMAX": 1
         }
+      }
+    }
+  },
+  "physics": {
+    "arduplane": {
+      "plane-jet": {
+        "c_drag_p": 0.0236
       }
     }
   }

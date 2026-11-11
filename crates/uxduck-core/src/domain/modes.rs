@@ -4,6 +4,8 @@
 //! QGroundControl shows, such as `Position` and `Hold`, and PX4's own names
 //! (`POSCTL`, `AUTO.LOITER`) are understood too.
 
+use super::telemetry_layout::VehicleClass;
+
 /// Which ArduPilot firmware a `MAV_TYPE` runs, or PX4, for its mode numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -208,7 +210,9 @@ impl Family {
     /// modes need a quadplane (a `Vtol…` type; `ArduPlane` reports fixed wing
     /// for one unless `Q_MAV_TYPE` says otherwise, so the engine passes a
     /// `Vtol…` type for it), Copter's AUTOROTATE a helicopter, PX4's VTOL
-    /// Takeoff a VTOL. `None` stands for every airframe.
+    /// Takeoff a VTOL, and PX4's modes for the air (`PX4_AIR_ONLY`)
+    /// anything but a rover, boat or submarine. `None` stands for every
+    /// airframe.
     #[must_use]
     pub fn has(self, mav_type: Option<&str>, name: &str) -> bool {
         let Some(mav_type) = mav_type else {
@@ -222,6 +226,9 @@ impl Family {
             }
             Self::Copter if name.eq_ignore_ascii_case("AUTOROTATE") => mav_type == "Helicopter",
             Self::Px4 if name.eq_ignore_ascii_case("VTOL Takeoff") => is_vtol(mav_type),
+            Self::Px4 if PX4_AIR_ONLY.iter().any(|m| m.eq_ignore_ascii_case(name)) => {
+                !VehicleClass::of(mav_type).never_flies()
+            }
             _ => true,
         }
     }
@@ -250,6 +257,20 @@ impl Family {
                 .map(|name| (name, true)),
         );
         all
+    }
+
+    /// What a mode does for a vehicle of this `MAV_TYPE`: `describe`, with
+    /// PX4's Return landing only where it comes down to land (a multicopter
+    /// or a VTOL).
+    #[must_use]
+    pub fn describe_for(self, name: &str, mav_type: &str) -> Option<&'static str> {
+        if self == Self::Px4
+            && self.number(name) == self.number("Return")
+            && (is_vtol(mav_type) || Self::of(mav_type) == Some(Self::Copter))
+        {
+            return Some("Goes home and lands");
+        }
+        self.describe(name)
     }
 
     /// What a mode does, in a few plain words, for the mode menu and the
@@ -611,7 +632,7 @@ const ROVER: &[(u32, &str)] = &[
 
 /// ArduPilot Blimp modes, from the pinned Blimp/mode.h.
 const BLIMP_WORDS: &[(&str, &str)] = &[
-    ("LAND", "Stops actuators; the blimp may drift"),
+    ("LAND", "Stops actuators. The blimp may drift"),
     ("MANUAL", "You control the fins or motors directly"),
     ("VELOCITY", "You choose its speed and direction"),
     ("LOITER", "Holds position and height"),
@@ -666,6 +687,9 @@ const PX4: &[(u32, &str)] = &[
     (6 << 16, "Offboard"),
     (7 << 16, "Stabilized"),
 ];
+
+/// PX4's modes for the air, not offered to a PX4 rover, boat or submarine.
+const PX4_AIR_ONLY: [&str; 5] = ["Altitude", "Orbit", "Takeoff", "Land", "Precision Land"];
 
 /// PX4's own names for the same modes, as MAVROS and PX4's shell use them,
 /// accepted when a mode is asked for by name.
@@ -766,7 +790,7 @@ const PLANE_WORDS: &[(&str, &str)] = &[
     ),
     (
         "FBWB",
-        "The roll stick sets bank angle. The pitch stick requests a climb or descent rate; centered, it holds altitude. The autopilot controls pitch and motor power. With an airspeed sensor, throttle normally selects airspeed: minimum stick requests minimum airspeed, not motor off. Without one, mid-stick and below use cruise throttle, and above mid-stick raises it. Flight options can change this behavior.",
+        "The roll stick sets bank angle. The pitch stick requests a climb or descent rate. Centered, it holds altitude. The autopilot controls pitch and motor power. With an airspeed sensor, throttle normally selects airspeed: minimum stick requests minimum airspeed, not motor off. Without one, mid-stick and below use cruise throttle, and above mid-stick raises it. Flight options can change this behavior.",
     ),
     (
         "CRUISE",
@@ -877,8 +901,8 @@ const PX4_WORDS: &[(&str, &str)] = &[
     ("Ready", "Armed and waiting"),
     ("Takeoff", "Takes off and climbs to a set height"),
     ("Hold", "Stops and stays where it is"),
-    ("Mission", "Flies the mission"),
-    ("Return", "Flies home and lands"),
+    ("Mission", "Runs the mission"),
+    ("Return", "Goes home"),
     ("Land", "Lands straight down where it is"),
     ("Follow Me", "Follows the person with the controller"),
     ("Precision Land", "Lands on a marker it can see"),
@@ -887,7 +911,7 @@ const PX4_WORDS: &[(&str, &str)] = &[
         "Acro",
         "The sticks control rotation rates. Releasing the sticks does not level the vehicle.",
     ),
-    ("Offboard", "Flies as a companion computer tells it"),
+    ("Offboard", "Follows a companion computer"),
     (
         "Stabilized",
         "The sticks control roll and pitch. Releasing the sticks levels the vehicle. You control throttle.",
@@ -1015,6 +1039,23 @@ mod tests {
         assert!(copter.iter().any(|(m, more)| *m == "FLIP" && *more));
         assert!(!names(copter.clone()).contains(&"AUTOROTATE"));
         assert!(names(Family::Copter.offered(Some("Helicopter"))).contains(&"AUTOROTATE"));
+        // A PX4 rover or boat has no modes for the air; its Return goes home.
+        for ground in ["GroundRover", "SurfaceBoat"] {
+            let modes = names(Family::Px4.offered(Some(ground)));
+            for air in PX4_AIR_ONLY.iter().chain(&["VTOL Takeoff"]) {
+                assert!(!modes.contains(air), "{ground} {air}");
+            }
+            assert!(modes.contains(&"Return") && modes.contains(&"Hold"));
+            assert_eq!(
+                Family::Px4.describe_for("Return", ground),
+                Some("Goes home")
+            );
+        }
+        assert!(names(Family::Px4.offered(Some("Quadrotor"))).contains(&"Land"));
+        assert_eq!(
+            Family::Px4.describe_for("AUTO.RTL", "Quadrotor"),
+            Some("Goes home and lands")
+        );
     }
 
     #[test]

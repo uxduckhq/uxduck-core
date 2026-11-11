@@ -8,7 +8,7 @@
       "goal": "Get it back on the ground at home before the battery runs low.",
       "steps": [
         {
-          "text": "Press Return to launch in the Control tab.",
+          "text": "Press Return to launch in the Cockpit tab.",
           "hint": "Return to launch flies it home and lands it by itself.",
           "hintAfterS": 60.0
         },
@@ -40,7 +40,7 @@
       "goal": "A first flight: send it somewhere, change its mode, bring it home and land.",
       "steps": [
         {
-          "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+          "text": "Press Go to under Guide in the Cockpit tab, then click a place on the map.",
           "hint": "Go to sends it to the place you clicked, flying forward like a plane.",
           "hintAfterS": 45.0
         }

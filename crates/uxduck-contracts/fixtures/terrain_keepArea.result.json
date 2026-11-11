@@ -1,8 +1,12 @@
 {
   "id": "ta0123456789abcdef",
   "name": "Snowdonia",
-  "southDeg": 53.0,
-  "westDeg": -4.3,
-  "northDeg": 53.2,
-  "eastDeg": -3.9
+  "points": [
+    { "latitudeDeg": 53.0, "longitudeDeg": -4.3 },
+    { "latitudeDeg": 53.0, "longitudeDeg": -3.9 },
+    { "latitudeDeg": 53.1, "longitudeDeg": -4.0 },
+    { "latitudeDeg": 53.2, "longitudeDeg": -3.9 },
+    { "latitudeDeg": 53.2, "longitudeDeg": -4.3 }
+  ],
+  "enabled": true
 }

@@ -1,0 +1,7 @@
+{
+  "method": "replay/open",
+  "params": {
+    "data": "AAAAAAAAAAA=",
+    "name": "flight.tlog"
+  }
+}

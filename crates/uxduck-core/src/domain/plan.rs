@@ -133,6 +133,17 @@ pub enum PatternShape {
         /// The lanes again at right angles.
         #[serde(default)]
         crosshatch: bool,
+        /// Kept from the area's edge and from the plan's exclusion zones,
+        /// which the lanes stop short of and the flight goes round.
+        #[serde(default)]
+        margin_m: f64,
+        /// Where the first lane starts; as drawn when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<SurveyStart>,
+        /// UXDuck picks the angle with the fewest lanes, then the shortest
+        /// flight, and keeps it in `angle_deg`.
+        #[serde(default)]
+        shortest: bool,
     },
     /// Lanes along a line, `width_m` wide in all.
     #[serde(rename_all = "camelCase")]
@@ -161,6 +172,18 @@ pub enum PatternShape {
         approach_from: LatLon,
         approach_altitude_m: f64,
     },
+}
+
+/// Where a survey's first lane starts: the lane end nearest a corner of
+/// the area, or nearest the plan's home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SurveyStart {
+    NorthWest,
+    NorthEast,
+    SouthEast,
+    SouthWest,
+    Home,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -291,6 +314,10 @@ pub struct PlanBody {
     pub labels: Vec<String>,
     #[serde(default)]
     pub notes: String,
+    /// The MAVLink dialects whose commands it offers, by id, beside those
+    /// for every vehicle (ADR-0044 F14).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialects: Vec<String>,
 }
 
 pub const DEFAULT_NEXT_ALTITUDE_M: f64 = 40.0;
@@ -438,6 +465,19 @@ pub struct PlanUpload {
     pub mission_version: u64,
 }
 
+/// What makes a plan a vehicle copy (ADR-0029 P17): a vehicle's mission
+/// being changed before it is written, never listed with the plans.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleCopy {
+    pub vehicle_id: String,
+    /// The vehicle's mission version the copy was made from.
+    pub mission_version: u64,
+    /// The plan the mission came from, which Save to plan writes to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+}
+
 /// A saved plan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,6 +506,10 @@ pub struct Plan {
     pub undo: u32,
     pub redo: u32,
     pub version: u64,
+    /// Set on a vehicle's copy of its mission; such a plan is not one of
+    /// the library's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_copy: Option<VehicleCopy>,
 }
 
 /// Plans deleted longer ago than this are gone.

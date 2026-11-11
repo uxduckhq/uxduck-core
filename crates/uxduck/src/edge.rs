@@ -1,7 +1,9 @@
 //! This computer's connection to its account (S78, ADR-0003 C7 and "The
 //! edge connection"): one outbound WebSocket to the relay, a Durable Object
-//! per computer in `apps/api`'s Worker, while UXDuck is signed in and
-//! "Connect this computer to my account" is on. Signed out, nothing leaves.
+//! per computer in `apps/api`'s Worker, while UXDuck is signed in, "Live
+//! sharing from this computer" is on (ADR-0048) and one of its watch links has
+//! not ended. Otherwise nothing leaves. Its only watchers are guests on watch
+//! links (S95).
 //!
 //! It says hello, then pings every few seconds; each answer gives the round
 //! trip and the relay's clock against this one's, which later slices use to
@@ -44,7 +46,7 @@ const DETAIL: Duration = Duration::from_millis(100);
 /// How often the list's vehicles are sent, at most.
 const SUMMARY: Duration = Duration::from_secs(1);
 
-/// What the computer sends of the vehicles watched (S79, ADR-0003 C8): the
+/// What the computer sends of the vehicles watched (S95, ADR-0003 C8): the
 /// latest values, only what changed, the list's at most once a second.
 /// There is no queue: a slow link sends the newest values less often.
 #[derive(Debug, Default)]
@@ -137,11 +139,11 @@ impl Publisher {
 }
 
 /// Starts the task; it lives as long as the daemon.
-pub fn start(data_dir: &std::path::Path, credentials: FileCredentials, engine: EngineHandle) {
+pub fn start(credentials: FileCredentials, engine: EngineHandle) {
     let Some(api) = crate::feedback::api_url() else {
         return;
     };
-    tokio::spawn(run(api, data_dir.to_owned(), credentials, engine));
+    tokio::spawn(run(api, credentials, engine));
 }
 
 /// The wait before reconnect `attempt` (0 first): doubling from a second to
@@ -197,12 +199,7 @@ enum Ended {
     Dropped(String),
 }
 
-async fn run(
-    api: String,
-    data_dir: std::path::PathBuf,
-    credentials: FileCredentials,
-    engine: EngineHandle,
-) {
+async fn run(api: String, credentials: FileCredentials, engine: EngineHandle) {
     let name = crate::sync::computer_name();
     let mut attempt = 0u32;
     let mut last = None;
@@ -242,24 +239,7 @@ async fn run(
         last = None;
         report(status(EdgeState::Connecting, None)).await;
         let started = tokio::time::Instant::now();
-        let (mut remote, answers) = crate::remote_users::RemoteUsers::new(
-            engine.clone(),
-            data_dir.clone(),
-            api.clone(),
-            device.clone(),
-        );
-        let ended = session(
-            &api,
-            &token,
-            &device,
-            &name,
-            &credentials,
-            &engine,
-            (&mut remote, answers),
-        )
-        .await;
-        // Everyone away goes with the connection, and their leases with them.
-        remote.close();
+        let ended = session(&api, &token, &device, &name, &credentials, &engine).await;
         if started.elapsed() >= STEADY {
             attempt = 0;
         }
@@ -290,10 +270,6 @@ async fn session(
     name: &str,
     credentials: &FileCredentials,
     engine: &EngineHandle,
-    (remote, mut answers): (
-        &mut crate::remote_users::RemoteUsers,
-        futures::channel::mpsc::UnboundedReceiver<String>,
-    ),
 ) -> Ended {
     let base = api
         .replacen("https://", "wss://", 1)
@@ -358,8 +334,6 @@ async fn session(
         let _ = engine.run(move |e| e.edge_changed(connected)).await;
     }
     tracing::info!(device, "connected this computer to its account");
-    // The keys for control from away, ready before anyone asks (S80).
-    remote.refresh_keys().await;
     let mut pinging = tokio::time::interval(PING);
     let mut check = tokio::time::interval(CHECK);
     let mut heard = tokio::time::Instant::now();
@@ -373,12 +347,6 @@ async fn session(
     publishing.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            // The engine's answers to people away (S80).
-            Some(answer) = answers.next() => {
-                if sink.send(Message::text(answer)).await.is_err() {
-                    return Ended::Dropped("the connection to UXDuck's server closed".into());
-                }
-            }
             _ = publishing.tick(), if publisher.active() => {
                 let demand = publisher.demand().clone();
                 let cameras = live.cameras();
@@ -445,20 +413,7 @@ async fn session(
                 };
                 heard = tokio::time::Instant::now();
                 let Ok(message) = serde_json::from_str::<Value>(&text) else { continue };
-                // Someone away (S80): a command, the lease, a receipt, or gone.
-                if message["method"] == "edge/command" {
-                    // Commands go first on the uplink: video does not climb now.
-                    live.command();
-                }
-                if message["method"].as_str().is_some_and(|m| matches!(m, "edge/command" | "edge/lease" | "edge/receipt" | "edge/left")) {
-                    if let Some(answer) = remote.request(&message).await
-                        && sink.send(Message::text(answer)).await.is_err()
-                    {
-                        return Ended::Dropped("the connection to UXDuck's server closed".into());
-                    }
-                    continue;
-                }
-                // What anyone watching asked for (S79).
+                // What anyone watching asked for (S95).
                 if message["method"] == "edge/demand" {
                     if let Ok(demand) = serde_json::from_value::<EdgeDemand>(message["params"].clone()) {
                         live.want(demand.video.clone());
@@ -534,6 +489,7 @@ mod tests {
             autopilot: "Ardupilotmega".into(),
             size_cm: None,
             look: None,
+            colour: None,
             presence: uxduck_contracts::dto::vehicle::Presence::Online,
             armed: false,
             mode: Some(mode.into()),
@@ -541,9 +497,9 @@ mod tests {
                 vehicle_id: id.into(),
                 positions: Vec::new(),
                 items: Vec::new(),
+                link_health: None,
             }),
             notices: Vec::new(),
-            lease: None,
             cameras: Vec::new(),
             at_ms: 1,
         }

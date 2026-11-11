@@ -67,6 +67,10 @@ pub fn route(effect: Effect) -> Routed {
         Effect::Traffic { vehicle_id, report } => {
             Routed::Engine(Box::new(move |e| e.vehicle_traffic(&vehicle_id, report)))
         }
+        Effect::TuningSamples {
+            vehicle_id,
+            samples,
+        } => Routed::Engine(Box::new(move |e| e.tuning_samples(&vehicle_id, samples))),
         Effect::MagCal { vehicle_id, report } => {
             Routed::Engine(Box::new(move |e| e.mag_cal(&vehicle_id, report)))
         }
@@ -109,6 +113,7 @@ pub fn start_command(session: &mut Session, order: CommandOrder, now_us: u64) ->
 }
 
 /// Starts a transfer in the session.
+#[allow(clippy::too_many_lines, reason = "one dispatch arm per transfer order")]
 pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) -> Vec<Effect> {
     match order {
         TransferOrder::DownloadParameters { vehicle_id } => {
@@ -126,9 +131,19 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
                 clippy::cast_possible_truncation,
                 reason = "the protocol carries an f32"
             )]
+            let carried = value as f32;
+            if carried.is_infinite() {
+                return vec![Effect::ParamWritten {
+                    order_id,
+                    result: Err(Lost::NotSent(format!(
+                        "{name} can't be sent: a vehicle keeps numbers between about -3.4e38 and 3.4e38"
+                    ))),
+                    attempts: 0,
+                }];
+            }
             let param = Param {
                 name,
-                value: value as f32,
+                value: carried,
                 kind: kind.to_mav(),
             };
             session.set_parameter(&order_id, &vehicle_id, param, by_file, now_us)
@@ -169,6 +184,7 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
                 FileOp::List { path } => files::Op::List { path },
                 FileOp::Read { path, from } => files::Op::Read { path, from },
                 FileOp::Write { path, bytes } => files::Op::Write { path, bytes },
+                FileOp::Patch { path, pieces } => files::Op::Patch { path, pieces },
                 FileOp::Remove { path } => files::Op::Remove { path },
                 FileOp::RemoveDir { path } => files::Op::RemoveDir { path },
                 FileOp::MakeDir { path } => files::Op::MakeDir { path },
@@ -192,8 +208,8 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
             block,
             groups,
             mask,
-            per_second,
-        } => session.terrain_data(&vehicle_id, block, groups, mask, per_second, now_us),
+            pace,
+        } => session.terrain_data(&vehicle_id, block, groups, mask, pace, now_us),
         TransferOrder::TerrainCheck {
             vehicle_id,
             lat,
@@ -231,6 +247,12 @@ fn transfer_report(effect: Effect) -> Option<Report> {
             boot_instant_us,
             restarted,
         } => Box::new(move |e| e.vehicle_booted(&vehicle_id, boot_instant_us, restarted)),
+        Effect::MissionChanged { vehicle_id } => Box::new(move |e| e.mission_changed(&vehicle_id)),
+        Effect::RcCalibration {
+            vehicle_id,
+            read,
+            problem,
+        } => Box::new(move |e| e.rc_calibration(&vehicle_id, read, problem)),
         Effect::Parameters {
             vehicle_id,
             result,
@@ -322,6 +344,11 @@ fn transfer_report(effect: Effect) -> Option<Report> {
             block,
             mask,
         } => Box::new(move |e| e.terrain_requested(&vehicle_id, block, mask)),
+        Effect::TerrainSent {
+            vehicle_id,
+            block,
+            mask,
+        } => Box::new(move |e| e.terrain_sent(&vehicle_id, block, mask)),
         Effect::TerrainChecked {
             vehicle_id,
             lat,
@@ -331,6 +358,7 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         Effect::Vehicle(_)
         | Effect::Telemetry(_)
         | Effect::Traffic { .. }
+        | Effect::TuningSamples { .. }
         | Effect::MagCal { .. }
         | Effect::AccelCalPosition { .. }
         | Effect::CommandDone { .. }
@@ -411,7 +439,7 @@ fn to_mavlink((seq, item): (usize, &MissionItem)) -> MissionItemInt {
     }
 }
 
-fn from_mavlink(item: &MissionItemInt) -> MissionItem {
+pub(crate) fn from_mavlink(item: &MissionItemInt) -> MissionItem {
     MissionItem {
         command: item.command,
         frame: item.frame,
@@ -447,5 +475,37 @@ mod tests {
         let there = to_mavlink((2, &item));
         assert_eq!((there.seq, there.x), (2, -353_632_611));
         assert_eq!(from_mavlink(&there), item);
+    }
+
+    #[test]
+    fn a_value_past_the_protocols_float_is_refused_rather_than_sent_as_infinity() {
+        let mut session = Session::new(session::Config::default());
+        let mut set = |value: f64| {
+            let order = TransferOrder::SetParameter {
+                order_id: "o".into(),
+                vehicle_id: "v".into(),
+                name: "ACME_RATE_MAX".into(),
+                value,
+                kind: ParamKind::Real32,
+                by_file: false,
+            };
+            match start_transfer(&mut session, order, 0).as_slice() {
+                [
+                    Effect::ParamWritten {
+                        result: Err(Lost::NotSent(why)),
+                        ..
+                    },
+                ] => why.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let refused =
+            "ACME_RATE_MAX can't be sent: a vehicle keeps numbers between about -3.4e38 and 3.4e38";
+        assert_eq!(set(f64::from(f32::MAX) * 2.0), refused);
+        assert_eq!(set(f64::from(f32::MIN) * 2.0), refused);
+        assert_eq!(set(1e100), refused);
+        let reached = "this vehicle has no address in this session";
+        assert_eq!(set(f64::from(f32::MAX)), reached, "the largest f32 goes on");
+        assert_eq!(set(12.5), reached);
     }
 }

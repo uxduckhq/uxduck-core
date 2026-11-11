@@ -743,3 +743,90 @@ fn a_removal_whose_answer_was_lost_is_done_when_asked_again() {
     assert!(!bench.fake.files.contains_key("/APM/LOGS/00000001.BIN"));
     assert!(bench.fake.dirs.contains("/APM/new"));
 }
+
+#[test]
+fn a_patch_writes_its_pieces_at_their_offsets_and_keeps_the_rest() {
+    let mut bench = Bench::new();
+    bench.fake.dirs.insert("/APM/TERRAIN".into());
+    let before: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+    bench
+        .fake
+        .files
+        .insert("/APM/TERRAIN/S36E149.DAT".into(), before.clone());
+    // Two blocks' worth, one past the file's end: the file grows, never shrinks.
+    let first = vec![0xaa; 2048];
+    let second = vec![0x55; 2048];
+    let events = bench.file(
+        "p",
+        Op::Patch {
+            path: "/APM/TERRAIN/S36E149.DAT".into(),
+            pieces: vec![(2048, first.clone()), (12_288, second.clone())],
+        },
+    );
+    assert_eq!(done(&events), &Ok(()));
+    assert_eq!(bench.opcodes(ftp::CREATE_FILE), 0, "never truncated");
+    assert_eq!(bench.opcodes(ftp::OPEN_FILE_WO), 1);
+    let after = &bench.fake.files["/APM/TERRAIN/S36E149.DAT"];
+    assert_eq!(after.len(), 14_336);
+    assert_eq!(after[..2048], before[..2048]);
+    assert_eq!(after[2048..4096], first[..]);
+    assert_eq!(after[4096..10_000], before[4096..]);
+    assert_eq!(after[10_000..12_288], vec![0; 2288][..]);
+    assert_eq!(after[12_288..], second[..]);
+    // No write crosses into the next piece.
+    for request in bench.sent.iter().filter(|r| r.opcode == ftp::WRITE_FILE) {
+        let start = u64::from(request.offset);
+        let end = start + u64::from(request.size);
+        assert!(
+            (2048..=4096).contains(&start) && end <= 4096 || start >= 12_288,
+            "{start}..{end}"
+        );
+    }
+    let sent: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Sent { done, total, .. } => {
+                assert_eq!(*total, 4096);
+                Some(*done)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.last(), Some(&4096));
+}
+
+#[test]
+fn a_patch_makes_a_missing_file_and_survives_a_lossy_link() {
+    let mut bench = Bench::new();
+    // A simulator's folder, relative: the fake keeps every path from the root.
+    bench.fake.dirs.insert("/terrain".into());
+    bench.fake.drop_every = Some(5);
+    let block = (0..2048u32).map(|i| (i % 7) as u8).collect::<Vec<u8>>();
+    let events = bench.file(
+        "p",
+        Op::Patch {
+            path: "terrain/N53W005.DAT".into(),
+            pieces: vec![(4096, block.clone())],
+        },
+    );
+    assert_eq!(done(&events), &Ok(()));
+    let after = &bench.fake.files["/terrain/N53W005.DAT"];
+    assert_eq!(after[..4096], vec![0; 4096][..]);
+    assert_eq!(after[4096..], block[..]);
+}
+
+#[test]
+fn a_patch_into_a_missing_folder_says_so() {
+    let mut bench = Bench::new();
+    let events = bench.file(
+        "p",
+        Op::Patch {
+            path: "/APM/TERRAIN/N00E000.DAT".into(),
+            pieces: vec![(0, vec![1; 10])],
+        },
+    );
+    assert_eq!(
+        done(&events),
+        &Err(Failure::Rejected("there is no such file or folder".into()))
+    );
+}

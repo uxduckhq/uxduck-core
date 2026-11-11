@@ -9,7 +9,10 @@ use uxduck_contracts::dto::sim::{CatalogueEntry, SimBinariesResult, SimCatalogue
 
 use super::client::{CliError, LocalClient};
 
-fn program(vehicle: SimVehicle, autopilot: SimAutopilot) -> Result<&'static str, CliError> {
+pub(super) fn program(
+    vehicle: SimVehicle,
+    autopilot: SimAutopilot,
+) -> Result<&'static str, CliError> {
     if autopilot == SimAutopilot::Px4 {
         return match vehicle {
             SimVehicle::Multicopter | SimVehicle::Plane | SimVehicle::Vtol | SimVehicle::Rover => {
@@ -32,16 +35,10 @@ fn newest<'a>(
     firmware: &str,
     program: &str,
 ) -> Option<&'a CatalogueEntry> {
-    let numbers = |version: &str| -> Vec<u64> {
-        version
-            .split(|c: char| !c.is_ascii_digit())
-            .filter_map(|n| n.parse().ok())
-            .collect()
-    };
     entries
         .iter()
         .filter(|e| e.build.firmware == firmware && e.build.program == program)
-        .max_by_key(|e| numbers(&e.build.version))
+        .max_by_key(|e| crate::sim::catalogue::build_order(&e.build.version))
 }
 
 pub async fn ensure(data_dir: &Path, vehicle: &str, autopilot: &str) -> Result<(), CliError> {
@@ -147,5 +144,55 @@ async fn download(client: &mut LocalClient, firmware: &str, program: &str) -> Re
             last_progress = Instant::now();
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uxduck_contracts::dto::sim::{CatalogueBuild, CatalogueEntry};
+
+    fn entry(version: &str) -> CatalogueEntry {
+        CatalogueEntry {
+            build: CatalogueBuild {
+                id: format!("ardupilot-arducopter-{version}-x86_64-linux"),
+                firmware: "ardupilot".into(),
+                program: "arducopter".into(),
+                version: version.into(),
+                platform: "x86_64-linux".into(),
+                files: Vec::new(),
+                source_url: String::new(),
+            },
+            state: "available".into(),
+            received_bytes: None,
+            total_bytes: 0,
+            detail: None,
+        }
+    }
+
+    /// The catalogue on 2026-11-07: the digest's digits made the CLI take
+    /// the build from run 40438362054, which has no `--local-only`, over
+    /// the newest, run 41446300470, which New simulation takes.
+    #[test]
+    fn the_newest_build_is_the_latest_run_as_new_simulation_takes_it() {
+        let entries: Vec<CatalogueEntry> = [
+            "4.7.2",
+            "d5420ff97c84-uxduck-4f484623ea81-41162534597.1",
+            "d5420ff97c84-uxduck-5595e8ee8c50-40438362054.1",
+            "d5420ff97c84-uxduck-5cebdc8b7722-39842652339.1",
+            "d5420ff97c84-uxduck-5cebdc8b7722-40306143760.1",
+            "d5420ff97c84-uxduck-a1dcf436565f-41260150753.1",
+            "d5420ff97c84-uxduck-a1dcf436565f-41446300470.1",
+        ]
+        .into_iter()
+        .map(entry)
+        .collect();
+        let newest = super::newest(&entries, "ardupilot", "arducopter").unwrap();
+        assert_eq!(
+            newest.build.version,
+            "d5420ff97c84-uxduck-a1dcf436565f-41446300470.1"
+        );
+        let releases = [entry("4.6.9"), entry("4.7.10"), entry("4.7.2")];
+        let newest = super::newest(&releases, "ardupilot", "arducopter").unwrap();
+        assert_eq!(newest.build.version, "4.7.10");
     }
 }

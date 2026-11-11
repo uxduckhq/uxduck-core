@@ -136,6 +136,44 @@ pub fn is_keyframe(codec: Codec, kind: u8) -> bool {
     }
 }
 
+/// Whether an SEI unit holds a recovery point: a picture a decoder can
+/// start from without an IDR, whole again a few pictures later. Cameras
+/// that refresh a stripe of the picture at a time (periodic intra refresh)
+/// send one with every cycle and an IDR only when they start.
+#[must_use]
+pub fn sei_has_recovery_point(codec: Codec, nal: &[u8]) -> bool {
+    const RECOVERY_POINT: u32 = 6;
+    let header = match codec {
+        Codec::H265 => 2,
+        Codec::H264 => 1,
+    };
+    let rbsp = unescape_rbsp(nal);
+    let mut at = header;
+    // Each message: its type and size as runs of 0xFF and a last byte.
+    let read = |at: &mut usize| -> Option<u32> {
+        let mut value = 0u32;
+        loop {
+            let byte = *rbsp.get(*at)?;
+            *at += 1;
+            value = value.checked_add(u32::from(byte))?;
+            if byte != 0xff {
+                return Some(value);
+            }
+        }
+    };
+    // Up to the trailing bits, which start 0x80.
+    while at < rbsp.len() && rbsp[at..] != [0x80] {
+        let (Some(kind), Some(size)) = (read(&mut at), read(&mut at)) else {
+            return false;
+        };
+        if kind == RECOVERY_POINT {
+            return true;
+        }
+        at = at.saturating_add(size as usize);
+    }
+    false
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ParameterSet {
     Vps,
@@ -362,4 +400,42 @@ fn h265_sps(nal: &[u8]) -> Result<SpsInfo, OutOfBits> {
         display_width: Some(display_width),
         display_height: Some(display_height),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_recovery_point_is_found_among_other_sei_messages() {
+        // User data (type 5, two bytes), then a recovery point (type 6).
+        let h264 = [0x06, 0x05, 0x02, 0xaa, 0xbb, 0x06, 0x01, 0x94, 0x80];
+        assert!(sei_has_recovery_point(Codec::H264, &h264));
+        let h265 = [0x4e, 0x01, 0x06, 0x01, 0x94, 0x80];
+        assert!(sei_has_recovery_point(Codec::H265, &h265));
+    }
+
+    #[test]
+    fn other_or_broken_sei_is_no_recovery_point() {
+        assert!(!sei_has_recovery_point(
+            Codec::H264,
+            &[0x06, 0x05, 0x01, 0x06, 0x80]
+        ));
+        // A payload holding 6 is not a message of type 6.
+        assert!(!sei_has_recovery_point(
+            Codec::H264,
+            &[0x06, 0x05, 0x02, 0x06, 0x06, 0x80]
+        ));
+        // Cut short, and a size of 0xFF runs past the end.
+        assert!(!sei_has_recovery_point(Codec::H264, &[0x06, 0x05]));
+        assert!(!sei_has_recovery_point(
+            Codec::H264,
+            &[0x06, 0x05, 0xff, 0xff]
+        ));
+        // Escaped zeros inside a payload are bytes of it, not a message.
+        assert!(!sei_has_recovery_point(
+            Codec::H264,
+            &[0x06, 0x05, 0x03, 0x00, 0x00, 0x03, 0x06, 0x80]
+        ));
+    }
 }

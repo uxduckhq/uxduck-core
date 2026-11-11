@@ -1,0 +1,3196 @@
+{
+  "delta": {
+    "actor": {
+      "clientId": "wire-fixture"
+    },
+    "changes": [
+      {
+        "entity": "mission",
+        "id": "wire-vehicle",
+        "mission": {
+          "bootInstantUs": 123,
+          "fence": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "items": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "rally": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "status": "synced",
+          "syncedAtUs": 456,
+          "vehicleId": "wire-vehicle",
+          "version": 7
+        },
+        "op": "upsert"
+      }
+    ],
+    "seq": 42,
+    "tsUs": 456
+  },
+  "frames": {
+    "mission/history": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"records\":[{\"counts\":\"7 items, a fence, 7 rally points\",\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"firstSeenUs\":123,\"id\":\"wire-record\",\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"lastSeenUs\":456,\"origin\":{\"kind\":\"uploaded\",\"planId\":\"wire-plan\",\"planName\":\"Wire fixture\",\"verified\":false},\"originText\":\"Uploaded from Wire fixture\",\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"times\":2,\"vehicleId\":\"wire-vehicle\"}]}}",
+    "mission/refresh": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7}}",
+    "mission/restore": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"mission\":{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7},\"notes\":[\"Exact readback; not a writable plan\"],\"status\":\"different\"}}",
+    "mission/upload": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"mission\":{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7},\"status\":\"accepted\"}}",
+    "plan/upload": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"mission\":{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7},\"notes\":[],\"plan\":{\"autopilot\":\"ardupilot\",\"bounds\":{\"eastDeg\":149.17,\"northDeg\":-35.35,\"southDeg\":-35.37,\"westDeg\":149.15},\"changedAtUs\":1790669400000000,\"createdAtUs\":1790669300000000,\"fence\":{\"circles\":[{\"center\":{\"latitudeDeg\":-35.36,\"longitudeDeg\":149.16},\"inclusion\":false,\"radiusM\":25.0}],\"polygons\":[{\"inclusion\":true,\"points\":[{\"latitudeDeg\":-35.35,\"longitudeDeg\":149.15},{\"latitudeDeg\":-35.37,\"longitudeDeg\":149.15},{\"latitudeDeg\":-35.37,\"longitudeDeg\":149.17}]}],\"settings\":{\"action\":\"return-to-launch\",\"ceilingM\":100.0}},\"frame\":\"above-terrain\",\"id\":\"plan1a2b3c4d5e6f7a8b\",\"items\":[{\"altitudeM\":30.0,\"autocontinue\":true,\"command\":22,\"frame\":10,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"params\":[0.0,0.0,0.0,null]},{\"altitudeM\":40.0,\"autocontinue\":true,\"command\":16,\"frame\":10,\"latitudeDeg\":-35.3605,\"longitudeDeg\":149.1652,\"params\":[0.0,0.0,0.0,null]}],\"labels\":[\"Survey\"],\"madeBy\":\"person\",\"minClearanceM\":10.0,\"name\":\"Ridge survey\",\"nextAltitudeM\":40.0,\"notes\":\"\",\"placeAt\":{\"latitudeDeg\":-35.36,\"longitudeDeg\":149.16},\"placeName\":\"Canberra\",\"plannedHome\":{\"altitudeM\":584.0,\"latitudeDeg\":-35.363261,\"longitudeDeg\":149.16523},\"rally\":[{\"altitudeM\":60.0,\"latitudeDeg\":-35.365,\"longitudeDeg\":149.161}],\"redo\":0,\"undo\":1,\"uploads\":[],\"vehicleType\":\"vtol\",\"version\":2},\"status\":\"different\"}}",
+    "state/delta": "{\"jsonrpc\":\"2.0\",\"method\":\"state/delta\",\"params\":{\"actor\":{\"clientId\":\"wire-fixture\"},\"changes\":[{\"entity\":\"mission\",\"id\":\"wire-vehicle\",\"mission\":{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7},\"op\":\"upsert\"}],\"seq\":42,\"tsUs\":456}}",
+    "state/subscribe": "{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{\"seq\":41,\"snapshot\":{\"missions\":[{\"bootInstantUs\":123,\"fence\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"items\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"rally\":[{\"altitudeM\":47.25,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":47.25,\"longitudeDeg\":47.25,\"param1\":47.25,\"param2\":47.25,\"param3\":47.25,\"param4\":47.25},{\"altitudeM\":-0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":-0.0,\"longitudeDeg\":-0.0,\"param1\":-0.0,\"param2\":-0.0,\"param3\":-0.0,\"param4\":-0.0},{\"altitudeM\":0.0,\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":0.0,\"longitudeDeg\":0.0,\"param1\":0.0,\"param2\":0.0,\"param3\":0.0,\"param4\":0.0},{\"altitudeM\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param1\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param2\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param3\":{\"nonFiniteF64\":\"7ff8000000000001\"},\"param4\":{\"nonFiniteF64\":\"7ff8000000000001\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff8000000000042\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param1\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param2\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param3\":{\"nonFiniteF64\":\"fff8000000000042\"},\"param4\":{\"nonFiniteF64\":\"fff8000000000042\"}},{\"altitudeM\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"7ff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"7ff0000000000000\"}},{\"altitudeM\":{\"nonFiniteF64\":\"fff0000000000000\"},\"autocontinue\":false,\"command\":32001,\"frame\":255,\"latitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"longitudeDeg\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param1\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param2\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param3\":{\"nonFiniteF64\":\"fff0000000000000\"},\"param4\":{\"nonFiniteF64\":\"fff0000000000000\"}}],\"status\":\"synced\",\"syncedAtUs\":456,\"vehicleId\":\"wire-vehicle\",\"version\":7}]}}}"
+  },
+  "history": {
+    "records": [
+      {
+        "counts": "7 items, a fence, 7 rally points",
+        "fence": [
+          {
+            "altitudeM": 47.25,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 47.25,
+            "longitudeDeg": 47.25,
+            "param1": 47.25,
+            "param2": 47.25,
+            "param3": 47.25,
+            "param4": 47.25
+          },
+          {
+            "altitudeM": -0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": -0.0,
+            "longitudeDeg": -0.0,
+            "param1": -0.0,
+            "param2": -0.0,
+            "param3": -0.0,
+            "param4": -0.0
+          },
+          {
+            "altitudeM": 0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 0.0,
+            "longitudeDeg": 0.0,
+            "param1": 0.0,
+            "param2": 0.0,
+            "param3": 0.0,
+            "param4": 0.0
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff8000000000001"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param1": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param2": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param3": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param4": {
+              "nonFiniteF64": "fff8000000000042"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff0000000000000"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "fff0000000000000"
+            }
+          }
+        ],
+        "firstSeenUs": 123,
+        "id": "wire-record",
+        "items": [
+          {
+            "altitudeM": 47.25,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 47.25,
+            "longitudeDeg": 47.25,
+            "param1": 47.25,
+            "param2": 47.25,
+            "param3": 47.25,
+            "param4": 47.25
+          },
+          {
+            "altitudeM": -0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": -0.0,
+            "longitudeDeg": -0.0,
+            "param1": -0.0,
+            "param2": -0.0,
+            "param3": -0.0,
+            "param4": -0.0
+          },
+          {
+            "altitudeM": 0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 0.0,
+            "longitudeDeg": 0.0,
+            "param1": 0.0,
+            "param2": 0.0,
+            "param3": 0.0,
+            "param4": 0.0
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff8000000000001"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param1": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param2": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param3": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param4": {
+              "nonFiniteF64": "fff8000000000042"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff0000000000000"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "fff0000000000000"
+            }
+          }
+        ],
+        "lastSeenUs": 456,
+        "origin": {
+          "kind": "uploaded",
+          "planId": "wire-plan",
+          "planName": "Wire fixture",
+          "verified": false
+        },
+        "originText": "Uploaded from Wire fixture",
+        "rally": [
+          {
+            "altitudeM": 47.25,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 47.25,
+            "longitudeDeg": 47.25,
+            "param1": 47.25,
+            "param2": 47.25,
+            "param3": 47.25,
+            "param4": 47.25
+          },
+          {
+            "altitudeM": -0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": -0.0,
+            "longitudeDeg": -0.0,
+            "param1": -0.0,
+            "param2": -0.0,
+            "param3": -0.0,
+            "param4": -0.0
+          },
+          {
+            "altitudeM": 0.0,
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": 0.0,
+            "longitudeDeg": 0.0,
+            "param1": 0.0,
+            "param2": 0.0,
+            "param3": 0.0,
+            "param4": 0.0
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff8000000000001"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff8000000000001"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param1": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param2": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param3": {
+              "nonFiniteF64": "fff8000000000042"
+            },
+            "param4": {
+              "nonFiniteF64": "fff8000000000042"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "7ff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "7ff0000000000000"
+            }
+          },
+          {
+            "altitudeM": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "autocontinue": false,
+            "command": 32001,
+            "frame": 255,
+            "latitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "longitudeDeg": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param1": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param2": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param3": {
+              "nonFiniteF64": "fff0000000000000"
+            },
+            "param4": {
+              "nonFiniteF64": "fff0000000000000"
+            }
+          }
+        ],
+        "times": 2,
+        "vehicleId": "wire-vehicle"
+      }
+    ]
+  },
+  "mission": {
+    "bootInstantUs": 123,
+    "fence": [
+      {
+        "altitudeM": 47.25,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 47.25,
+        "longitudeDeg": 47.25,
+        "param1": 47.25,
+        "param2": 47.25,
+        "param3": 47.25,
+        "param4": 47.25
+      },
+      {
+        "altitudeM": -0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": -0.0,
+        "longitudeDeg": -0.0,
+        "param1": -0.0,
+        "param2": -0.0,
+        "param3": -0.0,
+        "param4": -0.0
+      },
+      {
+        "altitudeM": 0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 0.0,
+        "longitudeDeg": 0.0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff8000000000001"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param1": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param2": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param3": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param4": {
+          "nonFiniteF64": "fff8000000000042"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff0000000000000"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "fff0000000000000"
+        }
+      }
+    ],
+    "items": [
+      {
+        "altitudeM": 47.25,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 47.25,
+        "longitudeDeg": 47.25,
+        "param1": 47.25,
+        "param2": 47.25,
+        "param3": 47.25,
+        "param4": 47.25
+      },
+      {
+        "altitudeM": -0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": -0.0,
+        "longitudeDeg": -0.0,
+        "param1": -0.0,
+        "param2": -0.0,
+        "param3": -0.0,
+        "param4": -0.0
+      },
+      {
+        "altitudeM": 0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 0.0,
+        "longitudeDeg": 0.0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff8000000000001"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param1": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param2": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param3": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param4": {
+          "nonFiniteF64": "fff8000000000042"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff0000000000000"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "fff0000000000000"
+        }
+      }
+    ],
+    "rally": [
+      {
+        "altitudeM": 47.25,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 47.25,
+        "longitudeDeg": 47.25,
+        "param1": 47.25,
+        "param2": 47.25,
+        "param3": 47.25,
+        "param4": 47.25
+      },
+      {
+        "altitudeM": -0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": -0.0,
+        "longitudeDeg": -0.0,
+        "param1": -0.0,
+        "param2": -0.0,
+        "param3": -0.0,
+        "param4": -0.0
+      },
+      {
+        "altitudeM": 0.0,
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": 0.0,
+        "longitudeDeg": 0.0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff8000000000001"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff8000000000001"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param1": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param2": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param3": {
+          "nonFiniteF64": "fff8000000000042"
+        },
+        "param4": {
+          "nonFiniteF64": "fff8000000000042"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "7ff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "7ff0000000000000"
+        }
+      },
+      {
+        "altitudeM": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "autocontinue": false,
+        "command": 32001,
+        "frame": 255,
+        "latitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "longitudeDeg": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param1": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param2": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param3": {
+          "nonFiniteF64": "fff0000000000000"
+        },
+        "param4": {
+          "nonFiniteF64": "fff0000000000000"
+        }
+      }
+    ],
+    "status": "synced",
+    "syncedAtUs": 456,
+    "vehicleId": "wire-vehicle",
+    "version": 7
+  },
+  "planUpload": {
+    "mission": {
+      "bootInstantUs": 123,
+      "fence": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "items": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "rally": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "status": "synced",
+      "syncedAtUs": 456,
+      "vehicleId": "wire-vehicle",
+      "version": 7
+    },
+    "notes": [],
+    "plan": {
+      "autopilot": "ardupilot",
+      "bounds": {
+        "eastDeg": 149.17,
+        "northDeg": -35.35,
+        "southDeg": -35.37,
+        "westDeg": 149.15
+      },
+      "changedAtUs": 1790669400000000,
+      "createdAtUs": 1790669300000000,
+      "fence": {
+        "circles": [
+          {
+            "center": {
+              "latitudeDeg": -35.36,
+              "longitudeDeg": 149.16
+            },
+            "inclusion": false,
+            "radiusM": 25.0
+          }
+        ],
+        "polygons": [
+          {
+            "inclusion": true,
+            "points": [
+              {
+                "latitudeDeg": -35.35,
+                "longitudeDeg": 149.15
+              },
+              {
+                "latitudeDeg": -35.37,
+                "longitudeDeg": 149.15
+              },
+              {
+                "latitudeDeg": -35.37,
+                "longitudeDeg": 149.17
+              }
+            ]
+          }
+        ],
+        "settings": {
+          "action": "return-to-launch",
+          "ceilingM": 100.0
+        }
+      },
+      "frame": "above-terrain",
+      "id": "plan1a2b3c4d5e6f7a8b",
+      "items": [
+        {
+          "altitudeM": 30.0,
+          "autocontinue": true,
+          "command": 22,
+          "frame": 10,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "params": [
+            0.0,
+            0.0,
+            0.0,
+            null
+          ]
+        },
+        {
+          "altitudeM": 40.0,
+          "autocontinue": true,
+          "command": 16,
+          "frame": 10,
+          "latitudeDeg": -35.3605,
+          "longitudeDeg": 149.1652,
+          "params": [
+            0.0,
+            0.0,
+            0.0,
+            null
+          ]
+        }
+      ],
+      "labels": [
+        "Survey"
+      ],
+      "madeBy": "person",
+      "minClearanceM": 10.0,
+      "name": "Ridge survey",
+      "nextAltitudeM": 40.0,
+      "notes": "",
+      "placeAt": {
+        "latitudeDeg": -35.36,
+        "longitudeDeg": 149.16
+      },
+      "placeName": "Canberra",
+      "plannedHome": {
+        "altitudeM": 584.0,
+        "latitudeDeg": -35.363261,
+        "longitudeDeg": 149.16523
+      },
+      "rally": [
+        {
+          "altitudeM": 60.0,
+          "latitudeDeg": -35.365,
+          "longitudeDeg": 149.161
+        }
+      ],
+      "redo": 0,
+      "undo": 1,
+      "uploads": [],
+      "vehicleType": "vtol",
+      "version": 2
+    },
+    "status": "different"
+  },
+  "restore": {
+    "mission": {
+      "bootInstantUs": 123,
+      "fence": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "items": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "rally": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "status": "synced",
+      "syncedAtUs": 456,
+      "vehicleId": "wire-vehicle",
+      "version": 7
+    },
+    "notes": [
+      "Exact readback; not a writable plan"
+    ],
+    "status": "different"
+  },
+  "snapshot": {
+    "seq": 41,
+    "snapshot": {
+      "missions": [
+        {
+          "bootInstantUs": 123,
+          "fence": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "items": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "rally": [
+            {
+              "altitudeM": 47.25,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 47.25,
+              "longitudeDeg": 47.25,
+              "param1": 47.25,
+              "param2": 47.25,
+              "param3": 47.25,
+              "param4": 47.25
+            },
+            {
+              "altitudeM": -0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": -0.0,
+              "longitudeDeg": -0.0,
+              "param1": -0.0,
+              "param2": -0.0,
+              "param3": -0.0,
+              "param4": -0.0
+            },
+            {
+              "altitudeM": 0.0,
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": 0.0,
+              "longitudeDeg": 0.0,
+              "param1": 0.0,
+              "param2": 0.0,
+              "param3": 0.0,
+              "param4": 0.0
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff8000000000001"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff8000000000001"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param1": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param2": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param3": {
+                "nonFiniteF64": "fff8000000000042"
+              },
+              "param4": {
+                "nonFiniteF64": "fff8000000000042"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "7ff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "7ff0000000000000"
+              }
+            },
+            {
+              "altitudeM": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "autocontinue": false,
+              "command": 32001,
+              "frame": 255,
+              "latitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "longitudeDeg": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param1": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param2": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param3": {
+                "nonFiniteF64": "fff0000000000000"
+              },
+              "param4": {
+                "nonFiniteF64": "fff0000000000000"
+              }
+            }
+          ],
+          "status": "synced",
+          "syncedAtUs": 456,
+          "vehicleId": "wire-vehicle",
+          "version": 7
+        }
+      ]
+    }
+  },
+  "upload": {
+    "mission": {
+      "bootInstantUs": 123,
+      "fence": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "items": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "rally": [
+        {
+          "altitudeM": 47.25,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 47.25,
+          "longitudeDeg": 47.25,
+          "param1": 47.25,
+          "param2": 47.25,
+          "param3": 47.25,
+          "param4": 47.25
+        },
+        {
+          "altitudeM": -0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": -0.0,
+          "longitudeDeg": -0.0,
+          "param1": -0.0,
+          "param2": -0.0,
+          "param3": -0.0,
+          "param4": -0.0
+        },
+        {
+          "altitudeM": 0.0,
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": 0.0,
+          "longitudeDeg": 0.0,
+          "param1": 0.0,
+          "param2": 0.0,
+          "param3": 0.0,
+          "param4": 0.0
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff8000000000001"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff8000000000001"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param1": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param2": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param3": {
+            "nonFiniteF64": "fff8000000000042"
+          },
+          "param4": {
+            "nonFiniteF64": "fff8000000000042"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "7ff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "7ff0000000000000"
+          }
+        },
+        {
+          "altitudeM": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "autocontinue": false,
+          "command": 32001,
+          "frame": 255,
+          "latitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "longitudeDeg": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param1": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param2": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param3": {
+            "nonFiniteF64": "fff0000000000000"
+          },
+          "param4": {
+            "nonFiniteF64": "fff0000000000000"
+          }
+        }
+      ],
+      "status": "synced",
+      "syncedAtUs": 456,
+      "vehicleId": "wire-vehicle",
+      "version": 7
+    },
+    "status": "accepted"
+  }
+}

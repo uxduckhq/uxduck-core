@@ -1,0 +1,6 @@
+{
+  "method": "firmware/list",
+  "params": {
+    "refresh": true
+  }
+}

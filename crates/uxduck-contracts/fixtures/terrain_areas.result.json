@@ -5,15 +5,50 @@
       "area": {
         "id": "ta0123456789abcdef",
         "name": "Snowdonia",
-        "southDeg": 53.0,
-        "westDeg": -4.3,
-        "northDeg": 53.2,
-        "eastDeg": -3.9
+        "points": [
+          { "latitudeDeg": 53.0, "longitudeDeg": -4.3 },
+          { "latitudeDeg": 53.0, "longitudeDeg": -3.9 },
+          { "latitudeDeg": 53.1, "longitudeDeg": -4.0 },
+          { "latitudeDeg": 53.2, "longitudeDeg": -3.9 },
+          { "latitudeDeg": 53.2, "longitudeDeg": -4.3 }
+        ],
+        "enabled": true
       },
       "state": "fetching",
       "chunks": 8,
       "done": 3,
-      "bytes": 210000
+      "bytes": 210000,
+      "vehicles": [
+        {
+          "areaId": "ta0123456789abcdef",
+          "name": "Snowdonia",
+          "vehicleId": "veh-7f3a",
+          "vehicleName": "Alpha",
+          "state": "waiting",
+          "blocks": 64,
+          "written": 0,
+          "skipped": 0,
+          "bytes": 131072,
+          "detail": "Waiting for you to agree: Alpha is on a radio"
+        }
+      ]
+    },
+    {
+      "area": {
+        "id": "tafedcba9876543210",
+        "name": "Lake District",
+        "points": [
+          { "latitudeDeg": 54.3, "longitudeDeg": -3.3 },
+          { "latitudeDeg": 54.3, "longitudeDeg": -2.9 },
+          { "latitudeDeg": 54.6, "longitudeDeg": -2.9 },
+          { "latitudeDeg": 54.6, "longitudeDeg": -3.3 }
+        ],
+        "enabled": false
+      },
+      "state": "disabled",
+      "chunks": 0,
+      "done": 0,
+      "bytes": 0
     }
   ],
   "manifestCheckedAtUs": 1791935617252782

@@ -24,10 +24,13 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
+use uxduck_core::domain::controller::centred_throttle;
+use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::preflight::{
     Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, OwnCheck,
     Preflight,
 };
+use uxduck_core::domain::settings::PilotInputMethod;
 use uxduck_core::domain::setup::{SetupKind, SetupRow, fix_for};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::domain::video::{RecordPolicy, VideoState};
@@ -41,6 +44,9 @@ use crate::{ConnectionId, Engine};
 const REVIEW_EVERY_US: u64 = 500_000;
 /// A radio's signal older than this is not read.
 const SIGNAL_FRESH_US: u64 = 10_000_000;
+/// An EKF status older than this no longer says where a simulation is, as
+/// for the simulation start's own wait (`launch.rs`).
+const EKF_FRESH_US: u64 = 5_000_000;
 /// `MAV_FRAME_GLOBAL_TERRAIN_ALT` and its integer form.
 const TERRAIN_FRAMES: [u8; 2] = [10, 11];
 
@@ -51,7 +57,7 @@ pub(crate) struct Preflights {
     reviewed_at: BTreeMap<String, u64>,
     /// Parameters a person changed that take effect once the vehicle
     /// restarts, by vehicle: cleared when it does. Lost with the daemon.
-    restart_params: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) restart_params: BTreeMap<String, BTreeSet<String>>,
     /// When each checklist rule that is held for some seconds began to
     /// hold, by vehicle and step (S193). Lost with the daemon: a rule
     /// waits its seconds again.
@@ -213,6 +219,7 @@ fn procedure_words(kind: SetupKind) -> &'static str {
         SetupKind::AirspeedZero => "Zeroing the airspeed sensor",
         SetupKind::AirspeedCheck => "The pitot check",
         SetupKind::AirspeedRatio => "The airspeed ratio",
+        SetupKind::Escs => "The ESC calibration",
     }
 }
 
@@ -225,15 +232,13 @@ fn row_restart_words(row: RowDto) -> &'static str {
         RowDto::Radio => "the radio calibration",
         RowDto::Airspeed => "the airspeed calibration",
         RowDto::Motors => "the motor settings",
+        RowDto::Escs => "the ESC calibration",
+        RowDto::Restart => "the restart",
     }
 }
 
-fn row_of(row: RowDto) -> SetupRow {
-    row.into()
-}
-
 /// "a, b and c".
-fn and_list(items: &[String]) -> String {
+pub(crate) fn and_list(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [one] => one.clone(),
@@ -283,7 +288,7 @@ pub(crate) fn refusal(label: &str, vehicle: &str, gating: &[CheckRef], operator:
         "{label} wasn't sent to {vehicle}: {n} preflight {} {}: {}.{hint}",
         if n == 1 { "check" } else { "checks" },
         if n == 1 { "doesn't pass" } else { "don't pass" },
-        list.join("; ")
+        list.join(", ")
     )
 }
 
@@ -316,6 +321,7 @@ impl Engine {
                 plugin: None,
             });
         }
+        checks.extend(self.simulation_position_check(vehicle));
         // The vehicle's checklist (S193), then plugins' checks (S194).
         checks.extend(self.checklist_checks(vehicle));
         checks.extend(self.plugin_checks(vehicle));
@@ -346,19 +352,12 @@ impl Engine {
     }
 
     /// A request that would arm a disarmed vehicle past failing blocking
-    /// checks, from a client here (not from away): the checks, for its
-    /// approval to list (K4). Empty for anything else.
-    pub(crate) fn preflight_asks(
-        &self,
-        connection: ConnectionId,
-        request: &ClientRequest,
-    ) -> Vec<CheckRef> {
+    /// checks: the checks, for its approval to list (K4). Empty for
+    /// anything else.
+    pub(crate) fn preflight_asks(&self, request: &ClientRequest) -> Vec<CheckRef> {
         let ClientRequest::CommandSend(params) = request else {
             return Vec::new();
         };
-        if self.remote_sender(connection).is_some() {
-            return Vec::new();
-        }
         let command = Command::from(params.command.clone());
         match self.vehicle(&params.vehicle_id) {
             Some(vehicle) if !vehicle.armed && command.arms_on_the_ground() => {
@@ -463,7 +462,9 @@ impl Engine {
     /// and of one that takes effect on restarting, makes a restart due; one
     /// of UXDuck's own (a simulation's start, practice) does not.
     pub(crate) fn preflight_written(&mut self, vehicle_id: &str, name: &str, asked: bool) {
-        if !asked || !self.param_facts(vehicle_id, name).1 {
+        // Lua scripting starts only as the vehicle boots (ADR-0027 F14),
+        // whether or not its definitions are loaded to say so.
+        if !asked || !(self.param_facts(vehicle_id, name).1 || name == "SCR_ENABLE") {
             return;
         }
         let Some(id) = self.vehicle(vehicle_id).map(|v| v.id.clone()) else {
@@ -545,6 +546,52 @@ impl Engine {
             .collect()
     }
 
+    /// A simulated `ArduPilot` vehicle that says it may arm before its EKF
+    /// knows where it is takes off in nothing but a stabilised mode: GUIDED,
+    /// AUTO and Take off are refused until it does. It waits until then, a
+    /// few seconds after its own checks pass, and while its EKF status is
+    /// missing or more than 5 s old. PX4 sends no `EKF_STATUS_REPORT`, so
+    /// it is not held.
+    fn simulation_position_check(&self, vehicle: &Vehicle) -> Option<Check> {
+        if !self.is_simulated(vehicle) || vehicle.autopilot != "Ardupilotmega" {
+            return None;
+        }
+        let now = self.clock.now_us();
+        let ekf = self
+            .telemetry(&vehicle.id)
+            .and_then(|t| t.items.iter().find(|i| i.key == "ekf.status"));
+        let name = &vehicle.name;
+        let (status, detail) = match ekf {
+            None => (
+                CheckStatus::Waiting,
+                format!("{name} hasn't said yet whether it knows where it is."),
+            ),
+            Some(item) if now.saturating_sub(item.time_us) > EKF_FRESH_US => (
+                CheckStatus::Waiting,
+                format!("{name} hasn't said for over 5 s whether it knows where it is."),
+            ),
+            Some(item) if item.text.as_deref() == Some("Good") => {
+                (CheckStatus::Pass, format!("{name} knows where it is."))
+            }
+            Some(_) => (
+                CheckStatus::Waiting,
+                format!(
+                    "{name} is still starting: it can arm once it knows where it is, in a few seconds."
+                ),
+            ),
+        };
+        Some(Check {
+            id: "uxduck:simulation-position".into(),
+            source: CheckSource::Uxduck,
+            title: "Position".into(),
+            severity: CheckSeverity::Block,
+            status,
+            detail: Some(detail),
+            fix: None,
+            plugin: None,
+        })
+    }
+
     fn setup_check(&self, vehicle: &Vehicle) -> Outcome {
         match self.running_setup(&vehicle.id) {
             Some(setup) => not(
@@ -581,11 +628,10 @@ impl Engine {
         }
         let mut what: Vec<String> = rows.iter().map(|r| row_restart_words(*r).into()).collect();
         what.extend(params.iter().cloned());
-        let fix = rows
-            .first()
-            .map_or(CheckFix::Restart, |row| CheckFix::Setup {
-                row: row_of(*row),
-            });
+        // The Restart row, wherever the restart is due from (S216, V16).
+        let fix = CheckFix::Setup {
+            row: SetupRow::Restart,
+        };
         let mut detail = and_list(&what);
         if let Some(first) = detail.get(..1) {
             detail = format!("{}{}", first.to_uppercase(), &detail[1..]);
@@ -640,7 +686,7 @@ impl Engine {
                 Some(CheckFix::Connections),
             ),
             Some(_) => pass(format!(
-                "Heard just now; the radio signal is at least {threshold:.0} %."
+                "Heard just now. The radio signal is at least {threshold:.0} %."
             )),
             None => pass("Heard just now."),
         }
@@ -662,6 +708,33 @@ impl Engine {
             .collect();
         if driving.is_empty() {
             return pass(format!("No controller drives {}.", vehicle.name));
+        }
+        // ArduRover stops at its throttle channel's trim, which
+        // `MANUAL_CONTROL` reaches only through that calibration, as the
+        // data plane's session holds it and says: without it the data plane
+        // sends the vehicle nothing.
+        if Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type) == Some(Family::Rover)
+            && self.pilot_input_method(&vehicle.id) == PilotInputMethod::ManualControl
+        {
+            let problem = match self.transfers.rc_calibrations.get(&vehicle.id) {
+                Some(problem) => problem.clone(),
+                None => Some(format!(
+                    "{}'s parameters haven't been read on this connection",
+                    vehicle.name
+                )),
+            };
+            if let Some(problem) = problem {
+                return not(
+                    CheckStatus::Fail,
+                    format!(
+                        "{problem}, so UXDuck sends {} no MANUAL_CONTROL. Read its parameters, or calibrate its radio.",
+                        vehicle.name
+                    ),
+                    Some(CheckFix::Setup {
+                        row: SetupRow::Radio,
+                    }),
+                );
+            }
         }
         let band = vehicle
             .preflight
@@ -689,12 +762,18 @@ impl Engine {
                     Some(CheckFix::Controllers),
                 );
             }
-            // 0 is the throttle's middle: at rest, a gamepad's springs back
-            // there and a radio's sits at the bottom.
-            if sticks.throttle >= band {
+            // 0 is the throttle's middle. An aircraft's rests below it, where
+            // a gamepad's springs back to the middle and a radio's sits at
+            // the bottom; forward / reverse and ascend / descend rest in the
+            // middle and move the vehicle either way from it.
+            let centred = centred_throttle(&vehicle.autopilot, &vehicle.vehicle_type);
+            if !sticks.throttle_neutral(centred.is_some(), band) {
                 return not(
                     CheckStatus::Fail,
-                    format!("Lower the throttle on {}.", controller.name),
+                    match centred {
+                        Some(control) => format!("Centre {control} on {}.", controller.name),
+                        None => format!("Lower the throttle on {}.", controller.name),
+                    },
                     Some(CheckFix::Controllers),
                 );
             }
@@ -797,7 +876,7 @@ impl Engine {
             .iter()
             .any(|i| TERRAIN_FRAMES.contains(&i.frame))
         {
-            return pass(format!("{name}'s mission doesn't fly above terrain."));
+            return pass(format!("{name}'s mission has no heights above terrain."));
         }
         let item = |key: &str| {
             self.telemetry(&vehicle.id)

@@ -1,0 +1,21 @@
+{
+  "cards": [
+    {
+      "path": "/Volumes/NO NAME",
+      "name": "NO NAME",
+      "logs": 12,
+      "bytes": 48211968
+    }
+  ],
+  "copied": [
+    {
+      "path": "/Users/pilot/Library/Application Support/UXDuck/logs-from-cards/NO NAME-2026-10-28/00000012.BIN",
+      "name": "00000012.BIN",
+      "card": "NO NAME-2026-10-28",
+      "bytes": 4017664
+    }
+  ],
+  "copying": "/Volumes/NO NAME",
+  "done": 12,
+  "of": 12
+}

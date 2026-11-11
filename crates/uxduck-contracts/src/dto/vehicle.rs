@@ -61,6 +61,15 @@ pub struct Vehicle {
     pub mode: Option<String>,
     pub saved: bool,
     pub dismissed: bool,
+    /// Hidden by the person, set with `vehicle/hide`: out of every list
+    /// until it is seen again or unhidden, kept with its name, flights and
+    /// history. Absent when not hidden.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Met only in a log someone opened, never heard live: a real board's
+    /// UID, kept so the name given it sticks. Absent once it is heard.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen_in_log: bool,
     /// Kept out of the account's library although sync is on (S16).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_only: bool,
@@ -77,6 +86,14 @@ pub struct Vehicle {
     /// autopilot's simulator flies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// Its gripper, as the operator identified it with `vehicle/gripper`
+    /// (S263). Absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper: Option<crate::dto::gripper::GripperSetup>,
+    /// Its companion computers, added with `computer/add` (S296). Absent
+    /// when it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<crate::dto::companion::CompanionComputer>,
     /// The traffic its ADS-B receiver reports is used, set with
     /// `vehicle/traffic` (S168). Absent when it is not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -85,6 +102,36 @@ pub struct Vehicle {
     /// its type gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// Its colour, given when it was first heard or chosen with
+    /// `vehicle/colour`, kept with its id. Absent only on a vehicle kept
+    /// from before colours were given and not heard since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<VehicleColour>,
+    /// A replay vehicle (ADR-0039 R3): a flight played back, not live.
+    /// Nothing can be sent to it and nothing is recorded of it. Absent when
+    /// live.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
+    /// A replay vehicle's original, when it is here: its name, look and
+    /// size are the original's, and renaming it renames the original.
+    /// Absent for a live vehicle and for a replay with no original here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_of: Option<String>,
+    /// When its source begins, for a replay vehicle shown twice at once:
+    /// two sources hold the same vehicle (ADR-0039 R20), and each copy
+    /// says when it was. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub replay_at_us: Option<u64>,
+    /// It said it is simulated: its SITL has `SIM_` parameters (ADR-0039
+    /// R14). Absent otherwise. A simulation of UXDuck's own is simulated by
+    /// its link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sim_evidence: bool,
+    /// The person's word, set with `vehicle/simulated`, over the evidence.
+    /// Absent until they say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated: Option<bool>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -131,6 +178,55 @@ pub struct VehicleLookParams {
     /// Absent gives it back the model its type gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+}
+
+/// A vehicle's colour on the maps, in the sidebar and on its mission
+/// (ADR-0029 P19). None is green, red, amber, orange or grey, which show
+/// fences and whether a vehicle is heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum VehicleColour {
+    Blue,
+    Pink,
+    Teal,
+    Purple,
+    Lilac,
+    Orchid,
+    Violet,
+    Sky,
+    Magenta,
+}
+
+/// `vehicle/colour`: the colour a vehicle is drawn in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleColourParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    pub colour: VehicleColour,
+}
+
+/// `vehicle/simulated`: whether a vehicle is a simulation, as the person
+/// says, over what it said itself (ADR-0039 R14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleSimulatedParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// True or false; absent goes back to its own word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated: Option<bool>,
+}
+
+/// `vehicle/hide`: hides an offline vehicle from every list until it is
+/// seen again, or shows it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleHideParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// True hides it; false shows it again.
+    pub hidden: bool,
 }
 
 /// `vehicle/size`: a vehicle's length, or wingspan, for the 3D map.

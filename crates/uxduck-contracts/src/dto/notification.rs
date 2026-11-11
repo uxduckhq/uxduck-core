@@ -69,8 +69,8 @@ pub enum Action {
     OpenUrl { url: String },
     /// Opens a Video tab showing this source; nothing is called.
     OpenVideo { source_id: String },
-    /// Opens the Controllers tab, for a controller just plugged in; nothing
-    /// is called.
+    /// Opens the Cockpit's controllers, for a controller just plugged in;
+    /// nothing is called.
     OpenControllers { controller_id: String },
     /// Calls `flight/keep` with `keep: true`: a flight just finished, saved
     /// to the account (C9).
@@ -104,12 +104,12 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access: Option<crate::dto::pairing::NetworkAccess>,
     },
-    /// Calls `lease/release`: takes control of a vehicle back from someone
-    /// away (S80).
-    TakeBack { vehicle_id: String },
     /// Calls `sim/restart`: starts a simulated vehicle again from where it
     /// started, after a crash.
     RestartSimulation { link_id: String },
+    /// Calls `sim/pause` with `paused` false: a simulated vehicle paused
+    /// where it touched the 3D scenery carries on from there.
+    ResumeSimulation { link_id: String },
     /// Calls `settings/update` with `vehicleTerrain`: answers and checks a
     /// vehicle from this dataset from now on (S119).
     UseTerrainDataset {
@@ -122,6 +122,9 @@ pub enum Action {
         vehicle_id: String,
         row: crate::dto::setup::SetupRow,
     },
+    /// Calls `terrain/putArea` for the vehicle: puts its areas on it, as
+    /// asked first over a radio or on a real vehicle (ADR-0051 A7).
+    PutTerrainAreas { vehicle_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

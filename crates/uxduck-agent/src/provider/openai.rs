@@ -107,6 +107,9 @@ pub fn body(request: &ProviderRequest) -> Value {
     if let Some(key) = &request.cache_key {
         body["prompt_cache_key"] = json!(key);
     }
+    if let Some(effort) = &request.effort {
+        body["reasoning"] = json!({ "effort": effort });
+    }
     body
 }
 
@@ -156,6 +159,8 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
                 response_id: response["id"].as_str().unwrap_or_default().to_owned(),
                 output: response["output"].as_array().cloned().unwrap_or_default(),
                 usage: usage(&response["usage"]),
+                usage_known: response["usage"]["input_tokens"].as_u64().is_some()
+                    && response["usage"]["output_tokens"].as_u64().is_some(),
             })
         }
         "response.incomplete" => {
@@ -174,19 +179,19 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
                 .or_else(|| value.get("code"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            return Err(
-                if matches!(
-                    code,
-                    "rate_limit_exceeded" | "server_error" | "server_is_overloaded"
-                ) {
-                    ProviderError::Busy {
-                        message: message(value),
-                        retry_after: None,
-                    }
-                } else {
-                    ProviderError::Refused(message(value))
-                },
-            );
+            return Err(if code == "uxduck-upstream" {
+                ProviderError::Transport(message(value))
+            } else if matches!(
+                code,
+                "rate_limit_exceeded" | "server_error" | "server_is_overloaded"
+            ) {
+                ProviderError::Busy {
+                    message: message(value),
+                    retry_after: None,
+                }
+            } else {
+                ProviderError::Refused(message(value))
+            });
         }
         _ => None,
     })
@@ -194,6 +199,40 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
 
 #[cfg(feature = "http")]
 impl Provider for OpenAiProvider {
+    fn respond_once_private(
+        &self,
+        request: ProviderRequest,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let mut provider = self.clone();
+        if provider.hosted {
+            provider.headers.insert(
+                HeaderName::from_static("x-uxduck-share"),
+                HeaderValue::from_static("none"),
+            );
+        }
+        provider.respond(request)
+    }
+
+    fn respond_with_input(
+        &self,
+        request: ProviderRequest,
+        inputs: crate::input::Inputs,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let mut provider = self.clone();
+        if provider.hosted && !inputs.sharing() {
+            provider.headers.insert(
+                HeaderName::from_static("x-uxduck-share"),
+                HeaderValue::from_static("none"),
+            );
+        }
+        if !request.model.starts_with("gpt-6") {
+            return provider.respond(request);
+        }
+        let url = format!("{}/responses", self.api_base)
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        super::openai_ws::respond(url, provider.headers, self.hosted, request, inputs)
+    }
     fn wire(&self) -> Wire {
         Wire::OpenAi
     }
@@ -270,6 +309,12 @@ mod tests {
         assert_eq!(body["prompt_cache_key"], "chat-1");
         assert_eq!(body["max_output_tokens"], 16_000);
         assert_eq!(body["tools"][0]["name"], "vehicle_list");
+        assert!(body.get("reasoning").is_none(), "the model's own effort");
+        let chosen = super::body(&ProviderRequest {
+            effort: Some("xhigh".into()),
+            ..request
+        });
+        assert_eq!(chosen["reasoning"], json!({ "effort": "xhigh" }));
     }
 
     #[test]
@@ -297,6 +342,7 @@ mod tests {
             response_id,
             output,
             usage,
+            ..
         })) = event(&done)
         else {
             panic!("completed");

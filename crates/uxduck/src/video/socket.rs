@@ -59,6 +59,9 @@ pub async fn serve(
                 if sink.send(Message::Binary(bytes.into())).await.is_err() {
                     break;
                 }
+                if let Item::Unit(unit) = &item {
+                    watcher.sent(unit, std::time::Instant::now());
+                }
             }
             let _ = sink.send(Message::Close(None)).await;
         })

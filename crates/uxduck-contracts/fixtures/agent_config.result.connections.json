@@ -1,0 +1,23 @@
+{
+  "models": ["gpt-6-sol", "codex:gpt-6-sol"],
+  "defaultModel": "gpt-6-sol",
+  "provider": "hosted",
+  "ready": false,
+  "readyModels": ["codex:gpt-6-sol"],
+  "connections": [
+    {
+      "id": "codex",
+      "title": "Codex",
+      "status": "connected",
+      "detail": "Your Pro plan",
+      "models": [{ "id": "codex:gpt-6-sol", "title": "GPT-6 Sol" }]
+    },
+    {
+      "id": "claude-code",
+      "title": "Claude",
+      "status": "disconnected",
+      "detail": "Connect your account",
+      "models": []
+    }
+  ]
+}

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use uxduck_contracts::dto::link::{SimAutopilot as SimAutopilotDto, SimVehicle as SimVehicleDto};
-use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary};
+use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult};
 use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle};
 
 #[cfg(debug_assertions)]
@@ -82,11 +82,15 @@ static CLAIMS: std::sync::LazyLock<
 /// are free again after `CLAIM_GRACE`, when its simulator has stopped.
 #[must_use]
 pub fn claim_instance(instance: u8) -> bool {
+    claim_with(instance, instance_free)
+}
+
+/// [`claim_instance`] with the ports' check given, so the claim's own logic
+/// is tested apart from ports other tests may hold for a moment.
+fn claim_with(instance: u8, free: impl Fn(u8) -> bool) -> bool {
     let mut claims = CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
-    claims.retain(|held, (_, at)| {
-        *held == instance || at.elapsed() < CLAIM_GRACE || !instance_free(*held)
-    });
-    if !instance_free(instance) {
+    claims.retain(|held, (_, at)| *held == instance || at.elapsed() < CLAIM_GRACE || !free(*held));
+    if !free(instance) {
         return false;
     }
     if claims.contains_key(&instance) {
@@ -161,6 +165,8 @@ pub struct Simulators {
     data_dir: PathBuf,
     /// Held across launches and log cleanup; released only after the guard exits.
     active: Arc<Mutex<HashSet<String>>>,
+    /// Guard roots for local resource measurements, held until their exit is reaped.
+    guards: Arc<Mutex<HashSet<u32>>>,
     binaries: Mutex<Vec<SimBinary>>,
     /// Set once the builds have been probed; a link reopened as the daemon
     /// starts waits for it.
@@ -168,6 +174,14 @@ pub struct Simulators {
     /// One scan at a time: a rescan after an install waits for a slower
     /// scan already running, so the older list never lands last.
     scanning: Mutex<()>,
+    frame_probe: Mutex<Option<FrameProbe>>,
+}
+
+#[derive(Debug)]
+struct FrameProbe {
+    binary: String,
+    vehicle: SimVehicleDto,
+    result: Option<Result<SimFramesResult, String>>,
 }
 
 impl Simulators {
@@ -176,9 +190,70 @@ impl Simulators {
         Arc::new(Self {
             data_dir: data_dir.to_owned(),
             active: Arc::default(),
+            guards: Arc::default(),
             binaries: Mutex::new(Vec::new()),
             probed: std::sync::OnceLock::new(),
             scanning: Mutex::new(()),
+            frame_probe: Mutex::new(None),
+        })
+    }
+
+    /// A single background probe keeps a slow executable off the engine thread.
+    /// Polling cannot execute a file; only an explicitly authorised refresh can.
+    /// # Errors
+    /// When another probe is running, none was requested, or the executable fails.
+    pub fn read_frames(
+        self: &Arc<Self>,
+        params: &SimFramesParams,
+    ) -> Result<SimFramesResult, String> {
+        let mut slot = self
+            .frame_probe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(probe) = slot.as_ref() {
+            let same = probe.binary == params.binary && probe.vehicle == params.vehicle;
+            if probe.result.is_none() {
+                return if same {
+                    Ok(SimFramesResult {
+                        reading: true,
+                        frames: Vec::new(),
+                        default_frame: None,
+                    })
+                } else {
+                    Err("Another simulator frame list is being read. Try again shortly.".into())
+                };
+            }
+            if same
+                && !params.refresh
+                && let Some(result) = &probe.result
+            {
+                return result.clone();
+            }
+        }
+        if !params.refresh {
+            return Err("No frame list has been requested for this executable. Choose Read frames from build.".into());
+        }
+        *slot = Some(FrameProbe {
+            binary: params.binary.clone(),
+            vehicle: params.vehicle,
+            result: None,
+        });
+        let manager = Arc::clone(self);
+        let params = params.clone();
+        std::thread::spawn(move || {
+            let result = inspect_frames(&params);
+            let mut slot = manager
+                .frame_probe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(probe) = slot.as_mut() {
+                probe.result = Some(result);
+            }
+        });
+        Ok(SimFramesResult {
+            reading: true,
+            frames: Vec::new(),
+            default_frame: None,
         })
     }
 
@@ -191,8 +266,8 @@ impl Simulators {
     /// Where builds are found, in order: in a development build
     /// `UXDUCK_SITL_DIR`, then the data directory's `simulators/bin/`, the
     /// catalogue's installed builds (S18), and in a development build
-    /// `.cache/simulators/native/` (or `UXDUCK_SIM_CACHE_DIR`), with legacy
-    /// `target/sitl/bin/` as fallback. A release reads nothing from the
+    /// `.cache/simulators/native/` with legacy `target/sitl/bin/` as fallback,
+    /// or only `UXDUCK_SIM_CACHE_DIR`'s `native/` when it is set. A release reads nothing from the
     /// checkout: it downloads its builds as everyone's does. The first build
     /// of a program in the plain folders is used; every catalogue build is
     /// listed.
@@ -210,7 +285,10 @@ impl Simulators {
             .filter(|path| path.join(BUILD_FILE).is_file())
             .collect();
         // Newest first, so the default for a vehicle is its newest version.
-        installed.sort_by(|a, b| b.cmp(a));
+        let order = |path: &PathBuf| {
+            catalogue::build_order(&path.file_name().unwrap_or_default().to_string_lossy())
+        };
+        installed.sort_by_key(|path| std::cmp::Reverse(order(path)));
         directories.extend(installed.into_iter().map(|d| (d, true)));
         #[cfg(debug_assertions)]
         directories.extend(cache::directories().into_iter().map(|d| (d, false)));
@@ -294,10 +372,21 @@ impl Simulators {
             return Err("This simulation is still stopping. Try again once it has stopped.".into());
         }
         let (mut running, endpoint) = self.launch_inner(link)?;
+        let guard_pid = running
+            .guard
+            .as_ref()
+            .ok_or("The simulator guard was not started.")?
+            .id();
         active.insert(link.id.clone());
+        self.guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(guard_pid);
         running.active = Some(ActiveSimulation {
             active: Arc::clone(&self.active),
             id: link.id.clone(),
+            guards: Arc::clone(&self.guards),
+            guard_pid,
         });
         Ok((running, endpoint))
     }
@@ -307,10 +396,73 @@ impl Simulators {
         self.with_active(|active| active.contains(id))
     }
 
+    /// Only guard processes started by this manager. Never process-name matching.
+    #[must_use]
+    pub fn guard_pids(&self) -> Vec<u32> {
+        self.guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect()
+    }
+
     /// Runs a storage operation while preventing a simulator from starting.
     pub fn with_active<T>(&self, operation: impl FnOnce(&HashSet<String>) -> T) -> T {
         let active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         operation(&active)
+    }
+
+    /// Whether a new simulator link has the build it would start, so a
+    /// start without one is refused before its link is added (FB-179): the
+    /// same choice as [`Self::launch`]. A build of the user's own must be
+    /// there, and is probed only when it starts.
+    ///
+    /// # Errors
+    /// What is missing and how to get it.
+    pub fn check_build(&self, kind: &LinkKind) -> Result<(), String> {
+        let LinkKind::Simulator {
+            vehicle,
+            autopilot,
+            ref frame,
+            ref binary,
+            ..
+        } = *kind
+        else {
+            return Ok(());
+        };
+        match binary {
+            Some(path) if Path::new(path).is_file() => Ok(()),
+            Some(path) => Err(format!(
+                "There is no simulator build at {path}. Choose another build."
+            )),
+            None => self
+                .installed_build(autopilot, vehicle, frame.as_deref())
+                .map(drop),
+        }
+    }
+
+    /// The first installed build of the autopilot that flies the vehicle,
+    /// on the frame when one is asked for.
+    fn installed_build(
+        &self,
+        autopilot: SimAutopilot,
+        vehicle: SimVehicle,
+        frame: Option<&str>,
+    ) -> Result<SimBinary, String> {
+        let wanted = dto_vehicle(vehicle);
+        self.binaries()
+            .into_iter()
+            .find(|b| {
+                b.autopilot == dto_autopilot(autopilot)
+                    && b.vehicles.contains(&wanted)
+                    && frame.is_none_or(|frame| {
+                        b.frames.iter().any(|candidate| candidate == frame)
+                            || frame.contains(':')
+                            || launcher_base(b, frame).is_some()
+                    })
+            })
+            .ok_or_else(|| missing(autopilot, vehicle))
     }
 
     fn launch_inner(&self, link: &Link) -> Result<(Running, Endpoint), String> {
@@ -324,6 +476,7 @@ impl Simulators {
             ref frame,
             speedup,
             ref binary,
+            allow_network,
             wipe,
             traffic,
             instance,
@@ -340,23 +493,11 @@ impl Simulators {
         // A build of the user's own is whatever it is; otherwise the first
         // build of the asked-for autopilot that flies the vehicle.
         let build = match binary {
-            Some(path) => probe(Path::new(path))?,
-            None => self
-                .binaries()
-                .into_iter()
-                .find(|b| {
-                    b.autopilot == dto_autopilot(autopilot)
-                        && b.vehicles.contains(&wanted)
-                        && frame.as_deref().is_none_or(|frame| {
-                            b.frames.iter().any(|candidate| candidate == frame)
-                                || frame.contains(':')
-                                || launcher_base(b, frame).is_some()
-                        })
-                })
-                .ok_or_else(|| missing(autopilot, vehicle))?,
+            Some(path) => probe_own(Path::new(path), autopilot, vehicle, frame.as_deref())?,
+            None => self.installed_build(autopilot, vehicle, frame.as_deref())?,
         };
         if !build.vehicles.contains(&wanted) {
-            return Err(format!("{} does not fly this vehicle", build.program));
+            return Err(format!("{} does not run this vehicle", build.program));
         }
         let frame = frame
             .clone()
@@ -393,7 +534,9 @@ impl Simulators {
         std::fs::create_dir_all(&directory)
             .map_err(|e| format!("cannot make {}: {e}", directory.display()))?;
         let (model, defaults) = model_and_defaults(&build, &frame, launcher);
-        let mut args = vec![
+        let model = profiles::with_physics(&directory, &build.program, &frame, model)?;
+        let mut args = local_only_args(Path::new(&build.path), allow_network)?;
+        args.extend([
             format!("--model={model}"),
             format!("--home={latitude_deg},{longitude_deg},{altitude_m},{heading_deg}"),
             format!("--speedup={}", speedup.unwrap_or(1)),
@@ -412,7 +555,7 @@ impl Simulators {
             }
             .into(),
             "--serial2=none".into(),
-        ];
+        ]);
         if wipe {
             args.push("--wipe".into());
         }
@@ -553,7 +696,7 @@ fn port_frees_up(port: u16) -> bool {
 
 fn missing(autopilot: SimAutopilot, vehicle: SimVehicle) -> String {
     if autopilot == SimAutopilot::Px4 {
-        return "no PX4 build: put one in the simulators folder (scripts/px4-sitl.sh), or choose your own build".into();
+        return "No PX4 simulator is installed on this computer. Build one into the simulators folder with scripts/px4-sitl.sh, or choose your own build.".into();
     }
     let program = match vehicle {
         SimVehicle::Multicopter => "arducopter",
@@ -562,7 +705,9 @@ fn missing(autopilot: SimAutopilot, vehicle: SimVehicle) -> String {
         SimVehicle::Submarine => "ardusub",
         SimVehicle::Airship => "blimp",
     };
-    format!("no {program} build: put one in the simulators folder, or choose your own build")
+    format!(
+        "No {program} simulator is installed on this computer. Download it from the simulator catalogue first with sim/catalogue and sim/download, or start it from New simulation, which downloads it for you. You can also choose your own build."
+    )
 }
 
 fn vehicle_name(vehicle: SimVehicle) -> &'static str {
@@ -686,22 +831,87 @@ pub fn probe(path: &Path) -> Result<SimBinary, String> {
                 path.display()
             )
         })?;
+    probe_ardupilot(path, program, vehicles, None)
+}
+
+/// A directly supplied executable need not be named like a catalogue build
+/// or ship a frame table. Its selected vehicle and frame are explicit.
+fn probe_own(
+    path: &Path,
+    autopilot: SimAutopilot,
+    vehicle: SimVehicle,
+    frame: Option<&str>,
+) -> Result<SimBinary, String> {
+    if autopilot == SimAutopilot::Px4 {
+        return probe(path);
+    }
+    let name = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let wanted = dto_vehicle(vehicle);
+    let (program, vehicles) = PROGRAMS
+        .iter()
+        .filter(|(program, _)| name.starts_with(program))
+        .max_by_key(|(program, _)| program.len())
+        .or_else(|| {
+            PROGRAMS
+                .iter()
+                .find(|(_, vehicles)| vehicles.contains(&wanted))
+        })
+        .map(|(program, vehicles)| (*program, vehicles.to_vec()))
+        .ok_or("No ArduPilot simulator runs this vehicle")?;
+    let usual = match vehicle {
+        SimVehicle::Multicopter => "quad",
+        SimVehicle::Plane => "plane",
+        SimVehicle::Vtol => "quadplane",
+        SimVehicle::Jet => JET_FRAME,
+        SimVehicle::Rover => "rover",
+        SimVehicle::Boat => "motorboat",
+        SimVehicle::Submarine => "vectored",
+        SimVehicle::Airship => "blimp",
+    };
+    probe_ardupilot(path, program, vehicles, Some(frame.unwrap_or(usual)))
+}
+
+fn probe_ardupilot(
+    path: &Path,
+    program: &str,
+    vehicles: Vec<SimVehicleDto>,
+    own_frame: Option<&str>,
+) -> Result<SimBinary, String> {
     let text = describe(path, "--list-models")?;
     let folder = path.parent().unwrap_or(Path::new("."));
     // An older build has no table inside; the catalogue ships its own.
-    let (frames, default_frame) = frames(&text, program)
-        .or_else(|| {
-            frames(
-                &std::fs::read_to_string(folder.join(FRAME_TABLE)).ok()?,
-                program,
-            )
-        })
-        .ok_or_else(|| {
-            format!(
-                "{} is not a SITL build with its frame table",
+    let table = frames(&text, program).or_else(|| {
+        frames(
+            &std::fs::read_to_string(folder.join(FRAME_TABLE)).ok()?,
+            program,
+        )
+    });
+    let (frames, default_frame) = match (table, own_frame) {
+        (Some(table), _) => table,
+        (None, Some(frame)) if !folder.join(FRAME_TABLE).exists() => {
+            let usage = describe(path, "--help")?;
+            if !["--model", "--home", "--instance", "--serial0"]
+                .iter()
+                .all(|option| has_option(&usage, option))
+            {
+                return Err(format!(
+                    "{} does not describe an ArduPilot SITL executable",
+                    path.display()
+                ));
+            }
+            (vec![frame.to_owned()], frame.to_owned())
+        }
+        _ => {
+            return Err(format!(
+                "{} is not a SITL build with its frame table: build it from its ArduPilot checkout with `uxduck sim build <checkout>`",
                 path.display()
-            )
-        })?;
+            ));
+        }
+    };
     let build: Option<CatalogueBuild> = std::fs::read(folder.join(BUILD_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -714,6 +924,44 @@ pub fn probe(path: &Path) -> Result<SimBinary, String> {
         default_frame,
         version: build.as_ref().map(|b| b.version.clone()),
         catalogue_id: build.map(|b| b.id),
+    })
+}
+
+/// Read the selected vehicle's frame table without starting a simulation.
+/// # Errors
+/// When the executable cannot be probed or a supplied table is invalid.
+pub fn inspect_frames(
+    params: &uxduck_contracts::dto::sim::SimFramesParams,
+) -> Result<uxduck_contracts::dto::sim::SimFramesResult, String> {
+    let path = Path::new(params.binary.trim());
+    if !path.is_absolute() || !path.is_file() {
+        return Err("Choose the full path to an existing simulator executable.".into());
+    }
+    let (program, _) = PROGRAMS
+        .iter()
+        .find(|(_, vehicles)| vehicles.contains(&params.vehicle))
+        .ok_or("No ArduPilot simulator runs this vehicle")?;
+    let text = describe(path, "--list-models")?;
+    let table = if let Some(table) = frames(&text, program) {
+        Some(table)
+    } else {
+        let file = path.parent().unwrap_or(Path::new(".")).join(FRAME_TABLE);
+        match std::fs::read_to_string(&file) {
+            Ok(text) => Some(frames(&text, program).ok_or_else(|| {
+                format!("{} has no valid frame table for {program}", file.display())
+            })?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Cannot read {}: {error}", file.display())),
+        }
+    };
+    let (frames, default_frame) = table.map_or_else(
+        || (Vec::new(), None),
+        |(frames, default)| (frames, Some(default)),
+    );
+    Ok(uxduck_contracts::dto::sim::SimFramesResult {
+        reading: false,
+        frames,
+        default_frame,
     })
 }
 
@@ -743,6 +991,103 @@ fn describe(path: &Path, argument: &str) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(reader.join().unwrap_or_default())
+}
+
+fn has_option(usage: &str, option: &str) -> bool {
+    usage
+        .split(|c: char| c.is_whitespace() || c == '|')
+        .any(|word| word == option)
+}
+
+fn require_local_only(usage: &str) -> Result<(), String> {
+    if has_option(usage, "--local-only") {
+        Ok(())
+    } else {
+        Err("This build does not support local-only connections. To run it, select Allow network access for this build in New simulation › Advanced, or use `uxduck sim start --binary <path> --allow-network`. Other computers on your network may be able to connect and control it. Choose Latest available for a build that keeps its connections on this computer.".into())
+    }
+}
+
+/// Beside a build of your own, the choice `uxduck sim build --allow-network`
+/// records to start it without the local-only network patch (S258).
+pub const ALLOW_NETWORK: &str = "allow-network";
+
+/// `--local-only` for a build that keeps to this computer. One without it
+/// starts only with explicit per-simulation consent or the existing
+/// `uxduck sim build --allow-network` marker.
+fn local_only_args(path: &Path, allow_network: bool) -> Result<Vec<String>, String> {
+    match require_local_only(&describe(path, "--help")?) {
+        Ok(()) => Ok(vec!["--local-only".into()]),
+        Err(_)
+            if allow_network
+                || path
+                    .parent()
+                    .is_some_and(|f| f.join(ALLOW_NETWORK).is_file()) =>
+        {
+            tracing::warn!(path = %path.display(), "starting an own build with explicitly allowed network access");
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Starts a build as UXDuck starts it, with `--local-only`, in `directory`,
+/// and checks its MAVLink port listens on this computer only: a
+/// connection from `network`, this computer's own address on its
+/// network, is refused (S258).
+pub fn check_local_only(
+    build: &SimBinary,
+    directory: &Path,
+    network: std::net::IpAddr,
+) -> Result<(), String> {
+    require_local_only(&describe(Path::new(&build.path), "--help")?)?;
+    let instance = (0..10u8)
+        .find(|i| crate::ports::tcp_port_free(BASE_PORT + 10 * u16::from(*i)))
+        .ok_or("no simulator port is free on this computer")?;
+    let port = BASE_PORT + 10 * u16::from(instance);
+    let (model, defaults) = model_and_defaults(build, &build.default_frame, None);
+    let mut args = vec![
+        "--local-only".to_owned(),
+        format!("--model={model}"),
+        format!("--instance={instance}"),
+        "--serial0=tcp:0:wait".into(),
+        "--serial1=none".into(),
+        "--serial2=none".into(),
+    ];
+    if let Some(defaults) = defaults {
+        args.push(format!("--defaults={defaults}"));
+    }
+    let mut child = command(Path::new(&build.path))
+        .args(&args)
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot run {}: {e}", build.path))?;
+    let result = listens_locally(port, network);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn listens_locally(port: u16, network: std::net::IpAddr) -> Result<(), String> {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while crate::ports::tcp_port_free(port) {
+        if std::time::Instant::now() > deadline {
+            return Err(format!("the simulator did not open its port {port}"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let timeout = Duration::from_secs(2);
+    if TcpStream::connect_timeout(&SocketAddr::new(network, port), timeout).is_ok() {
+        return Err(format!(
+            "the simulator took a connection from the network at {network}:{port}, so it is not local-only"
+        ));
+    }
+    TcpStream::connect_timeout(&SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port), timeout)
+        .map(|_| ())
+        .map_err(|e| format!("the simulator refused a connection on this computer: {e}"))
 }
 
 /// A PX4 build: `px4 -h` shows it runs here, and its frames are the SIH
@@ -1065,6 +1410,8 @@ pub struct Running {
 struct ActiveSimulation {
     active: Arc<Mutex<HashSet<String>>>,
     id: String,
+    guards: Arc<Mutex<HashSet<u32>>>,
+    guard_pid: u32,
 }
 
 impl Drop for ActiveSimulation {
@@ -1073,6 +1420,10 @@ impl Drop for ActiveSimulation {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.id);
+        self.guards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.guard_pid);
     }
 }
 
@@ -1422,10 +1773,171 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn description_fixture(program: &Path) -> PathBuf {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sim/fixtures/describe.sh");
+        assert!(
+            fixture.is_file(),
+            "missing simulator fixture: {}",
+            fixture.display()
+        );
+        std::os::unix::fs::symlink(fixture, program).unwrap();
+        program.with_extension("help")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_frame_lists_come_from_the_executable_or_its_companion() {
+        use uxduck_contracts::dto::sim::SimFramesParams;
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("renamed-controller");
+        let output = description_fixture(&program);
+        let table = r#"{"ArduCopter":{"default_frame":"X","frames":{"X":{"waf_target":"bin/arducopter"},"fork-quad":{"waf_target":"bin/arducopter"}}}}"#;
+        std::fs::write(&output, table).unwrap();
+        let params = SimFramesParams {
+            binary: program.display().to_string(),
+            vehicle: SimVehicleDto::Multicopter,
+            refresh: true,
+        };
+        let embedded = inspect_frames(&params).unwrap();
+        assert_eq!(embedded.frames, ["X", "fork-quad"]);
+        assert_eq!(embedded.default_frame.as_deref(), Some("X"));
+        std::fs::write(&output, "unrecognised option --list-models\n").unwrap();
+        assert!(inspect_frames(&params).unwrap().frames.is_empty());
+        let companion = folder.path().join(FRAME_TABLE);
+        std::fs::write(&companion, table).unwrap();
+        assert_eq!(inspect_frames(&params).unwrap(), embedded);
+        std::fs::write(&companion, "broken metadata").unwrap();
+        assert!(
+            inspect_frames(&params)
+                .unwrap_err()
+                .contains("no valid frame table")
+        );
+        assert!(
+            inspect_frames(&SimFramesParams {
+                binary: "/missing/simulator".into(),
+                ..params
+            })
+            .unwrap_err()
+            .contains("existing simulator executable")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frame_probe_runs_in_background_and_polling_never_executes_a_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("controller");
+        let output = description_fixture(&program);
+        std::fs::write(output, "no frame table\n").unwrap();
+        std::fs::write(program.with_extension("delay"), "0.1").unwrap();
+        let manager = Simulators::new(folder.path());
+        let mut params = SimFramesParams {
+            binary: program.display().to_string(),
+            vehicle: SimVehicleDto::Multicopter,
+            refresh: false,
+        };
+        assert!(manager.read_frames(&params).is_err());
+        params.refresh = true;
+        assert!(manager.read_frames(&params).unwrap().reading);
+        params.refresh = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while manager.read_frames(&params).unwrap().reading {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_file(program).unwrap();
+        assert!(
+            manager.read_frames(&params).unwrap().frames.is_empty(),
+            "polling uses the completed result without executing again"
+        );
+        params.binary = "/another/controller".into();
+        assert!(manager.read_frames(&params).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unpatched_build_needs_explicit_network_consent() {
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("arducopter");
+        let help = description_fixture(&program);
+        std::fs::write(&help, "--serial0 device --model model\n").unwrap();
+        let error = local_only_args(&program, false).unwrap_err();
+        assert!(
+            error.contains("Allow network access for this build"),
+            "{error}"
+        );
+        assert!(local_only_args(&program, true).unwrap().is_empty());
+        assert!(
+            !folder.path().join(ALLOW_NETWORK).exists(),
+            "consent is not written beside the build"
+        );
+        std::fs::write(folder.path().join(ALLOW_NETWORK), "").unwrap();
+        assert!(local_only_args(&program, false).unwrap().is_empty());
+        std::fs::write(&help, "--local-only restrict sockets to localhost\n").unwrap();
+        for allowed in [false, true] {
+            assert_eq!(
+                local_only_args(&program, allowed).unwrap(),
+                ["--local-only"]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_own_standalone_build_uses_its_selected_vehicle_and_frame() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("my-flight-controller");
+        let output = description_fixture(&path);
+        let status = path.with_extension("status");
+        std::fs::write(
+            &output,
+            "--model|-M MODEL --home|-O HOME --instance|-I N --serial0 device\n",
+        )
+        .unwrap();
+        std::fs::write(&status, "1").unwrap();
+        let build = probe_own(
+            &path,
+            SimAutopilot::Ardupilot,
+            SimVehicle::Multicopter,
+            Some("X"),
+        )
+        .unwrap();
+        assert_eq!(build.program, "arducopter");
+        assert_eq!(build.frames, ["X"]);
+        assert_eq!(build.default_frame, "X");
+        assert_eq!(
+            probe_own(&path, SimAutopilot::Ardupilot, SimVehicle::Vtol, None)
+                .unwrap()
+                .default_frame,
+            "quadplane"
+        );
+        assert!(probe(&path).is_err(), "catalogue discovery stays strict");
+        std::fs::write(&output, "--model-disabled --home --instance --serial0\n").unwrap();
+        std::fs::write(status, "0").unwrap();
+        assert!(
+            probe_own(
+                &path,
+                SimAutopilot::Ardupilot,
+                SimVehicle::Multicopter,
+                None
+            )
+            .unwrap_err()
+            .contains("ArduPilot SITL")
+        );
+    }
+
+    #[test]
+    fn outdated_simulators_cannot_silently_launch_with_network_access() {
+        let error = require_local_only("--serial0 device --model model").unwrap_err();
+        assert!(error.contains("Latest available"));
+        assert!(error.contains("Allow network access for this build"));
+        assert!(require_local_only("--local-only restrict sockets to localhost").is_ok());
+        assert!(require_local_only("--local-only-disabled").is_err());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn refreshing_finds_a_new_program_and_drops_a_removed_build() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("data directory");
         let bin = dir.path().join("simulators/bin");
         std::fs::create_dir_all(&bin).expect("build directory");
@@ -1437,10 +1949,7 @@ mod tests {
                     "frames": { "test": { "waf_target": format!("bin/{program}") } }
                 }
             });
-            std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{table}'\n"))
-                .expect("test build");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("executable");
+            std::fs::write(description_fixture(&path), table.to_string()).expect("frame table");
             path.display().to_string()
         };
         let copter = put("arducopter");
@@ -1494,19 +2003,34 @@ mod tests {
 
     #[test]
     fn an_instance_claimed_by_another_process_is_not_claimed_again() {
-        // An instance the other tests here leave alone.
+        let child = "UXDUCK_SIMULATOR_CLAIM_TEST_CHILD";
+        if std::env::var_os(child).is_none() {
+            let thread = std::thread::current();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", thread.name().unwrap()])
+                .env(child, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+            return;
+        }
+        // An instance the other tests here leave alone. Its ports count as
+        // free: their real check binds MAVLink ports other tests use.
         let instance: u8 = 30;
-        assert!(
-            instance_free(instance),
-            "instance {instance}'s ports are free"
-        );
+        let free = |_: u8| true;
         // A second open of the file locks as another process would.
         let elsewhere = claim_file(instance).expect("the claim file");
         elsewhere.try_lock().expect("nobody holds the claim yet");
-        assert!(!claim_instance(instance), "held elsewhere: skipped");
+        assert!(!claim_with(instance, free), "held elsewhere: skipped");
         drop(elsewhere);
-        assert!(claim_instance(instance), "free and unclaimed: ours");
-        assert!(claim_instance(instance), "ours already: still ours");
+        assert!(claim_with(instance, free), "free and unclaimed: ours");
+        assert!(claim_with(instance, free), "ours already: still ours");
         let later = claim_file(instance).expect("the claim file");
         assert!(later.try_lock().is_err(), "while ours, nobody else's");
     }
@@ -1743,6 +2267,8 @@ mod active_storage_tests {
             .spawn()
             .unwrap();
         let stdin = guard.stdin.take();
+        let guard_pid = guard.id();
+        let guards = Arc::new(Mutex::new(HashSet::from([guard_pid])));
         let running = Running {
             guard: Some(guard),
             stdin,
@@ -1750,6 +2276,8 @@ mod active_storage_tests {
             active: Some(ActiveSimulation {
                 active: Arc::clone(&active),
                 id: "simulation".into(),
+                guards: Arc::clone(&guards),
+                guard_pid,
             }),
         };
         drop(running);
@@ -1757,6 +2285,7 @@ mod active_storage_tests {
             active.lock().unwrap().contains("simulation"),
             "closing stdin does not mean the process has exited"
         );
+        assert!(guards.lock().unwrap().contains(&guard_pid));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while active.lock().unwrap().contains("simulation") {
             assert!(
@@ -1764,6 +2293,12 @@ mod active_storage_tests {
                 "process exit must release log protection"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+        // The reaper removes both registrations together.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while guards.lock().unwrap().contains(&guard_pid) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
         }
     }
 }

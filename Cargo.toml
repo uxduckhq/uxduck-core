@@ -2,12 +2,12 @@
 resolver = "3"
 members = ["crates/uxduck","crates/uxduck-core","crates/uxduck-contracts","crates/uxduck-engine","crates/uxduck-mavlink","crates/uxduck-agent","crates/uxduck-media","crates/uxduck-sdk","crates/uxduck-terrain","crates/uxduck-web"]
 # Plugins build for WebAssembly in a workspace of their own.
-exclude = ["plugins", "vendor/tray-icon", "vendor/wasmtime-internal-cache"]
+exclude = ["plugins", "vendor/glib", "vendor/mavinspect", "vendor/tray-icon"]
 
 [workspace.package]
-version = "0.8.0-beta.1"
+version = "0.15.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 publish = false
 repository = "https://github.com/uxduckhq/uxduck-core"
 
@@ -47,10 +47,12 @@ dunce = "1"
 # Process CPU time and memory for `cargo xtask perf` (S24).
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 mavio = { version = "0.5.10", default-features = false, features = ["std", "dlct-ardupilotmega"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Reading the stored types' source in a test (stored_fields.rs).
+syn = { version = "2", features = ["full"] }
 mavinspect = { version = "0.6.6", default-features = false }
 sha2 = "0.11"
 # Interface archives (S109): a tar of the web build, zstd-compressed.
@@ -64,6 +66,8 @@ thiserror = "2"
 serialport = { version = "4.10", default-features = false }
 # Gamepads (S12); on Linux it needs libudev.
 gilrs = "0.11"
+# gilrs's platform codes, for the axes it takes for triggers (FB-87).
+gilrs-core = "0.6"
 # Plugins (S14): WebAssembly through wasmtime.
 extism = { version = "1.41", default-features = false }
 # Extism's engine, with only what it needs: no component model, no WASI
@@ -107,6 +111,9 @@ missing_debug_implementations = "warn"
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
+# New in Rust 1.99: it rewrites `assert!(!v.is_empty())` as
+# `assert_ne!(v, [] as [T; 0])`, which reads worse in tests.
+assert_is_empty = "allow"
 
 # Rust's default 16 codegen units: one unit left the last crates (engine,
 # then uxduck) to one core, about 10 of the Windows release build's 13 min.
@@ -149,7 +156,7 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Extism 1.41 requires Wasmtime 49; its cache still pins vulnerable zstd 0.13.
-# See the vendored README for the single dependency change and removal condition.
 [patch.crates-io]
-wasmtime-internal-cache = { path = "vendor/wasmtime-internal-cache" }
+# mavio's MAVLink codegen reads XML through MAVInspect, which depends on the
+# unsound, unmaintained serde_yml and libyml. See the vendored README.
+mavinspect = { path = "vendor/mavinspect" }

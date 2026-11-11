@@ -1,0 +1,19 @@
+{
+  "vehicleId": "5b0c2e1a-7d3f-5e8b-9c4a-2f1e0d3c4b5a",
+  "setup": {
+    "actuator": 1,
+    "opensAt": "max"
+  },
+  "wiring": {
+    "output": 11,
+    "openButton": 15,
+    "closeButton": 0,
+    "minUs": 1100,
+    "maxUs": 1900,
+    "neutralUs": 1500
+  },
+  "problems": [],
+  "warnings": [],
+  "freeOutputs": [12, 13, 14, 15, 16],
+  "freeButtons": [16, 17, 18]
+}

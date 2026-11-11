@@ -98,13 +98,14 @@ pub enum CoordinateFormat {
     Utm,
 }
 
-/// The map an operator flies over: imagery, or grey streets that follow the
-/// theme.
+/// The map an operator flies over: imagery, grey streets that follow the
+/// theme, or terrain (hillshaded relief with contour lines).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Basemap {
     Imagery,
     Streets,
+    Terrain,
 }
 
 /// What a tab shows.
@@ -120,8 +121,9 @@ pub enum TabKind {
     /// The vehicles on a flat map.
     Map,
     /// The vehicles over terrain on a 3D globe: "3D map". Opened beside the
-    /// map by the map's "3D" button, or from "+". Layouts stored with a Map
-    /// in 3D come back with a 3D map tab in its place.
+    /// map by the map's "3D" button, or from "+".
+    // Layouts stored with a Map in 3D come back with a 3D map tab in its
+    // place (kept out of the schema: agents are sent it each turn).
     #[serde(rename = "map-3d")]
     Map3d,
     /// A close view of the selected vehicle as a live model, without a map.
@@ -130,10 +132,11 @@ pub enum TabKind {
     /// position on a whole, centred globe, the chosen one faced. Pressing a
     /// vehicle chooses it; pressing a region sends the map there.
     Globe,
-    /// The focused vehicle's readings, as tiles (S65). Layouts stored with a
-    /// `vehicle` tab come back with Telemetry and Control in its place.
+    /// The focused vehicle's readings, as tiles (S65).
+    // Layouts stored with a `vehicle` tab come back with Telemetry and
+    // Cockpit in its place.
     Telemetry,
-    /// Everything that acts on the focused vehicle (S65).
+    /// Cockpit: everything that acts on the focused vehicle (S65).
     Control,
     /// The focused vehicle's own messages, every one, searchable (S26).
     Messages,
@@ -157,8 +160,9 @@ pub enum TabKind {
     /// The focused vehicle's history: notes and what UXDuck recorded (S69).
     History,
     /// The focused vehicle's camera (S75): a real vehicle's video (S38), or
-    /// a simulated vehicle's 3D world (S35). Layouts stored with a `3d` or
-    /// `video` tab come back with a Camera tab in its place.
+    /// a simulated vehicle's 3D world (S35).
+    // Layouts stored with a `3d` or `video` tab come back with a Camera
+    // tab in its place.
     Camera,
     /// What to try first, for someone new: above the chat in the first-run
     /// layout, gone once closed.
@@ -204,6 +208,8 @@ pub enum TabKind {
     /// The focused vehicle's checklist with its other preflight checks
     /// (S193, ADR-0038), as a tab of its own.
     Checklist,
+    /// The focused vehicle's tuning: Feel, gains and snapshots (S329).
+    Tuning,
 }
 
 /// One tab: what it shows and, when pinned, the vehicle it shows instead of
@@ -226,6 +232,13 @@ pub struct Tab {
     /// bytes; dropped from other kinds of tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<String>,
+    /// How a Camera tab shows its vehicle's cameras; none chooses from how
+    /// many there are and whether one was chosen. Dropped from other kinds
+    /// of tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_view: Option<CameraView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_camera: Option<MapCameraOptions>,
     /// The panel a Plugin tab shows: `<plugin id>/<panel id>`, up to 64
     /// bytes; dropped from other kinds of tab (S101).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,6 +254,60 @@ pub struct Tab {
     /// What a Chart tab draws (S113); dropped from other kinds of tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<ChartSpec>,
+    /// The part a Tuning tab was last asked to show (S333); dropped from
+    /// other kinds of tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<TuningSection>,
+}
+
+// A part of the Tuning tab; `roll`, `pitch` and `yaw` graph that axis. No
+// doc comment: the agent's tools are sent with every turn, in 40 KB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuningSection {
+    Steps,
+    Autotune,
+    Roll,
+    Pitch,
+    Yaw,
+    Feel,
+    Gains,
+}
+
+/// How a Camera tab shows its vehicle's cameras (2026-10-30).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraView {
+    /// One camera as large as the tab allows.
+    Single,
+    /// One camera large, the vehicle's others small under it.
+    Focus,
+    /// Every camera of the vehicle, the same size, fitted to the tab.
+    Grid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MapCameraOptions {
+    pub viewpoint: MapViewpoint,
+    pub following: bool,
+    pub resume: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag_to_pan: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapViewpoint {
+    Cockpit,
+    Rear,
+    Tail,
+    Orbit,
+    Behind,
+    Below,
+    Camera,
+    Home,
+    Above,
 }
 
 /// A Chart tab's series and time span (S113).
@@ -482,7 +549,7 @@ pub struct Operator {
     /// `received:HEARTBEAT` or `sent:COMMAND_LONG`.
     #[serde(default)]
     pub inspector_pinned: Vec<String>,
-    /// The Control tab's buttons per vehicle type, in the operator's order.
+    /// The Cockpit tab's buttons per vehicle type, in the operator's order.
     /// A type not listed shows UXDuck's own.
     #[serde(default)]
     pub control_actions: Vec<ControlActions>,
@@ -506,9 +573,47 @@ pub struct Operator {
     /// theirs, else the one the controller last used.
     #[serde(default)]
     pub controller_mappings: Vec<ControllerMapping>,
+    /// The Terms of Service this operator last agreed to on this computer
+    /// (ADR-0047); read only, recorded by `terms/accept`. UXDuck arms a
+    /// real vehicle for them only while it is the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<TermsAcceptance>,
     /// Bumped on every change. Send it back as `expectedVersion` when editing.
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// An operator's agreement to the Terms of Service (ADR-0047).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TermsAcceptance {
+    /// The terms version they agreed to, such as `2026-11-03`.
+    pub version: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub accepted_at_ms: u64,
+    /// The account signed in on this computer when they agreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+/// Where a person agreed to the terms, kept with the account's record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TermsContext {
+    /// Before UXDuck armed a real vehicle for them.
+    RealVehicle,
+    /// Asked once of a signed-in account whose agreement is not current.
+    Account,
+}
+
+/// The connection's operator agrees to the current Terms of Service, which
+/// they were shown (ADR-0047). Only a person's interface may send it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TermsAcceptParams {
+    /// The version they read; anything but the current one is refused.
+    pub version: String,
+    pub context: TermsContext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -579,7 +684,7 @@ pub struct OperatorUpdateParams {
     /// each `received:` or `sent:` and a message name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspector_pinned: Option<Vec<String>>,
-    /// Every type's Control tab buttons; replaces the ones saved. Each type
+    /// Every type's Cockpit tab buttons; replaces the ones saved. Each type
     /// once, at most 40 actions each, by action id such as
     /// `vehicle:mode:guided`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,7 +712,7 @@ pub struct ControllerMapping {
     pub mapping_id: String,
 }
 
-/// The Control tab's buttons for one type of vehicle, in order, by action
+/// The Cockpit tab's buttons for one type of vehicle, in order, by action
 /// id: `vehicle:arm` (arm or disarm), `vehicle:take-off`, `vehicle:rtl`,
 /// `vehicle:land`, `vehicle:reboot` or `vehicle:mode:<mode in lower case>`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -637,11 +742,23 @@ pub struct OperatorRemoveParams {
 
 /// Shows a tab of a kind in an operator's layout, as "+" does: the one
 /// there, else a new one (S43). The operator is the chat's, else the one
-/// given; with neither, the chat's window opens it in its own layout.
+/// given; with neither, the chat's window opens it in its own layout. A
+/// tab given items is always a new one; one given only a vehicle shows the
+/// tab of the kind already pinned to it, else a new one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutOpenParams {
     pub kind: TabKind,
+    /// Pins the tab to this vehicle, only to show several vehicles at once.
+    /// Leave it out: the tab then follows the selected vehicle, the chat's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// What a `chart` (up to 8) or a `readout` (one) shows: `telemetry_get`
+    /// keys, such as `vibration.x_mps2`. Without them it opens empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<TuningSection>,
     /// The chat asking; the agent's turns fill it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
@@ -657,6 +774,15 @@ pub struct LayoutOpenResult {
     #[serde(default)]
     pub operator_id: Option<String>,
     pub kind: TabKind,
+    /// What the new tab was given, as it will show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ChartSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<TuningSection>,
 }
 
 /// Which operator this connection acts as; journal entries name it.

@@ -41,6 +41,11 @@ pub struct VideoCounters {
     pub pictures: u64,
     #[schemars(schema_with = "crate::safe::integer")]
     pub keyframes: u64,
+    /// Recovery points that were not keyframes: a camera with periodic
+    /// intra refresh has these and no keyframe after it starts.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub recovery_points: u64,
     /// Packets lost on the way (continuity gaps, transport errors).
     #[schemars(schema_with = "crate::safe::integer")]
     pub lost: u64,
@@ -64,6 +69,39 @@ pub struct VideoCounters {
     #[serde(default)]
     #[schemars(schema_with = "crate::safe::integer")]
     pub klv_bad: u64,
+    /// How long UXDuck's daemon holds a picture, in microseconds: from its
+    /// first datagram's arrival to its send on the `/video` socket, the
+    /// median over the last second, the longest of the browsers watching
+    /// (S262). Absent while no browser watches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub hold_us: Option<u64>,
+    /// RFC 3550 interarrival jitter in microseconds: how unevenly pictures
+    /// arrive against their presentation times (S262).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub jitter_us: Option<u64>,
+    /// Where the camera says when it captured a picture; absent for a
+    /// camera that sends no clock (S262).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_clock: Option<CameraClock>,
+    /// Microseconds from capture by the camera's clock to arrival at
+    /// UXDuck, the median over the last second. Absent with a
+    /// `cameraClock` when the result is negative or over 5 s: the camera's
+    /// clock is not in step with this computer's (S262).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub camera_delay_us: Option<u64>,
+}
+
+/// Where a camera says when it captured a picture (S262).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraClock {
+    /// RTCP sender reports: its RTP clock at a wall-clock time.
+    SenderReports,
+    /// The Precision Time Stamp in its KLV (MISB ST 0601 tag 2).
+    Klv,
 }
 
 /// Prerecorded footage played as a camera, independent of vehicle motion.
@@ -148,6 +186,10 @@ pub struct VideoSource {
     /// Recording intent, including while reconnecting. Record can stop it then too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recording_requested: bool,
+    /// The encoder re-encoding it for live view now (`h264_videotoolbox`,
+    /// `libx264`, ...), for a camera that sends no IDR; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reencoding: Option<String>,
     pub id: String,
     /// Its address, such as `udp://127.0.0.1:5600` or an RTSP address
     /// without its password, until someone renames it.
@@ -270,12 +312,20 @@ pub struct VideoAddParams {
     /// An RTSP address (`rtsp://user:password@host:554/path`), or a UDP port
     /// to listen on (`udp://:5601` or `udp:5601`).
     pub url: String,
+    /// What to call the camera ("Front"); its address when absent or empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The vehicle it belongs to, chosen by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoAddResult {
-    /// The RTSP source, connecting.
+    /// The RTSP source, connecting; for a UDP port, the camera on it: one
+    /// already arriving there, or one waiting for its first picture, which
+    /// the first stream to arrive becomes, keeping its name and vehicle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<VideoSource>,
     /// The UDP port now listened on.
@@ -468,6 +518,19 @@ pub enum RecordPolicy {
     Always,
 }
 
+/// How a camera that sends no IDR is re-encoded for live view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reencoder {
+    /// Hardware when it works, software when it does not.
+    #[default]
+    Automatic,
+    /// Only the hardware encoder.
+    Hardware,
+    /// Only software (x264).
+    Software,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordingState {
@@ -529,6 +592,12 @@ pub struct VideoRecording {
     /// alone; none for one made before, named `<id>.mp4`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+    /// A video added to a flight from elsewhere: the flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight_id: Option<String>,
+    /// How an added video's start was put on the flight's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<VideoAlignment>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -693,4 +762,50 @@ pub struct VideoDemosResult {
     pub refreshing: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// How an added video was put on the flight's clock (ADR-0039 R8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AlignedBy {
+    /// MISB ST 0601 time stamps in the stream: exact.
+    Klv,
+    /// The file's own creation time.
+    Metadata,
+    /// The simulator's computer's clock, corrected by the vehicle's.
+    VehicleClock,
+    /// Set by a person: a nudge, a time, the take-off or the landing.
+    Hand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAlignment {
+    pub by: AlignedBy,
+    /// Where the file's own clock put its start.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub own_start_us: u64,
+}
+
+/// `flight/addVideo`: a video from elsewhere kept with a flight.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightAddVideoParams {
+    pub flight_id: String,
+    /// The file on the computer running UXDuck: MP4, MOV, M4V or MPEG-TS.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// Or a video the operator attached to a chat message (S246): its
+    /// attachment id, in place of `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
+}
+
+/// `video/align`: an added video's start on the flight's clock.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAlignParams {
+    pub recording_id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub started_at_us: u64,
 }

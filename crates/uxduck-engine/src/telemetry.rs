@@ -4,12 +4,16 @@
 //! by the data plane to its tick rate.
 
 use uxduck_contracts::dto::telemetry::{
-    TelemetrySubscribeResult, VehicleTelemetry as TelemetryDto,
+    LinkHealth as LinkHealthDto, RoundTripMissing, TelemetrySubscribeResult,
+    VehicleTelemetry as TelemetryDto,
 };
 use uxduck_contracts::rpc::ServerNotification;
-use uxduck_core::domain::telemetry::{TelemetryItem, VehicleTelemetry};
+use uxduck_core::domain::telemetry::{LinkHealth, TelemetryItem, VehicleTelemetry};
 
 use crate::{ConnectionId, Engine, rpc};
+
+/// A link report not renewed for this long is no longer measured.
+const LINK_HEALTH_STALE_MS: u64 = 5_000;
 
 impl Engine {
     /// Merges what the data plane produced and tells subscribers.
@@ -21,8 +25,14 @@ impl Engine {
             let derived = self.battery_items(&update);
             update.items.extend(derived);
         }
-        let source_observation =
-            !update.positions.is_empty() || update.items.iter().any(|i| i.source != "flight");
+        // A replay vehicle's telemetry is shown and nothing more (ADR-0039 R3).
+        let replay = self
+            .state
+            .vehicles
+            .get(&update.vehicle_id)
+            .is_some_and(|v| v.replay);
+        let source_observation = !replay
+            && (!update.positions.is_empty() || update.items.iter().any(|i| i.source != "flight"));
         self.telemetry_history.observe(self.clock.now_us(), &update);
         let vehicle_id = update.vehicle_id.clone();
         // The radio's channels, for its calibration (S187).
@@ -48,7 +58,11 @@ impl Engine {
         for id in subscribers {
             self.send(id, &frame);
         }
+        if replay {
+            return;
+        }
         self.drive_launch_of_vehicle(&vehicle_id);
+        self.drive_plan_run_of_vehicle(&vehicle_id);
         self.review_prearm(&vehicle_id);
         if radio {
             self.review_radio(&vehicle_id);
@@ -57,9 +71,11 @@ impl Engine {
             self.review_airspeed(&vehicle_id);
         }
         self.review_flight(&vehicle_id);
+        self.review_scenery_hit(&vehicle_id);
         self.review_flight_time(&vehicle_id);
         self.review_practice(&vehicle_id);
         self.review_terrain(&vehicle_id);
+        self.review_vehicle_terrain(&vehicle_id);
         self.track_rules(&vehicle_id);
         self.review_preflight_soon(&vehicle_id);
     }
@@ -100,6 +116,54 @@ impl Engine {
         }
     }
 
+    /// How each vehicle's link is doing, from the data plane once a second
+    /// (S261): kept beside its telemetry and sent to subscribers as a
+    /// `telemetry/update` with only `linkHealth`, never journaled. A
+    /// replay's vehicle has no link.
+    pub fn link_health_observed(&mut self, reports: Vec<(String, LinkHealth)>) {
+        let now_us = self.clock.now_us();
+        for (vehicle_id, health) in reports {
+            if self
+                .state
+                .vehicles
+                .get(&vehicle_id)
+                .is_none_or(|v| v.replay)
+            {
+                continue;
+            }
+            let frame =
+                rpc::router::notification(&ServerNotification::TelemetryUpdate(TelemetryDto {
+                    vehicle_id: vehicle_id.clone(),
+                    positions: Vec::new(),
+                    items: Vec::new(),
+                    link_health: Some((&health).into()),
+                }));
+            self.link_health.insert(vehicle_id, (health, now_us));
+            let subscribers: Vec<ConnectionId> =
+                self.telemetry_subscribers.iter().copied().collect();
+            for id in subscribers {
+                self.send(id, &frame);
+            }
+        }
+    }
+
+    /// How a vehicle's link is doing now: its age counts on from the last
+    /// report, and a report the data plane stopped renewing (its vehicle
+    /// gone from the link) keeps only that.
+    pub(crate) fn link_health_of(&self, vehicle_id: &str) -> Option<LinkHealthDto> {
+        let (health, at_us) = self.link_health.get(vehicle_id)?;
+        let since_ms = self.clock.now_us().saturating_sub(*at_us) / 1000;
+        let mut dto = LinkHealthDto::from(health);
+        dto.age_ms = health.age_ms.map(|age| age + since_ms);
+        if since_ms > LINK_HEALTH_STALE_MS {
+            dto.round_trip_ms = None;
+            dto.one_way_ms = None;
+            dto.round_trip_missing = Some(RoundTripMissing::NotSent);
+            dto.loss_percent = None;
+        }
+        Some(dto)
+    }
+
     /// The latest telemetry of a vehicle, by id or alias.
     #[must_use]
     pub fn telemetry(&self, vehicle_id: &str) -> Option<&VehicleTelemetry> {
@@ -118,7 +182,10 @@ impl Engine {
                 .telemetry
                 .values()
                 .filter(|t| self.state.vehicles.contains_key(&t.vehicle_id))
-                .map(TelemetryDto::from)
+                .map(|t| TelemetryDto {
+                    link_health: self.link_health_of(&t.vehicle_id),
+                    ..TelemetryDto::from(t)
+                })
                 .collect(),
         }
     }

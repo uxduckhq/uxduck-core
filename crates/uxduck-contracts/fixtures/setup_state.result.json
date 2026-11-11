@@ -31,6 +31,12 @@
       "row": "motors",
       "state": "unknown",
       "procedure": "motors"
+    },
+    {
+      "row": "escs",
+      "state": "calibrated",
+      "calibratedAtUs": 1792713600000000,
+      "procedure": "escs"
     }
   ],
   "compasses": [
@@ -158,9 +164,24 @@
         "gatheredS": 60,
         "settled": true,
         "writes": [
-          { "name": "ARSPD_AUTOCAL", "from": 0.0, "to": 1.0, "state": "written" },
-          { "name": "ARSPD_AUTOCAL", "from": 1.0, "to": 0.0, "state": "written" },
-          { "name": "ARSPD_RATIO", "from": 1.6, "to": 1.989, "state": "written" }
+          {
+            "name": "ARSPD_AUTOCAL",
+            "from": 0.0,
+            "to": 1.0,
+            "state": "written"
+          },
+          {
+            "name": "ARSPD_AUTOCAL",
+            "from": 1.0,
+            "to": 0.0,
+            "state": "written"
+          },
+          {
+            "name": "ARSPD_RATIO",
+            "from": 1.6,
+            "to": 1.989,
+            "state": "written"
+          }
         ]
       },
       "startedBy": {
@@ -178,11 +199,20 @@
       "kind": "motors",
       "step": "succeeded",
       "progress": 0,
-      "motor": { "order": 1, "label": "A", "throttle": 5.0 },
+      "motor": {
+        "order": 1,
+        "label": "A",
+        "throttle": 5.0
+      },
       "startedAtUs": 1790669370000000,
       "updatedAtUs": 1790669372000000,
       "finishedAtUs": 1790669372000000,
       "version": 3
     }
-  ]
+  ],
+  "restart": {
+    "rows": ["compass"],
+    "parameters": ["SERIAL1_PROTOCOL"],
+    "restartedAtUs": 1792713500000000
+  }
 }

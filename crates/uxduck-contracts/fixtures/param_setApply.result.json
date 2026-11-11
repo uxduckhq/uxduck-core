@@ -1,0 +1,36 @@
+{
+  "before": {
+    "id": "ps1b2c3d4e5f6a7b8c",
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "name": "Before Field tune",
+    "origin": "before",
+    "savedBy": "Ben",
+    "savedAtUs": 1792713600000000,
+    "firmware": "ArduCopter V4.6.2",
+    "count": 1342,
+    "differ": 0,
+    "file": "Before-Field-tune.param"
+  },
+  "written": ["RTL_ALT", "SERIAL1_PROTOCOL"],
+  "refused": [
+    {
+      "name": "WPNAV_SPEED",
+      "detail": "the vehicle kept 1000"
+    }
+  ],
+  "skipped": [
+    {
+      "name": "STAT_RUNTIME",
+      "why": "statistic"
+    },
+    {
+      "name": "MYFORK_GAIN",
+      "why": "not-on-vehicle"
+    },
+    {
+      "name": "FORMAT_VERSION",
+      "why": "read-only"
+    }
+  ],
+  "rebootRequired": ["SERIAL1_PROTOCOL"]
+}

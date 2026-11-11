@@ -1,5 +1,4 @@
-//! Opens a URL in a browser (UXDuck's own pages preferring a Chromium one,
-//! `app_browser`), and a folder in the file manager.
+//! Opens a URL in the default browser, and a folder in the file manager.
 
 use std::process::{Command, Stdio};
 

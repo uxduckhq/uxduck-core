@@ -6,7 +6,9 @@
       "protocolVersion": 1,
       "binaryChannels": true,
       "approvals": true,
-      "optOutNotifications": ["log/line"]
+      "optOutNotifications": ["log/line"],
+      "markerShapes": true,
+      "replayStepMarks": true
     }
   }
 }

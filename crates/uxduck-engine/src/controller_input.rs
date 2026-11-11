@@ -8,11 +8,13 @@
 use std::collections::BTreeMap;
 
 use uxduck_contracts::dto::controller::{
-    AxisValue, ButtonState, ControllerInputs, ControllerInputsResult,
+    AxisValue, ButtonState, ControllerInputs, ControllerInputsResult, InputKind,
 };
+use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{
     AxisBinding, GamepadAxis, GamepadButton, InputMapping, PositionBinding, Sticks,
 };
+use uxduck_core::domain::gripper::GripperAction;
 use uxduck_core::domain::settings::PilotInputMethod;
 
 use crate::runtime::ControlRoute;
@@ -56,7 +58,20 @@ pub enum InputEvent {
         axes: Vec<(u32, Option<GamepadAxis>, f64)>,
         buttons: Vec<(u32, Option<GamepadButton>, bool)>,
     },
+    /// The page's on-screen gripper Open or Close, held or let go (S263),
+    /// for the controller `id` its connection drives the vehicle with. A
+    /// hold lasts `SCREEN_HOLD_US` after `at_us` unless refreshed.
+    Gripper {
+        id: String,
+        action: Option<GripperAction>,
+        at_us: u64,
+    },
 }
+
+/// How long an on-screen gripper hold lasts without a refresh: the page
+/// refreshes it well inside this, so a page that disappears stops the
+/// gripper within this and one pilot tick.
+pub const SCREEN_HOLD_US: u64 = 500_000;
 
 /// What the engine must hear about.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,11 +95,94 @@ pub enum Report {
         button: Option<GamepadButton>,
         code: Option<u32>,
     },
-    /// An axis moved into a position of the routed mapping.
+    /// An axis moved into a position of the routed mapping and stayed
+    /// there `SETTLE_MS`, or its hold.
     Positioned {
         id: String,
         position: PositionBinding,
     },
+    /// A button or position bound with a hold went down: `command` goes
+    /// as `Pressed` or `Positioned` once it has been held `hold_ms`.
+    Holding {
+        id: String,
+        command: Command,
+        hold_ms: u32,
+    },
+    /// The hold under way ended: let go early, or complete.
+    LetGo {
+        id: String,
+    },
+}
+
+/// What is being held for its command.
+#[derive(Clone, Debug, PartialEq)]
+enum Held {
+    Button {
+        button: Option<GamepadButton>,
+        code: Option<u32>,
+    },
+    Position(PositionBinding),
+}
+
+impl Held {
+    /// What goes once it has been held.
+    fn report(self, id: &str) -> Report {
+        let id = id.to_owned();
+        match self {
+            Self::Button { button, code } => Report::Pressed { id, button, code },
+            Self::Position(position) => Report::Positioned { id, position },
+        }
+    }
+}
+
+/// A hold under way: since the first tick after it began, as input
+/// events carry no time.
+#[derive(Debug)]
+struct Pending {
+    held: Held,
+    since_us: Option<u64>,
+    hold_ms: u32,
+}
+
+/// Takes those of `pending` held long enough by `now_us`, starting the
+/// time of those just begun.
+fn due(pending: &mut Vec<Pending>, now_us: u64) -> Vec<Held> {
+    let mut done = Vec::new();
+    pending.retain_mut(|pending| {
+        let since = *pending.since_us.get_or_insert(now_us);
+        let complete = now_us.saturating_sub(since) >= u64::from(pending.hold_ms) * 1_000;
+        if complete {
+            done.push(pending.held.clone());
+        }
+        !complete
+    });
+    done
+}
+
+/// How long an axis must stay in a position before its command goes
+/// (FB-67), so a switch flicked through its middle sends only where it
+/// stops. A flick passes a three-way switch's middle in tens of
+/// milliseconds; ArduPilot's own mode switch waits 200 ms
+/// (`SWITCH_DEBOUNCE_TIME_MS`), so a deliberate move goes about as soon as
+/// one flown by radio would. A position bound with a hold already waits.
+pub const SETTLE_MS: u32 = 200;
+
+/// How far apart two readings of an axis must be to be different places:
+/// more than a resting stick's or a switch's jitter.
+const LEVEL: f64 = 0.06;
+
+/// The smallest step between a switch's places. A stick moved from one
+/// place to another reads between them; a switch jumps.
+const SWITCH_STEP: f64 = 0.25;
+
+/// A button as last reported.
+#[derive(Clone, Copy, Debug, Default)]
+struct Button {
+    held: bool,
+    /// Pressed since it was plugged in.
+    seen: bool,
+    /// How many times it has gone down.
+    presses: u32,
 }
 
 #[derive(Debug, Default)]
@@ -94,14 +192,68 @@ struct Device {
     /// Every axis it has or that has moved, by its code and its gamepad
     /// axis (only for a device whose layout is known: never a guess).
     axes: BTreeMap<(Option<u32>, Option<GamepadAxis>), f64>,
-    /// Every button it has or that has been pressed: whether it is held,
-    /// and whether it has been pressed since it was plugged in.
-    buttons: BTreeMap<(Option<u32>, Option<GamepadButton>), (bool, bool)>,
+    /// Every button it has or that has been pressed.
+    buttons: BTreeMap<(Option<u32>, Option<GamepadButton>), Button>,
     neutral: Option<bool>,
     route: Option<ControlRoute>,
     /// Whether the axis is in each position of the route's mapping, as last
     /// judged: a command goes only on moving into one.
     held: Vec<bool>,
+    /// The places each axis has been seen at, by the same key as `axes`,
+    /// to tell a switch from a stick (`AxisValue::kind`).
+    levels: BTreeMap<(Option<u32>, Option<GamepadAxis>), Levels>,
+    /// Holds under way, for bindings with `hold_ms`.
+    holds: Vec<Pending>,
+    /// Positions moved into, until they have settled (`SETTLE_MS`); one
+    /// left before then, as a switch's middle flicked through, sends
+    /// nothing.
+    settling: Vec<Pending>,
+    /// Gripper buttons held when the route began, which act only once let
+    /// go and pressed again (S263).
+    stale_actions: Vec<(Option<u32>, Option<GamepadButton>)>,
+    /// The on-screen gripper hold and when it was last refreshed.
+    screen: Option<(GripperAction, u64)>,
+    /// The on-screen hold must be let go before it acts again: after a new
+    /// route or an expiry.
+    screen_stale: bool,
+    /// Open and close were asked for together: nothing moves until every
+    /// gripper input is let go.
+    opposed: bool,
+    /// The gripper action asked for now, after the rules above.
+    gripper: Option<GripperAction>,
+}
+
+/// The distinct places an axis has read, until it reads between them.
+#[derive(Debug, Default)]
+struct Levels {
+    seen: Vec<f64>,
+    continuous: bool,
+}
+
+impl Levels {
+    fn saw(&mut self, value: f64) {
+        if self.continuous || self.seen.iter().any(|l| (l - value).abs() <= LEVEL) {
+            return;
+        }
+        self.seen.push(value);
+        self.seen.sort_by(f64::total_cmp);
+        // Once it has read between two places, it is a stick, slider or
+        // knob for good: never mistaken for a switch again.
+        self.continuous = self.seen.windows(2).any(|w| w[1] - w[0] < SWITCH_STEP);
+    }
+
+    /// A stick, slider or knob; a switch (or anything the radio sends as
+    /// one, such as a stick it outputs as on and off); or unknown until it
+    /// has moved.
+    fn kind(&self) -> Option<InputKind> {
+        if self.continuous {
+            Some(InputKind::Continuous)
+        } else if self.seen.len() >= 2 {
+            Some(InputKind::Switch)
+        } else {
+            None
+        }
+    }
 }
 
 impl Device {
@@ -119,6 +271,58 @@ impl Device {
             })
             .map(|(_, &value)| value)
             .or_else(|| self.layout_known.then_some(0.0))
+    }
+
+    /// Ends the hold of `held`, if one is under way: whether there was.
+    fn let_go(&mut self, held: &Held) -> bool {
+        let before = self.holds.len();
+        self.holds.retain(|pending| pending.held != *held);
+        self.holds.len() != before
+    }
+
+    /// The route's gripper buttons held now, by code and name.
+    fn pressed_actions(&self) -> Vec<(Option<u32>, Option<GamepadButton>)> {
+        let Some(route) = self.route.as_ref() else {
+            return Vec::new();
+        };
+        self.buttons
+            .iter()
+            .filter(|((code, button), state)| {
+                state.held && route.mapping.action(*button, *code).is_some()
+            })
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// The gripper action asked for from the held buttons and the screen:
+    /// none while open and close are both asked for, and none after that
+    /// until every gripper input is let go.
+    fn settle_gripper(&mut self) {
+        let mut asked: Vec<GripperAction> = self
+            .route
+            .as_ref()
+            .map(|route| {
+                self.buttons
+                    .iter()
+                    .filter(|(key, state)| state.held && !self.stale_actions.contains(key))
+                    .filter_map(|((code, button), _)| route.mapping.action(*button, *code))
+                    .filter_map(|binding| binding.action.gripper())
+                    .collect()
+            })
+            .unwrap_or_default();
+        asked.extend(self.screen.map(|(action, _)| action));
+        asked.sort_unstable();
+        asked.dedup();
+        self.opposed = match asked.len() {
+            0 => false,
+            1 => self.opposed,
+            _ => true,
+        };
+        self.gripper = if self.opposed || self.route.is_none() {
+            None
+        } else {
+            asked.first().copied()
+        };
     }
 
     /// Whether the axis is in each position of the route's mapping now.
@@ -234,6 +438,7 @@ impl Controls {
                 let device = self.devices.entry(id.clone()).or_default();
                 let axis = device.named(code, axis);
                 device.axes.insert((code, axis), value);
+                device.levels.entry((code, axis)).or_default().saw(value);
                 let mut reports = self.neutral_changed(&id);
                 reports.extend(self.positions_entered(&id));
                 reports
@@ -243,38 +448,153 @@ impl Controls {
                 button,
                 code,
                 pressed,
-            } => {
-                let device = self.devices.entry(id.clone()).or_default();
-                let button = device.named(code, button);
-                let key = (code, button);
-                let (was, seen) = device.buttons.get(&key).copied().unwrap_or_default();
-                if pressed || device.buttons.contains_key(&key) {
-                    device.buttons.insert(key, (pressed, seen || pressed));
+            } => self.button(id, button, code, pressed),
+            InputEvent::Gripper { id, action, at_us } => {
+                if let Some(device) = self.devices.get_mut(&id) {
+                    match action {
+                        None => {
+                            device.screen = None;
+                            device.screen_stale = false;
+                        }
+                        Some(action) if !device.screen_stale => {
+                            device.screen = Some((action, at_us));
+                        }
+                        Some(_) => {}
+                    }
+                    device.settle_gripper();
                 }
-                if pressed && !was && (button.is_some() || code.is_some()) {
-                    vec![Report::Pressed { id, button, code }]
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             }
             InputEvent::Present { id, axes, buttons } => {
                 let device = self.devices.entry(id.clone()).or_default();
                 for (code, axis, value) in axes {
                     let axis = device.named(Some(code), axis);
                     device.axes.insert((Some(code), axis), value);
+                    device
+                        .levels
+                        .entry((Some(code), axis))
+                        .or_default()
+                        .saw(value);
                 }
                 for (code, button, pressed) in buttons {
                     let button = device.named(Some(code), button);
                     device
                         .buttons
                         .entry((Some(code), button))
-                        .or_insert((pressed, false));
+                        .or_insert(Button {
+                            held: pressed,
+                            ..Button::default()
+                        });
                 }
                 let mut reports = self.neutral_changed(&id);
                 reports.extend(self.positions_entered(&id));
                 reports
             }
         }
+    }
+
+    /// A button went down or up: a press sends, or starts the hold its
+    /// binding asks for; letting go ends that hold.
+    fn button(
+        &mut self,
+        id: String,
+        button: Option<GamepadButton>,
+        code: Option<u32>,
+        pressed: bool,
+    ) -> Vec<Report> {
+        let device = self.devices.entry(id.clone()).or_default();
+        let button = device.named(code, button);
+        let key = (code, button);
+        let before = device.buttons.get(&key).copied().unwrap_or_default();
+        let was = before.held;
+        if pressed || device.buttons.contains_key(&key) {
+            device.buttons.insert(
+                key,
+                Button {
+                    held: pressed,
+                    seen: before.seen || pressed,
+                    presses: before.presses.saturating_add(u32::from(pressed && !was)),
+                },
+            );
+        }
+        let action_bound = device
+            .route
+            .as_ref()
+            .is_some_and(|route| route.mapping.action(button, code).is_some());
+        if action_bound {
+            if !pressed {
+                device.stale_actions.retain(|held| *held != (code, button));
+            }
+            device.settle_gripper();
+            return Vec::new();
+        }
+        if !pressed {
+            let held = Held::Button { button, code };
+            return if was && device.let_go(&held) {
+                vec![Report::LetGo { id }]
+            } else {
+                Vec::new()
+            };
+        }
+        if was || (button.is_none() && code.is_none()) {
+            return Vec::new();
+        }
+        let hold = device.route.as_ref().and_then(|route| {
+            let binding = route.mapping.button(button, code)?;
+            Some((binding.command.clone(), binding.hold_ms?))
+        });
+        match hold {
+            Some((command, hold_ms)) => {
+                device.holds.push(Pending {
+                    held: Held::Button { button, code },
+                    since_us: None,
+                    hold_ms,
+                });
+                vec![Report::Holding {
+                    id,
+                    command,
+                    hold_ms,
+                }]
+            }
+            None => vec![Report::Pressed { id, button, code }],
+        }
+    }
+
+    /// Holds held long enough, and positions settled: each hold ends, and
+    /// its command goes as a press or a move into the position would. A
+    /// hold's or a settle's time starts at the first call after it began,
+    /// so call this on every pilot tick.
+    pub fn due_holds(&mut self, now_us: u64) -> Vec<Report> {
+        let mut reports = Vec::new();
+        for (id, device) in &mut self.devices {
+            for held in due(&mut device.holds, now_us) {
+                reports.push(Report::LetGo { id: id.clone() });
+                reports.push(held.report(id));
+            }
+            for held in due(&mut device.settling, now_us) {
+                reports.push(held.report(id));
+            }
+        }
+        reports
+    }
+
+    /// Lets go on-screen gripper holds not refreshed for `SCREEN_HOLD_US`,
+    /// as a page that disappeared stops refreshing; the page must let go
+    /// and press again. Call on every pilot tick; true when one expired.
+    pub fn expire_screen_holds(&mut self, now_us: u64) -> bool {
+        let mut expired = false;
+        for device in self.devices.values_mut() {
+            if device
+                .screen
+                .is_some_and(|(_, at)| now_us.saturating_sub(at) >= SCREEN_HOLD_US)
+            {
+                device.screen = None;
+                device.screen_stale = true;
+                device.settle_gripper();
+                expired = true;
+            }
+        }
+        expired
     }
 
     /// Centre stale steering without releasing the page's keyboard session.
@@ -337,12 +657,17 @@ impl Controls {
                             number: code.and_then(|code| self.naming.number(code, true)),
                             axis: axis.map(Into::into),
                             value,
+                            // A known gamepad's sticks are sticks: only a
+                            // device without a known layout is judged.
+                            kind: (!device.layout_known)
+                                .then(|| device.levels.get(&(code, axis)).and_then(Levels::kind))
+                                .flatten(),
                         })
                         .collect(),
                     buttons: device
                         .buttons
                         .iter()
-                        .map(|(&(code, button), &(pressed, seen))| ButtonState {
+                        .map(|(&(code, button), state)| ButtonState {
                             code,
                             name: code.map_or_else(
                                 || kebab(button),
@@ -350,10 +675,12 @@ impl Controls {
                             ),
                             number: code.and_then(|code| self.naming.number(code, false)),
                             button: button.map(Into::into),
-                            pressed,
-                            seen,
+                            pressed: state.held,
+                            seen: state.seen,
+                            presses: state.presses,
                         })
                         .collect(),
+                    gripper: device.gripper.map(Into::into),
                 })
                 .collect(),
         }
@@ -365,8 +692,25 @@ impl Controls {
         device.route = route;
         // Where the axes are now is no move: a claim never sends a command.
         device.held = device.in_positions();
+        // Nor does a gripper button already down, or a hold the page keeps
+        // refreshing: each needs letting go and a fresh press.
+        device.stale_actions = device.pressed_actions();
+        device.screen_stale = device.screen.is_some();
+        device.screen = None;
+        device.opposed = false;
+        device.settle_gripper();
+        // A hold begun under another route sends nothing, nor a position
+        // still settling.
+        let let_go = !device.holds.is_empty();
+        device.holds.clear();
+        device.settling.clear();
+        let mut reports = Vec::new();
+        if let_go {
+            reports.push(Report::LetGo { id: id.to_owned() });
+        }
         // Neutral is judged through the mapping in use.
-        self.neutral_changed(id)
+        reports.extend(self.neutral_changed(id));
+        reports
     }
 
     /// The sticks through the mapping in use; none while an input it
@@ -374,8 +718,7 @@ impl Controls {
     fn sticks(device: &Device) -> Option<Sticks> {
         let default = InputMapping::mode_2();
         let mapping = device.route.as_ref().map_or(&default, |r| &r.mapping);
-        let bindings = [mapping.roll, mapping.pitch, mapping.yaw, mapping.throttle];
-        if bindings.iter().any(|b| device.read(b).is_none()) {
+        if mapping.stick_bindings().any(|b| device.read(b).is_none()) {
             return None;
         }
         Some(mapping.sticks(|binding| device.read(binding).unwrap_or(0.0)))
@@ -387,22 +730,45 @@ impl Controls {
             return Vec::new();
         };
         let now = device.in_positions();
-        let entered = device.route.as_ref().map_or_else(Vec::new, |route| {
-            route
-                .mapping
-                .positions
-                .iter()
-                .zip(&now)
-                .enumerate()
-                .filter(|&(i, (_, &inside))| inside && !device.held.get(i).copied().unwrap_or(true))
-                .map(|(_, (position, _))| Report::Positioned {
-                    id: id.to_owned(),
-                    position: position.clone(),
-                })
-                .collect()
-        });
+        let positions = device
+            .route
+            .as_ref()
+            .map_or_else(Vec::new, |route| route.mapping.positions.clone());
+        let mut reports = Vec::new();
+        for (i, (position, &inside)) in positions.iter().zip(&now).enumerate() {
+            let was = device.held.get(i).copied().unwrap_or(true);
+            let held = Held::Position(position.clone());
+            if !inside && was && device.let_go(&held) {
+                reports.push(Report::LetGo { id: id.to_owned() });
+            }
+            if !inside {
+                device.settling.retain(|pending| pending.held != held);
+            }
+            if !inside || was {
+                continue;
+            }
+            match position.hold_ms {
+                Some(hold_ms) => {
+                    device.holds.push(Pending {
+                        held,
+                        since_us: None,
+                        hold_ms,
+                    });
+                    reports.push(Report::Holding {
+                        id: id.to_owned(),
+                        command: position.command.clone(),
+                        hold_ms,
+                    });
+                }
+                None => device.settling.push(Pending {
+                    held,
+                    since_us: None,
+                    hold_ms: SETTLE_MS,
+                }),
+            }
+        }
         device.held = now;
-        entered
+        reports
     }
 
     fn neutral_changed(&mut self, id: &str) -> Vec<Report> {
@@ -441,7 +807,7 @@ impl Controls {
         reason = "pilot inputs and auxiliary RC inputs"
     )]
     #[must_use]
-    pub fn pilot_outputs(&self) -> Vec<(String, [i16; 4], Vec<(u8, i16)>, PilotInputMethod)> {
+    pub fn pilot_outputs(&self) -> Vec<(String, [i16; 4], Vec<(u8, i16)>, PilotInputMethod, u32)> {
         self.devices
             .values()
             .filter_map(|device| {
@@ -464,6 +830,10 @@ impl Controls {
                     Self::sticks(device)?.manual_control(),
                     auxiliary,
                     route.pilot_input_method,
+                    route
+                        .gripper
+                        .as_ref()
+                        .map_or(0, |wiring| wiring.buttons(device.gripper)),
                 ))
             })
             .collect()
@@ -475,7 +845,7 @@ impl Controls {
     pub fn outputs(&self) -> Vec<(String, [i16; 4])> {
         self.pilot_outputs()
             .into_iter()
-            .map(|(vehicle, sticks, _, _)| (vehicle, sticks))
+            .map(|(vehicle, sticks, _, _, _)| (vehicle, sticks))
             .collect()
     }
 }
@@ -601,6 +971,7 @@ mod tests {
                 vehicle_id: "sim".into(),
                 mapping: InputMapping::mode_2(),
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
             }),
         );
         let centred = controls.outputs();
@@ -680,6 +1051,7 @@ mod tests {
                 "r",
                 Some(ControlRoute {
                     pilot_input_method: PilotInputMethod::Automatic,
+                    gripper: None,
                     vehicle_id: "v".into(),
                     mapping: serde_json::from_str(&saved).unwrap(),
                 }),
@@ -701,7 +1073,8 @@ mod tests {
                         "v".into(),
                         [0, 0, 0, 0],
                         expected,
-                        PilotInputMethod::Automatic
+                        PilotInputMethod::Automatic,
+                        0
                     )]
                 );
             }
@@ -747,6 +1120,7 @@ mod tests {
             "g",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping,
             }),
@@ -764,7 +1138,8 @@ mod tests {
                     "v".into(),
                     [0, 0, 500, 0],
                     vec![(9, expected)],
-                    PilotInputMethod::Automatic
+                    PilotInputMethod::Automatic,
+                    0
                 )]
             );
         }
@@ -786,6 +1161,7 @@ mod tests {
             "g",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping,
             }),
@@ -829,6 +1205,7 @@ mod tests {
             "g",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping: InputMapping::mode_2(),
             }),
@@ -938,6 +1315,7 @@ mod tests {
             "r",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping,
             }),
@@ -1008,6 +1386,7 @@ mod tests {
             "r",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping,
             }),
@@ -1035,6 +1414,51 @@ mod tests {
             .find(|b| b.code == Some(0x9_0003))
             .unwrap();
         assert!(three.pressed && three.seen);
+    }
+
+    /// FB-60/FB-61: a rover's radio with its left stick's channels turned
+    /// off reports only steering and throttle. With pitch and yaw not used
+    /// it is neutral at rest and drives; with them used it never would.
+    #[test]
+    fn controls_not_used_need_no_input_and_send_centred() {
+        use uxduck_core::domain::controller::StickControl;
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "r".into(),
+            name: "TBS Joystick".into(),
+            layout_known: false,
+        });
+        controls.input(InputEvent::Present {
+            id: "r".into(),
+            axes: vec![(0x1_0030, None, 0.0), (0x1_0032, None, -1.0)],
+            buttons: Vec::new(),
+        });
+        let mut rover = InputMapping::radio();
+        assert!(
+            routed_to(&mut controls, "r", rover.clone()).is_empty(),
+            "pitch and yaw read nothing: never neutral"
+        );
+        assert!(controls.outputs().is_empty(), "and nothing is sent");
+        rover.unused = vec![StickControl::Pitch, StickControl::Yaw];
+        assert_eq!(
+            routed_to(&mut controls, "r", rover),
+            [Report::Neutral {
+                id: "r".into(),
+                neutral: true
+            }]
+        );
+        controls.input(InputEvent::Axis {
+            id: "r".into(),
+            axis: None,
+            code: Some(0x1_0030),
+            value: 1.0,
+        });
+        let [(_, sticks)] = controls.outputs().try_into().unwrap();
+        assert_eq!(
+            sticks,
+            [0, 1000, 0, 0],
+            "steering full right, throttle idle, pitch and yaw centred"
+        );
     }
 
     #[test]
@@ -1093,6 +1517,7 @@ mod tests {
             code: Some(RZ),
             at,
             command: Command::SetMode { mode: mode.into() },
+            hold_ms: None,
         };
         let mut mapping = InputMapping::mode_2();
         mapping.positions = vec![at(-0.2, "LOITER"), at(0.2, "ALT_HOLD")];
@@ -1100,6 +1525,7 @@ mod tests {
             "r",
             Some(ControlRoute {
                 pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
                 vehicle_id: "v".into(),
                 mapping,
             }),
@@ -1122,17 +1548,542 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(positioned(controls.input(rz(0.21))), ["ALT_HOLD"]);
-        assert!(
-            positioned(controls.input(rz(0.19))).is_empty(),
-            "still in it"
-        );
-        assert!(
-            positioned(controls.input(rz(0.6))).is_empty(),
-            "no position there"
-        );
-        assert_eq!(positioned(controls.input(rz(-0.2))), ["LOITER"]);
+        let mut now = 0;
+        let mut settled = |controls: &mut Controls, value| {
+            let mut reports = controls.input(rz(value));
+            now += 1_000_000;
+            reports.extend(controls.due_holds(now));
+            reports.extend(controls.due_holds(now + u64::from(SETTLE_MS) * 1_000));
+            positioned(reports)
+        };
+        assert_eq!(settled(&mut controls, 0.21), ["ALT_HOLD"]);
+        assert!(settled(&mut controls, 0.19).is_empty(), "still in it");
+        assert!(settled(&mut controls, 0.6).is_empty(), "no position there");
+        assert_eq!(settled(&mut controls, -0.2), ["LOITER"]);
         controls.route("r", None);
-        assert!(positioned(controls.input(rz(0.2))).is_empty(), "not routed");
+        assert!(settled(&mut controls, 0.2).is_empty(), "not routed");
+    }
+
+    #[test]
+    fn a_switch_flicked_through_a_position_sends_only_where_it_settles() {
+        use uxduck_core::domain::command::Command;
+        // FB-67: a three-way switch on Rz.
+        const RZ: u32 = 0x1_0035;
+        let mut controls = Controls::default();
+        let rz = |value| InputEvent::Axis {
+            id: "r".into(),
+            axis: None,
+            code: Some(RZ),
+            value,
+        };
+        controls.input(InputEvent::Connected {
+            id: "r".into(),
+            name: "TX16S".into(),
+            layout_known: false,
+        });
+        controls.input(rz(-1.0));
+        let at = |at, mode: &str| PositionBinding {
+            axis: GamepadAxis::LeftStickX,
+            code: Some(RZ),
+            at,
+            command: Command::SetMode { mode: mode.into() },
+            hold_ms: None,
+        };
+        let mut mapping = InputMapping::mode_2();
+        mapping.positions = vec![
+            at(-1.0, "STABILIZE"),
+            at(0.0, "ALT_HOLD"),
+            at(1.0, "LOITER"),
+        ];
+        routed_to(&mut controls, "r", mapping.clone());
+        let modes = |reports: Vec<Report>| -> Vec<String> {
+            reports
+                .into_iter()
+                .filter_map(|r| match r {
+                    Report::Positioned { position, .. } => match position.command {
+                        Command::SetMode { mode } => Some(mode),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // From one end to the other, a tick in the middle.
+        assert!(modes(controls.input(rz(0.0))).is_empty());
+        assert!(modes(controls.due_holds(1_000_000)).is_empty());
+        assert!(modes(controls.input(rz(1.0))).is_empty());
+        assert!(modes(controls.due_holds(1_040_000)).is_empty());
+        assert!(
+            modes(controls.due_holds(1_239_000)).is_empty(),
+            "LOITER has not settled; ALT_HOLD was passed"
+        );
+        assert_eq!(
+            modes(controls.due_holds(1_240_000)),
+            ["LOITER"],
+            "settled: only where it stopped"
+        );
+        assert!(modes(controls.due_holds(5_000_000)).is_empty(), "once");
+
+        // A deliberate move goes as soon as it has settled.
+        assert!(modes(controls.input(rz(0.0))).is_empty());
+        assert!(modes(controls.due_holds(6_000_000)).is_empty());
+        assert_eq!(modes(controls.due_holds(6_200_000)), ["ALT_HOLD"]);
+
+        // A settle begun under another route sends nothing.
+        controls.input(rz(1.0));
+        controls.due_holds(7_000_000);
+        routed_to(&mut controls, "r", mapping);
+        assert!(
+            modes(controls.due_holds(8_000_000)).is_empty(),
+            "a claim never sends a command"
+        );
+    }
+
+    fn routed_to(controls: &mut Controls, id: &str, mapping: InputMapping) -> Vec<Report> {
+        controls.route(
+            id,
+            Some(ControlRoute {
+                pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
+                vehicle_id: "v".into(),
+                mapping,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_held_button_sends_once_held_long_enough_and_nothing_if_let_go_early() {
+        use uxduck_core::domain::command::Command;
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        let mut mapping = InputMapping::mode_2();
+        mapping.buttons[0].command = Command::Arm;
+        mapping.buttons[0].hold_ms = Some(1_000);
+        routed_to(&mut controls, "g", mapping);
+        let east = |pressed| InputEvent::Button {
+            id: "g".into(),
+            button: Some(GamepadButton::East),
+            code: None,
+            pressed,
+        };
+        let holding = || Report::Holding {
+            id: "g".into(),
+            command: Command::Arm,
+            hold_ms: 1_000,
+        };
+        let let_go = || Report::LetGo { id: "g".into() };
+
+        assert_eq!(controls.input(east(true)), [holding()]);
+        assert!(controls.due_holds(10_000_000).is_empty(), "its time starts");
+        assert!(controls.due_holds(10_900_000).is_empty(), "0.9 s: not yet");
+        assert_eq!(controls.input(east(false)), [let_go()], "let go early");
+        assert!(controls.due_holds(12_000_000).is_empty(), "so nothing goes");
+
+        assert_eq!(controls.input(east(true)), [holding()]);
+        assert!(controls.due_holds(20_000_000).is_empty());
+        assert_eq!(
+            controls.due_holds(21_000_000),
+            [
+                let_go(),
+                Report::Pressed {
+                    id: "g".into(),
+                    button: Some(GamepadButton::East),
+                    code: None,
+                }
+            ],
+            "held 1 s: sent once"
+        );
+        assert!(controls.due_holds(22_000_000).is_empty(), "and only once");
+        assert!(controls.input(east(false)).is_empty(), "nothing to let go");
+
+        // The other button sends on the press, as before.
+        let north = InputEvent::Button {
+            id: "g".into(),
+            button: Some(GamepadButton::North),
+            code: None,
+            pressed: true,
+        };
+        assert!(matches!(
+            controls.input(north).as_slice(),
+            [Report::Pressed { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_held_position_sends_once_held_and_a_new_route_drops_the_hold() {
+        use uxduck_core::domain::command::Command;
+        const CH5: u32 = 0x1_0034;
+        let mut controls = Controls::default();
+        let ch5 = |value| InputEvent::Axis {
+            id: "r".into(),
+            axis: None,
+            code: Some(CH5),
+            value,
+        };
+        controls.input(InputEvent::Connected {
+            id: "r".into(),
+            name: "TBS Joystick".into(),
+            layout_known: false,
+        });
+        controls.input(ch5(-1.0));
+        let mut mapping = InputMapping::mode_2();
+        mapping.positions = vec![PositionBinding {
+            axis: GamepadAxis::LeftStickX,
+            code: Some(CH5),
+            at: 1.0,
+            command: Command::ArmToggle,
+            hold_ms: Some(2_000),
+        }];
+        routed_to(&mut controls, "r", mapping.clone());
+        assert!(matches!(
+            controls.input(ch5(1.0)).as_slice(),
+            [Report::Holding { hold_ms: 2_000, .. }]
+        ));
+        controls.due_holds(0);
+        assert_eq!(
+            controls.input(ch5(-1.0)),
+            [Report::LetGo { id: "r".into() }],
+            "moved out after a moment"
+        );
+        controls.input(ch5(1.0));
+        controls.due_holds(5_000_000);
+        let done = controls.due_holds(7_000_000);
+        assert!(
+            matches!(done.as_slice(), [Report::LetGo { .. }, Report::Positioned { position, .. }] if position.command == Command::ArmToggle),
+            "{done:?}"
+        );
+
+        controls.input(ch5(-1.0));
+        controls.input(ch5(1.0));
+        assert_eq!(
+            routed_to(&mut controls, "r", mapping)
+                .into_iter()
+                .filter(|r| matches!(r, Report::LetGo { .. }))
+                .count(),
+            1,
+            "a hold begun under another route is dropped"
+        );
+        assert!(controls.due_holds(60_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_switch_is_told_from_a_stick_by_the_places_it_reads() {
+        const STICK: u32 = 0x1_0030;
+        const SWITCH: u32 = 0x1_0034;
+        const SIX_WAY: u32 = 0x1_0035;
+        const FLICKED: u32 = 0x1_0031;
+        let mut controls = Controls::default();
+        let axis = |code, value| InputEvent::Axis {
+            id: "r".into(),
+            axis: None,
+            code: Some(code),
+            value,
+        };
+        let kind = |controls: &Controls, code| {
+            let inputs = controls
+                .snapshot()
+                .controllers
+                .into_iter()
+                .find(|c| c.id == "r")
+                .unwrap();
+            inputs
+                .axes
+                .into_iter()
+                .find(|a| a.code == Some(code))
+                .unwrap()
+                .kind
+        };
+        for value in [0.0, 0.01, -0.01] {
+            controls.input(axis(STICK, value));
+            controls.input(axis(SWITCH, value - 1.0));
+        }
+        assert_eq!(kind(&controls, STICK), None, "jitter at rest is no move");
+        assert_eq!(kind(&controls, SWITCH), None);
+
+        // A three-position switch jumps, a stick passes through.
+        for value in [0.0, 1.0, -1.0] {
+            controls.input(axis(SWITCH, value));
+        }
+        for value in [0.1, 0.3, 0.6, 1.0] {
+            controls.input(axis(STICK, value));
+        }
+        for value in [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0] {
+            controls.input(axis(SIX_WAY, value));
+        }
+        assert_eq!(kind(&controls, SWITCH), Some(InputKind::Switch));
+        assert_eq!(kind(&controls, SIX_WAY), Some(InputKind::Switch));
+        assert_eq!(kind(&controls, STICK), Some(InputKind::Continuous));
+
+        // A stick flicked end to end in one reading looks like a switch
+        // until it reads between; then it is a stick for good.
+        controls.input(axis(FLICKED, 0.0));
+        controls.input(axis(FLICKED, 1.0));
+        assert_eq!(kind(&controls, FLICKED), Some(InputKind::Switch));
+        for value in [0.9, 0.7, 0.4, 0.1] {
+            controls.input(axis(FLICKED, value));
+        }
+        assert_eq!(kind(&controls, FLICKED), Some(InputKind::Continuous));
+        controls.input(axis(FLICKED, 1.0));
+        assert_eq!(kind(&controls, FLICKED), Some(InputKind::Continuous));
+
+        // A known gamepad's stick is never judged, however it moves.
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        for value in [0.0, 1.0, -1.0] {
+            controls.input(InputEvent::Axis {
+                id: "g".into(),
+                axis: Some(GamepadAxis::LeftStickY),
+                code: None,
+                value,
+            });
+        }
+        let pad = controls
+            .snapshot()
+            .controllers
+            .into_iter()
+            .find(|c| c.id == "g")
+            .unwrap();
+        assert_eq!(pad.axes[0].kind, None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod gripper_tests {
+    use uxduck_core::domain::controller::{
+        ActionBinding, GamepadAxis, GamepadButton, HeldAction, InputMapping,
+    };
+    use uxduck_core::domain::gripper::{GripperAction, GripperEnd, GripperWiring};
+    use uxduck_core::domain::settings::PilotInputMethod;
+
+    use super::{Controls, InputEvent, SCREEN_HOLD_US};
+    use crate::runtime::ControlRoute;
+
+    const OPEN: u32 = 1 << 15;
+    const CLOSE: u32 = 1;
+
+    fn route() -> ControlRoute {
+        let mut mapping = InputMapping::mode_2();
+        mapping.actions = vec![
+            ActionBinding {
+                button: GamepadButton::RightTrigger,
+                code: None,
+                action: HeldAction::Open,
+            },
+            ActionBinding {
+                button: GamepadButton::LeftTrigger,
+                code: None,
+                action: HeldAction::Close,
+            },
+        ];
+        ControlRoute {
+            vehicle_id: "sub".into(),
+            mapping,
+            pilot_input_method: PilotInputMethod::ManualControl,
+            gripper: Some(GripperWiring {
+                actuator: 1,
+                opens_at: GripperEnd::Max,
+                output: 11,
+                open_button: 15,
+                close_button: 0,
+                min_us: 1100,
+                max_us: 1900,
+            }),
+        }
+    }
+
+    fn pad(controls: &mut Controls) {
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        controls.input(InputEvent::Present {
+            id: "g".into(),
+            axes: [
+                GamepadAxis::LeftStickX,
+                GamepadAxis::LeftStickY,
+                GamepadAxis::RightStickX,
+                GamepadAxis::RightStickY,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, axis)| (u32::try_from(i).unwrap(), Some(axis), 0.0))
+            .collect(),
+            buttons: vec![],
+        });
+    }
+
+    fn press(button: GamepadButton, pressed: bool) -> InputEvent {
+        InputEvent::Button {
+            id: "g".into(),
+            button: Some(button),
+            code: None,
+            pressed,
+        }
+    }
+
+    fn buttons(controls: &Controls) -> u32 {
+        let [(_, _, _, _, buttons)] = controls.pilot_outputs().try_into().unwrap();
+        buttons
+    }
+
+    #[test]
+    fn a_talk_button_asks_nothing_of_the_vehicle_and_counts_its_presses_for_the_window() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        let mut talking = route();
+        talking.mapping.actions.push(ActionBinding {
+            button: GamepadButton::North,
+            code: None,
+            action: HeldAction::Talk,
+        });
+        controls.route("g", Some(talking));
+        let sticks = controls.outputs();
+        assert!(controls.input(press(GamepadButton::North, true)).is_empty());
+        assert_eq!(buttons(&controls), 0, "no gripper bit");
+        assert_eq!(controls.outputs(), sticks, "steering is unchanged");
+        let north = |controls: &Controls| {
+            let [inputs] = controls.snapshot().controllers.try_into().unwrap();
+            assert!(inputs.gripper.is_none());
+            let state = inputs
+                .buttons
+                .into_iter()
+                .find(|b| b.button == Some(uxduck_contracts::dto::controller::GamepadButton::North))
+                .expect("the window reads it from controller/inputs");
+            (state.pressed, state.presses)
+        };
+        assert_eq!(north(&controls), (true, 1));
+        // A tap between two reads still counts.
+        controls.input(press(GamepadButton::North, false));
+        controls.input(press(GamepadButton::North, true));
+        controls.input(press(GamepadButton::North, false));
+        assert_eq!(north(&controls), (false, 2));
+        controls.input(press(GamepadButton::North, false));
+        assert_eq!(north(&controls), (false, 2), "only going down counts");
+    }
+
+    #[test]
+    fn a_held_gripper_button_sets_its_bit_until_let_go_and_sends_no_command() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.route("g", Some(route()));
+        let sticks = controls.outputs();
+        assert_eq!(buttons(&controls), 0);
+        assert!(
+            controls
+                .input(press(GamepadButton::RightTrigger, true))
+                .is_empty()
+        );
+        assert_eq!(buttons(&controls), OPEN);
+        assert_eq!(controls.outputs(), sticks, "steering is unchanged");
+        controls.input(press(GamepadButton::RightTrigger, false));
+        assert_eq!(buttons(&controls), 0);
+        controls.input(press(GamepadButton::LeftTrigger, true));
+        assert_eq!(buttons(&controls), CLOSE);
+        let [inputs] = controls.snapshot().controllers.try_into().unwrap();
+        assert!(inputs.gripper.is_some());
+    }
+
+    #[test]
+    fn open_and_close_together_stop_it_until_both_are_let_go() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.route("g", Some(route()));
+        controls.input(press(GamepadButton::RightTrigger, true));
+        controls.input(press(GamepadButton::LeftTrigger, true));
+        assert_eq!(buttons(&controls), 0);
+        controls.input(press(GamepadButton::LeftTrigger, false));
+        assert_eq!(buttons(&controls), 0, "still held from before: no movement");
+        controls.input(press(GamepadButton::RightTrigger, false));
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(buttons(&controls), OPEN);
+    }
+
+    #[test]
+    fn a_button_held_through_a_new_route_needs_a_fresh_press() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.input(press(GamepadButton::RightTrigger, true));
+        controls.route("g", Some(route()));
+        assert_eq!(buttons(&controls), 0);
+        controls.input(press(GamepadButton::RightTrigger, false));
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(buttons(&controls), OPEN);
+        controls.route("g", Some(route()));
+        assert_eq!(
+            buttons(&controls),
+            0,
+            "a vehicle switch or reconnect lets go"
+        );
+        controls.route("g", None);
+        assert!(controls.pilot_outputs().is_empty());
+    }
+
+    #[test]
+    fn a_route_without_a_gripper_sends_no_bits() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.route(
+            "g",
+            Some(ControlRoute {
+                gripper: None,
+                ..route()
+            }),
+        );
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(buttons(&controls), 0);
+    }
+
+    #[test]
+    fn the_screen_hold_expires_unless_refreshed_and_then_needs_letting_go() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.route("g", Some(route()));
+        let screen = |action, at_us| InputEvent::Gripper {
+            id: "g".into(),
+            action,
+            at_us,
+        };
+        controls.input(screen(Some(GripperAction::Close), 1_000_000));
+        assert_eq!(buttons(&controls), CLOSE);
+        controls.input(screen(Some(GripperAction::Close), 1_400_000));
+        assert!(!controls.expire_screen_holds(1_400_000 + SCREEN_HOLD_US - 1));
+        assert_eq!(buttons(&controls), CLOSE);
+        assert!(controls.expire_screen_holds(1_400_000 + SCREEN_HOLD_US));
+        assert_eq!(buttons(&controls), 0);
+        controls.input(screen(Some(GripperAction::Close), 2_000_000));
+        assert_eq!(buttons(&controls), 0, "a late refresh does not resume it");
+        controls.input(screen(None, 2_100_000));
+        controls.input(screen(Some(GripperAction::Open), 2_200_000));
+        assert_eq!(buttons(&controls), OPEN);
+        controls.route("g", Some(route()));
+        assert_eq!(
+            buttons(&controls),
+            0,
+            "a new route lets go of the screen too"
+        );
+    }
+
+    #[test]
+    fn screen_and_button_asking_opposite_ways_stop_it() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.route("g", Some(route()));
+        controls.input(press(GamepadButton::RightTrigger, true));
+        controls.input(InputEvent::Gripper {
+            id: "g".into(),
+            action: Some(GripperAction::Close),
+            at_us: 0,
+        });
+        assert_eq!(buttons(&controls), 0);
     }
 }

@@ -1,0 +1,282 @@
+--- /dev/null
++++ b/libraries/AP_HAL/utility/SITL_Network.h
+@@ -0,0 +1,53 @@
++// UXDuck builds stay local even when started by an older installed daemon.
++#pragma once
++#include <arpa/inet.h>
++#include <errno.h>
++#include <sys/socket.h>
++
++namespace SITLNetwork {
++inline bool &local_only()
++{
++    static bool enabled = true;
++    return enabled;
++}
++
++inline bool allow_destination(uint32_t network_address)
++{
++    if (!local_only() || (ntohl(network_address) & 0xff000000U) == 0x7f000000U) {
++        return true;
++    }
++    errno = EACCES;
++    return false;
++}
++
++inline bool bind_address(struct sockaddr_in &address)
++{
++    if (local_only() && address.sin_addr.s_addr == htonl(INADDR_ANY)) {
++        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    }
++    return allow_destination(address.sin_addr.s_addr);
++}
++
++// Windows can leave even a connected UDP socket bound to INADDR_ANY.
++// Bind clients before connect/sendto, without rebinding an explicit RC port.
++inline bool bind_client(int fd)
++{
++    if (!local_only()) {
++        return true;
++    }
++    struct sockaddr_in address {};
++    socklen_t length = sizeof(address);
++    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0 && errno != EINVAL) {
++        return false;
++    }
++    if (address.sin_port != 0) {
++        return allow_destination(address.sin_addr.s_addr);
++    }
++    address.sin_family = AF_INET;
++#ifdef HAVE_SOCK_SIN_LEN
++    address.sin_len = sizeof(address);
++#endif
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    return bind(fd, (struct sockaddr *)&address, sizeof(address)) == 0;
++}
++}
+--- a/libraries/AP_HAL/utility/Socket.cpp
++++ b/libraries/AP_HAL/utility/Socket.cpp
+@@ -50,6 +50,13 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ 
++#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && !HAL_SITL_WASM_ENABLED && !AP_NETWORKING_BACKEND_CHIBIOS && !AP_NETWORKING_BACKEND_PPP
++#include "SITL_Network.h"
++#define UXDUCK_LOCAL_NETWORK 1
++#else
++#define UXDUCK_LOCAL_NETWORK 0
++#endif
++
+ #if AP_NETWORKING_BACKEND_CHIBIOS || AP_NETWORKING_BACKEND_PPP
+ #define CALL_PREFIX(x) ::lwip_##x
+ #else
+@@ -189,6 +196,12 @@
+     int ret;
+     int one = 1;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        (datagram && !SITLNetwork::bind_client(fd))) {
++        return false;
++    }
++#endif
+ 
+     if (datagram && is_multicast_address(sockaddr)) {
+         /*
+@@ -295,6 +308,12 @@
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        (datagram && !SITLNetwork::bind_client(fd))) {
++        return false;
++    }
++#endif
+ 
+     set_blocking(false);
+ 
+@@ -329,6 +348,11 @@
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::bind_address(sockaddr)) {
++        return false;
++    }
++#endif
+ 
+     reuseaddress();
+     if (CALL_PREFIX(bind)(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) != 0) {
+@@ -534,6 +558,12 @@
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = htonl(address);
+ 
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        !SITLNetwork::bind_client(fd)) {
++        return -1;
++    }
++#endif
+     return CALL_PREFIX(sendto)(fd, buf, size, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+ }
+ 
+@@ -547,6 +577,12 @@
+     }
+     struct sockaddr_in sockaddr;
+     make_sockaddr(address, port, sockaddr);
++#if UXDUCK_LOCAL_NETWORK
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr) ||
++        !SITLNetwork::bind_client(fd)) {
++        return -1;
++    }
++#endif
+     return CALL_PREFIX(sendto)(fd, buf, size, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+ }
+ 
+--- a/libraries/AP_HAL_SITL/UARTDriver.cpp
++++ b/libraries/AP_HAL_SITL/UARTDriver.cpp
+@@ -44,6 +44,7 @@
+ #endif
+ 
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include "SITL_State.h"
+ #include "SITL_Multicast.h"
+ #if HAL_GCS_ENABLED
+@@ -417,6 +418,10 @@
+                 (unsigned)ntohs(_listen_sockaddr.sin_port),
+                 (unsigned)_portNumber);
+ 
++        if (!SITLNetwork::bind_address(_listen_sockaddr)) {
++            fprintf(stderr, "Local-only simulation cannot listen outside localhost\n");
++            exit(1);
++        }
+         ret = bind(_listen_fd, (struct sockaddr *)&_listen_sockaddr, sizeof(_listen_sockaddr));
+         if (ret == -1) {
+             fprintf(stderr, "bind failed on port %u - %s\n",
+@@ -597,6 +602,10 @@
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     constexpr auto one=1;
+     int ret;
+@@ -673,6 +682,10 @@
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     _fd = socket(AF_INET, SOCK_DGRAM, 0);
+     if (_fd == -1) {
+@@ -690,6 +703,10 @@
+     int one = 1;
+     setsockopt(_fd,SOL_SOCKET,SO_BROADCAST,(char *)&one,sizeof(one));
+ 
++    if (!SITLNetwork::bind_client(_fd)) {
++        fprintf(stderr, "Local-only simulation cannot bind its UDP client to localhost\n");
++        exit(1);
++    }
+     ret = connect(_fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+     if (ret == -1) {
+         fprintf(stderr, "udp connect failed on port %u - %s\n",
+@@ -710,6 +727,10 @@
+  */
+ void UARTDriver::_udp_start_multicast(const char *address, uint16_t port)
+ {
++    if (SITLNetwork::local_only()) {
++        fprintf(stderr, "Local-only simulation does not support multicast serial ports\n");
++        exit(1);
++    }
+     if (_connected) {
+         return;
+     }
+@@ -726,6 +747,10 @@
+     sockaddr.sin_port = htons(port);
+     sockaddr.sin_family = AF_INET;
+     sockaddr.sin_addr.s_addr = inet_addr(address);
++    if (!SITLNetwork::allow_destination(sockaddr.sin_addr.s_addr)) {
++        fprintf(stderr, "Local-only simulation cannot connect outside localhost\n");
++        exit(1);
++    }
+ 
+     _mc_fd = socket(AF_INET, SOCK_DGRAM, 0);
+     if (_mc_fd == -1) {
+--- a/libraries/AP_HAL_SITL/SITL_State.cpp
++++ b/libraries/AP_HAL_SITL/SITL_State.cpp
+@@ -6,6 +6,7 @@
+ #include "AP_HAL_SITL_Namespace.h"
+ #include "HAL_SITL_Class.h"
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include "Scheduler.h"
+ #include "CANSocketIface.h"
+ #include "SITL_Multicast.h"
+@@ -526,6 +527,14 @@
+  */
+ void SITL_State::multicast_state_send(void)
+ {
++    // Built-in physics needs no AP_Periph multicast or wildcard servo socket.
++    if (SITLNetwork::local_only()) {
++        if (_periph_lockstep) {
++            fprintf(stderr, "Local-only simulation does not support multicast peripherals\n");
++            exit(1);
++        }
++        return;
++    }
+     if (_sitl == nullptr) {
+         return;
+     }
+--- a/libraries/AP_HAL_SITL/SITL_cmdline.cpp
++++ b/libraries/AP_HAL_SITL/SITL_cmdline.cpp
+@@ -6,6 +6,7 @@
+ #include "AP_HAL_SITL_Namespace.h"
+ #include "HAL_SITL_Class.h"
+ #include "UARTDriver.h"
++#include <AP_HAL/utility/SITL_Network.h>
+ #include <AP_HAL/utility/getopt_cpp.h>
+ #include <AP_HAL_SITL/Storage.h>
+ #include <AP_Param/AP_Param.h>
+@@ -96,6 +97,7 @@
+            "\t--gimbal                 enable simulated MAVLink gimbal\n"
+            "\t--autotest-dir DIR       set directory for additional files\n"
+            "\t--defaults path          set path to defaults file\n"
++           "\t--local-only             restrict native simulation sockets to localhost\n"
+            "\t--list-models            list embedded vehicleinfo.json models and exit\n"
+            "\t--sim-periph-lockstep    do not advance the simulation until all simulated peripherals have consumed our state\n"
+            "\t--serial0 device         set device string for SERIAL0\n"
+@@ -319,6 +321,7 @@
+         CMDLINE_SYSID,
+         CMDLINE_SLAVE,
+         CMDLINE_LIST_MODELS,
++        CMDLINE_LOCAL_ONLY,
+         CMDLINE_SIM_PERIPH_LOCKSTEP,
+ #if STORAGE_USE_FLASH
+         CMDLINE_SET_STORAGE_FLASH_ENABLED,
+@@ -384,6 +387,7 @@
+         {"start-time",      true,   0, CMDLINE_START_TIME},
+         {"sysid",           true,   0, CMDLINE_SYSID},
+         {"slave",           true,   0, CMDLINE_SLAVE},
++        {"local-only",      false,  0, CMDLINE_LOCAL_ONLY},
+         {"list-models",     false,  0, CMDLINE_LIST_MODELS},
+         {"sim-periph-lockstep", false, 0, CMDLINE_SIM_PERIPH_LOCKSTEP},
+ #if STORAGE_USE_FLASH
+@@ -621,6 +625,10 @@
+ #endif  // AP_SIM_JSON_MASTER_ENABLED
+             break;
+         }
++        case CMDLINE_LOCAL_ONLY:
++            SITLNetwork::local_only() = true;
++            break;
++
+         case CMDLINE_LIST_MODELS:
+             list_models_and_exit();
+             break;

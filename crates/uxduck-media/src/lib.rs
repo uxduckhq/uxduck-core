@@ -10,6 +10,7 @@ pub mod au;
 pub mod audio;
 pub mod bits;
 pub mod klv;
+pub mod latency;
 pub mod mp4;
 pub mod nal;
 pub mod opus;

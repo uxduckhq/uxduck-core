@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use uxduck_contracts::dto::controller::ControllerInputsResult;
+#[cfg(feature = "gamepad")]
 use uxduck_core::domain::controller::{GamepadAxis, GamepadButton};
 pub use uxduck_engine::controller_input::{Controls, InputEvent, Report};
 
@@ -153,16 +154,20 @@ fn gamepad_id(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
 fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId) -> InputEvent {
     let gamepad = gilrs.gamepad(pad);
     // Otherwise gilrs guesses gamepad names, wrong for a radio in joystick mode.
-    InputEvent::Connected {
+    let connected = InputEvent::Connected {
         id: gamepad_id(gilrs, pad),
         name: gamepad.name().to_owned(),
         layout_known: gamepad.mapping_source() == gilrs::MappingSource::SdlMappings,
-    }
+    };
+    #[cfg(target_os = "linux")]
+    super::bluetooth::track(&connected, gilrs::LinuxGamepadExt::devpath(&gamepad));
+    connected
 }
 
 /// Gamepads through gilrs, on a thread of their own. Without a gamepad
 /// backend (no permission, no libudev) it logs once and does nothing.
 #[cfg(feature = "gamepad")]
+#[allow(clippy::too_many_lines, reason = "one arm per gilrs event")]
 pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
     let spawned = std::thread::Builder::new()
         .name("gamepads".into())
@@ -184,6 +189,8 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                     return;
                 }
             };
+            #[cfg(target_os = "linux")]
+            let events = super::bluetooth::watch(events);
             #[cfg(target_os = "macos")]
             let mut duplicates = std::collections::HashMap::new();
             let pads: Vec<gilrs::GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
@@ -203,6 +210,16 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                     std::thread::sleep,
                 );
                 let id = gamepad_id(&gilrs, event.id);
+                let known =
+                    gilrs.gamepad(event.id).mapping_source() == gilrs::MappingSource::SdlMappings;
+                #[cfg(target_os = "macos")]
+                let native = |code: u32| {
+                    duplicates
+                        .get(&event.id)
+                        .is_some_and(|observer: &super::hid::Duplicates| observer.handles(code))
+                };
+                #[cfg(not(target_os = "macos"))]
+                let native = |_: u32| false;
                 match event.event {
                     gilrs::EventType::Connected => {
                         #[cfg(target_os = "macos")]
@@ -222,34 +239,38 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                         events(InputEvent::Disconnected { id });
                     }
                     gilrs::EventType::AxisChanged(axis, value, code) => {
-                        #[cfg(target_os = "macos")]
-                        if duplicates
-                            .get(&event.id)
-                            .is_some_and(|observer| observer.handles(code.into_u32()))
-                        {
-                            continue;
-                        }
-                        let known = gilrs.gamepad(event.id).mapping_source()
-                            == gilrs::MappingSource::SdlMappings;
-                        let value = as_sent(known, axis, f64::from(value));
-                        if let Some(buttons) = dpad(axis, value) {
-                            for (button, pressed) in buttons {
-                                events(InputEvent::Button {
-                                    id: id.clone(),
-                                    button: Some(button),
-                                    code: None,
-                                    pressed,
-                                });
-                            }
-                        } else if steady.changed(&id, code.into_u32(), value) {
-                            events(InputEvent::Axis {
-                                id,
-                                axis: axis_of(axis),
-                                code: Some(code.into_u32()),
-                                value,
-                            });
+                        let analog = Analog::Axis(axis);
+                        for input in analog_events(
+                            &id,
+                            analog,
+                            code.into_u32(),
+                            value,
+                            known,
+                            native,
+                            &mut steady,
+                        ) {
+                            events(input);
                         }
                     }
+                    gilrs::EventType::ButtonChanged(_, value, code)
+                        if trigger_axis(known, code.into_u32()) =>
+                    {
+                        let analog = Analog::Trigger;
+                        for input in analog_events(
+                            &id,
+                            analog,
+                            code.into_u32(),
+                            value,
+                            known,
+                            native,
+                            &mut steady,
+                        ) {
+                            events(input);
+                        }
+                    }
+                    gilrs::EventType::ButtonPressed(_, code)
+                    | gilrs::EventType::ButtonReleased(_, code)
+                        if trigger_axis(known, code.into_u32()) => {}
                     gilrs::EventType::ButtonPressed(button, code)
                     | gilrs::EventType::ButtonReleased(button, code) => {
                         let pressed = matches!(event.event, gilrs::EventType::ButtonPressed(..));
@@ -404,6 +425,83 @@ impl Steady {
     }
 }
 
+/// Whether a button event is one of a joystick's axes: gilrs's own layout,
+/// which it uses for every device it has no mapping for, takes the axes at
+/// these platform codes for triggers and reports them as buttons. On Windows
+/// they are a joystick's 4th, 5th, 7th and 8th axes, so a radio's channels
+/// 4, 5, 7 and 8 showed as buttons, pressed past half travel (FB-87). A
+/// gamepad gilrs knows keeps its triggers.
+#[cfg(feature = "gamepad")]
+fn trigger_axis(known: bool, code: u32) -> bool {
+    !known && TRIGGER_AXES.iter().any(|axis| axis.into_u32() == code)
+}
+
+/// The axes gilrs's own layout takes for triggers, on this platform.
+#[cfg(feature = "gamepad")]
+const TRIGGER_AXES: [gilrs_core::EvCode; 4] = {
+    use gilrs_core::native_ev_codes as nec;
+    [nec::AXIS_LT, nec::AXIS_RT, nec::AXIS_LT2, nec::AXIS_RT2]
+};
+
+/// An analog change from gilrs: an axis, or an axis it took for a trigger.
+#[cfg(feature = "gamepad")]
+#[derive(Clone, Copy)]
+enum Analog {
+    Axis(gilrs::Axis),
+    Trigger,
+}
+
+/// What an analog change becomes. `native` says which codes the macOS
+/// reader of repeated HID usages sends itself: gilrs reports every element
+/// of such a usage under one code, so its values would overwrite each other.
+#[cfg(feature = "gamepad")]
+fn analog_events(
+    id: &str,
+    analog: Analog,
+    code: u32,
+    value: f32,
+    known: bool,
+    native: impl Fn(u32) -> bool,
+    steady: &mut Steady,
+) -> Vec<InputEvent> {
+    if native(code) {
+        return Vec::new();
+    }
+    let (axis, value) = match analog {
+        Analog::Axis(axis) => {
+            let value = as_sent(known, axis, f64::from(value));
+            if let Some(buttons) = dpad(axis, value) {
+                return buttons
+                    .into_iter()
+                    .map(|(button, pressed)| InputEvent::Button {
+                        id: id.to_owned(),
+                        button: Some(button),
+                        code: None,
+                        pressed,
+                    })
+                    .collect();
+            }
+            (axis_of(axis), value)
+        }
+        Analog::Trigger => (None, trigger_as_axis(value)),
+    };
+    if !steady.changed(id, code, value) {
+        return Vec::new();
+    }
+    vec![InputEvent::Axis {
+        id: id.to_owned(),
+        axis,
+        code: Some(code),
+        value,
+    }]
+}
+
+/// An axis gilrs took for a trigger, from its 0 to 1 back to -1 to 1.
+#[cfg(feature = "gamepad")]
+fn trigger_as_axis(value: f32) -> f64 {
+    f64::from(value).mul_add(2.0, -1.0)
+}
+
 /// A hat D-pad, which gilrs reports as two axes, as D-pad buttons.
 #[cfg(feature = "gamepad")]
 fn dpad(axis: gilrs::Axis, value: f64) -> Option<[(GamepadButton, bool); 2]> {
@@ -523,6 +621,79 @@ mod tests {
             steady.changed("other", 1, 0.0),
             "each controller on its own"
         );
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn a_radio_channel_gilrs_takes_for_a_trigger_is_an_axis() {
+        use gilrs_core::native_ev_codes as nec;
+        for trigger in [nec::AXIS_LT, nec::AXIS_RT, nec::AXIS_LT2, nec::AXIS_RT2] {
+            assert!(trigger_axis(false, trigger.into_u32()), "a radio's channel");
+            assert!(
+                !trigger_axis(true, trigger.into_u32()),
+                "a known gamepad's trigger"
+            );
+        }
+        assert!(
+            !trigger_axis(false, nec::AXIS_LSTICKX.into_u32()),
+            "an axis gilrs reports as one"
+        );
+        assert!(!trigger_axis(false, nec::BTN_LT2.into_u32()), "a button");
+        if cfg!(target_os = "windows") {
+            for channel in [0x1_0003, 0x1_0004, 0x1_0006, 0x1_0007] {
+                assert!(
+                    trigger_axis(false, channel),
+                    "FB-87's channels 4, 5, 7 and 8"
+                );
+            }
+        }
+        assert!((trigger_as_axis(0.0) + 1.0).abs() < f64::EPSILON);
+        assert!(
+            trigger_as_axis(0.5).abs() < f64::EPSILON,
+            "a switch's middle"
+        );
+        assert!((trigger_as_axis(1.0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn a_value_the_native_reader_sends_is_not_sent_again() {
+        use gilrs_core::native_ev_codes as nec;
+        let repeated = nec::AXIS_RT2.into_u32();
+        let native = |code: u32| code == repeated;
+        let mut steady = Steady::default();
+        for analog in [Analog::Trigger, Analog::Axis(gilrs::Axis::RightZ)] {
+            assert!(
+                analog_events("r", analog, repeated, 0.7, false, native, &mut steady).is_empty(),
+                "the second element's value would overwrite the first's"
+            );
+        }
+        let trigger = nec::AXIS_LT2.into_u32();
+        let sent = analog_events(
+            "r",
+            Analog::Trigger,
+            trigger,
+            1.0,
+            false,
+            native,
+            &mut steady,
+        );
+        assert!(
+            matches!(&sent[..], [InputEvent::Axis { axis: None, code: Some(c), value, .. }]
+                if *c == trigger && (value - 1.0).abs() < f64::EPSILON),
+            "a trigger usage the reader does not send"
+        );
+        let x = nec::AXIS_LSTICKX.into_u32();
+        let sent = analog_events(
+            "r",
+            Analog::Axis(gilrs::Axis::LeftStickX),
+            x,
+            0.5,
+            false,
+            |_| false,
+            &mut steady,
+        );
+        assert!(matches!(&sent[..], [InputEvent::Axis { code: Some(c), .. }] if *c == x));
     }
 
     #[cfg(feature = "gamepad")]

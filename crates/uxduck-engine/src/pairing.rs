@@ -441,7 +441,7 @@ pub fn condition(code: &str) -> String {
 /// The question every operator's app shows while a browser waits: who asks,
 /// its code to compare with the one on its page, and Allow or Deny. A phone
 /// or tablet on the network is named with its address, and is allowed to
-/// watch, or to watch and fly (S97).
+/// watch, or to watch and control (S97).
 pub(crate) fn question(asked: &Question) -> Raise {
     let Question {
         origin,
@@ -469,11 +469,11 @@ pub(crate) fn question(asked: &Question) -> Raise {
             subject: Subject::System,
             title: format!("{device} at {peer} asks to connect to UXDuck"),
             body: Some(format!(
-                "From this computer's network. Allow it only if it's your device and it shows {spaced}. Watching can't send commands. Flying can."
+                "From this computer's network. Allow it only if it's your device and it shows {spaced}. Watching can't send commands. Watch and control can."
             )),
             actions: vec![
                 answer("Watch only", true, Some(NetworkAccess::Watch)),
-                answer("Watch and fly", true, Some(NetworkAccess::Fly)),
+                answer("Watch and control", true, Some(NetworkAccess::Fly)),
                 answer("Deny", false, None),
             ],
             condition: Some(condition(code)),

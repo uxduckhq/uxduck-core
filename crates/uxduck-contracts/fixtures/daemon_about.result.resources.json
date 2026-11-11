@@ -1,0 +1,21 @@
+{
+  "version": "0.8.0",
+  "runsIn": "installed",
+  "protocolVersion": 1,
+  "releaseStage": "flight",
+  "target": "aarch64-apple-darwin",
+  "dev": false,
+  "uptimeUs": 3000000,
+  "processUsage": {
+    "residentBytes": 125829120,
+    "cpuCoreCount": 8,
+    "cpuPercent": 7,
+    "cpuWindowMs": 2000,
+    "simulations": {
+      "count": 2,
+      "residentBytes": 268435456,
+      "cpuPercent": 43,
+      "cpuWindowMs": 2000
+    }
+  }
+}

@@ -62,7 +62,7 @@ pub enum CheckFix {
     Plans,
     /// The vehicle's Mission tab.
     Mission,
-    /// The Controllers tab.
+    /// The Cockpit's controllers.
     Controllers,
     /// The vehicle's cameras.
     Cameras,

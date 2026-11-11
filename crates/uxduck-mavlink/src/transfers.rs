@@ -369,6 +369,22 @@ pub type WithDefault = (Param, Option<f32>);
 /// # Errors
 /// When the file is not a parameter pack or ends inside an entry.
 pub fn parse_param_pck(bytes: &[u8]) -> Result<Vec<WithDefault>, String> {
+    let mut out = Vec::new();
+    read_param_pck(bytes, &mut out)?;
+    Ok(out)
+}
+
+/// As much of a `param.pck` as there is: the parameters before the point
+/// where it ends or stops making sense, for a file put together from a log
+/// with gaps (ADR-0050 L4).
+#[must_use]
+pub fn parse_param_pck_partial(bytes: &[u8]) -> Vec<WithDefault> {
+    let mut out = Vec::new();
+    let _ = read_param_pck(bytes, &mut out);
+    out
+}
+
+fn read_param_pck(bytes: &[u8], out: &mut Vec<WithDefault>) -> Result<(), String> {
     if bytes.len() < 6 {
         return Err("the parameter file is too short".into());
     }
@@ -378,7 +394,7 @@ pub fn parse_param_pck(bytes: &[u8]) -> Result<Vec<WithDefault>, String> {
     }
     let with_defaults = magic == 0x671c;
     let count = usize::from(u16::from_le_bytes([bytes[2], bytes[3]]));
-    let mut out = Vec::with_capacity(count);
+    out.reserve(count);
     let mut name = String::new();
     let mut at = 6;
     while out.len() < count {
@@ -441,7 +457,7 @@ pub fn parse_param_pck(bytes: &[u8]) -> Result<Vec<WithDefault>, String> {
             default,
         ));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Writes a `param.pck` with defaults, sorted by name, for the fake vehicle

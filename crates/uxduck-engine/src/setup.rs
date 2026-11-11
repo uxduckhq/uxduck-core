@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use uxduck_contracts::dto::setup::{
-    CompassInfo, HeadingParams, RowState, Setup as SetupDto, SetupConfirmParams, SetupParams,
-    SetupRowState, SetupStartParams, SetupStateResult,
+    CompassInfo, HeadingParams, RowState, ScriptingState, Setup as SetupDto, SetupConfirmParams,
+    SetupParams, SetupRowState, SetupStartParams, SetupStateResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -58,6 +58,7 @@ use uxduck_core::events::{Actor, Change};
 use uxduck_mavlink::session::MagCal;
 
 mod airspeed;
+mod escs;
 mod firmware;
 mod motors;
 mod px4;
@@ -153,6 +154,11 @@ pub(crate) struct Setups {
     /// A PX4 airspeed calibration's offset and the pressure blown into
     /// it, pascals, by vehicle, for its history (S191).
     px4_airspeed: BTreeMap<String, (Option<i32>, Option<i32>)>,
+    /// The ESC calibrations' writes and restarts (S216).
+    escs: escs::Escs,
+    /// When each vehicle was last seen to restart, for the Restart row
+    /// (S216). Lost with the daemon.
+    restarted_at: BTreeMap<String, u64>,
 }
 
 fn actor() -> Actor {
@@ -303,6 +309,10 @@ fn start(
             None
         }
         SetupKind::Compass | SetupKind::Accelerometer | SetupKind::Level => None,
+        // ArduPilot's ESC calibration is a parameter and a replug (S216).
+        SetupKind::Escs => {
+            return escs::start(engine, connection, &vehicle, params.propellers_off);
+        }
         SetupKind::Motors => {
             return Err(ApiError::new(
                 ErrorKind::InvalidParams,
@@ -399,7 +409,8 @@ fn start(
         | SetupKind::Firmware
         | SetupKind::AirspeedZero
         | SetupKind::AirspeedCheck
-        | SetupKind::AirspeedRatio => unreachable!("refused above"),
+        | SetupKind::AirspeedRatio
+        | SetupKind::Escs => unreachable!("refused above"),
     };
     engine.send_setup_command(&vehicle, actor, receipt_id, command, Order::Start);
     to_value(&SetupDto::from(&saved))
@@ -460,6 +471,10 @@ fn cancel(
             Order::Cancel,
         );
     }
+    // An ESC calibration's 3 goes back to 0 (S216).
+    if setup.kind == SetupKind::Escs {
+        engine.cancel_escs(&vehicle, actor.clone(), connection);
+    }
     let command = match setup.kind {
         _ if px4::px4(&vehicle) && setup.kind != SetupKind::Radio => None,
         SetupKind::Compass => Some(Command::Long {
@@ -474,7 +489,8 @@ fn cancel(
         | SetupKind::Firmware
         | SetupKind::AirspeedZero
         | SetupKind::AirspeedCheck
-        | SetupKind::AirspeedRatio => None,
+        | SetupKind::AirspeedRatio
+        | SetupKind::Escs => None,
     };
     if let Some(command) = command
         && engine.not_writable(&vehicle.link_id).is_none()
@@ -768,6 +784,17 @@ fn round1(value: impl Into<f64>) -> String {
     }
 }
 
+/// Where ArduPilot looks for Lua scripts over MAVLink FTP (ADR-0027 F14):
+/// its storage card's `APM/scripts` on a board; in a simulation, which runs
+/// from a folder of its own, `scripts` in that folder.
+fn scripts_folder(simulated: bool) -> &'static str {
+    if simulated {
+        "/scripts"
+    } else {
+        "/APM/scripts"
+    }
+}
+
 impl Engine {
     /// The vehicle's procedure as it stands, journaled or not yet: the one
     /// running, else the one changed last.
@@ -846,10 +873,7 @@ impl Engine {
             return Some(format!("UXDuck can't hear {} right now.", vehicle.name));
         }
         if vehicle.armed {
-            return Some(format!(
-                "Disarm {} first: it is set up only on the ground.",
-                vehicle.name
-            ));
+            return Some(format!("Disarm {} to set it up.", vehicle.name));
         }
         None
     }
@@ -901,6 +925,7 @@ impl Engine {
             attempts: 0,
             client_id: actor.client_id.clone(),
             operator_id: actor.operator_id.clone(),
+            sent_by: None,
             remote: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
@@ -990,7 +1015,8 @@ impl Engine {
             SetupKind::Motors
             | SetupKind::Firmware
             | SetupKind::AirspeedCheck
-            | SetupKind::AirspeedRatio => return true,
+            | SetupKind::AirspeedRatio
+            | SetupKind::Escs => return true,
             SetupKind::Compass | SetupKind::Accelerometer => {}
         }
         let now = self.clock.now_us();
@@ -1544,9 +1570,9 @@ impl Engine {
         }
         let results: Vec<String> = setup.sensors.iter().map(sensor_words).collect();
         let text = if succeeded {
-            format!("Compasses calibrated: {}", results.join("; "))
+            format!("Compasses calibrated: {}", results.join(", "))
         } else {
-            format!("Compass calibration failed: {}", results.join("; "))
+            format!("Compass calibration failed: {}", results.join(", "))
         };
         let event = HistoryEvent::Calibrated {
             kind: setup.kind,
@@ -1562,13 +1588,18 @@ impl Engine {
     /// A vehicle restarted: every calibration waiting on it is in use now,
     /// and one running when it restarted stopped.
     pub(crate) fn setup_restarted(&mut self, vehicle_id: &str) {
+        let now = self.clock.now_us();
+        self.setup.restarted_at.insert(vehicle_id.to_owned(), now);
+        // An ESC calibration waits for this restart (S216).
+        let escs = self.escs_restarted(vehicle_id);
         let mut all = self.setups_of(vehicle_id);
         // The one running is ended last, so it stays the latest.
         all.sort_by_key(|s| s.step.running());
         for mut setup in all {
             let now = self.clock.now_us();
-            // Restarting is how an install ends (S189).
-            if setup.kind == SetupKind::Firmware {
+            // Restarting is how an install ends (S189), and how the ESCs
+            // calibrate (S216).
+            if setup.kind == SetupKind::Firmware || (setup.kind == SetupKind::Escs && escs) {
                 continue;
             }
             // A ratio turns autocal off, which the vehicle kept (S190).
@@ -1714,6 +1745,30 @@ impl Engine {
                 procedure: Some(SetupKind::Motors.into()),
             });
         }
+        // The ESCs, for a copter with PWM or OneShot ESCs (S216).
+        rows.extend(self.escs_row(vehicle, last(SetupRow::Escs).as_ref()));
+        // What a restart is due for (S216, V16).
+        let restart = uxduck_contracts::dto::setup::RestartDue {
+            rows: rows
+                .iter()
+                .filter(|r| r.state == RowState::NeedsRestart)
+                .map(|r| r.row)
+                .collect(),
+            parameters: self
+                .preflight
+                .restart_params
+                .get(&vehicle.id)
+                .map(|names| names.iter().cloned().collect())
+                .unwrap_or_default(),
+            restarted_at_us: self.setup.restarted_at.get(&vehicle.id).copied(),
+        };
+        // Lua scripting, when the firmware has it (S259, ADR-0027 F14).
+        let scripting = param("SCR_ENABLE").map(|value| ScriptingState {
+            enabled: (value - 1.0).abs() < 0.5,
+            needs_restart: restart.parameters.iter().any(|name| name == "SCR_ENABLE"),
+            folder: scripts_folder(self.is_simulated(vehicle)).to_owned(),
+            messages: self.script_messages(&vehicle.id),
+        });
         Ok(SetupStateResult {
             vehicle_id: vehicle.id.clone(),
             rows,
@@ -1724,6 +1779,8 @@ impl Engine {
                 .map(Into::into),
             procedure: procedure.as_ref().map(Into::into),
             procedures: self.setups_of(&vehicle.id).iter().map(Into::into).collect(),
+            restart,
+            scripting,
         })
     }
 

@@ -91,6 +91,8 @@ struct Write {
     vehicle_id: String,
     name: String,
     requested: f64,
+    /// The saved set being applied that this write is one of (S217).
+    group: Option<String>,
 }
 
 #[derive(Debug)]
@@ -124,14 +126,30 @@ pub(crate) struct Pending {
     progress_at: BTreeMap<(String, ProgressKind), u64>,
     /// Plans going up (S127), by upload order, then `verify:<vehicle>`.
     pub(crate) plan_jobs: BTreeMap<String, PlanJob>,
+    /// Saved parameter sets being applied (S217), by apply id.
+    pub(crate) applies: BTreeMap<String, crate::param_definitions::saved::Applying>,
     /// Vehicles whose next mission download goes on to the fence and rally
-    /// points (S128): asked for by a person, or a plan's read-back.
+    /// points (S128): asked for by a person, a plan's read-back, a boot or
+    /// a change on board (S199).
     with_parts: std::collections::BTreeSet<String>,
+    /// Vehicles whose mission changed on board while it was being read
+    /// (S199): read again once that read ends.
+    reread: std::collections::BTreeSet<String>,
     /// The boot instant the data plane last reported, by vehicle.
     pub(crate) boots: BTreeMap<String, u64>,
+    /// What the data plane's session says of each vehicle's RC calibration
+    /// once it has read it: why a rover's throttle calibration can't be
+    /// used, if it can't. The kept parameters outlive a daemon restart and
+    /// a new connection, but each session reads and judges its own.
+    pub(crate) rc_calibrations: BTreeMap<String, Option<String>>,
     /// Simulator links, by id and version, whose vehicle was sent its
     /// type's example mission (P12): once per start.
     pub(crate) examples_sent: std::collections::BTreeSet<String>,
+    /// Vehicles whose mission is being read because a new boot was seen.
+    /// Only that read may send a simulation its example (P12): a read-back
+    /// after an upload, a clear or Read from never does, even after the
+    /// daemon restarted and forgot `examples_sent`.
+    pub(crate) boot_reads: std::collections::BTreeSet<String>,
     /// How the next mission recorded for each vehicle came: an upload
     /// UXDuck made, with who (S134).
     pub(crate) arriving: BTreeMap<
@@ -211,12 +229,7 @@ pub(crate) fn handle(
             require(Capability::Read)?;
             let id = engine.writable_vehicle(&id)?;
             // Asked for: the fence and rally points come too (S128).
-            if engine
-                .vehicle(&id)
-                .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
-            {
-                engine.transfers.with_parts.insert(id.clone());
-            }
+            engine.read_parts_next(&id);
             engine.download_mission(&id);
             to_value(&MissionDto::from(&engine.mission(&id)))
         }
@@ -288,10 +301,10 @@ fn set_parameter(
             "a reason is up to 200 characters",
         ));
     }
-    if !params.value.is_finite() || (current.kind.is_integer() && params.value.fract() != 0.0) {
+    if let Some(takes) = current.kind.refuses(params.value) {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!("{} takes a whole number", params.name),
+            format!("{} {takes}", params.name),
         ));
     }
     if let Some(expected) = params.expected_value
@@ -337,6 +350,7 @@ fn set_parameter(
             vehicle_id: vehicle.id.clone(),
             name: params.name.clone(),
             requested: params.value,
+            group: None,
         },
     );
     engine.links.transfer(TransferOrder::SetParameter {
@@ -471,6 +485,20 @@ impl Engine {
         (vehicle_id, name, value): (&str, &str, f64),
         kind: ParamKind,
     ) -> String {
+        self.write_parameter_in(actor, author, reason, (vehicle_id, name, value), kind, None)
+    }
+
+    /// One write of a saved set being applied (S217), or of no group: as a
+    /// person's, sent as one file with the others when `group` says so.
+    pub(crate) fn write_parameter_in(
+        &mut self,
+        actor: Actor,
+        author: uxduck_core::domain::history::Author,
+        reason: &str,
+        (vehicle_id, name, value): (&str, &str, f64),
+        kind: ParamKind,
+        group: Option<(&str, bool)>,
+    ) -> String {
         let order_id = format!("pw{}", &self.random.token()[..16]);
         self.transfers.writes.insert(
             order_id.clone(),
@@ -482,6 +510,7 @@ impl Engine {
                 vehicle_id: vehicle_id.to_owned(),
                 name: name.to_owned(),
                 requested: value,
+                group: group.map(|(id, _)| id.to_owned()),
             },
         );
         self.links.transfer(TransferOrder::SetParameter {
@@ -490,7 +519,7 @@ impl Engine {
             name: name.to_owned(),
             value,
             kind,
-            by_file: false,
+            by_file: group.is_some_and(|(_, by_file)| by_file),
         });
         order_id
     }
@@ -541,6 +570,9 @@ impl Engine {
 
     /// Why nothing may be sent on this link, if so.
     pub(crate) fn not_writable(&self, link_id: &str) -> Option<String> {
+        if link_id == crate::replay::REPLAY_LINK {
+            return Some(crate::replay::NOTHING_SENT.into());
+        }
         match self.state.links.get(link_id) {
             None => Some("its link is gone".into()),
             Some(link) if link.policy == LinkPolicy::Read => {
@@ -594,6 +626,47 @@ impl Engine {
         self.links.transfer(TransferOrder::DownloadParameters {
             vehicle_id: vehicle_id.to_owned(),
         });
+    }
+
+    /// The next mission download goes on to the fence and rally points
+    /// (S128), which an airship does not have.
+    fn read_parts_next(&mut self, vehicle_id: &str) {
+        if self
+            .vehicle(vehicle_id)
+            .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
+        {
+            self.transfers.with_parts.insert(vehicle_id.to_owned());
+        }
+    }
+
+    /// The vehicle's mission, fence or rally points changed on board, not
+    /// by UXDuck's upload (S199): read them all again, so what is shown is
+    /// what it holds without anyone asking. Not during an upload, which
+    /// ends in its own read-back or record; during a read, once it ends.
+    pub fn mission_changed(&mut self, vehicle_id: &str) {
+        let Some(vehicle) = self.vehicle(vehicle_id).cloned() else {
+            return;
+        };
+        if self.not_writable(&vehicle.link_id).is_some() {
+            return;
+        }
+        match self.mission(&vehicle.id).status {
+            TransferStatus::Uploading => {}
+            TransferStatus::Downloading => {
+                self.transfers.reread.insert(vehicle.id);
+            }
+            _ => {
+                self.read_parts_next(&vehicle.id);
+                self.download_mission(&vehicle.id);
+            }
+        }
+    }
+
+    /// A read ended: again if the mission changed on board meanwhile (S199).
+    fn reread_if_changed(&mut self, vehicle_id: &str) {
+        if self.transfers.reread.remove(vehicle_id) {
+            self.mission_changed(vehicle_id);
+        }
     }
 
     fn download_mission(&mut self, vehicle_id: &str) {
@@ -660,7 +733,25 @@ impl Engine {
             self.download_parameters(&vehicle.id);
         }
         if !mission_current {
+            // The fence and rally points are new with the boot too (S199).
+            self.transfers.reread.remove(&vehicle.id);
+            self.read_parts_next(&vehicle.id);
+            self.transfers.boot_reads.insert(vehicle.id.clone());
             self.download_mission(&vehicle.id);
+        }
+    }
+
+    /// What the data plane's session holds of the vehicle's RC calibration:
+    /// whether it has read it, and why a rover's throttle calibration can't
+    /// be used.
+    pub fn rc_calibration(&mut self, vehicle_id: &str, read: bool, problem: Option<String>) {
+        let id = self
+            .vehicle(vehicle_id)
+            .map_or_else(|| vehicle_id.to_owned(), |v| v.id.clone());
+        if read {
+            self.transfers.rc_calibrations.insert(id, problem);
+        } else {
+            self.transfers.rc_calibrations.remove(&id);
         }
     }
 
@@ -723,6 +814,7 @@ impl Engine {
                         }
                     })
                     .collect();
+                self.sim_evidence(&id, parameters.iter().map(|p| p.name.as_str()));
                 let prefix = format!("{id}/");
                 let removed: Vec<String> = self
                     .state
@@ -776,6 +868,12 @@ impl Engine {
             }
         }
         self.refreshed(&id);
+        // An ESC calibration ends on the parameters read after it (S216).
+        self.escs_read(&id);
+        // A kept AutoTune's history has the gains read back (S332).
+        if self.parameter_set(&id).status == TransferStatus::Synced {
+            self.autotune_read(&id);
+        }
     }
 
     /// How far a transfer has come (S127): kept on the parameter set or
@@ -861,7 +959,7 @@ impl Engine {
         }
         let definitions = self.vehicle_definitions(vehicle_id);
         let vehicle_type = self.vehicle(vehicle_id).map(|v| v.vehicle_type.clone());
-        let unwatched = definitions.as_deref().is_some_and(|set| {
+        let unwatched = definitions.as_ref().is_some_and(|set| {
             set.find(name, vehicle_type.as_deref() == Some("Helicopter"))
                 .is_some_and(|d| d.volatile || d.read_only)
         });
@@ -884,6 +982,7 @@ impl Engine {
     /// another ground station made it if one was heard (`station`), and
     /// otherwise the vehicle did, as far as UXDuck can tell.
     pub fn parameter_reported(&mut self, vehicle_id: &str, reported: Reported, station: bool) {
+        self.sim_evidence(vehicle_id, std::iter::once(reported.name.as_str()));
         let Some(id) = self.vehicle(vehicle_id).map(|v| v.id.clone()) else {
             return;
         };
@@ -915,7 +1014,7 @@ impl Engine {
                 daemon(),
                 Change::ParameterChanged {
                     parameter: Parameter {
-                        vehicle_id: id,
+                        vehicle_id: id.clone(),
                         name: reported.name,
                         value: reported.value,
                         kind: reported.kind,
@@ -923,6 +1022,7 @@ impl Engine {
                     },
                 },
             );
+            self.escs_read(&id);
         }
     }
 
@@ -993,9 +1093,9 @@ impl Engine {
         self.radio_written(order_id, status == WriteStatus::Accepted);
         // One of the airspeed ratio's (S190).
         self.airspeed_written(order_id, status == WriteStatus::Accepted);
-        // A change that takes effect on restarting makes a restart due (S192).
-        let asked = write.reply.is_some() && status == WriteStatus::Accepted;
-        self.preflight_written(&write.vehicle_id, &write.name, asked);
+        // The ESC calibration's (S216).
+        self.escs_written(order_id, status == WriteStatus::Accepted);
+        self.written_asked(&write, status, detail.as_deref());
         if write.reply.is_some() {
             self.track_task(
                 &write.vehicle_id,
@@ -1036,6 +1136,19 @@ impl Engine {
         }
     }
 
+    /// A write someone asked for ended. One that takes effect on restarting
+    /// makes a restart due (S192); one of a saved set's is answered with the
+    /// others (S217).
+    fn written_asked(&mut self, write: &Write, status: WriteStatus, detail: Option<&str>) {
+        let accepted = status == WriteStatus::Accepted;
+        let asked = (write.reply.is_some() || write.group.is_some()) && accepted;
+        self.preflight_written(&write.vehicle_id, &write.name, asked);
+        if let Some(group) = &write.group {
+            let refused = (!accepted).then(|| detail.unwrap_or("not written").to_owned());
+            self.applied_one(group, &write.name, refused);
+        }
+    }
+
     /// A mission download ended. The version moves only if the items did.
     pub fn mission_downloaded(
         &mut self,
@@ -1067,16 +1180,21 @@ impl Engine {
                 mission.boot_instant_us = self.transfers.boots.get(&id).copied();
                 mission.synced_at_us = Some(self.clock.now_us());
                 let empty = mission.items.len() <= 1;
+                let booted = self.transfers.boot_reads.remove(&id);
                 self.commit_as(daemon(), Change::MissionUpserted { mission });
                 self.record_mission(&id);
-                // A new simulated vehicle gets its type's example (P12).
-                if empty {
+                // A new simulated vehicle gets its type's example (P12), on
+                // the read its boot started only.
+                if empty && booted {
                     self.send_example_mission(&id);
                 }
             }
             Err(failure) => {
                 let detail = failure.detail(0);
                 self.transfers.with_parts.remove(&id);
+                self.transfers.boot_reads.remove(&id);
+                // Not again at once: it could not be read.
+                self.transfers.reread.remove(&id);
                 mission.status = TransferStatus::Failed;
                 mission.detail = Some(detail.clone());
                 self.commit_as(daemon(), Change::MissionUpserted { mission });
@@ -1086,6 +1204,7 @@ impl Engine {
         self.refreshed(&id);
         let ok = self.mission(&id).status == TransferStatus::Synced;
         self.plan_mission_read(&id, ok);
+        self.reread_if_changed(&id);
     }
 
     /// A fence (1) or rally points (2) download ended (S128). One the
@@ -1126,10 +1245,19 @@ impl Engine {
         mission.detail = None;
         mission.boot_instant_us = self.transfers.boots.get(&id).copied();
         mission.synced_at_us = Some(self.clock.now_us());
+        let empty = mission.items.len() <= 1;
+        let booted = self.transfers.boot_reads.remove(&id);
         self.commit_as(daemon(), Change::MissionUpserted { mission });
         self.record_mission(&id);
+        // A new simulated vehicle gets its type's example (P12), now that
+        // its boot reads the fence and rally points too (S199), on the read
+        // its boot started only.
+        if empty && booted {
+            self.send_example_mission(&id);
+        }
         self.refreshed(&id);
         self.plan_mission_read(&id, true);
+        self.reread_if_changed(&id);
     }
 
     /// A mission upload ended: on success the mission is the uploaded one,
@@ -1226,7 +1354,10 @@ impl Engine {
             mission: MissionDto::from(&mission),
         };
         if let Some((connection, request_id)) = upload.reply {
-            let frame = json!({ "jsonrpc": "2.0", "id": request_id, "result": result });
+            let frame = match self.require_mission_float_bits(connection) {
+                Ok(()) => json!({ "jsonrpc": "2.0", "id": request_id, "result": result }),
+                Err(error) => crate::rpc::router::error(&request_id, &error),
+            };
             self.send(connection, &frame);
         }
         // A plan's upload goes on to be read back (S127).
@@ -1301,6 +1432,9 @@ pub(crate) struct PlanJob {
     pub(crate) items: Vec<MissionItem>,
     /// Item 0 is home, which the autopilot keeps as its own.
     pub(crate) home_first: bool,
+    /// The commands the plan's dialects declared without a place when the
+    /// upload started, so the readback is checked against those.
+    pub(crate) placeless: Vec<u16>,
 }
 
 impl Engine {
@@ -1320,8 +1454,9 @@ impl Engine {
     pub(crate) fn upload_plan_mission_as(
         &mut self,
         actor: Actor,
-        job: PlanJob,
+        mut job: PlanJob,
     ) -> Result<(), ApiError> {
+        job.placeless = self.placeless_commands(&job.plan_id);
         let vehicle = self.vehicle(&job.vehicle_id).cloned().ok_or_else(|| {
             ApiError::new(
                 ErrorKind::NotFound,
@@ -1403,12 +1538,7 @@ impl Engine {
                 for (name, value, kind) in std::mem::take(&mut job.fence_settings) {
                     self.write_parameter_as(daemon(), &vehicle_id, &name, value, kind);
                 }
-                if self
-                    .vehicle(&vehicle_id)
-                    .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
-                {
-                    self.transfers.with_parts.insert(vehicle_id.clone());
-                }
+                self.read_parts_next(&vehicle_id);
                 self.transfers
                     .plan_jobs
                     .insert(format!("verify:{vehicle_id}"), job);
@@ -1450,7 +1580,8 @@ impl Engine {
             return;
         }
         let read = self.mission(vehicle_id);
-        let (mut same, mut notes) = compare_missions(&job.items, &read.items, job.home_first);
+        let (mut same, mut notes) =
+            compare_missions_with(&job.items, &read.items, job.home_first, &job.placeless);
         for (name, sent, back) in [
             ("fence", &job.fence, &read.fence),
             ("rally points", &job.rally, &read.rally),
@@ -1511,9 +1642,14 @@ impl Engine {
         detail: Option<String>,
         notes: Vec<String>,
     ) {
+        self.plan_run_uploaded(&job.vehicle_id, status, detail.as_deref());
         let Some((connection, request_id)) = job.reply else {
             return;
         };
+        if let Err(error) = self.require_mission_float_bits(connection) {
+            self.send(connection, &crate::rpc::router::error(&request_id, &error));
+            return;
+        }
         self.track_task(
             &job.vehicle_id,
             uxduck_contracts::dto::analytics::EngagementTask::PlanVerified,
@@ -1541,15 +1677,42 @@ impl Engine {
     }
 }
 
+/// The mission commands ArduPilot keeps without a place
+/// (`AP_Mission::stored_in_location` against the commands it reads, at the
+/// pinned commit), which it gives back in `MAV_FRAME_GLOBAL` whatever frame
+/// they were sent in. Any other command, a dialect's own among them, keeps
+/// its frame: a place's frame says what its height is above.
+const WITHOUT_A_PLACE: [u16; 46] = [
+    20, 83, 93, 112, 114, 115, 177, 178, 181, 182, 183, 184, 193, 194, 196, 197, 202, 203, 205,
+    206, 207, 208, 210, 211, 212, 213, 215, 216, 217, 218, 222, 223, 531, 532, 534, 600, 601, 1000,
+    2000, 2001, 2500, 2501, 3000, 42600, 42702, 42703,
+];
+
 /// Whether what was read back is what was sent, allowing for what the
 /// autopilot keeps: positions to its 1e-7°, heights to the centimetre, and
-/// parameters as it stores them (noted, not refused). Item 0 is home on
+/// parameters as it stores them (noted, not refused), and the frame of a
+/// command ArduPilot keeps without a place (`WITHOUT_A_PLACE`) as anything.
+/// Item 0 is home on
 /// ArduPilot and is the vehicle's own.
 #[must_use]
 pub fn compare_missions(
     sent: &[MissionItem],
     read: &[MissionItem],
     home_first: bool,
+) -> (bool, Vec<String>) {
+    compare_missions_with(sent, read, home_first, &[])
+}
+
+/// As [`compare_missions`], with the commands a plan's dialects declare
+/// without a place (`hasLocation="false"`, ADR-0044 F14): their frame is
+/// not compared either, as ArduPilot gives a fork's command it keeps
+/// without a place back in `MAV_FRAME_GLOBAL`. Their numbers still are.
+#[must_use]
+pub fn compare_missions_with(
+    sent: &[MissionItem],
+    read: &[MissionItem],
+    home_first: bool,
+    placeless: &[u16],
 ) -> (bool, Vec<String>) {
     let skip = usize::from(home_first);
     if sent.len() != read.len() {
@@ -1574,7 +1737,9 @@ pub fn compare_missions(
     for (index, (a, b)) in sent.iter().zip(read).enumerate().skip(skip) {
         let number = index + 1 - skip;
         if a.command != b.command
-            || (a.command != 20 && frame_of(a.frame) != frame_of(b.frame))
+            || (!WITHOUT_A_PLACE.contains(&a.command)
+                && !placeless.contains(&a.command)
+                && frame_of(a.frame) != frame_of(b.frame))
             || !close(a.latitude_deg, b.latitude_deg, 2e-7)
             || !close(a.longitude_deg, b.longitude_deg, 2e-7)
             || !close(a.altitude_m, b.altitude_m, 0.02)
@@ -1679,7 +1844,108 @@ fn restore(
         vehicle_id,
         items,
         home_first: ardupilot,
+        placeless: Vec::new(),
     };
     engine.upload_plan_mission(connection, job)?;
     Ok(Value::Null)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "in-memory asynchronous completion fixtures"
+)]
+mod mission_read_tests {
+    use super::*;
+    use crate::mission_reads::fixtures;
+
+    #[test]
+    fn mission_read_async_upload_publication_checks_the_original_connection() {
+        for support in [false, true] {
+            let (mut engine, _ui, orders, _plan) = fixtures::setup();
+            let mut peer = fixtures::connect(&mut engine, "operator-cli", Some(support));
+            let items = engine.state.missions["v"].items.clone();
+            let mut fence = items[0].clone();
+            fence.param4 = f64::from_bits(0x7ff8_0000_0000_0042);
+            engine.state.missions.get_mut("v").expect("mission").fence = vec![fence];
+            let actor = engine.actor(peer.id);
+            engine.transfers.uploads.insert(
+                "completed".into(),
+                Upload {
+                    reply: Some((peer.id, json!("completed"))),
+                    actor,
+                    vehicle_id: "v".into(),
+                    items,
+                    kind: 0,
+                },
+            );
+            engine.mission_uploaded("completed", Ok(()));
+            let replies = fixtures::frames(&mut peer);
+            let reply = replies
+                .iter()
+                .find(|frame| frame["id"] == "completed")
+                .expect("completion");
+            if support {
+                assert_eq!(reply["result"]["status"], "accepted");
+                assert_eq!(
+                    reply["result"]["mission"]["fence"][0]["param4"]["nonFiniteF64"],
+                    "7ff8000000000042"
+                );
+            } else {
+                assert_eq!(reply["error"]["data"]["kind"], "update-required");
+                assert!(reply.get("result").is_none());
+            }
+            assert_eq!(engine.state.missions["v"].status, TransferStatus::Synced);
+            assert!(!engine.transfers.uploads.contains_key("completed"));
+            assert!(orders.take().is_empty());
+        }
+    }
+
+    #[test]
+    fn mission_read_async_plan_and_restore_publication_never_leak_to_unsupported_peers() {
+        for restore in [false, true] {
+            for support in [false, true] {
+                let (mut engine, _ui, orders, plan) = fixtures::setup();
+                let mut peer = fixtures::connect(&mut engine, "operator-cli", Some(support));
+                engine.state.missions.get_mut("v").expect("mission").items[0].param4 =
+                    f64::from_bits(0xfff8_0000_0000_0042);
+                let job = PlanJob {
+                    reply: Some((peer.id, json!("completed"))),
+                    parts: vec![],
+                    fence: vec![],
+                    rally: vec![],
+                    fence_settings: vec![],
+                    plan_id: if restore {
+                        "historical-record-no-plan".into()
+                    } else {
+                        plan
+                    },
+                    plan_version: 1,
+                    vehicle_id: "v".into(),
+                    items: vec![],
+                    home_first: false,
+                    placeless: Vec::new(),
+                };
+                engine.answer_plan_job(job, PlanUploadStatus::Verified, None, vec![]);
+                let replies = fixtures::frames(&mut peer);
+                let reply = replies
+                    .iter()
+                    .find(|frame| frame["id"] == "completed")
+                    .expect("completion");
+                if support {
+                    assert_eq!(reply["result"]["status"], "verified");
+                    assert_eq!(
+                        reply["result"]["mission"]["items"][0]["param4"]["nonFiniteF64"],
+                        "fff8000000000042"
+                    );
+                    assert_eq!(reply["result"].get("plan").is_none(), restore);
+                } else {
+                    assert_eq!(reply["error"]["data"]["kind"], "update-required");
+                    assert!(reply.get("result").is_none());
+                }
+                assert!(orders.take().is_empty());
+            }
+        }
+    }
 }

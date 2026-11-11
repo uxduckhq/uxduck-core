@@ -23,7 +23,8 @@
           "name": "Button 24",
           "number": 24,
           "pressed": true,
-          "seen": true
+          "seen": true,
+          "presses": 2
         }
       ]
     },
@@ -42,7 +43,8 @@
           "name": "south",
           "button": "south",
           "pressed": false,
-          "seen": false
+          "seen": false,
+          "presses": 0
         }
       ]
     }

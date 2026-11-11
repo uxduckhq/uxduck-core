@@ -8,6 +8,8 @@ use crate::domain::approval::Approval;
 use crate::domain::client::ClientRecord;
 use crate::domain::command::Receipt;
 use crate::domain::controller::{Controller, InputMapping};
+use crate::domain::dialect::Dialect;
+use crate::domain::firmware_profile::FirmwareProfile;
 use crate::domain::history::HistoryEntry;
 use crate::domain::link::Link;
 use crate::domain::marker::Marker;
@@ -183,9 +185,22 @@ pub enum Change {
     FlightUpserted {
         flight: crate::domain::flight::Flight,
     },
+    /// An operation made, changed or given flights (ADR-0039 R16).
+    OperationUpserted {
+        operation: crate::domain::operation::Operation,
+    },
+    /// An operation gone: made by itself and no longer two vehicles, or
+    /// left with no flights.
+    OperationRemoved {
+        id: String,
+    },
     /// A flight deleted from the account (C9): gone from computers that had
     /// it from the account; on the one that recorded it, kept, no longer saved.
     FlightRemoved {
+        id: String,
+    },
+    /// A local logbook summary removed, without deleting shared telemetry.
+    FlightForgotten {
         id: String,
     },
     /// A flight deleted from the account saved there again (2026-10-24):
@@ -201,6 +216,13 @@ pub enum Change {
         baseline: crate::domain::parameter::ParamBaseline,
     },
     BaselineRemoved {
+        id: String,
+    },
+    /// A saved parameter set kept, or renamed (S217): on this computer only.
+    SavedParamsUpserted {
+        set: crate::domain::parameter::SavedParams,
+    },
+    SavedParamsRemoved {
         id: String,
     },
     /// A mission a vehicle holds, new to it or held again (S134).
@@ -233,6 +255,22 @@ pub enum Change {
         set: OwnSet,
     },
     OwnSetRemoved {
+        id: String,
+    },
+    /// A person added a MAVLink dialect, or changed what it is bound to
+    /// (ADR-0044).
+    DialectUpserted {
+        dialect: Dialect,
+    },
+    DialectRemoved {
+        id: String,
+    },
+    /// A person added a fork's firmware profile, or it was read again
+    /// (ADR-0044 F12).
+    FirmwareProfileUpserted {
+        profile: FirmwareProfile,
+    },
+    FirmwareProfileRemoved {
         id: String,
     },
     /// Sync switched, or a batch went to the account or came from it
@@ -283,8 +321,9 @@ pub enum Change {
         bytes: u64,
     },
     /// Part of a recording was deleted before it reached the account (S83,
-    /// ADR-0003 "Eviction"): to free disk space, or by hand. The exact range,
-    /// in wall-clock microseconds.
+    /// ADR-0003 "Eviction"): by hand, or, before 2026-11-01 when `evicted`,
+    /// by UXDuck to free disk space. The exact range, in wall-clock
+    /// microseconds.
     VideoLost {
         recording: String,
         from_us: u64,

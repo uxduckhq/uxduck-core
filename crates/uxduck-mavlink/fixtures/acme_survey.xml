@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- A small custom dialect for the regression tests of S338: a sprayer's
+     message with units and an enum, and a mission command of its own
+     declared without a place. The firmware's parameters are described in
+     acme_survey.pdef.xml beside it. -->
+<mavlink>
+  <include>common.xml</include>
+  <enums>
+    <enum name="ACME_SPRAY_STATE">
+      <entry value="0" name="ACME_SPRAY_IDLE"/>
+      <entry value="1" name="ACME_SPRAY_ON"/>
+      <entry value="2" name="ACME_SPRAY_FAULT"/>
+    </enum>
+    <enum name="MAV_CMD">
+      <entry value="31010" name="MAV_CMD_ACME_SPRAY" hasLocation="false" isDestination="false">
+        <description>Spray at a rate for a time.</description>
+        <param index="1" label="Rate" units="l/min" minValue="0" maxValue="20">Litres a minute.</param>
+        <param index="2" label="Seconds" units="s">How long it sprays.</param>
+        <param index="3" label="Nozzle">Which nozzle, 1 to 4.</param>
+        <param index="4" reserved="true" default="0"/>
+        <param index="5" label="Pressure" units="kPa">The pump's pressure.</param>
+        <param index="6" reserved="true" default="0"/>
+        <param index="7" label="Height" units="m">Height above the crop.</param>
+      </entry>
+    </enum>
+  </enums>
+  <messages>
+    <message id="43010" name="ACME_SPRAY_STATUS">
+      <description>The sprayer's state.</description>
+      <field type="uint32_t" name="time_boot_ms" units="ms">Time since boot.</field>
+      <field type="float" name="flow" units="l/min">Flow.</field>
+      <field type="uint16_t" name="tank" units="ml">Left in the tank.</field>
+      <field type="uint8_t" name="state" enum="ACME_SPRAY_STATE">What the sprayer is doing.</field>
+    </message>
+  </messages>
+</mavlink>

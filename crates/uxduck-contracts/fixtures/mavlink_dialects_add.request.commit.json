@@ -1,0 +1,12 @@
+{
+  "method": "mavlink/dialects/add",
+  "params": {
+    "files": [
+      {
+        "name": "acme.xml",
+        "text": "<mavlink><messages><message id=\"43001\" name=\"ACME_STATUS\"><field type=\"uint8_t\" name=\"mode\" enum=\"ACME_MODE\">Mode.</field></message></messages></mavlink>"
+      }
+    ],
+    "commits": ["2a3dc4b7", "9f00aa12"]
+  }
+}

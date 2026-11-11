@@ -63,11 +63,13 @@ pub fn core_producers() -> Vec<Box<dyn Producer>> {
         Box::new(Fused),
         Box::new(Gps),
         Box::new(AttitudeProducer),
+        Box::new(QuaternionProducer),
         Box::new(Power),
         Box::new(Hud),
         Box::new(MissionProgress),
         Box::new(Navigation),
         Box::new(Home),
+        Box::new(Origin),
         Box::new(Servos),
         Box::new(RcInputs),
         Box::new(Health),
@@ -118,6 +120,13 @@ impl Producer for Fused {
         else {
             return;
         };
+        out.item(
+            "altitude.relative_m",
+            "Altitude above home",
+            Unit::Meter,
+            f64::from(relative_alt) / 1000.0,
+            (self.id(), component_id, now_us),
+        );
         if lat == 0 && lon == 0 {
             return; // No estimate yet.
         }
@@ -291,6 +300,83 @@ impl Producer for AttitudeProducer {
     }
 }
 
+/// Optional #31 is consumed when received, never added to requested streams.
+#[derive(Debug)]
+pub struct QuaternionProducer;
+
+impl Producer for QuaternionProducer {
+    fn id(&self) -> &'static str {
+        "attitude-quaternion"
+    }
+
+    fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let &Message::AttitudeQuaternion {
+            time_boot_ms,
+            q,
+            rollspeed,
+            pitchspeed,
+            yawspeed,
+            repr_offset_q,
+        } = message
+        else {
+            return;
+        };
+        let Some(q) = normalized_quaternion(q) else {
+            return;
+        };
+        let from = (self.id(), component_id, now_us);
+        for (axis, value) in ["w", "x", "y", "z"].into_iter().zip(q) {
+            out.item(
+                &format!("attitude.quaternion_{axis}"),
+                &format!("Attitude quaternion {axis}"),
+                Unit::None,
+                value,
+                from,
+            );
+        }
+        out.item(
+            "attitude.quaternion_boot_s",
+            "Attitude boot time",
+            Unit::Second,
+            f64::from(time_boot_ms) / 1000.0,
+            from,
+        );
+        for (axis, rate) in ["roll", "pitch", "yaw"]
+            .into_iter()
+            .zip([rollspeed, pitchspeed, yawspeed])
+        {
+            if rate.is_finite() {
+                out.item(
+                    &format!("attitude.quaternion_{axis}_degps"),
+                    &format!("Body {axis} rate"),
+                    Unit::DegreePerSecond,
+                    f64::from(rate).to_degrees(),
+                    from,
+                );
+            }
+        }
+        // Preserve the optional instrument-reference offset separately. It must
+        // not rotate the physical airframe model when a tailsitter changes mode.
+        if let Some(offset) = normalized_quaternion(repr_offset_q) {
+            for (axis, value) in ["w", "x", "y", "z"].into_iter().zip(offset) {
+                out.item(
+                    &format!("attitude.display_offset_{axis}"),
+                    &format!("Attitude display offset {axis}"),
+                    Unit::None,
+                    value,
+                    from,
+                );
+            }
+        }
+    }
+}
+
+fn normalized_quaternion(q: [f32; 4]) -> Option<[f64; 4]> {
+    let q = q.map(f64::from);
+    let norm = q.iter().map(|n| n * n).sum::<f64>().sqrt();
+    (norm.is_finite() && norm > 1e-6).then(|| q.map(|n| n / norm))
+}
+
 /// `SYS_STATUS`: battery voltage, current and remaining, and whether the
 /// pre-arm checks pass.
 #[derive(Debug)]
@@ -405,7 +491,8 @@ impl Producer for Hud {
 }
 
 /// `MISSION_CURRENT`: the mission item it is flying to, which a simulation
-/// snapshot keeps (S34).
+/// snapshot keeps (S34). `MISSION_ITEM_REACHED`: the last item it reached,
+/// which the Cockpit resumes after (S342).
 #[derive(Debug)]
 pub struct MissionProgress;
 
@@ -415,10 +502,23 @@ impl Producer for MissionProgress {
     }
 
     fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
-        let &Message::MissionCurrent { seq, state, mode } = message else {
+        let from = (self.id(), component_id, now_us);
+        if let &Message::MissionItemReached { seq } = message {
+            out.item(
+                "mission.reached",
+                "Mission item reached",
+                Unit::None,
+                f64::from(seq),
+                from,
+            );
+            return;
+        }
+        let &Message::MissionCurrent {
+            seq, state, mode, ..
+        } = message
+        else {
             return;
         };
-        let from = (self.id(), component_id, now_us);
         out.item(
             "mission.current",
             "Mission item",
@@ -576,9 +676,57 @@ impl Producer for Home {
     }
 }
 
-/// `SERVO_OUTPUT_RAW`: the outputs in use, as `servo.1` to `servo.8` in
-/// microseconds, which the 3D view turns into control surfaces and
-/// propellers (S35).
+/// `GPS_GLOBAL_ORIGIN`: the EKF origin, the point the vehicle's position
+/// estimate is measured from, for the Cockpit's Home subtab.
+#[derive(Debug)]
+pub struct Origin;
+
+impl Producer for Origin {
+    fn id(&self) -> &'static str {
+        "origin"
+    }
+
+    fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let &Message::GpsGlobalOrigin {
+            latitude,
+            longitude,
+            altitude,
+        } = message
+        else {
+            return;
+        };
+        let from = (self.id(), component_id, now_us);
+        out.item(
+            "origin.latitude_deg",
+            "EKF origin latitude",
+            Unit::Degree,
+            degrees_e7(latitude),
+            from,
+        );
+        out.item(
+            "origin.longitude_deg",
+            "EKF origin longitude",
+            Unit::Degree,
+            degrees_e7(longitude),
+            from,
+        );
+        out.item(
+            "origin.altitude_msl_m",
+            "EKF origin altitude",
+            Unit::Meter,
+            f64::from(altitude) / 1000.0,
+            from,
+        );
+    }
+}
+
+/// `SERVO_OUTPUT_RAW`: the outputs in use, as `servo.1` to `servo.16` in
+/// microseconds, which the 3D view turns into control surfaces, propellers
+/// and a simulated gripper's jaws (S35, S263), and `servo.time_s`, the
+/// sample's autopilot boot time, which a paused simulator stops. An output
+/// reported as 0 or `UINT16_MAX` (unused, or an extension field the frame
+/// did not carry) is left out, so it goes stale rather than reading as a
+/// position.
 #[derive(Debug)]
 pub struct Servos;
 
@@ -588,11 +736,22 @@ impl Producer for Servos {
     }
 
     fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
-        let Message::ServoOutputs { servos } = message else {
+        let Message::ServoOutputs { servos, time_us } = message else {
             return;
         };
         let from = (self.id(), component_id, now_us);
-        for (index, pulse) in servos.iter().enumerate().filter(|(_, p)| **p > 0) {
+        out.item(
+            "servo.time_s",
+            "Servo output time",
+            Unit::Second,
+            f64::from(*time_us) / 1_000_000.0,
+            from,
+        );
+        for (index, pulse) in servos
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p > 0 && **p != u16::MAX)
+        {
             let n = index + 1;
             out.item(
                 &format!("servo.{n}"),
@@ -608,7 +767,8 @@ impl Producer for Servos {
 /// `RC_CHANNELS`: the receiver's channels as the autopilot reads them, as
 /// `rc.1` to `rc.18` in microseconds before any reversal, for the radio
 /// calibration's bars (S187). Channels it does not give, or gives as unused
-/// (0 or `UINT16_MAX`), are left out.
+/// (0 or `UINT16_MAX`), are left out. Receiver strength is `rc.rssi` on its
+/// device-dependent scale; 255 clears it to unknown, while zero is valid.
 #[derive(Debug)]
 pub struct RcInputs;
 
@@ -618,10 +778,26 @@ impl Producer for RcInputs {
     }
 
     fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
-        let Message::RcChannels { count, channels } = message else {
+        let Message::RcChannels {
+            count,
+            channels,
+            rssi,
+        } = message
+        else {
             return;
         };
         let from = (self.id(), component_id, now_us);
+        // Preserve the device-dependent scale. Unknown clears a previous sample.
+        out.items.push(TelemetryItem {
+            key: "rc.rssi".into(),
+            label: "RC RSSI".into(),
+            unit: Unit::None,
+            value: (*rssi != u8::MAX).then(|| f64::from(*rssi)),
+            text: None,
+            source: self.id().into(),
+            component_id,
+            time_us: now_us,
+        });
         for (index, pulse) in channels
             .iter()
             .enumerate()
@@ -718,6 +894,7 @@ impl Producer for Health {
                 remnoise,
                 rxerrors,
                 fixed,
+                ..
             } => radio([rssi, remrssi, noise, remnoise], rxerrors, fixed, from, out),
             &Message::EkfStatus { flags, variances } => ekf(flags, variances, from, out),
             // The fence (S132): outside it now, and breaches since boot.
@@ -746,40 +923,23 @@ impl Producer for Health {
             } => battery(id, consumed_mah, &cells_mv, temperature_cdeg, from, out),
             &Message::DistanceSensor {
                 distance_cm,
+                min_distance_cm,
+                max_distance_cm,
+                signal_quality,
                 orientation,
             } if orientation == DOWNWARD => {
-                rangefinder(f64::from(distance_cm) / 100.0, from, out);
+                let valid = signal_quality != 1
+                    && (min_distance_cm..=max_distance_cm).contains(&distance_cm);
+                rangefinder(valid.then(|| f64::from(distance_cm) / 100.0), from, out);
             }
             &Message::Rangefinder { distance } if distance.is_finite() => {
-                rangefinder(f64::from(distance), from, out);
+                rangefinder(Some(f64::from(distance)), from, out);
             }
             &Message::Wind {
                 direction,
                 speed,
                 speed_z,
-            } => {
-                out.item(
-                    "wind.speed_mps",
-                    "Wind",
-                    Unit::MeterPerSecond,
-                    f64::from(speed),
-                    from,
-                );
-                out.item(
-                    "wind.direction_deg",
-                    "Wind from",
-                    Unit::Degree,
-                    f64::from(direction).rem_euclid(360.0),
-                    from,
-                );
-                out.item(
-                    "wind.vertical_mps",
-                    "Vertical wind",
-                    Unit::MeterPerSecond,
-                    f64::from(speed_z),
-                    from,
-                );
-            }
+            } => wind(direction, speed, speed_z, from, out),
             // The automatic airspeed calibration's ratio (S190), while it
             // runs; the Setup tab's Airspeed row follows it.
             &Message::AirspeedAutocal { ratio } if ratio.is_finite() => {
@@ -808,6 +968,7 @@ impl Producer for Health {
                     from,
                 );
             }
+            Message::OnboardComputerStatus(status) => computer(component_id, status, from, out),
             // `ArduSub` says "Leak Detected!" (S72).
             Message::StatusText { text, .. } if text.to_lowercase().contains("leak detected") => {
                 out.item("leak.detected", "Leak", Unit::None, 1.0, from);
@@ -815,6 +976,30 @@ impl Producer for Health {
             _ => {}
         }
     }
+}
+
+fn wind(direction: f32, speed: f32, speed_z: f32, from: (&str, u8, u64), out: &mut Produced) {
+    out.item(
+        "wind.speed_mps",
+        "Wind",
+        Unit::MeterPerSecond,
+        f64::from(speed),
+        from,
+    );
+    out.item(
+        "wind.direction_deg",
+        "Wind from",
+        Unit::Degree,
+        f64::from(direction).rem_euclid(360.0),
+        from,
+    );
+    out.item(
+        "wind.vertical_mps",
+        "Vertical wind",
+        Unit::MeterPerSecond,
+        f64::from(speed_z),
+        from,
+    );
 }
 
 /// Signal and noise here and at the far end, as 0 to 254 (255 unknown).
@@ -825,7 +1010,7 @@ fn radio(levels: [u8; 4], rxerrors: u16, fixed: u16, from: (&str, u8, u64), out:
     if rssi != u8::MAX {
         out.item(
             "link.rssi_pct",
-            "Radio signal",
+            "Telemetry radio",
             Unit::Percent,
             pct(rssi),
             from,
@@ -995,14 +1180,90 @@ impl Producer for Gimbal {
     }
 }
 
-fn rangefinder(metres: f64, from: (&str, u8, u64), out: &mut Produced) {
-    out.item(
-        "rangefinder.distance_m",
-        "Rangefinder",
-        Unit::Meter,
-        metres,
-        from,
-    );
+fn rangefinder(metres: Option<f64>, from: (&str, u8, u64), out: &mut Produced) {
+    let (source, component_id, time_us) = from;
+    out.items.push(TelemetryItem {
+        key: "rangefinder.distance_m".into(),
+        label: "Rangefinder".into(),
+        unit: Unit::Meter,
+        value: metres,
+        text: None,
+        source: source.into(),
+        component_id,
+        time_us,
+    });
+}
+
+/// An onboard computer's health (S295, ADR-0049): its hottest core, its
+/// board, its cores' mean use, memory and storage in use, and its uptime,
+/// each only when it says so.
+fn computer(
+    component_id: u8,
+    status: &crate::computer::ComputerStatus,
+    from: (&str, u8, u64),
+    out: &mut Produced,
+) {
+    let (group, name) = crate::computer::group(component_id);
+    let share = |used: Option<u32>, total: Option<u32>| match (used, total) {
+        (Some(used), Some(total)) if total > 0 => Some(f64::from(used) / f64::from(total) * 100.0),
+        _ => None,
+    };
+    let readings = [
+        (
+            "cpu_temperature_degc",
+            "CPU temperature",
+            Unit::DegreeCelsius,
+            status.core_degc.iter().max().map(|t| f64::from(*t)),
+        ),
+        (
+            "board_temperature_degc",
+            "board temperature",
+            Unit::DegreeCelsius,
+            status.board_degc.map(f64::from),
+        ),
+        (
+            "cpu_load_pct",
+            "CPU use",
+            Unit::Percent,
+            (!status.cpu_cores_pct.is_empty()).then(|| {
+                status
+                    .cpu_cores_pct
+                    .iter()
+                    .map(|p| f64::from(*p))
+                    .sum::<f64>()
+                    / f64::from(u8::try_from(status.cpu_cores_pct.len()).unwrap_or(u8::MAX))
+            }),
+        ),
+        (
+            "memory_used_pct",
+            "memory in use",
+            Unit::Percent,
+            share(status.ram_used_mib, status.ram_total_mib),
+        ),
+        (
+            "storage_used_pct",
+            "storage in use",
+            Unit::Percent,
+            share(status.storage_used_mib, status.storage_total_mib),
+        ),
+        (
+            "uptime_s",
+            "uptime",
+            Unit::Second,
+            Some(f64::from(status.uptime_ms) / 1000.0),
+        ),
+    ];
+    for (key, label, unit, value) in readings {
+        if let Some(value) = value {
+            out.item(
+                &format!("{group}.{key}"),
+                &format!("{name} {label}"),
+                unit,
+                value,
+                from,
+            );
+        }
+    }
 }
 
 /// Battery used, cells and temperature; a second battery's keys say which.
@@ -1028,13 +1289,26 @@ fn battery(
             from,
         );
     }
-    // Only the total in the first is not per cell.
     let cells: Vec<u16> = cells_mv
         .iter()
         .copied()
         .take_while(|mv| *mv != u16::MAX)
         .collect();
-    if cells.len() > 1 {
+    if cells.len() == 1 || cells.first() == Some(&(u16::MAX - 1)) {
+        let (source, component_id, time_us) = from;
+        for n in 1..=14 {
+            out.items.push(TelemetryItem {
+                key: format!("{group}.cell_{n}_v"),
+                label: format!("{name} cell {n}"),
+                unit: Unit::Volt,
+                value: None,
+                text: None,
+                source: source.into(),
+                component_id,
+                time_us,
+            });
+        }
+    } else if cells.len() > 1 {
         for (i, mv) in cells.iter().enumerate() {
             let n = i + 1;
             out.item(
@@ -1097,12 +1371,315 @@ mod tests {
     }
 
     #[test]
+    fn each_onboard_computer_has_its_own_items_and_unused_fields_none() {
+        let status = crate::computer::ComputerStatus {
+            uptime_ms: 90_500,
+            cpu_cores_pct: vec![10, 30],
+            board_degc: None,
+            core_degc: vec![55, 61],
+            ram_used_mib: Some(1_000),
+            ram_total_mib: Some(4_000),
+            storage_used_mib: None,
+            storage_total_mib: Some(30_000),
+        };
+        let message = Message::OnboardComputerStatus(Box::new(status));
+        let mut out = Produced::default();
+        Health.consume(192, &message, 5, &mut out);
+        let items: Vec<(String, String, f64)> = out
+            .items
+            .iter()
+            .map(|i| (i.key.clone(), i.label.clone(), i.value.unwrap_or(f64::NAN)))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (
+                    "computer_2.cpu_temperature_degc".into(),
+                    "Companion computer 2 CPU temperature".into(),
+                    61.0
+                ),
+                (
+                    "computer_2.cpu_load_pct".into(),
+                    "Companion computer 2 CPU use".into(),
+                    20.0
+                ),
+                (
+                    "computer_2.memory_used_pct".into(),
+                    "Companion computer 2 memory in use".into(),
+                    25.0
+                ),
+                (
+                    "computer_2.uptime_s".into(),
+                    "Companion computer 2 uptime".into(),
+                    90.5
+                ),
+            ]
+        );
+        assert!(out.items.iter().all(|i| i.component_id == 192));
+        let mut first = Produced::default();
+        Health.consume(191, &message, 5, &mut first);
+        assert_eq!(first.items[0].key, "computer.cpu_temperature_degc");
+        assert_eq!(first.items[0].unit, Unit::DegreeCelsius);
+    }
+
+    #[test]
+    fn relative_altitude_survives_without_a_global_position() {
+        for (lat, lon) in [(0, 0), (-353_632_610, 1_491_652_300)] {
+            let mut out = Produced::default();
+            Fused.consume(
+                42,
+                &Message::GlobalPositionInt {
+                    time_boot_ms: 0,
+                    lat,
+                    lon,
+                    alt: 578_000,
+                    relative_alt: -6_000,
+                    vx: 300,
+                    vy: 400,
+                    vz: 100,
+                    hdg: u16::MAX,
+                },
+                123,
+                &mut out,
+            );
+            assert_eq!(out.positions.is_empty(), (lat, lon) == (0, 0));
+            let altitude = out
+                .items
+                .iter()
+                .find(|i| i.key == "altitude.relative_m")
+                .unwrap();
+            assert_eq!(altitude.value, Some(-6.0));
+            assert_eq!(altitude.unit, Unit::Meter);
+            assert_eq!(altitude.source, "fused");
+            assert_eq!(altitude.component_id, 42);
+            assert_eq!(altitude.time_us, 123);
+        }
+    }
+
+    #[test]
+    fn saturated_pack_voltage_chunks_are_not_individual_cells() {
+        use uxduck_core::domain::telemetry::VehicleTelemetry;
+
+        for values in [vec![12_600], vec![65_534, 14_466], vec![65_534, 65_534]] {
+            let mut out = Produced::default();
+            let mut cells_mv = [u16::MAX; 10];
+            cells_mv[..2].copy_from_slice(&[4100, 4200]);
+            Health.consume(
+                1,
+                &Message::BatteryStatus {
+                    id: 0,
+                    consumed_mah: 0,
+                    cells_mv,
+                    temperature_cdeg: i16::MAX,
+                },
+                0,
+                &mut out,
+            );
+            let mut latest = VehicleTelemetry {
+                items: out.items,
+                ..VehicleTelemetry::default()
+            };
+            let mut cells_mv = [u16::MAX; 10];
+            cells_mv[..values.len()].copy_from_slice(&values);
+            let mut out = Produced::default();
+            Health.consume(
+                1,
+                &Message::BatteryStatus {
+                    id: 0,
+                    consumed_mah: 123,
+                    cells_mv,
+                    temperature_cdeg: 2550,
+                },
+                123,
+                &mut out,
+            );
+            latest.merge(&VehicleTelemetry {
+                items: out.items,
+                ..VehicleTelemetry::default()
+            });
+            let cells: Vec<_> = latest
+                .items
+                .iter()
+                .filter(|i| i.key.starts_with("battery.cell_"))
+                .collect();
+            assert_eq!(cells.len(), 14);
+            assert!(cells.iter().all(|i| i.value.is_none() && i.time_us == 123));
+            let item = |key| {
+                latest
+                    .items
+                    .iter()
+                    .find(|i| i.key == key)
+                    .and_then(|i| i.value)
+            };
+            assert_eq!(item("battery.consumed_mah"), Some(123.0));
+            assert_eq!(item("battery.temperature_degc"), Some(25.5));
+        }
+    }
+
+    #[test]
+    fn invalid_downward_ranges_clear_a_previous_measurement() {
+        use uxduck_core::domain::telemetry::VehicleTelemetry;
+
+        let mut latest = VehicleTelemetry::default();
+        for (distance_cm, signal_quality, expected) in [
+            (1250, 100, Some(12.5)),
+            (1250, 1, None),
+            (20, 0, Some(0.2)),
+            (19, 100, None),
+            (1500, 0, Some(15.0)),
+            (1501, 100, None),
+        ] {
+            let mut out = Produced::default();
+            Health.consume(
+                42,
+                &Message::DistanceSensor {
+                    distance_cm,
+                    min_distance_cm: 20,
+                    max_distance_cm: 1500,
+                    signal_quality,
+                    orientation: DOWNWARD,
+                },
+                123,
+                &mut out,
+            );
+            assert_eq!(out.items.len(), 1);
+            latest.merge(&VehicleTelemetry {
+                items: out.items,
+                ..VehicleTelemetry::default()
+            });
+            let item = &latest.items[0];
+            assert_eq!(item.key, "rangefinder.distance_m");
+            assert_eq!(item.value, expected);
+            assert_eq!(item.unit, Unit::Meter);
+            assert_eq!(item.component_id, 42);
+            assert_eq!(item.time_us, 123);
+        }
+    }
+
+    #[test]
+    fn servo_outputs_cover_sixteen_and_unused_ones_are_left_out() {
+        let mut servos = [0_u16; 16];
+        servos[0] = 1100;
+        servos[10] = 1900;
+        servos[11] = u16::MAX;
+        let items = produced(&Message::ServoOutputs {
+            servos,
+            time_us: 2_500_000,
+        });
+        let servo: Vec<_> = items
+            .iter()
+            .filter(|(k, _)| k.starts_with("servo."))
+            .collect();
+        assert_eq!(
+            servo,
+            [
+                &("servo.time_s".to_owned(), 2.5),
+                &("servo.1".to_owned(), 1100.0),
+                &("servo.11".to_owned(), 1900.0),
+            ],
+            "0 and UINT16_MAX are unused, never a position"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|(k, _)| !k.starts_with("servo.time") || k == "servo.time_s")
+        );
+    }
+
+    #[test]
+    fn quaternion_sample_is_normalized_and_keeps_one_packet_identity() {
+        let mut out = Produced::default();
+        QuaternionProducer.consume(
+            42,
+            &Message::AttitudeQuaternion {
+                time_boot_ms: 1234,
+                q: [2.0, 0.0, 0.0, 0.0],
+                rollspeed: std::f32::consts::PI,
+                pitchspeed: 0.0,
+                yawspeed: f32::NAN,
+                repr_offset_q: [0.707, 0.0, 0.707, 0.0],
+            },
+            123_456,
+            &mut out,
+        );
+        assert!(out.items.iter().all(|i| i.time_us == 123_456
+            && i.component_id == 42
+            && i.source == "attitude-quaternion"));
+        let value = |key: &str| {
+            out.items
+                .iter()
+                .find(|i| i.key == key)
+                .and_then(|i| i.value)
+                .expect(key)
+        };
+        assert!((value("attitude.quaternion_w") - 1.0).abs() < 1e-12);
+        assert!((value("attitude.quaternion_boot_s") - 1.234).abs() < 1e-12);
+        assert!((value("attitude.quaternion_roll_degps") - 180.0).abs() < 0.001);
+        assert!((value("attitude.display_offset_y") - 0.5_f64.sqrt()).abs() < 0.001);
+        assert!(
+            !out.items
+                .iter()
+                .any(|i| i.key == "attitude.quaternion_yaw_degps")
+        );
+        assert!(!out.items.iter().any(|i| i.key == "attitude.roll_deg"));
+        assert!(
+            out.items
+                .iter()
+                .all(|i| uxduck_core::domain::telemetry::key_says_unit(&i.key, i.unit))
+        );
+    }
+
+    #[test]
+    fn invalid_quaternions_never_become_telemetry_and_zero_offset_is_unsupported() {
+        for q in [
+            [0.0; 4],
+            [f32::NAN, 0.0, 0.0, 0.0],
+            [f32::INFINITY, 0.0, 0.0, 0.0],
+        ] {
+            assert!(
+                produced(&Message::AttitudeQuaternion {
+                    time_boot_ms: 0,
+                    q,
+                    rollspeed: 0.0,
+                    pitchspeed: 0.0,
+                    yawspeed: 0.0,
+                    repr_offset_q: [0.0; 4]
+                })
+                .is_empty()
+            );
+        }
+        let items = produced(&Message::AttitudeQuaternion {
+            time_boot_ms: 0,
+            q: [1.0, 0.0, 0.0, 0.0],
+            rollspeed: 0.0,
+            pitchspeed: 0.0,
+            yawspeed: 0.0,
+            repr_offset_q: [0.0; 4],
+        });
+        assert!(
+            !items
+                .iter()
+                .any(|(key, _)| key.starts_with("attitude.display_offset"))
+        );
+    }
+
+    #[test]
+    fn mission_progress_says_the_item_reached() {
+        let items = produced(&Message::MissionItemReached { seq: 3 });
+        assert_eq!(items, vec![("mission.reached".into(), 3.0)]);
+    }
+
+    #[test]
     fn mission_progress_keeps_the_reported_execution_state() {
         for state in [0, 2, 3, 4, 5] {
             let items = produced(&Message::MissionCurrent {
                 seq: 4,
                 state,
                 mode: 1,
+                total: 4,
+                mission_id: 0,
+                fence_id: 0,
+                rally_id: 0,
             });
             assert!(items.contains(&("mission.current".into(), 4.0)));
             assert!(items.contains(&("mission.state".into(), f64::from(state))));
@@ -1250,6 +1827,22 @@ mod tests {
         assert_eq!(home[0].0, "home.latitude_deg");
         assert!((home[0].1 + 35.363_261).abs() < 1e-9);
         assert!((home[2].1 - 584.09).abs() < 1e-9);
+        let origin = produced(&Message::GpsGlobalOrigin {
+            latitude: -353_632_610,
+            longitude: 1_491_652_300,
+            altitude: 584_090,
+        });
+        let keys: Vec<&str> = origin.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "origin.latitude_deg",
+                "origin.longitude_deg",
+                "origin.altitude_msl_m"
+            ]
+        );
+        assert!((origin[1].1 - 149.165_23).abs() < 1e-9);
+        assert!((origin[2].1 - 584.09).abs() < 1e-9);
     }
 
     #[test]
@@ -1322,6 +1915,36 @@ mod tests {
     }
 
     #[test]
+    fn rc_rssi_is_available_without_a_telemetry_radio_or_plugin() {
+        for rssi in [0, 100, 127, 254, 255] {
+            let mut out = Produced::default();
+            RcInputs.consume(
+                1,
+                &Message::RcChannels {
+                    count: 1,
+                    channels: [1500; 18],
+                    rssi,
+                },
+                42,
+                &mut out,
+            );
+            assert_eq!(out.items.last().unwrap().key, "rc.1");
+            let signal = out.items.iter().find(|item| item.key == "rc.rssi");
+            if rssi == 255 {
+                assert_eq!(signal.unwrap().value, None);
+            } else {
+                let signal = signal.unwrap();
+                assert_eq!(signal.value, Some(f64::from(rssi)));
+                assert_eq!(signal.unit, Unit::None);
+                assert_eq!(signal.source, "rc");
+                assert_eq!(signal.component_id, 1);
+                assert_eq!(signal.time_us, 42);
+            }
+            assert!(!out.items.iter().any(|item| item.key.starts_with("link.")));
+        }
+    }
+
+    #[test]
     fn health_values_are_named_with_their_units() {
         let link = produced(&Message::RadioStatus {
             rssi: 127,
@@ -1330,6 +1953,7 @@ mod tests {
             remnoise: u8::MAX,
             rxerrors: 3,
             fixed: 1,
+            txbuf: 100,
         });
         assert_eq!(link[0], ("link.rssi_pct".to_owned(), 50.0));
         assert_eq!(
@@ -1359,38 +1983,19 @@ mod tests {
         assert!(vibration.contains(&("vibration.max_mps2".to_owned(), 64.5)));
         assert!(vibration.contains(&("vibration.clipping".to_owned(), 7.0)));
 
-        let mut cells = [u16::MAX; 10];
-        cells[..3].copy_from_slice(&[4100, 4090, 4110]);
-        let battery = produced(&Message::BatteryStatus {
-            id: 0,
-            consumed_mah: 1234,
-            cells_mv: cells,
-            temperature_cdeg: i16::MAX,
-        });
-        assert_eq!(battery[0], ("battery.consumed_mah".to_owned(), 1234.0));
-        assert_eq!(battery[1], ("battery.cell_1_v".to_owned(), 4.1));
-        assert_eq!(battery.len(), 4, "three cells, no temperature");
-        let mut total = [u16::MAX; 10];
-        total[0] = 12_600;
-        let second = produced(&Message::BatteryStatus {
-            id: 1,
-            consumed_mah: -1,
-            cells_mv: total,
-            temperature_cdeg: 2550,
-        });
-        assert_eq!(
-            second,
-            [("battery_2.temperature_degc".to_owned(), 25.5)],
-            "a total is not a cell; unknown use left out"
-        );
-
         let down = produced(&Message::DistanceSensor {
             distance_cm: 1250,
+            min_distance_cm: 20,
+            max_distance_cm: 1500,
+            signal_quality: 0,
             orientation: 25,
         });
         assert_eq!(down, [("rangefinder.distance_m".to_owned(), 12.5)]);
         let forward = produced(&Message::DistanceSensor {
             distance_cm: 500,
+            min_distance_cm: 20,
+            max_distance_cm: 1500,
+            signal_quality: 1,
             orientation: 0,
         });
         assert!(forward.is_empty(), "only one pointing down is the height");
@@ -1419,6 +2024,41 @@ mod tests {
     }
 
     #[test]
+    fn battery_health_values_keep_units_and_unknowns() {
+        let mut cells = [u16::MAX; 10];
+        cells[..3].copy_from_slice(&[4100, 4090, 4110]);
+        let battery = produced(&Message::BatteryStatus {
+            id: 0,
+            consumed_mah: 1234,
+            cells_mv: cells,
+            temperature_cdeg: i16::MAX,
+        });
+        assert_eq!(battery[0], ("battery.consumed_mah".to_owned(), 1234.0));
+        assert_eq!(battery[1], ("battery.cell_1_v".to_owned(), 4.1));
+        assert_eq!(battery.len(), 4, "three cells, no temperature");
+        let mut total = [u16::MAX; 10];
+        total[0] = 12_600;
+        let second = produced(&Message::BatteryStatus {
+            id: 1,
+            consumed_mah: -1,
+            cells_mv: total,
+            temperature_cdeg: 2550,
+        });
+        assert!(second.contains(&("battery_2.temperature_degc".to_owned(), 25.5)));
+        assert!(
+            !second
+                .iter()
+                .any(|(key, _)| key == "battery_2.consumed_mah")
+        );
+        let cells: Vec<_> = second
+            .iter()
+            .filter(|(key, _)| key.starts_with("battery_2.cell_"))
+            .collect();
+        assert_eq!(cells.len(), 14);
+        assert!(cells.iter().all(|(_, value)| value.is_nan()));
+    }
+
+    #[test]
     fn every_health_key_says_its_unit() {
         let mut out = Produced::default();
         let mut cells = [u16::MAX; 10];
@@ -1431,6 +2071,7 @@ mod tests {
                 remnoise: 1,
                 rxerrors: 1,
                 fixed: 1,
+                txbuf: 100,
             },
             Message::EkfStatus {
                 flags: 0,

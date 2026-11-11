@@ -108,7 +108,13 @@ impl TerrainPort for Host {
                     Some(Arrived::Read { key, bytes })
                 }
                 Order::Fetch { key } => {
-                    let result = fetch(&format!("{base_url}/{key}")).await;
+                    // A full address (the seabed's, ADR-0043) as it is; else the bucket's.
+                    let url = if key.starts_with("https://") {
+                        key.clone()
+                    } else {
+                        format!("{base_url}/{key}")
+                    };
+                    let result = fetch(&url).await;
                     Some(Arrived::Fetched { key, result })
                 }
                 Order::Write { key, bytes } => {

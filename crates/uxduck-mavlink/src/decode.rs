@@ -110,6 +110,15 @@ pub enum Message {
         pitchspeed: f32,
         yawspeed: f32,
     },
+    /// Body FRD attitude in local NED; quaternion order w, x, y, z.
+    AttitudeQuaternion {
+        time_boot_ms: u32,
+        q: [f32; 4],
+        rollspeed: f32,
+        pitchspeed: f32,
+        yawspeed: f32,
+        repr_offset_q: [f32; 4],
+    },
     SysStatus {
         /// Millivolts; `u16::MAX` when unknown.
         voltage_battery: u16,
@@ -132,22 +141,39 @@ pub enum Message {
         /// Metres per second.
         climb: f32,
     },
-    /// The first eight servo outputs, in microseconds; 0 when unused.
+    /// Servo outputs 1 to 16 (`SERVO_OUTPUT_RAW` port 0), in microseconds;
+    /// 0 when unused, and for 9 to 16 when the frame came without its
+    /// extension fields. `time_us` is the autopilot's boot time of the
+    /// sample, which a simulator's pause also stops.
     ServoOutputs {
-        servos: [u16; 8],
+        servos: [u16; 16],
+        time_us: u32,
     },
     /// The receiver's channels as the autopilot reads them (`RC_CHANNELS`),
     /// in microseconds, before any reversal: the first `count` are given,
     /// `UINT16_MAX` for one unused (S187).
     RcChannels {
+        /// Device-dependent signal strength, 255 when unknown.
+        rssi: u8,
         count: u8,
         channels: [u16; 18],
     },
-    /// The mission item the vehicle is flying to.
+    /// The mission item the vehicle is flying to, and what it holds: the
+    /// mission's item count without home, and the ids of its mission, fence
+    /// and rally points (S199). Each is 0 when the autopilot does not say,
+    /// or the frame came without its extension fields.
     MissionCurrent {
         seq: u16,
         state: u8,
         mode: u8,
+        total: u16,
+        mission_id: u32,
+        fence_id: u32,
+        rally_id: u32,
+    },
+    /// `MISSION_ITEM_REACHED`: the mission item it has just reached (S342).
+    MissionItemReached {
+        seq: u16,
     },
     /// A message from the vehicle, or one part of a long one (S26).
     StatusText {
@@ -176,6 +202,8 @@ pub enum Message {
         remnoise: u8,
         rxerrors: u16,
         fixed: u16,
+        /// Free transmit buffer, percent: how much more it can take.
+        txbuf: u8,
     },
     /// `EKF_STATUS_REPORT` (S72): `EKF_STATUS_FLAGS` and the variances of
     /// velocity, horizontal and vertical position, compass and terrain.
@@ -200,6 +228,9 @@ pub enum Message {
     /// (25 is down).
     DistanceSensor {
         distance_cm: u16,
+        min_distance_cm: u16,
+        max_distance_cm: u16,
+        signal_quality: u8,
         orientation: u8,
     },
     /// ArduPilot's `RANGEFINDER` (S72): metres.
@@ -250,6 +281,8 @@ pub enum Message {
     ScaledPressure2 {
         temperature_cdeg: i16,
     },
+    /// `ONBOARD_COMPUTER_STATUS` (S295): a companion computer's health.
+    OnboardComputerStatus(Box<crate::computer::ComputerStatus>),
     /// `FILE_TRANSFER_PROTOCOL` (S74): MAVLink FTP, both ways.
     Ftp {
         target_system: u8,
@@ -269,6 +302,12 @@ pub enum Message {
     },
     /// Where home is: degrees times 1e7, millimetres above mean sea level.
     HomePosition {
+        latitude: i32,
+        longitude: i32,
+        altitude: i32,
+    },
+    /// `GPS_GLOBAL_ORIGIN`: the EKF origin, in `HomePosition`'s units.
+    GpsGlobalOrigin {
         latitude: i32,
         longitude: i32,
         altitude: i32,
@@ -326,6 +365,7 @@ pub enum Message {
         name: String,
         value: f32,
         param_type: u8,
+        target_system: u8,
     },
     MissionRequestList {
         mission_type: u8,
@@ -345,6 +385,8 @@ pub enum Message {
     ManualControl {
         target: u8,
         sticks: [i16; 4],
+        /// Held button bits: `buttons`, then `buttons2` from bit 16.
+        buttons: u32,
     },
     RcChannelsOverride {
         target: u8,
@@ -445,6 +487,37 @@ pub enum Message {
         fitness: f32,
         offsets: [f32; 3],
     },
+    /// MAVLink's ping (`TIMESYNC`, S261): a request has `tc1` 0 and the
+    /// asker's clock in `ts1`; the reply has the answerer's clock in `tc1`
+    /// and `ts1` echoed, addressed to the asker when the extension is sent.
+    Timesync {
+        tc1: i64,
+        ts1: i64,
+        target_system: u8,
+        target_component: u8,
+    },
+    /// What one rate controller was asked and did (`PID_TUNING`), sent
+    /// for the axes in `GCS_PID_MASK`: rates in degrees per second, terms
+    /// in the controller's output units. `axis` is `PID_TUNING_AXIS`.
+    PidTuning {
+        axis: u8,
+        desired: f32,
+        achieved: f32,
+        ff: f32,
+        p: f32,
+        i: f32,
+        d: f32,
+    },
+    /// The body rates the attitude controller asks for
+    /// (`ATTITUDE_TARGET`), in radians per second; `type_mask` bits 1, 2
+    /// and 4 say a rate is not given.
+    AttitudeTarget {
+        time_boot_ms: u32,
+        type_mask: u8,
+        body_roll_rate: f32,
+        body_pitch_rate: f32,
+        body_yaw_rate: f32,
+    },
     Other {
         message_id: u32,
     },
@@ -504,6 +577,32 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
         return None;
     }
     let packet = frame.decode::<Ardupilotmega>();
+    // A fork may send a standard message with extensions ArduPilot's has
+    // not (ADR-0044): its checksum is the same, and UXDuck reads the fields
+    // it knows, as MAVLink asks of a receiver.
+    if let Err(mavio::error::Error::Spec(mavio::error::SpecError::V2PayloadIsTooLong {
+        maximum,
+        ..
+    })) = packet
+    {
+        let extra = <Ardupilotmega as mavio::protocol::Dialect>::message_info(message_id)
+            .ok()?
+            .crc_extra();
+        let header = (system_id, component_id, frame.sequence());
+        let payload = frame.payload().bytes().get(..maximum)?;
+        return decode(&crate::custom::frame_from(
+            header, message_id, payload, extra,
+        ));
+    }
+    // A `MAV_CMD` or `MAV_FRAME` newer than mavio's dialect does not decode:
+    // read the item or the acknowledgement from its bytes.
+    if packet.is_err() && matches!(message_id, MISSION_ITEM_INT | COMMAND_ACK) {
+        let mut bytes = [0u8; 38];
+        let payload = frame.payload().bytes();
+        let length = payload.len().min(bytes.len());
+        bytes[..length].copy_from_slice(&payload[..length]);
+        return Some(raw_command(system_id, component_id, message_id, &bytes));
+    }
     let mission_target = packet.as_ref().ok().and_then(|packet| match packet {
         Ardupilotmega::MissionCount(m) => Some((m.target_system, m.target_component)),
         Ardupilotmega::MissionItemInt(m) => Some((m.target_system, m.target_component)),
@@ -601,6 +700,30 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             pitchspeed: m.pitchspeed,
             yawspeed: m.yawspeed,
         },
+        Ok(Ardupilotmega::PidTuning(m)) => Message::PidTuning {
+            axis: m.axis as u8,
+            desired: m.desired,
+            achieved: m.achieved,
+            ff: m.ff,
+            p: m.p,
+            i: m.i,
+            d: m.d,
+        },
+        Ok(Ardupilotmega::AttitudeTarget(m)) => Message::AttitudeTarget {
+            time_boot_ms: m.time_boot_ms,
+            type_mask: m.type_mask.bits(),
+            body_roll_rate: m.body_roll_rate,
+            body_pitch_rate: m.body_pitch_rate,
+            body_yaw_rate: m.body_yaw_rate,
+        },
+        Ok(Ardupilotmega::AttitudeQuaternion(m)) => Message::AttitudeQuaternion {
+            time_boot_ms: m.time_boot_ms,
+            q: [m.q1, m.q2, m.q3, m.q4],
+            rollspeed: m.rollspeed,
+            pitchspeed: m.pitchspeed,
+            yawspeed: m.yawspeed,
+            repr_offset_q: m.repr_offset_q,
+        },
         Ok(Ardupilotmega::SysStatus(m)) => Message::SysStatus {
             voltage_battery: m.voltage_battery,
             current_battery: m.current_battery,
@@ -610,6 +733,12 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
                 m.onboard_control_sensors_health.bits(),
             ),
         },
+        Ok(Ardupilotmega::Timesync(m)) => Message::Timesync {
+            tc1: m.tc1,
+            ts1: m.ts1,
+            target_system: m.target_system,
+            target_component: m.target_component,
+        },
         Ok(Ardupilotmega::VfrHud(m)) => Message::VfrHud {
             airspeed: m.airspeed,
             groundspeed: m.groundspeed,
@@ -617,6 +746,9 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             throttle: m.throttle,
             climb: m.climb,
         },
+        Ok(Ardupilotmega::OnboardComputerStatus(m)) => Message::OnboardComputerStatus(Box::new(
+            crate::computer::ComputerStatus::from_message(&m),
+        )),
         Ok(other) => command(&other)
             .or_else(|| transfer(other))
             .unwrap_or(Message::Other { message_id }),
@@ -678,6 +810,7 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
             remnoise: m.remnoise,
             rxerrors: m.rxerrors,
             fixed: m.fixed,
+            txbuf: m.txbuf,
         },
         Ardupilotmega::EkfStatusReport(m) => Message::EkfStatus {
             flags: m.flags.bits(),
@@ -701,6 +834,9 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
         },
         Ardupilotmega::DistanceSensor(m) => Message::DistanceSensor {
             distance_cm: m.current_distance,
+            min_distance_cm: m.min_distance,
+            max_distance_cm: m.max_distance,
+            signal_quality: m.signal_quality,
             orientation: m.orientation as u8,
         },
         Ardupilotmega::Rangefinder(m) => Message::Rangefinder {
@@ -769,6 +905,45 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
 
 /// `MAG_CAL_REPORT`'s message id.
 const MAG_CAL_REPORT: u32 = 192;
+const MISSION_ITEM_INT: u32 = 73;
+const COMMAND_ACK: u32 = 77;
+
+/// A `MISSION_ITEM_INT` or `COMMAND_ACK` read field by field from its
+/// payload, zero-padded to its full length, in MAVLink's wire order.
+fn raw_command(system_id: u8, component_id: u8, message_id: u32, bytes: &[u8; 38]) -> Decoded {
+    let four = |at: usize| [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]];
+    let two = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    if message_id == COMMAND_ACK {
+        return Decoded {
+            system_id,
+            component_id,
+            mission_target: None,
+            message: Message::CommandAck {
+                command: two(0),
+                result: bytes[2],
+                target_system: bytes[8],
+                target_component: bytes[9],
+            },
+        };
+    }
+    Decoded {
+        system_id,
+        component_id,
+        mission_target: Some((bytes[32], bytes[33])),
+        message: Message::MissionItem(MissionItemInt {
+            seq: two(28),
+            frame: bytes[34],
+            command: two(30),
+            current: bytes[35] != 0,
+            autocontinue: bytes[36] != 0,
+            params: [0, 4, 8, 12].map(|at| f32::from_le_bytes(four(at))),
+            x: i32::from_le_bytes(four(16)),
+            y: i32::from_le_bytes(four(20)),
+            z: f32::from_le_bytes(four(24)),
+            mission_type: bytes[37],
+        }),
+    }
+}
 
 /// A `MAG_CAL_REPORT` from its payload: ten floats (fitness, the offsets,
 /// the diagonal and off-diagonal), then `compass_id`, `cal_mask`,
@@ -802,9 +977,14 @@ fn mission_current(m: &mavio::dialects::ardupilotmega::messages::MissionCurrent)
         seq: m.seq,
         state: m.mission_state as u8,
         mode: m.mission_mode,
+        total: m.total,
+        mission_id: m.mission_id,
+        fence_id: m.fence_id,
+        rally_id: m.rally_points_id,
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per message")]
 fn transfer(message: Ardupilotmega) -> Option<Message> {
     match message {
         Ardupilotmega::ParamValue(m) => Some(Message::ParamValue {
@@ -828,6 +1008,7 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             name: param_name(&m.param_id),
             value: m.param_value,
             param_type: m.param_type as u8,
+            target_system: m.target_system,
         }),
         Ardupilotmega::MissionRequestList(m) => Some(Message::MissionRequestList {
             mission_type: m.mission_type as u8,
@@ -859,6 +1040,7 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
         Ardupilotmega::ManualControl(m) => Some(Message::ManualControl {
             target: m.target,
             sticks: [m.x, m.y, m.z, m.r],
+            buttons: u32::from(m.buttons) | (u32::from(m.buttons2) << 16),
         }),
         Ardupilotmega::RcChannelsOverride(m) => Some(rc_override(&m)),
         Ardupilotmega::MissionAck(m) => Some(Message::MissionAck {
@@ -866,6 +1048,7 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             mission_type: m.mission_type as u8,
         }),
         Ardupilotmega::MissionCurrent(m) => Some(mission_current(&m)),
+        Ardupilotmega::MissionItemReached(m) => Some(Message::MissionItemReached { seq: m.seq }),
         Ardupilotmega::Statustext(m) => {
             let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
             Some(Message::StatusText {
@@ -892,7 +1075,13 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             longitude: m.longitude,
             altitude: m.altitude,
         }),
-        Ardupilotmega::ServoOutputRaw(m) => Some(Message::ServoOutputs {
+        Ardupilotmega::GpsGlobalOrigin(m) => Some(Message::GpsGlobalOrigin {
+            latitude: m.latitude,
+            longitude: m.longitude,
+            altitude: m.altitude,
+        }),
+        // Port 1 carries outputs 17 to 32, which nothing here uses.
+        Ardupilotmega::ServoOutputRaw(m) if m.port == 0 => Some(Message::ServoOutputs {
             servos: [
                 m.servo1_raw,
                 m.servo2_raw,
@@ -902,14 +1091,23 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
                 m.servo6_raw,
                 m.servo7_raw,
                 m.servo8_raw,
+                m.servo9_raw,
+                m.servo10_raw,
+                m.servo11_raw,
+                m.servo12_raw,
+                m.servo13_raw,
+                m.servo14_raw,
+                m.servo15_raw,
+                m.servo16_raw,
             ],
+            time_us: m.time_usec,
         }),
         other => health(&other),
     }
 }
 
-/// Whether whole-frame bytes are a frame of the dialect (for resynchronising
-/// byte streams).
+/// Whether whole-frame bytes are a frame of the dialect, or of a dialect a
+/// person added (for resynchronising byte streams).
 #[must_use]
 pub fn check(bytes: &[u8]) -> crate::framing::Check {
     use crate::framing::Check;
@@ -918,14 +1116,36 @@ pub fn check(bytes: &[u8]) -> crate::framing::Check {
     let Ok(frame) = receiver.recv() else {
         return Check::Invalid;
     };
-    if Ardupilotmega::message_info(frame.message_id()).is_err() {
-        return Check::Unknown;
+    let known = Ardupilotmega::message_info(frame.message_id()).is_ok();
+    if known && frame.validate_checksum::<Ardupilotmega>().is_ok() {
+        return Check::Valid;
     }
-    if frame.validate_checksum::<Ardupilotmega>().is_ok() {
-        Check::Valid
-    } else {
+    // A message a person's dialect adds or changes (ADR-0044 F4).
+    if crate::custom::checksum_matches(bytes) {
+        return Check::Valid;
+    }
+    if known {
         Check::Invalid
+    } else {
+        Check::Unknown
     }
+}
+
+/// Whether UXDuck's own readers act on a message of the built-in dialect
+/// (ADR-0044 F5): a frame of it, all zeros or all ones, decodes to more than
+/// [`Message::Other`].
+#[must_use]
+pub fn reads(id: u32) -> bool {
+    use mavio::protocol::Dialect;
+    let (Ok(info), Some(message)) = (Ardupilotmega::message_info(id), crate::dialect::message(id))
+    else {
+        return false;
+    };
+    let size: usize = message.fields().map(|f| f.size()).sum();
+    [0_u8, 1].into_iter().any(|fill| {
+        let frame = crate::custom::frame(id, &vec![fill; size], info.crc_extra());
+        decode(&frame).is_some_and(|d| !matches!(d.message, Message::Other { .. }))
+    })
 }
 
 /// `flight_sw_version` as `major.minor.patch`.
@@ -955,6 +1175,7 @@ fn prearm(enabled: u32, health: u32) -> Option<bool> {
 /// `RC_CHANNELS` (S187).
 const fn rc_channels(m: &mavio::dialects::ardupilotmega::messages::RcChannels) -> Message {
     Message::RcChannels {
+        rssi: m.rssi,
         count: m.chancount,
         channels: [
             m.chan1_raw,
@@ -1029,6 +1250,36 @@ mod tests {
     }
 
     #[test]
+    fn servo_outputs_decode_sixteen_from_port_0_only() {
+        use mavio::dialects::ardupilotmega::messages::ServoOutputRaw;
+        let raw = |port: u8| ServoOutputRaw {
+            time_usec: 1_234_567,
+            port,
+            servo1_raw: 1100,
+            servo11_raw: 1900,
+            ..ServoOutputRaw::default()
+        };
+        let decoded = decode(&sim::frame(1, 1, 0, &raw(0))).map(|d| d.message);
+        let mut servos = [0; 16];
+        servos[0] = 1100;
+        servos[10] = 1900;
+        assert_eq!(
+            decoded,
+            Some(Message::ServoOutputs {
+                servos,
+                time_us: 1_234_567
+            })
+        );
+        assert!(
+            !matches!(
+                decode(&sim::frame(1, 1, 0, &raw(1))).map(|d| d.message),
+                Some(Message::ServoOutputs { .. })
+            ),
+            "port 1 is outputs 17 to 32"
+        );
+    }
+
+    #[test]
     fn a_mag_cal_report_with_a_newer_failure_still_decodes() {
         // 9 (bad scaling) is past the dialect's MAG_CAL_STATUS enum.
         for status in [8u8, 9, 10] {
@@ -1076,6 +1327,76 @@ mod tests {
         let written = frame.serialize(&mut buf).unwrap_or(0);
         buf.truncate(written);
         buf
+    }
+
+    #[test]
+    fn distance_sensor_keeps_measurement_validity() {
+        use mavio::dialects::ardupilotmega::messages::DistanceSensor;
+        for signal_quality in [0, 1, 100] {
+            let packet = DistanceSensor {
+                min_distance: 20,
+                max_distance: 1500,
+                current_distance: 1250,
+                signal_quality,
+                ..Default::default()
+            };
+            let decoded = decode(&frame_of(7, 0, &packet)).expect("distance sensor frame");
+            assert!(matches!(decoded.message, Message::DistanceSensor {
+                distance_cm: 1250,
+                min_distance_cm: 20,
+                max_distance_cm: 1500,
+                signal_quality: quality,
+                orientation: 0,
+            } if quality == signal_quality));
+        }
+    }
+
+    #[test]
+    fn rc_channels_keeps_receiver_signal_strength() {
+        use mavio::dialects::ardupilotmega::messages::RcChannels;
+        for rssi in [0, 127, 254, 255] {
+            let packet = RcChannels {
+                chancount: 1,
+                chan1_raw: 1500,
+                rssi,
+                ..Default::default()
+            };
+            let decoded = decode(&frame_of(7, 0, &packet)).expect("RC channels frame");
+            assert!(
+                matches!(decoded.message, Message::RcChannels { rssi: actual, count: 1, channels } if actual == rssi && channels[0] == 1500)
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_optional_quaternion_attitude_without_losing_rates_or_offset() {
+        use mavio::dialects::ardupilotmega::messages::AttitudeQuaternion;
+        let packet = AttitudeQuaternion {
+            time_boot_ms: 1234,
+            q1: 0.5,
+            q2: -0.5,
+            q3: 0.5,
+            q4: -0.5,
+            rollspeed: 1.0,
+            pitchspeed: -2.0,
+            yawspeed: 3.0,
+            repr_offset_q: [0.707, 0.0, 0.707, 0.0],
+        };
+        let decoded = decode(&frame_of(7, 0, &packet)).expect("quaternion frame");
+        assert_eq!(decoded.component_id, 1);
+        assert_eq!(
+            decoded.message,
+            Message::AttitudeQuaternion {
+                time_boot_ms: 1234,
+                q: [0.5, -0.5, 0.5, -0.5],
+                rollspeed: 1.0,
+                pitchspeed: -2.0,
+                yawspeed: 3.0,
+                repr_offset_q: [0.707, 0.0, 0.707, 0.0],
+            }
+        );
+        assert!(!crate::session::STREAM_RATES.iter().any(|(id, _)| *id == 31));
+        assert!(crate::session::STREAM_RATES.contains(&(30, 100_000)));
     }
 
     #[test]

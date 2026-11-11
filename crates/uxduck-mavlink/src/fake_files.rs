@@ -96,6 +96,11 @@ impl Default for FakeFiles {
         for (number, len) in [(1, 3_000), (2, 20_000), (3, 60_000)] {
             files.insert(format!("/APM/LOGS/{number:08}.BIN"), log_bytes(number, len));
         }
+        // A DataFlash log that reads as one, a copter's minute (S212).
+        files.insert(
+            "/APM/LOGS/00000004.BIN".into(),
+            crate::dataflash::fixture::flight(),
+        );
         files.insert("/APM/LOGS/LASTLOG.TXT".into(), b"3\n".to_vec());
         files.insert("@SYS/uarts.txt".into(), UARTS.as_bytes().to_vec());
         files.insert("@SYS/threads.txt".into(), THREADS.as_bytes().to_vec());

@@ -621,6 +621,8 @@ impl Engine {
     /// Once a second: a PX4 calibration UXDuck has heard nothing of for a
     /// long time ended unseen (its last words lost, or the vehicle gone).
     pub fn expire_setups(&mut self, now: u64) {
+        // ESC calibrations not heard back (S216).
+        self.expire_escs(now);
         let silent: Vec<Setup> = self
             .state
             .setups

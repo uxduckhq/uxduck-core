@@ -1,0 +1,7 @@
+{
+  "method": "mavlink/dialects/bind",
+  "params": {
+    "id": "dialect-3f9a1c2b7d4e",
+    "commits": ["2a3dc4b7", "9f00aa12"]
+  }
+}

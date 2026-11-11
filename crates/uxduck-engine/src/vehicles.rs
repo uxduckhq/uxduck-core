@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
 use uxduck_core::domain::notification::NotificationState;
-use uxduck_core::domain::vehicle::{CALLSIGNS, Observation, Presence, Vehicle, callsign};
+use uxduck_core::domain::vehicle::{
+    Observation, Presence, Vehicle, VehicleColour, callsign, simulation_name,
+};
 use uxduck_core::events::{Actor, Change};
 
 use crate::{Engine, NO_CONNECTION};
@@ -15,7 +17,7 @@ use crate::{Engine, NO_CONNECTION};
 /// notice, before its id.
 const GROUND_TESTING: &str = "ground-testing:";
 
-fn data_plane() -> Actor {
+pub(crate) fn data_plane() -> Actor {
     Actor {
         client_id: "data-plane".into(),
         operator_id: None,
@@ -134,6 +136,7 @@ impl Engine {
     /// Merges what the data plane saw. A vehicle seen under a new id (its
     /// UID arrived) replaces the record under its old id, keeping its name
     /// and whether it was saved or dismissed.
+    #[allow(clippy::too_many_lines, reason = "a new record is one line per field")]
     pub fn vehicle_observed(&mut self, seen: Observation) {
         if self.closed_before(&seen.link_id) {
             return;
@@ -141,12 +144,7 @@ impl Engine {
         // A record that already knows this id as an earlier one (after a
         // restart, the session hears the vehicle under its provisional id
         // before its UID) keeps its lasting id.
-        let known_as = self
-            .state
-            .vehicles
-            .values()
-            .find(|v| v.id != seen.id && v.aliases.contains(&seen.id))
-            .map(|v| v.id.clone());
+        let known_as = self.known_as(&seen.id);
         let previous_id = std::iter::once(&seen.id)
             .chain(seen.aliases.iter())
             .find(|id| self.state.vehicles.contains_key(*id))
@@ -156,37 +154,14 @@ impl Engine {
             .as_ref()
             .and_then(|id| self.state.vehicles.get(id))
             .cloned();
-        let mut vehicle = previous.clone().unwrap_or_else(|| Vehicle {
-            id: seen.id.clone(),
-            name: self.callsign_for(&seen.link_id),
-            aliases: Vec::new(),
-            link_id: String::new(),
-            peer: String::new(),
-            system_id: seen.system_id,
-            component_ids: Vec::new(),
-            autopilot: String::new(),
-            vehicle_type: String::new(),
-            uid: None,
-            firmware: None,
-            firmware_commit: None,
-            presence: Presence::Offline,
-            last_heartbeat_us: 0,
-            armed: false,
-            mode: None,
-            saved: false,
-            dismissed: false,
-            local_only: false,
-            labels: Vec::new(),
-            bookmarks: Vec::new(),
-            size_cm: None,
-            traffic: false,
-            look: None,
-            preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
-            version: 0,
-        });
+        let mut vehicle = previous.clone().unwrap_or_else(|| self.first_heard(&seen));
         if known_as.is_none() {
             vehicle.id.clone_from(&seen.id);
         }
+        // A record kept from before colours were given takes one now.
+        vehicle
+            .colour
+            .get_or_insert_with(|| self.given_colour(&vehicle.id));
         let duplicates = self.fold_duplicates(&seen.aliases, previous_id.as_ref(), &mut vehicle);
         for alias in &seen.aliases {
             if !vehicle.aliases.contains(alias) {
@@ -195,6 +170,8 @@ impl Engine {
         }
         self.remove_observed_duplicates(&seen, &vehicle.id);
         vehicle.link_id = seen.link_id;
+        // Heard live: no longer known from a log alone (S248).
+        vehicle.seen_in_log = false;
         vehicle.peer = seen.peer;
         vehicle.system_id = seen.system_id;
         vehicle.component_ids = seen.component_ids;
@@ -206,6 +183,11 @@ impl Engine {
             vehicle.firmware_commit = seen.firmware_commit;
         }
         vehicle.firmware = seen.firmware.or(vehicle.firmware);
+        // Hidden until seen again (S247): only an offline vehicle is
+        // hidden, so heard at all, it is shown.
+        if seen.presence != Presence::Offline {
+            vehicle.hidden = false;
+        }
         vehicle.presence = seen.presence;
         vehicle.last_heartbeat_us = seen.last_heartbeat_us;
         vehicle.armed = seen.armed;
@@ -238,6 +220,68 @@ impl Engine {
         self.vehicle_upserted(before.as_ref(), &after, presence_changed);
     }
 
+    /// The record of a vehicle heard for the first time: named and coloured
+    /// as nobody chose.
+    fn first_heard(&self, seen: &Observation) -> Vehicle {
+        Vehicle {
+            id: seen.id.clone(),
+            name: self.unchosen_name(&seen.link_id, None),
+            aliases: Vec::new(),
+            link_id: String::new(),
+            peer: String::new(),
+            system_id: seen.system_id,
+            component_ids: Vec::new(),
+            autopilot: String::new(),
+            vehicle_type: String::new(),
+            uid: None,
+            firmware: None,
+            firmware_commit: None,
+            presence: Presence::Offline,
+            last_heartbeat_us: 0,
+            armed: false,
+            mode: None,
+            saved: false,
+            dismissed: false,
+            hidden: false,
+            seen_in_log: false,
+            local_only: false,
+            labels: Vec::new(),
+            bookmarks: Vec::new(),
+            size_cm: None,
+            gripper: None,
+            companions: Vec::new(),
+            traffic: false,
+            look: None,
+            colour: Some(self.given_colour(&seen.id)),
+            preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
+            definitions: uxduck_core::domain::param_definitions::DefinitionsChoice::default(),
+            dialects: uxduck_core::domain::dialect::DialectChoice::default(),
+            replay: false,
+            replay_of: None,
+            replay_at_us: None,
+            sim_evidence: false,
+            simulated: None,
+            version: 0,
+        }
+    }
+
+    /// The lasting record that already knows `id` as an earlier one, noted
+    /// as heard provisionally (`heard_provisionally`) until heard by its
+    /// lasting id.
+    fn known_as(&mut self, id: &str) -> Option<String> {
+        let known_as = self
+            .state
+            .vehicles
+            .values()
+            .find(|v| v.id != id && v.aliases.iter().any(|a| a == id))
+            .map(|v| v.id.clone());
+        match &known_as {
+            Some(lasting) => self.heard_provisionally.insert(lasting.clone()),
+            None => self.heard_provisionally.remove(id),
+        };
+        known_as
+    }
+
     fn remove_observed_duplicates(&mut self, seen: &Observation, vehicle_id: &str) {
         // Every other record this observation names is the same vehicle:
         // heard again from a new address (its link moved, or it rebooted
@@ -252,6 +296,7 @@ impl Engine {
             .collect();
         for old in duplicates {
             self.telemetry.remove(&old);
+            self.link_health.remove(&old);
             self.commit_as(data_plane(), Change::VehicleRemoved { id: old });
         }
     }
@@ -316,6 +361,7 @@ impl Engine {
         }
         self.refresh_wake_lock();
         self.drive_launch_of_vehicle(&after.id);
+        self.drive_plan_run_of_vehicle(&after.id);
         self.review_practice(&after.id);
         self.choose_definitions(&after.id);
         // An install waiting for the vehicle's new version (S189).
@@ -377,40 +423,54 @@ impl Engine {
         })
     }
 
-    /// A new vehicle's name: on a simulator, the callsign of its instance
-    /// (instance 0 is Alpha), so simulations started together are named
-    /// the same each time; otherwise, or when that one is taken, the first
-    /// free callsign.
-    fn callsign_for(&self, link_id: &str) -> String {
-        let instance = match self.state.links.get(link_id).map(|l| &l.kind) {
-            Some(LinkKind::Simulator {
-                instance: Some(instance),
-                ..
-            }) => Some(usize::from(*instance)),
-            _ => None,
-        };
-        instance
-            .and_then(|i| CALLSIGNS.get(i))
-            .filter(|word| !self.state.vehicles.values().any(|v| v.name == **word))
-            .map_or_else(|| self.free_callsign(None), |word| (*word).to_owned())
-    }
-
-    /// The first callsign no vehicle but `except` goes by.
-    pub(crate) fn free_callsign(&self, except: Option<&str>) -> String {
-        callsign(
+    /// The colour for a vehicle with none yet: one no other vehicle heard
+    /// now has, if there is one (ADR-0029 P19).
+    pub(crate) fn given_colour(&self, except: &str) -> VehicleColour {
+        VehicleColour::given(
             self.state
                 .vehicles
                 .values()
-                .filter(|v| Some(v.id.as_str()) != except)
-                .map(|v| v.name.as_str()),
+                .filter(|v| v.id != except && !v.replay)
+                .filter_map(|v| {
+                    v.colour
+                        .as_ref()
+                        .map(|c| (c, v.presence != Presence::Offline))
+                }),
         )
+    }
+
+    /// The name of a vehicle nobody named, on `link_id`: a simulation's
+    /// "Sim n" (instance 0 is Sim 1), so simulations started together are
+    /// named the same each time; a real vehicle's callsign, never one
+    /// another real vehicle went by. `except` is the vehicle being named,
+    /// which gets its own callsign back.
+    pub(crate) fn unchosen_name(&self, link_id: &str, except: Option<&str>) -> String {
+        let others = || {
+            self.state
+                .vehicles
+                .values()
+                .filter(move |v| Some(v.id.as_str()) != except)
+                .map(|v| v.name.as_str())
+        };
+        if let Some(LinkKind::Simulator { instance, .. }) =
+            self.state.links.get(link_id).map(|l| &l.kind)
+        {
+            return simulation_name(instance.map(usize::from), others());
+        }
+        let retired = self
+            .state
+            .retired_callsigns
+            .iter()
+            .filter(|(_, id)| Some(id.as_str()) != except)
+            .map(|(word, _)| word.as_str());
+        callsign(others().chain(retired))
     }
 
     /// Nothing is heard until the data plane reports again: every vehicle
     /// starts a daemon run offline, and every link is asked to open but a
-    /// simulator's. The last run's simulations are not remembered, unless
-    /// "Recreate simulations when UXDuck starts" is on, when each starts
-    /// again afresh where it first started (maintainer, 2026-10-11).
+    /// simulator's. The last run's simulations are forgotten;
+    /// with "Recreate simulations when UXDuck starts" on, each that was
+    /// running starts again afresh where it first started. Stopped ones go.
     pub(crate) fn start_data_plane(&mut self) {
         // A record under another's earlier id is that vehicle, left behind
         // by a daemon that did not fold it in: it goes, its saved mark with
@@ -455,18 +515,24 @@ impl Engine {
         self.links.gcs_system_id(self.state.settings.gcs_system_id);
         let links: Vec<Link> = self.state.links.values().cloned().collect();
         let recreate = self.state.settings.recreate_simulations;
+        // Remove old sessions before opening anything: their dependent
+        // forwards must never briefly reopen or reserve another link's port.
         for link in &links {
+            if link.kind.is_simulator() && (!recreate || link.status.is_off()) {
+                let _ = crate::sim::forget_previous(self, &link.id);
+            }
+        }
+        for link in &links {
+            if !self.state.links.contains_key(&link.id) {
+                continue;
+            }
             // Each fails only for a link that is gone, and this one is here.
-            if link.kind.is_simulator() && !recreate {
-                let _ = crate::rpc::vehicles::remove_link(self, NO_CONNECTION, &link.id);
+            if link.kind.is_simulator() {
+                let _ = crate::sim::restart(self, NO_CONNECTION, &link.id);
                 continue;
             }
             // A link the user turned off stays off until they turn it on.
             if link.status == LinkStatus::Disabled {
-                continue;
-            }
-            if link.kind.is_simulator() {
-                let _ = crate::sim::restart(self, NO_CONNECTION, &link.id);
                 continue;
             }
             self.links.open(link);

@@ -42,6 +42,7 @@ use uxduck_core::domain::frames::{self, MotorLayout};
 use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::parameter::parameter_id;
 use uxduck_core::domain::setup::{MotorTest, Setup, SetupKind, SetupStep};
+use uxduck_core::domain::telemetry_layout::VehicleClass;
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::Actor;
 
@@ -68,8 +69,9 @@ const STOP_WAIT_US: u64 = 1_000_000;
 /// The vehicle armed or disarmed this soon after a test ended: its own
 /// arming for the test.
 const ARMED_FOR_TEST_US: u64 = 3_000_000;
-/// The throttle a test may ask for, percent.
-const MAX_THROTTLE: f32 = 30.0;
+/// The throttle a test may ask for, percent: up to full power (maintainer,
+/// 2026-11-02: "someone might want to test at 100% too").
+const MAX_THROTTLE: f32 = 100.0;
 
 /// A motor held: whose hold, which motor, and when it was last kept and
 /// renewed.
@@ -213,14 +215,22 @@ fn press(
     params: &SetupSpinParams,
 ) -> Result<Value, ApiError> {
     // Nothing spins until the person has said the propellers are off
-    // (maintainer, 2026-10-27): a switch on the row, not a line.
+    // (maintainer, 2026-10-27): a switch on the row, not a line. A rover's
+    // wheels are lifted clear instead, and a boat's or a submarine's
+    // propellers kept clear of hands.
     if !params.propellers_off {
+        let name = &vehicle.name;
         return Err(ApiError::new(
             ErrorKind::ConfirmationRequired,
-            format!(
-                "Confirm {}'s propellers are off before testing a motor.",
-                vehicle.name
-            ),
+            match VehicleClass::of(&vehicle.vehicle_type) {
+                VehicleClass::Rover => {
+                    format!("Confirm {name}'s wheels are off the ground before testing a motor.")
+                }
+                VehicleClass::Boat | VehicleClass::Sub => {
+                    format!("Confirm {name}'s propellers are clear before testing a motor.")
+                }
+                _ => format!("Confirm {name}'s propellers are off before testing a motor."),
+            },
         ));
     }
     let throttle = params.throttle;
@@ -420,12 +430,6 @@ impl Engine {
             return Some(busy(format!(
                 "{} is driving {}. Release it first.",
                 controller.name, vehicle.name
-            )));
-        }
-        if let Some(lease) = self.lease_of(&vehicle.id) {
-            return Some(busy(format!(
-                "{} has control of {} from away. Take it back first.",
-                lease.name, vehicle.name
             )));
         }
         None
@@ -764,7 +768,7 @@ impl Engine {
 fn said(reason: &str) -> String {
     let trimmed = reason.trim().trim_end_matches('.');
     match trimmed.to_lowercase().as_str() {
-        "safety switch" => "its safety switch is on; press it first".into(),
+        "safety switch" => "its safety switch is on. Press it first".into(),
         "rc not calibrated" => "its radio is not calibrated".into(),
         "vehicle not landed" => "it is not landed".into(),
         "board initialising" => "it is still starting up".into(),
@@ -822,7 +826,7 @@ mod tests {
     fn the_vehicles_reasons_in_words() {
         assert_eq!(
             said("Safety switch"),
-            "its safety switch is on; press it first"
+            "its safety switch is on. Press it first"
         );
         assert_eq!(said("RC not calibrated"), "its radio is not calibrated");
         assert_eq!(said("Throttle too high."), "Throttle too high");

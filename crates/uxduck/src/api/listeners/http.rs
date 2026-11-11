@@ -844,6 +844,42 @@ async fn recording(
         return (StatusCode::UNAUTHORIZED, "ask for the recording first").into_response();
     };
     let dir = state.video.dir().to_owned();
+    // A video added from elsewhere (S208): its file where it is, or the
+    // copy a browser plays.
+    if std::path::Path::new(&name).is_absolute() {
+        if file != format!("{id}.mp4") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let cache = crate::video::playback::cache_dir(&dir);
+        let original = std::path::PathBuf::from(&name);
+        let made = tokio::task::spawn_blocking(move || {
+            let copy = crate::video::playback::added_copy(&cache, &original);
+            if copy.is_file() {
+                crate::video::playback::mark_used(&copy);
+                return Ok(copy);
+            }
+            let play = crate::video::created::probe(&original)
+                .map_err(std::io::Error::other)?
+                .play;
+            if play == crate::video::created::Play::Direct {
+                return Ok(original);
+            }
+            crate::video::playback::prepare(&original, play, &copy)?;
+            Ok::<_, std::io::Error>(copy)
+        })
+        .await;
+        let path = match made {
+            Ok(Ok(path)) => path,
+            Ok(Err(e)) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        return match ServeFile::new(path).try_call(request).await {
+            Ok(response) => response.map(Body::new).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
     let kept_as_ts = std::path::Path::new(&name)
         .extension()
         .is_some_and(|e| e == "ts");

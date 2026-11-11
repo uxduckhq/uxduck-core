@@ -173,6 +173,7 @@ async fn run(
             );
             report.id = Some(id.to_owned());
             report.sender = "recorded video".into();
+            report.counters.hold_us = hub.hold_us(id);
             before = (status.counters.bytes, status.counters.pictures);
             reported = Instant::now();
             let config = input.clone();

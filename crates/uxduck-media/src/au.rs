@@ -6,10 +6,11 @@
 //! hold `00 00 01` and so fake a NAL unit of a reserved type; both go here.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crate::nal::{
     Codec, ParameterSet, SpsInfo, h264, h265, is_keyframe, is_vcl, parameter_set, parameter_set_id,
-    parse_header, parse_sps, split_annex_b,
+    parse_header, parse_sps, sei_has_recovery_point, split_annex_b,
 };
 
 /// One picture, ready for a decoder.
@@ -17,10 +18,31 @@ use crate::nal::{
 pub struct AccessUnit {
     /// Annex B, four-byte start codes.
     pub data: Vec<u8>,
+    /// An IDR (or IRAP): a decoder starts here with nothing before it.
     pub key: bool,
-    /// Microseconds, unwrapped.
+    /// A recovery point that is not an IDR: a decoder that accepts one can
+    /// start here, the picture whole again a few pictures on. Cameras with
+    /// periodic intra refresh send no other place to start. WebCodecs does
+    /// not accept one; recordings and `FFmpeg` do.
+    pub recovery: bool,
+    /// Microseconds, unwrapped: when it is shown.
     pub timestamp_us: u64,
+    /// How long before it is shown it is decoded, from the PES's DTS: a
+    /// picture others are predicted from comes ahead of them when the
+    /// stream has B-frames. 0 without.
+    pub composition_us: u32,
     pub sps: SpsInfo,
+    /// When its first datagram arrived, for how long UXDuck holds it
+    /// (S262); none for a picture UXDuck made or read from a file.
+    pub arrived: Option<Instant>,
+}
+
+impl AccessUnit {
+    /// Where a recording, or a decoder other than WebCodecs, can begin.
+    #[must_use]
+    pub const fn start(&self) -> bool {
+        self.key || self.recovery
+    }
 }
 
 /// What to do with a picture that lost packets.
@@ -37,6 +59,8 @@ pub enum OnDamage {
 pub struct FilterStats {
     pub units: u64,
     pub keyframes: u64,
+    /// Recovery points that were not keyframes.
+    pub recovery_points: u64,
     pub nals_kept: u64,
     /// By why: `AUD`, `filler`, `SEI`, `forbidden bit`, `layer id`, ...
     pub nals_dropped: BTreeMap<&'static str, u64>,
@@ -67,6 +91,12 @@ pub struct Filter {
     sets: BTreeMap<(ParameterSet, u32), Vec<u8>>,
     sps: Option<SpsInfo>,
     waiting_for_key: bool,
+    /// Whether a keyframe ever came, and recovery points since the last:
+    /// a camera that sends keyframes waits for one after a loss, one that
+    /// refreshes without them (periodic intra refresh) resumes at a
+    /// recovery point.
+    seen_key: bool,
+    recoveries_since_key: u32,
     skipping_rasl: bool,
     last_pts: Option<i64>,
     pts_offset: i64,
@@ -84,6 +114,8 @@ impl Filter {
             sets: BTreeMap::new(),
             sps: None,
             waiting_for_key: true,
+            seen_key: false,
+            recoveries_since_key: 0,
             skipping_rasl: false,
             last_pts: None,
             pts_offset: 0,
@@ -122,7 +154,25 @@ impl Filter {
 
     /// One PES payload; the access unit it makes, if any.
     pub fn push(&mut self, es: &[u8], pts: Option<u64>, damaged: bool) -> Option<AccessUnit> {
+        self.push_timed(es, pts, None, damaged)
+    }
+
+    /// The same, with the PES's DTS when it has one (B-frames).
+    #[allow(clippy::too_many_lines, reason = "one access unit, filtered in order")]
+    pub fn push_timed(
+        &mut self,
+        es: &[u8],
+        pts: Option<u64>,
+        dts: Option<u64>,
+        damaged: bool,
+    ) -> Option<AccessUnit> {
         let timestamp_us = self.unwrap(pts);
+        // PTS less DTS on the 33-bit clock: under a second when it is sane.
+        let composition_us = pts
+            .zip(dts)
+            .map(|(pts, dts)| pts.wrapping_sub(dts) & ((1 << 33) - 1))
+            .filter(|ticks| *ticks < 90_000)
+            .map_or(0, |ticks| u32::try_from(ticks * 100 / 9).unwrap_or(0));
         if damaged {
             self.stats.damaged += 1;
             if self.on_damage == OnDamage::Wait {
@@ -133,9 +183,16 @@ impl Filter {
         let mut kept: Vec<&[u8]> = Vec::new();
         let mut present = BTreeSet::new();
         let mut vcl = Vec::new();
+        let mut recovery_point = false;
         for nal in split_annex_b(es) {
             let header = parse_header(self.codec, nal);
-            let drop = if self.enabled {
+            // A recovery point marks where intra refresh starts, and stays:
+            // without it a decoder never shows a picture from there.
+            let holds_recovery_point = header.invalid.is_none()
+                && header.kind.is_some_and(|kind| self.is_sei(kind))
+                && sei_has_recovery_point(self.codec, nal);
+            recovery_point |= holds_recovery_point;
+            let drop = if self.enabled && !holds_recovery_point {
                 self.drop_reason(header.kind, header.invalid)
             } else {
                 None
@@ -159,12 +216,22 @@ impl Filter {
             return None;
         }
         let key = vcl.iter().any(|&k| is_keyframe(self.codec, k));
-        if self.waiting_for_key && !key {
+        let recovery = recovery_point && !key;
+        if key {
+            self.seen_key = true;
+            self.recoveries_since_key = 0;
+        } else if recovery {
+            self.recoveries_since_key = self.recoveries_since_key.saturating_add(1);
+        }
+        let resumes = key || (recovery && (!self.seen_key || self.recoveries_since_key >= 2));
+        if self.waiting_for_key && !resumes {
             self.stats.skipped_waiting_for_key += 1;
             return None;
         }
-        if key {
+        if resumes {
             self.waiting_for_key = false;
+        }
+        if key {
             self.skipping_rasl = self.codec == Codec::H265 && vcl.contains(&h265::CRA);
         } else if self.skipping_rasl {
             // Leading pictures of a CRA we started from refer to pictures we
@@ -183,19 +250,25 @@ impl Filter {
         if key {
             self.stats.keyframes += 1;
         }
+        if recovery {
+            self.stats.recovery_points += 1;
+        }
         self.stats.nals_kept += kept.len() as u64;
         if !self.enabled {
             return Some(AccessUnit {
                 data: es.to_vec(),
                 key,
+                recovery,
                 timestamp_us,
+                composition_us,
                 sps,
+                arrived: None,
             });
         }
         let mut parts: Vec<&[u8]> = Vec::new();
-        if key {
-            // Parameter sets travel with every keyframe, whether the camera
-            // sent them or not.
+        if key || recovery {
+            // Parameter sets travel with every place to start, whether the
+            // camera sent them or not.
             let order: &[ParameterSet] = match self.codec {
                 Codec::H265 => &[ParameterSet::Vps, ParameterSet::Sps, ParameterSet::Pps],
                 Codec::H264 => &[ParameterSet::Sps, ParameterSet::Pps],
@@ -219,9 +292,19 @@ impl Filter {
         Some(AccessUnit {
             data,
             key,
+            recovery,
             timestamp_us,
+            composition_us,
             sps,
+            arrived: None,
         })
+    }
+
+    const fn is_sei(&self, kind: u8) -> bool {
+        match self.codec {
+            Codec::H265 => kind == h265::SEI_PREFIX,
+            Codec::H264 => kind == h264::SEI,
+        }
     }
 
     fn drop_reason(&self, kind: Option<u8>, invalid: Option<&'static str>) -> Option<&'static str> {

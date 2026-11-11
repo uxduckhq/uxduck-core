@@ -44,7 +44,7 @@ fn a_worker_without_consent_exits_and_releases_its_startup_lease() {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(!data.path().join("app-update-result").exists());
+        assert!(!stage.join("install-result").exists());
         assert!(lease.try_lock().is_ok());
     }
 }
@@ -84,11 +84,11 @@ fn worker_requires_parent_exit_even_after_consent_and_has_no_installer_on_bad_pa
         worker.try_wait().unwrap().is_none(),
         "worker must wait for parent pipe to close"
     );
-    assert!(!data.path().join("app-update-result").exists());
+    assert!(!stage.join("install-result").exists());
     drop(worker.stdin.take());
     assert!(!worker.wait().unwrap().success());
     assert!(
-        std::fs::read_to_string(data.path().join("app-update-result"))
+        std::fs::read_to_string(stage.join("install-result"))
             .unwrap()
             .starts_with("Update not installed:")
     );
@@ -161,7 +161,7 @@ fn sparkle_guard_waits_for_consent_parent_exit_and_the_matching_completion() {
             .contains("daemon")
     );
     assert_eq!(
-        std::fs::read_to_string(data.path().join("app-update-result")).unwrap(),
+        std::fs::read_to_string(stage.join("install-result")).unwrap(),
         "Updated UXDuck to 0.3.1."
     );
 }
@@ -205,7 +205,99 @@ fn window_reopen_failure_is_recorded_after_a_successful_update() {
         !result.status.success(),
         "reopen failure was silently ignored"
     );
-    let detail = std::fs::read_to_string(data.path().join("app-update-result")).unwrap();
+    let detail = std::fs::read_to_string(stage.join("install-result")).unwrap();
     assert!(detail.contains("Updated UXDuck to 0.3.1."), "{detail}");
     assert!(detail.contains("window startup failed"), "{detail}");
+}
+
+/// Writes a plan for a Sparkle-style install whose app is the script `installed`,
+/// starts the worker, consents, lets the "daemon" go and returns its outcome.
+#[cfg(unix)]
+fn install_with(data: &std::path::Path, script: &str, reopen: bool) -> std::process::Output {
+    use std::os::unix::fs::PermissionsExt;
+    let stage = data.join("updates/sparkle/0.3.1");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(data.join("daemon.lock"), b"").unwrap();
+    let installed = data.join("installed");
+    std::fs::write(&installed, script).unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let plan = serde_json::json!({"version":"0.3.1","kind":"sparkle","executable":installed,"data_dir":data,"port":48091,"reopen":reopen,"reopen_target":"window"});
+    std::fs::write(stage.join("plan.json"), serde_json::to_vec(&plan).unwrap()).unwrap();
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("__install-update")
+        .arg(&stage)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(worker.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "ready\n");
+    std::fs::write(data.join("sparkle-installed"), "0.3.1").unwrap();
+    worker
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"install\n")
+        .unwrap();
+    drop(worker.stdin.take());
+    worker.wait_with_output().unwrap()
+}
+
+/// FB-58: the window closes a moment after its daemon. Its files must not
+/// be replaced while it still runs.
+#[cfg(unix)]
+#[test]
+fn the_install_waits_for_the_desktop_window_to_close() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = tempfile::tempdir().unwrap();
+    let window = data.path().join("desktop-app/uxduck-desktop");
+    std::fs::create_dir_all(window.parent().unwrap()).unwrap();
+    let sleep = Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .unwrap();
+    std::fs::copy(String::from_utf8(sleep.stdout).unwrap().trim(), &window).unwrap();
+    std::fs::set_permissions(&window, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut closing = Command::new(&window).arg("2").spawn().unwrap();
+    let seen = data.path().join("window-at-install");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then s=$(ps -p {} -o stat= 2>/dev/null); case \"$s\" in ''|Z*) echo closed;; *) echo open;; esac > '{}'; echo 'uxduck 0.3.1'; fi\n",
+        closing.id(),
+        seen.display()
+    );
+    let result = install_with(data.path(), &script, false);
+    closing.wait().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(seen).unwrap().trim(), "closed");
+}
+
+/// FB-58: the About card showed `uxduck open`'s JSON-RPC error as it was printed.
+#[cfg(unix)]
+#[test]
+fn a_reopen_failure_is_recorded_in_words() {
+    let data = tempfile::tempdir().unwrap();
+    let said = data.path().join("open-stderr");
+    std::fs::write(
+        &said,
+        "uxduck: cannot save startup error: No such file or directory (os error 2)\n{\n  \"code\": -32006,\n  \"data\": {\n    \"kind\": \"invalid-value\"\n  },\n  \"message\": \"UXDuck's desktop window is missing. Reinstall UXDuck, or run `uxduck open --browser`.\"\n}\n",
+    )
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'uxduck 0.3.1'; elif [ \"$3\" = open ]; then cat '{}' >&2; exit 1; fi\n",
+        said.display()
+    );
+    let result = install_with(data.path(), &script, true);
+    assert!(!result.status.success());
+    assert_eq!(
+        std::fs::read_to_string(data.path().join("updates/sparkle/0.3.1/install-result")).unwrap(),
+        "Updated UXDuck to 0.3.1. Couldn't reopen UXDuck: UXDuck's desktop window is missing. Reinstall UXDuck, or run `uxduck open --browser`. Open UXDuck again."
+    );
 }

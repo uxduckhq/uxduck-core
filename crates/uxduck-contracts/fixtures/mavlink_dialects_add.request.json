@@ -1,0 +1,13 @@
+{
+  "method": "mavlink/dialects/add",
+  "params": {
+    "files": [
+      {
+        "name": "acme.xml",
+        "text": "<mavlink><messages><message id=\"43001\" name=\"ACME_STATUS\"><field type=\"uint8_t\" name=\"mode\" enum=\"ACME_MODE\">Mode.</field></message></messages></mavlink>"
+      }
+    ],
+    "label": "Acme r12",
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"
+  }
+}

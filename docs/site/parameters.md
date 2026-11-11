@@ -24,9 +24,13 @@ Choose a value, change it and choose **Stage**. Staged changes wait at the top o
 
 Every change of value goes in the vehicle's **History** with who made it and why: you, the agent, another ground station, the vehicle itself, or a change found when the parameters downloaded again. Values the vehicle sets at each start, such as ground pressure and gyro offsets, are left out.
 
-## .param files
+## Saved parameters
 
-**Export .param** saves every value in Mission Planner's `NAME,value` format. **Import .param…** compares a file with the vehicle first, showing each difference with the file's value, the vehicle's and the units; **Stage** puts them with your other changes.
+**Save these…** keeps every value as it is now under a name, such as "Field tune", as a `.param` file in the vehicle's Files on this computer. **Saved parameters** lists them newest first, with how many values differ from the vehicle now. Open one to compare it, then hold **Apply** to write every value that differs: the values before are saved first as "Before Field tune", so switching back is one more apply. **Import .param…** keeps a file as a saved set and compares it before anything is written. **Export .param** saves the vehicle's values in Mission Planner's `NAME,value` format. From the command line: `uxduck params sets`, `save`, `apply` and `export`.
+
+## Restart
+
+Some values take effect only once the vehicle restarts. UXDuck says so where you wrote them; **Restart…** opens the Restart row in the vehicle's setup, which lists what is waiting and restarts it with a hold.
 
 ## Your own descriptions
 
@@ -41,6 +45,21 @@ uxduck params definitions generate path/to/ardupilot --vehicle Plane
 Use `Copter`, `Plane`, `Rover`, `Sub`, `Tracker` or `Blimp` for `--vehicle`. Python 3 with `lxml` is required; `PYTHON` can point to an existing virtual environment's interpreter. The generated set records the checkout's commit and is used only for firmware with that commit. Keep a clean checkout so the descriptions match its recorded source. Remove one with `uxduck params definitions remove <set-id>`.
 
 PX4 parameter descriptions are not supported yet.
+
+## Your fork's messages, and each vehicle's definitions
+
+In **Settings › MAVLink messages**, add your fork's MAVLink XML and give the commit of each build that has it. A vehicle reports the commit its firmware was built from, so every vehicle running those builds decodes the fork's messages in the MAVLink inspector, for the agent and for plugins, without anyone choosing. A dialect that changes a standard message applies only to those vehicles, or to the vehicles it is chosen for.
+
+To choose for one vehicle, open its setup's **Definitions**: turn dialects on or off, add one from its XML files, and pick ArduPilot's descriptions and your own separately. If your CI publishes a firmware profile, add its URL under **Firmware profiles** in the same settings, or with `uxduck firmware add <url>`: each build's parameters and messages arrive with its commit and are fetched again daily.
+
+From the command line:
+
+```sh
+uxduck mavlink dialects add acme.xml --commit 2a3dc4b7 --commit 9f00aa12
+uxduck mavlink dialects use Alpha --dialect "Acme fork"
+```
+
+With the ArduPilot checkout that built your firmware, add its messages for builds of its commit in one step: `uxduck mavlink dialects generate path/to/ardupilot` reads its `ardupilotmega.xml` and the files that includes. Only the messages your fork adds or changes are kept; a standard message that only lacks fields newer MAVLink added still decodes with UXDuck's own.
 
 ## Missing descriptions
 

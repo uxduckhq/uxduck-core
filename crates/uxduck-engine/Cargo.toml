@@ -30,6 +30,8 @@ quick-xml.workspace = true
 [dev-dependencies]
 # Signing a terrain manifest in tests (S23).
 minisign.workspace = true
+# Which fields the checkpoint and event log require (stored_fields.rs).
+syn.workspace = true
 
 [lints]
 workspace = true

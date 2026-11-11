@@ -207,7 +207,8 @@ fn resolve_link<'a>(
     for v in engine.state.vehicles.values() {
         if v.id == query
             || v.aliases.iter().any(|id| id == query)
-            || v.name.eq_ignore_ascii_case(query)
+            // A replay vehicle has its original's name; the live one is meant.
+            || (!v.replay && v.name.eq_ignore_ascii_case(query))
         {
             candidates.push(v.link_id.clone());
         }

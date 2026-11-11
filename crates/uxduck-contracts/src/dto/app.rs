@@ -5,12 +5,17 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// `client/visibility`: whether the page is on screen, sent when it
-/// connects and on every `visibilitychange`.
+/// `client/visibility`: whether the page is on screen and has the focus,
+/// sent when it connects and whenever either changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientVisibilityParams {
     pub visible: bool,
+    /// The person is using this page. Vehicles' warnings go to the system's
+    /// notifications only while no page has the focus, as a messaging app's
+    /// do. A page that does not say is taken as focused while visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
 }
 
 /// `app/focus`: whether a connected page was asked to come forward. When
@@ -77,7 +82,8 @@ pub struct AppOpenParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
     /// UXDuck was opened again while it ran (the Start menu, `uxduck
-    /// open`): the tray says so under its icon with `tray/reopened`.
+    /// open`). When that opens no window or page, in menu-bar-only mode,
+    /// the tray says so under its icon with `tray/reopened`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reopened: bool,
 }

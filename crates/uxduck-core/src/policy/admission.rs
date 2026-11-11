@@ -15,26 +15,17 @@ pub enum Trust {
     /// never an operator. `client` is the record made when it paired, which
     /// holds what it may do.
     NetworkBrowser { origin: String, client: String },
-    /// A person away, through the account's relay (S80, ADR-0003 C9): one
-    /// connection per cloud user, opened by the daemon's edge task once the
-    /// cloud's signed grant naming them checks out.
-    Relay { user_id: String, name: String },
 }
 
 /// Operators get full control on admission; everyone else starts with `read`
 /// and escalates on first need (S10). A browser can only be an operator UI.
-/// Someone away gets `read` and `control`; what they may send is then
-/// decided by "Allow remote control from my account" (S80), never by an
-/// approval for more. A phone on the network is never an operator (S97).
+/// A phone on the network is never an operator (S97).
 #[must_use]
 pub fn granted(kind: ClientKind, trust: &Trust) -> Vec<Capability> {
     let operator = match trust {
         Trust::LocalUser => kind.is_operator(),
         Trust::PairedBrowser { .. } => kind == ClientKind::OperatorUi,
-        Trust::Relay { .. } if kind == ClientKind::RemoteOperator => {
-            return vec![Capability::Read, Capability::Control];
-        }
-        Trust::Relay { .. } | Trust::NetworkBrowser { .. } => false,
+        Trust::NetworkBrowser { .. } => false,
     };
     if operator {
         Capability::ALL.to_vec()

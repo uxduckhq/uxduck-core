@@ -4,6 +4,12 @@
 //! request to request; and a chat is compacted well before a model's
 //! context fills, because every request carries the whole of it.
 
+/// The models a development build offers with a developer's own keys or
+/// the fake, comma-separated; the first is the default. The hosted model
+/// offers only what the server says.
+pub const DEFAULT_MODELS: &str =
+    "gpt-6.1-sol,gpt-6-sol,gpt-6-luna,claude-opus-5-5,claude-sonnet-5-5";
+
 /// Settings for one model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelSettings {

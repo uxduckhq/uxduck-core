@@ -13,12 +13,14 @@ use serde_json::{Map, Value};
 use uxduck_contracts::dto::analytics::Surface;
 use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
-    BundleVehicle, FeedbackAttachment, FeedbackBundle, FeedbackKind, FeedbackSendParams,
-    FeedbackSendResult, FeedbackSuggestParams, FeedbackVoiceNote, SuggestionCard,
+    BundleVehicle, FeedbackAddParams, FeedbackAttachment, FeedbackBundle, FeedbackFileParams,
+    FeedbackFiled, FeedbackKind, FeedbackSendParams, FeedbackSendResult, FeedbackSuggestParams,
+    FeedbackVoiceNote, SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
+use uxduck_core::domain::client::ClientKind;
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::thread::ItemKind;
@@ -63,6 +65,9 @@ pub struct FeedbackOrder {
     /// Credit the signed-in account, or tell this install, when it ships (S73).
     pub credit: bool,
     pub from_agent: bool,
+    /// Filed by the agent without the person reading it (S294): sent
+    /// anonymously, whoever is signed in.
+    pub agent_filed: bool,
     /// Files the person attached, base64, as the page sent them.
     pub attachments: Vec<FeedbackAttachment>,
     /// The key the page keeps to add to the report later.
@@ -79,9 +84,28 @@ pub struct FlightRef {
     pub system_id: u8,
 }
 
+/// More for a report the agent filed (S294): the root adds it with the
+/// report's follow-up key, which it keeps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeedbackAddition {
+    /// A UUID, so a retry adds nothing twice.
+    pub id: String,
+    pub report_id: String,
+    pub text: String,
+    /// Files the person added, base64.
+    pub attachments: Vec<FeedbackAttachment>,
+}
+
 /// Where reports go; the root answers through [`Engine::feedback_done`].
 pub trait FeedbackPort: Send {
     fn send(&mut self, order: FeedbackOrder);
+    /// Adds to a report the agent filed; answered by the addition's id.
+    fn add(&mut self, addition: FeedbackAddition);
+    /// Whether reports go out from here. The browser worker's page sends
+    /// its own, so the agent cannot file one there.
+    fn sends(&self) -> bool {
+        true
+    }
 }
 
 /// No sender: every report is refused. For tests and the browser worker.
@@ -90,6 +114,10 @@ pub struct NoFeedback;
 
 impl FeedbackPort for NoFeedback {
     fn send(&mut self, _: FeedbackOrder) {}
+    fn add(&mut self, _: FeedbackAddition) {}
+    fn sends(&self) -> bool {
+        false
+    }
 }
 
 /// Keeps a frame for the connection's report: the safe side only (the tap
@@ -498,6 +526,7 @@ pub(crate) fn handle(
         flight,
         credit: params.credit,
         from_agent: params.from_agent,
+        agent_filed: false,
         attachments: params.attachments.clone(),
         follow_up_key: params.follow_up_key.clone(),
         voice_notes: params.voice_notes.clone(),
@@ -512,6 +541,172 @@ pub(crate) fn handle(
     Ok(Value::Null)
 }
 
+/// How many reports the agent may file in one chat, and additions to them.
+const MAX_FILED: usize = 3;
+const MAX_ADDED: usize = 10;
+
+/// A report the agent files by itself (S294): the title and text only,
+/// scrubbed as a bundle's free text is, sent anonymously with a follow-up key
+/// the root keeps so the agent can add to it from the same chat.
+pub(crate) fn file(engine: &mut Engine, params: &FeedbackFileParams) -> Result<Value, ApiError> {
+    let thread = agent_chat(engine, params.thread_id.as_deref())?;
+    let title = scrub_text(params.title.trim());
+    let text = scrub_text(params.text.trim());
+    if title.is_empty() || title.chars().count() > MAX_TITLE {
+        return Err(invalid("the title must be 1 to 120 characters"));
+    }
+    if text.is_empty() || text.chars().count() > MAX_SUGGESTION {
+        return Err(invalid("the text must be 1 to 2,000 characters"));
+    }
+    let filed = calls_in(engine, &thread, "feedback/file")
+        + engine
+            .agent_filing
+            .values()
+            .filter(|t| **t == thread)
+            .count();
+    if filed >= MAX_FILED {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            "three reports were filed from this chat already: add to one with feedback/add",
+        ));
+    }
+    let report_id = uuid(&engine.random.token());
+    let order = FeedbackOrder {
+        report_id: report_id.clone(),
+        kind: params.kind,
+        text: format!("{title}\n\n{text}"),
+        reply_email: None,
+        reporter_name: None,
+        surface: engine.surface(),
+        context: engine.agent_context(),
+        screenshot: None,
+        bundle: None,
+        flight: None,
+        credit: false,
+        from_agent: true,
+        agent_filed: true,
+        attachments: Vec::new(),
+        follow_up_key: Some(engine.random.token()),
+        voice_notes: Vec::new(),
+    };
+    if let Some(waiting) = engine.replying_to.take() {
+        engine.awaiting_feedback.insert(report_id.clone(), waiting);
+    }
+    engine.agent_filing.insert(report_id, thread);
+    engine.feedback.send(order);
+    Ok(Value::Null)
+}
+
+/// More for a report filed from the same chat (S294): the agent's words,
+/// scrubbed, or files the person added from the chat's card.
+pub(crate) fn add(
+    engine: &mut Engine,
+    params: &FeedbackAddParams,
+    operator: bool,
+) -> Result<Value, ApiError> {
+    let thread = agent_chat(engine, params.thread_id.as_deref())?;
+    if !filed_in(engine, &thread).contains(&params.report_id) {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            "no report with that id was filed from this chat",
+        ));
+    }
+    if !operator && !params.attachments.is_empty() {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "only the person can attach files to a report",
+        ));
+    }
+    let text = if operator {
+        params.text.trim().to_owned()
+    } else {
+        scrub_text(params.text.trim())
+    };
+    if (text.is_empty() && params.attachments.is_empty()) || text.chars().count() > MAX_SUGGESTION {
+        return Err(invalid("add 1 to 2,000 characters, or a file"));
+    }
+    if params.attachments.len() > MAX_ATTACHMENTS
+        || params
+            .attachments
+            .iter()
+            .map(|a| a.data.len())
+            .sum::<usize>()
+            > MAX_ATTACHMENTS_B64
+    {
+        return Err(invalid("attach up to 10 files, 25 MB together"));
+    }
+    if calls_in(engine, &thread, "feedback/add") >= MAX_ADDED {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            "enough was added from this chat already",
+        ));
+    }
+    let id = uuid(&engine.random.token());
+    if let Some(waiting) = engine.replying_to.take() {
+        engine.awaiting_feedback.insert(id.clone(), waiting);
+    }
+    engine.feedback.add(FeedbackAddition {
+        id,
+        report_id: params.report_id.clone(),
+        text,
+        attachments: params.attachments.clone(),
+    });
+    Ok(Value::Null)
+}
+
+/// The chat a report is filed from, where reports go out from here.
+fn agent_chat(engine: &Engine, thread: Option<&str>) -> Result<String, ApiError> {
+    if !engine.feedback.sends() {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Automatic reporting isn't available in this browser session. Use feedback_suggest \
+             to prepare a draft for the person to review and send. Nothing has been sent.",
+        ));
+    }
+    thread
+        .filter(|id| engine.state.threads.contains_key(*id))
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("reports are filed from a UXDuck chat"))
+}
+
+/// How many calls of a method a chat holds, whatever became of them.
+fn calls_in(engine: &Engine, thread: &str, method: &str) -> usize {
+    engine
+        .state
+        .items_of(thread)
+        .into_iter()
+        .filter(|item| item.tool_call.as_ref().is_some_and(|c| c.method == method))
+        .count()
+}
+
+/// The reports the agent filed in a chat, from its calls' results.
+fn filed_in(engine: &Engine, thread: &str) -> Vec<String> {
+    engine
+        .state
+        .items_of(thread)
+        .into_iter()
+        .filter_map(|item| item.tool_call.as_ref())
+        .filter(|call| call.method == "feedback/file")
+        .filter_map(|call| serde_json::from_str::<FeedbackFiled>(call.result.as_deref()?).ok())
+        .map(|filed| filed.report_id)
+        .collect()
+}
+
+/// A random token's first 32 hex digits as a version 4 UUID.
+fn uuid(token: &str) -> String {
+    let hex = token
+        .get(..32)
+        .unwrap_or("00000000000000000000000000000000");
+    format!(
+        "{}-{}-4{}-8{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
 impl Engine {
     /// Where reports go; nothing is sent until the composition root sets it.
     pub fn set_feedback(&mut self, port: Box<dyn FeedbackPort>) {
@@ -523,7 +718,19 @@ impl Engine {
         let Some((connection, request_id)) = self.awaiting_feedback.remove(report_id) else {
             return;
         };
-        let frame = match result.and_then(|r| to_value(&r)) {
+        // Filed by the agent: answered with the report's id, to add to it.
+        let filed = self.agent_filing.remove(report_id).is_some();
+        let frame = match result.and_then(|r| {
+            if filed {
+                to_value(&FeedbackFiled {
+                    report_id: report_id.to_owned(),
+                    status: r.status,
+                    issue: r.issue,
+                })
+            } else {
+                to_value(&r)
+            }
+        }) {
             Ok(value) => serde_json::json!({ "jsonrpc": "2.0", "id": request_id, "result": value }),
             Err(error) => crate::rpc::router::error(&request_id, &error),
         };
@@ -543,6 +750,56 @@ impl Engine {
             condition: Some(format!("shipped:{issue}")),
             report: None,
         });
+    }
+
+    /// Where a report from the chat is said to come from: UXDuck Desktop
+    /// when its shell is connected.
+    fn surface(&self) -> Surface {
+        let shell = self.connections.values().any(|c| {
+            c.admitted
+                .as_ref()
+                .is_some_and(|a| a.kind == ClientKind::Shell)
+        });
+        if shell {
+            Surface::Desktop
+        } else {
+            Surface::Browser
+        }
+    }
+
+    /// "UXDuck 0.4.1 · filed from a chat by the agent · 1 vehicle
+    /// (ArduPilot Copter, udp-listen)": nothing about the page or the person.
+    fn agent_context(&self) -> String {
+        [
+            format!("UXDuck {}", self.config.daemon_version),
+            "filed from a chat by the agent".to_owned(),
+            self.vehicles_line(),
+        ]
+        .join(" · ")
+    }
+
+    /// "1 vehicle (ArduPilot Copter, udp-listen)": their autopilots, types
+    /// and links, up to three.
+    fn vehicles_line(&self) -> String {
+        let vehicles: Vec<String> = self
+            .state
+            .vehicles
+            .values()
+            .take(3)
+            .map(|v| {
+                let link = self
+                    .state
+                    .links
+                    .get(&v.link_id)
+                    .map_or("gone", |l| link_kind(&l.kind));
+                format!("{} {}, {link}", v.autopilot, v.vehicle_type)
+            })
+            .collect();
+        match self.state.vehicles.len() {
+            0 => "no vehicle".to_owned(),
+            1 => format!("1 vehicle ({})", vehicles.join(", ")),
+            n => format!("{n} vehicles ({})", vehicles.join(", ")),
+        }
     }
 
     /// UXDuck's part of the bundle, before scrubbing.
@@ -670,26 +927,7 @@ impl Engine {
         if let Some(window) = &ui.window {
             parts.push(format!("window {}", short(window)));
         }
-        let vehicles: Vec<String> = self
-            .state
-            .vehicles
-            .values()
-            .take(3)
-            .map(|v| {
-                let link = self
-                    .state
-                    .links
-                    .get(&v.link_id)
-                    .map_or("gone", |l| link_kind(&l.kind));
-                format!("{} {}, {link}", v.autopilot, v.vehicle_type)
-            })
-            .collect();
-        let count = self.state.vehicles.len();
-        parts.push(match count {
-            0 => "no vehicle".to_owned(),
-            1 => format!("1 vehicle ({})", vehicles.join(", ")),
-            n => format!("{n} vehicles ({})", vehicles.join(", ")),
-        });
+        parts.push(self.vehicles_line());
         parts.push("not signed in".to_owned());
         fitted(&parts, &params.ui.panes)
     }

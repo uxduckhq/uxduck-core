@@ -80,8 +80,14 @@ pub enum VideoCommand {
     /// `rtsp://admin:password@192.168.144.25/main`, or another UDP port to
     /// listen on, such as `udp:5601`. A camera with several video tracks
     /// plays its first; `#track=2` on the address plays the second, and
-    /// `uxduck video list` shows what each camera offers.
-    Add { url: String },
+    /// `uxduck video list` shows what each camera offers. A UDP port's
+    /// camera waits for its first picture, named ahead with `--name`.
+    Add {
+        url: String,
+        /// What to call the camera, such as "Front".
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Removes a camera added by hand (its id from `uxduck video list`) or a
     /// UDP port (`udp:5601`).
     Remove { what: String },
@@ -137,16 +143,23 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
             Ok(())
         }
         VideoCommand::Probe { port, seconds } => probe(data_dir, port, seconds).await,
-        VideoCommand::Add { url } => {
+        VideoCommand::Add { url, name } => {
             let mut client = LocalClient::connect(data_dir).await?;
             client.initialize().await?;
-            let added = client.call("video/add", json!({ "url": url })).await?;
-            match (added["source"]["id"].as_str(), added["port"].as_u64()) {
-                (Some(id), _) => println!(
-                    "Added {id}, connecting to {}.",
-                    added["source"]["url"].as_str().unwrap_or("")
+            let added = client
+                .call("video/add", json!({ "url": url, "name": name }))
+                .await?;
+            let source = &added["source"];
+            match (source["url"].as_str(), added["port"].as_u64()) {
+                (Some(url), _) => println!(
+                    "Added {}, connecting to {url}.",
+                    source["id"].as_str().unwrap_or("")
                 ),
-                (None, Some(port)) => println!("Listening for video on UDP {port}."),
+                (None, Some(port)) => println!(
+                    "Listening for video on UDP {port}: {} ({}).",
+                    source["name"].as_str().unwrap_or(""),
+                    source["id"].as_str().unwrap_or("")
+                ),
                 _ => println!("Added."),
             }
             Ok(())

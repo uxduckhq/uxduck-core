@@ -1,0 +1,8 @@
+{
+  "method": "param/changes",
+  "params": {
+    "vehicleId": "47511900-7665-5ac5-9f3f-0ef13835549f",
+    "fromUs": 1790000000000000,
+    "toUs": 1790000600000000
+  }
+}

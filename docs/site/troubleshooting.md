@@ -45,6 +45,30 @@ Run `uxduck video list`. Use `uxduck video probe --port 5600` to inspect the arr
 
 Check the active radio model's channel monitor and USB joystick mode, then compare individual inputs in UXDuck's controller setup. [Controllers and radio transmitters](/docs/controllers) covers Tango 2 CH7/CH8 on macOS, rear E/F button mixes, EdgeTX USB modes and Xbox layouts. Native support requires the app to be connected to **Computer**.
 
+## Show your location on Linux
+
+UXDuck asks GeoClue, Linux's location service, where this computer is, and GeoClue asks you through an agent on your desktop the first time. If **Show your location** says this computer has no location service, install GeoClue:
+
+| Distribution                    | Command                                    |
+| ------------------------------- | ------------------------------------------ |
+| Debian, Ubuntu, Raspberry Pi OS | `sudo apt install geoclue-2.0`             |
+| Fedora                          | `sudo dnf install geoclue2 geoclue2-demos` |
+| Arch Linux                      | `sudo pacman -S geoclue`                   |
+
+Each package includes GeoClue's agent, which starts when you sign in; GNOME has its own. Sign out and back in, then press **Show your location** again.
+
+GeoClue finds the computer from nearby Wi-Fi networks through an online service. Debian 12, Raspberry Pi OS and Arch use beaconDB. Ubuntu 24.04's GeoClue still asks Mozilla Location Service, which closed in 2024, so UXDuck keeps saying it couldn't find where this computer is. Point it at beaconDB:
+
+```
+sudo mkdir -p /etc/geoclue/conf.d
+printf '[wifi]\nurl=https://api.beacondb.net/v1/geolocate\n' | sudo tee /etc/geoclue/conf.d/90-beacondb.conf
+sudo systemctl restart geoclue
+```
+
+If UXDuck says GeoClue has no agent, the agent hasn't started yet. Sign out and back in. If your desktop doesn't start the programs in `/etc/xdg/autostart`, add `/usr/libexec/geoclue-2.0/demos/agent` (`/usr/lib/geoclue-2.0/demos/agent` on Arch) to its autostart settings. If location is off for UXDuck, allow it when the agent asks, or in your desktop's privacy or location settings.
+
+UXDuck doesn't guess where you are. Until GeoClue works, use **Search places** to go to a place or coordinates on the map.
+
 ## Prepare a useful report
 
 Include the running version and release stage from `uxduck rpc call daemon/about`, the vehicle's firmware version, the link type, the exact symptom and when it happened. Add the recent message or command receipt and whether telemetry was fresh. For an MCP investigation, include the requested interval, actual coverage, missing keys and truncation flags.

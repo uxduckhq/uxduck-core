@@ -62,12 +62,12 @@ pub fn configure(dir: &Path) -> std::io::Result<()> {
     let incidents = if path.exists() {
         if std::fs::metadata(&path)?.len() > 8 << 20 {
             return Err(std::io::Error::other(
-                "router-incidents.json exceeds 8 MiB; move it aside before starting UXDuck",
+                "router-incidents.json exceeds 8 MiB. Move it aside before starting UXDuck",
             ));
         }
         serde_json::from_slice::<VecDeque<RouterEvent>>(&std::fs::read(&path)?).map_err(|e| {
             std::io::Error::other(format!(
-                "Invalid router-incidents.json: {e}; move it aside before starting UXDuck"
+                "Invalid router-incidents.json: {e}. Move it aside before starting UXDuck"
             ))
         })?
     } else {

@@ -19,6 +19,7 @@ use uxduck_core::domain::client::{Capability, ClientKind, ClientRecord};
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
+use uxduck_core::domain::thread::{ItemKind, ItemStatus};
 use uxduck_core::events::{Actor, Change};
 
 use crate::commands::Raise;
@@ -62,6 +63,7 @@ pub fn record_id(kind: ClientKind, name: &str, executable: Option<&str>) -> Stri
 /// only operators may call (pairing, the trace) are not escalated.
 fn escalatable(request: &ClientRequest) -> Option<Capability> {
     match request {
+        ClientRequest::SimFrames(params) if !params.refresh => None,
         ClientRequest::CommandSend(_)
         | ClientRequest::MissionUpload(_)
         | ClientRequest::PlanUpload(_)
@@ -69,8 +71,11 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::TransferCancel(_)
         | ClientRequest::PluginCommand(_)
         | ClientRequest::PracticeGuide(_)
-        | ClientRequest::SimPause(_) => Some(Capability::Control),
+        | ClientRequest::SimPause(_)
+        | ClientRequest::SimCrash(_) => Some(Capability::Control),
         ClientRequest::ParamSet(_)
+        // Applying a saved parameter set is a parameter write (S217).
+        | ClientRequest::ParamSetApply(_)
         // A vehicle's checklist steps (S193, ADR-0038 K11): an agent asks
         // first; ticking is a person's and never asked for.
         | ClientRequest::ChecklistUpdate(_)
@@ -119,16 +124,23 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
         | ClientRequest::VehicleLook(_)
+        | ClientRequest::VehicleColour(_)
+        | ClientRequest::VehicleGripper(_)
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
+        | ClientRequest::VehicleHide(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::OperatorCreate(_)
         | ClientRequest::OperatorUpdate(_)
         | ClientRequest::OperatorRemove(_)
         | ClientRequest::SimStart(_)
+        // Plans flown in simulation (S293): new simulated vehicles, so an
+        // agent asks first, as for one.
+        | ClientRequest::PlanSimulate(_)
         | ClientRequest::SimStop(_)
         | ClientRequest::SimRestart(_)
         | ClientRequest::SimDownload(_)
+        | ClientRequest::SimFrames(_)
         | ClientRequest::SimSnapshot(_)
         | ClientRequest::SnapshotStart(_)
         | ClientRequest::SnapshotRename(_)
@@ -137,7 +149,22 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::FilesUpload(_)
         | ClientRequest::FilesRemove(_)
         | ClientRequest::FilesMkdir(_)
-        | ClientRequest::FilesRename(_) => Some(Capability::Config),
+        | ClientRequest::FilesRename(_)
+        // Terrain areas written to a vehicle's card (ADR-0051 A11).
+        | ClientRequest::TerrainPutArea(_)
+        // Operations (ADR-0039 R16): an agent gathers flights after asking.
+        | ClientRequest::OperationCreate(_)
+        | ClientRequest::OperationRename(_)
+        | ClientRequest::OperationAddFlights(_)
+        | ClientRequest::OperationRemoveFlights(_)
+        | ClientRequest::FlightRename(_)
+        // A video kept with a flight (S246): an agent asks first, even for
+        // one the operator attached.
+        | ClientRequest::FlightAddVideo(_)
+        // Which descriptions a vehicle uses (ADR-0044 F10).
+        | ClientRequest::ParamDefinitionsUse(_)
+        // Which dialects a vehicle uses (F13).
+        | ClientRequest::MavlinkDialectsUse(_) => Some(Capability::Config),
         // Where this computer is (ADR-0030 L4): an agent asks first, and
         // "Always allow" remembers it for that agent.
         ClientRequest::LocationStatus(_) => Some(Capability::Location),
@@ -218,23 +245,17 @@ impl Engine {
         };
         // An agent's install always asks (X12): no capability skips it, and
         // only the operator's "allow once", now running it, lets it through.
-        // So does a Critical command from away that remote control does not
-        // allow (S80): the people at the computer say yes each time. And a
-        // plugin's command it declares dangerous: "always allow" for the
+        // So does a plugin's command it declares dangerous: "always allow" for the
         // `control` it needs must not let every later one through unasked.
         let install = matches!(request, ClientRequest::PluginInstall(_));
         // Arming past failing preflight checks always asks (ADR-0038 K4),
         // listing them: a client never overrides them on its own.
-        let preflight = self.preflight_asks(connection, request);
+        let preflight = self.preflight_asks(request);
         let always = install
-            || self.remote_critical_asks(connection, request)
             || self.dangerous_plugin_command(request)
+            || self.spoken_turn_asks(connection, request)
             || !preflight.is_empty();
-        if always {
-            if self.running_approved {
-                return false;
-            }
-        } else if granted.contains(&capability) {
+        if (always && self.running_approved) || (!always && granted.contains(&capability)) {
             return false;
         }
         let Some((record, name)) = self
@@ -256,6 +277,7 @@ impl Engine {
         };
         let now = self.clock.now_us();
         let (summary, body) = self.approval_words(request, capability, &preflight);
+        let item_id = self.waiting_tool_call(connection, &method_of(request));
         let approval = Approval {
             id: format!("ap{}", &self.random.token()[..16]),
             client_id: record.clone(),
@@ -264,6 +286,7 @@ impl Engine {
             method: method_of(request),
             summary,
             preflight,
+            item_id,
             state: ApprovalState::Pending,
             remember: None,
             deadline_us: now + APPROVAL_DEADLINE_US,
@@ -319,6 +342,37 @@ impl Engine {
             report: None,
         });
         true
+    }
+
+    /// Whether the request comes from a turn said aloud (ADR-0012 V6): its
+    /// commands are approved by hand each time, whatever was allowed before,
+    /// since words heard are not always the operator's.
+    fn spoken_turn_asks(&self, connection: ConnectionId, request: &ClientRequest) -> bool {
+        self.waiting_tool_call(connection, &method_of(request))
+            .and_then(|id| self.state.items.get(&id))
+            .and_then(|item| self.turns.get(&item.thread_id))
+            .is_some_and(|turn| self.spoken_turns.contains_key(turn))
+    }
+
+    /// The chat tool call an in-app agent on `connection` is waiting on for
+    /// `method`: recorded just before the call, still in progress. The
+    /// newest wins, in case an earlier call to the same method was left open.
+    fn waiting_tool_call(&self, connection: ConnectionId, method: &str) -> Option<String> {
+        let client_id = &self.connections.get(&connection)?.client_id;
+        self.state
+            .items
+            .values()
+            .filter(|item| {
+                item.kind == ItemKind::ToolCall
+                    && item.status == ItemStatus::InProgress
+                    && self.turns.contains_key(&item.thread_id)
+                    && item
+                        .tool_call
+                        .as_ref()
+                        .is_some_and(|call| &call.client_id == client_id && call.method == method)
+            })
+            .max_by_key(|item| (item.created_at_us, item.index))
+            .map(|item| item.id.clone())
     }
 
     /// An approval's summary and its notice's words: with failing preflight
@@ -526,7 +580,15 @@ impl Engine {
                         &params.vehicle_id,
                         &params.name,
                     ))
-                    .map(|p| p.value);
+                    .map(|p| match p.kind {
+                        // A float the vehicle keeps in 32 bits, without the
+                        // digits widening it adds (0.6, not 0.6000000238418579).
+                        #[allow(clippy::cast_possible_truncation)]
+                        uxduck_core::domain::parameter::ParamKind::Real32 => {
+                            (p.value as f32).to_string()
+                        }
+                        _ => p.value.to_string(),
+                    });
                 let helicopter = self
                     .vehicle(&params.vehicle_id)
                     .is_some_and(|v| v.vehicle_type == "Helicopter");
@@ -544,6 +606,17 @@ impl Engine {
                     ),
                     None => format!("set {} to {}{units} on {name}", params.name, params.value),
                 }
+            }
+            ClientRequest::ParamSetApply(params) => {
+                let name = self
+                    .vehicle(&params.vehicle_id)
+                    .map_or_else(|| params.vehicle_id.clone(), |v| v.name.clone());
+                let set = self
+                    .state
+                    .saved_params
+                    .get(&params.id)
+                    .map_or_else(|| params.id.clone(), |s| s.name.clone());
+                format!("apply the saved parameters “{set}” to {name}")
             }
             ClientRequest::VehicleAddNote(params) => {
                 let name = self
@@ -592,6 +665,26 @@ impl Engine {
                 params.to,
                 self.vehicle_name(&params.vehicle_id)
             ),
+            ClientRequest::TerrainPutArea(params) => {
+                let vehicle = self.vehicle_name(&params.vehicle_id);
+                let area = params.area_id.as_ref().map(|id| {
+                    self.state
+                        .settings
+                        .terrain_areas
+                        .iter()
+                        .find(|a| &a.id == id)
+                        .map_or_else(|| id.clone(), |a| a.name.clone())
+                });
+                match (area, params.remove) {
+                    (Some(area), true) => {
+                        format!("remove the terrain area “{area}” from {vehicle}'s card")
+                    }
+                    (Some(area), false) => {
+                        format!("write the terrain area “{area}” to {vehicle}'s card")
+                    }
+                    (None, _) => format!("write the enabled terrain areas to {vehicle}'s card"),
+                }
+            }
             ClientRequest::MissionUpload(params) => {
                 let name = self
                     .vehicle(&params.vehicle_id)
@@ -611,7 +704,7 @@ impl Engine {
             ClientRequest::LinkAdd(_) => "add a link".into(),
             ClientRequest::LinkRemove(_) => "remove a link".into(),
             ClientRequest::SimStart(params) => format!(
-                "start a simulated {}",
+                "start a simulated {}{}",
                 match params.vehicle {
                     uxduck_contracts::dto::link::SimVehicle::Plane => "plane",
                     uxduck_contracts::dto::link::SimVehicle::Multicopter => "multicopter",
@@ -621,11 +714,31 @@ impl Engine {
                     uxduck_contracts::dto::link::SimVehicle::Submarine => "submarine",
                     uxduck_contracts::dto::link::SimVehicle::Airship => "blimp",
                     uxduck_contracts::dto::link::SimVehicle::Jet => "jet",
+                },
+                if params.allow_network {
+                    " and allow other computers on the network to connect and control it"
+                } else {
+                    ""
                 }
             ),
             ClientRequest::SimStop(_) => "stop a simulated vehicle".into(),
+            ClientRequest::ParamDefinitionsUse(params) => {
+                let name = self
+                    .vehicle(&params.vehicle_id)
+                    .map_or_else(|| params.vehicle_id.clone(), |v| v.name.clone());
+                format!("change which parameter descriptions {name} uses")
+            }
+            ClientRequest::MavlinkDialectsUse(params) => {
+                let name = self
+                    .vehicle(&params.vehicle_id)
+                    .map_or_else(|| params.vehicle_id.clone(), |v| v.name.clone());
+                format!("change which MAVLink dialects {name} uses")
+            }
             ClientRequest::SimDownload(params) => {
                 format!("download and install simulator build {}", params.id)
+            }
+            ClientRequest::SimFrames(params) => {
+                format!("run {} to read its simulator frame list", params.binary)
             }
             ClientRequest::PracticeStart(params) => format!(
                 "start the practice exercise \"{}\" on {}",
@@ -649,17 +762,45 @@ impl Engine {
             }
             .into(),
             ClientRequest::SimSnapshot(_) => "save a snapshot of a simulated vehicle".into(),
+            ClientRequest::SimCrash(_) => "end a simulated flight after a scenery collision".into(),
             ClientRequest::SnapshotStart(params) => format!(
-                "start a simulation from the snapshot {}",
+                "start a simulation from the snapshot {}{}",
                 self.state
                     .snapshots
                     .get(&params.id)
-                    .map_or(params.id.as_str(), |s| s.name.as_str())
+                    .map_or(params.id.as_str(), |s| s.name.as_str()),
+                if params.allow_network {
+                    " and allow other computers on the network to connect and control it"
+                } else {
+                    ""
+                }
             ),
-            ClientRequest::MarkerAdd(params) => params.name.as_ref().map_or_else(
-                || "add a marker to the map".into(),
-                |name| format!("add the marker {name} to the map"),
-            ),
+            ClientRequest::MarkerAdd(params) if params.shape.is_some() => {
+                use uxduck_contracts::dto::marker::MarkerShape;
+                let (article, kind) = match params.shape {
+                    Some(MarkerShape::Line { .. }) => ("a", "line"),
+                    Some(MarkerShape::Area { .. }) => ("an", "area"),
+                    _ => ("a", "circle"),
+                };
+                params.name.as_ref().map_or_else(
+                    || format!("draw {article} {kind} on the map"),
+                    |name| format!("draw the {kind} {name} on the map"),
+                )
+            }
+            ClientRequest::MarkerAdd(params) => {
+                let kind = if params.outline.is_some()
+                    || params.height_m.is_some()
+                    || params.look == Some(uxduck_contracts::dto::marker::MarkerLook::Building)
+                {
+                    "building"
+                } else {
+                    "marker"
+                };
+                params.name.as_ref().map_or_else(
+                    || format!("add a {kind} to the map"),
+                    |name| format!("add the {kind} {name} to the map"),
+                )
+            }
             ClientRequest::MarkerUpdate(params) => {
                 format!("change the marker {}", self.marker_name(&params.id))
             }
@@ -724,6 +865,13 @@ impl Engine {
                 ErrorKind::CapabilityDenied,
                 format!("{why} (approval {id})"),
             );
+            self.send(
+                held.connection,
+                &rpc::router::error(&held.request_id, &error),
+            );
+            return;
+        }
+        if let Err(error) = self.check_mission_read_request(held.connection, &held.request) {
             self.send(
                 held.connection,
                 &rpc::router::error(&held.request_id, &error),
@@ -1049,4 +1197,80 @@ fn resolve_approval(
     done.remember = remember;
     done.version += 1;
     to_value(&ApprovalDto::from(&done))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "in-memory held approval fixture"
+)]
+mod mission_read_tests {
+    use super::*;
+    use crate::mission_reads::fixtures;
+
+    #[test]
+    fn legacy_held_mission_requests_cannot_gain_remembered_authority_or_dispatch() {
+        for remember in ["once", "connection", "always"] {
+            let (mut engine, mut ui, orders, _plan) = fixtures::setup();
+            let mut agent = fixtures::connect(&mut engine, "agent", Some(true));
+            let items = serde_json::to_value(&engine.state.missions["v"].items).expect("items");
+            fixtures::send(
+                &mut engine,
+                &agent,
+                "mission/upload",
+                json!({ "vehicleId": "v", "expectedVersion": 1, "items": items }),
+            );
+            assert!(
+                fixtures::frames(&mut agent)
+                    .iter()
+                    .all(|frame| frame["id"] != "mission/upload")
+            );
+            let approval = engine
+                .state
+                .approvals
+                .values()
+                .find(|approval| approval.method == "mission/upload")
+                .expect("held approval")
+                .id
+                .clone();
+            let admitted = engine
+                .connections
+                .get_mut(&agent.id)
+                .expect("connection")
+                .admitted
+                .as_mut()
+                .expect("admitted");
+            admitted.reads.mission_read_float_bits = false;
+            let record = admitted.record.clone();
+            let authority = engine.granted(agent.id);
+            let stored_capabilities = engine.state.clients[&record].capabilities.clone();
+            let missions = engine.state.missions.clone();
+            let plans = engine.state.plans.clone();
+            assert!(orders.take().is_empty());
+            let resolution = fixtures::call(
+                &mut engine,
+                &mut ui,
+                "approval/resolve",
+                json!({ "id": approval, "allow": true, "remember": remember }),
+            );
+            assert!(resolution.get("result").is_some(), "{resolution}");
+            let replies = fixtures::frames(&mut agent);
+            let refused = replies
+                .iter()
+                .find(|frame| frame["id"] == "mission/upload")
+                .expect("held reply");
+            assert_eq!(refused["error"]["data"]["kind"], "update-required");
+            assert!(refused.get("result").is_none());
+            assert!(!engine.held.contains_key(&approval));
+            assert_eq!(engine.granted(agent.id), authority);
+            assert_eq!(
+                engine.state.clients[&record].capabilities,
+                stored_capabilities
+            );
+            assert_eq!(engine.state.missions, missions);
+            assert_eq!(engine.state.plans, plans);
+            assert!(orders.take().is_empty());
+        }
+    }
 }

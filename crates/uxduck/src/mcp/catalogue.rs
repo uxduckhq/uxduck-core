@@ -65,6 +65,33 @@ const fn default_limit() -> usize {
     3
 }
 
+fn schema_has_action(schema: &Value, word: &str) -> bool {
+    let matches = |value: &Value| {
+        value.as_str().is_some_and(|value| {
+            value
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|part| part.eq_ignore_ascii_case(word))
+        })
+    };
+    match schema {
+        Value::Object(fields) => {
+            fields
+                .get("properties")
+                .and_then(|properties| properties.get("type"))
+                .is_some_and(|kind| {
+                    kind.get("const").is_some_and(matches)
+                        || kind
+                            .get("enum")
+                            .and_then(Value::as_array)
+                            .is_some_and(|values| values.iter().any(matches))
+                })
+                || fields.values().any(|value| schema_has_action(value, word))
+        }
+        Value::Array(values) => values.iter().any(|value| schema_has_action(value, word)),
+        _ => false,
+    }
+}
+
 /// Local discovery only: never calls the daemon or broadens its allowlist.
 pub fn search(catalogue: &[Tool], arguments: Value) -> Result<Value, String> {
     let search: Search = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
@@ -110,6 +137,7 @@ pub fn search(catalogue: &[Tool], arguments: Value) -> Result<Value, String> {
                             + 3 * usize::from(name)
                             + usize::from(about)
                             + usize::from(argument)
+                            + 10 * usize::from(schema_has_action(&tool.parameters, word))
                     })
                     .sum();
                 (score > 0).then_some((score, tool))
@@ -196,7 +224,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|t| t["name"] == "command_send")
+                .any(|t| t["name"] == "command_send"),
+            "{arm}\ncommand_send={}",
+            definition(
+                catalogue
+                    .iter()
+                    .find(|tool| tool.name == "command_send")
+                    .unwrap()
+            )
         );
         let survey = search(&catalogue, json!({ "query": "survey" })).unwrap();
         assert!(
@@ -249,9 +284,21 @@ mod tests {
             ("download simulator", "sim_download"),
             ("param_refresh", "param_refresh"),
             ("sim_catalogue", "sim_catalogue"),
+            ("tuning gains oscillating", "tuning_state"),
         ] {
             let result = search(&catalogue, json!({"query":query})).unwrap();
             assert_eq!(result["tools"][0]["name"], expected, "{query}: {result}");
         }
+        // Tuning's samples are the tab's; its summaries are in tuning_state (S333).
+        let graph = search(&catalogue, json!({ "query": "tuning_response" })).unwrap();
+        assert_eq!(graph["total"], 0, "{graph}");
+        assert_eq!(
+            invocation(
+                &catalogue,
+                json!({ "name": "tuning_state", "arguments": { "vehicleId": "v1" } })
+            )
+            .unwrap(),
+            ("tuning/state".to_owned(), json!({ "vehicleId": "v1" }))
+        );
     }
 }

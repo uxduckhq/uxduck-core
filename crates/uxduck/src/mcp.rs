@@ -20,7 +20,7 @@ mod catalogue;
 /// The MCP revision this server speaks.
 pub const PROTOCOL: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "UXDuck vehicle tools. Before advice, read vehicle_history and cite dated entries; read param_get and report describedBy; never guess undescribed parameters. Named simulation starts: place_search, place_locate, terrain_at, then sim_start; ask about ambiguous places. Reads are allowed; commands/configuration need capabilities and approvals. Give reasons for parameter writes; history records them. For reported physical work, offer one concise note and ask before vehicle_add_note unless asked to record it. Record completed work only; attribute reports, retain dates, read history to avoid duplicates, never edit/delete notes. Config permission is not note consent. After your changes, offer notes only for useful context absent from automatic history; never interrupt flying or unfinished work, or repeat declined offers. For telemetry_window report coverage, missing signals and historyTruncated; for packet/routing/log evidence report coverage and missing provenance. Empty or incomplete results do not prove nothing happened. vehicle_messages is a snapshot; poll for newer messages.";
+const INSTRUCTIONS: &str = "UXDuck vehicle tools. Before advice, read vehicle_history and cite dated entries; read param_get and report describedBy; never guess undescribed parameters. Named simulation starts: place_search, place_locate, terrain_at, then sim_start; ask about ambiguous places. Reads are allowed; commands/configuration need capabilities and approvals. Give reasons for parameter writes; history records them. For reported physical work, offer one concise note and ask before vehicle_add_note unless asked to record it. Record completed work only; attribute reports, retain dates, read history to avoid duplicates, never edit/delete notes. Config permission is not note consent. After your changes, offer notes only for useful context absent from automatic history; never interrupt an armed vehicle or unfinished work, or repeat declined offers. For telemetry_window report coverage, missing signals and historyTruncated; for packet/routing/log evidence report coverage and missing provenance. Empty or incomplete results do not prove nothing happened. vehicle_messages is a snapshot; poll for newer messages. Tuning: read tuning_state first; change gains only with param_set; a person flies AutoTune.";
 
 fn reply(id: &Value, result: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -46,16 +46,7 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
                 let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
                 session.dispatch(data_dir, &catalogue, all_tools, message).await?
             }
-            frame = daemon_frame(&mut session.daemon) => {
-                let frame = frame?.ok_or_else(|| CliError::Protocol("the daemon closed the connection".into()))?;
-                frame["id"].as_i64().and_then(|id| session.pending.remove(&id)).map(|id| {
-                    let result = frame.get("error").map_or_else(
-                        || tool_result(frame.get("result").cloned().unwrap_or(Value::Null)),
-                        api_error,
-                    );
-                    reply(&id, &result)
-                })
-            }
+            frame = daemon_frame(&mut session.daemon) => session.route_daemon_frame(frame)?,
         };
         if let Some(answer) = answer {
             let mut text = answer.to_string();
@@ -81,6 +72,34 @@ struct Session {
 }
 
 impl Session {
+    fn route_daemon_frame(
+        &mut self,
+        frame: Result<Option<Value>, CliError>,
+    ) -> Result<Option<Value>, CliError> {
+        match frame {
+            Err(CliError::Api(error)) => Ok(Some(json!({
+                "jsonrpc": "2.0", "method": "notifications/message", "params": {
+                    "level": "error", "logger": "uxduck", "data": error,
+                },
+            }))),
+            Err(error) => Err(error),
+            Ok(frame) => {
+                let frame = frame
+                    .ok_or_else(|| CliError::Protocol("the daemon closed the connection".into()))?;
+                Ok(frame["id"]
+                    .as_i64()
+                    .and_then(|id| self.pending.remove(&id))
+                    .map(|id| {
+                        let result = frame.get("error").map_or_else(
+                            || tool_result(frame.get("result").cloned().unwrap_or(Value::Null)),
+                            api_error,
+                        );
+                        reply(&id, &result)
+                    }))
+            }
+        }
+    }
+
     async fn dispatch(
         &mut self,
         data_dir: &Path,
@@ -184,7 +203,11 @@ impl Session {
                 "too many pending tool calls; wait or cancel one",
             )));
         }
-        let daemon_id = client.send_request(&method, arguments).await?;
+        let daemon_id = match client.send_request(&method, arguments).await {
+            Ok(id) => id,
+            Err(CliError::Api(error)) => return Ok(Some(reply(&id, &api_error(&error)))),
+            Err(error) => return Err(error),
+        };
         self.pending.insert(daemon_id, id);
         Ok(None)
     }
@@ -277,5 +300,182 @@ mod tests {
         assert_eq!(result["structuredContent"]["error"], error);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(serde_json::from_str::<Value>(text).unwrap(), error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, reason = "one MCP session protocol scenario")]
+    async fn mission_read_quarantine_returns_tool_errors_without_ending_the_mcp_session() {
+        let (client, peer) = LocalClient::test_pair();
+        let mut peer = BufReader::new(peer);
+        let catalogue = tools();
+        let mut session = Session {
+            daemon: Some(client),
+            pending: BTreeMap::new(),
+        };
+        let queued = session
+            .invoke(
+                &catalogue,
+                json!("history-ok"),
+                json!({ "name": "mission_history", "arguments": { "id": "v" } }),
+            )
+            .await
+            .unwrap();
+        assert!(queued.is_none());
+        let mut line = String::new();
+        peer.read_line(&mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "mission/history");
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../uxduck-contracts/tests/goldens/mission-read.json"
+        )))
+        .unwrap();
+        let mut good: Value =
+            serde_json::from_str(fixture["frames"]["mission/history"].as_str().unwrap()).unwrap();
+        good["id"] = request["id"].clone();
+        let bytes = format!("{good}\n");
+        let (written, frame) = tokio::join!(
+            peer.get_mut().write_all(bytes.as_bytes()),
+            daemon_frame(&mut session.daemon)
+        );
+        written.unwrap();
+        let routed = session.route_daemon_frame(frame).unwrap().unwrap();
+        assert_eq!(routed["id"], "history-ok");
+        let output = &routed["result"];
+        assert_eq!(output["isError"], false);
+        assert_eq!(
+            output["structuredContent"]["records"][0]["items"][3]["param4"]["nonFiniteF64"],
+            "7ff8000000000001"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(output["content"][0]["text"].as_str().unwrap()).unwrap(),
+            output["structuredContent"]
+        );
+        assert!(session.pending.is_empty());
+        assert!(
+            session
+                .invoke(
+                    &catalogue,
+                    json!("history-bad"),
+                    json!({ "name": "mission_history", "arguments": { "id": "v" } })
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        line.clear();
+        peer.read_line(&mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        let mut broken: Value =
+            serde_json::from_str(fixture["frames"]["mission/history"].as_str().unwrap()).unwrap();
+        broken["id"] = request["id"].clone();
+        broken["result"]["records"][0]["items"][0]["param4"] = Value::Null;
+        let bytes = format!("{broken}\n");
+        let (written, frame) = tokio::join!(
+            peer.get_mut().write_all(bytes.as_bytes()),
+            daemon_frame(&mut session.daemon)
+        );
+        written.unwrap();
+        let routed = session.route_daemon_frame(frame).unwrap().unwrap();
+        assert_eq!(routed["id"], "history-bad");
+        assert_eq!(
+            routed["result"]["structuredContent"]["error"]["data"]["kind"],
+            "update-required"
+        );
+        assert_eq!(routed["result"]["isError"], true);
+        assert!(session.pending.is_empty());
+        for name in [
+            "mission_history",
+            "mission_refresh",
+            "mission_restore",
+            "plan_upload",
+        ] {
+            let answer = session
+                .invoke(
+                    &catalogue,
+                    json!("blocked"),
+                    json!({ "name": name, "arguments": { "id": "v" } }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer["result"]["isError"], true, "{name}: {answer}");
+            assert_eq!(
+                answer["result"]["structuredContent"]["error"]["data"]["kind"],
+                "update-required"
+            );
+        }
+        let unavailable = session
+            .invoke(
+                &catalogue,
+                json!("unavailable"),
+                json!({ "name": "mission_upload", "arguments": {} }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unavailable["error"]["code"], -32602);
+        assert!(session.pending.is_empty());
+        assert!(peer.buffer().is_empty());
+        assert_eq!(
+            peer.get_ref().try_read(&mut [0_u8; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let mut delta: Value =
+            serde_json::from_str(fixture["frames"]["state/delta"].as_str().unwrap()).unwrap();
+        delta["params"]["changes"][0]["mission"]["items"][0]["param4"] = Value::Null;
+        let bytes = format!("{delta}\n");
+        let (written, notification) = tokio::join!(
+            peer.get_mut().write_all(bytes.as_bytes()),
+            daemon_frame(&mut session.daemon)
+        );
+        written.unwrap();
+        let routed = session.route_daemon_frame(notification).unwrap().unwrap();
+        assert_eq!(routed["method"], "notifications/message");
+        assert_eq!(routed["params"]["data"]["data"]["kind"], "update-required");
+        assert!(session.daemon.is_some());
+        let ping = session
+            .dispatch(
+                Path::new("/not-used"),
+                &catalogue,
+                false,
+                json!({ "jsonrpc": "2.0", "id": "ping", "method": "ping" }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ping["result"], json!({}));
+        assert!(session.daemon.is_some());
+        let queued = session
+            .invoke(
+                &catalogue,
+                json!("vehicles-after"),
+                json!({ "name": "vehicle_list", "arguments": {} }),
+            )
+            .await
+            .unwrap();
+        assert!(queued.is_none());
+        line.clear();
+        peer.read_line(&mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "vehicle/list");
+        let bytes = format!(
+            "{}\n",
+            json!({ "jsonrpc": "2.0", "id": request["id"], "result": { "vehicles": [] } })
+        );
+        let (written, frame) = tokio::join!(
+            peer.get_mut().write_all(bytes.as_bytes()),
+            daemon_frame(&mut session.daemon)
+        );
+        written.unwrap();
+        let routed = session.route_daemon_frame(frame).unwrap().unwrap();
+        assert_eq!(routed["id"], "vehicles-after");
+        assert_eq!(routed["result"]["isError"], false);
+        assert_eq!(
+            routed["result"]["structuredContent"],
+            json!({ "vehicles": [] })
+        );
+        assert!(session.pending.is_empty());
     }
 }

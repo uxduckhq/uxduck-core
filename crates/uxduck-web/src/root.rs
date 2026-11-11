@@ -29,7 +29,8 @@ use uxduck_engine::param_definitions::{DefinitionsArrived, DefinitionsOrder, Def
 use uxduck_engine::plane::{self, Routed};
 use uxduck_engine::runtime::{
     AgentPort, Clock, CommandOrder, ControlRoute, Credentials, HistoryOf, LinkPort, NoPlugins,
-    NoSystem, Persistence, Ports, Random, SerialPortInfo, System, TransferOrder, TurnRequest,
+    NoSystem, Persistence, Ports, Random, ReplayRead, SerialPortInfo, System, TransferOrder,
+    TurnRequest,
 };
 use uxduck_engine::state::{self, State};
 use uxduck_engine::terrain::TerrainPort;
@@ -48,13 +49,13 @@ const EXPIRY_EVERY_US: u64 = 1_000_000;
 /// Pilot input goes at most this often: 25 Hz, as in the daemon.
 const PILOT_EVERY_US: u64 = 35_000;
 /// Shown when no account is bound to the sending operator.
-pub const NO_ACCOUNT: &str = "Sign in with this operator’s account to use AI. Request access from your account page if needed.";
+pub const NO_ACCOUNT: &str = "Sign in to use AI. Request access from your account page if needed.";
 
 /// Readiness is a hint only. The HTTP transport and API authorize each request.
 struct AccountCredentials(Arc<AtomicBool>);
 impl Credentials for AccountCredentials {
     fn set(&mut self, _: &str, _: &str) -> Result<(), String> {
-        Err("Browser AI uses the signed-in account; provider keys are never stored here.".into())
+        Err("Browser AI uses the signed-in account. Provider keys are never stored here.".into())
     }
     fn has(&self, name: &str) -> bool {
         name == uxduck_engine::ACCOUNT_TOKEN && self.0.load(Ordering::SeqCst)
@@ -89,6 +90,8 @@ pub enum Output {
     /// Keep, read or remove terrain files in the Origin Private File
     /// System (S23).
     Store(Store),
+    /// A request to the account's sync, answered with [`Browser::synced`].
+    Sync(crate::sync::Request),
 }
 
 /// What a failed fetch's error starts with when there was no connection,
@@ -244,6 +247,7 @@ enum Call {
     Journal(Write),
     Turn(TurnRequest),
     CancelTurn(String),
+    SteerTurn(String, u64, String, String, bool),
     Definitions(DefinitionsOrder),
     Terrain(uxduck_terrain::Order),
     Places(uxduck_engine::places::Order),
@@ -261,15 +265,20 @@ fn push(queue: &Queue, call: Call) {
         .push_back(call);
 }
 
-/// The engine's journal: handed to the worker as lines.
+/// The engine's journal: handed to the worker as lines, and read for the
+/// account as they go.
 #[derive(Debug)]
-struct Journal(Queue);
+struct Journal(Queue, crate::sync::SharedOutbox);
 
 impl Persistence for Journal {
     fn append(&mut self, event: &Event) {
         if let Ok(line) = serde_json::to_string(event) {
             push(&self.0, Call::Journal(Write::Event(line)));
         }
+        self.1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .read(event);
     }
     fn checkpoint(&mut self, state: &State) {
         if let Ok(json) = serde_json::to_string(state) {
@@ -322,6 +331,12 @@ impl LinkPort for Links {
 struct Agent(Queue);
 
 impl AgentPort for Agent {
+    fn steer_turn(&mut self, thread: &str, turn: u64, item: &str, text: &str, share: bool) {
+        push(
+            &self.0,
+            Call::SteerTurn(thread.into(), turn, item.into(), text.into(), share),
+        );
+    }
     fn start_turn(&mut self, turn: TurnRequest) {
         push(&self.0, Call::Turn(turn));
     }
@@ -390,9 +405,17 @@ impl Clock for SharedClock {
 struct Host {
     none: NoSystem,
     inspector: Arc<Mutex<Inspector>>,
+    /// Each link's frames this visit, for replay (ADR-0039 R9).
+    logs: Arc<Mutex<crate::logs::Logs>>,
     clock: SharedClock,
     inputs: Arc<Mutex<ControllerInputsResult>>,
+    /// Files attached to chat messages this visit (S246), in memory: the
+    /// browser has no folder for them. Whole or not.
+    attached: HashMap<String, (Vec<u8>, bool)>,
 }
+
+/// The most attached files the page holds at once, together.
+const ATTACHED_MAX: usize = 512 * 1024 * 1024;
 
 impl System for Host {
     fn check_udp_bind(&self, host: &str, port: u16) -> Result<(), String> {
@@ -420,6 +443,86 @@ impl System for Host {
             .unwrap_or_else(PoisonError::into_inner)
             .read(vehicle_ids, now_us)
             .decode(None)
+    }
+    fn replay_available(&self, what: &ReplayRead) -> Option<bool> {
+        match what {
+            ReplayRead::Link {
+                link_id,
+                from_us,
+                to_us,
+                ..
+            } => Some(
+                self.logs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .available(link_id, *from_us, *to_us),
+            ),
+            _ => None,
+        }
+    }
+    fn replay_read(&mut self, what: &ReplayRead) -> Result<Vec<u8>, String> {
+        match what {
+            ReplayRead::Link {
+                link_id,
+                from_us,
+                to_us,
+                ..
+            } => self
+                .logs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .read(link_id, *from_us, *to_us),
+            _ => Err("UXDuck Web opens a log from its file: Flights › Open a log….".into()),
+        }
+    }
+    fn attachment_write(
+        &mut self,
+        id: &str,
+        _name: &str,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let held: usize = self.attached.values().map(|(b, _)| b.len()).sum();
+        if held + bytes.len() > ATTACHED_MAX {
+            return Err(
+                "UXDuck Web keeps up to 512 MB of attached files while it is open. \
+                Remove one, or attach a bigger file in UXDuck Desktop."
+                    .into(),
+            );
+        }
+        let (file, _) = self.attached.entry(id.to_owned()).or_default();
+        if file.len() as u64 != offset {
+            return Err("The file's bytes came out of order. Attach it again.".into());
+        }
+        file.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn attachment_finish(&mut self, id: &str, _name: &str, keep: bool) -> Result<(), String> {
+        if !keep {
+            self.attached.remove(id);
+            return Ok(());
+        }
+        let file = self
+            .attached
+            .get_mut(id)
+            .ok_or("The file is no longer here. Attach it again.")?;
+        file.1 = true;
+        Ok(())
+    }
+    fn attachment_read(&mut self, id: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let (bytes, _) = self.attached.get(id).filter(|(_, whole)| *whole).ok_or(
+            "UXDuck Web keeps attached files only while it is open. Attach the file again.",
+        )?;
+        let from = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        Ok(bytes[from..from.saturating_add(len).min(bytes.len())].to_vec())
+    }
+    fn link_last_heard_us(&self, link_id: &str) -> Option<u64> {
+        self.logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_us(link_id)
     }
     fn vehicle_heartbeat_us(&self, vehicle_ids: &[String]) -> Option<u64> {
         self.inspector
@@ -481,6 +584,8 @@ pub struct Browser {
     /// The latest message of each type to and from each vehicle, for
     /// `mavlink/inspect`.
     inspector: Arc<Mutex<Inspector>>,
+    /// Each link's frames this visit, for replay (ADR-0039 R9).
+    logs: Arc<Mutex<crate::logs::Logs>>,
     queue: Queue,
     connections: BTreeMap<u32, (ConnectionId, UnboundedReceiver<String>)>,
     next_connection: u32,
@@ -508,6 +613,8 @@ pub struct Browser {
     last_pilot_us: u64,
     last_tick_us: Option<u64>,
     last_tick_gap_ms: u32,
+    /// Sync with the account (S16).
+    syncer: crate::sync::Syncer,
 }
 
 impl std::fmt::Debug for Browser {
@@ -523,12 +630,17 @@ const CHECKPOINT_EVERY: u64 = 500;
 
 impl Browser {
     /// Restores from the journal (the last checkpoint, if any, then the
-    /// events after it, one JSON per line) and starts the engine, which
-    /// reopens any simulator that was running.
+    /// events after it, one JSON per line) and the flight logs kept with it
+    /// (see [`crate::logs`]), and starts the engine, which reopens any
+    /// simulator that was running.
     ///
     /// # Errors
     /// When the checkpoint is not a state; unreadable event lines are
     /// skipped, and replay stops at the first gap, as in the daemon.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the browser daemon's start, every port in turn"
+    )]
     pub fn new(
         version: &str,
         clock: Box<dyn Clock>,
@@ -536,32 +648,39 @@ impl Browser {
         random: Box<dyn Random>,
         checkpoint: Option<&str>,
         events: &str,
+        logs: crate::logs::Logs,
     ) -> Result<(Self, Vec<Output>), Unreadable> {
         let checkpoint = checkpoint
             .map(serde_json::from_str::<State>)
             .transpose()
             .map_err(|e| Unreadable(format!("the checkpoint: {e}")))?;
-        let events = events
+        let events: Vec<Event> = events
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str::<Event>(line).ok());
-        let restored = state::restore(checkpoint, events);
+            .filter_map(|line| serde_json::from_str::<Event>(line).ok())
+            .collect();
+        let checkpoint_seq = checkpoint.as_ref().map_or(0, |state| state.seq);
+        let restored = state::restore(checkpoint, events.iter().cloned());
+        let outbox = crate::sync::SharedOutbox::default();
 
         let queue: Queue = Arc::default();
         let clock = SharedClock(Arc::new(Mutex::new(clock)));
         let inspector: Arc<Mutex<Inspector>> = Arc::default();
+        let logs = Arc::new(Mutex::new(logs));
         let inputs: Arc<Mutex<ControllerInputsResult>> = Arc::default();
         let account_ready = Arc::new(AtomicBool::new(false));
         let ports = Ports {
-            persistence: Box::new(Journal(queue.clone())),
+            persistence: Box::new(Journal(queue.clone(), outbox.clone())),
             agent: Box::new(Agent(queue.clone())),
             credentials: Box::new(AccountCredentials(account_ready.clone())),
             links: Box::new(Links(queue.clone())),
             system: Box::new(Host {
                 none: NoSystem::default(),
                 inspector: inspector.clone(),
+                logs: logs.clone(),
                 clock: clock.clone(),
                 inputs: inputs.clone(),
+                attached: HashMap::new(),
             }),
             plugins: Box::new(NoPlugins),
         };
@@ -574,7 +693,8 @@ impl Browser {
             },
             ui_url: String::new(),
             checkpoint_every: CHECKPOINT_EVERY,
-            models: vec!["gpt-6-luna".into(), "gpt-6-sol".into()],
+            // Only the hosted model's, from the account (S29).
+            models: Vec::new(),
             // ADR-0011 M9: the agent is the hosted model, after sign-in.
             agent_provider: "hosted".into(),
             // The wasm build's own stamp (`build.rs`); it keeps its data in
@@ -605,6 +725,7 @@ impl Browser {
             session: Session::new(Config::default()),
             clock: Box::new(clock),
             inspector,
+            logs,
             queue,
             connections: BTreeMap::new(),
             next_connection: 0,
@@ -628,7 +749,11 @@ impl Browser {
             last_pilot_us: 0,
             last_tick_us: None,
             last_tick_gap_ms: 0,
+            syncer: crate::sync::Syncer::new(outbox),
         };
+        browser.read_for_the_account(checkpoint_seq, &events);
+        let wake = crate::sync::Wake(browser.syncer.woken.clone());
+        browser.engine.set_sync(Box::new(wake));
         let port = Definitions(browser.queue.clone());
         browser.engine.set_definitions(Box::new(port));
         let terrain = TerrainFiles(browser.queue.clone());
@@ -812,7 +937,9 @@ impl Browser {
             DefinitionsOrder::StoreOwn { id, set } => {
                 self.own_sets.insert(id, *set);
             }
-            DefinitionsOrder::FetchOwn { id, url } => self.fetch(url, Fetching::Own(id), outputs),
+            DefinitionsOrder::FetchOwn { id, url } | DefinitionsOrder::FetchProfile { id, url } => {
+                self.fetch(url, Fetching::Own(id), outputs);
+            }
             DefinitionsOrder::RemoveOwn { id } => {
                 self.own_sets.remove(&id);
             }
@@ -831,54 +958,123 @@ impl Browser {
     /// Simulated vehicles and their links stay here.
     #[must_use]
     pub fn export(&self) -> Vec<serde_json::Value> {
-        let state = self.engine.state();
-        let mut changes: Vec<Change> = Vec::new();
-        changes.extend(
-            state
-                .operators
-                .values()
-                .map(|operator| Change::OperatorUpserted {
-                    operator: operator.clone(),
-                }),
-        );
-        changes.extend(state.folders.values().map(|folder| Change::FolderUpserted {
-            folder: folder.clone(),
-        }));
-        for thread in state.threads.values() {
-            changes.push(Change::ThreadUpserted {
-                thread: thread.clone(),
-            });
-            changes.extend(
-                state
-                    .items_of(&thread.id)
-                    .into_iter()
-                    .map(|item| Change::ItemUpserted { item: item.clone() }),
-            );
-        }
-        changes.extend(state.places.values().map(|place| Change::PlaceUpserted {
-            place: place.clone(),
-        }));
-        changes.extend(state.markers.values().map(|marker| Change::MarkerUpserted {
-            marker: marker.clone(),
-        }));
-        changes.extend(state.plans.values().map(|plan| Change::PlanSaved {
-            plan: plan.clone(),
-            revision: uxduck_core::domain::plan::PlanRevision::None,
-        }));
-        changes.extend(
-            state
-                .snapshots
-                .values()
-                .map(|snapshot| Change::SnapshotUpserted {
-                    snapshot: snapshot.clone(),
-                }),
-        );
-        changes
+        work(self.engine.state())
             .iter()
             .filter_map(|change| serde_json::to_value(change).ok())
             .collect()
     }
 
+    /// The signed-in account, from any page: the browser has one.
+    fn account_id(&self) -> Option<String> {
+        self.accounts
+            .values()
+            .find_map(|account| account.account_id.clone())
+    }
+
+    /// What the account may not have yet after a visit: events the journal
+    /// kept past the export cursor and, when its checkpoint is past it too,
+    /// all of this browser's work, since what the checkpoint folded in is
+    /// no longer events.
+    fn read_for_the_account(&mut self, checkpoint_seq: u64, events: &[Event]) {
+        let cursor = self.engine.sync_state().exported_through;
+        let mut outbox = self
+            .syncer
+            .outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if checkpoint_seq > cursor {
+            let now = self.clock.now_us();
+            for change in work(self.engine.state()) {
+                outbox.read(&Event {
+                    seq: checkpoint_seq,
+                    ts_us: now,
+                    actor: uxduck_core::events::Actor {
+                        client_id: "browser".into(),
+                        operator_id: None,
+                        identity: None,
+                    },
+                    change,
+                });
+            }
+        }
+        for event in events.iter().filter(|event| event.seq > cursor) {
+            outbox.read(event);
+        }
+    }
+
+    /// The worker's answer to an [`Output::Sync`] request: the HTTP
+    /// status and body, or status 0 and why there was no answer.
+    pub fn synced(
+        &mut self,
+        request: u32,
+        status: u16,
+        body: Option<&str>,
+        error: Option<&str>,
+    ) -> Vec<Output> {
+        let account = self.account_id();
+        let next = self.syncer.answer(
+            &mut self.engine,
+            account.as_deref(),
+            request,
+            status,
+            body,
+            error,
+        );
+        let mut outputs: Vec<Output> = next.into_iter().map(Output::Sync).collect();
+        outputs.extend(self.drain());
+        outputs
+    }
+}
+
+/// This browser's work as the changes that create it: operators, folders,
+/// chats with their messages in order, saved places, markers, plans and
+/// simulation snapshots.
+fn work(state: &State) -> Vec<Change> {
+    let mut changes: Vec<Change> = Vec::new();
+    changes.extend(
+        state
+            .operators
+            .values()
+            .map(|operator| Change::OperatorUpserted {
+                operator: operator.clone(),
+            }),
+    );
+    changes.extend(state.folders.values().map(|folder| Change::FolderUpserted {
+        folder: folder.clone(),
+    }));
+    for thread in state.threads.values() {
+        changes.push(Change::ThreadUpserted {
+            thread: thread.clone(),
+        });
+        changes.extend(
+            state
+                .items_of(&thread.id)
+                .into_iter()
+                .map(|item| Change::ItemUpserted { item: item.clone() }),
+        );
+    }
+    changes.extend(state.places.values().map(|place| Change::PlaceUpserted {
+        place: place.clone(),
+    }));
+    changes.extend(state.markers.values().map(|marker| Change::MarkerUpserted {
+        marker: marker.clone(),
+    }));
+    changes.extend(state.plans.values().map(|plan| Change::PlanSaved {
+        plan: plan.clone(),
+        revision: uxduck_core::domain::plan::PlanRevision::None,
+    }));
+    changes.extend(
+        state
+            .snapshots
+            .values()
+            .map(|snapshot| Change::SnapshotUpserted {
+                snapshot: snapshot.clone(),
+            }),
+    );
+    changes
+}
+
+impl Browser {
     /// A page connects through its `MessagePort`.
     pub fn connect(&mut self) -> (u32, Vec<Output>) {
         let (outbox, inbox) = unbounded();
@@ -908,11 +1104,20 @@ impl Browser {
         if let Some(previous) = self.accounts.remove(&id) {
             self.agents.forget_account(&previous);
         }
+        let before = self.account_id();
         if let Some(next) = next {
             self.accounts.insert(id, next);
         }
+        if self.account_id() != before {
+            self.syncer.soon();
+        }
         self.account_ready
             .store(!self.accounts.is_empty(), Ordering::SeqCst);
+        self.engine.set_hosted_models(
+            self.accounts
+                .values()
+                .find_map(|account| account.hosted_models.clone()),
+        );
         let mut outputs: Vec<_> = agent_outputs.into_iter().map(Output::Agent).collect();
         outputs.extend(self.drain());
         outputs
@@ -1075,15 +1280,21 @@ impl Browser {
         let now = self.clock.now_us();
         let gone = self.controls.stale_keyboard_inputs(now);
         self.controller_input(gone, outputs);
+        if self.controls.expire_screen_holds(now) {
+            *self.inputs.lock().unwrap_or_else(PoisonError::into_inner) = self.controls.snapshot();
+        }
+        let held = self.controls.due_holds(now);
+        self.report_controls(held);
         if self.controls.routed() && now.saturating_sub(self.last_pilot_us) >= PILOT_EVERY_US {
             self.last_pilot_us = now;
             let mut effects = Vec::new();
-            for (vehicle_id, sticks, auxiliary, method) in self.controls.pilot_outputs() {
+            for (vehicle_id, sticks, auxiliary, method, buttons) in self.controls.pilot_outputs() {
                 effects.extend(self.session.pilot_control_with_method(
                     &vehicle_id,
                     sticks,
                     &auxiliary,
                     method,
+                    buttons,
                 ));
             }
             self.apply(effects, outputs);
@@ -1153,6 +1364,12 @@ impl Browser {
             Report::Positioned { id, position } => {
                 self.engine.controller_positioned(&id, &position);
             }
+            Report::Holding {
+                id,
+                command,
+                hold_ms,
+            } => self.engine.controller_holding(&id, command, hold_ms),
+            Report::LetGo { id } => self.engine.controller_let_go(&id),
         }
     }
 
@@ -1163,6 +1380,23 @@ impl Browser {
         self.drain()
     }
 
+    /// Forgets the flight logs kept here: their files were cleared.
+    pub fn clear_logs(&mut self) {
+        self.logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Each link's frames received since the last call, as tlog bytes to
+    /// append to its file.
+    pub fn take_logs(&mut self) -> Vec<(String, Vec<u8>)> {
+        self.logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take_unsaved()
+    }
+
     /// Bytes from a simulator's serial port.
     pub fn link_received(&mut self, link_id: &str, bytes: &[u8]) -> Vec<Output> {
         let Some(stream) = self.streams.get_mut(link_id) else {
@@ -1171,6 +1405,11 @@ impl Browser {
         let frames = stream.push(bytes, uxduck_mavlink::decode::check);
         let now = self.clock.now_us();
         let mut effects = Vec::new();
+        let mut logs = self.logs.lock().unwrap_or_else(PoisonError::into_inner);
+        for frame in &frames {
+            logs.record(link_id, now, frame);
+        }
+        drop(logs);
         for frame in frames {
             effects.extend(self.session.ingest(link_id, PEER, &frame, now));
             if let Some(header) = uxduck_mavlink::framing::header(&frame)
@@ -1202,6 +1441,8 @@ impl Browser {
             let effects = self.session.tick(now);
             self.apply(effects, &mut outputs);
         }
+        // A replay's clock, while one plays (ADR-0039).
+        self.engine.replay_tick(now);
         if now.saturating_sub(self.last_expiry_us) >= EXPIRY_EVERY_US {
             self.last_expiry_us = now;
             self.engine.expire_approvals(now);
@@ -1214,6 +1455,10 @@ impl Browser {
             self.engine.expire_setups(now);
             // Preflight checks that change with time alone (S192).
             self.engine.review_preflights();
+        }
+        let account = self.account_id();
+        if let Some(request) = self.syncer.poll(&mut self.engine, account.as_deref(), now) {
+            outputs.push(Output::Sync(request));
         }
         let gone = self.controls.stale_keyboard_inputs(now);
         self.controller_input(gone, &mut outputs);
@@ -1239,6 +1484,11 @@ impl Browser {
                     // A paused simulator would read it all at once on resuming.
                     if self.streams.contains_key(&link_id) && !self.session.is_paused(&link_id) {
                         self.inspect_sent(&link_id, &peer, &bytes);
+                        // Kept in the link's log beside what it heard (ADR-0050 L1).
+                        self.logs
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .record(&link_id, self.clock.now_us(), &bytes);
                         outputs.push(Output::LinkWrite { link_id, bytes });
                     }
                 }
@@ -1302,7 +1552,7 @@ impl Browser {
     fn call(&mut self, call: Call, outputs: &mut Vec<Output>) {
         let now = self.clock.now_us();
         match call {
-            Call::Open(link) => match start(&link) {
+            Call::Open(link) => match start(&link, self.engine.start_speedup(&link.id)) {
                 Some(order) => {
                     self.session.simulated(&link.id);
                     self.streams.insert(link.id.clone(), Reassembler::default());
@@ -1349,6 +1599,9 @@ impl Browser {
                     .cloned()
                     .unwrap_or_default();
                 self.agents.start(&mut self.engine, turn, account, now);
+            }
+            Call::SteerTurn(thread, turn, item, text, share) => {
+                self.agents.steer(&thread, turn, item, text, share);
             }
             Call::CancelTurn(thread) => {
                 let mut agent_outputs = Vec::new();
@@ -1399,7 +1652,12 @@ impl Browser {
                 }));
             }
             Order::Fetch { key } => {
-                let url = format!("{}/{key}", self.terrain_url);
+                // A full address (the seabed's, ADR-0043) as it is; else the bucket's.
+                let url = if key.starts_with("https://") {
+                    key.clone()
+                } else {
+                    format!("{}/{key}", self.terrain_url)
+                };
                 self.fetch(url, Fetching::Terrain(key), outputs);
             }
             Order::Write { key, bytes } => outputs.push(Output::Store(Store::Write { key, bytes })),
@@ -1429,8 +1687,9 @@ fn release_key() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// How to start a simulator link: ArduPilot's program and model.
-fn start(link: &Link) -> Option<Order> {
+/// How to start a simulator link: ArduPilot's program and model, at
+/// `speedup` when its take-off is to be sped up from the start.
+fn start(link: &Link, speedup_now: Option<u8>) -> Option<Order> {
     let LinkKind::Simulator {
         vehicle,
         latitude_deg,
@@ -1469,7 +1728,7 @@ fn start(link: &Link) -> Option<Order> {
         link_id: link.id.clone(),
         program,
         model: frame.clone().unwrap_or_else(|| default_model.to_owned()),
-        speedup: speedup.unwrap_or(1),
+        speedup: speedup_now.unwrap_or_else(|| speedup.unwrap_or(1)),
         latitude_deg,
         longitude_deg,
         altitude_m,

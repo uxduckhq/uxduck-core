@@ -105,6 +105,12 @@ enum Asked {
     Read(Vec<u8>),
     /// Removed, made, renamed: answered with nothing.
     Change,
+    /// The file there now, read before an upload replaces it and kept as
+    /// a copy (S260, ADR-0027 F15); then the upload goes.
+    Keep {
+        read: Vec<u8>,
+        bytes: Vec<u8>,
+    },
 }
 
 /// A running transfer's live parts, not journaled.
@@ -234,6 +240,7 @@ pub(crate) fn handle(
         }) => {
             require(Capability::Config)?;
             refuse_read_only(&path)?;
+            engine.refuse_scripts_while_armed(&vehicle_id, &path)?;
             let op = if dir {
                 FileOp::RemoveDir { path: clean(&path) }
             } else {
@@ -244,6 +251,7 @@ pub(crate) fn handle(
         ClientRequest::FilesMkdir(FilesPathParams { vehicle_id, path }) => {
             require(Capability::Config)?;
             refuse_read_only(&path)?;
+            engine.refuse_scripts_while_armed(&vehicle_id, &path)?;
             engine.change(&vehicle_id, &path, FileOp::MakeDir { path: clean(&path) })
         }
         ClientRequest::FilesRename(FilesRenameParams {
@@ -254,6 +262,8 @@ pub(crate) fn handle(
             require(Capability::Config)?;
             refuse_read_only(&from)?;
             refuse_read_only(&to)?;
+            engine.refuse_scripts_while_armed(&vehicle_id, &from)?;
+            engine.refuse_scripts_while_armed(&vehicle_id, &to)?;
             let op = FileOp::Rename {
                 from: clean(&from),
                 to: clean(&to),
@@ -289,6 +299,14 @@ pub(crate) fn handle(
     }
 }
 
+/// A script, or anything in a scripts folder (S260, ADR-0027 F17).
+fn is_script(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".lua")
+        || path
+            .split('/')
+            .any(|part| part.eq_ignore_ascii_case("scripts"))
+}
+
 fn refuse_read_only(path: &str) -> Result<(), ApiError> {
     if read_only(path) {
         return Err(ApiError::new(
@@ -314,20 +332,43 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
 }
 
 impl Engine {
-    /// Keeps a file UXDuck made for a vehicle among its copies, as a
+    /// Removes a copy UXDuck kept and its line in the vehicle's Files
+    /// (S217): a saved parameter set deleted or renamed.
+    pub(crate) fn forget_copy(&mut self, id: &str) {
+        if self.state.file_transfers.contains_key(id) {
+            let _ = self.cancel_transfer(id);
+        }
+    }
+
+    /// Keeps a file UXDuck made at `path` among the vehicle's Files, as a
     /// finished download that Files lists and saves: the parameters saved
-    /// before installing firmware (S189).
+    /// before installing firmware (S189), a saved parameter set (S217).
+    /// The transfer's id that lists it.
     ///
     /// # Errors
     /// With no files port (UXDuck Web), or when the disk refuses.
-    pub(crate) fn keep_copy(
+    pub(crate) fn keep_file(
         &mut self,
         vehicle_id: &str,
-        name: &str,
+        path: &str,
         bytes: &[u8],
-    ) -> Result<(), String> {
-        let path = format!("/UXDuck/{name}");
-        let local = local_for(vehicle_id, &path);
+    ) -> Result<String, String> {
+        let local = local_for(vehicle_id, path);
+        self.keep_copy(vehicle_id, path, local, None, bytes)
+    }
+
+    /// Keeps `bytes` at `local` in "Vehicle files" as a finished download
+    /// of `path`, with `detail` said beside it.
+    fn keep_copy(
+        &mut self,
+        vehicle_id: &str,
+        path: &str,
+        local: String,
+        detail: Option<String>,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        let path = path.to_owned();
+        let name = name_of(&path);
         let port = self
             .files
             .port
@@ -338,23 +379,54 @@ impl Engine {
         port.finish(&local)?;
         let now = self.clock.now_us();
         let size = bytes.len() as u64;
+        let id = self.file_id("fd");
         let transfer = FileTransfer {
-            id: self.file_id("fd"),
+            id: id.clone(),
             vehicle_id: vehicle_id.to_owned(),
             direction: TransferDirection::Download,
-            name: name.to_owned(),
+            name,
             path,
             local: Some(local),
             size: Some(size),
             done: size,
             state: TransferState::Done,
-            detail: None,
+            detail,
             rate_bps: None,
             started_at_us: now,
             updated_at_us: now,
         };
         self.commit_as(actor(), Change::FileTransferUpserted { transfer });
+        Ok(id)
+    }
+
+    /// Writing a script, or anything in a scripts folder, is refused while
+    /// the vehicle is armed (ADR-0027 F17): a script changed in flight
+    /// runs as soon as the scripts restart.
+    fn refuse_scripts_while_armed(&self, vehicle_id: &str, path: &str) -> Result<(), ApiError> {
+        if is_script(path) && self.vehicle(vehicle_id).is_some_and(|v| v.armed) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!(
+                    "Disarm {} before changing its scripts",
+                    self.vehicle_name(vehicle_id)
+                ),
+            ));
+        }
         Ok(())
+    }
+
+    /// The file an upload replaces, kept before it goes (F15): beside the
+    /// vehicle's other copies, in a folder of its own so a later save or a
+    /// download of the same file does not replace it.
+    fn keep_before_saving(
+        &mut self,
+        vehicle_id: &str,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        let stamp = self.clock.now_us();
+        let local = local_for(vehicle_id, &format!("Before saving/{stamp}/{path}"));
+        self.keep_copy(vehicle_id, path, local, Some("Before saving".into()), bytes)
     }
 
     /// Gives the engine its files port (the daemon's "Vehicle files"), and
@@ -413,7 +485,7 @@ impl Engine {
         let id = self.file_id("fo");
         let op = match what {
             Asked::List => FileOp::List { path: path.clone() },
-            Asked::Read(_) | Asked::Change => FileOp::Read {
+            Asked::Read(_) | Asked::Change | Asked::Keep { .. } => FileOp::Read {
                 path: path.clone(),
                 from: 0,
             },
@@ -513,6 +585,7 @@ impl Engine {
         if path == "/" || name_of(&path).is_empty() {
             return Err(ApiError::new(ErrorKind::InvalidValue, "name the file"));
         }
+        self.refuse_scripts_while_armed(&vehicle_id, &path)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(params.content_base64.trim())
             .map_err(|e| ApiError::new(ErrorKind::InvalidValue, format!("not base64: {e}")))?;
@@ -522,6 +595,40 @@ impl Engine {
                 "files over 4 MB are too slow to send over MAVLink",
             ));
         }
+        if !params.keep {
+            let transfer = self.queue_upload(vehicle_id, path, bytes);
+            return to_value(&FileTransferDto::from(&transfer));
+        }
+        if self.files.port.is_none() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "UXDuck Web keeps no copies of a vehicle's files: save without keeping the one there now",
+            ));
+        }
+        // The file there now first; the upload follows once it is kept.
+        let id = self.file_id("fo");
+        self.files.waiting.insert(
+            id.clone(),
+            Waiting {
+                reply: self.replying_to.take(),
+                vehicle_id: vehicle_id.clone(),
+                path: path.clone(),
+                what: Asked::Keep {
+                    read: Vec::new(),
+                    bytes,
+                },
+            },
+        );
+        self.links.transfer(TransferOrder::File {
+            vehicle_id,
+            id,
+            op: FileOp::Read { path, from: 0 },
+        });
+        Ok(Value::Null)
+    }
+
+    /// Queues an upload's bytes as a transfer and starts it.
+    fn queue_upload(&mut self, vehicle_id: String, path: String, bytes: Vec<u8>) -> FileTransfer {
         let now = self.clock.now_us();
         let transfer = FileTransfer {
             id: self.file_id("fu"),
@@ -546,7 +653,7 @@ impl Engine {
             },
         );
         self.start_transfer(&transfer);
-        to_value(&FileTransferDto::from(&transfer))
+        transfer
     }
 
     /// Hands a queued transfer to the data plane: a download from its copy's
@@ -701,6 +808,14 @@ impl Engine {
 
     /// What the data plane reports about a file job.
     pub fn file_reported(&mut self, report: FileReport) {
+        // A listing of the vehicle's terrain folder (S310).
+        if self.terrain_files_reported(&report) {
+            return;
+        }
+        // A write of terrain areas to the vehicle's card (S312).
+        if self.terrain_put_reported(&report) {
+            return;
+        }
         let id = match &report {
             FileReport::Listed { id, .. }
             | FileReport::Opened { id, .. }
@@ -759,6 +874,32 @@ impl Engine {
             (FileReport::Done { result: Ok(()), .. }, Asked::Change) => {
                 Some(to_value(&Empty::default()))
             }
+            (FileReport::Data { bytes, .. }, Asked::Keep { read, .. }) => {
+                read.extend_from_slice(&bytes);
+                (read.len() as u64 > UPLOAD_MAX).then(|| {
+                    self.links.transfer(TransferOrder::CancelFile {
+                        vehicle_id: waiting.vehicle_id.clone(),
+                        id: id.to_owned(),
+                    });
+                    Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        format!(
+                            "{} is over 4 MB, too big to keep a copy of here: download it first",
+                            name_of(&waiting.path)
+                        ),
+                    ))
+                })
+            }
+            (FileReport::Done { result, .. }, Asked::Keep { read, bytes }) => {
+                let (read, bytes) = (std::mem::take(read), std::mem::take(bytes));
+                Some(self.keep_then_upload(
+                    &waiting.vehicle_id,
+                    &waiting.path,
+                    result,
+                    &read,
+                    bytes,
+                ))
+            }
             (
                 FileReport::Done {
                     result: Err(failure),
@@ -786,6 +927,39 @@ impl Engine {
             };
             self.send(connection, &frame);
         }
+    }
+
+    /// A save's `keep` (F15), once the file there now is read: kept, or
+    /// nothing there to keep, then the new one queued. Any other refusal
+    /// fails the save before anything is sent.
+    fn keep_then_upload(
+        &mut self,
+        vehicle_id: &str,
+        path: &str,
+        result: Result<(), Failure>,
+        read: &[u8],
+        bytes: Vec<u8>,
+    ) -> Result<Value, ApiError> {
+        match result {
+            Ok(()) => {
+                self.keep_before_saving(vehicle_id, path, read)
+                    .map_err(|why| {
+                        ApiError::new(
+                            ErrorKind::InvalidValue,
+                            format!("the copy could not be kept: {why}"),
+                        )
+                    })?;
+            }
+            Err(Failure::Rejected(why)) if why == "there is no such file or folder" => {}
+            Err(failure) => {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    refused(&self.vehicle_name(vehicle_id), path, &failure),
+                ));
+            }
+        }
+        let transfer = self.queue_upload(vehicle_id.to_owned(), path.to_owned(), bytes);
+        to_value(&FileTransferDto::from(&transfer))
     }
 
     fn transfer_reported(&mut self, id: &str, report: FileReport) {

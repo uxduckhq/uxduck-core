@@ -265,6 +265,7 @@ fn start(
             in_air_m,
             snapshot_id: Some(snapshot.id.clone()),
             binary: params.binary.map(|b| b.trim().to_owned()),
+            allow_network: params.allow_network,
             wipe: false,
             // A snapshot brings its own mission.
             with_mission: false,

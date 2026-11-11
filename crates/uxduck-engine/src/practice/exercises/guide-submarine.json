@@ -15,7 +15,7 @@
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+      "text": "Press Go to under Guide in the Cockpit tab, then click a place on the map.",
       "hint": "Go to takes it to the place you clicked and holds it there.",
       "hintAfterS": 45,
       "all": [
@@ -24,7 +24,7 @@
       ]
     },
     {
-      "text": "Choose POSHOLD in the Mode menu in the Cockpit tab.",
+      "text": "Choose POSHOLD under Modes in the Cockpit tab.",
       "hint": "Position hold keeps it where it is, at its depth.",
       "hintAfterS": 45,
       "all": [

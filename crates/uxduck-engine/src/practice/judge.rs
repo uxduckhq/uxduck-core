@@ -374,7 +374,7 @@ fn is_kind(command: &Command, kind: &str, mode: Option<&str>) -> bool {
     let set_mode = |wanted: &str| matches!(command, Command::SetMode { mode } if mode.eq_ignore_ascii_case(wanted));
     match kind {
         "setMode" => mode.is_some_and(set_mode),
-        // A quadplane's own return and landing count, as Control's Land is
+        // A quadplane's own return and landing count, as Cockpit's Land is
         // QLAND on one and SURFACE on a submarine.
         "rtl" => matches!(command, Command::Rtl) || set_mode("RTL") || set_mode("QRTL"),
         "land" => {
@@ -857,6 +857,7 @@ mod tests {
                     longitude_deg: ring.1,
                     altitude_m: 50.0,
                     altitude_frame: AltitudeFrame::AboveHome,
+                    loiter_radius_m: None,
                     heading: None,
                 },
             ));
@@ -966,6 +967,7 @@ mod tests {
             longitude_deg: ring.1,
             altitude_m: 50.0,
             altitude_frame: AltitudeFrame::AboveHome,
+            loiter_radius_m: None,
             heading: None,
         };
         let set = |s: u64, value: f64| (s * S, "WPNAV_SPEED".to_owned(), value);
@@ -1152,6 +1154,91 @@ mod tests {
             (0, Verdict::Keep),
             "once is not twice"
         );
+    }
+
+    #[test]
+    fn a_quadplane_holds_the_box_hovering_in_qloiter_then_qhover() {
+        let inside = from_home(12.0, -15.0);
+        let minute = |from: u64, mode: &str| -> Vec<View> {
+            (from..=from + 60)
+                .step_by(5)
+                .map(|s| by_hand(at(s, flying(inside, 30.0, mode))))
+                .collect()
+        };
+        let mut views = minute(20, "QLOITER");
+        views.extend(minute(85, "QHOVER"));
+        let (_, verdict) = run("hold-the-box-vtol", &views);
+        assert!(
+            matches!(verdict, Verdict::Passed { ref line, .. } if line == "Passed. In the box in both modes."),
+            "{verdict:?}"
+        );
+        // A plane's LOITER circles by itself; it is not the hover asked for.
+        let (attempt, verdict) = run("hold-the-box-vtol", &minute(20, "LOITER"));
+        assert_eq!((attempt.step, verdict), (0, Verdict::Keep));
+        let (_, verdict) = run(
+            "hold-the-box-vtol",
+            &[at(20, flying(inside, 30.0, "QLOITER"))],
+        );
+        assert!(
+            matches!(verdict, Verdict::Failed { ref line, .. } if line == "Failed. The controller was released."),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_plane_or_quadplane_flies_the_gates_in_fbwb_after_switching_to_it() {
+        // Across each gate, 300 m out, at 60 m.
+        let across = |bearing: f64, side: f64| {
+            let centre = place(
+                HOME,
+                Offset {
+                    bearing_deg: bearing,
+                    distance_m: 300.0,
+                },
+            );
+            place(
+                centre,
+                Offset {
+                    bearing_deg: bearing + 90.0,
+                    distance_m: side,
+                },
+            )
+        };
+        let crossing = |bearing: f64, from: u64, height: f64, mode: &str| -> Vec<View> {
+            [-20.0, 20.0]
+                .iter()
+                .enumerate()
+                .map(|(n, &side)| {
+                    by_hand(at(
+                        from + 3 * n as u64,
+                        flying(across(bearing, side), height, mode),
+                    ))
+                })
+                .collect()
+        };
+        for id in ["through-the-gates-vtol", "through-the-gates-plane"] {
+            let mut views = vec![by_hand(at(20, flying(HOME, 60.0, "FBWB")))];
+            for (n, bearing) in [0.0, 72.0, 144.0, 216.0, 288.0].into_iter().enumerate() {
+                views.extend(crossing(bearing, 23 + 6 * n as u64, 60.0, "FBWB"));
+            }
+            let (_, verdict) = run(id, &views);
+            assert_eq!(
+                verdict,
+                Verdict::Passed {
+                    line: "Passed. Through all five in 40 s.".into(),
+                    measure: Some(40.0)
+                },
+                "{id}"
+            );
+            // Gate 1 in LOITER, before FBWB, does not count.
+            let (attempt, verdict) = run(id, &crossing(0.0, 20, 60.0, "LOITER"));
+            assert_eq!((attempt.step, verdict), (0, Verdict::Keep), "{id}");
+            // Nor in FBWB under the band.
+            let mut low = vec![by_hand(at(20, flying(HOME, 25.0, "FBWB")))];
+            low.extend(crossing(0.0, 23, 25.0, "FBWB"));
+            let (attempt, verdict) = run(id, &low);
+            assert_eq!((attempt.step, verdict), (1, Verdict::Keep), "{id}");
+        }
     }
 
     #[test]
@@ -1410,6 +1497,7 @@ mod tests {
                             longitude_deg: HOME.1,
                             altitude_m: 50.0,
                             altitude_frame: AltitudeFrame::AboveHome,
+                            loiter_radius_m: None,
                             heading: None,
                         },
                         other => panic!("{other:?}"),

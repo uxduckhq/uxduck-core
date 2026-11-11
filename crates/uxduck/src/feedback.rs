@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use uxduck_contracts::dto::feedback::{FeedbackKind, FeedbackSendResult, FeedbackStatus};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
-use uxduck_engine::feedback::{FeedbackOrder, FeedbackPort, FlightRef};
+use uxduck_engine::feedback::{FeedbackAddition, FeedbackOrder, FeedbackPort, FlightRef};
 
 use crate::adapters::credentials::FileCredentials;
 use crate::daemon::engine_task::EngineHandle;
@@ -30,16 +31,31 @@ const FLIGHT_US: u64 = 5 * 60 * 1_000_000;
 const MAX_FLIGHT: usize = 20 * 1024 * 1024;
 const KEEP_FOR: Duration = Duration::from_hours(24 * 7);
 const RETRY: Duration = Duration::from_mins(1);
+/// The longest a 429's `Retry-After` holds kept reports back.
+const LONGEST_PAUSE: Duration = Duration::from_hours(24);
+
+/// How many follow-up keys of reports the agent filed are kept (S294).
+const KEYS_KEPT: usize = 200;
+
+/// What the sender task is asked to do.
+#[derive(Debug)]
+enum Job {
+    Report(Box<FeedbackOrder>),
+    Addition(FeedbackAddition),
+}
 
 /// The engine's end: each report is a message to the sender task.
 #[derive(Debug)]
 pub struct FeedbackChannel {
-    tx: mpsc::UnboundedSender<FeedbackOrder>,
+    tx: mpsc::UnboundedSender<Job>,
 }
 
 impl FeedbackPort for FeedbackChannel {
     fn send(&mut self, order: FeedbackOrder) {
-        let _ = self.tx.send(order);
+        let _ = self.tx.send(Job::Report(Box::new(order)));
+    }
+    fn add(&mut self, addition: FeedbackAddition) {
+        let _ = self.tx.send(Job::Addition(addition));
     }
 }
 
@@ -62,6 +78,7 @@ pub fn start(
         api: api_url(),
         client: crate::online::client(Duration::from_secs(60)),
         sent: data_dir.join("suggestions.json"),
+        keys: data_dir.join("agent-feedback-keys.json"),
         credentials,
     };
     // Suggestions sent from here that this version ships (S73).
@@ -90,6 +107,8 @@ struct Sender {
     client: Option<reqwest::Client>,
     /// The suggestions sent from here to be told about (S73).
     sent: PathBuf,
+    /// The follow-up keys of reports the agent filed, by report id (S294).
+    keys: PathBuf,
     credentials: FileCredentials,
 }
 
@@ -98,29 +117,47 @@ enum Sent {
     Done(FeedbackSendResult),
     /// Offline, or the API cannot take it now: kept for later.
     Later,
+    /// The API takes no more reports from this address for now (429): kept,
+    /// and nothing is tried again for this long.
+    Limited(Duration),
     /// The API refused it for good, saying why.
     Refused(String),
 }
 
-async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<FeedbackOrder>, engine: EngineHandle) {
+async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>, engine: EngineHandle) {
+    // While the API is limiting this address, kept reports wait until then.
+    let mut paused_until: Option<Instant> = None;
     loop {
         let waiting = sender.waiting();
-        let order = if waiting.is_empty() {
+        let job = if waiting.is_empty() {
             rx.recv().await
         } else {
+            let wake = paused_until
+                .filter(|until| *until > Instant::now())
+                .unwrap_or_else(|| Instant::now() + sender.retry);
             tokio::select! {
-                order = rx.recv() => order,
-                () = tokio::time::sleep(sender.retry) => {
+                job = rx.recv() => job,
+                () = tokio::time::sleep_until(wake) => {
                     crate::wakes::count("feedback: retry");
                     for dir in waiting {
-                        sender.retry(&dir).await;
+                        if let Some(wait) = sender.retry(&dir).await {
+                            paused_until = Some(Instant::now() + wait);
+                            break;
+                        }
                     }
                     continue;
                 }
             }
         };
-        let Some(order) = order else {
-            return;
+        let order = match job {
+            None => return,
+            Some(Job::Report(order)) => *order,
+            Some(Job::Addition(addition)) => {
+                let id = addition.id.clone();
+                let answer = sender.add(addition).await;
+                let _ = engine.run(move |e| e.feedback_done(&id, answer)).await;
+                continue;
+            }
         };
         let report_id = order.report_id.clone();
         let answer = match sender.keep(order).await {
@@ -138,7 +175,17 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<FeedbackOrder>, eng
                     status: FeedbackStatus::Queued,
                     issue: None,
                     transcript: None,
+                    limited: false,
                 }),
+                Sent::Limited(wait) => {
+                    paused_until = Some(Instant::now() + wait);
+                    Ok(FeedbackSendResult {
+                        status: FeedbackStatus::Queued,
+                        issue: None,
+                        transcript: None,
+                        limited: true,
+                    })
+                }
                 Sent::Refused(why) => {
                     let _ = std::fs::remove_dir_all(&dir);
                     Err(ApiError::new(ErrorKind::InvalidValue, why))
@@ -175,7 +222,9 @@ impl Sender {
         dirs.into_iter().map(|(_, dir)| dir).collect()
     }
 
-    async fn retry(&self, dir: &Path) {
+    /// Tries a kept report again; how long to wait when the API is limiting
+    /// this address.
+    async fn retry(&self, dir: &Path) -> Option<Duration> {
         match self.send(dir).await {
             Sent::Done(result) => {
                 self.remember(dir, &result);
@@ -187,7 +236,9 @@ impl Sender {
                 let _ = std::fs::remove_dir_all(dir);
             }
             Sent::Later => {}
+            Sent::Limited(wait) => return Some(wait),
         }
+        None
     }
 
     /// A suggestion sent with "tell me when it ships" (S73): kept, so this
@@ -214,6 +265,113 @@ impl Sender {
         crate::shipped::remember(&self.sent, issue, title, by_email);
     }
 
+    /// The follow-up keys of reports the agent filed, newest last.
+    fn read_keys(&self) -> Vec<(String, String)> {
+        std::fs::read(&self.keys)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Keeps a report's follow-up key so the agent can add to it later,
+    /// after a restart too; only the newest are kept.
+    fn keep_key(&self, report_id: &str, key: &str) -> std::io::Result<()> {
+        let mut keys = self.read_keys();
+        keys.retain(|(id, _)| id != report_id);
+        keys.push((report_id.to_owned(), key.to_owned()));
+        let skip = keys.len().saturating_sub(KEYS_KEPT);
+        let kept: Vec<_> = keys.into_iter().skip(skip).collect();
+        std::fs::write(&self.keys, json!(kept).to_string())
+    }
+
+    /// Adds to a report the agent filed (S294): `POST /v1/feedback/<id>/more`
+    /// with its kept key. Not kept while offline: the agent is told.
+    async fn add(&self, addition: FeedbackAddition) -> Result<FeedbackSendResult, ApiError> {
+        let (Some(api), Some(client)) = (&self.api, &self.client) else {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "feedback is turned off in this build",
+            ));
+        };
+        let Some((_, key)) = self
+            .read_keys()
+            .into_iter()
+            .find(|(id, _)| *id == addition.report_id)
+        else {
+            return Err(ApiError::new(
+                ErrorKind::NotFound,
+                "this computer no longer has that report's key",
+            ));
+        };
+        let mut form = Multipart::new();
+        form.part(
+            "addition",
+            None,
+            "application/json",
+            json!({ "id": addition.id, "key": key, "text": addition.text })
+                .to_string()
+                .as_bytes(),
+        );
+        for file in &addition.attachments {
+            let Some(bytes) = base64_decode(&file.data) else {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    format!("{} is not base64", file.name),
+                ));
+            };
+            form.part(
+                "attachment",
+                Some(&quoted(&file.name)),
+                "application/octet-stream",
+                &bytes,
+            );
+        }
+        let (content_type, body) = form.finish();
+        let unreachable = || {
+            ApiError::new(
+                ErrorKind::Busy,
+                "couldn't reach UXDuck's servers. Nothing was added",
+            )
+        };
+        let response = client
+            .post(format!("{api}/v1/feedback/{}/more", addition.report_id))
+            .header("Content-Type", content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| unreachable())?;
+        let status = response.status();
+        let answer: Value = response.json().await.unwrap_or(Value::Null);
+        match status.as_u16() {
+            200..=299 => Ok(FeedbackSendResult {
+                status: match answer["status"].as_str() {
+                    Some("received") => FeedbackStatus::Received,
+                    Some("duplicate") => FeedbackStatus::Duplicate,
+                    _ => FeedbackStatus::Filed,
+                },
+                issue: answer["issue"].as_str().map(str::to_owned),
+                transcript: None,
+                limited: false,
+            }),
+            404 => Err(ApiError::new(
+                ErrorKind::NotFound,
+                "the report hasn't reached UXDuck's servers yet. Try again once it's sent",
+            )),
+            429 => Err(ApiError::new(
+                ErrorKind::Busy,
+                "UXDuck's servers are taking no more from this network for now. Nothing was added. Try again later",
+            )),
+            500..=599 => Err(unreachable()),
+            _ => Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                answer["error"]
+                    .as_str()
+                    .unwrap_or("the addition was refused")
+                    .to_owned(),
+            )),
+        }
+    }
+
     fn signed_in(&self) -> bool {
         self.credentials
             .get(crate::account::TOKEN)
@@ -234,6 +392,7 @@ impl Sender {
             },
             "credit": order.credit,
             "fromAgent": order.from_agent,
+            "agentFiled": order.agent_filed,
             "text": order.text,
             "email": order.reply_email,
             "name": order.reporter_name,
@@ -254,6 +413,11 @@ impl Sender {
                 .collect();
         }
         std::fs::write(dir.join("report.json"), report.to_string())?;
+        if order.agent_filed
+            && let Some(key) = &order.follow_up_key
+        {
+            self.keep_key(&order.report_id, key)?;
+        }
         if let Some(mut bundle) = order.bundle {
             if let Some(report) = bundle.get_mut("report").and_then(Value::as_object_mut) {
                 report.insert("platform".into(), json!(crate::analytics::platform()));
@@ -352,20 +516,37 @@ impl Sender {
             .body(body);
         // Signed in: the report is the account's, to see on any computer,
         // and credited when asked (S73). The API reads it from the token.
+        // One the agent filed by itself goes without it (S294).
+        let anonymous =
+            serde_json::from_slice::<Value>(&report).is_ok_and(|kept| kept["agentFiled"] == true);
         if let Some(token) = self
             .credentials
             .get(crate::account::TOKEN)
-            .filter(|t| !t.is_empty())
+            .filter(|t| !t.is_empty() && !anonymous)
         {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await;
-        let Ok(response) = response else {
-            return Sent::Later;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(%error, "feedback: UXDuck's servers could not be reached; kept");
+                return Sent::Later;
+            }
         };
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|seconds| Duration::from_secs(seconds.min(LONGEST_PAUSE.as_secs())));
         let answer: Value = response.json().await.unwrap_or(Value::Null);
-        match status.as_u16() {
+        self.outcome(status.as_u16(), retry_after, &answer)
+    }
+
+    /// What the API's answer to a report means for it.
+    fn outcome(&self, status: u16, retry_after: Option<Duration>, answer: &Value) -> Sent {
+        match status {
             // Not set up on the server: no retry will help, so say so now.
             503 if answer["code"] == "not-configured" => Sent::Refused(
                 answer["error"]
@@ -375,6 +556,7 @@ impl Sender {
             ),
             200..=299 => {
                 let status = match answer["status"].as_str() {
+                    Some("received") => FeedbackStatus::Received,
                     Some("duplicate") => FeedbackStatus::Duplicate,
                     Some("held") => FeedbackStatus::Held,
                     _ => FeedbackStatus::Filed,
@@ -383,11 +565,26 @@ impl Sender {
                     status,
                     issue: answer["issue"].as_str().map(str::to_owned),
                     transcript: answer["transcript"].as_str().map(str::to_owned),
+                    limited: false,
                 })
+            }
+            429 => {
+                let wait = retry_after.unwrap_or(self.retry).max(self.retry);
+                tracing::warn!(
+                    seconds = wait.as_secs(),
+                    "feedback: the API takes no more reports from this address for now; kept"
+                );
+                Sent::Limited(wait)
             }
             // A redirect is a network that wants a sign-in first, or
             // something else in the way: keep the report for later.
-            300..=399 | 429 | 500..=599 => Sent::Later,
+            300..=399 | 500..=599 => {
+                tracing::warn!(
+                    status,
+                    "feedback: the API could not take the report now; kept"
+                );
+                Sent::Later
+            }
             _ => Sent::Refused(
                 answer["error"]
                     .as_str()

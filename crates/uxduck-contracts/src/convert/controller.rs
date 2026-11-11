@@ -19,6 +19,8 @@ macro_rules! both_ways {
 
 both_ways!(c::TargetMode, dto::TargetMode, Pinned, FollowsSelection);
 both_ways!(c::StickMode, dto::StickMode, Mode1, Mode2, Mode3, Mode4);
+both_ways!(c::StickControl, dto::StickControl, Roll, Pitch, Yaw);
+both_ways!(c::HeldAction, dto::HeldAction, Open, Close, Talk);
 both_ways!(
     c::ThrottleRange,
     dto::ThrottleRange,
@@ -105,6 +107,7 @@ impl From<&c::ButtonBinding> for dto::ButtonBinding {
             button: v.button.into(),
             code: v.code,
             command: (&v.command).into(),
+            hold_ms: v.hold_ms,
         }
     }
 }
@@ -115,6 +118,27 @@ impl From<dto::ButtonBinding> for c::ButtonBinding {
             button: v.button.into(),
             code: v.code,
             command: v.command.into(),
+            hold_ms: v.hold_ms,
+        }
+    }
+}
+
+impl From<&c::ActionBinding> for dto::ActionBinding {
+    fn from(v: &c::ActionBinding) -> Self {
+        Self {
+            button: v.button.into(),
+            code: v.code,
+            action: v.action.into(),
+        }
+    }
+}
+
+impl From<dto::ActionBinding> for c::ActionBinding {
+    fn from(v: dto::ActionBinding) -> Self {
+        Self {
+            button: v.button.into(),
+            code: v.code,
+            action: v.action.into(),
         }
     }
 }
@@ -134,6 +158,8 @@ impl From<&c::InputMapping> for dto::InputMapping {
             buttons: v.buttons.iter().map(Into::into).collect(),
             positions: v.positions.iter().map(Into::into).collect(),
             rc_channels: v.rc_channels.iter().map(Into::into).collect(),
+            unused: v.unused.iter().copied().map(Into::into).collect(),
+            actions: v.actions.iter().map(Into::into).collect(),
             version: v.version,
         }
     }
@@ -146,6 +172,7 @@ impl From<&c::PositionBinding> for dto::PositionBinding {
             code: v.code,
             at: v.at,
             command: (&v.command).into(),
+            hold_ms: v.hold_ms,
         }
     }
 }
@@ -157,6 +184,7 @@ impl From<dto::PositionBinding> for c::PositionBinding {
             code: v.code,
             at: v.at,
             command: v.command.into(),
+            hold_ms: v.hold_ms,
         }
     }
 }
@@ -177,6 +205,10 @@ impl From<&c::Controller> for dto::Controller {
             pending_target: v.pending_target.clone(),
             mapping_id: v.mapping_id.clone(),
             input_pause: v.input_pause.clone(),
+            holding: v.holding.as_ref().map(|hold| dto::ControllerHold {
+                command: (&hold.command).into(),
+                hold_ms: hold.hold_ms,
+            }),
             version: v.version,
         }
     }

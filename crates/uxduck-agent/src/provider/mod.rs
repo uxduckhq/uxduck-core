@@ -3,7 +3,6 @@
 //! hosted model in front of either; a scripted one for tests; and a wrapper
 //! that retries, times out and falls back.
 
-#[cfg(feature = "http")]
 pub mod anthropic;
 pub mod fake;
 #[cfg(feature = "http")]
@@ -11,7 +10,10 @@ pub mod hosted;
 #[cfg(feature = "http")]
 mod http;
 pub mod openai;
+#[cfg(feature = "http")]
+mod openai_ws;
 pub mod resilient;
+pub mod socket;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +37,9 @@ pub struct ProviderRequest {
     pub conversation: Vec<Value>,
     pub tools: Vec<Tool>,
     pub max_output_tokens: u32,
-    pub effort: Option<&'static str>,
+    /// The reasoning effort: OpenAI's `reasoning.effort`, Anthropic's
+    /// `output_config.effort`. Changing it within a chat costs a cache miss.
+    pub effort: Option<String>,
     /// The response this one continues: a tool round, or a summary. The
     /// hosted model counts it as part of the same chat.
     pub continues: Option<String>,
@@ -69,6 +73,10 @@ impl Usage {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
+    /// A provider response exists; retrying it could lose live steering.
+    Started,
+    /// Native steering was committed by the successor response.
+    InputApplied(crate::input::Input),
     TextDelta(String),
     ToolCall {
         call_id: String,
@@ -81,6 +89,7 @@ pub enum ProviderEvent {
         response_id: String,
         output: Vec<Value>,
         usage: Usage,
+        usage_known: bool,
     },
     /// The request was sent again after a busy answer or a dropped
     /// connection.
@@ -127,6 +136,22 @@ impl ProviderError {
 pub trait Provider: Send + Sync {
     /// The items this provider's conversations are made of.
     fn wire(&self) -> Wire;
+
+    fn respond_once_private(
+        &self,
+        request: ProviderRequest,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        self.respond(request)
+    }
+
+    /// Optional full-duplex input; ordinary providers leave it for the shared loop.
+    fn respond_with_input(
+        &self,
+        request: ProviderRequest,
+        _inputs: crate::input::Inputs,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        self.respond(request)
+    }
 
     /// Starts a response and streams its events.
     fn respond(

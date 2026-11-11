@@ -124,3 +124,19 @@ fn opening_shows_argument_errors_from_the_background_daemon() {
     assert!(error.contains("--port"), "{error}");
     assert!(!dir.path().join("daemon.json").exists());
 }
+
+/// `ssh` runs UXDuck as its `SSH_ASKPASS` for a companion computer's
+/// password (S296): it prints the check's file, whatever the prompt.
+#[test]
+fn as_ssh_askpass_it_prints_the_password_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("askpass");
+    std::fs::write(&file, "raspberry").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("pi@pi-vision.local's password: ")
+        .env("UXDUCK_ASKPASS_FILE", &file)
+        .output()
+        .expect("spawn uxduck");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "raspberry\n");
+}

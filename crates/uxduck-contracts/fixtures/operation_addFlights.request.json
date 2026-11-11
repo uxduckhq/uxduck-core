@@ -1,0 +1,7 @@
+{
+  "method": "operation/addFlights",
+  "params": {
+    "id": "op3c9a1e7b2d4f6a80",
+    "flightIds": ["fl5e1c3a9d4f6b8c02"]
+  }
+}

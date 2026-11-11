@@ -1,8 +1,8 @@
-//! Flights to the account (S82, ADR-0003 C2 to C4, C17): every few seconds
-//! the spool cuts what is due, and while UXDuck is signed in with "Store
-//! flights and recordings in my account" on, the chunks go straight to
-//! storage with create-only URLs the API grants, then the API is told,
-//! checks them and catalogues them. A chunk's file here goes only once the
+//! Flights to the account (S82, ADR-0003 C2 to C4, C17, ADR-0046): every
+//! few seconds each flight synced with its log has it cut from its connection's
+//! tlogs, and while UXDuck is signed in the chunks go straight to storage
+//! with create-only URLs the API grants, then the API is told, checks them
+//! and catalogues them. A chunk's file here goes only once the
 //! account acknowledged it. A network or a cloud that is down only makes
 //! the backlog wait; it is reported in Settings › Storage.
 //!
@@ -10,7 +10,16 @@
 //! else (ADR-0003 "Uplink priority").
 //!
 //! Recordings (S83) take the same way as segments of their own bytes, once
-//! they end unless "Upload video while flying" is on. When the disk runs
+//! they end unless "Upload video while flying" is on: every one with
+//! automatic sync and "What to sync" at video, else those of flights synced
+//! with their video, on a plan that takes video (B4, B8, B11).
+//!
+//! On a metered connection (B12), with "Wait for unmetered networks" on,
+//! nothing is cut or sent until it is not; summaries sync as they do.
+//!
+//! The account has a quota and a plan (B3 to B5): `/v1/storage` says what
+//! it allows, and a grant it refuses stops the uploads, everything kept
+//! here, until the plan or what it keeps changes or someone signs in again. When the disk runs
 //! low, ended recordings make room, those already in the account first;
 //! whatever goes before it was stored is journaled and told with its range.
 
@@ -20,7 +29,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use uxduck_contracts::dto::settings::UploadStatus;
+use uxduck_contracts::dto::analytics::DaemonEvent;
+use uxduck_contracts::dto::settings::{StoragePlan, SyncRefusal, UploadStatus};
 
 use crate::adapters::credentials::FileCredentials;
 use crate::daemon::engine_task::EngineHandle;
@@ -28,29 +38,75 @@ use crate::spool::{Spool, State};
 
 /// How often the spool cuts and the uploader looks.
 const EVERY: Duration = Duration::from_secs(10);
-/// A tlog that has not grown for this long is cut whatever its size.
-const IDLE_US: u64 = 60_000_000;
 /// Chunks per round.
 const BATCH: usize = 20;
 /// Below this much free disk, ended recordings make room (S83).
 const MIN_FREE_BYTES: u64 = 2 << 30;
 /// How often the account's storage used is asked for.
 const USAGE_EVERY: Duration = Duration::from_secs(300);
+/// Why nothing goes while the connection is metered (ADR-0046 B12).
+const METERED: &str = "Waiting for a network that isn't metered";
 /// After rounds that failed in a row, the next waits up to this many
 /// rounds: a server with no storage yet is asked about every 5 minutes.
 const MAX_REST_ROUNDS: u32 = 32;
 
 /// Whether this round may cut and upload.
 enum Gate {
-    /// Flights are not stored at all: signed out, no server, or the
-    /// setting off. Nothing is cut, and what waits is let go.
+    /// Nothing goes: signed out, or no server.
     Off(String),
-    /// Stored, but not now (a vehicle is armed): nothing is cut yet.
+    /// Not now (a vehicle is armed, or the connection is metered): nothing
+    /// is cut yet.
     Wait(String),
-    /// Signed in with the setting off: only the flight logs someone asked
-    /// for go, each by itself (2026-10-24); the rest is let go as when off.
+    /// Signed in with automatic sync off: only the flights synced by hand
+    /// go, each log by itself, and their videos (2026-10-24, ADR-0046 B1).
     Asked(String),
+    /// Automatic sync on: flights' logs, and recordings when allowed.
     Ready,
+}
+
+/// What `/v1/storage` says of the account (ADR-0046 B3); each part unknown
+/// to a server that does not say it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Usage {
+    bytes: Option<u64>,
+    quota_bytes: Option<u64>,
+    plan: Option<StoragePlan>,
+    video: Option<bool>,
+    simulated: Option<bool>,
+}
+
+/// A refusal (B5): why, the server's words, and what the account was then;
+/// uploads wait until that changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Refused {
+    reason: SyncRefusal,
+    said: Option<String>,
+    then: Option<Usage>,
+}
+
+impl Refused {
+    /// Whether the account changed enough to try again: anything for a
+    /// full account (a delete, a bigger quota), the plan for video.
+    fn lifted(&self, now: Option<&Usage>) -> bool {
+        let plan = |u: Option<&Usage>| u.map(|u| (u.plan, u.video, u.quota_bytes));
+        match self.reason {
+            SyncRefusal::StorageFull => self.then.as_ref() != now,
+            SyncRefusal::Plan => plan(self.then.as_ref()) != plan(now),
+        }
+    }
+}
+
+/// A round that did not finish: a problem to rest after, or the account's
+/// refusal.
+enum Failure {
+    Problem(String),
+    Refused(SyncRefusal, Option<String>),
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Self::Problem(why)
+    }
 }
 
 pub fn start(data_dir: &Path, credentials: FileCredentials, engine: EngineHandle) {
@@ -106,6 +162,7 @@ async fn on_spool<T: Send + 'static>(
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one round, read top to bottom")]
 async fn run(
     spool: Shared,
     video: std::path::PathBuf,
@@ -121,7 +178,9 @@ async fn run(
     let mut every = tokio::time::interval(fast.map_or(EVERY, Duration::from_millis));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut usage_asked: Option<std::time::Instant> = None;
-    let mut stored_bytes: Option<u64> = None;
+    let mut usage_now: Option<Usage> = None;
+    let mut refused: Option<Refused> = None;
+    let mut signed_in_as: Option<String> = None;
     let mut problem: Option<String> = None;
     // Rounds that failed in a row, and when the next may try.
     let mut failed: u32 = 0;
@@ -132,74 +191,142 @@ async fn run(
         let token = credentials
             .get(crate::account::TOKEN)
             .filter(|t| !t.is_empty());
-        let Some(gate) = gate(api.as_ref(), client.as_ref(), token.as_ref(), &engine).await else {
-            return;
-        };
-        if matches!(gate, Gate::Off(_) | Gate::Asked(_))
-            && let Err(error) = on_spool(&spool, Spool::release).await
-        {
-            tracing::warn!(%error, "the flight spool could not let go of its chunks");
+        // Signed in again, or as someone else: the account is asked afresh (B5).
+        if token != signed_in_as {
+            signed_in_as.clone_from(&token);
+            (usage_now, usage_asked, refused) = (None, None, None);
         }
         let resting = rest_until.is_some_and(|at| tokio::time::Instant::now() < at);
-        let ready = matches!(gate, Gate::Ready) && !resting;
+        // What the account allows, every few minutes, and every round while
+        // it refuses, to try again once that changes.
+        if let (Some(api), Some(client), Some(token)) = (&api, &client, &token)
+            && !resting
+            && (refused.is_some()
+                || usage_asked.is_none_or(|at: std::time::Instant| at.elapsed() >= USAGE_EVERY))
+        {
+            usage_asked = Some(std::time::Instant::now());
+            usage_now = usage(api, client, token).await.or(usage_now);
+            if refused
+                .as_ref()
+                .is_some_and(|r| r.lifted(usage_now.as_ref()))
+            {
+                refused = None;
+            }
+        }
+        // Reported first, so this round's cuts already follow the plan.
+        let video_ok = usage_now.as_ref().and_then(|u| u.video) != Some(false)
+            && refused
+                .as_ref()
+                .is_none_or(|r| r.reason != SyncRefusal::Plan);
+        let metered = tokio::task::spawn_blocking(crate::metered::metered)
+            .await
+            .ok()
+            .flatten();
+        let (chunks, bytes) = on_spool(&spool, |s| s.backlog()).await.unwrap_or((0, 0));
+        let early = upload_status(
+            (chunks, bytes),
+            problem.clone(),
+            usage_now.as_ref(),
+            refused.as_ref(),
+            metered,
+        );
+        if engine.run(move |e| e.upload_reported(early)).await.is_err() {
+            return;
+        }
+        let gate = gate(
+            api.as_ref(),
+            client.as_ref(),
+            token.as_ref(),
+            &engine,
+            metered == Some(true),
+        );
+        let Some(gate) = gate.await else {
+            return;
+        };
+        // Whole connections' tlogs are no longer sent as they are written
+        // (B1): what an earlier UXDuck cut of them goes.
+        if let Err(error) = on_spool(&spool, Spool::release).await {
+            tracing::warn!(%error, "the flight spool could not let go of its chunks");
+        }
+        let Ok(held) = flight_logs_waiting(&spool, &engine).await else {
+            return;
+        };
+        let full = refused
+            .as_ref()
+            .is_some_and(|r| r.reason == SyncRefusal::StorageFull);
+        let going = matches!(gate, Gate::Asked(_) | Gate::Ready) && !resting && !full;
         // Cut only what a round can send: a backlog the account is not
         // taking grows no further, and no round reads much.
         let (waiting, _) = on_spool(&spool, |s| s.backlog()).await.unwrap_or((0, 0));
-        let room = if ready {
+        let room = if going && video_ok {
             BATCH.saturating_sub(usize::try_from(waiting).unwrap_or(usize::MAX))
         } else {
             0
         };
-        if room > 0 {
-            let every_us = fast.map_or(crate::spool::CUT_EVERY_US, |ms| ms * 1000);
-            let cut = on_spool(&spool, move |s| {
-                s.cut_every(now_us(), IDLE_US, every_us, room)
-            })
-            .await;
-            if let Err(error) = cut {
-                tracing::warn!(%error, "the flight spool could not cut a chunk");
-            }
-        }
         if recordings(&spool, &video, &engine, room > 0).await.is_err() {
             return;
         }
-        if matches!(gate, Gate::Asked(_) | Gate::Ready) && !resting {
+        if going {
             cut_asked(&spool, &engine).await;
         }
         problem = match (gate, &api, &client, &token) {
+            _ if full => refused
+                .as_ref()
+                .map(|r| refusal_problem(r, usage_now.as_ref())),
             (gate @ (Gate::Asked(_) | Gate::Ready), Some(api), Some(client), Some(token))
                 if !resting =>
             {
-                let only_asked = matches!(gate, Gate::Asked(_));
-                let outcome = round(&spool, api, client, token, &engine, only_asked).await;
+                // Recordings go only while allowed; which go, the engine said.
+                let only_asked = !video_ok;
+                let outcome = round(&spool, api, client, token, &engine, only_asked, &held).await;
+                let outcome = match outcome {
+                    Err(Failure::Refused(reason, said)) => {
+                        // Asked afresh at once, so a stale plan is not what waits.
+                        usage_now = usage(api, client, token).await.or(usage_now);
+                        usage_asked = Some(std::time::Instant::now());
+                        let fresh = refused.as_ref().is_none_or(|r| r.reason != reason);
+                        refused = Some(Refused {
+                            reason,
+                            said,
+                            then: usage_now.clone(),
+                        });
+                        if fresh {
+                            let _ = engine
+                                .run(move |e| e.track(DaemonEvent::SyncRefused { reason }))
+                                .await;
+                        }
+                        Ok(())
+                    }
+                    Err(Failure::Problem(why)) => Err(why),
+                    Ok(()) => Ok(()),
+                };
                 let (problem, rest) = settle(outcome, &mut failed, every.period());
                 rest_until = rest;
-                // Off but for what was asked: still said so.
-                problem.or(match gate {
-                    Gate::Asked(why) => Some(why),
-                    _ => None,
-                })
+                problem
+                    .or_else(|| {
+                        refused
+                            .as_ref()
+                            .map(|r| refusal_problem(r, usage_now.as_ref()))
+                    })
+                    // Off but for what was asked: still said so.
+                    .or(match gate {
+                        Gate::Asked(why) => Some(why),
+                        _ => None,
+                    })
             }
             (Gate::Ready, ..) => problem,
             (Gate::Off(why) | Gate::Wait(why) | Gate::Asked(why), ..) => Some(why),
         };
-        if problem.is_none()
-            && usage_asked.is_none_or(|at: std::time::Instant| at.elapsed() >= USAGE_EVERY)
-        {
-            usage_asked = Some(std::time::Instant::now());
-            if let (Some(api), Some(client), Some(token)) = (&api, &client, &token) {
-                stored_bytes = usage(api, client, token).await.or(stored_bytes);
-            }
-        }
         let (chunks, bytes) = on_spool(&spool, |s| s.backlog()).await.unwrap_or((0, 0));
-        let status = UploadStatus {
-            chunks,
-            bytes,
-            problem: problem.clone().filter(|_| chunks > 0),
-            stored_bytes,
-        };
+        let report = upload_status(
+            (chunks, bytes),
+            problem.clone(),
+            usage_now.as_ref(),
+            refused.as_ref(),
+            metered,
+        );
         if engine
-            .run(move |e| e.upload_reported(status))
+            .run(move |e| e.upload_reported(report))
             .await
             .is_err()
         {
@@ -208,24 +335,116 @@ async fn run(
     }
 }
 
-/// What this round may do; `None` once the engine stopped.
+/// What the uploader reports: what waits, why it is not going, and what the
+/// account allows (ADR-0046 B3 to B5).
+fn upload_status(
+    (chunks, bytes): (u64, u64),
+    problem: Option<String>,
+    usage: Option<&Usage>,
+    refused: Option<&Refused>,
+    metered: Option<bool>,
+) -> UploadStatus {
+    let video_refused = refused.is_some_and(|r| r.reason == SyncRefusal::Plan);
+    UploadStatus {
+        chunks,
+        bytes,
+        problem: problem.filter(|_| chunks > 0),
+        stored_bytes: usage.and_then(|u| u.bytes),
+        quota_bytes: usage.and_then(|u| u.quota_bytes),
+        plan: usage.and_then(|u| u.plan),
+        may_upload_video: if video_refused {
+            Some(false)
+        } else {
+            usage.and_then(|u| u.video)
+        },
+        may_sync_simulated: usage.and_then(|u| u.simulated),
+        refused: refused.map(|r| r.reason),
+        metered,
+    }
+}
+
+/// The flight logs waiting here, sorted by the engine (ADR-0046 B2, B6):
+/// those no longer wanted go, and those to hold are returned. `Err` once
+/// the engine stopped.
+async fn flight_logs_waiting(spool: &Shared, engine: &EngineHandle) -> Result<Vec<String>, ()> {
+    let waiting = on_spool(spool, |s| s.asked_recordings())
+        .await
+        .unwrap_or_default();
+    if waiting.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (held, unwanted) = engine
+        .run(move |e| e.flight_logs_waiting(waiting))
+        .await
+        .map_err(|_| ())?;
+    for recording in unwanted {
+        if let Err(error) = on_spool(spool, move |s| s.drop_recording(&recording)).await {
+            tracing::warn!(%error, "a flight's log no longer wanted could not be let go");
+        }
+    }
+    Ok(held)
+}
+
+/// Why nothing goes, in plain words (ADR-0046 B5).
+fn refusal_problem(refused: &Refused, usage: Option<&Usage>) -> String {
+    match refused.reason {
+        SyncRefusal::Plan => "Video syncs on a paid plan.".into(),
+        SyncRefusal::StorageFull => match usage.and_then(|u| u.bytes.zip(u.quota_bytes)) {
+            Some((used, quota)) => format!(
+                "Your account is full: {} of {} used.",
+                size_words(used.min(quota)),
+                size_words(quota)
+            ),
+            None => refused
+                .said
+                .clone()
+                .unwrap_or_else(|| "Your account is full.".into()),
+        },
+    }
+}
+
+/// Bytes as people read them, in the account's decimal units: `312 MB`,
+/// `1 GB`, `1.5 GB`.
+fn size_words(bytes: u64) -> String {
+    const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
+    if bytes < GB {
+        return format!("{} MB", bytes.div_ceil(MB));
+    }
+    let tenths = (bytes + GB / 20) / (GB / 10);
+    match tenths % 10 {
+        0 => format!("{} GB", tenths / 10),
+        t => format!("{}.{t} GB", tenths / 10),
+    }
+}
+
+/// What this round may do; `None` once the engine stopped. A metered
+/// connection holds everything while the person asked it to (B12).
 async fn gate(
     api: Option<&String>,
     client: Option<&reqwest::Client>,
     token: Option<&String>,
     engine: &EngineHandle,
+    metered: bool,
 ) -> Option<Gate> {
     Some(match (api, client, token) {
         (None, _, _) | (_, None, _) => Gate::Off("This UXDuck has no account server".into()),
         (_, _, None) => Gate::Off("Sign in to store flights in your account".into()),
         _ => match engine
-            .run(|e| (e.stores_flights(), e.upload_wanted()))
+            .run(|e| {
+                (
+                    e.stores_flights(),
+                    e.upload_wanted(),
+                    e.waits_for_unmetered(),
+                )
+            })
             .await
             .ok()?
         {
-            (false, _) => Gate::Asked("Storing flights in the account is off".into()),
-            (true, Err(why)) => Gate::Wait(why),
-            (true, Ok(())) => Gate::Ready,
+            (_, _, true) if metered => Gate::Wait(METERED.into()),
+            (false, ..) => Gate::Asked("Automatic sync is off".into()),
+            (true, Err(why), _) => Gate::Wait(why),
+            (true, Ok(()), _) => Gate::Ready,
         },
     })
 }
@@ -289,26 +508,20 @@ async fn recordings(
     {
         tracing::warn!(%error, "the spool could not cut a recording's segment");
     }
-    let mut lost: Vec<(crate::spool::Lost, bool)> = on_spool(spool, Spool::find_lost)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|l| (l, false))
-        .collect();
+    let lost = on_spool(spool, Spool::find_lost).await.unwrap_or_default();
     let need = room_needed(video);
     if need > 0 {
         let ended: Vec<_> = wanted
             .iter()
             .filter_map(|v| v.ended_at_us.map(|at| (as_spooled(v), at)))
             .collect();
-        match on_spool(spool, move |s| s.evict(&ended, need)).await {
-            Ok(evicted) => lost.extend(evicted.into_iter().map(|l| (l, true))),
-            Err(error) => tracing::warn!(%error, "recordings could not make room"),
+        if let Err(error) = on_spool(spool, move |s| s.evict(&ended, need)).await {
+            tracing::warn!(%error, "recordings could not make room");
         }
     }
-    for (l, evicted) in lost {
+    for l in lost {
         engine
-            .run(move |e| e.video_lost(l.recording, l.from_us, l.to_us, evicted))
+            .run(move |e| e.video_lost(l.recording, l.from_us, l.to_us))
             .await
             .map_err(|_| ())?;
     }
@@ -334,8 +547,8 @@ fn room_needed(video: &Path) -> u64 {
     fs4::available_space(video).map_or(0, |free| MIN_FREE_BYTES.saturating_sub(free))
 }
 
-/// What the account keeps, in bytes.
-async fn usage(api: &str, client: &reqwest::Client, token: &str) -> Option<u64> {
+/// What the account keeps and allows (ADR-0046 B3).
+async fn usage(api: &str, client: &reqwest::Client, token: &str) -> Option<Usage> {
     let answer = client
         .get(format!("{api}/v1/storage"))
         .bearer_auth(token)
@@ -345,8 +558,17 @@ async fn usage(api: &str, client: &reqwest::Client, token: &str) -> Option<u64> 
     if !answer.status().is_success() {
         return None;
     }
-    let usage: Value = answer.json().await.ok()?;
-    usage["bytes"].as_u64()
+    Some(read_usage(&answer.json().await.ok()?))
+}
+
+fn read_usage(usage: &Value) -> Usage {
+    Usage {
+        bytes: usage["bytes"].as_u64(),
+        quota_bytes: usage["quotaBytes"].as_u64(),
+        plan: serde_json::from_value(usage["plan"].clone()).ok(),
+        video: usage["video"].as_bool(),
+        simulated: usage["simulated"].as_bool(),
+    }
 }
 
 /// One round: grants for what is waiting, the puts, and the completion.
@@ -395,6 +617,30 @@ async fn cut_asked(spool: &Shared, engine: &EngineHandle) {
     }
 }
 
+/// The chunks a round may send, oldest first: flights' logs only, or
+/// recordings too; none of a log held back (B6).
+async fn sendable(
+    spool: &Shared,
+    only_asked: bool,
+    held: &[String],
+) -> Result<Vec<(crate::spool::Chunk, State)>, String> {
+    let held = held.to_vec();
+    on_spool(spool, move |s| {
+        let waiting = if only_asked {
+            s.waiting_asked(usize::MAX)
+        } else {
+            s.waiting(usize::MAX)
+        }?;
+        Ok(waiting
+            .into_iter()
+            .filter(|(chunk, _)| !held.contains(&chunk.recording))
+            .take(BATCH)
+            .collect())
+    })
+    .await
+    .map_err(|e: rusqlite::Error| e.to_string())
+}
+
 async fn round(
     spool: &Shared,
     api: &str,
@@ -402,16 +648,9 @@ async fn round(
     token: &str,
     engine: &EngineHandle,
     only_asked: bool,
-) -> Result<(), String> {
-    let waiting = on_spool(spool, move |s| {
-        if only_asked {
-            s.waiting_asked(BATCH)
-        } else {
-            s.waiting(BATCH)
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    held: &[String],
+) -> Result<(), Failure> {
+    let waiting = sendable(spool, only_asked, held).await?;
     if waiting.is_empty() {
         return Ok(());
     }
@@ -420,7 +659,8 @@ async fn round(
         .await
         .map_err(|_| "UXDuck is stopping".to_owned())?;
     put_new(spool, api, client, token, &device, &waiting).await?;
-    complete(spool, api, client, token, &device, engine, only_asked).await
+    complete(spool, api, client, token, &device, engine, only_asked, held).await?;
+    Ok(())
 }
 
 fn unreachable(_: reqwest::Error) -> String {
@@ -435,7 +675,7 @@ async fn put_new(
     token: &str,
     device: &str,
     waiting: &[(crate::spool::Chunk, State)],
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     // Grants for those not put yet.
     let to_put: Vec<_> = waiting
         .iter()
@@ -453,8 +693,12 @@ async fn put_new(
             .send()
             .await
             .map_err(unreachable)?;
+        if answer.status() == reqwest::StatusCode::FORBIDDEN {
+            let body: Value = answer.json().await.unwrap_or_default();
+            return Err(grants_refused(&body));
+        }
         if !answer.status().is_success() {
-            return Err(refused(&answer));
+            return Err(refused(&answer).into());
         }
         let grants: Value = answer.json().await.map_err(|e| e.to_string())?;
         for chunk in &to_put {
@@ -477,7 +721,7 @@ async fn put_new(
                 .await
                 .map_err(unreachable)?;
             if !put.status().is_success() {
-                return Err(format!("storage refused a chunk ({})", put.status()));
+                return Err(format!("storage refused a chunk ({})", put.status()).into());
             }
             let name = chunk.name.clone();
             on_spool(spool, move |s| s.mark(&name, State::Uploaded))
@@ -489,6 +733,10 @@ async fn put_new(
 }
 
 /// Tells the account what was put, and lets go of what it keeps.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the round's context, passed down"
+)]
 async fn complete(
     spool: &Shared,
     api: &str,
@@ -497,21 +745,15 @@ async fn complete(
     device: &str,
     engine: &EngineHandle,
     only_asked: bool,
+    held: &[String],
 ) -> Result<(), String> {
     // Everything put, here or in an earlier round: does the account keep it?
-    let put: Vec<_> = on_spool(spool, move |s| {
-        if only_asked {
-            s.waiting_asked(BATCH)
-        } else {
-            s.waiting(BATCH)
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .filter(|(_, state)| *state == State::Uploaded)
-    .map(|(chunk, _)| chunk)
-    .collect();
+    let put: Vec<_> = sendable(spool, only_asked, held)
+        .await?
+        .into_iter()
+        .filter(|(_, state)| *state == State::Uploaded)
+        .map(|(chunk, _)| chunk)
+        .collect();
     if put.is_empty() {
         return Ok(());
     }
@@ -571,6 +813,18 @@ async fn complete(
     Ok(())
 }
 
+/// A grant refused with 403 (ADR-0046 B5): `{ error, code }`, the code
+/// `storage-full` or `plan`; any other is a problem like the rest.
+fn grants_refused(body: &Value) -> Failure {
+    let said = body["error"].as_str().map(str::to_owned);
+    match serde_json::from_value::<SyncRefusal>(body["code"].clone()) {
+        Ok(reason) => Failure::Refused(reason, said),
+        Err(_) => Failure::Problem(
+            said.unwrap_or_else(|| "UXDuck's server refused the upload (403 Forbidden)".to_owned()),
+        ),
+    }
+}
+
 fn refused(answer: &reqwest::Response) -> String {
     let status = answer.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -616,7 +870,7 @@ impl Stored {
     }
 }
 
-/// `uxduck account flights` and `recordings`: what the account keeps,
+/// `uxduck account logbook` and `recordings`: what the account keeps,
 /// newest first.
 ///
 /// # Errors
@@ -755,4 +1009,110 @@ pub async fn download(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn free_and_full() -> Usage {
+        read_usage(&json!({
+            "bytes": 1_000_000_000u64,
+            "quotaBytes": 1_000_000_000u64,
+            "plan": "free",
+            "video": false,
+            "simulated": false,
+        }))
+    }
+
+    #[test]
+    fn the_accounts_plan_is_read_and_an_older_server_says_nothing_of_it() {
+        assert_eq!(
+            free_and_full(),
+            Usage {
+                bytes: Some(1_000_000_000),
+                quota_bytes: Some(1_000_000_000),
+                plan: Some(StoragePlan::Free),
+                video: Some(false),
+                simulated: Some(false),
+            }
+        );
+        assert_eq!(
+            read_usage(&json!({ "bytes": 5 })),
+            Usage {
+                bytes: Some(5),
+                ..Usage::default()
+            }
+        );
+    }
+
+    /// ADR-0046 B5: a 403 from the grants says why, in plain words.
+    #[test]
+    fn a_refused_grant_says_why_and_waits_until_the_account_changes() {
+        let Failure::Refused(reason, said) = grants_refused(&json!({
+            "error": "Your account is full.",
+            "code": "storage-full",
+        })) else {
+            panic!("a refusal");
+        };
+        assert_eq!(reason, SyncRefusal::StorageFull);
+        let refused = Refused {
+            reason,
+            said,
+            then: Some(free_and_full()),
+        };
+        assert_eq!(
+            refusal_problem(&refused, refused.then.as_ref()),
+            "Your account is full: 1 GB of 1 GB used."
+        );
+        assert_eq!(
+            refusal_problem(&refused, None),
+            "Your account is full.",
+            "the server's words when its numbers are unknown"
+        );
+        // Unchanged, it waits; a delete or a paid plan lets it try again.
+        assert!(!refused.lifted(Some(&free_and_full())));
+        let deleted = Usage {
+            bytes: Some(400_000_000),
+            ..free_and_full()
+        };
+        assert!(refused.lifted(Some(&deleted)));
+
+        let Failure::Refused(reason, said) = grants_refused(&json!({
+            "error": "Video syncs on a paid plan.",
+            "code": "plan",
+        })) else {
+            panic!("a refusal");
+        };
+        let video = Refused {
+            reason,
+            said,
+            then: Some(free_and_full()),
+        };
+        assert_eq!(refusal_problem(&video, None), "Video syncs on a paid plan.");
+        // Logs uploaded since do not lift it; a paid plan does.
+        assert!(!video.lifted(Some(&deleted)));
+        let paid = Usage {
+            plan: Some(StoragePlan::Paid),
+            video: Some(true),
+            quota_bytes: Some(100_000_000_000),
+            ..free_and_full()
+        };
+        assert!(video.lifted(Some(&paid)));
+
+        // Any other 403 is a problem like the rest.
+        assert!(matches!(
+            grants_refused(&json!({ "error": "no" })),
+            Failure::Problem(why) if why == "no"
+        ));
+    }
+
+    #[test]
+    fn sizes_read_as_the_account_counts_them() {
+        assert_eq!(size_words(312_000_000), "312 MB");
+        assert_eq!(size_words(1), "1 MB");
+        assert_eq!(size_words(1_000_000_000), "1 GB");
+        assert_eq!(size_words(1_500_000_000), "1.5 GB");
+        assert_eq!(size_words(100_000_000_000), "100 GB");
+    }
 }

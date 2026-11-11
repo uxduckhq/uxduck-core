@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use uxduck_core::domain::video::{
-    CameraMetadata, VideoAudio, VideoContainer, VideoCounters, VideoReport, source_id,
+    CameraClock, CameraMetadata, VideoAudio, VideoContainer, VideoCounters, VideoReport, source_id,
     split_source_id,
 };
 use uxduck_media::source::{Output, Source, Status};
@@ -143,7 +143,7 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
         }
         if last_tick.elapsed() >= REPORT_EVERY {
             last_tick = Instant::now();
-            tick(&mut senders, port, engine);
+            tick(&mut senders, port, hub, engine);
         }
     }
     // Stopped listening: its senders have stopped as far as UXDuck knows.
@@ -241,7 +241,7 @@ pub(super) fn item(output: Output) -> Item {
     }
 }
 
-fn tick(senders: &mut HashMap<String, Sender>, port: u16, engine: &EngineHandle) {
+fn tick(senders: &mut HashMap<String, Sender>, port: u16, hub: &Hub, engine: &EngineHandle) {
     let now = Instant::now();
     for (id, sender) in senders.iter_mut() {
         if sender.stopped {
@@ -261,6 +261,7 @@ fn tick(senders: &mut HashMap<String, Sender>, port: u16, engine: &EngineHandle)
         let elapsed = now.duration_since(at).as_secs_f64().max(0.001);
         sender.reported = (now, status.counters.bytes, status.counters.pictures);
         let mut report = report(port, &sender.address, &status, elapsed, bytes, pictures);
+        report.counters.hold_us = hub.hold_us(id);
         // A second stream from the address says which it is.
         if report.source_id() != *id {
             report.id = Some(id.clone());
@@ -313,6 +314,7 @@ pub(super) fn report(
             datagrams: c.datagrams,
             pictures: c.pictures,
             keyframes: c.keyframes,
+            recovery_points: c.recovery_points,
             lost: c.lost,
             damaged: c.damaged,
             pes_length_mismatches: c.pes_length_mismatches,
@@ -320,6 +322,13 @@ pub(super) fn report(
             nals_dropped: c.nals_dropped,
             klv: c.klv,
             klv_bad: c.klv_bad,
+            hold_us: None,
+            jitter_us: status.jitter_us,
+            camera_clock: status.camera.map(|camera| match camera.clock {
+                uxduck_media::latency::CameraClock::SenderReports => CameraClock::SenderReports,
+                uxduck_media::latency::CameraClock::Klv => CameraClock::Klv,
+            }),
+            camera_delay_us: status.camera.and_then(|camera| camera.delay_us),
         },
     }
 }
@@ -413,5 +422,11 @@ mod tests {
         let audio = report.audio.expect("the source reports its sound");
         assert!(audio.name.starts_with("AAC,"), "{}", audio.name);
         assert!(audio.recorded);
+        // How late (S262): its jitter, no clock of the camera's, and no
+        // hold until a browser is sent a picture.
+        assert!(report.counters.jitter_us.is_some());
+        assert_eq!(report.counters.camera_clock, None);
+        assert_eq!(report.counters.camera_delay_us, None);
+        assert_eq!(report.counters.hold_us, None);
     }
 }

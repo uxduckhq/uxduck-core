@@ -97,6 +97,7 @@ impl From<&core::ParamDefinition> for dto::ParamDefinition {
             volatile: v.volatile,
             calibration: v.calibration,
             variant: v.variant.clone(),
+            from: None,
         }
     }
 }
@@ -187,10 +188,43 @@ impl From<&core::VehicleDefinitions> for dto::VehicleDefinitions {
                 core::DefinitionsStatus::Missing => dto::DefinitionsStatus::Missing,
                 core::DefinitionsStatus::Failed => dto::DefinitionsStatus::Failed,
             },
+            firmware: v.firmware.map(Into::into),
             set_id: v.set_id.clone(),
             title: v.title.clone(),
             matched: v.matched.map(Into::into),
+            own_set_id: v.own_set_id.clone(),
+            own_title: v.own_title.clone(),
+            choice: (&v.choice).into(),
             detail: v.detail.clone(),
+        }
+    }
+}
+
+impl From<&core::SetChoice> for dto::SetChoice {
+    fn from(v: &core::SetChoice) -> Self {
+        match v {
+            core::SetChoice::Automatic => Self::Automatic,
+            core::SetChoice::Set { id } => Self::Set { id: id.clone() },
+            core::SetChoice::None => Self::None,
+        }
+    }
+}
+
+impl From<dto::SetChoice> for core::SetChoice {
+    fn from(v: dto::SetChoice) -> Self {
+        match v {
+            dto::SetChoice::Automatic => Self::Automatic,
+            dto::SetChoice::Set { id } => Self::Set { id },
+            dto::SetChoice::None => Self::None,
+        }
+    }
+}
+
+impl From<&core::DefinitionsChoice> for dto::DefinitionsChoice {
+    fn from(v: &core::DefinitionsChoice) -> Self {
+        Self {
+            ardupilot: (&v.ardupilot).into(),
+            own: (&v.own).into(),
         }
     }
 }
@@ -208,6 +242,7 @@ impl From<&core::OwnSet> for dto::OwnSet {
             added_at_us: v.added_at_us,
             url: v.url.clone(),
             fetched_at_us: v.fetched_at_us,
+            profile_id: v.profile_id.clone(),
         }
     }
 }

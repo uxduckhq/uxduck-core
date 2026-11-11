@@ -1,0 +1,7 @@
+{
+  "name": "copter.param",
+  "bytes": 31,
+  "text": "ARMING_CHECK,1\nBATT_ARM_VOLT,15.2\n",
+  "truncated": false,
+  "binary": false
+}

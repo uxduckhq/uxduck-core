@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::mission_read::ReadMissionItem;
+
 use crate::dto::parameter::{TransferProgress, TransferStatus, WriteStatus};
 
 /// One item, as `MISSION_ITEM_INT` carries it. In global frames the
@@ -31,7 +33,7 @@ pub struct MissionItem {
 #[serde(rename_all = "camelCase")]
 pub struct Mission {
     pub vehicle_id: String,
-    pub items: Vec<MissionItem>,
+    pub items: Vec<ReadMissionItem>,
     pub status: TransferStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -51,9 +53,9 @@ pub struct Mission {
     /// Its fence and rally points, as the mission protocol carries them
     /// (S128).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fence: Vec<MissionItem>,
+    pub fence: Vec<ReadMissionItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rally: Vec<MissionItem>,
+    pub rally: Vec<ReadMissionItem>,
 }
 
 /// Uploads a mission edited from `expectedVersion`; refused with
@@ -127,11 +129,11 @@ pub enum MissionOrigin {
 pub struct MissionRecord {
     pub id: String,
     pub vehicle_id: String,
-    pub items: Vec<MissionItem>,
+    pub items: Vec<ReadMissionItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fence: Vec<MissionItem>,
+    pub fence: Vec<ReadMissionItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rally: Vec<MissionItem>,
+    pub rally: Vec<ReadMissionItem>,
     pub origin: MissionOrigin,
     /// How it came, in words: "Uploaded from Ridge survey".
     pub origin_text: String,

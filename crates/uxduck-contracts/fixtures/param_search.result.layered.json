@@ -1,0 +1,27 @@
+{
+  "describedBy": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "vehicleName": "Copter 1",
+    "firmware": "4.5.7",
+    "definitions": {
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "status": "ready",
+      "setId": "arducopter-4.5.7",
+      "title": "Copter 4.5.7",
+      "matched": "exact",
+      "ownSetId": "own-3f9a1c2b7d4e",
+      "ownTitle": "Acme additions",
+      "detail": "Descriptions from Acme additions over Copter 4.5.7."
+    }
+  },
+  "hits": [
+    {
+      "name": "MYFORK_GAIN",
+      "displayName": "Acme gain",
+      "summary": "How hard the Acme controller pushes.",
+      "value": 3.0,
+      "from": "Acme additions"
+    }
+  ],
+  "total": 1
+}

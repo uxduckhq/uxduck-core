@@ -1,0 +1,19 @@
+{
+  "method": "plan/simulate",
+  "params": {
+    "runs": [
+      {
+        "planId": "plan1a2b3c4d5e6f7a8b",
+        "count": 3,
+        "speedup": 3,
+        "windMps": 6,
+        "windFromDeg": 270
+      },
+      {
+        "planId": "plan2b3c4d5e6f7a8b9c"
+      }
+    ],
+    "name": "Pond survey in wind",
+    "limitMin": 45
+  }
+}

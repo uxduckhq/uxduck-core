@@ -6,6 +6,7 @@
 //! comes back whole, for the host to keep and replay (see `conversation`).
 
 pub mod conversation;
+pub mod input;
 pub mod models;
 pub mod provider;
 pub mod tools;

@@ -1,0 +1,63 @@
+{
+  "method": "replay",
+  "params": {
+    "open": true,
+    "clock": "wall",
+    "startUs": 1790000000000000,
+    "endUs": 1790000060000000,
+    "timeUs": 1790000029000000,
+    "atUs": 1790003600000000,
+    "speed": 5.0,
+    "playing": true,
+    "generation": 2,
+    "sources": [
+      {
+        "kind": "flight",
+        "name": "Alpha",
+        "flightId": "fl3c9a1e7b2d4f6a80",
+        "startUs": 1790000000000000,
+        "endUs": 1790000060000000
+      }
+    ],
+    "vehicles": [
+      {
+        "id": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "originalId": "3f1e2d4c-5b6a-5978-8a9b-0c1d2e3f4a5b",
+        "name": "Alpha"
+      }
+    ],
+    "focusVehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+    "marks": [
+      {
+        "kind": "armed",
+        "vehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "atUs": 1790000010000000
+      },
+      {
+        "kind": "mode",
+        "vehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "atUs": 1790000000000000,
+        "untilUs": 1790000025000000,
+        "text": "GUIDED"
+      },
+      {
+        "kind": "air",
+        "vehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "atUs": 1790000012400000,
+        "untilUs": 1790000047600000
+      },
+      {
+        "kind": "message",
+        "vehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "atUs": 1790000030000000,
+        "text": "Battery low",
+        "severity": 4
+      },
+      {
+        "kind": "disarmed",
+        "vehicleId": "6e2f0d9a-1c3b-5d4e-8f7a-2b1c0d9e8f7a",
+        "atUs": 1790000050000000
+      }
+    ]
+  }
+}

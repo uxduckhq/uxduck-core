@@ -195,7 +195,13 @@ pub fn decode(id: u32, payload: &[u8]) -> Option<Decoded> {
 }
 
 fn read(field: &Field, bytes: &[u8]) -> Value {
-    match (field.kind, field.length) {
+    read_value(field.kind, field.length, bytes)
+}
+
+/// A field's value from its bytes: text for a `char` array, an array of
+/// numbers for another, a number otherwise.
+pub(crate) fn read_value(kind: Kind, length: Option<usize>, bytes: &[u8]) -> Value {
+    match (kind, length) {
         (Kind::Char, Some(_)) => {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             Value::String(String::from_utf8_lossy(&bytes[..end]).into_owned())

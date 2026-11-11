@@ -1,0 +1,72 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "controllers": [
+    {
+      "controller": "copter",
+      "feel": [
+        {
+          "feel": "responsiveness",
+          "param": { "name": "ATC_INPUT_TC", "value": 0.15, "default": 0.15, "units": "s" }
+        },
+        {
+          "feel": "max-lean",
+          "param": { "name": "ATC_ANGLE_MAX", "value": 30.0, "default": 30.0, "units": "deg" }
+        }
+      ],
+      "rates": [
+        {
+          "axis": "roll",
+          "terms": [
+            {
+              "term": "p",
+              "param": {
+                "name": "ATC_RAT_RLL_P",
+                "value": 0.135,
+                "default": 0.135,
+                "units": "s/rad"
+              }
+            },
+            {
+              "term": "fltd",
+              "param": { "name": "ATC_RAT_RLL_FLTD", "value": 20.0, "units": "Hz" }
+            }
+          ]
+        }
+      ],
+      "angles": [{ "axis": "roll", "param": { "name": "ATC_ANG_RLL_P", "value": 4.5 } }],
+      "steps": [
+        {
+          "step": "prepare",
+          "done": false,
+          "why": "Its battery voltages for thrust are not set yet",
+          "names": ["MOT_BAT_VOLT_MAX", "MOT_BAT_VOLT_MIN"]
+        },
+        {
+          "step": "first-flight",
+          "done": true,
+          "why": "It has learned to hover at 35% throttle",
+          "names": ["MOT_THST_HOVER"],
+          "changedAtUs": 1762300800000000
+        }
+      ],
+      "autotune": {
+        "mode": "AUTOTUNE",
+        "modeNumber": 15,
+        "axes": "AUTOTUNE_AXES",
+        "strength": "AUTOTUNE_AGGR",
+        "switchOption": 17,
+        "keeps": "It keeps the new gains when it lands and disarms in AutoTune.",
+        "channel": 5,
+        "positions": [6]
+      }
+    }
+  ],
+  "autotune": {
+    "controller": "copter",
+    "phase": "running",
+    "line": "Roll: raising rate D, 50%",
+    "axis": "roll",
+    "startedAtUs": 1762300900000000,
+    "before": [{ "name": "ATC_RAT_RLL_P", "value": 0.135 }]
+  }
+}

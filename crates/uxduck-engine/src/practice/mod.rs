@@ -216,6 +216,7 @@ fn listed(
         vehicles: exercise.vehicles.iter().map(|&v| v.into()).collect(),
         guide: exercise.guide,
         goal: exercise.goal.clone(),
+        needs_controller: exercise.needs_controller,
         steps: exercise
             .steps
             .iter()
@@ -300,7 +301,7 @@ impl Engine {
             return Some(only_for(&exercise.vehicles));
         }
         if exercise.needs_controller && !self.controller_drives(vehicle_id) {
-            return Some("Claim a controller to try this.".into());
+            return Some("Fly it with your keyboard or a controller to try this.".into());
         }
         None
     }
@@ -733,7 +734,10 @@ impl Engine {
     /// clients that are not operators are remembered, so an unknown client
     /// is an operator's.
     fn operator_client(&self, client_id: &str) -> bool {
-        if matches!(client_id, ACTOR | crate::launch::ACTOR | "daemon" | "agent") {
+        if matches!(
+            client_id,
+            ACTOR | crate::launch::ACTOR | crate::plan_runs::ACTOR | "daemon" | "agent"
+        ) {
             return false;
         }
         self.state
@@ -871,6 +875,7 @@ impl Engine {
                         longitude_deg: target.1,
                         altitude_m: exercise.start.height_m,
                         altitude_frame: AltitudeFrame::AboveHome,
+                        loiter_radius_m: None,
                         heading: None,
                     },
                 );
@@ -1006,6 +1011,7 @@ impl Engine {
             attempts: 0,
             client_id: ACTOR.into(),
             operator_id: None,
+            sent_by: None,
             remote: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,

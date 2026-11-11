@@ -1,0 +1,50 @@
+{
+  "operation": {
+    "id": "op3c9a1e7b2d4f6a80",
+    "name": "Pond survey in wind",
+    "flightIds": ["fl3c9a1e7b2d4f6a80"],
+    "fromUs": 1790000000000000,
+    "toUs": 1790000600000000,
+    "vehicles": 1,
+    "kept": 0,
+    "simulation": {
+      "runs": [
+        {
+          "linkId": "lk1a2b3c4d",
+          "vehicleName": "Pond survey 1",
+          "planId": "plan1a2b3c4d5e6f7a8b",
+          "planName": "Pond survey",
+          "speedup": 3,
+          "windMps": 6,
+          "windFromDeg": 270,
+          "state": "finished",
+          "flightId": "fl3c9a1e7b2d4f6a80",
+          "breached": true
+        },
+        {
+          "linkId": "lk2b3c4d5e",
+          "vehicleName": "Pond survey 2",
+          "planId": "plan1a2b3c4d5e6f7a8b",
+          "planName": "Pond survey",
+          "speedup": 3,
+          "windMps": 6,
+          "windFromDeg": 270,
+          "state": "failed",
+          "detail": "It failed its pre-arm checks (Messages says why)."
+        },
+        {
+          "linkId": "lk3c4d5e6f",
+          "vehicleName": "Field 3",
+          "planId": "plan2b3c4d5e6f7a8b9c",
+          "planName": "Field",
+          "speedup": 1,
+          "state": "flying"
+        }
+      ],
+      "recommended": 3,
+      "limitMin": 45
+    },
+    "version": 4
+  },
+  "warning": "4 at once is more than the 3 recommended for this computer (8 processors) at 3×. They may run slower than asked, and a simulator that falls behind can fly badly."
+}

@@ -1,0 +1,21 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "status": "ready",
+  "firmware": "ArduCopter",
+  "setId": "arducopter-4.5.7",
+  "title": "Copter 4.5.7",
+  "matched": "exact",
+  "ownSetId": "own-3f9a1c2b7d4e",
+  "ownTitle": "Acme additions",
+  "choice": {
+    "ardupilot": {
+      "type": "set",
+      "id": "arducopter-4.5.7"
+    },
+    "own": {
+      "type": "set",
+      "id": "own-3f9a1c2b7d4e"
+    }
+  },
+  "detail": "Descriptions from Acme additions over Copter 4.5.7."
+}

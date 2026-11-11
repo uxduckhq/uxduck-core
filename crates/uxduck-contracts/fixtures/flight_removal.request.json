@@ -1,0 +1,6 @@
+{
+  "method": "flight/removal",
+  "params": {
+    "ids": ["fl0123456789abcdef", "fl00000000000000ff"]
+  }
+}

@@ -10,11 +10,18 @@ use std::time::{Duration, Instant};
 
 use uxduck_media::aac::AudioUnit;
 use uxduck_media::au::AccessUnit;
+use uxduck_media::latency::Window;
 
 /// How much a watcher may fall behind (V7).
 pub const MAX_QUEUED: Duration = Duration::from_millis(200);
 /// A token not used within this long is forgotten.
 const TOKEN_LIFETIME: Duration = Duration::from_secs(30);
+/// Recovery points a browser waits through, with no IDR, before the camera
+/// is re-encoded for it: a camera with periodic intra refresh sends no IDR
+/// after it starts, and `WebCodecs` starts only at one.
+pub const RECOVERIES_BEFORE_REENCODE: u32 = 2;
+/// After a failed re-encode, how long before trying again.
+const REENCODE_RETRY: Duration = Duration::from_secs(60);
 
 /// One thing to send.
 #[derive(Clone, Debug)]
@@ -43,6 +50,10 @@ struct Queue {
     /// The next picture follows dropped ones.
     discontinuity: bool,
     started: bool,
+    /// Starts at a recovery point too: `FFmpeg` can, `WebCodecs` cannot.
+    from_recovery: bool,
+    /// Recovery points passed by while waiting for an IDR.
+    recoveries_waited: u32,
     closed: bool,
     dropped: u64,
     sent: u64,
@@ -53,6 +64,9 @@ struct Queue {
 pub struct Watcher {
     queue: Mutex<Queue>,
     ready: tokio::sync::Notify,
+    /// How long each picture sent lately was held, from its first
+    /// datagram's arrival to its send (S262).
+    held: Mutex<Window>,
 }
 
 impl Default for Watcher {
@@ -63,11 +77,30 @@ impl Default for Watcher {
                 ..Queue::default()
             }),
             ready: tokio::sync::Notify::new(),
+            held: Mutex::default(),
         }
     }
 }
 
 impl Watcher {
+    /// A watcher that may also start at a recovery point (intra refresh).
+    fn from_recovery() -> Self {
+        let watcher = Self::default();
+        watcher.lock().from_recovery = true;
+        watcher
+    }
+
+    /// A browser's socket, not one of this daemon's own `FFmpeg` taps.
+    fn browser(&self) -> bool {
+        !self.lock().from_recovery
+    }
+
+    /// A browser still waiting for an IDR after recovery points went by.
+    fn waits_on_refresh(&self) -> bool {
+        let q = self.lock();
+        !q.from_recovery && q.skipping && q.recoveries_waited >= RECOVERIES_BEFORE_REENCODE
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
         self.queue
             .lock()
@@ -86,14 +119,17 @@ impl Watcher {
             q.dropped += q.items.len() as u64;
             q.items.clear();
             q.skipping = true;
+            q.recoveries_waited = 0;
         }
         if let Item::Unit(unit) = &item {
             if q.skipping {
-                if !unit.key {
+                if !(unit.key || (q.from_recovery && unit.recovery)) {
+                    q.recoveries_waited += u32::from(unit.recovery);
                     q.dropped += 1;
                     return;
                 }
                 q.skipping = false;
+                q.recoveries_waited = 0;
                 q.discontinuity = q.started;
                 q.started = true;
             }
@@ -111,11 +147,27 @@ impl Watcher {
         let mut q = self.lock();
         q.items.retain(|(_, item)| !matches!(item, Item::Unit(_)));
         q.skipping = true;
+        q.recoveries_waited = 0;
     }
 
     pub fn close(&self) {
         self.lock().closed = true;
         self.ready.notify_one();
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Window> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A picture went out on the socket `now`: how long it was held.
+    pub fn sent(&self, unit: &AccessUnit, now: Instant) {
+        if let Some(arrived) = unit.arrived {
+            let held = now.saturating_duration_since(arrived).as_micros();
+            self.held()
+                .add(now, i64::try_from(held).unwrap_or(i64::MAX));
+        }
     }
 
     /// Pictures dropped for this watcher so far.
@@ -157,6 +209,10 @@ struct Inner {
     playback: HashMap<String, (String, String, Instant)>,
     /// Photo tokens (S144): the photo's id and file, and when given.
     photos: HashMap<String, (String, String, Instant)>,
+    /// Sources re-encoded for browsers now, and those whose re-encode
+    /// failed, until when not to try again.
+    reencoded: std::collections::HashSet<String>,
+    reencode_failed: HashMap<String, Instant>,
 }
 
 /// How long a playback token lasts.
@@ -166,6 +222,8 @@ const PLAYBACK_LIFETIME: Duration = Duration::from_secs(3600);
 #[derive(Debug, Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
+    /// Where to ask for a source to be re-encoded (`reencode::manage`).
+    reencoder: Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
     /// Where photos and recordings are kept, together (S150): the Video
     /// storage category.
     dir: std::path::PathBuf,
@@ -189,6 +247,7 @@ impl Hub {
     pub fn new(dir: std::path::PathBuf) -> Self {
         Self {
             inner: Mutex::default(),
+            reencoder: Mutex::default(),
             dir,
         }
     }
@@ -310,7 +369,8 @@ impl Hub {
     /// publisher (S84). Like a socket, it falls to the next keyframe when
     /// it is 200 ms behind, so a slow uplink loses pictures, never latency.
     pub fn tap(&self, key: &str, source_id: &str) -> Arc<Watcher> {
-        let watcher = Arc::new(Watcher::default());
+        // FFmpeg decodes it, so it can start at a recovery point.
+        let watcher = Arc::new(Watcher::from_recovery());
         let old = self
             .lock()
             .open
@@ -324,6 +384,108 @@ impl Hub {
     pub fn close(&self, token: &str) {
         if let Some((_, watcher)) = self.lock().open.remove(token) {
             watcher.close();
+        }
+    }
+
+    /// Re-encode requests go here from now on.
+    pub fn reencode_with(&self, to: tokio::sync::mpsc::UnboundedSender<String>) {
+        *self
+            .reencoder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(to);
+    }
+
+    /// How long the daemon holds this source's pictures, in microseconds:
+    /// the median over the last second, the longest of its browsers'
+    /// (S262). None while no browser was sent a picture in that second.
+    pub fn hold_us(&self, source_id: &str) -> Option<u64> {
+        let now = Instant::now();
+        self.watchers_of(source_id)
+            .iter()
+            .filter(|w| w.browser())
+            .filter_map(|w| w.held().median(now))
+            .max()
+            .and_then(|us| u64::try_from(us).ok())
+    }
+
+    /// Browsers watching a source now.
+    pub fn browsers(&self, source_id: &str) -> usize {
+        self.lock()
+            .open
+            .values()
+            .filter(|(s, w)| s == source_id && w.browser())
+            .count()
+    }
+
+    /// Whether a source is re-encoded for browsers now.
+    pub fn reencoded(&self, source_id: &str) -> bool {
+        self.lock().reencoded.contains(source_id)
+    }
+
+    /// A re-encode ended: the camera's own pictures go to browsers again.
+    /// After a failure the source is not re-encoded again for a minute.
+    /// Browsers still watching wait for the camera's own IDR: its pictures
+    /// do not follow on from the re-encoded ones.
+    pub fn reencode_ended(&self, source_id: &str, failed: bool) {
+        {
+            let mut inner = self.lock();
+            inner.reencoded.remove(source_id);
+            if failed {
+                inner
+                    .reencode_failed
+                    .insert(source_id.to_owned(), Instant::now() + REENCODE_RETRY);
+            }
+        }
+        for watcher in self.watchers_of(source_id) {
+            if watcher.browser() {
+                watcher.wait_for_keyframe();
+            }
+        }
+    }
+
+    /// A re-encoded picture: for the source's browsers only.
+    pub fn publish_reencoded(&self, source_id: &str, unit: Arc<AccessUnit>) {
+        let now = Instant::now();
+        let item = Item::Unit(unit);
+        for watcher in self.watchers_of(source_id) {
+            if watcher.browser() {
+                watcher.push(item.clone(), now);
+            }
+        }
+    }
+
+    fn watchers_of(&self, source_id: &str) -> Vec<Arc<Watcher>> {
+        self.lock()
+            .open
+            .values()
+            .filter(|(s, _)| s == source_id)
+            .map(|(_, w)| w.clone())
+            .collect()
+    }
+
+    /// Asks once for a source to be re-encoded, unless it is already or
+    /// failed a moment ago.
+    fn want_reencode(&self, source_id: &str, now: Instant) {
+        {
+            let mut inner = self.lock();
+            if inner.reencoded.contains(source_id)
+                || inner
+                    .reencode_failed
+                    .get(source_id)
+                    .is_some_and(|until| now < *until)
+            {
+                return;
+            }
+            inner.reencoded.insert(source_id.to_owned());
+        }
+        let sent = self
+            .reencoder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|to| to.send(source_id.to_owned()).is_ok());
+        if !sent {
+            self.lock().reencoded.remove(source_id);
         }
     }
 
@@ -350,17 +512,22 @@ impl Hub {
 
     pub fn publish(&self, source_id: &str, item: &Item) {
         let now = Instant::now();
-        let watchers: Vec<Arc<Watcher>> = self
-            .lock()
-            .open
-            .values()
-            .filter(|(s, _)| s == source_id)
-            .map(|(_, w)| w.clone())
-            .collect();
+        let watchers = self.watchers_of(source_id);
         // Sockets and the live publisher take pictures and KLV only.
         if matches!(item, Item::Unit(_) | Item::Klv { .. }) {
-            for watcher in watchers {
-                watcher.push(item.clone(), now);
+            // A re-encoded camera's browsers take the re-encoder's pictures.
+            let reencoded = matches!(item, Item::Unit(_)) && self.reencoded(source_id);
+            for watcher in &watchers {
+                if !(reencoded && watcher.browser()) {
+                    watcher.push(item.clone(), now);
+                }
+            }
+            if let Item::Unit(unit) = item
+                && unit.recovery
+                && !reencoded
+                && watchers.iter().any(|w| w.waits_on_refresh())
+            {
+                self.want_reencode(source_id, now);
             }
         }
         // Recordings get every picture: no dropping to catch up.
@@ -378,9 +545,12 @@ mod tests {
 
     fn unit(key: bool, timestamp_us: u64) -> Item {
         Item::Unit(Arc::new(AccessUnit {
+            arrived: None,
             data: vec![0, 0, 0, 1],
             key,
+            recovery: false,
             timestamp_us,
+            composition_us: 0,
             sps: SpsInfo {
                 id: 0,
                 codec: "avc1.64001f".into(),
@@ -413,6 +583,135 @@ mod tests {
         watcher.push(unit(true, 2), now);
         watcher.push(unit(false, 3), now);
         assert_eq!(drain(&watcher), [(2, false), (3, false)]);
+    }
+
+    fn recovery(timestamp_us: u64) -> Item {
+        let Item::Unit(unit) = unit(false, timestamp_us) else {
+            unreachable!()
+        };
+        Item::Unit(Arc::new(AccessUnit {
+            recovery: true,
+            ..(*unit).clone()
+        }))
+    }
+
+    #[test]
+    fn a_browser_waits_for_an_idr_but_ffmpeg_starts_at_a_recovery_point() {
+        let hub = Hub::default();
+        hub.allow("socket", "camera");
+        let (_, socket) = hub.open("socket").unwrap();
+        let live = hub.tap("viewer", "camera");
+        for item in [unit(false, 1), recovery(2), unit(false, 3), unit(true, 4)] {
+            hub.publish("camera", &item);
+        }
+        // WebCodecs refuses anything but an IDR to start from.
+        assert_eq!(drain(&socket), [(4, false)]);
+        assert_eq!(drain(&live), [(2, false), (3, false), (4, false)]);
+    }
+
+    #[test]
+    fn a_browser_waiting_through_refreshes_has_the_camera_re_encoded_once() {
+        let hub = Hub::default();
+        let (to, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        hub.reencode_with(to);
+        hub.allow("socket", "camera");
+        let (_, browser) = hub.open("socket").unwrap();
+        let live = hub.tap("viewer", "camera");
+        hub.publish("camera", &recovery(1));
+        assert!(asked.try_recv().is_err(), "one refresh is not enough");
+        hub.publish("camera", &unit(false, 2));
+        hub.publish("camera", &recovery(3));
+        assert_eq!(asked.try_recv().unwrap(), "camera");
+        assert!(hub.reencoded("camera"));
+        // The camera's own pictures go on to FFmpeg, not to the browser,
+        // which takes the re-encoder's from its IDR.
+        hub.publish("camera", &recovery(4));
+        let Item::Unit(idr) = unit(true, 5) else {
+            unreachable!()
+        };
+        hub.publish_reencoded("camera", idr);
+        assert_eq!(drain(&browser), [(5, false)]);
+        assert_eq!(
+            drain(&live),
+            [(1, false), (2, false), (3, false), (4, false)]
+        );
+        // Asked once while it lasts.
+        hub.publish("camera", &recovery(6));
+        assert!(asked.try_recv().is_err());
+        assert_eq!(hub.browsers("camera"), 1);
+    }
+
+    #[test]
+    fn a_failed_re_encode_waits_before_asking_again() {
+        let hub = Hub::default();
+        let (to, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        hub.reencode_with(to);
+        hub.allow("socket", "camera");
+        let _browser = hub.open("socket").unwrap();
+        for t in 1..=2 {
+            hub.publish("camera", &recovery(t));
+        }
+        assert!(asked.try_recv().is_ok());
+        hub.reencode_ended("camera", true);
+        assert!(!hub.reencoded("camera"));
+        hub.publish("camera", &recovery(3));
+        assert!(asked.try_recv().is_err());
+    }
+
+    #[test]
+    fn separate_waits_do_not_add_up_to_a_re_encode() {
+        let hub = Hub::default();
+        let (to, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        hub.reencode_with(to);
+        hub.allow("socket", "camera");
+        let (_, browser) = hub.open("socket").unwrap();
+        // Each wait passes one recovery point before the camera's IDR.
+        for round in 0..3 {
+            let t = round * 10;
+            hub.publish("camera", &recovery(t + 1));
+            hub.publish("camera", &unit(true, t + 2));
+            browser.wait_for_keyframe();
+        }
+        assert!(asked.try_recv().is_err());
+    }
+
+    #[test]
+    fn browsers_wait_for_the_cameras_own_idr_when_a_re_encode_ends() {
+        let hub = Hub::default();
+        let (to, _asked) = tokio::sync::mpsc::unbounded_channel();
+        hub.reencode_with(to);
+        hub.allow("socket", "camera");
+        let (_, browser) = hub.open("socket").unwrap();
+        for t in 1..=2 {
+            hub.publish("camera", &recovery(t));
+        }
+        let Item::Unit(idr) = unit(true, 3) else {
+            unreachable!()
+        };
+        hub.publish_reencoded("camera", idr);
+        assert_eq!(drain(&browser), [(3, false)]);
+        hub.reencode_ended("camera", true);
+        // The camera's pictures do not follow on from the re-encoded ones.
+        hub.publish("camera", &unit(false, 4));
+        hub.publish("camera", &recovery(5));
+        hub.publish("camera", &unit(true, 6));
+        assert_eq!(drain(&browser), [(6, true)]);
+    }
+
+    #[test]
+    fn a_camera_with_idrs_is_never_re_encoded() {
+        let hub = Hub::default();
+        let (to, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        hub.reencode_with(to);
+        hub.allow("socket", "camera");
+        let (_, browser) = hub.open("socket").unwrap();
+        hub.publish("camera", &recovery(1));
+        hub.publish("camera", &unit(true, 2));
+        for t in 3..=6 {
+            hub.publish("camera", &recovery(t));
+        }
+        assert!(asked.try_recv().is_err());
+        assert_eq!(drain(&browser).len(), 5);
     }
 
     #[test]
@@ -482,5 +781,45 @@ mod tests {
         assert!(runtime.block_on(watcher.next()).is_none());
         assert!(!hub.watched("s"));
         assert!(hub.open("never").is_none());
+    }
+
+    /// What the daemon holds a picture for (S262): per browser, the median
+    /// of the last second's; the longest browser's for the source. The
+    /// daemon's own taps and pictures with no arrival are not counted.
+    #[test]
+    fn the_hold_is_the_slowest_browsers_median_over_the_last_second() {
+        let hub = Hub::default();
+        assert_eq!(hub.hold_us("camera"), None);
+        hub.allow("fast", "camera");
+        hub.allow("slow", "camera");
+        let (_, fast) = hub.open("fast").unwrap();
+        let (_, slow) = hub.open("slow").unwrap();
+        let tap = hub.tap("publisher", "camera");
+        let now = Instant::now();
+        let picture = |held_ms: u64| {
+            let Item::Unit(unit) = unit(true, 0) else {
+                unreachable!()
+            };
+            AccessUnit {
+                arrived: now.checked_sub(Duration::from_millis(held_ms)),
+                ..(*unit).clone()
+            }
+        };
+        assert_eq!(hub.hold_us("camera"), None, "nothing sent yet");
+        for held in [4, 5, 6] {
+            fast.sent(&picture(held), now);
+        }
+        for held in [30, 90, 40] {
+            slow.sent(&picture(held), now);
+        }
+        tap.sent(&picture(900), now);
+        let Item::Unit(made) = unit(true, 0) else {
+            unreachable!()
+        };
+        slow.sent(&made, now);
+        assert_eq!(hub.hold_us("camera"), Some(40_000));
+        assert_eq!(hub.hold_us("other"), None);
+        hub.close("slow");
+        assert_eq!(hub.hold_us("camera"), Some(5_000));
     }
 }

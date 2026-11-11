@@ -27,6 +27,7 @@
     "datagrams": 4100,
     "pictures": 270,
     "keyframes": 3,
+    "recoveryPoints": 0,
     "lost": 0,
     "damaged": 0,
     "pesLengthMismatches": 0,

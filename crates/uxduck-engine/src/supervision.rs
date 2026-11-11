@@ -56,11 +56,17 @@ impl Engine {
         )
     }
 
+    /// Someone at the computer: an operator client.
+    fn someone_here(&self) -> bool {
+        self.connections
+            .values()
+            .any(|c| c.admitted.as_ref().is_some_and(|a| a.operator))
+    }
+
     /// Whether someone is there to supervise a vehicle: an operator at the
-    /// computer, a writable forward link up, or its lease holder from away.
-    fn supervised(&self, vehicle_id: &str) -> bool {
+    /// computer, or a writable forward link up.
+    fn supervised(&self) -> bool {
         self.someone_here()
-            || self.lease_of(vehicle_id).is_some()
             || self.state.links.values().any(|link| {
                 link.kind.is_forward()
                     && link.policy == LinkPolicy::ReadWrite
@@ -81,7 +87,7 @@ impl Engine {
             .collect();
         for vehicle in &vehicles {
             let id = vehicle.id.clone();
-            if self.supervised(&id) {
+            if self.supervised() {
                 self.supervision.unsupervised_since.remove(&id);
                 if self.supervision.withheld.remove(&id) {
                     self.resume_heartbeat(vehicle);

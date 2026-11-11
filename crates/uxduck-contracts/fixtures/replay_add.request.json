@@ -1,0 +1,6 @@
+{
+  "method": "replay/add",
+  "params": {
+    "path": "/Users/pilot/second-computer.tlog"
+  }
+}

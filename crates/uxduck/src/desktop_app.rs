@@ -2,6 +2,7 @@
 //! app/window action. Signed runtime updates may also be kept in the data
 //! folder. The daemon and menu-bar helper run independently of Electron.
 
+mod metadata;
 mod startup;
 
 use std::io::{Read as _, Write as _};
@@ -28,6 +29,14 @@ pub fn executable(version_dir: &Path) -> PathBuf {
     } else {
         version_dir.join("uxduck-desktop")
     }
+}
+
+fn app_archive(version_dir: &Path) -> PathBuf {
+    version_dir.join(if cfg!(target_os = "macos") {
+        "UXDuck.app/Contents/Resources/app.asar"
+    } else {
+        "resources/app.asar"
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,7 +101,7 @@ impl DesktopApp {
             key,
             target: crate::update::TARGET.to_owned(),
             dir: data_dir.join("desktop-app"),
-            bundled_dir: bundled_directory(&std::env::current_exe().unwrap_or_default()),
+            bundled_dir: bundled_directory(&crate::paths::executable().unwrap_or_default()),
             data_dir: data_dir.to_owned(),
             runtime,
             state: Mutex::new(State::default()),
@@ -113,27 +122,43 @@ impl DesktopApp {
             .filter(|path| path.join(INSTALLED).is_file() && executable(path).is_file())
             .filter_map(|path| {
                 let name = path.file_name()?.to_str()?.to_owned();
+                let marker: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path.join(INSTALLED)).ok()?).ok()?;
+                if marker["version"].as_str() != Some(name.as_str()) {
+                    return None;
+                }
                 Some((semver::Version::parse(&name).ok()?, name, path))
             })
             .max_by(|a, b| a.0.cmp(&b.0))
             .map(|(_, name, path)| (name, path))
     }
 
-    fn available_installation(&self) -> Option<(String, PathBuf)> {
-        let bundled = std::fs::read(self.bundled_dir.join(INSTALLED))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value["version"].as_str().map(str::to_owned))
-            .filter(|_| executable(&self.bundled_dir).is_file())
-            .map(|version| (version, self.bundled_dir.clone()));
-        [self.installed(), bundled]
+    fn bundled_installation(&self) -> Result<Option<(String, PathBuf)>, String> {
+        if !executable(&self.bundled_dir).is_file() {
+            return Ok(None);
+        }
+        // installed.json commits a downloaded runtime. The installer-owned app
+        // is already complete when installed: read its own package metadata,
+        // which Electron needs too. A lost/corrupt sidecar must not hide it.
+        metadata::version(&app_archive(&self.bundled_dir))
+            .map(|version| Some((version, self.bundled_dir.clone())))
+    }
+
+    fn available_installation(&self) -> Result<Option<(String, PathBuf)>, String> {
+        let downloaded = self.installed();
+        let bundled = match self.bundled_installation() {
+            Ok(bundled) => bundled,
+            Err(_) if downloaded.is_some() => None,
+            Err(error) => return Err(error),
+        };
+        Ok([downloaded, bundled]
             .into_iter()
             .flatten()
             .filter_map(|(version, folder)| {
                 Some((semver::Version::parse(&version).ok()?, version, folder))
             })
             .max_by(|a, b| a.0.cmp(&b.0))
-            .map(|(_, version, folder)| (version, folder))
+            .map(|(_, version, folder)| (version, folder)))
     }
 
     /// Where it stands; asks the release channel the first time, and again
@@ -148,7 +173,9 @@ impl DesktopApp {
         if fetch_now {
             self.fetch();
         }
-        let installed = self.available_installation();
+        let installation = self.available_installation();
+        let installation_error = installation.as_ref().err();
+        let installed = installation.as_ref().ok().and_then(|value| value.as_ref());
         let state = self.lock();
         let offered = match &state.fetch {
             Fetch::Ready(offered) => offered.clone(),
@@ -159,7 +186,7 @@ impl DesktopApp {
             (DesktopAppState::Downloading, None)
         } else if installed.is_some() {
             (DesktopAppState::Installed, None)
-        } else if let Some(why) = &state.failed {
+        } else if let Some(why) = installation_error.or(state.failed.as_ref()) {
             (DesktopAppState::Failed, Some(why.clone()))
         } else {
             match &state.fetch {
@@ -183,7 +210,7 @@ impl DesktopApp {
             size: offered.as_ref().map(|(_, artifact)| artifact.size),
             unpacked_size: offered.as_ref().map(|(_, artifact)| artifact.unpacked_size),
             received: state.downloading,
-            installed_version: installed.map(|(version, _)| version),
+            installed_version: installed.map(|(version, _)| version.clone()),
             detail,
         }
     }
@@ -328,17 +355,22 @@ impl DesktopApp {
             if !exe.is_file() {
                 return Err("The download has no desktop app in it, so it was deleted.".into());
             }
+            if metadata::version(&app_archive(&partial))? != version {
+                return Err("The downloaded desktop app's version does not match the release. It was deleted. Check for updates again.".into());
+            }
             check_signature(&exe)
         });
         if let Err(why) = checked {
             let _ = std::fs::remove_dir_all(&partial);
             return Err(why);
         }
-        std::fs::write(
-            partial.join(INSTALLED),
-            format!("{{\"version\":\"{version}\"}}\n"),
-        )
-        .map_err(|e| e.to_string())?;
+        let mut marker =
+            std::fs::File::create(partial.join(INSTALLED)).map_err(|e| e.to_string())?;
+        marker
+            .write_all(format!("{{\"version\":\"{version}\"}}\n").as_bytes())
+            .and_then(|()| marker.sync_all())
+            .map_err(|e| e.to_string())?;
+        drop(marker);
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::rename(&partial, &folder).map_err(|e| e.to_string())?;
         // Older versions go; one still running is left for next time.
@@ -356,9 +388,11 @@ impl DesktopApp {
     /// # Errors
     /// When none is installed, or it fails its checks (it is then deleted).
     pub fn path(&self) -> Result<String, String> {
-        let (_, folder) = self.available_installation().ok_or(
+        let (_, folder) = self.available_installation()?.ok_or(if cfg!(debug_assertions) {
             "UXDuck's desktop window is missing. Reinstall UXDuck, or run `uxduck open --browser`. For a development window, package apps/desktop first."
-        )?;
+        } else {
+            "UXDuck's desktop window is missing. Reinstall UXDuck, or run `uxduck open --browser`."
+        })?;
         let exe = executable(&folder);
         if let Err(why) = check_signature(&exe) {
             if folder != self.bundled_dir {
@@ -567,7 +601,7 @@ impl DesktopApp {
 
 /// Installers and portable archives use the same runtime folder name. A
 /// UXDuck started from a `\\?\` path on Windows still finds a plain one.
-fn bundled_directory(daemon: &Path) -> PathBuf {
+pub(crate) fn bundled_directory(daemon: &Path) -> PathBuf {
     let parent = dunce::simplified(daemon)
         .parent()
         .unwrap_or_else(|| Path::new("."));
@@ -717,7 +751,7 @@ fn team(path: &Path) -> Option<String> {
 /// checks nothing, since there is no developer to compare with.
 #[cfg(target_os = "macos")]
 fn check_signature(exe: &Path) -> Result<(), String> {
-    let own = std::env::current_exe().ok().and_then(|exe| team(&exe));
+    let own = crate::paths::executable().ok().and_then(|exe| team(&exe));
     let Some(own) = own else {
         return Ok(());
     };
@@ -757,6 +791,7 @@ mod tests {
         let exe = executable(&src.join("UXDuck Desktop"));
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        write_bundled_archive(&src.join("UXDuck Desktop"));
         let archive = dir.join("app.tar.gz");
         let status = Command::new("tar")
             .arg("-czf")
@@ -806,7 +841,8 @@ mod tests {
             .unwrap();
         };
         write_runtime(&app.bundled_dir, "0.2.0");
-        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        write_bundled_archive(&app.bundled_dir);
+        assert_eq!(app.available_installation().unwrap().unwrap().0, "0.2.0");
         assert_eq!(
             app.path().unwrap(),
             executable(&app.bundled_dir).display().to_string()
@@ -816,15 +852,98 @@ mod tests {
             "finding a runtime never starts it"
         );
         write_runtime(&app.dir.join("0.1.0"), "0.1.0");
-        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        assert_eq!(app.available_installation().unwrap().unwrap().0, "0.2.0");
         write_runtime(&app.dir.join("0.3.0"), "0.3.0");
-        assert_eq!(app.available_installation().unwrap().0, "0.3.0");
+        assert_eq!(app.available_installation().unwrap().unwrap().0, "0.3.0");
         app.remove().unwrap();
-        assert_eq!(app.available_installation().unwrap().0, "0.2.0");
+        assert_eq!(app.available_installation().unwrap().unwrap().0, "0.2.0");
         assert!(
             executable(&app.bundled_dir).is_file(),
             "the installer owns the bundled runtime"
         );
+    }
+
+    fn write_bundled_archive(dir: &Path) -> PathBuf {
+        let archive = app_archive(dir);
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        std::fs::write(
+            &archive,
+            include_bytes!("../tests/fixtures/desktop-app.asar"),
+        )
+        .unwrap();
+        archive
+    }
+
+    #[test]
+    fn a_bundled_window_survives_missing_zeroed_invalid_or_stale_installer_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        Arc::get_mut(&mut app).unwrap().bundled_dir = tmp.path().join("bundled");
+        let exe = executable(&app.bundled_dir);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"runtime").unwrap();
+        write_bundled_archive(&app.bundled_dir);
+        let marker = app.bundled_dir.join(INSTALLED);
+        assert_eq!(app.path().unwrap(), exe.display().to_string());
+        assert!(
+            !marker.exists(),
+            "discovery never writes into an installed app"
+        );
+        for bytes in [
+            vec![0; 20],
+            b"{\"version\":\"invalid\"}".to_vec(),
+            b"{\"version\":\"999.0.0\"}".to_vec(),
+        ] {
+            std::fs::write(&marker, &bytes).unwrap();
+            assert_eq!(app.path().unwrap(), exe.display().to_string());
+            assert_eq!(app.available_installation().unwrap().unwrap().0, "0.2.0");
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        }
+        // The marker is still required to commit a downloaded app. A partial
+        // download with an executable and valid ASAR must never be selected.
+        let partial = app.dir.join("999.0.0");
+        let partial_exe = executable(&partial);
+        std::fs::create_dir_all(partial_exe.parent().unwrap()).unwrap();
+        std::fs::write(partial_exe, b"runtime").unwrap();
+        write_bundled_archive(&partial);
+        assert_eq!(app.path().unwrap(), exe.display().to_string());
+        std::fs::write(partial.join(INSTALLED), [0_u8; 20]).unwrap();
+        assert_eq!(app.path().unwrap(), exe.display().to_string());
+        std::fs::write(partial.join(INSTALLED), b"{\"version\":\"0.2.0\"}").unwrap();
+        assert_eq!(app.path().unwrap(), exe.display().to_string());
+    }
+
+    #[test]
+    fn damaged_app_resources_are_explained_but_a_complete_download_remains_usable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = app(tmp.path());
+        let inner = Arc::get_mut(&mut app).unwrap();
+        inner.bundled_dir = tmp.path().join("bundled");
+        inner.url = None;
+        let exe = executable(&app.bundled_dir);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"runtime").unwrap();
+        let archive = write_bundled_archive(&app.bundled_dir);
+        for contents in [None, Some(vec![0; 20])] {
+            if let Some(bytes) = contents {
+                std::fs::write(&archive, bytes).unwrap();
+            } else {
+                std::fs::remove_file(&archive).unwrap();
+            }
+            let error = app.path().unwrap_err();
+            assert!(error.contains(&archive.display().to_string()), "{error}");
+            assert!(error.contains("damaged"), "{error}");
+            assert!(error.contains("open --browser"), "{error}");
+            let status = app.status(false);
+            assert_eq!(status.state, DesktopAppState::Failed);
+            assert_eq!(status.detail.as_deref(), Some(error.as_str()));
+        }
+        let update = app.dir.join("0.3.0");
+        let exe = executable(&update);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"runtime").unwrap();
+        std::fs::write(update.join(INSTALLED), b"{\"version\":\"0.3.0\"}").unwrap();
+        assert_eq!(app.path().unwrap(), exe.display().to_string());
     }
 
     #[test]
@@ -835,6 +954,7 @@ mod tests {
         let error = app.path().unwrap_err();
         assert!(error.contains("Reinstall UXDuck"));
         assert!(error.contains("open --browser"));
+        assert_eq!(error.contains("apps/desktop"), cfg!(debug_assertions));
     }
 
     #[test]
@@ -876,6 +996,17 @@ mod tests {
         );
         assert!(app.installed().is_none());
         assert!(!app.dir.join("0.2.0.partial").exists());
+    }
+
+    #[test]
+    fn an_archive_with_a_different_package_version_never_gets_a_completion_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(&tmp.path().join("data"));
+        let (archive, artifact) = archive(tmp.path());
+        let error = app.install(&archive, "0.3.0", &artifact).unwrap_err();
+        assert!(error.contains("version does not match"), "{error}");
+        assert!(app.installed().is_none());
+        assert!(!app.dir.join("0.3.0.partial").exists());
     }
 
     #[test]

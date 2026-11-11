@@ -17,6 +17,13 @@ pub enum SetupRow {
     Radio,
     Airspeed,
     Motors,
+    /// The ESCs' throttle range: copters with PWM or `OneShot` ESCs
+    /// (`MOT_PWM_TYPE` 0 to 3).
+    Escs,
+    /// Restarting the vehicle: always at the foot of the tab, its state in
+    /// `SetupStateResult.restart`. Not one of `rows`; messages and checks
+    /// that need a restart point at it.
+    Restart,
 }
 
 /// A procedure UXDuck runs on a vehicle.
@@ -60,6 +67,13 @@ pub enum SetupKind {
     /// turned on while it circles, then off once the ratio has settled
     /// (`airspeed.settled`), and the ratio kept as a parameter change.
     AirspeedRatio,
+    /// The ESCs' throttle range, all at once, on a disarmed copter with its
+    /// propellers off and powered from its battery: `ESC_CALIBRATION` 3
+    /// written, the battery unplugged and plugged in, and done when the
+    /// vehicle is back with it at 0. Needs `propellersOff` in
+    /// `setup/start`. Cancelling sets it back to 0, at once or once the
+    /// vehicle is back.
+    Escs,
 }
 
 /// Which way a propeller turns, seen from above.
@@ -120,7 +134,7 @@ pub struct MotorTest {
     pub order: u8,
     /// "A", or a rover's "Throttle".
     pub label: String,
-    /// Percent, 1 to 30.
+    /// Percent, 1 to 100.
     pub throttle: f32,
 }
 
@@ -131,7 +145,7 @@ pub struct SetupSpinParams {
     pub vehicle_id: String,
     /// Its place in the test's order, from 1 (`MotorPlace.order`).
     pub motor: u8,
-    /// Percent of its range, 1 to 30; 5 by default.
+    /// Percent of its range, 1 to 100; 5 by default.
     #[serde(default = "five")]
     pub throttle: f32,
     /// Still held: true to start or keep it spinning, false to stop it.
@@ -463,6 +477,9 @@ pub enum Instruction {
     /// PX4's compass: keep the side found (`position`) down and turn the
     /// vehicle slowly round.
     TurnOnThisSide,
+    /// Unplug the battery, wait five seconds and plug it in: the ESCs beep
+    /// as they learn the range.
+    ReplugBattery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -839,6 +856,10 @@ pub struct SetupStartParams {
     /// For `compass-heading` only, and needed there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heading: Option<HeadingParams>,
+    /// For `escs`, and needed there: the person says the propellers are
+    /// off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub propellers_off: bool,
 }
 
 /// `setup/confirm`: the person did what the running procedure asks, such
@@ -947,4 +968,50 @@ pub struct SetupStateResult {
     /// does not hide the compass's restart or the radio's undo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub procedures: Vec<Setup>,
+    /// The Restart row: what waits for the vehicle to restart, and when it
+    /// last did.
+    #[serde(default)]
+    pub restart: RestartDue,
+    /// Lua scripting (S259, ADR-0027 F14): absent when the firmware has
+    /// none (it reports no `SCR_ENABLE`) or is not ArduPilot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripting: Option<ScriptingState>,
+}
+
+/// A vehicle's Lua scripting (S259, ADR-0027 F14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptingState {
+    /// `SCR_ENABLE` is 1 (Lua) as the vehicle last reported it.
+    pub enabled: bool,
+    /// `SCR_ENABLE` was written from UXDuck and takes effect once the
+    /// vehicle restarts (the Restart row).
+    pub needs_restart: bool,
+    /// Where its scripts go, for `files/list`: `/APM/scripts` on a board,
+    /// `/scripts` in a simulation.
+    pub folder: String,
+    /// What the vehicle said about its scripts since UXDuck started, newest
+    /// last, at most ten: messages starting `Lua` or `Scripting`, or
+    /// naming a `.lua` file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<crate::dto::messages::VehicleMessage>,
+}
+
+/// What a restart is due for (V16): calibrations that take effect once the
+/// vehicle restarts, and parameters written from UXDuck that do. Cleared
+/// when the vehicle is seen to restart, after which its parameters are
+/// downloaded again. A restart is the `reboot` command, refused while armed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartDue {
+    /// Rows calibrated and waiting for it, in the tab's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<SetupRow>,
+    /// Parameters written that take effect once it restarts, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<String>,
+    /// When UXDuck last saw it restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub restarted_at_us: Option<u64>,
 }

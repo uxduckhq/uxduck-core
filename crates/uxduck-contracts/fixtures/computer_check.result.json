@@ -1,0 +1,35 @@
+{
+  "id": "5b0c2e1a-7d3f-5e8b-9c4a-2f1e0d3c4b5a",
+  "name": "Skimmer",
+  "aliases": [],
+  "linkId": "lk5e6f7a8b9c0d1e2f",
+  "peer": "127.0.0.1:14550",
+  "systemId": 1,
+  "componentIds": [1, 191],
+  "autopilot": "Ardupilotmega",
+  "vehicleType": "Quadrotor",
+  "firmware": "4.6.2",
+  "presence": "online",
+  "lastHeartbeatUs": 1790668800123456,
+  "armed": false,
+  "saved": true,
+  "dismissed": false,
+  "version": 4,
+  "companions": [
+    {
+      "id": "cc3f9a1b2c4d5e6f",
+      "name": "pi-vision.local",
+      "host": "pi-vision.local",
+      "user": "pi",
+      "role": "report",
+      "componentId": 191,
+      "check": {
+        "state": "reached",
+        "atUs": 1790668805123456,
+        "os": "Debian GNU/Linux 12 (bookworm)",
+        "arch": "aarch64",
+        "hostKey": "SHA256:k3Yl2mO7v8bQx1J0a9cR4tE6wZ5nH2pD3sF7gU1iL0o"
+      }
+    }
+  ]
+}

@@ -221,7 +221,7 @@ fn engine_with(state: State, wire: &Wire, journal: &Journal, time: &Time) -> Eng
         Box::new(Counter(0)),
         ports,
         Loaded {
-            state,
+            state: agreed(state),
             sessions: vec![],
         },
     )
@@ -491,7 +491,7 @@ fn the_demo_arm_waits_for_both_steps() {
     assert_eq!(waiting["status"], "waiting");
     assert_eq!(
         waiting["detail"],
-        "Battery is at least 22.2 V; it passes once that holds 3 s."
+        "Battery is at least 22.2 V. It passes once that holds 3 s."
     );
     b.time.advance(2 * S);
     b.volts(22.5);
@@ -1064,7 +1064,7 @@ fn arming_records_the_checklist_in_history_and_the_flight() {
     assert_eq!(record.steps[0].status, CheckStatus::ToDo);
     assert_eq!(
         text,
-        "Armed with its checklist: 1 of 2 steps passed; armed past Propellers tight by the operator"
+        "Armed with its checklist: 1 of 2 steps passed. Armed past Propellers tight by the operator"
     );
 }
 
@@ -1098,7 +1098,7 @@ fn arming_from_the_radio_with_a_blocking_step_failing_warns() {
         unreachable!()
     };
     assert_eq!(record.failing.len(), 2);
-    assert!(text.contains("armed from outside UXDuck"), "{text}");
+    assert!(text.contains("Armed from outside UXDuck"), "{text}");
     // Disarmed, the warning goes.
     b.seen(false);
     assert!(
@@ -1212,4 +1212,20 @@ fn reordering_and_removing_steps() {
     assert_eq!(step["kind"], "rule");
     assert!(step["tick"].is_null());
     assert_eq!(step["unit"], "V");
+}
+
+/// Someone at this computer agreed to the Terms of Service (ADR-0047), so a
+/// real vehicle arms for a window that acts as no one in particular.
+fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State {
+    let operator = serde_json::from_value(json!({
+        "id": "op-agreed",
+        "name": "Agreed",
+        "units": "metric",
+        "coordinateFormat": "decimal",
+        "terms": { "version": uxduck_contracts::version::TERMS_VERSION, "acceptedAtMs": 1 },
+        "version": 1
+    }))
+    .unwrap();
+    state.operators.insert("op-agreed".into(), operator);
+    state
 }

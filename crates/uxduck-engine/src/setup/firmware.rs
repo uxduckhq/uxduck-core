@@ -210,7 +210,7 @@ fn vehicle_type(asked: Option<&str>, vehicle: &Vehicle) -> Result<VehicleType, A
                 ApiError::new(
                     ErrorKind::InvalidValue,
                     format!(
-                        "{slug} is not a vehicle type ArduPilot builds; use {}.",
+                        "{slug} is not a vehicle type ArduPilot builds. Use {}.",
                         VehicleType::ALL.map(VehicleType::slug).join(", ")
                     ),
                 )
@@ -381,7 +381,7 @@ impl Engine {
                     ))
                 } else if releases.releases.is_empty() && releases.platform.is_none() {
                     Some(
-                        "UXDuck reads the board when it restarts it; choose the vehicle type and \
+                        "UXDuck reads the board when it restarts it. Choose the vehicle type and \
                          release to install."
                             .to_owned(),
                     )
@@ -490,8 +490,12 @@ impl Engine {
             "{}-{date}-{time}-before-firmware.param",
             safe.trim_matches('-')
         );
-        match self.keep_copy(&vehicle.id, &name, text.as_bytes()) {
-            Ok(()) => Some(name),
+        match self.keep_file(&vehicle.id, &format!("/UXDuck/{name}"), text.as_bytes()) {
+            Ok(id) => {
+                // One of the vehicle's saved parameter sets too (S217).
+                self.kept_before_firmware(vehicle, &name, id);
+                Some(name)
+            }
             // Installing goes on: the parameters stay on the vehicle
             // unless erasing loses them, and the procedure says none were
             // saved.
@@ -548,10 +552,7 @@ pub(super) fn install(
     if online && vehicle.armed {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!(
-                "Disarm {} first: firmware is installed only on the ground.",
-                vehicle.name
-            ),
+            format!("Disarm {} to install firmware.", vehicle.name),
         ));
     }
     if let Some(running) = engine.running_setup(&vehicle.id) {
@@ -1204,9 +1205,9 @@ fn change_words(firmware: &FirmwareInstall) -> String {
         (Some(b), Some(a)) if a != b => format!(" ({b} → {a})"),
         _ => String::new(),
     };
-    let mut text = format!("{before} → {after}{types}; {}", source_words(firmware));
+    let mut text = format!("{before} → {after}{types}. {}", source_words(firmware));
     if let Some(file) = &firmware.parameters {
-        text.push_str("; parameters before saved as ");
+        text.push_str(". Parameters before saved as ");
         text.push_str(file);
     }
     text
@@ -1265,8 +1266,8 @@ mod tests {
         };
         assert_eq!(
             change_words(&firmware),
-            "4.6.2 → 4.7.2; Copter stable 4.7.2 from firmware.ardupilot.org, board CubeOrange \
-             (140); parameters before saved as Alpha-2026-10-25-120000-before-firmware.param"
+            "4.6.2 → 4.7.2. Copter stable 4.7.2 from firmware.ardupilot.org, board CubeOrange \
+             (140). Parameters before saved as Alpha-2026-10-25-120000-before-firmware.param"
         );
     }
 }

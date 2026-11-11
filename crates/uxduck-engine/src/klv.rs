@@ -155,11 +155,10 @@ impl Engine {
         if vehicle_id.is_none()
             && !source.assigned_by_hand
             && let Some(platform) = metadata.platform_designation.as_deref()
-            && let Some(vehicle) = self
-                .state
-                .vehicles
-                .values()
-                .find(|v| !v.dismissed && v.name.trim().eq_ignore_ascii_case(platform.trim()))
+            && let Some(vehicle) = self.state.vehicles.values().find(|v| {
+                // A replay vehicle has its original's name; the live one is meant.
+                !v.dismissed && !v.replay && v.name.trim().eq_ignore_ascii_case(platform.trim())
+            })
         {
             vehicle_id = Some(vehicle.id.clone());
             let mut claimed = source;

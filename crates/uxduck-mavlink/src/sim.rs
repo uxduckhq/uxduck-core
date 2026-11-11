@@ -12,7 +12,7 @@ use mavio::dialects::ardupilotmega::messages::{
     Attitude, AutopilotVersion, AvailableModes, AvailableModesMonitor, BatteryStatus, CommandLong,
     DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat, MissionCurrent,
     NavControllerOutput, PositionTargetGlobalInt, RadioStatus, RcChannels, ServoOutputRaw,
-    SysStatus, TerrainReport, VfrHud, Vibration, VideoStreamInformation, Wind,
+    SysStatus, TerrainReport, Timesync, VfrHud, Vibration, VideoStreamInformation, Wind,
 };
 use mavio::protocol::{V2, Versionless};
 use mavio::{Frame, Message};
@@ -20,7 +20,12 @@ use mavio::{Frame, Message};
 use crate::decode::{Message as Decoded, decode};
 use crate::modes::AvailableMode;
 
-fn frame(system_id: u8, component_id: u8, sequence: u8, message: &dyn Message) -> Vec<u8> {
+pub(crate) fn frame(
+    system_id: u8,
+    component_id: u8,
+    sequence: u8,
+    message: &dyn Message,
+) -> Vec<u8> {
     let Ok(builder) = Frame::builder()
         .version(V2)
         .system_id(system_id)
@@ -35,6 +40,52 @@ fn frame(system_id: u8, component_id: u8, sequence: u8, message: &dyn Message) -
     let written = frame.serialize(&mut buf).unwrap_or(0);
     buf.truncate(written);
     buf
+}
+
+/// `SYS_STATUS` as the fork in `fixtures/acme_fork.xml` sends it: ArduPilot's,
+/// then its own `acme_payload_mv` (11.95 V) after the extensions.
+fn forked_status(frame: &[u8]) -> Vec<u8> {
+    use mavio::protocol::Dialect;
+    let (Some(header), Some(payload)) = (
+        crate::framing::header(frame),
+        crate::framing::payload(frame),
+    ) else {
+        return frame.to_vec();
+    };
+    let mut payload = payload.to_vec();
+    payload.resize(43, 0);
+    payload.extend_from_slice(&11_950_u16.to_le_bytes());
+    let extra = mavio::dialects::ardupilotmega::Ardupilotmega::message_info(1)
+        .map_or(0, mavio::protocol::MessageSpec::crc_extra);
+    crate::custom::frame_from(
+        (header.system_id, header.component_id, header.sequence),
+        1,
+        &payload,
+        extra,
+    )
+}
+
+/// That fork's `ACME_STATUS` (43001): surveying (mode 3), armed and hot.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a simulated time"
+)]
+fn acme_status(system_id: u8, sequence: u8, t_s: f64) -> Vec<u8> {
+    static EXTRA: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let extra = *EXTRA.get_or_init(|| {
+        crate::custom::read(&[("acme_fork.xml", include_str!("../fixtures/acme_fork.xml"))])
+            .ok()
+            .and_then(|read| read.messages.into_iter().find(|m| m.id == 43001))
+            .map_or(0, |m| m.crc_extra)
+    });
+    let mut payload = Vec::with_capacity(24);
+    payload.extend_from_slice(&((t_s * 1e6) as u64).to_le_bytes());
+    payload.extend_from_slice(&15.8_f32.to_le_bytes());
+    payload.extend_from_slice(&[3, 0x05]);
+    payload.extend_from_slice(b"ACME-1\0\0");
+    payload.extend_from_slice(&2_350_i16.to_le_bytes());
+    crate::custom::frame_from((system_id, 1, sequence), 43001, &payload, extra)
 }
 
 /// A quadcopter heartbeat from an ArduPilot autopilot.
@@ -133,6 +184,83 @@ pub fn global_position_frame(
     frame(system_id, 1, sequence, &position)
 }
 
+/// `GLOBAL_POSITION_INT` at a place (degrees times 10^7), an altitude
+/// above mean sea level and above home in millimetres, and a time since
+/// boot.
+#[must_use]
+pub fn global_position_at_frame(
+    (system_id, sequence): (u8, u8),
+    (lat_e7, lon_e7): (i32, i32),
+    (alt_mm, relative_alt_mm): (i32, i32),
+    time_boot_ms: u32,
+) -> Vec<u8> {
+    let position = GlobalPositionInt {
+        time_boot_ms,
+        lat: lat_e7,
+        lon: lon_e7,
+        alt: alt_mm,
+        relative_alt: relative_alt_mm,
+        hdg: u16::MAX,
+        ..GlobalPositionInt::default()
+    };
+    frame(system_id, 1, sequence, &position)
+}
+
+/// `ATTITUDE`: roll, pitch and yaw in degrees, at a time since boot.
+#[must_use]
+pub fn attitude_frame(
+    (system_id, sequence): (u8, u8),
+    (roll_deg, pitch_deg, yaw_deg): (f32, f32, f32),
+    time_boot_ms: u32,
+) -> Vec<u8> {
+    let attitude = Attitude {
+        time_boot_ms,
+        roll: roll_deg.to_radians(),
+        pitch: pitch_deg.to_radians(),
+        yaw: yaw_deg.to_radians(),
+        ..Attitude::default()
+    };
+    frame(system_id, 1, sequence, &attitude)
+}
+
+/// `PID_TUNING` for one axis (1 roll, 2 pitch, 3 yaw): desired and achieved
+/// rate in rad/s, as a copter sends them, with no terms.
+#[must_use]
+pub fn pid_tuning_frame(
+    (system_id, sequence): (u8, u8),
+    axis: u8,
+    desired: f32,
+    achieved: f32,
+) -> Vec<u8> {
+    let extra =
+        <mavio::dialects::ardupilotmega::Ardupilotmega as mavio::protocol::Dialect>::message_info(
+            194,
+        )
+        .map_or(0, mavio::protocol::MessageSpec::crc_extra);
+    let mut payload: Vec<u8> = [desired, achieved, 0.0, 0.0, 0.0, 0.0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    payload.push(axis);
+    crate::custom::frame_from((system_id, 1, sequence), 194, &payload, extra)
+}
+
+/// `SYSTEM_TIME`: the vehicle's GPS time and its time since boot.
+#[must_use]
+pub fn system_time_frame(
+    system_id: u8,
+    sequence: u8,
+    time_unix_usec: u64,
+    time_boot_ms: u32,
+) -> Vec<u8> {
+    use mavio::dialects::ardupilotmega::messages::SystemTime;
+    let message = SystemTime {
+        time_unix_usec,
+        time_boot_ms,
+    };
+    frame(system_id, 1, sequence, &message)
+}
+
 /// A ground station's heartbeat, which must never become a vehicle.
 #[must_use]
 pub fn gcs_heartbeat_frame(system_id: u8, component_id: u8, sequence: u8) -> Vec<u8> {
@@ -145,6 +273,24 @@ pub fn gcs_heartbeat_frame(system_id: u8, component_id: u8, sequence: u8) -> Vec
         mavlink_version: 3,
     };
     frame(system_id, component_id, sequence, &heartbeat)
+}
+
+/// `TIMESYNC` (S261) from `system_id` and `component_id` to a target (0
+/// for anyone): a request with `tc1` 0, or a reply with the answerer's
+/// clock in `tc1` and the request's `ts1` echoed.
+#[must_use]
+pub fn timesync_frame(
+    (system_id, component_id, sequence): (u8, u8, u8),
+    (tc1, ts1): (i64, i64),
+    (target_system, target_component): (u8, u8),
+) -> Vec<u8> {
+    let message = Timesync {
+        tc1,
+        ts1,
+        target_system,
+        target_component,
+    };
+    frame(system_id, component_id, sequence, &message)
 }
 
 #[must_use]
@@ -333,20 +479,40 @@ pub fn command_long_frame(
     params: [f32; 7],
     confirmation: u8,
 ) -> Vec<u8> {
-    let command = CommandLong {
-        target_system,
-        target_component,
-        command: MavCmd::try_from(command).unwrap_or(MavCmd::ComponentArmDisarm),
-        confirmation,
-        param1: params[0],
-        param2: params[1],
-        param3: params[2],
-        param4: params[3],
-        param5: params[4],
-        param6: params[5],
-        param7: params[6],
-    };
-    frame(gcs, crate::GCS_COMPONENT_ID, sequence, &command)
+    let mut payload = Vec::with_capacity(33);
+    for param in params {
+        payload.extend_from_slice(&param.to_le_bytes());
+    }
+    payload.extend_from_slice(&command.to_le_bytes());
+    payload.extend_from_slice(&[target_system, target_component, confirmation]);
+    crate::custom::frame_from(
+        (gcs, crate::GCS_COMPONENT_ID, sequence),
+        COMMAND_LONG.0,
+        &payload,
+        COMMAND_LONG.1,
+    )
+}
+
+/// `COMMAND_LONG`, `COMMAND_INT`, `MISSION_ITEM_INT` and `COMMAND_ACK`: their
+/// message ids and CRC extras. UXDuck writes them byte by byte, in MAVLink's
+/// wire order, so a `MAV_CMD` or `MAV_FRAME` newer than mavio's dialect
+/// goes out as its number rather than as another command.
+const COMMAND_LONG: (u32, u8) = (76, 152);
+const COMMAND_INT: (u32, u8) = (75, 158);
+const MISSION_ITEM_INT: (u32, u8) = (73, 38);
+const COMMAND_ACK: (u32, u8) = (77, 143);
+
+/// Param1 to param4, then x, y and z: the start of `COMMAND_INT` and
+/// `MISSION_ITEM_INT`.
+fn params_and_place(params: [f32; 4], x: i32, y: i32, z: f32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(38);
+    for param in params {
+        payload.extend_from_slice(&param.to_le_bytes());
+    }
+    payload.extend_from_slice(&x.to_le_bytes());
+    payload.extend_from_slice(&y.to_le_bytes());
+    payload.extend_from_slice(&z.to_le_bytes());
+    payload
 }
 
 /// A `COMMAND_INT`'s place: its frame, `param1` to `param4`, and the
@@ -376,24 +542,15 @@ pub fn command_int_frame(
     command: u16,
     place: IntPlace,
 ) -> Vec<u8> {
-    use mavio::dialects::ardupilotmega::enums::MavFrame;
-    use mavio::dialects::ardupilotmega::messages::CommandInt;
-    let command = CommandInt {
-        target_system,
-        target_component,
-        frame: MavFrame::try_from(place.frame).unwrap_or(MavFrame::GlobalRelativeAltInt),
-        command: MavCmd::try_from(command).unwrap_or(MavCmd::DoReposition),
-        current: 0,
-        autocontinue: 0,
-        param1: place.params[0],
-        param2: place.params[1],
-        param3: place.params[2],
-        param4: place.params[3],
-        x: place.x,
-        y: place.y,
-        z: place.z,
-    };
-    frame(gcs, crate::GCS_COMPONENT_ID, sequence, &command)
+    let mut payload = params_and_place(place.params, place.x, place.y, place.z);
+    payload.extend_from_slice(&command.to_le_bytes());
+    payload.extend_from_slice(&[target_system, target_component, place.frame, 0, 0]);
+    crate::custom::frame_from(
+        (gcs, crate::GCS_COMPONENT_ID, sequence),
+        COMMAND_INT.0,
+        &payload,
+        COMMAND_INT.1,
+    )
 }
 
 /// A vehicle's `COMMAND_ACK` to a ground station's `(system, component)`.
@@ -406,17 +563,19 @@ pub fn command_ack_frame(
     command: u16,
     result: u8,
 ) -> Vec<u8> {
-    use mavio::dialects::ardupilotmega::enums::MavResult;
-    use mavio::dialects::ardupilotmega::messages::CommandAck;
-    let ack = CommandAck {
-        command: MavCmd::try_from(command).unwrap_or(MavCmd::ComponentArmDisarm),
-        result: MavResult::try_from(result).unwrap_or(MavResult::Failed),
-        target_system: to.0,
-        target_component: to.1,
-        ..CommandAck::default()
-    };
-    frame(system_id, component_id, sequence, &ack)
+    let mut payload = Vec::with_capacity(10);
+    payload.extend_from_slice(&command.to_le_bytes());
+    payload.extend_from_slice(&[result, 0, 0, 0, 0, 0, to.0, to.1]);
+    crate::custom::frame_from(
+        (system_id, component_id, sequence),
+        COMMAND_ACK.0,
+        &payload,
+        COMMAND_ACK.1,
+    )
 }
+
+/// The fake vehicle's script (S259), as ArduPilot's own hello world.
+const HELLO_LUA: &str = "-- Says hello every five seconds.\nfunction update()\n  gcs:send_text(6, \"hello, world\")\n  return update, 5000\nend\n\nreturn update()\n";
 
 /// `STATUSTEXT`: one message, or one 50-byte part of a long one (`id` not 0).
 #[must_use]
@@ -740,6 +899,13 @@ impl Route {
     }
 }
 
+/// `MISSION_ITEM_REACHED`: the vehicle reached mission item `seq` (S343).
+#[must_use]
+pub fn mission_item_reached_frame(system_id: u8, sequence: u8, seq: u16) -> Vec<u8> {
+    use mavio::dialects::ardupilotmega::messages::MissionItemReached;
+    frame(system_id, 1, sequence, &MissionItemReached { seq })
+}
+
 /// `MISSION_COUNT`: the daemon starting an upload, or a vehicle answering a
 /// request for its list.
 #[must_use]
@@ -775,26 +941,23 @@ pub fn mission_item_frame(
     sequence: u8,
     item: &crate::decode::MissionItemInt,
 ) -> Vec<u8> {
-    use mavio::dialects::ardupilotmega::enums::MavFrame;
-    use mavio::dialects::ardupilotmega::messages::MissionItemInt;
-    let message = MissionItemInt {
-        target_system: route.to.0,
-        target_component: route.to.1,
-        seq: item.seq,
-        frame: MavFrame::try_from(item.frame).unwrap_or(MavFrame::GlobalRelativeAlt),
-        command: MavCmd::try_from(item.command).unwrap_or(MavCmd::NavWaypoint),
-        current: u8::from(item.current),
-        autocontinue: u8::from(item.autocontinue),
-        param1: item.params[0],
-        param2: item.params[1],
-        param3: item.params[2],
-        param4: item.params[3],
-        x: item.x,
-        y: item.y,
-        z: item.z,
-        mission_type: mission_type_of(item.mission_type),
-    };
-    frame(route.from.0, route.from.1, sequence, &message)
+    let mut payload = params_and_place(item.params, item.x, item.y, item.z);
+    payload.extend_from_slice(&item.seq.to_le_bytes());
+    payload.extend_from_slice(&item.command.to_le_bytes());
+    payload.extend_from_slice(&[
+        route.to.0,
+        route.to.1,
+        item.frame,
+        u8::from(item.current),
+        u8::from(item.autocontinue),
+        item.mission_type,
+    ]);
+    crate::custom::frame_from(
+        (route.from.0, route.from.1, sequence),
+        MISSION_ITEM_INT.0,
+        &payload,
+        MISSION_ITEM_INT.1,
+    )
 }
 
 /// `MISSION_ACK` with `MAV_MISSION_RESULT`.
@@ -813,17 +976,27 @@ pub fn mission_ack_frame(route: Route, sequence: u8, result: u8, kind: u8) -> Ve
 }
 
 /// `MANUAL_CONTROL` from the daemon: x pitch, y roll, z throttle (0 to
-/// 1000), r yaw.
+/// 1000), r yaw, and held button bits: 0 to 15 in `buttons`, 16 to 31 in
+/// the `buttons2` extension.
 #[must_use]
-pub fn manual_control_frame(gcs: u8, target_system: u8, sequence: u8, sticks: [i16; 4]) -> Vec<u8> {
+pub fn manual_control_frame(
+    gcs: u8,
+    target_system: u8,
+    sequence: u8,
+    sticks: [i16; 4],
+    buttons: u32,
+) -> Vec<u8> {
     use mavio::dialects::ardupilotmega::messages::ManualControl;
     let [x, y, z, r] = sticks;
+    #[allow(clippy::cast_possible_truncation, reason = "each half of the mask")]
     let message = ManualControl {
         target: target_system,
         x,
         y,
         z,
         r,
+        buttons: (buttons & 0xFFFF) as u16,
+        buttons2: (buttons >> 16) as u16,
         ..ManualControl::default()
     };
     frame(gcs, crate::GCS_COMPONENT_ID, sequence, &message)
@@ -1024,6 +1197,16 @@ pub struct FakeVehicle {
     /// Its fence and rally points (S128), as the mission protocol keeps them.
     pub fence: Vec<crate::decode::MissionItemInt>,
     pub rally: Vec<crate::decode::MissionItemInt>,
+    /// Reports ids for its mission, fence and rally points in
+    /// `MISSION_CURRENT` (S199), as PX4 does; ArduPilot sends zeros.
+    pub plan_ids: bool,
+    /// Those ids, by kind: a new one each time a kind is stored, 0 for an
+    /// empty fence or rally points.
+    plan_id: [u32; 3],
+    /// The last id given.
+    plan_id_counter: u32,
+    /// `MISSION_CURRENT`'s `mission_state`: 0, unknown, unless set.
+    pub mission_state: u8,
     /// An upload in progress: its kind, how many are coming, the items so far.
     upload: Option<(u8, u16, Vec<crate::decode::MissionItemInt>)>,
     /// Seconds into the run when it last booted; `time_boot_ms` counts
@@ -1062,6 +1245,10 @@ pub struct FakeVehicle {
     pub vibration_high: bool,
     /// Says "Leak Detected!" every 10 s, as `ArduSub` does (S72).
     pub leak: bool,
+    /// Sends a fork's own messages, as a vehicle running the fork in
+    /// `fixtures/acme_fork.xml` does (S252): `ACME_STATUS` (43001), and
+    /// `SYS_STATUS` with the extension that fork adds.
+    pub fork_messages: bool,
     /// Streams only the telemetry asked for with `SET_MESSAGE_INTERVAL`, as
     /// `ArduCopter` does with every `SRn_` rate at 0. Off, it streams it
     /// all, as a vehicle another ground station has set up does.
@@ -1111,6 +1298,10 @@ pub struct FakeVehicle {
     /// PX4 (S191): set by `make_px4`, it heartbeats, lists its parameters
     /// and calibrates as PX4 does.
     pub px4: Option<crate::fake_px4::FakePx4>,
+    /// When its battery is "replugged" after `ESC_CALIBRATION` 3 was set
+    /// (S216): it restarts then, calibrates and sets the parameter back to
+    /// 0, as `ArduPilot` does at its next start.
+    esc_replug_at_s: Option<f64>,
     /// The true heading a calibration from a heading was given (S185):
     /// reported while it is disarmed, as a vehicle standing still facing
     /// that way would.
@@ -1121,7 +1312,10 @@ pub struct FakeVehicle {
     said_burst: bool,
     said_prearm_s: Option<f64>,
     said_repeat_s: Option<f64>,
+    /// The autopilot's sequence; each other component counts its own, as a
+    /// telemetry radio and a camera do (S261: loss is counted per sender).
     sequence: u8,
+    sequences: std::collections::BTreeMap<u8, u8>,
 }
 
 /// A `param.pck` with defaults for these parameters: the defaults are the
@@ -1374,6 +1568,10 @@ impl FakeVehicle {
             mission_capacity: 100,
             fence: Vec::new(),
             rally: Vec::new(),
+            plan_ids: true,
+            plan_id: [1, 0, 0],
+            plan_id_counter: 1,
+            mission_state: 0,
             upload: None,
             booted_at_s: 0.0,
             last_t_s: 0.0,
@@ -1391,6 +1589,7 @@ impl FakeVehicle {
             repeat_warning: false,
             vibration_high: false,
             leak: false,
+            fork_messages: false,
             streams_on_request: true,
             requested: std::collections::BTreeSet::new(),
             battery_from_pct: 100.0,
@@ -1408,12 +1607,14 @@ impl FakeVehicle {
             motors: crate::fake_motors::FakeMotors::default(),
             airspeed: crate::fake_airspeed::FakeAirspeed::default(),
             px4: None,
+            esc_replug_at_s: None,
             held_heading: None,
             said_compass_s: None,
             said_burst: false,
             said_prearm_s: None,
             said_repeat_s: None,
             sequence: 0,
+            sequences: std::collections::BTreeMap::new(),
             gcs: (crate::GCS_SYSTEM_ID, crate::GCS_COMPONENT_ID),
         }
     }
@@ -1737,6 +1938,69 @@ impl FakeVehicle {
 
     /// Lists a quad X's `FRAME_CLASS` and `FRAME_TYPE` (S188), so its
     /// motors can be drawn for the motor test.
+    /// Lists a copter's ESC parameters (S216): `MOT_PWM_TYPE` as given (0
+    /// plain PWM, 6 `DShot600`) and `ESC_CALIBRATION` 0. Set to 3, it
+    /// "is replugged" eight seconds later: it restarts with 0. Later than a
+    /// person would, so it has been up long enough for the restart to be
+    /// told from a pause.
+    pub fn add_escs(&mut self, pwm_type: u8) {
+        self.parameters
+            .push(("MOT_PWM_TYPE".to_owned(), f32::from(pwm_type), INT8));
+        self.parameters
+            .push(("ESC_CALIBRATION".to_owned(), 0.0, INT8));
+    }
+
+    /// The battery replugged for an ESC calibration (S216): a restart, and
+    /// `ESC_CALIBRATION` back to 0.
+    fn esc_replug(&mut self, t_s: f64) {
+        if self.esc_replug_at_s.is_some_and(|at| t_s >= at) {
+            self.esc_replug_at_s = None;
+            self.reboot();
+            self.set_parameter("ESC_CALIBRATION", 0.0);
+        }
+    }
+
+    /// Lists `SCR_ENABLE` (0 off, 1 Lua) and puts a `hello.lua` in
+    /// `/APM/scripts` (S259). `MAV_CMD_SCRIPTING`'s restart is answered,
+    /// with "Scripting: restarted", while scripting is on.
+    pub fn add_scripting(&mut self, enabled: u8) {
+        self.parameters
+            .push(("SCR_ENABLE".to_owned(), f32::from(enabled), INT8));
+        self.files.files.insert(
+            "/APM/scripts/hello.lua".into(),
+            HELLO_LUA.as_bytes().to_vec(),
+        );
+    }
+
+    /// Restarts its scripts (S259): accepted while scripting is on, as
+    /// ArduPilot does, and said.
+    fn restart_scripts(&mut self) -> Vec<Vec<u8>> {
+        let on = self
+            .parameters
+            .iter()
+            .any(|p| p.0 == "SCR_ENABLE" && (p.1 - 1.0).abs() < 0.5);
+        let sequence = self.next();
+        let mut replies = vec![command_ack_frame(
+            self.system_id,
+            1,
+            self.gcs,
+            sequence,
+            42701,
+            if on { 0 } else { 4 },
+        )];
+        if on {
+            let sequence = self.next();
+            replies.push(status_text_frame(
+                self.system_id,
+                sequence,
+                6,
+                "Scripting: restarted",
+                (0, 0),
+            ));
+        }
+        replies
+    }
+
     pub fn add_motors(&mut self) {
         self.parameters.push(("FRAME_CLASS".to_owned(), 1.0, INT8));
         self.parameters.push(("FRAME_TYPE".to_owned(), 1.0, INT8));
@@ -1930,7 +2194,13 @@ impl FakeVehicle {
     /// Its radio's channels (S187), when asked for.
     fn radio_channels(&mut self, t_s: f64) -> Option<Vec<u8>> {
         if !self.radio.listed {
-            return None;
+            return self.stream(
+                1,
+                &RcChannels {
+                    rssi: u8::MAX,
+                    ..Default::default()
+                },
+            );
         }
         let c = self.radio.channels(t_s);
         #[allow(
@@ -1980,7 +2250,7 @@ impl FakeVehicle {
         if !self.radio.listed || (param1 - 65.0).abs() > 0.5 {
             return Vec::new();
         }
-        if param2 > 0.0 {
+        if param2 > 0.0 && param2 <= 100_000.0 {
             self.radio.asked(self.last_t_s);
         }
         let sequence = self.next();
@@ -2291,11 +2561,23 @@ impl FakeVehicle {
             .collect()
     }
 
+    /// A status frame as the fork sends it with `fork_messages` (S252),
+    /// followed by its `ACME_STATUS`.
+    fn as_forked(&mut self, status: Option<Vec<u8>>, t_s: f64) -> Vec<Vec<u8>> {
+        if !self.fork_messages {
+            return status.into_iter().collect();
+        }
+        let mut frames: Vec<Vec<u8>> = status.iter().map(|f| forked_status(f)).collect();
+        let seq = self.next();
+        frames.push(acme_status(self.system_id, seq, t_s));
+        frames
+    }
+
     fn stream(&mut self, component: u8, message: &dyn Message) -> Option<Vec<u8>> {
         if self.streams_on_request && !self.requested.contains(&message.id()) {
             return None;
         }
-        let seq = self.next();
+        let seq = self.next_of(component);
         Some(frame(self.system_id, component, seq, message))
     }
 
@@ -2388,6 +2670,26 @@ impl FakeVehicle {
     fn converse(&mut self, message: Decoded) -> Vec<Vec<u8>> {
         let mut replies = Vec::new();
         match message {
+            // As ArduPilot answers: its clock since boot in nanoseconds, the
+            // asker's `ts1` echoed, addressed to the asker.
+            Decoded::Timesync {
+                tc1: 0,
+                ts1,
+                target_system,
+                ..
+            } if target_system == 0 || target_system == self.system_id => {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "nanoseconds since boot fit in an i64 for centuries"
+                )]
+                let tc1 = ((self.last_t_s - self.booted_at_s).max(0.0) * 1e9) as i64 + 1;
+                let sequence = self.next();
+                replies.push(timesync_frame(
+                    (self.system_id, 1, sequence),
+                    (tc1, ts1),
+                    self.gcs,
+                ));
+            }
             Decoded::Ftp {
                 target_system,
                 payload,
@@ -2452,6 +2754,11 @@ impl FakeVehicle {
                     // FORMAT_VERSION is read-only: the old value comes back.
                     if name != "FORMAT_VERSION" {
                         self.parameters[index].1 = value;
+                    }
+                    // A person replugs the battery a few seconds after
+                    // asking for an ESC calibration (S216).
+                    if name == "ESC_CALIBRATION" && (value - 3.0).abs() < f32::EPSILON {
+                        self.esc_replug_at_s = Some(self.last_t_s + 8.0);
                     }
                     replies.extend(self.param_frame(index));
                 } else if self.on_ground {
@@ -2545,6 +2852,17 @@ impl FakeVehicle {
         self.sequence
     }
 
+    /// The next sequence number of a component: the autopilot's, or
+    /// another's own.
+    fn next_of(&mut self, component: u8) -> u8 {
+        if component == 1 {
+            return self.next();
+        }
+        let sequence = self.sequences.entry(component).or_default();
+        *sequence = sequence.wrapping_add(1);
+        *sequence
+    }
+
     /// What it keeps of one kind: the mission, the fence or rally points.
     fn stored(&self, kind: u8) -> &[crate::decode::MissionItemInt] {
         match kind {
@@ -2555,11 +2873,50 @@ impl FakeVehicle {
     }
 
     fn store(&mut self, kind: u8, items: Vec<crate::decode::MissionItemInt>) {
+        self.plan_id_counter = self.plan_id_counter.wrapping_add(1).max(1);
+        let id = if items.is_empty() && kind != 0 {
+            0
+        } else {
+            self.plan_id_counter
+        };
+        self.plan_id[usize::from(kind.min(2))] = id;
         match kind {
             1 => self.fence = items,
             2 => self.rally = items,
             _ => self.mission = items,
         }
+    }
+
+    /// Another ground station replaces one kind (S199): 0 the mission, 1
+    /// the fence, 2 rally points. Stored as an upload is, with a new id.
+    pub fn replace_elsewhere(&mut self, kind: u8, items: Vec<crate::decode::MissionItemInt>) {
+        self.store(kind, items);
+    }
+
+    /// `MISSION_CURRENT` as it streams it: the item flown to, the mission's
+    /// count without home and, when it reports them, the ids (S199).
+    fn mission_current_message(&self) -> MissionCurrent {
+        let [mission_id, fence_id, rally_points_id] =
+            if self.plan_ids { self.plan_id } else { [0; 3] };
+        MissionCurrent {
+            seq: 0,
+            total: u16::try_from(self.mission.len().saturating_sub(1)).unwrap_or(u16::MAX),
+            mission_id,
+            fence_id,
+            rally_points_id,
+            mission_state: mavio::dialects::ardupilotmega::enums::MissionState::try_from(
+                self.mission_state,
+            )
+            .unwrap_or_default(),
+            ..MissionCurrent::default()
+        }
+    }
+
+    /// One `MISSION_CURRENT` frame now, outside the telemetry streams.
+    pub fn mission_current(&mut self) -> Vec<u8> {
+        let message = self.mission_current_message();
+        let sequence = self.next();
+        frame(self.system_id, 1, sequence, &message)
     }
 
     /// A take-off's climb since the last telemetry, at 5 m/s.
@@ -2626,7 +2983,7 @@ impl FakeVehicle {
     /// The camera component's heartbeat, when it has a camera.
     pub fn camera_heartbeat(&mut self) -> Option<Vec<u8>> {
         self.camera.as_ref()?;
-        let sequence = self.next();
+        let sequence = self.next_of(CAMERA_COMPONENT);
         Some(camera_heartbeat_frame(
             self.system_id,
             CAMERA_COMPONENT,
@@ -2814,6 +3171,7 @@ impl FakeVehicle {
             .collect()
     }
 
+    #[allow(clippy::too_many_lines, reason = "one check per command it answers")]
     pub fn answer(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut replies = Vec::new();
         for frame in crate::framing::split(bytes).frames {
@@ -2869,6 +3227,16 @@ impl FakeVehicle {
                 ));
             }
             if let Some(Decoded::CommandLong {
+                command: 42701,
+                param1,
+                ..
+            }) = decode(frame).map(|d| d.message)
+                && (param1 - 3.0).abs() < f32::EPSILON
+                && !self.ignores_commands
+            {
+                replies.extend(self.restart_scripts());
+            }
+            if let Some(Decoded::CommandLong {
                 command: 512,
                 param1,
                 ..
@@ -2885,7 +3253,7 @@ impl FakeVehicle {
                 && (param1 - 269.0).abs() < f32::EPSILON
                 && let Some(uri) = self.camera.clone()
             {
-                let sequence = self.next();
+                let sequence = self.next_of(CAMERA_COMPONENT);
                 replies.push(video_stream_information_frame(
                     self.system_id,
                     CAMERA_COMPONENT,
@@ -3050,7 +3418,8 @@ impl FakeVehicle {
         ));
         let remaining = (self.battery_from_pct - t_s / 12.0).max(0.0);
         let status = self.status(remaining);
-        frames.extend(self.stream(id, &status));
+        let status = self.stream(id, &status);
+        frames.extend(self.as_forked(status, t_s));
         frames.extend(self.stream(
             id,
             &VfrHud {
@@ -3076,6 +3445,7 @@ impl FakeVehicle {
             let out = px4.tick(t_s);
             return self.px4_out(out);
         }
+        self.esc_replug(t_s);
         let mut frames = self.compass_calibration(t_s);
         frames.extend(self.accel_calibration(t_s));
         frames.extend(self.radio_channels(t_s));
@@ -3114,7 +3484,7 @@ impl FakeVehicle {
         let mut cells = [u16::MAX; 10];
         cells[..3].copy_from_slice(&[4200, 4190, 4210]);
         let mut frames = Vec::new();
-        let seq = self.next();
+        let seq = self.next_of(68);
         // A telemetry radio reports as the vehicle's component 68, asked or
         // not: it is the radio's own message, not the autopilot's.
         frames.push(frame(
@@ -3128,7 +3498,8 @@ impl FakeVehicle {
                 remnoise: 42,
                 rxerrors: 3,
                 fixed: 1,
-                ..RadioStatus::default()
+                // Room to spare: a fake radio never slows terrain.
+                txbuf: 100,
             },
         ));
         frames.extend(self.stream(
@@ -3292,10 +3663,7 @@ impl FakeVehicle {
         let servos = self.servos(t_s);
         let mut frames = Vec::new();
         frames.extend(self.stream(id, &servos));
-        let current = MissionCurrent {
-            seq: 0,
-            ..MissionCurrent::default()
-        };
+        let current = self.mission_current_message();
         frames.extend(self.stream(id, &current));
         // 120 m to the waypoint, for the instruments (S43).
         let navigation = NavControllerOutput {
@@ -3361,5 +3729,158 @@ impl FakeVehicle {
             servo4_raw: motor(3.0),
             ..ServoOutputRaw::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod esc_tests {
+    #![allow(clippy::unwrap_used, reason = "test")]
+
+    use super::*;
+
+    /// Set to 3, `ESC_CALIBRATION` has the fake "replugged" a few seconds
+    /// later: it restarts, and the parameter is back at 0 (S216).
+    #[test]
+    fn an_esc_calibration_restarts_it_with_the_parameter_back_at_0() {
+        let mut vehicle = FakeVehicle::new(1, 1);
+        vehicle.add_escs(0);
+        let _ = vehicle.telemetry(10.0);
+        let set = param_set_frame(255, 1, 1, 0, "ESC_CALIBRATION", 3.0, INT8);
+        let _ = vehicle.answer(&set);
+        let value = |v: &FakeVehicle| {
+            v.parameters
+                .iter()
+                .find(|p| p.0 == "ESC_CALIBRATION")
+                .unwrap()
+                .1
+        };
+        assert!((value(&vehicle) - 3.0).abs() < f32::EPSILON);
+        for step in 1..=100 {
+            let _ = vehicle.telemetry(10.0 + f64::from(step) * 0.1);
+        }
+        assert!(
+            vehicle.booted_at_s > 17.0,
+            "restarted at {}",
+            vehicle.booted_at_s
+        );
+        assert!(value(&vehicle).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    #![allow(clippy::unwrap_used, reason = "test")]
+
+    use super::*;
+    use crate::custom::{Messages, read};
+    use uxduck_core::domain::dialect::Dialect;
+
+    /// With `fork_messages`, it sends `ACME_STATUS` and a `SYS_STATUS` with the
+    /// fork's extension (S252): UXDuck's own reader still reads that status,
+    /// and the fork's dialect decodes both.
+    #[test]
+    fn a_forks_messages_read_by_uxduck_and_decoded_by_the_dialect() {
+        let mut vehicle = FakeVehicle::new(1, 1);
+        vehicle.fork_messages = true;
+        vehicle.streams_on_request = false;
+        let frames = vehicle.telemetry(2.0);
+        let of = |id: u32| {
+            frames
+                .iter()
+                .find(|f| crate::framing::header(f).unwrap().message_id == id)
+                .unwrap()
+        };
+        let status = of(1);
+        assert!(matches!(
+            decode(status).unwrap().message,
+            Decoded::SysStatus { .. }
+        ));
+        assert_eq!(crate::decode::check(status), crate::framing::Check::Valid);
+        let read = read(&[("acme_fork.xml", include_str!("../fixtures/acme_fork.xml"))]).unwrap();
+        let acme = Dialect {
+            id: "acme".into(),
+            label: "Acme".into(),
+            files: Vec::new(),
+            commits: Vec::new(),
+            every_vehicle: false,
+            messages: read.messages,
+            enums: read.enums,
+            commands: read.commands,
+            unchanged: read.unchanged,
+            added_at_us: 0,
+            updated_at_us: 0,
+            profile_id: None,
+            places_read: true,
+        };
+        crate::custom::publish_checksums(&acme);
+        let messages = Messages::of([&acme]);
+        let payload = |id| crate::framing::payload(of(id)).unwrap();
+        let decoded = messages.decode(1, payload(1)).unwrap();
+        assert_eq!(decoded.fields["acme_payload_mv"], 11_950);
+        let decoded = messages.decode(43_001, payload(43_001)).unwrap();
+        assert_eq!(decoded.fields["mode"], 3);
+        assert_eq!(decoded.labels["mode"], "ACME_MODE_SURVEY");
+        assert_eq!(decoded.fields["temperature"], 2_350);
+        assert_eq!(
+            crate::decode::check(of(43_001)),
+            crate::framing::Check::Valid
+        );
+        crate::custom::forget_checksums("acme");
+    }
+}
+
+#[cfg(test)]
+mod unnamed_commands {
+    use super::{IntPlace, command_int_frame, command_long_frame};
+    use crate::decode::{Message, decode};
+
+    /// The `MAV_CMD` a command frame carries, read from its bytes.
+    fn carried(frame: &[u8]) -> u16 {
+        let payload = &frame[10..10 + usize::from(frame[1])];
+        u16::from_le_bytes([payload[28], payload[29]])
+    }
+
+    #[test]
+    fn a_command_the_dialect_does_not_name_goes_as_itself_with_a_good_checksum() {
+        // DO_SET_GLOBAL_ORIGIN, from MAVLink's development set.
+        let place = IntPlace {
+            frame: 5,
+            params: [0.0; 4],
+            x: -353_632_610,
+            y: 1_491_652_300,
+            z: 584.25,
+        };
+        let int = command_int_frame(255, 1, 1, 7, 611, place);
+        assert_eq!(carried(&int), 611);
+        assert_eq!(crate::decode::check(&int), crate::framing::Check::Valid);
+        let long = command_long_frame(255, 1, 1, 8, 31_999, [1.0; 7], 0);
+        assert_eq!(carried(&long), 31_999);
+        assert_eq!(crate::decode::check(&long), crate::framing::Check::Valid);
+        // Named ones are as before.
+        assert_eq!(carried(&command_int_frame(255, 1, 1, 9, 179, place)), 179);
+        assert_eq!(
+            carried(&command_long_frame(255, 1, 1, 9, 400, [1.0; 7], 0)),
+            400
+        );
+    }
+
+    #[test]
+    fn its_acknowledgement_is_read_from_the_bytes() {
+        use mavio::protocol::Dialect;
+        let extra = mavio::dialects::ardupilotmega::Ardupilotmega::message_info(77)
+            .unwrap()
+            .crc_extra();
+        // 611 refused (4, failed), to the ground station 255/190.
+        let payload = [0x63, 0x02, 4, 0, 0, 0, 0, 0, 255, 190];
+        let ack = crate::custom::frame_from((1, 1, 3), 77, &payload, extra);
+        assert_eq!(
+            decode(&ack).map(|d| d.message),
+            Some(Message::CommandAck {
+                command: 611,
+                result: 4,
+                target_system: 255,
+                target_component: 190,
+            })
+        );
     }
 }

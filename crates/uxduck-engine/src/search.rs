@@ -362,10 +362,7 @@ fn parameters_and_missions(
                         helicopter,
                     )
                 });
-            let definition = set
-                .0
-                .as_deref()
-                .and_then(|s| s.find(&parameter.name, set.1));
+            let definition = set.0.as_ref().and_then(|s| s.find(&parameter.name, set.1));
             let meaning = definition.map_or(0, |d| d.meaning_score(query));
             let what = definition.map_or_else(String::new, |d| format!(" · {}", d.display_name));
             add(

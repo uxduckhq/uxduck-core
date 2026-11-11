@@ -1,13 +1,11 @@
 //! This computer's connection to its account (ADR-0003 C7, S78). The root's
-//! task holds one outbound WebSocket to the relay while signed in and
-//! "Connect this computer to my account" is on; the engine keeps how it is
-//! going, journals every connect and disconnect (what leaves the computer
-//! is on the record), and answers `account/computers` with the account's
-//! list and this computer's own state.
+//! task holds one outbound WebSocket to the relay while signed in, "Live
+//! sharing from this computer" is on (ADR-0048) and one of its watch links
+//! has not ended; the engine keeps how it is
+//! going and journals every connect and disconnect (what leaves the
+//! computer is on the record).
 
-use serde_json::Value;
-use uxduck_contracts::dto::edge::{AccountComputers, ComputerList, EdgeState, EdgeStatus};
-use uxduck_contracts::errors::{ApiError, ErrorKind};
+use uxduck_contracts::dto::edge::{EdgeState, EdgeStatus};
 use uxduck_core::events::{Actor, Change};
 
 use crate::Engine;
@@ -21,10 +19,13 @@ fn edge_actor() -> Actor {
 }
 
 impl Engine {
-    /// Whether the person wants this computer connected to their account.
+    /// Whether the person wants this computer connected to their account:
+    /// only for watch links, so only while live sharing is on (ADR-0048), no
+    /// earlier order to end them waits, and one of its links has not ended.
+    /// Without one, nothing leaves.
     #[must_use]
     pub fn edge_wanted(&self) -> bool {
-        self.state.settings.connect_to_account
+        self.watch_publishable() && self.has_live_link()
     }
 
     /// This computer's id in the account, as sync uses it: minted the first
@@ -44,6 +45,8 @@ impl Engine {
     pub fn edge_changed(&mut self, status: EdgeStatus) {
         let was = self.edge_status.state == EdgeState::Connected;
         let now = status.state == EdgeState::Connected;
+        let was_signed_out = self.edge_status.state == EdgeState::SignedOut;
+        let now_signed_out = status.state == EdgeState::SignedOut;
         if was != now {
             self.commit_as(
                 edge_actor(),
@@ -54,28 +57,16 @@ impl Engine {
             );
         }
         self.edge_status = status;
+        if now_signed_out && !was_signed_out {
+            self.signed_out_of_account();
+        } else if !now_signed_out && (was_signed_out || now != was) {
+            self.watch_account_reached();
+        }
     }
 
     #[must_use]
     pub fn edge_status(&self) -> &EdgeStatus {
         &self.edge_status
-    }
-
-    /// The account's list came back for `account/computers`: this
-    /// computer's id and its connection go with it.
-    pub(crate) fn computers_listed(
-        &self,
-        result: Result<Value, ApiError>,
-    ) -> Result<Value, ApiError> {
-        let list: ComputerList = serde_json::from_value(result?)
-            .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
-        let id = &self.state.sync.device_id;
-        let answer = AccountComputers {
-            computers: list.computers,
-            this_computer: (!id.is_empty()).then(|| id.clone()),
-            edge: self.edge_status.clone(),
-        };
-        serde_json::to_value(answer).map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))
     }
 }
 
@@ -88,7 +79,7 @@ impl Engine {
     pub fn upload_wanted(&self) -> Result<(), String> {
         let settings = &self.state.settings;
         if !settings.store_flights {
-            return Err("Storing flights in the account is off".into());
+            return Err("Automatic sync is off".into());
         }
         if !settings.upload_while_armed && self.state.vehicles.values().any(|v| v.armed) {
             return Err("Waiting until every vehicle is disarmed".into());
@@ -101,6 +92,29 @@ impl Engine {
     #[must_use]
     pub const fn stores_flights(&self) -> bool {
         self.state.settings.store_flights
+    }
+
+    /// "Wait for unmetered networks" (ADR-0046 B12).
+    #[must_use]
+    pub const fn waits_for_unmetered(&self) -> bool {
+        self.state.settings.wait_for_unmetered
+    }
+
+    /// Whether the account takes camera recordings (ADR-0046 B4): unless
+    /// it said no, as an older server never does.
+    #[must_use]
+    pub fn may_upload_video(&self) -> bool {
+        self.upload_status.as_ref().and_then(|s| s.may_upload_video) != Some(false)
+    }
+
+    /// Whether the account takes simulated flights (B6): only once it said
+    /// so, which a paid plan does.
+    #[must_use]
+    pub fn may_sync_simulated(&self) -> bool {
+        self.upload_status
+            .as_ref()
+            .and_then(|s| s.may_sync_simulated)
+            == Some(true)
     }
 
     /// The uploader's report: what is waiting.
@@ -132,7 +146,7 @@ pub fn signed_out() -> EdgeStatus {
     }
 }
 
-/// The values a viewer of one vehicle sees (S79): attitude, speeds,
+/// The values a watcher of one vehicle sees (S79, S95): attitude, speeds,
 /// battery, GPS, link and the next waypoint. Everything else stays here.
 const DETAIL_ITEMS: [&str; 14] = [
     "attitude.roll_deg",
@@ -154,12 +168,13 @@ const DETAIL_ITEMS: [&str; 14] = [
 impl Engine {
     /// The vehicles anyone watching asked for, as they leave the computer
     /// (S79, ADR-0003 C8): the fused position for the list, the values a
-    /// viewer shows for those open in detail. None while "Let my account
-    /// watch this computer" is off.
-    #[must_use]
+    /// watcher shows for those open in detail. None while "Live sharing
+    /// from this computer" is off.
+    ///
     /// `live` is each camera wanted from away now, with its media node or
     /// its problem (S84): the daemon's live video task holds it, not the
     /// engine.
+    #[must_use]
     pub fn edge_vehicles(
         &self,
         demand: &uxduck_contracts::dto::edge::EdgeDemand,
@@ -168,7 +183,7 @@ impl Engine {
         use uxduck_contracts::dto::telemetry::VehicleTelemetry as TelemetryDto;
         use uxduck_core::domain::notification::{NotificationState, Severity, Subject};
 
-        if !self.state.settings.watch_from_account {
+        if !self.watch_publishable() {
             return Vec::new();
         }
         // Dated on the relay's clock, so viewers can age them.
@@ -222,12 +237,12 @@ impl Engine {
                     autopilot: vehicle.autopilot.clone(),
                     size_cm: vehicle.size_cm,
                     look: vehicle.look.map(Into::into),
+                    colour: vehicle.colour.map(Into::into),
                     presence: vehicle.presence.into(),
                     armed: vehicle.armed,
                     mode: vehicle.mode.clone(),
                     telemetry,
                     notices: notices.iter().take(5).map(|n| n.title.clone()).collect(),
-                    lease: self.lease_of(&vehicle.id),
                     cameras: self
                         .state
                         .video_sources
@@ -247,12 +262,12 @@ impl Engine {
     }
 
     /// What the daemon needs to publish a camera from away (S84), while
-    /// "Let my account watch this computer" is on and the camera is known.
+    /// "Live sharing from this computer" is on and the camera is known.
     #[must_use]
     pub fn edge_live_source(&self, camera_id: &str) -> Option<LiveSource> {
         use uxduck_core::domain::video::RecordingState;
 
-        if !self.state.settings.watch_from_account {
+        if !self.watch_publishable() {
             return None;
         }
         let source = self.state.video_sources.get(camera_id)?;
@@ -266,7 +281,11 @@ impl Engine {
         Some(LiveSource {
             codec: source.codec.clone(),
             recording_id,
-            store: self.state.settings.store_flights,
+            // Kept by the account only as recordings would be (ADR-0046 B4, B8).
+            store: self.state.settings.store_flights
+                && self.state.settings.sync_content
+                    == uxduck_core::domain::settings::SyncContent::Video
+                && self.may_upload_video(),
         })
     }
 }

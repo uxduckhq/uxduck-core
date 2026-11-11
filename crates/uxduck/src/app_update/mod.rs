@@ -197,6 +197,9 @@ const PACKAGE_KIND: &str = if cfg!(target_os = "macos") {
 /// Marks a version whose per-file update failed, so it installs from its
 /// full package instead. Kept in the version's folder.
 const FILES_FAILED: &str = "files.failed";
+/// How the last attempt to install a staged version ended, kept in that
+/// version's folder so it is only ever shown with that version.
+const RESULT: &str = "install-result";
 
 async fn publish_failure(engine: &EngineHandle, why: String) {
     tracing::warn!(%why, "app update failed");
@@ -371,6 +374,7 @@ async fn download(
         report.verdict,
         crate::update::Verdict::Available(_) | crate::update::Verdict::RolledBack(_)
     ) {
+        forget_downloads(data_dir, |_| false);
         publish_current(engine, include_beta, report.warning).await?;
         return Ok(None);
     }
@@ -446,14 +450,78 @@ async fn download(
     }
     s.phase = UpdatePhase::Ready;
     // Surface a cancelled/failed installation when the background process returns.
-    if let Ok(result) = std::fs::read_to_string(data_dir.join("app-update-result")) {
+    if let Ok(result) = std::fs::read_to_string(dir.join(RESULT)) {
         s.detail = Some(
             s.detail
                 .map_or_else(|| result.clone(), |warning| format!("{warning} {result}")),
         );
     }
     channel.publish(s).await?;
+    announce(engine, data_dir, &version).await;
+    forget_downloads(data_dir, |staged| staged.to_string() == version);
     Ok(Some(dir))
+}
+
+/// The last version the notifications said was ready, kept so that a
+/// restart doesn't say it again.
+const ANNOUNCED: &str = "app-updates/announced";
+
+/// Says once per version, across restarts, that a downloaded update is
+/// ready (FB-97). A version not said yet because a vehicle is flying is
+/// said at a later check.
+async fn announce(engine: &EngineHandle, data_dir: &Path, version: &str) {
+    let marker = data_dir.join(ANNOUNCED);
+    if std::fs::read_to_string(&marker).is_ok_and(|said| said.trim() == version) {
+        return;
+    }
+    let asked = version.to_owned();
+    if !matches!(
+        engine.run(move |e| e.app_update_announce(&asked)).await,
+        Ok(true)
+    ) {
+        return;
+    }
+    let written = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&marker, version));
+    if let Err(error) = written {
+        tracing::warn!(%error, "couldn't remember the announced update");
+    }
+}
+
+/// Deletes downloaded versions `keep` turns down. Installed, superseded and
+/// withdrawn versions are never installed from again, and are about 300 MB
+/// each.
+fn forget_downloads(data_dir: &Path, keep: impl Fn(&semver::Version) -> bool) {
+    for folder in ["app-updates", "updates/sparkle"] {
+        let Ok(entries) = std::fs::read_dir(data_dir.join(folder)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(version) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| semver::Version::parse(name).ok())
+            else {
+                continue;
+            };
+            if keep(&version) {
+                continue;
+            }
+            if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                tracing::warn!(%error, %version, "couldn't delete an old update download");
+            }
+        }
+    }
+}
+
+/// At every start, even with automatic updates off: this version and older
+/// ones are installed already.
+pub fn forget_installed(data_dir: &Path) {
+    if let Ok(running) = semver::Version::parse(env!("CARGO_PKG_VERSION")) {
+        forget_downloads(data_dir, |version| *version > running);
+    }
 }
 
 /// Shared download progress across files fetched at once.
@@ -811,7 +879,7 @@ fn prepare_worker(
             if let Err(why) = installer::preflight_files(dir, list, installed, version) {
                 let _ = write(&dir.join(FILES_FAILED), why.as_bytes());
                 return Err(format!(
-                    "UXDuck could not prepare the smaller update ({why}). It is downloading the complete installer; install again when it is ready."
+                    "UXDuck could not prepare the smaller update ({why}). It is downloading the complete installer. Install again when it is ready."
                 ));
             }
         }
@@ -849,6 +917,7 @@ fn spawn_worker(dir: &Path, plan: &Plan) -> Result<(Child, std::process::ChildSt
         .map_err(|e| format!("Couldn't prepare the installer helper: {e}"))?;
     let mut command = Command::new(copy);
     command
+        .env_remove(crate::startup::ERROR_FILE)
         .arg("__install-update")
         .arg(dir)
         .stdin(Stdio::piped())
@@ -937,6 +1006,7 @@ pub fn worker(dir: &Path) -> Result<(), String> {
         .as_ref()
         .unwrap_or(&plan.executable);
     let result: Result<(), String> = (|| {
+        close_windows(installed, &plan.data_dir, Duration::from_secs(10))?;
         if plan.kind == "sparkle" {
             wait_for_sparkle(&plan)?;
         } else {
@@ -980,7 +1050,7 @@ pub fn worker(dir: &Path) -> Result<(), String> {
         |e| format!("Update not installed: {e}"),
         |()| format!("Updated UXDuck to {}.", plan.version),
     );
-    if let Err(error) = write(&plan.data_dir.join("app-update-result"), message.as_bytes()) {
+    if let Err(error) = write(&dir.join(RESULT), message.as_bytes()) {
         eprintln!("Could not record the update result: {error}");
     }
     drop(lock);
@@ -1028,19 +1098,84 @@ pub fn worker(dir: &Path) -> Result<(), String> {
                 if output.status.success() {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Couldn't reopen UXDuck: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ))
+                    Err(format!("Couldn't reopen UXDuck: {}", said(&output.stderr)))
                 }
             });
         if let Err(why) = reopened {
-            let detail = format!("{message} {why}. Open UXDuck again.");
-            write(&plan.data_dir.join("app-update-result"), detail.as_bytes())?;
+            let detail = format!(
+                "{message} {}. Open UXDuck again.",
+                why.trim_end_matches('.')
+            );
+            write(&dir.join(RESULT), detail.as_bytes())?;
             return Err(detail);
         }
     }
     result
+}
+
+/// What `uxduck open` said: an API error's message, not its JSON (FB-58).
+fn said(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    text.find('{')
+        .and_then(|start| serde_json::from_str::<serde_json::Value>(&text[start..]).ok())
+        .and_then(|error| error["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| text.trim().to_owned())
+}
+
+/// The desktop windows quit when their daemon has gone, but a moment after
+/// it. Replacing their files while they run leaves a half-installed window
+/// on Windows (FB-58), so wait for them, then stop any that stay.
+fn close_windows(installed: &Path, data_dir: &Path, grace: Duration) -> Result<(), String> {
+    use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
+    let folders: Vec<PathBuf> = [
+        crate::desktop_app::bundled_directory(installed),
+        data_dir.join("desktop-app"),
+    ]
+    .iter()
+    .filter_map(|folder| dunce::canonicalize(folder).ok())
+    .collect();
+    let inside = |exe: &Path| {
+        let Ok(exe) = dunce::canonicalize(exe) else {
+            return false;
+        };
+        folders.iter().any(|folder| {
+            if cfg!(windows) {
+                let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+                lower(&exe).starts_with(lower(folder))
+            } else {
+                exe.starts_with(folder)
+            }
+        })
+    };
+    let mut system = System::new();
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+        );
+        let running: Vec<_> = system
+            .processes()
+            .values()
+            .filter(|process| {
+                process.status() != ProcessStatus::Zombie && process.exe().is_some_and(inside)
+            })
+            .collect();
+        if running.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline + grace {
+            return Err("UXDuck's window did not close".into());
+        }
+        if now >= deadline {
+            for process in running {
+                let _ = process.kill();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// A stale lock file is harmless. A live installer excludes fresh daemon starts.

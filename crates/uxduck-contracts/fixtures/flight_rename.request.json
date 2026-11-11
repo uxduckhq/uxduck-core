@@ -1,0 +1,7 @@
+{
+  "method": "flight/rename",
+  "params": {
+    "id": "fl0123456789abcdef",
+    "name": "Bridge inspection"
+  }
+}

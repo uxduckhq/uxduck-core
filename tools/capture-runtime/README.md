@@ -10,7 +10,7 @@ target architecture. No installed codec libraries are used.
 
 The script downloads FFmpeg 9.0.2 and x264 commit
 `31e19f92f00c7003fa115047ce50978bc98c3a0d`, validates their pinned SHA-256 hashes,
-applies the small AVFoundation identity/default-mode patch, builds a static
+applies the AVFoundation identity/default-mode and V4L2 node-capability patches, builds a static
 standalone executable and checks the required capture input and H.264 encoders.
 For a camera's sound (S148) it also has FFmpeg's AAC encoder, PCM decoders and
 resampling, selects an AVFoundation sound input by its exact unique ID
@@ -20,6 +20,13 @@ On macOS it also checks that Camera default's zero frame rate reaches exact
 device lookup, using a nonexistent ID so no physical camera is opened.
 Camera default holds the device configuration lock until the capture session
 starts, as explicit modes do, so startup cannot replace the active mode.
+On Linux, discovery and capture use each node's `device_caps` when available,
+so a webcam's metadata-only node is not offered as another camera. Older drivers
+without `V4L2_CAP_DEVICE_CAPS` retain their aggregate capability checks. Native
+Linux builds test the real device-opening function with synthetic capability
+replies, including metadata, video, multiplanar, legacy and failed queries;
+run this separately with `python3 tools/capture-runtime/test-v4l2.py
+target/capture/<target>/build/ffmpeg`. It never opens a physical camera.
 The input declares its actual frame rate from CoreMedia timing rather than
 letting the encoder mistake the microsecond timestamp clock for one million
 frames per second. Native macOS builds exercise the real stream-setup function
@@ -35,7 +42,8 @@ Distribute the complete capture directory, including the licenses and `sources/`
 The source archives, patch and build script are the corresponding source. To
 rebuild it independently, unpack `ffmpeg.tar.xz` and `x264.tar.gz` into
 `<work>/ffmpeg` and `<work>/x264` using `tar --strip-components=1`, run
-`python3 patch-avfoundation.py <work>/ffmpeg`, then
+`python3 patch-avfoundation.py <work>/ffmpeg` and
+`python3 patch-v4l2.py <work>/ffmpeg`, then
 `bash build.sh <work> <runtime-output> <aarch64-or-x86_64>`.
 
 Packaged macOS camera access is granted to UXDuck via the app usage description

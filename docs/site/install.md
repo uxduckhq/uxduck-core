@@ -22,7 +22,12 @@ The command-line tool is inside the app: use `~/Applications/UXDuck.app/Contents
 
 ## Windows
 
-Run the `.msi`. If Windows says "Windows protected your PC", choose **More info**, then **Run anyway**.
+Download the Windows x64 `.msi` and run it. Setup offers two installation scopes:
+
+- **Everyone on this computer** (the default) installs in Program Files. Installing and updating requires administrator approval.
+- **Just me** installs in your account's `%LocalAppData%\Programs\UXDuck` folder. Installing and updating does not require administrator approval, unless your organisation's policy restricts it.
+
+Choose whether to create a desktop shortcut. At Finish, leave **Open UXDuck** checked to start the app, or open **UXDuck** from the Start menu later. Updates keep the installation scope and shortcut choice. Removing the app keeps your settings and recordings.
 
 ## Linux and Raspberry Pi
 
@@ -65,8 +70,8 @@ While UXDuck runs, its icon is in the menu bar on a Mac, the notification area o
 
 ## Updates
 
-UXDuck checks for new app versions even with its window closed and asks before installing. Open **About › App updates** to check, install, or see what is waiting. Installing restarts UXDuck. On macOS, downloading starts after approval and safe shutdown; updates to your own `~/Applications/UXDuck.app` need no administrator password. Replacing a protected system installation may require administrator permission. Windows and Linux download updates in the background and may ask for authorization to install.
+UXDuck checks for new app versions even with its window closed and asks before installing. Open **About › App updates** to check, install, or see what is waiting. Installing closes and reopens UXDuck; your computer doesn't restart. On macOS, downloading starts after approval and safe shutdown; updates to your own `~/Applications/UXDuck.app` need no administrator password. Replacing a protected system installation may require administrator permission. Windows and Linux download updates in the background and may ask for authorization to install.
 
-Choose **Install when idle** to wait for UXDuck’s windows and browser tabs to close and for vehicles, recordings, simulations and other work to finish. UXDuck also waits for a disconnected real vehicle last seen armed to reconnect and confirm it is disarmed. You can cancel the scheduled update; quitting UXDuck cancels it too. Updates never stop that work or restart your computer.
+If vehicles, recordings, simulations or other work are active, About lists them. Finish that work to install, or choose **Install anyway**, which asks before interrupting it. A disconnected real vehicle last seen armed counts as active until it reconnects and confirms it is disarmed. Updates never restart your computer.
 
 macOS uses Sparkle to replace the complete signed app, Windows uses Windows Installer, and Debian/Ubuntu Linux uses its `.deb` package and polkit. A headless Linux computer can download updates but needs a manual package installation when no desktop authorization agent is available. Interface updates continue separately: **Reload** applies them to an open page.

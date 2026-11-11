@@ -1,29 +1,30 @@
 //! Simulated vehicles (ADR-0011): `simulator` links, which the installed
 //! daemon runs from a SITL build (S17) and a browser from ArduPilot's
 //! WebAssembly build (S20). A simulated vehicle is its link: starting one
-//! adds the link, and stopping it removes the link.
+//! adds the link. Stop keeps it for this session; a new session forgets it
+//! unless the person opted to recreate running simulations.
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::RunsIn;
 use uxduck_contracts::dto::link::{IdParams, Link as LinkDto, LinkAddParams};
 use uxduck_contracts::dto::sim::{
-    SimBinariesResult, SimBuildParams, SimForward, SimPauseParams, SimStartParams,
+    SimBinariesResult, SimBuildParams, SimCrashParams, SimForward, SimPauseParams, SimStartParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
-use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, LinkStatus, SimAutopilot, SimVehicle};
+use uxduck_core::domain::link::{
+    JET_FRAME, Link, LinkKind, LinkStatus, SCENERY_CLEAR_M, SimAutopilot, SimVehicle,
+};
+use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::Change;
 
 use crate::rpc::handlers::to_value;
-use crate::{ConnectionId, Engine};
+use crate::{ConnectionId, Engine, NO_CONNECTION};
 
 /// Simulated vehicles one installed daemon runs at once. Each is a whole
 /// autopilot; the instance also sets its ports (5760 + 10 per instance).
 pub const MAX_INSTANCES: u8 = 32;
-
-/// How many simulated vehicles a browser runs at once.
-pub const MAX_IN_BROWSER: usize = 2;
 
 /// The heights a simulated vehicle may start in the air at (S33), in metres
 /// above the ground.
@@ -78,6 +79,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         speedup,
         in_air_m,
         binary,
+        allow_network,
         ..
     } = kind
     else {
@@ -86,6 +88,15 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
     let capabilities = &engine.config.capabilities;
     if !capabilities.simulator {
         return Err(invalid("this UXDuck does not run simulated vehicles"));
+    }
+    if *allow_network
+        && (capabilities.runs_in != RunsIn::Installed
+            || *autopilot != SimAutopilot::Ardupilot
+            || binary.is_none())
+    {
+        return Err(invalid(
+            "Network access can only be allowed for an own ArduPilot build on this computer",
+        ));
     }
     let placed = latitude_deg.abs() <= 90.0
         && longitude_deg.abs() <= 180.0
@@ -111,7 +122,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
             SimVehicle::Boat | SimVehicle::Submarine | SimVehicle::Airship | SimVehicle::Jet
         ) {
             return Err(invalid(
-                "PX4 flies a multicopter, plane, VTOL or rover here: not a boat, submarine, blimp or jet",
+                "PX4 runs a multicopter, plane, VTOL or rover here: not a boat, submarine, blimp or jet",
             ));
         }
     }
@@ -133,22 +144,17 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
         if binary.is_some() {
             return Err(invalid("a browser runs only its own simulator"));
         }
-        // Each is a whole autopilot in this tab: two, as the first visit
-        // starts (maintainer, 2026-10-02).
-        if simulators >= MAX_IN_BROWSER {
-            return Err(invalid(format!(
-                "{MAX_IN_BROWSER} simulated vehicles are already running in this browser. Stop one first"
-            )));
-        }
     } else {
         if binary.as_deref().is_some_and(|b| b.trim().is_empty()) {
             return Err(invalid("a SITL build needs its path"));
         }
         if simulators >= usize::from(MAX_INSTANCES) {
             return Err(invalid(format!(
-                "{MAX_INSTANCES} simulated vehicles are running. Stop one first"
+                "UXDuck keeps {MAX_INSTANCES} simulated vehicles at most, stopped ones too. Delete one first"
             )));
         }
+        // Its link would only go down for want of a build (FB-179).
+        engine.system.sim_build_ready(kind).map_err(invalid)?;
     }
     Ok(match vehicle {
         SimVehicle::Plane => "Simulated plane",
@@ -166,9 +172,9 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
 /// Gives a new simulator the lowest instance that is free in its own
 /// state; an installed daemon's must also have ports this computer can open
 /// (S71), so several run beside each other and beside other programs'
-/// simulators. The instance sets the vehicle's system id, so two in one
-/// browser are two vehicles.
-pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
+/// simulators. Browser instances use the MAVLink identity space, excluding
+/// the ground station, without the installed daemon's TCP port range.
+pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> Result<LinkKind, ApiError> {
     let LinkKind::Simulator {
         vehicle,
         autopilot,
@@ -181,13 +187,14 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         in_air_m,
         snapshot_id,
         binary,
+        allow_network,
         wipe,
         with_mission,
         traffic,
         ..
     } = kind
     else {
-        return kind;
+        return Ok(kind);
     };
     let installed = engine.config.capabilities.runs_in == RunsIn::Installed;
     let taken: Vec<u8> = engine
@@ -199,12 +206,26 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
             _ => None,
         })
         .collect();
+    let available = if installed { MAX_INSTANCES } else { u8::MAX };
     let instance = Some(
-        (0..MAX_INSTANCES)
-            .find(|i| !taken.contains(i) && (!installed || engine.system.sim_instance_free(*i)))
-            .unwrap_or(MAX_INSTANCES - 1),
+        (0..available)
+            .find(|i| {
+                !taken.contains(i)
+                    && if installed {
+                        engine.system.sim_instance_free(*i)
+                    } else {
+                        i + 1 != engine.state.settings.gcs_system_id
+                    }
+            })
+            .ok_or_else(|| {
+                invalid(if installed {
+                    "No simulator ports are available. Delete a simulation or free its ports first"
+                } else {
+                    "No MAVLink vehicle IDs are available. Delete a simulation first"
+                })
+            })?,
     );
-    LinkKind::Simulator {
+    Ok(LinkKind::Simulator {
         vehicle,
         autopilot,
         latitude_deg,
@@ -216,11 +237,12 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> LinkKind {
         in_air_m,
         snapshot_id,
         binary,
+        allow_network,
         wipe,
         with_mission,
         traffic,
         instance,
-    }
+    })
 }
 
 pub(crate) fn handle(
@@ -248,20 +270,7 @@ pub(crate) fn handle(
         }
         ClientRequest::SimStop(IdParams { id }) => {
             require(Capability::Config)?;
-            let simulated = engine
-                .state
-                .links
-                .get(&id)
-                .is_some_and(|l| l.kind.is_simulator());
-            if !simulated {
-                return Err(ApiError::new(
-                    ErrorKind::NotFound,
-                    format!("no simulated vehicle on link {id}"),
-                ));
-            }
-            engine.give_up_practice_on(&id, connection);
-            crate::rpc::vehicles::remove_link(engine, connection, &id)?;
-            Ok(json!({}))
+            stop(engine, connection, &id)
         }
         ClientRequest::SimRestart(IdParams { id }) => {
             require(Capability::Config)?;
@@ -271,11 +280,23 @@ pub(crate) fn handle(
             require(Capability::Control)?;
             pause(engine, connection, &id, paused)
         }
+        ClientRequest::SimCrash(params) => {
+            require(Capability::Control)?;
+            crash(engine, connection, params)
+        }
         ClientRequest::SimBinaries(_) => {
             require(Capability::Read)?;
             to_value(&SimBinariesResult {
                 binaries: engine.system.sim_binaries(),
             })
+        }
+        ClientRequest::SimFrames(params) => {
+            require(if params.refresh {
+                Capability::Config
+            } else {
+                Capability::Read
+            })?;
+            to_value(&engine.system.sim_frames(&params).map_err(invalid)?)
         }
         ClientRequest::SimCatalogue(params) => {
             require(Capability::Read)?;
@@ -352,6 +373,87 @@ pub(crate) fn start_link(
 /// pinned to it. Its vehicles go offline first, as on a daemon start, so
 /// the take-off waits for the new simulator instead of talking to the one
 /// that is stopping.
+/// `sim/stop` (S264): its simulator ends and its flight with it, but the
+/// simulation stays, Stopped, with its vehicle offline under its name, its
+/// history, tabs and last position, until it is started again or deleted
+/// (`link/remove`). Hiding it as well is `vehicle/hide`, a person's alone.
+/// Stopping a stopped one only makes sure its vehicle is offline and
+/// disarmed, as when the daemon starts.
+pub(crate) fn stop(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    id: &str,
+) -> Result<Value, ApiError> {
+    let Some(mut link) = engine
+        .state
+        .links
+        .get(id)
+        .filter(|l| l.kind.is_simulator())
+        .cloned()
+    else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no simulated vehicle on link {id}"),
+        ));
+    };
+    let running = link.status != LinkStatus::Stopped;
+    if running {
+        engine.give_up_practice_on(id, connection);
+        engine.links.close(id);
+        // Its flight ends there: the vehicle is gone, not out of contact (#283).
+        engine.end_flights_on_simulation(id);
+        engine.forget_flights_on(id);
+        engine.drop_launch(id);
+        engine.drop_plan_run(id);
+        engine.resolve(&format!("link-loop:{id}"));
+    }
+    // A stopped simulator cannot remain armed: nothing would be mistaken
+    // for disconnected armed hardware.
+    let on_link: Vec<_> = engine
+        .state
+        .vehicles
+        .values()
+        .filter(|v| v.link_id == id && (v.armed || v.presence != Presence::Offline))
+        .cloned()
+        .collect();
+    for mut vehicle in on_link {
+        vehicle.armed = false;
+        vehicle.presence = Presence::Offline;
+        vehicle.version += 1;
+        engine.commit(connection, Change::VehicleUpserted { vehicle });
+    }
+    if !running {
+        return Ok(json!({}));
+    }
+    link.status = LinkStatus::Stopped;
+    link.status_detail = None;
+    link.launch = None;
+    link.paused = false;
+    link.scenery_hit = None;
+    link.version += 1;
+    engine.commit(connection, Change::LinkUpserted { link });
+    engine.refresh_wake_lock();
+    Ok(json!({}))
+}
+
+/// A simulation belongs to one daemon session unless explicitly recreated.
+/// Retire its live records without Delete's history erasure. Snapshots and
+/// recorded flights remain independently available.
+pub(crate) fn forget_previous(engine: &mut Engine, id: &str) -> Result<Value, ApiError> {
+    stop(engine, NO_CONNECTION, id)?;
+    let vehicles: Vec<_> = engine
+        .state
+        .vehicles
+        .values()
+        .filter(|vehicle| vehicle.link_id == id)
+        .map(|vehicle| vehicle.id.clone())
+        .collect();
+    for id in vehicles {
+        engine.commit(NO_CONNECTION, Change::VehicleRemoved { id });
+    }
+    crate::rpc::vehicles::remove_link(engine, NO_CONNECTION, id)
+}
+
 pub(crate) fn restart(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -371,9 +473,11 @@ pub(crate) fn restart(
     }
     // "Start again" gives up an attempt at practice on it (S100).
     engine.give_up_practice_on(id, connection);
+    engine.end_flights_on_simulation(id);
     engine.pause_controllers_for_restart(id);
     engine.links.close(id);
     engine.drop_launch(id);
+    engine.drop_plan_run(id);
     crate::rpc::vehicles::vehicles_offline(engine, connection, id);
     engine.forget_flights_on(id);
     link.status = LinkStatus::Configured;
@@ -381,6 +485,7 @@ pub(crate) fn restart(
     link.launch = None;
     // A new simulator starts running, whatever the last one was doing.
     link.paused = false;
+    link.scenery_hit = None;
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
     engine.links.open(&link);
@@ -454,6 +559,97 @@ pub(crate) fn pause(
     link.paused = paused;
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+    // Carrying on after touching the scenery: its notice has been answered,
+    // and `scenery_hit` stays until the vehicle is clear of the spot.
+    if !paused && link.scenery_hit.is_some() {
+        engine.scenery_hit_answered(id);
+    }
+    to_value(&LinkDto::from(&link))
+}
+
+/// Contact with the 3D scenery. The scenery can be wrong (a building or
+/// hill where the simulator has none), so an ArduPilot simulation pauses
+/// where it touched instead of ending (maintainer, 2026-10-31): Continue
+/// anyway resumes it, and contact within [`SCENERY_CLEAR_M`] of the spot is
+/// not reported until it is clear, so it can fly out of the obstacle;
+/// Start again puts it back where it started. A PX4 simulation cannot
+/// pause, so it still ends, keeping its vehicle, telemetry, tabs and Start
+/// again. Either way a practice attempt on it is given up.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "handlers take their params by value"
+)]
+fn crash(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: SimCrashParams,
+) -> Result<Value, ApiError> {
+    let Some(mut link) = engine.state.links.get(&params.id).cloned() else {
+        return Err(invalid("no simulated vehicle on this link"));
+    };
+    if !link.kind.is_simulator() {
+        return Err(invalid("only a simulator can report a scenery collision"));
+    }
+    if link.version != params.version {
+        return Err(ApiError::new(
+            ErrorKind::VersionConflict,
+            "the simulation changed. Discard this collision report",
+        ));
+    }
+    if link.status != LinkStatus::Up || link.paused || engine.is_launching(&link.id) {
+        return Err(invalid("the simulation isn't flying"));
+    }
+    let vehicle = engine
+        .state
+        .vehicles
+        .values()
+        .find(|v| {
+            v.link_id == link.id
+                && v.armed
+                && v.presence == uxduck_core::domain::vehicle::Presence::Online
+        })
+        .cloned()
+        .ok_or_else(|| invalid("the simulation has no flying vehicle"))?;
+    // Near a spot it carried on past: not contact until it is clear (a map
+    // that had not heard yet, or another window's).
+    if let Some(hit) = link.scenery_hit
+        && engine
+            .metres_from(&vehicle.id, hit)
+            .is_none_or(|m| m < SCENERY_CLEAR_M)
+    {
+        return to_value(&LinkDto::from(&link));
+    }
+    engine.give_up_practice_on(&link.id, connection);
+    let at = engine.ground_position(&vehicle.id);
+    if let (
+        LinkKind::Simulator {
+            autopilot: SimAutopilot::Ardupilot,
+            ..
+        },
+        Some(at),
+    ) = (&link.kind, at)
+    {
+        engine.links.pause_simulation(&link.id, true);
+        link.paused = true;
+        link.scenery_hit = Some(at);
+        link.version += 1;
+        engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+        engine.scenery_hit_reported(&vehicle, at);
+        return to_value(&LinkDto::from(&link));
+    }
+    engine.end_flights_on_simulation(&link.id);
+    engine.pause_controllers_for_restart(&link.id);
+    engine.links.close(&link.id);
+    engine.drop_launch(&link.id);
+    engine.crashed_plan_run(&link.id);
+    crate::rpc::vehicles::vehicles_offline(engine, connection, &link.id);
+    link.launch = None;
+    link.status = LinkStatus::Stopped;
+    link.status_detail = Some("Crashed into the 3D scenery. Start again to fly again.".into());
+    link.paused = false;
+    link.version += 1;
+    engine.commit(connection, Change::LinkUpserted { link: link.clone() });
+    engine.scenery_crash_reported(&vehicle, at);
     to_value(&LinkDto::from(&link))
 }
 
@@ -496,7 +692,7 @@ impl Engine {
     }
 }
 
-fn add_params(params: SimStartParams) -> LinkAddParams {
+pub(crate) fn add_params(params: SimStartParams) -> LinkAddParams {
     LinkAddParams {
         name: params.name,
         kind: uxduck_contracts::dto::link::LinkKind::Simulator {
@@ -511,6 +707,7 @@ fn add_params(params: SimStartParams) -> LinkAddParams {
             in_air_m: params.in_air_m,
             snapshot_id: None,
             binary: params.binary.map(|b| b.trim().to_owned()),
+            allow_network: params.allow_network,
             wipe: params.wipe,
             with_mission: params.with_mission,
             traffic: params.traffic,

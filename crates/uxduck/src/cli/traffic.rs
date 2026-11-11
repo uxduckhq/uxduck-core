@@ -8,7 +8,7 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 
 use super::client::{CliError, LocalClient};
-use super::vehicle::resolve;
+use super::vehicle::{resolve, vehicle_text};
 
 #[derive(Debug, Subcommand)]
 pub enum TrafficCommand {
@@ -67,7 +67,7 @@ async fn switch(client: &mut LocalClient, wanted: &str, on: bool) -> Result<(), 
     let vehicle = client
         .call("vehicle/traffic", json!({ "id": id, "on": on }))
         .await?;
-    let name = vehicle["name"].as_str().unwrap_or(wanted);
+    let name = vehicle_text(&vehicle);
     if on {
         println!("Using {name}'s traffic.");
     } else {
@@ -88,10 +88,8 @@ async fn names(client: &mut LocalClient) -> Result<BTreeMap<String, String>, Cli
             .into_iter()
             .flatten()
             .filter_map(|v| {
-                Some((
-                    format!("{prefix}:{}", v["id"].as_str()?),
-                    v["name"].as_str()?.to_owned(),
-                ))
+                v["name"].as_str()?;
+                Some((format!("{prefix}:{}", v["id"].as_str()?), vehicle_text(v)))
             })
             .collect()
     };

@@ -16,7 +16,7 @@
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+      "text": "Press Go to under Guide in the Cockpit tab, then click a place on the map.",
       "hint": "Go to takes it to the place you clicked and keeps it there.",
       "hintAfterS": 45,
       "all": [
@@ -25,7 +25,7 @@
       ]
     },
     {
-      "text": "Choose HOLD in the Mode menu in the Cockpit tab.",
+      "text": "Choose HOLD under Modes in the Cockpit tab.",
       "hint": "HOLD stops its motors; on the water it may drift a little.",
       "hintAfterS": 45,
       "all": [

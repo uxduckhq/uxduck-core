@@ -69,6 +69,14 @@ pub struct AccountState {
     /// This sign-in made the account (S114): "Account created".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub created: bool,
+    /// Said where it heard of UXDuck, or skipped it (S251); `false` asks it
+    /// once. Unknown from an older API, which asks nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_answered: Option<bool>,
+    /// The Terms of Service version the account last agreed to (ADR-0047),
+    /// none if it never has; unknown from an older API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_version: Option<String>,
 }
 
 /// Recorded telemetry logs stored in this account, without session credentials.
@@ -113,6 +121,11 @@ pub struct AccountVerifyParams {
     /// "Send me product updates", off unless ticked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub product_updates: bool,
+    /// The Terms of Service version the form said continuing agrees to
+    /// (ADR-0047); the account records it. None from an older interface,
+    /// which said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_version: Option<String>,
 }
 
 /// Chooses or changes the account's username (S73): 3 to 20 lower-case
@@ -130,6 +143,34 @@ pub struct AccountUsernameParams {
 #[serde(rename_all = "camelCase")]
 pub struct AccountNameParams {
     pub name: String,
+}
+
+/// Where a new account heard of UXDuck (S251).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SignupSource {
+    Youtube,
+    Search,
+    Reddit,
+    /// The ArduPilot or PX4 forums, or their Discord.
+    Forum,
+    Friend,
+    /// An AI assistant, such as `ChatGPT` or Claude.
+    Ai,
+    Other,
+    /// The person passed on the question.
+    Skipped,
+}
+
+/// Says where a new account heard of UXDuck (S251), once, after the sign-in
+/// that made it. `other` is kept only with `Other`: spaces collapsed, up
+/// to 80 characters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSourceParams {
+    pub source: SignupSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
 }
 
 /// Joins or leaves the product updates list.

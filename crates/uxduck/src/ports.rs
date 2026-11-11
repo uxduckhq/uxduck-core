@@ -58,15 +58,26 @@ pub fn check_udp_bind(host: &str, port: u16) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             Err(in_use_message(Protocol::Udp, port))
         }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            Err(uxduck_engine::runtime::not_local_message(host))
+        }
         Err(error) => Err(format!("cannot listen on {host}:{port}: {error}")),
     }
 }
 
 /// Whether nothing listens on this TCP port on any address, as SITL's
-/// SERIAL0 (`tcp:0`) needs.
+/// SERIAL0 (`tcp:0`) needs. It tries loopback as well as every address:
+/// with the address reuse the standard library sets, macOS lets either one
+/// bind while a listener holds the other, and a local-only SITL holds
+/// loopback.
 #[must_use]
 pub fn tcp_port_free(port: u16) -> bool {
-    std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok()
+    [
+        std::net::Ipv4Addr::LOCALHOST,
+        std::net::Ipv4Addr::UNSPECIFIED,
+    ]
+    .into_iter()
+    .all(|ip| std::net::TcpListener::bind((ip, port)).is_ok())
 }
 
 /// Whether an address belongs to this machine: loopback, unspecified, or one
@@ -370,12 +381,30 @@ mod tests {
     }
 
     #[test]
+    fn a_tcp_port_held_on_loopback_is_not_free() {
+        // As a local-only SITL listens for its SERIAL0.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!tcp_port_free(port));
+    }
+
+    #[test]
     fn our_own_addresses_are_local() {
         assert!(is_local_address("127.0.0.1"));
         assert!(is_local_address("0.0.0.0"));
         assert!(is_local_address("localhost"));
         assert!(!is_local_address("192.0.2.1"), "TEST-NET-1 is never ours");
         assert!(!is_local_address("not an address"));
+    }
+
+    #[test]
+    fn listening_on_another_devices_address_says_whose_it_is() {
+        let message = check_udp_bind("192.0.2.1", 15010).unwrap_err();
+        assert!(
+            message.starts_with("192.0.2.1 is not an address of this computer"),
+            "{message}"
+        );
+        assert!(message.contains("listen on 0.0.0.0"), "{message}");
     }
 }
 

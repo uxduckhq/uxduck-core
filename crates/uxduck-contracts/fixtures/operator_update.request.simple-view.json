@@ -47,68 +47,14 @@
           {
             "size": 440,
             "node": {
-              "type": "split",
-              "direction": "row",
-              "children": [
+              "type": "group",
+              "tabs": [
                 {
-                  "size": 500,
-                  "node": {
-                    "type": "group",
-                    "tabs": [
-                      {
-                        "id": "control",
-                        "kind": "control"
-                      },
-                      {
-                        "id": "mission",
-                        "kind": "mission"
-                      },
-                      {
-                        "id": "controllers",
-                        "kind": "controllers"
-                      },
-                      {
-                        "id": "history",
-                        "kind": "history"
-                      },
-                      {
-                        "id": "parameters",
-                        "kind": "parameters"
-                      },
-                      {
-                        "id": "camera",
-                        "kind": "camera"
-                      }
-                    ],
-                    "active": 0
-                  }
-                },
-                {
-                  "size": 500,
-                  "node": {
-                    "type": "group",
-                    "tabs": [
-                      {
-                        "id": "telemetry",
-                        "kind": "telemetry"
-                      },
-                      {
-                        "id": "messages",
-                        "kind": "messages"
-                      },
-                      {
-                        "id": "flight-display",
-                        "kind": "flight-display"
-                      },
-                      {
-                        "id": "instruments",
-                        "kind": "instruments"
-                      }
-                    ],
-                    "active": 0
-                  }
+                  "id": "control",
+                  "kind": "control"
                 }
-              ]
+              ],
+              "active": 0
             }
           }
         ]
@@ -159,75 +105,21 @@
               {
                 "size": 440,
                 "node": {
-                  "type": "split",
-                  "direction": "row",
-                  "children": [
+                  "type": "group",
+                  "tabs": [
                     {
-                      "size": 500,
-                      "node": {
-                        "type": "group",
-                        "tabs": [
-                          {
-                            "id": "control",
-                            "kind": "control"
-                          },
-                          {
-                            "id": "mission",
-                            "kind": "mission"
-                          },
-                          {
-                            "id": "controllers",
-                            "kind": "controllers"
-                          },
-                          {
-                            "id": "history",
-                            "kind": "history"
-                          },
-                          {
-                            "id": "parameters",
-                            "kind": "parameters"
-                          },
-                          {
-                            "id": "camera",
-                            "kind": "camera"
-                          }
-                        ],
-                        "active": 0
-                      }
-                    },
-                    {
-                      "size": 500,
-                      "node": {
-                        "type": "group",
-                        "tabs": [
-                          {
-                            "id": "telemetry",
-                            "kind": "telemetry"
-                          },
-                          {
-                            "id": "messages",
-                            "kind": "messages"
-                          },
-                          {
-                            "id": "flight-display",
-                            "kind": "flight-display"
-                          },
-                          {
-                            "id": "instruments",
-                            "kind": "instruments"
-                          }
-                        ],
-                        "active": 0
-                      }
+                      "id": "control",
+                      "kind": "control"
                     }
-                  ]
+                  ],
+                  "active": 0
                 }
               }
             ]
           },
           "preset": {
             "kind": "simple",
-            "version": 11,
+            "version": 15,
             "base": {
               "type": "split",
               "direction": "column",
@@ -270,68 +162,14 @@
                 {
                   "size": 440,
                   "node": {
-                    "type": "split",
-                    "direction": "row",
-                    "children": [
+                    "type": "group",
+                    "tabs": [
                       {
-                        "size": 500,
-                        "node": {
-                          "type": "group",
-                          "tabs": [
-                            {
-                              "id": "control",
-                              "kind": "control"
-                            },
-                            {
-                              "id": "mission",
-                              "kind": "mission"
-                            },
-                            {
-                              "id": "controllers",
-                              "kind": "controllers"
-                            },
-                            {
-                              "id": "history",
-                              "kind": "history"
-                            },
-                            {
-                              "id": "parameters",
-                              "kind": "parameters"
-                            },
-                            {
-                              "id": "camera",
-                              "kind": "camera"
-                            }
-                          ],
-                          "active": 0
-                        }
-                      },
-                      {
-                        "size": 500,
-                        "node": {
-                          "type": "group",
-                          "tabs": [
-                            {
-                              "id": "telemetry",
-                              "kind": "telemetry"
-                            },
-                            {
-                              "id": "messages",
-                              "kind": "messages"
-                            },
-                            {
-                              "id": "flight-display",
-                              "kind": "flight-display"
-                            },
-                            {
-                              "id": "instruments",
-                              "kind": "instruments"
-                            }
-                          ],
-                          "active": 0
-                        }
+                        "id": "control",
+                        "kind": "control"
                       }
-                    ]
+                    ],
+                    "active": 0
                   }
                 }
               ]

@@ -54,6 +54,14 @@ pub fn provisional_vid(link: &str, peer: &str, system_id: u8) -> String {
     .to_string()
 }
 
+/// A replay vehicle's id (ADR-0039 R3): from the id it had live, so the
+/// same flight opened again gives the same vehicle and tabs pinned to it
+/// stay.
+#[must_use]
+pub fn replay_vid(original: &str) -> String {
+    Uuid::new_v5(&NAMESPACE, format!("replay:{original}").as_bytes()).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

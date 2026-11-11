@@ -3,7 +3,8 @@
 //! known heading (S185), its accelerometers in six positions or level
 //! (S186), its radio (S187), installing firmware (S189), and a plane's
 //! airspeed sensor: zeroed, its pitot checked, its ratio found in flight
-//! (S190).
+//! (S190). Restarting it, with what was due, and a copter's ESCs calibrated
+//! by replugging its battery (S216).
 
 use std::path::Path;
 
@@ -80,6 +81,25 @@ pub enum SetupCommand {
         /// Find the ratio in flight instead: take off first, then circle.
         #[arg(long)]
         ratio: bool,
+    },
+    /// Restarts the vehicle (it must be disarmed), saying what was due:
+    /// calibrations and parameters that take effect once it restarts. Its
+    /// parameters download again once it is back.
+    Restart {
+        /// The vehicle, by name or id.
+        vehicle: String,
+    },
+    /// Calibrates a copter's PWM or `OneShot` ESCs all at once: with the
+    /// propellers off and the vehicle on its battery, `ESC_CALIBRATION` is
+    /// set to 3; unplug the battery, wait five seconds and plug it in, and
+    /// it is done when the vehicle is back with it at 0. Ctrl-C cancels it
+    /// and sets it back to 0.
+    Escs {
+        /// The vehicle, by name or id.
+        vehicle: String,
+        /// Say the propellers are off: the motors spin at full throttle.
+        #[arg(long)]
+        propellers_off: bool,
     },
     /// Installs firmware on a board on this computer's USB: a release of
     /// ArduPilot from its firmware server for the board its bootloader
@@ -184,6 +204,54 @@ pub async fn run(data_dir: &Path, command: SetupCommand) -> Result<(), CliError>
                 .await?;
             println!("Hold it still in each position it asks for.");
             positions(&mut client, &id).await?;
+            follow(&mut client, &id).await?;
+        }
+        SetupCommand::Restart { vehicle } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            let state = client
+                .call("setup/state", json!({ "vehicleId": id }))
+                .await?;
+            println!("{}", restart_words(&state["restart"]));
+            let before = state["restart"]["restartedAtUs"].clone();
+            client
+                .call(
+                    "command/send",
+                    json!({ "vehicleId": id, "command": { "type": "reboot" } }),
+                )
+                .await?;
+            println!("Restarting…");
+            for _ in 0..240 {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let state = client
+                    .call("setup/state", json!({ "vehicleId": id }))
+                    .await?;
+                if state["restart"]["restartedAtUs"] != before {
+                    println!("Restarted. Its parameters are downloading again.");
+                    return Ok(());
+                }
+            }
+            return Err(CliError::Usage(
+                "Not seen restarting within a minute: check it is connected.".into(),
+            ));
+        }
+        SetupCommand::Escs {
+            vehicle,
+            propellers_off,
+        } => {
+            let id = super::vehicle::resolve(&mut client, &vehicle).await?;
+            if !propellers_off {
+                return Err(CliError::Usage(
+                    "Take the propellers off, power the vehicle from its battery, not USB, \
+                     then run this again with --propellers-off."
+                        .into(),
+                ));
+            }
+            client
+                .call(
+                    "setup/start",
+                    json!({ "vehicleId": id, "kind": "escs", "propellersOff": true }),
+                )
+                .await?;
             follow(&mut client, &id).await?;
         }
         SetupCommand::Radio {
@@ -499,7 +567,7 @@ fn print_ranges(radio: &Value) {
 /// What to do for a position: "Hold it on its left side."
 fn position_line(position: &str) -> String {
     let how = match position {
-        "level" => "level, as it sits to fly",
+        "level" => "level, as it normally sits",
         "left" => "on its left side",
         "right" => "on its right side",
         "nose-down" => "nose down",
@@ -839,12 +907,13 @@ fn instruction(code: &str) -> Option<&'static str> {
         "give-position" => "Give its position: --at \"latitude, longitude\".",
         "place-as-shown" => "Hold it in the position asked for, then press Enter.",
         "hold-still" => "Hold it still.",
-        "set-level" => "Set it on a level surface, or as it flies level, and try again.",
+        "set-level" => "Set it level, as it normally sits, and try again.",
         "centre-sticks" => "Centre the sticks, throttle down.",
         "move-to-ends" => "Move every stick and switch to both ends.",
         "move-stick" => "Move the stick asked for.",
         "check-radio" => "Check the ranges and fixes, then write them.",
         "replug" => "Unplug the board and plug it back in.",
+        "replug-battery" => "Unplug the battery, wait five seconds, plug it in: the ESCs beep.",
         "keep-plugged" => "Keep it plugged in.",
         "cover-pitot" => "Cover the pitot from the wind.",
         "blow-into-pitot" => "Blow gently into the pitot.",
@@ -864,9 +933,10 @@ fn print_state(state: &Value) {
             "firmware" => "Firmware",
             "accelerometer" => "Accelerometer",
             "compass" => "Compass",
-            "radio" => "Radio",
+            "radio" => "Controller over RC",
             "airspeed" => "Airspeed",
             "motors" => "Motors",
+            "escs" => "ESCs",
             other => other,
         };
         let words = match row["state"].as_str().unwrap_or_default() {
@@ -896,7 +966,40 @@ fn print_state(state: &Value) {
             compass["deviceId"]
         );
     }
+    println!("{:<14} {}", "Restart", restart_words(&state["restart"]));
     if state["procedure"].is_object() {
         println!("Last: {}", progress_line(&state["procedure"]));
+    }
+}
+
+/// The Restart row in words (S216): "Due: compass calibrated", "Due: 2
+/// parameters changed (`SERIAL1_PROTOCOL`, …)", or "Nothing due".
+fn restart_words(restart: &Value) -> String {
+    let rows: Vec<&str> = restart["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let names: Vec<&str> = restart["parameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut due: Vec<String> = rows.iter().map(|r| format!("{r} calibrated")).collect();
+    match names.as_slice() {
+        [] => {}
+        [one] => due.push(format!("1 parameter changed ({one})")),
+        many => due.push(format!(
+            "{} parameters changed ({})",
+            many.len(),
+            many.join(", ")
+        )),
+    }
+    if due.is_empty() {
+        "Nothing due".into()
+    } else {
+        format!("Due: {}", due.join("; "))
     }
 }

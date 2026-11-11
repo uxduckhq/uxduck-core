@@ -18,7 +18,17 @@ struct Profiles {
     /// with avoidance off so the vehicle flies as it would without it.
     traffic: BTreeMap<String, f32>,
     programs: BTreeMap<String, Program>,
+    /// A frame's own physics, for SITL's `--model <frame>:<file>.json`:
+    /// `ArduPlane`'s plane model reads its aerodynamic coefficients from
+    /// it, keeping the frame's own for any not given.
+    physics: BTreeMap<String, BTreeMap<String, BTreeMap<String, f32>>>,
 }
+
+/// The physics file, written beside the profile in the simulator's working
+/// directory, which SITL runs in. A relative name: SITL's plane model reads
+/// its variants from anywhere in the model's text, so a path holding
+/// `-ice` or `-3d` would change how it flies.
+const PHYSICS: &str = "uxduck-physics.json";
 
 fn profiles() -> Result<Profiles, String> {
     let profiles: Profiles = serde_json::from_str(SOURCE)
@@ -66,11 +76,58 @@ pub(super) fn defaults(program: &str, frame: &str) -> Result<Option<String>, Str
         .programs
         .get(program)
         .ok_or_else(|| format!("missing simulation profile for {program}"))?;
-    let Some(parameters) = selected.frames.get(frame) else {
+    let launcher = frame.rsplit_once('-').and_then(|(base, launcher)| {
+        (base.starts_with("plane")
+            && base != "plane-tailsitter"
+            && super::LAUNCHERS.contains(&launcher))
+        .then(|| format!("plane-{launcher}"))
+    });
+    let Some(parameters) = selected.frames.get(frame).or_else(|| {
+        launcher
+            .as_ref()
+            .and_then(|frame| selected.frames.get(frame))
+    }) else {
         // Unreviewed frames explicitly retain the firmware's own defaults.
         return Ok(None);
     };
     lines(parameters, &format!("{program}/{frame}")).map(Some)
+}
+
+/// The model SITL runs a frame as: the frame with UXDuck's physics, written
+/// into `directory`, when the shared profile gives it some, else `model`.
+pub(super) fn with_physics(
+    directory: &Path,
+    program: &str,
+    frame: &str,
+    model: String,
+) -> Result<String, String> {
+    let profiles = profiles()?;
+    let Some(coefficients) = profiles.physics.get(program).and_then(|p| p.get(frame)) else {
+        return Ok(model);
+    };
+    if model != frame {
+        return Err(format!(
+            "{program}/{frame} runs {model}, which UXDuck's physics cannot replace"
+        ));
+    }
+    if coefficients.is_empty()
+        || coefficients.iter().any(|(name, value)| {
+            name.is_empty()
+                || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !value.is_finite()
+        })
+    {
+        return Err(format!("invalid simulation physics {program}/{frame}"));
+    }
+    let text = serde_json::to_string(coefficients).map_err(|error| error.to_string())?;
+    let path = directory.join(PHYSICS);
+    std::fs::write(&path, text).map_err(|error| {
+        format!(
+            "cannot write simulation physics {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(format!("{frame}:{PHYSICS}"))
 }
 
 /// Append UXDuck's embedded profile, and simulated traffic's parameters when
@@ -109,11 +166,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launcher_auto_takeoff_waits_for_release_acceleration() {
+        for base in ["plane", "plane-elevon", "plane-jet"] {
+            for launcher in super::super::LAUNCHERS {
+                assert_eq!(
+                    defaults("arduplane", &format!("{base}-{launcher}")),
+                    Ok(Some("TKOFF_THR_MINACC 3\n".into()))
+                );
+            }
+        }
+        for frame in [
+            "plane",
+            "plane-elevon",
+            "plane-tailsitter-catapult",
+            "quadplane-catapult",
+        ] {
+            assert_eq!(defaults("arduplane", frame), Ok(None));
+        }
+        assert_eq!(defaults("arducopter", "plane-catapult"), Ok(None));
+        let directory = tempfile::tempdir().expect("profile directory");
+        let files = with_defaults(
+            directory.path(),
+            "arduplane",
+            "plane-elevon-catapult",
+            Some("@ROMFS/default_params/plane.parm".into()),
+            false,
+        )
+        .expect("launcher defaults")
+        .expect("profile files");
+        assert!(files.starts_with("@ROMFS/default_params/plane.parm,"));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("uxduck-profile.parm")).unwrap(),
+            "TKOFF_THR_MINACC 3\n"
+        );
+    }
+
+    #[test]
     fn supported_programs_and_unreviewed_frames_keep_upstream_defaults() {
         for program in ["arducopter", "arduplane", "ardurover", "ardusub", "blimp"] {
             assert_eq!(defaults(program, "unreviewed"), Ok(None));
         }
         assert!(defaults("missing", "rover").is_err());
+    }
+
+    #[test]
+    /// The seabed lies under a submarine's home: no offset from it at arming (ADR-0043).
+    fn simulated_submarines_ask_for_the_seabed_and_sound_it() {
+        for frame in ["vectored", "vectored_6dof"] {
+            assert_eq!(
+                defaults("ardusub", frame),
+                Ok(Some(
+                    "RNGFND1_MAX 50\nRNGFND1_PIN 0\nRNGFND1_SCALING 12.12\nRNGFND1_TYPE 1\nTERRAIN_ENABLE 1\nTERRAIN_OFS_MAX 0\nTERRAIN_SPACING 30\n".into()
+                ))
+            );
+        }
     }
 
     #[test]
@@ -134,40 +240,100 @@ mod tests {
         }
     }
 
-    /// The jet (S143) cruises at 50 m/s, against the plane's 22, on
-    /// `ArduPlane`'s jet limits with roll and height tuning that does not
-    /// wobble (upstream's rate gains oscillated), and a circle, navigation
-    /// period and TECS pitch damping that hold height at true airspeeds up
-    /// to about 80 m/s, high up, and `ArduPlane`'s default throttle slew rate,
-    /// so a long take-off roll from a high field does not hold full throttle
-    /// after lift-off; the plane keeps its own.
+    /// The jet (S143) flies as the Reaper does: cruise 200 m/s and 220 at
+    /// most (790 km/h), against the plane's 22, banking to 70° so it can turn
+    /// onto its circle (its tightest turn at 55° is 2.9 km across), on `ArduPlane`'s jet limits
+    /// with roll and height tuning that does not wobble (upstream's rate
+    /// gains oscillated), a 4 km circle, a climb of 2 km in about 35 s,
+    /// height kept by pitch alone so it never trades height for speed near
+    /// the ground, a battery gauge that lasts as long as the old cruise's,
+    /// and `ArduPlane`'s default throttle slew rate, so a long
+    /// take-off roll from a high field does not hold full throttle after
+    /// lift-off; the plane keeps its own.
     #[test]
     fn the_jet_profile_is_faster_than_the_plane_and_the_plane_keeps_upstream() {
         let jet = defaults("arduplane", "plane-jet")
             .expect("a valid profile")
             .expect("a jet profile");
         for line in [
-            "AIRSPEED_CRUISE 50\n",
-            "AIRSPEED_MAX 80\n",
+            "AIRSPEED_CRUISE 200\n",
+            "AIRSPEED_MAX 220\n",
             "AIRSPEED_MIN 25\n",
+            "BATT_CAPACITY 45000\n",
             "THR_MAX 100\n",
             "THR_SLEWRATE 100\n",
-            "ROLL_LIMIT_DEG 55\n",
+            "ROLL_LIMIT_DEG 70\n",
             "LEVEL_ROLL_LIMIT 0\n",
             "RLL_RATE_P 0.08\n",
             "TECS_SINK_MIN 2\n",
             "TECS_TIME_CONST 7\n",
             "TECS_PTCH_DAMP 0.8\n",
             "TECS_VERT_ACC 15\n",
-            "PTCH_LIM_MAX_DEG 20\n",
+            "TECS_SPDWEIGHT 0\n",
+            "TECS_CLMB_MAX 100\n",
+            "TECS_SINK_MAX 30\n",
+            "PTCH_LIM_MAX_DEG 45\n",
             "PTCH_LIM_MIN_DEG -25\n",
             "NAVL1_PERIOD 25\n",
-            "WP_LOITER_RAD 400\n",
+            "WP_LOITER_RAD 4000\n",
+            "TKOFF_DIST 6000\n",
         ] {
             assert!(jet.contains(line), "{line}");
         }
         assert_eq!(defaults("arduplane", "plane"), Ok(None));
         assert_eq!(defaults("arduplane", "quadplane"), Ok(None));
+    }
+
+    /// The jet's drag is low enough for 790 km/h at full throttle; its
+    /// physics is a file beside the profile, named relative to SITL's
+    /// working directory, and every other frame flies its own.
+    #[test]
+    fn the_jet_flies_uxducks_physics_and_other_frames_their_own() {
+        let directory = tempfile::tempdir().expect("physics directory");
+        assert_eq!(
+            with_physics(
+                directory.path(),
+                "arduplane",
+                "plane-jet",
+                "plane-jet".into()
+            ),
+            Ok("plane-jet:uxduck-physics.json".into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(PHYSICS)).expect("written physics"),
+            r#"{"c_drag_p":0.0236}"#
+        );
+        assert_eq!(
+            with_physics(directory.path(), "arduplane", "plane", "plane".into()),
+            Ok("plane".into())
+        );
+        assert_eq!(
+            with_physics(
+                directory.path(),
+                "arducopter",
+                "freestyle",
+                "X:@ROMFS/models/freestyle.json".into()
+            ),
+            Ok("X:@ROMFS/models/freestyle.json".into())
+        );
+        assert!(
+            with_physics(
+                directory.path(),
+                "arduplane",
+                "plane-jet",
+                "plane:other.json".into()
+            )
+            .is_err()
+        );
+        assert!(
+            with_physics(
+                &directory.path().join("missing"),
+                "arduplane",
+                "plane-jet",
+                "plane-jet".into()
+            )
+            .is_err()
+        );
     }
 
     #[test]

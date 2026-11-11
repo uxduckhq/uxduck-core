@@ -1,0 +1,8 @@
+{
+  "method": "account/verify",
+  "params": {
+    "email": "ana@example.com",
+    "code": "482913",
+    "termsVersion": "2026-11-03"
+  }
+}

@@ -2,7 +2,7 @@ use uxduck_core::domain::operator as core;
 use uxduck_core::events;
 
 use crate::dto::operator as dto;
-use crate::dto::state::Actor;
+use crate::dto::state::{Actor, ActorIdentity};
 
 impl From<core::UnitSystem> for dto::UnitSystem {
     fn from(value: core::UnitSystem) -> Self {
@@ -44,6 +44,7 @@ macro_rules! same_units {
 }
 
 same_units! {
+    MapViewpoint { Cockpit, Rear, Tail, Orbit, Behind, Below, Camera, Home, Above }
     DistanceUnit { Kilometers, Miles }
     AltitudeUnit { Meters, Feet }
     SpeedUnit { MetersPerSecond, KilometersPerHour, Knots, MilesPerHour }
@@ -102,6 +103,7 @@ impl From<core::Basemap> for dto::Basemap {
         match value {
             core::Basemap::Imagery => Self::Imagery,
             core::Basemap::Streets => Self::Streets,
+            core::Basemap::Terrain => Self::Terrain,
         }
     }
 }
@@ -111,6 +113,7 @@ impl From<dto::Basemap> for core::Basemap {
         match value {
             dto::Basemap::Imagery => Self::Imagery,
             dto::Basemap::Streets => Self::Streets,
+            dto::Basemap::Terrain => Self::Terrain,
         }
     }
 }
@@ -167,6 +170,11 @@ impl From<&core::Operator> for dto::Operator {
                     mapping_id: m.mapping_id.clone(),
                 })
                 .collect(),
+            terms: value.terms.as_ref().map(|t| dto::TermsAcceptance {
+                version: t.version.clone(),
+                accepted_at_ms: t.accepted_at_ms,
+                account_id: t.account_id.clone(),
+            }),
             version: value.version,
         }
     }
@@ -181,18 +189,21 @@ impl From<&dto::ParameterGroup> for core::ParameterGroup {
     }
 }
 
+impl From<&events::ActorIdentity> for ActorIdentity {
+    fn from(value: &events::ActorIdentity) -> Self {
+        Self {
+            operator_name: value.operator_name.clone(),
+            account_id: value.account_id.clone(),
+        }
+    }
+}
+
 impl From<&events::Actor> for Actor {
     fn from(value: &events::Actor) -> Self {
         Self {
             client_id: value.client_id.clone(),
             operator_id: value.operator_id.clone(),
-            identity: value
-                .identity
-                .as_ref()
-                .map(|identity| crate::dto::state::ActorIdentity {
-                    operator_name: identity.operator_name.clone(),
-                    account_id: identity.account_id.clone(),
-                }),
+            identity: value.identity.as_ref().map(Into::into),
         }
     }
 }
@@ -234,6 +245,7 @@ fn tab_to_dto(kind: core::TabKind) -> dto::TabKind {
         core::TabKind::Airspace => dto::TabKind::Airspace,
         core::TabKind::Setup => dto::TabKind::Setup,
         core::TabKind::Checklist => dto::TabKind::Checklist,
+        core::TabKind::Tuning => dto::TabKind::Tuning,
     }
 }
 
@@ -278,6 +290,19 @@ fn tab_from_dto(kind: dto::TabKind) -> core::TabKind {
         dto::TabKind::Airspace => core::TabKind::Airspace,
         dto::TabKind::Setup => core::TabKind::Setup,
         dto::TabKind::Checklist => core::TabKind::Checklist,
+        dto::TabKind::Tuning => core::TabKind::Tuning,
+    }
+}
+
+impl From<&core::ChartSpec> for dto::ChartSpec {
+    fn from(value: &core::ChartSpec) -> Self {
+        chart_to_dto(value)
+    }
+}
+
+impl From<dto::ChartSpec> for core::ChartSpec {
+    fn from(value: dto::ChartSpec) -> Self {
+        chart_from_dto(value)
     }
 }
 
@@ -349,14 +374,66 @@ fn dock_to_dto(value: &core::DockNode) -> dto::DockNode {
                     vehicle_id: t.vehicle_id.clone(),
                     hidden: t.hidden,
                     camera: t.camera.clone(),
+                    camera_view: t.camera_view.map(camera_view_to_dto),
+                    map_camera: t.map_camera.map(|options| dto::MapCameraOptions {
+                        viewpoint: options.viewpoint.into(),
+                        following: options.following,
+                        resume: options.resume,
+                        drag_to_pan: options.drag_to_pan,
+                    }),
                     panel: t.panel.clone(),
                     item: t.item.clone(),
                     camera_behind: t.camera_behind,
                     chart: t.chart.as_ref().map(chart_to_dto),
+                    section: t.section.map(Into::into),
                 })
                 .collect(),
             active: *active,
         },
+    }
+}
+
+impl From<core::TuningSection> for dto::TuningSection {
+    fn from(value: core::TuningSection) -> Self {
+        match value {
+            core::TuningSection::Steps => Self::Steps,
+            core::TuningSection::Autotune => Self::Autotune,
+            core::TuningSection::Roll => Self::Roll,
+            core::TuningSection::Pitch => Self::Pitch,
+            core::TuningSection::Yaw => Self::Yaw,
+            core::TuningSection::Feel => Self::Feel,
+            core::TuningSection::Gains => Self::Gains,
+        }
+    }
+}
+
+impl From<dto::TuningSection> for core::TuningSection {
+    fn from(value: dto::TuningSection) -> Self {
+        match value {
+            dto::TuningSection::Steps => Self::Steps,
+            dto::TuningSection::Autotune => Self::Autotune,
+            dto::TuningSection::Roll => Self::Roll,
+            dto::TuningSection::Pitch => Self::Pitch,
+            dto::TuningSection::Yaw => Self::Yaw,
+            dto::TuningSection::Feel => Self::Feel,
+            dto::TuningSection::Gains => Self::Gains,
+        }
+    }
+}
+
+const fn camera_view_to_dto(value: core::CameraView) -> dto::CameraView {
+    match value {
+        core::CameraView::Single => dto::CameraView::Single,
+        core::CameraView::Focus => dto::CameraView::Focus,
+        core::CameraView::Grid => dto::CameraView::Grid,
+    }
+}
+
+const fn camera_view_from_dto(value: dto::CameraView) -> core::CameraView {
+    match value {
+        dto::CameraView::Single => core::CameraView::Single,
+        dto::CameraView::Focus => core::CameraView::Focus,
+        dto::CameraView::Grid => core::CameraView::Grid,
     }
 }
 
@@ -384,10 +461,18 @@ fn dock_from_dto(value: dto::DockNode) -> core::DockNode {
                     vehicle_id: t.vehicle_id,
                     hidden: t.hidden,
                     camera: t.camera,
+                    camera_view: t.camera_view.map(camera_view_from_dto),
+                    map_camera: t.map_camera.map(|options| core::MapCameraOptions {
+                        viewpoint: options.viewpoint.into(),
+                        following: options.following,
+                        resume: options.resume,
+                        drag_to_pan: options.drag_to_pan,
+                    }),
                     panel: t.panel,
                     item: t.item,
                     camera_behind: t.camera_behind,
                     chart: t.chart.map(chart_from_dto),
+                    section: t.section.map(Into::into),
                 })
                 .collect(),
             active,

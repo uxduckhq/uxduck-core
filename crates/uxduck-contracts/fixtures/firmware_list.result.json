@@ -1,0 +1,17 @@
+{
+  "profiles": [
+    {
+      "id": "firmware-5c0e2a91d7b3",
+      "url": "https://ci.acme.example/firmware/acme-r12/profile.json",
+      "label": "Acme r12",
+      "firmware": "ArduCopter",
+      "version": "4.5.7-acme12",
+      "commit": "2a3dc4b7bf9e",
+      "ownSetId": "firmware-5c0e2a91d7b3-parameters",
+      "dialectId": "firmware-5c0e2a91d7b3-dialect",
+      "addedAtUs": 1793404800000000,
+      "fetchedAtUs": 1793491200000000,
+      "problem": "https://ci.acme.example/firmware/acme-r12/profile.json answered 503"
+    }
+  ]
+}

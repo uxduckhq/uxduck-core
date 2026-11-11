@@ -129,6 +129,8 @@ impl Index {
 struct Registry {
     /// Each open link's current file, indexed as it is written.
     current: HashMap<String, (PathBuf, Index)>,
+    /// Where each open link's latest record begins in its current file.
+    latest: HashMap<String, u64>,
     /// Earlier files' indexes, the one read most recently last.
     earlier: Vec<(PathBuf, Arc<Index>)>,
 }
@@ -168,11 +170,22 @@ pub fn open(link_id: &str, path: &Path) {
         link_id.to_owned(),
         (path.to_owned(), Index::new(0, MAX_OFFSETS)),
     );
+    registry.latest.remove(link_id);
+}
+
+/// The file a link writes now, by name, and where its latest record
+/// begins: where a flight beginning now starts in it (ADR-0039 R10).
+pub fn position(link_id: &str) -> Option<(String, u64)> {
+    let registry = registry();
+    let (path, _) = registry.current.get(link_id)?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some((name, registry.latest.get(link_id).copied().unwrap_or(0)))
 }
 
 /// The link closed: its file joins the earlier ones.
 pub fn close(link_id: &str) {
     let mut registry = registry();
+    registry.latest.remove(link_id);
     if let Some((old, index)) = registry.current.remove(link_id) {
         registry.keep(old, Arc::new(index));
     }
@@ -182,6 +195,9 @@ pub fn close(link_id: &str) {
 /// header and the offset of its record.
 pub fn indexed(link_id: &str, records: &[(Header, u64)]) {
     let mut registry = registry();
+    if let Some((_, offset)) = records.last() {
+        registry.latest.insert(link_id.to_owned(), *offset);
+    }
     if let Some((_, index)) = registry.current.get_mut(link_id) {
         for (header, offset) in records {
             index.add((header.system_id, header.message_id), *offset);
@@ -525,7 +541,16 @@ mod tests {
         log.extend_from_slice(&[0, 1, 2]);
         std::fs::write(dir.path().join("detail-100.tlog"), log).unwrap();
         let range = (100_000_001, 100_000_004);
-        let first = packet_page(dir.path(), "detail", Some(1), Some(0), range, None, 2).unwrap();
+        let first = packet_page(
+            dir.path(),
+            "detail",
+            (Some(1), None),
+            Some(0),
+            range,
+            None,
+            2,
+        )
+        .unwrap();
         assert_eq!(
             first.records.iter().map(|r| r.at_us).collect::<Vec<_>>(),
             [100_000_004, 100_000_003]
@@ -541,7 +566,7 @@ mod tests {
         let second = packet_page(
             dir.path(),
             "detail",
-            Some(1),
+            (Some(1), None),
             Some(0),
             range,
             first.older.as_deref(),
@@ -553,8 +578,45 @@ mod tests {
             [100_000_002, 100_000_001]
         );
         assert!(second.older.is_none());
-        let all = packet_page(dir.path(), "detail", None, None, range, None, 20).unwrap();
+        let all = packet_page(dir.path(), "detail", (None, None), None, range, None, 20).unwrap();
         assert_eq!(all.records.len(), 12);
+    }
+
+    /// ADR-0050 L1: a link's tlog holds what UXDuck sent beside what it
+    /// heard, and a page of received packets leaves UXDuck's own out.
+    #[test]
+    fn a_page_of_received_packets_leaves_out_what_uxduck_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Vec::new();
+        for n in 0..4u8 {
+            let heard = sim::heartbeat_frame(1, 1, n);
+            let sent = sim::gcs_heartbeat_frame(255, 190, n);
+            let other = sim::gcs_heartbeat_frame(254, 190, n);
+            for frame in [&heard, &sent, &other] {
+                uxduck_mavlink::tlog::record(&mut log, 100_000_000 + u64::from(n), frame).unwrap();
+            }
+        }
+        std::fs::write(dir.path().join("both-100.tlog"), log).unwrap();
+        let range = (0, u64::MAX);
+        let everything = packet_page(dir.path(), "both", (None, None), None, range, None, 20);
+        assert_eq!(everything.unwrap().records.len(), 12);
+        let received = packet_page(
+            dir.path(),
+            "both",
+            (None, Some((255, 190))),
+            None,
+            range,
+            None,
+            20,
+        )
+        .unwrap();
+        let from: Vec<u8> = received
+            .records
+            .iter()
+            .map(|r| framing::header(&r.frame).unwrap().system_id)
+            .collect();
+        assert_eq!(from.len(), 8, "{from:?}");
+        assert!(!from.contains(&255), "{from:?}");
     }
 
     #[test]
@@ -630,10 +692,13 @@ pub struct PacketPage {
 
 /// Bounded to 32 MiB across at most 64 files per call. Peers are not present
 /// in legacy tlogs and must not be reconstructed from current configuration.
+/// `(system, sender)`: only frames from `system`, if given, and none from
+/// `sender`, a system and component: UXDuck's own, which its tlogs hold
+/// beside what it received (ADR-0050 L1).
 pub fn packet_page(
     dir: &Path,
     link: &str,
-    system: Option<u8>,
+    (system, sender): (Option<u8>, Option<(u8, u8)>),
     message: Option<u32>,
     range: (u64, u64),
     before: Option<&str>,
@@ -698,6 +763,7 @@ pub fn packet_page(
                 || at_us > range.1
                 || before.is_some_and(|b| (*seconds, position) >= b)
                 || system.is_some_and(|id| id != header.system_id)
+                || sender == Some((header.system_id, header.component_id))
                 || message.is_some_and(|id| id != header.message_id)
             {
                 continue;

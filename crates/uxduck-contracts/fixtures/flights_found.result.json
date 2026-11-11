@@ -1,0 +1,48 @@
+{
+  "folders": [
+    {
+      "id": "qgroundcontrol",
+      "name": "QGroundControl",
+      "path": "/Users/pilot/Documents/QGroundControl/Telemetry",
+      "on": true,
+      "exists": true
+    },
+    {
+      "id": "mission-planner",
+      "name": "Mission Planner",
+      "path": "/Users/pilot/Documents/Mission Planner/logs",
+      "on": false,
+      "exists": false
+    },
+    {
+      "id": "/Users/pilot/mavproxy",
+      "name": "mavproxy",
+      "path": "/Users/pilot/mavproxy",
+      "on": true,
+      "exists": true,
+      "added": true,
+      "deep": true
+    }
+  ],
+  "flights": [
+    {
+      "folder": "qgroundcontrol",
+      "path": "/Users/pilot/Documents/QGroundControl/Telemetry/2026-10-28 14-02-17.tlog",
+      "file": "2026-10-28 14-02-17.tlog",
+      "systemId": 1,
+      "vehicleType": "Quadrotor",
+      "armedAtUs": 1790000010000000,
+      "endedAtUs": 1790000040000000
+    },
+    {
+      "folder": "/Users/pilot/mavproxy",
+      "path": "/Users/pilot/mavproxy/flight.tlog",
+      "file": "flight.tlog",
+      "systemId": 1,
+      "vehicleType": "FixedWing",
+      "armedAtUs": 1789990000000000,
+      "recording": true
+    }
+  ],
+  "scanning": true
+}

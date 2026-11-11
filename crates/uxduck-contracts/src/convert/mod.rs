@@ -4,9 +4,13 @@
 pub mod checklist;
 mod client;
 mod command;
+mod companion;
 mod controller;
+mod dialect;
 mod files;
 mod find;
+mod firmware_profile;
+mod gripper;
 mod history;
 mod marker;
 mod operator;
@@ -22,6 +26,7 @@ mod setup;
 mod snapshot;
 mod telemetry;
 mod thread;
+pub mod tuning;
 mod vehicle;
 mod video;
 

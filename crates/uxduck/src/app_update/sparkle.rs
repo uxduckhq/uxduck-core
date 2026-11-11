@@ -32,7 +32,7 @@ pub(super) fn app_for(executable: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn installed_app() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::paths::executable().map_err(|e| e.to_string())?;
     app_for(&exe).ok_or("Mac app updates require the complete UXDuck.app bundle.".into())
 }
 
@@ -175,6 +175,7 @@ async fn release_feed(
     .await
     .map_err(|e| e.to_string())?;
     if !matches!(report.verdict, crate::update::Verdict::Available(_)) {
+        super::forget_downloads(data, |_| false);
         super::publish_current(engine, include_beta, report.warning).await?;
         return Ok(None);
     }
@@ -257,6 +258,7 @@ async fn stage_archive(
         let _ = std::fs::remove_file(&partial);
     }
     result?;
+    super::forget_downloads(data, |staged| *staged == version);
     Ok(archive)
 }
 
@@ -331,6 +333,9 @@ async fn cycle(
                 if !engine.run(move |e| e.app_update_publish_for_channel(include_beta, s)).await.unwrap_or(false) {
                     let _ = child.kill(); let _ = child.wait(); return Ok(());
                 }
+                if let Some(version) = &ready {
+                    super::announce(engine, data, version).await;
+                }
             },
             () = engine.requested(|r| r.app_update) => {
                 let recheck = engine.run(move |e| {
@@ -376,7 +381,7 @@ async fn cycle(
         let reopen = reopen_target.is_some();
         let dir = data.join("updates/sparkle").join(version);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        let executable = crate::paths::executable().map_err(|e| e.to_string())?;
         let plan = Plan {
             version: version.into(),
             kind: "sparkle".into(),
@@ -504,10 +509,19 @@ mod tests {
             sha256: format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes))),
         };
         let data = tempfile::tempdir().unwrap();
+        let installed = [
+            data.path().join("app-updates/0.5.0"),
+            data.path().join("updates/sparkle/0.5.0"),
+        ];
+        for old in &installed {
+            std::fs::create_dir_all(old).unwrap();
+            std::fs::write(old.join("package.dmg"), b"installed already").unwrap();
+        }
         let staged = stage_archive(channel, data.path(), "0.5.1-beta.2", &artifact, None)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&staged).unwrap(), bytes);
+        assert!(installed.iter().all(|old| !old.exists()));
         assert!(!engine.run(|e| e.app_update_approved()).await.unwrap());
         assert_eq!(
             engine

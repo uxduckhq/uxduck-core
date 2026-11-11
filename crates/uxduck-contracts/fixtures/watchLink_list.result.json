@@ -12,5 +12,10 @@
       },
       "watching": 12
     }
-  ]
+  ],
+  "edge": {
+    "state": "connected",
+    "roundTripMs": 42,
+    "clockOffsetMs": -3
+  }
 }

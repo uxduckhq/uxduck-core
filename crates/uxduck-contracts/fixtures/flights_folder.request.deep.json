@@ -1,0 +1,7 @@
+{
+  "method": "flights/folder",
+  "params": {
+    "id": "/Users/pilot/mavproxy",
+    "deep": true
+  }
+}

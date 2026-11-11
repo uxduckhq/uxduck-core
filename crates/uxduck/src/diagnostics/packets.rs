@@ -31,10 +31,12 @@ fn message(
     })
 }
 
+/// `(system, gcs)`: the system asked about, if one, and the system id
+/// UXDuck sends as, whose frames in a tlog it sent (ADR-0050 L1).
 pub fn history(
     dir: &Path,
     link: &str,
-    system: Option<u8>,
+    (system, gcs): (Option<u8>, u8),
     params: &MavlinkHistoryParams,
     now: u64,
 ) -> Result<MavlinkHistoryResult, ApiError> {
@@ -61,7 +63,7 @@ pub fn history(
     let page = crate::tlog_index::packet_page(
         dir,
         link,
-        system,
+        (system, Some((gcs, uxduck_mavlink::GCS_COMPONENT_ID))),
         (!params.all_messages).then_some(params.id),
         (from, to),
         before.as_deref(),

@@ -43,8 +43,9 @@ pub enum TerrainCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Keeps an area's terrain on this computer for use offline (S120):
-    /// its south-west and north-east corners.
+    /// Keeps an area's terrain on this computer for use offline (S120): a
+    /// rectangle by its south-west and north-east corners, kept as a
+    /// four-cornered polygon (ADR-0051 A5). Draw other shapes on the map.
     Keep {
         #[arg(long)]
         name: String,
@@ -99,10 +100,12 @@ pub async fn run(data_dir: &Path, command: TerrainCommand) -> Result<(), CliErro
             north,
             east,
         } => {
-            let bounds =
-                json!({ "southDeg": south, "westDeg": west, "northDeg": north, "eastDeg": east });
-            let size = client.call("terrain/areaSize", bounds.clone()).await?;
-            let mut params = bounds;
+            let corner = |lat: f64, lon: f64| json!({ "latitudeDeg": lat, "longitudeDeg": lon });
+            let polygon = json!({ "points": [
+                corner(south, west), corner(south, east), corner(north, east), corner(north, west)
+            ] });
+            let size = client.call("terrain/areaSize", polygon.clone()).await?;
+            let mut params = polygon;
             params["name"] = json!(name);
             let area = client.call("terrain/keepArea", params).await?;
             println!(
@@ -175,6 +178,7 @@ fn area_lines(areas: &Value) -> Vec<String> {
         .map(|a| {
             let state = match a["state"].as_str() {
                 Some("kept") => "kept".to_owned(),
+                Some("disabled") => "disabled, not kept".to_owned(),
                 Some("fetching") => format!(
                     "fetching, {} of {}",
                     a["done"].as_u64().unwrap_or_default(),
@@ -259,11 +263,16 @@ mod tests {
     fn areas_read_one_a_line() {
         let areas = json!({ "areas": [
             { "area": { "id": "ta1", "name": "Snowdonia" }, "state": "kept", "chunks": 64, "done": 64 },
-            { "area": { "id": "ta2", "name": "Lakes" }, "state": "fetching", "chunks": 30, "done": 12 }
+            { "area": { "id": "ta2", "name": "Lakes" }, "state": "fetching", "chunks": 30, "done": 12 },
+            { "area": { "id": "ta3", "name": "Peaks" }, "state": "disabled", "chunks": 0, "done": 0 }
         ]});
         assert_eq!(
             area_lines(&areas),
-            ["ta1  Snowdonia: kept", "ta2  Lakes: fetching, 12 of 30"]
+            [
+                "ta1  Snowdonia: kept",
+                "ta2  Lakes: fetching, 12 of 30",
+                "ta3  Peaks: disabled, not kept"
+            ]
         );
         assert_eq!(
             size_text(&json!({ "chunks": 64, "bytes": 3_200_000 })),

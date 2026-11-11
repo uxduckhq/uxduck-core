@@ -20,13 +20,17 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uxduck_contracts::dto::Empty;
-use uxduck_contracts::dto::initialize::{Capability, ClientKind, InitializeResult};
+use uxduck_contracts::dto::initialize::{
+    Capability, ClientKind, InitializeParams, InitializeResult,
+};
 use uxduck_contracts::dto::link::{Link, SerialListResult};
 use uxduck_contracts::dto::operator::{Operator, OperatorListResult, OperatorProfile};
 use uxduck_contracts::dto::pairing::{BootstrapToken, PairingListResult};
 use uxduck_contracts::dto::state::StateSubscribeResult;
 use uxduck_contracts::dto::telemetry::{TelemetrySubscribeResult, VehicleTelemetry};
-use uxduck_contracts::dto::thread::{AgentConfig, Folder, Item, Thread, ThreadBulkResult};
+use uxduck_contracts::dto::thread::{
+    AgentConfig, Folder, Item, Thread, ThreadBulkResult, ThreadCancelParams,
+};
 use uxduck_contracts::dto::vehicle::{Vehicle, VehicleListResult};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientNotification, ClientRequest, ServerNotification};
@@ -39,6 +43,125 @@ fn fixture(name: &str) -> Value {
     let path = dir().join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+#[test]
+fn an_older_host_does_not_claim_survey_planning_support() {
+    let mut value = fixture("initialize.result.json");
+    value["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("surveyPlanning");
+    let hello: InitializeResult = serde_json::from_value(value).unwrap();
+    assert!(!hello.capabilities.survey_planning);
+}
+
+#[test]
+fn an_older_host_does_not_claim_marker_shapes() {
+    let mut value = fixture("initialize.result.json");
+    value["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("markerShapes");
+    let hello: InitializeResult = serde_json::from_value(value).unwrap();
+    assert!(!hello.capabilities.marker_shapes);
+}
+
+#[test]
+fn an_older_host_does_not_claim_raw_mission_numbers() {
+    let mut value = fixture("initialize.result.json");
+    value["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("rawMissionNumbers");
+    let hello: InitializeResult = serde_json::from_value(value).unwrap();
+    assert!(!hello.capabilities.raw_mission_numbers);
+}
+
+#[test]
+fn an_older_host_does_not_claim_terrain_polygons() {
+    let mut value = fixture("initialize.result.json");
+    value["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("terrainPolygons");
+    let hello: InitializeResult = serde_json::from_value(value).unwrap();
+    assert!(!hello.capabilities.terrain_polygons);
+}
+
+/// A page from before polygons (0.13 and earlier) keeps and sizes areas as
+/// rectangles; they are refused, not kept as an area without corners.
+#[test]
+fn an_older_pages_rectangle_area_is_refused() {
+    let rectangle = serde_json::json!({
+        "name": "Snowdonia", "southDeg": 53.0, "westDeg": -4.3, "northDeg": 53.2, "eastDeg": -3.9,
+    });
+    for method in ["terrain/keepArea", "terrain/areaSize"] {
+        let request = serde_json::json!({ "method": method, "params": rectangle });
+        assert!(
+            serde_json::from_value::<ClientRequest>(request).is_err(),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn an_older_page_does_not_claim_marker_shapes() {
+    let mut value = fixture("initialize.request.json");
+    value["params"]["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("markerShapes");
+    let hello: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(!hello.capabilities.marker_shapes);
+}
+
+#[test]
+fn an_older_page_does_not_claim_replay_step_marks() {
+    let mut value = fixture("initialize.request.json");
+    value["params"]["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("replayStepMarks");
+    let hello: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(!hello.capabilities.replay_step_marks);
+}
+
+#[test]
+fn mission_read_and_replay_mark_capabilities_default_independently() {
+    for mission in [None, Some(false), Some(true)] {
+        for replay in [None, Some(false), Some(true)] {
+            let mut value = fixture("initialize.request.json");
+            let capabilities = value["params"]["capabilities"].as_object_mut().unwrap();
+            for (name, flag) in [
+                ("missionReadFloatBits", mission),
+                ("replayStepMarks", replay),
+            ] {
+                capabilities.remove(name);
+                if let Some(flag) = flag {
+                    capabilities.insert(name.into(), flag.into());
+                }
+            }
+            let hello: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+            assert_eq!(
+                hello.capabilities.mission_read_float_bits,
+                mission == Some(true)
+            );
+            assert_eq!(hello.capabilities.replay_step_marks, replay == Some(true));
+            let round_trip: InitializeParams =
+                serde_json::from_value(serde_json::to_value(&hello).unwrap()).unwrap();
+            assert_eq!(round_trip.capabilities, hello.capabilities);
+        }
+    }
+}
+
+#[test]
+fn older_thread_contracts_do_not_claim_spoken_turn_support_or_item_cancellation() {
+    let config: AgentConfig = serde_json::from_value(fixture("agent_config.result.json")).unwrap();
+    assert!(!config.spoken_turns);
+    let cancel: ThreadCancelParams =
+        serde_json::from_value(fixture("thread_cancel.request.json")["params"].clone()).unwrap();
+    assert!(cancel.item_id.is_none());
 }
 
 /// Deserialises, serialises and compares. A `.minimal` case omits optional
@@ -86,7 +209,9 @@ fn check(name: &str) {
         (
             "result",
             "vehicle_get" | "vehicle_save" | "vehicle_size" | "vehicle_bookmarks"
-            | "vehicle_dismiss" | "vehicle_traffic" | "vehicle_look",
+            | "vehicle_dismiss" | "vehicle_traffic" | "vehicle_look" | "vehicle_colour"
+            | "vehicle_simulated" | "vehicle_hide" | "vehicle_gripper" | "computer_add"
+            | "computer_check" | "computer_remove",
         ) => {
             round_trip::<Vehicle>(name, &json);
         }
@@ -94,6 +219,9 @@ fn check(name: &str) {
             round_trip::<Link>(name, &json);
         }
         ("result", "serial_list") => round_trip::<SerialListResult>(name, &json),
+        ("result", "gripper_status") => {
+            round_trip::<uxduck_contracts::dto::gripper::GripperStatus>(name, &json);
+        }
         ("result", "link_list") => {
             round_trip::<uxduck_contracts::dto::link::LinkListResult>(name, &json);
         }
@@ -156,6 +284,12 @@ fn check(name: &str) {
         }
         ("result", "plan_upload") => {
             round_trip::<uxduck_contracts::dto::plan::PlanUploadResult>(name, &json);
+        }
+        ("result", "plan_simulate") => {
+            round_trip::<uxduck_contracts::dto::operation::PlanSimulateResult>(name, &json);
+        }
+        ("result", "plan_simulateCheck") => {
+            round_trip::<uxduck_contracts::dto::operation::PlanSimulateCheckResult>(name, &json);
         }
         ("result", "plan_export") => {
             round_trip::<uxduck_contracts::dto::plan::PlanExportResult>(name, &json);
@@ -248,7 +382,10 @@ fn check(name: &str) {
         ("result", "account_claimFeedback") => {
             round_trip::<uxduck_contracts::dto::feedback::ClaimFeedbackResult>(name, &json);
         }
-        ("result", "feedback_send") => {
+        ("result", "feedback_file") => {
+            round_trip::<uxduck_contracts::dto::feedback::FeedbackFiled>(name, &json);
+        }
+        ("result", "feedback_send" | "feedback_add") => {
             round_trip::<uxduck_contracts::dto::feedback::FeedbackSendResult>(name, &json);
         }
         ("bundle", "feedback") => {
@@ -259,6 +396,48 @@ fn check(name: &str) {
         }
         ("result", "daemon_wakeups") => {
             round_trip::<uxduck_contracts::dto::settings::Wakeups>(name, &json);
+        }
+        (
+            "result",
+            "replay_open"
+            | "replay_play"
+            | "replay_pause"
+            | "replay_restart"
+            | "replay_speed"
+            | "replay_seek"
+            | "replay_close"
+            | "replay_state"
+            | "replay_save"
+            | "replay_add"
+            | "replay_nudge"
+            | "replay_rename"
+            | "replay_startTogether",
+        ) => {
+            round_trip::<uxduck_contracts::dto::replay::ReplayState>(name, &json);
+        }
+        ("result", "operation_list" | "operation_removeFlights") => {
+            round_trip::<uxduck_contracts::dto::operation::OperationListResult>(name, &json);
+        }
+        ("result", "operation_create" | "operation_rename" | "operation_addFlights") => {
+            round_trip::<uxduck_contracts::dto::operation::Operation>(name, &json);
+        }
+        ("result", "flights_found" | "flights_folder") => {
+            round_trip::<uxduck_contracts::dto::replay::FoundFlightsResult>(name, &json);
+        }
+        ("result", "flight_addVideo" | "video_align") => {
+            round_trip::<uxduck_contracts::dto::video::VideoRecording>(name, &json);
+        }
+        ("result", "flight_series") => {
+            round_trip::<uxduck_contracts::dto::replay::FlightSeriesResult>(name, &json);
+        }
+        ("result", "replay_logFields") => {
+            round_trip::<uxduck_contracts::dto::replay::ReplayLogFieldsResult>(name, &json);
+        }
+        ("result", "replay_motion") => {
+            round_trip::<uxduck_contracts::dto::replay::ReplayMotionResult>(name, &json);
+        }
+        ("result", "logs_cards" | "logs_copyCard") => {
+            round_trip::<uxduck_contracts::dto::replay::LogCardsResult>(name, &json);
         }
         ("result", "traffic_status") => {
             round_trip::<uxduck_contracts::dto::traffic::TrafficStatus>(name, &json);
@@ -305,6 +484,9 @@ fn check(name: &str) {
             round_trip::<uxduck_contracts::dto::param_definitions::DefinitionsListResult>(
                 name, &json,
             );
+        }
+        ("result", "param_definitions_use") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::VehicleDefinitions>(name, &json);
         }
         ("result", "vehicle_history") => {
             round_trip::<uxduck_contracts::dto::history::VehicleHistoryResult>(name, &json);
@@ -367,11 +549,48 @@ fn check(name: &str) {
         ("result", "flight_list") => {
             round_trip::<uxduck_contracts::dto::flight::FlightListResult>(name, &json);
         }
-        ("result", "flight_keep" | "flight_end" | "flight_uploadLog") => {
+        ("result", "flight_keep" | "flight_end" | "flight_rename" | "flight_uploadLog") => {
             round_trip::<uxduck_contracts::dto::flight::Flight>(name, &json);
+        }
+        ("result", "flight_log") => {
+            round_trip::<uxduck_contracts::dto::flight::FlightLogResult>(name, &json);
+        }
+        ("result", "flight_removal") => {
+            round_trip::<uxduck_contracts::dto::flight::FlightRemovalResult>(name, &json);
+        }
+        ("result", "param_sets") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamSetsResult>(name, &json);
+        }
+        ("result", "param_setSave" | "param_setRename") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::SavedParams>(name, &json);
+        }
+        ("result", "param_setApply") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamSetApplyResult>(
+                name, &json,
+            );
+        }
+        ("result", "param_setExport") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamSetExportResult>(
+                name, &json,
+            );
+        }
+        ("result", "tuning_response") => {
+            round_trip::<uxduck_contracts::dto::tuning::TuningResponse>(name, &json);
+        }
+        ("result", "tuning_live") => {
+            round_trip::<uxduck_contracts::dto::tuning::TuningLiveResult>(name, &json);
+        }
+        ("result", "tuning_prepare") => {
+            round_trip::<uxduck_contracts::dto::tuning::TuningPrepare>(name, &json);
+        }
+        ("result", "tuning_state") => {
+            round_trip::<uxduck_contracts::dto::tuning::TuningState>(name, &json);
         }
         ("result", "param_diff") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamDiffResult>(name, &json);
+        }
+        ("result", "param_changes") => {
+            round_trip::<uxduck_contracts::dto::param_definitions::ParamChangesResult>(name, &json);
         }
         ("result", "mavlink_inspect") => {
             round_trip::<uxduck_contracts::dto::inspect::MavlinkInspectResult>(name, &json);
@@ -390,6 +609,18 @@ fn check(name: &str) {
         }
         ("result", "mavlink_history") => {
             round_trip::<uxduck_contracts::dto::inspect::MavlinkHistoryResult>(name, &json);
+        }
+        ("result", "mavlink_dialects_list" | "mavlink_dialects_use") => {
+            round_trip::<uxduck_contracts::dto::dialect::DialectsListResult>(name, &json);
+        }
+        ("result", "firmware_list") => {
+            round_trip::<uxduck_contracts::dto::firmware_profile::FirmwareListResult>(name, &json);
+        }
+        ("result", "firmware_add" | "firmware_rename") => {
+            round_trip::<uxduck_contracts::dto::firmware_profile::FirmwareProfile>(name, &json);
+        }
+        ("result", "mavlink_dialects_add" | "mavlink_dialects_bind") => {
+            round_trip::<uxduck_contracts::dto::dialect::Dialect>(name, &json);
         }
         ("result", "param_definitions_add") => {
             round_trip::<uxduck_contracts::dto::param_definitions::OwnSet>(name, &json);
@@ -424,12 +655,15 @@ fn check(name: &str) {
         ("result", "telemetry_subscribe") => round_trip::<TelemetrySubscribeResult>(name, &json),
         ("result", "telemetry_get") => round_trip::<VehicleTelemetry>(name, &json),
         ("result", "thread_create" | "thread_update") => round_trip::<Thread>(name, &json),
-        ("result", "thread_send") => round_trip::<Item>(name, &json),
+        ("result", "thread_send" | "thread_edit") => round_trip::<Item>(name, &json),
         ("result", "agent_config") => round_trip::<AgentConfig>(name, &json),
         ("result", "sim_binaries") => {
             round_trip::<uxduck_contracts::dto::sim::SimBinariesResult>(name, &json);
         }
-        ("result", "sim_start" | "sim_restart" | "sim_pause" | "snapshot_start") => {
+        ("result", "sim_frames") => {
+            round_trip::<uxduck_contracts::dto::sim::SimFramesResult>(name, &json);
+        }
+        ("result", "sim_start" | "sim_restart" | "sim_pause" | "sim_crash" | "snapshot_start") => {
             round_trip::<uxduck_contracts::dto::link::Link>(name, &json);
         }
         ("result", "sim_snapshot" | "snapshot_rename") => {
@@ -462,11 +696,23 @@ fn check(name: &str) {
         ("result", "account_environment" | "account_setEnvironment") => {
             round_trip::<uxduck_contracts::dto::account::AccountEnvironmentState>(name, &json);
         }
+        ("result", "thread_cancel") => {
+            round_trip::<uxduck_contracts::dto::thread::ThreadCancelResult>(name, &json);
+        }
         ("result", "thread_feedback") => {
             round_trip::<uxduck_contracts::dto::thread::ThreadFeedbackResult>(name, &json);
         }
-        ("result", "lease_take") => {
-            round_trip::<uxduck_contracts::dto::edge::Lease>(name, &json);
+        ("result", "attachment_begin") => {
+            round_trip::<uxduck_contracts::dto::thread::AttachmentBeginResult>(name, &json);
+        }
+        ("result", "attachment_append") => {
+            round_trip::<uxduck_contracts::dto::thread::AttachmentAppendResult>(name, &json);
+        }
+        ("result", "attachment_finish") => {
+            round_trip::<uxduck_contracts::dto::thread::AttachedFile>(name, &json);
+        }
+        ("result", "attachment_read") => {
+            round_trip::<uxduck_contracts::dto::thread::AttachmentReadResult>(name, &json);
         }
         ("result", "files_list") => {
             round_trip::<uxduck_contracts::dto::files::FilesListResult>(name, &json);
@@ -524,6 +770,9 @@ fn check(name: &str) {
         ("result", "terrain_status") => {
             round_trip::<uxduck_contracts::dto::terrain::TerrainStatusResult>(name, &json);
         }
+        ("result", "terrain_vehicle" | "terrain_putArea") => {
+            round_trip::<uxduck_contracts::dto::terrain::VehicleTerrainResult>(name, &json);
+        }
         ("result", "terrain_areas") => {
             round_trip::<uxduck_contracts::dto::terrain::TerrainAreasResult>(name, &json);
         }
@@ -545,9 +794,6 @@ fn check(name: &str) {
         ("result", "watchLink_list") => {
             round_trip::<uxduck_contracts::dto::edge::WatchLinkListResult>(name, &json);
         }
-        ("result", "account_computers") => {
-            round_trip::<uxduck_contracts::dto::edge::AccountComputers>(name, &json);
-        }
         ("result", "account_shared") => {
             round_trip::<uxduck_contracts::dto::account::SharedData>(name, &json);
         }
@@ -566,7 +812,9 @@ fn check(name: &str) {
         ("result", "state_subscribe") => round_trip::<StateSubscribeResult>(name, &json),
         ("result", "operator_list") => round_trip::<OperatorListResult>(name, &json),
         ("result", "operator_profile") => round_trip::<OperatorProfile>(name, &json),
-        ("result", "operator_create" | "operator_update") => round_trip::<Operator>(name, &json),
+        ("result", "operator_create" | "operator_update" | "terms_accept") => {
+            round_trip::<Operator>(name, &json);
+        }
         (
             "result",
             "trace_subscribe"
@@ -577,7 +825,8 @@ fn check(name: &str) {
             | "operator_remove"
             | "client_setOperator"
             | "operator_switch"
-            | "thread_cancel"
+            | "thread_queue"
+            | "agent_connection"
             | "credentials_set"
             | "thread_delete"
             | "folder_delete"
@@ -585,6 +834,7 @@ fn check(name: &str) {
             | "controller_release"
             | "controller_keyboardInput"
             | "controller_keyboardStop"
+            | "gripper_hold"
             | "controller_forget"
             | "daemon_restart"
             | "daemon_stop"
@@ -607,6 +857,8 @@ fn check(name: &str) {
             | "sim_stop"
             | "snapshot_delete"
             | "param_definitions_remove"
+            | "param_setRemove"
+            | "flight_remove"
             | "sim_download"
             | "sim_delete"
             | "account_signIn"
@@ -620,9 +872,8 @@ fn check(name: &str) {
             | "find_stop"
             | "plugin_unshare"
             | "watchLink_revoke"
-            | "lease_release"
-            | "remote_watch"
             | "account_requestDeletion"
+            | "account_setSource"
             | "files_remove"
             | "files_mkdir"
             | "files_rename"
@@ -631,7 +882,9 @@ fn check(name: &str) {
             | "tray_location"
             | "marker_remove"
             | "marker_share"
-            | "marker_unshare",
+            | "marker_unshare"
+            | "mavlink_dialects_remove"
+            | "firmware_remove",
         ) => {
             round_trip::<Empty>(name, &json);
         }

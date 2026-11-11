@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use uxduck_contracts::dto::command::CommandSendParams;
 use uxduck_contracts::dto::controller::{
     ClientSelectParams, Controller as ControllerDto, ControllerClaimParams,
-    ControllerSetTargetParams, InputMapping as MappingDto, MappingCreateParams,
+    ControllerSetTargetParams, InputMapping as MappingDto, KeyboardStopReason, MappingCreateParams,
     MappingUpdateParams,
 };
 use uxduck_contracts::dto::link::IdParams;
@@ -32,11 +32,11 @@ use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
-use uxduck_core::domain::command::Command;
+use uxduck_core::domain::command::{Command, ReceiptStatus};
 use uxduck_core::domain::controller::{
-    Claim, Controller, GamepadButton, InputMapping, NEUTRAL, PositionBinding, Sticks, TargetMode,
+    ActionBinding, Claim, Controller, GamepadButton, HOLD_MS, Hold, InputMapping, NEUTRAL,
+    PositionBinding, StickControl, Sticks, TargetMode, centred_throttle,
 };
-use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
 };
@@ -47,10 +47,6 @@ use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
 use crate::runtime::ControlRoute;
 use crate::{ConnectionId, Engine, upsert};
-
-/// How far below the middle a flying multicopter's throttle may be when a
-/// controller takes it over: -1 is idle, 0 the middle; -0.3 is 35% input.
-const HOLDING_THROTTLE: f64 = 0.3;
 
 /// How long a window's controllers keep flying after it goes, for the
 /// next window like it to take back: long enough for a reload.
@@ -68,24 +64,40 @@ struct Detached {
 /// What the engine knows about controllers that is not journaled.
 #[derive(Debug, Default)]
 pub(crate) struct Live {
-    /// Whether each controller's sticks are centred, as the data plane
-    /// last said; unknown counts as not.
-    neutral: BTreeMap<String, bool>,
     /// The connection holding each claimed controller.
-    claimant: BTreeMap<String, ConnectionId>,
+    pub(crate) claimant: BTreeMap<String, ConnectionId>,
     /// Each connection's selected vehicle.
     selection: BTreeMap<ConnectionId, String>,
     /// Claims whose window went moments ago: still routed, held by no
     /// connection, until a window like it comes or the grace runs out.
     detached: BTreeMap<String, Detached>,
     /// Page-owned keyboards never inherit a physical controller's reload grace.
-    keyboards: BTreeMap<ConnectionId, String>,
-    /// Simulator links whose controller routes need a safe restart handover.
+    pub(crate) keyboards: BTreeMap<ConnectionId, String>,
+    /// Simulator links pressed to start again whose vehicle is not back yet.
     restarting: BTreeSet<String>,
     /// Browser input is missing, but the person has not released activation.
     /// The value is the interruption time: queued earlier samples cannot resume.
     /// No route or action may run until the claiming page supplies fresh input.
     input_lost: BTreeMap<String, u64>,
+    /// Each routed controller's gripper wiring as last sent with its route
+    /// (S263): which routes `gripper/hold` may join, and whether a
+    /// parameter change needs a new route.
+    pub(crate) routed_gripper:
+        BTreeMap<String, Option<uxduck_core::domain::gripper::GripperWiring>>,
+    /// Each controller's last position command still to be answered, and
+    /// the position settled since (FB-67).
+    position_sends: BTreeMap<String, PositionSend>,
+}
+
+/// A position's command on its way to the vehicle. A position settled
+/// meanwhile goes once it is answered, never alongside it: the vehicle's
+/// answer cannot say which of two mode changes it is for, and the older
+/// must not land after the newer. A later one replaces it, so only where
+/// the switch is now goes.
+#[derive(Debug)]
+struct PositionSend {
+    receipt_id: String,
+    next: Option<PositionBinding>,
 }
 
 fn daemon() -> Actor {
@@ -104,6 +116,7 @@ pub(crate) fn mappings(engine: &Engine) -> Vec<InputMapping> {
         InputMapping::radio(),
         InputMapping::radio_taer(),
         InputMapping::expresslrs_bluetooth(),
+        InputMapping::expresslrs_4_bluetooth(),
     ]
     .into_iter()
     .map(|m| (m.id.clone(), m))
@@ -134,17 +147,6 @@ fn mapping(engine: &Engine, id: &str) -> Option<InputMapping> {
 /// The condition of the "claim it again" notice after a restart.
 fn reclaim(controller_id: &str) -> String {
     format!("reclaim:{controller_id}")
-}
-
-fn not_neutral(controller: &Controller, doing: &str) -> ApiError {
-    ApiError::new(
-        ErrorKind::InvalidValue,
-        format!(
-            "Centre roll, pitch and yaw on {} before {doing}. Throttle can stay where it is. \
-             If it isn't a known gamepad, move each mapped stick once first.",
-            controller.name
-        ),
-    )
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -218,10 +220,14 @@ pub(crate) fn handle(
         }
         ClientRequest::KeyboardStart(params) => keyboard_start(engine, connection, params),
         ClientRequest::KeyboardInput(params) => keyboard_input(engine, connection, params.axes),
-        ClientRequest::KeyboardStop(_) => {
+        ClientRequest::KeyboardStop(params) => {
+            if params.reason == Some(KeyboardStopReason::AppUnfocused) {
+                engine.say_keyboard_unfocused(connection);
+            }
             engine.stop_keyboard(connection);
             Ok(json!({}))
         }
+        ClientRequest::GripperHold(params) => crate::gripper::hold(engine, connection, params),
         ClientRequest::ControllerClaim(params) if params.id.starts_with("keyboard:") => {
             denied("Start keyboard control from the vehicle's Cockpit tab")
         }
@@ -275,21 +281,19 @@ fn keyboard_start(
             "Throttle must be between -1 and 1",
         ));
     }
+    // Where the throttle centres, a start away from the middle drives or
+    // dives the moment the keyboard takes over, armed or not.
+    if let Some(control) = centred_throttle(&vehicle.autopilot, &vehicle.vehicle_type)
+        && params.throttle.abs() >= NEUTRAL
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!("Start keyboard control with {control} at neutral."),
+        ));
+    }
     let id = format!("keyboard:{}", connection.0);
     engine.drivable(&id, Some(params.vehicle_id.clone()))?;
     engine.controller_connected(&id, "Keyboard", true);
-    let controller = engine
-        .state
-        .controllers
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| not_found("keyboard controller"))?;
-    if let Err(error) =
-        engine.require_throttle_to_hold(&controller, Some(&params.vehicle_id), params.throttle)
-    {
-        engine.controller_disconnected(&id);
-        return Err(error);
-    }
     engine.controller_neutral(&id, true);
     // The start frame is neutral by construction, even if a preceding session's
     // input snapshot is still in the data plane's asynchronous queue.
@@ -382,7 +386,6 @@ fn forget(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Val
             format!("Release {} first.", controller.name),
         ));
     }
-    engine.live.neutral.remove(id);
     engine.resolve(&reclaim(id));
     engine.commit(connection, Change::ControllerRemoved { id: id.to_owned() });
     Ok(json!({}))
@@ -446,7 +449,7 @@ fn claim(
         (TargetMode::FollowsSelection, None) => None,
         (_, target) => Some(engine.drivable(&controller.id, target)?),
     };
-    engine.require_claim_neutral(&controller, target.as_deref())?;
+    engine.require_mapping_reads(&controller)?;
     if let Some(target) = &target {
         engine.require_rc_channels(&controller.mapping_id, target)?;
     }
@@ -575,13 +578,8 @@ fn set_target(
     engine.require_rc_channels(&controller.mapping_id, &target)?;
     let moving = controller.target.as_deref() != Some(target.as_str());
     if moving && controller.target.is_none() {
-        // Its first vehicle: judged as a claim is, the throttle included.
-        engine.require_claim_neutral(&controller, Some(&target))?;
-    } else if moving {
-        let stays = controller.target.as_deref().map_or_else(String::new, |t| {
-            format!(": it stays on {}", engine.target_name(t))
-        });
-        engine.require_neutral(&controller, &format!("switching{stays}"))?;
+        // Its first vehicle: judged as a claim is.
+        engine.require_mapping_reads(&controller)?;
     }
     controller.mode = mode;
     controller.target = Some(target);
@@ -667,6 +665,66 @@ fn require_calibrations(params: &MappingUpdateParams) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Every hold must be one a pilot can make: 0.1 to 10 seconds.
+/// The mapping's gripper buttons (S263), kept when the update names none: a
+/// button either sends a command or holds the gripper, and only once.
+fn require_actions(
+    params: &MappingUpdateParams,
+    current: &InputMapping,
+) -> Result<Vec<ActionBinding>, ApiError> {
+    let actions: Vec<ActionBinding> = params.actions.clone().map_or_else(
+        || current.actions.clone(),
+        |actions| actions.into_iter().map(Into::into).collect(),
+    );
+    if actions.iter().any(|action| {
+        params
+            .buttons
+            .iter()
+            .any(|b| action.matches(Some(b.button.into()), b.code))
+            || actions
+                .iter()
+                .filter(|other| other.matches(Some(action.button), action.code))
+                .count()
+                > 1
+    }) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "A button either sends a command or is held for an action, once.",
+        ));
+    }
+    Ok(actions)
+}
+
+fn require_holds(params: &MappingUpdateParams) -> Result<(), ApiError> {
+    if params
+        .buttons
+        .iter()
+        .filter_map(|b| b.hold_ms)
+        .chain(params.positions.iter().filter_map(|p| p.hold_ms))
+        .any(|ms| !HOLD_MS.contains(&ms))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "A hold is from 0.1 to 10 seconds.",
+        ));
+    }
+    Ok(())
+}
+
+/// Each RC channel is passed on once, on a channel ArduPilot reads as one.
+fn require_rc_channels(params: &MappingUpdateParams) -> Result<(), ApiError> {
+    let channels: std::collections::BTreeSet<_> =
+        params.rc_channels.iter().map(|b| b.channel).collect();
+    if channels.len() != params.rc_channels.len() || channels.iter().any(|c| !(5..=16).contains(c))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "RC channels must be unique and between 5 and 16.",
+        ));
+    }
+    Ok(())
+}
+
 fn update_mapping(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -692,8 +750,12 @@ fn update_mapping(
         params.yaw.into(),
         params.throttle.into(),
     ];
+    let mut unused: Vec<StickControl> = params.unused.iter().copied().map(Into::into).collect();
+    unused.sort_unstable();
+    unused.dedup();
     if (current.throttle_range != params.throttle_range.into()
         || sticks != [current.roll, current.pitch, current.yaw, current.throttle]
+        || unused != current.unused
         || (current.deadzone - params.deadzone).abs() > f64::EPSILON
         || current.rc_channels
             != params
@@ -714,15 +776,9 @@ fn update_mapping(
         ));
     }
     require_calibrations(&params)?;
-    let channels: std::collections::BTreeSet<_> =
-        params.rc_channels.iter().map(|b| b.channel).collect();
-    if channels.len() != params.rc_channels.len() || channels.iter().any(|c| !(5..=16).contains(c))
-    {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "RC channels must be unique and between 5 and 16.",
-        ));
-    }
+    require_rc_channels(&params)?;
+    require_holds(&params)?;
+    let actions = require_actions(&params, &current)?;
     if params
         .positions
         .iter()
@@ -752,6 +808,8 @@ fn update_mapping(
         buttons: params.buttons.into_iter().map(Into::into).collect(),
         positions: params.positions.into_iter().map(Into::into).collect(),
         rc_channels: params.rc_channels.into_iter().map(Into::into).collect(),
+        unused,
+        actions,
         version: current.version + 1,
     };
     engine.commit(
@@ -935,23 +993,18 @@ impl Engine {
         Ok(())
     }
 
-    /// Before a claim the data plane has no mapping of the controller's, so
-    /// it judges neutral by Mode 2's, where the throttle it leaves out may be
-    /// this controller's pitch. Judged here through the mapping it will
-    /// drive by, from its raw input now; by the data plane's word when the
-    /// host reads no raw input for it.
-    fn require_claim_neutral(
-        &self,
-        controller: &Controller,
-        target: Option<&str>,
-    ) -> Result<(), ApiError> {
+    /// A controller is used with its sticks wherever they are (maintainer,
+    /// 2026-10-29), but not by a mapping that reads nothing of some of its
+    /// channels: it would fly on made-up values. Judged from its raw input
+    /// now; one the host reads no raw input for is taken as it is.
+    fn require_mapping_reads(&self, controller: &Controller) -> Result<(), ApiError> {
         if controller.id.starts_with("keyboard:") {
-            return self.require_neutral(controller, "using it");
+            return Ok(());
         }
         let inputs = self.system.controller_inputs();
         let raw = inputs.controllers.iter().find(|c| c.id == controller.id);
         let (Some(raw), Some(mapping)) = (raw, mapping(self, &controller.mapping_id)) else {
-            return self.require_neutral(controller, "using it");
+            return Ok(());
         };
         let read = |binding: &uxduck_core::domain::controller::AxisBinding| {
             let axis = binding.axis.into();
@@ -966,12 +1019,16 @@ impl Engine {
                 // plane's `Device::read`); a gamepad's rests centred.
                 .or_else(|| raw.layout_known.then_some(0.0))
         };
-        let mut channels = vec![
-            ("roll", mapping.roll),
-            ("pitch", mapping.pitch),
-            ("throttle", mapping.throttle),
-            ("yaw", mapping.yaw),
-        ];
+        let mut channels: Vec<_> = [
+            ("roll", Some(StickControl::Roll), mapping.roll),
+            ("pitch", Some(StickControl::Pitch), mapping.pitch),
+            ("throttle", None, mapping.throttle),
+            ("yaw", Some(StickControl::Yaw), mapping.yaw),
+        ]
+        .into_iter()
+        .filter(|(_, control, _)| control.is_none_or(|c| !mapping.unused.contains(&c)))
+        .map(|(name, _, binding)| (name, binding))
+        .collect();
         channels.extend(
             mapping
                 .rc_channels
@@ -998,78 +1055,7 @@ impl Engine {
                 ),
             ));
         }
-        let sticks = mapping.sticks(|b| read(b).unwrap_or(0.0));
-        let off: Vec<String> = [
-            ("roll", sticks.roll),
-            ("pitch", sticks.pitch),
-            ("yaw", sticks.yaw),
-        ]
-        .iter()
-        .filter(|(_, value)| value.abs() >= NEUTRAL)
-        .map(|(name, value)| format!("{name} (it reads {value:.2})"))
-        .collect();
-        if off.is_empty() {
-            self.require_throttle_to_hold(controller, target, sticks.throttle)
-        } else {
-            Err(ApiError::new(
-                ErrorKind::InvalidValue,
-                format!(
-                    "Centre {} on {} before using it. Throttle can stay where it is.",
-                    list(&off),
-                    controller.name
-                ),
-            ))
-        }
-    }
-
-    /// A multicopter in the air taken over with the throttle at idle
-    /// descends at once, in any mode: the throttle must be near the middle,
-    /// where Loiter and Alt Hold hold height and Stabilize roughly hovers.
-    /// On the ground, or for a plane or rover, it may be anywhere.
-    fn require_throttle_to_hold(
-        &self,
-        controller: &Controller,
-        target: Option<&str>,
-        throttle: f64,
-    ) -> Result<(), ApiError> {
-        let Some((target, vehicle)) = target.and_then(|t| Some((t, self.vehicle(t)?))) else {
-            return Ok(());
-        };
-        let copter = Family::of(&vehicle.vehicle_type) == Some(Family::Copter);
-        if !copter || !vehicle.armed || !self.off_the_ground(target, true) {
-            return Ok(());
-        }
-        if throttle >= -HOLDING_THROTTLE {
-            return Ok(());
-        }
-        Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            format!(
-                "{} is in the air. Raise the throttle on {} to about the middle before \
-                 using it, or it would descend at once.",
-                vehicle.name, controller.name
-            ),
-        ))
-    }
-
-    fn require_neutral(&self, controller: &Controller, doing: &str) -> Result<(), ApiError> {
-        // With its route removed the data plane uses its default mapping;
-        // a paused Mode 1/radio must still be judged through its own mapping.
-        let neutral = if controller.input_pause.is_some() {
-            self.mapped_controller_input(controller)
-                .is_some_and(|(sticks, _)| sticks.neutral())
-        } else {
-            self.live
-                .neutral
-                .get(&controller.id)
-                .copied()
-                .unwrap_or(false)
-        };
-        if neutral {
-            Ok(())
-        } else {
-            Err(not_neutral(controller, doing))
-        }
+        Ok(())
     }
 
     /// The vehicle's id, if it exists and no other controller drives it.
@@ -1135,68 +1121,37 @@ impl Engine {
         self.commit_as(daemon(), Change::ControllerUpserted { controller });
     }
 
-    /// Restart handover is stricter than an ordinary target switch. Read the
-    /// actual mapping (including throttle range), never a cached neutral bit.
-    fn controller_restart_pause(&self, id: &str) -> Option<String> {
+    /// A claimed controller sends nothing while UXDuck starts its
+    /// simulation: while it restarts, and while it takes off or is put back
+    /// by itself, so the sticks cannot stop it arming. It drives the vehicle
+    /// again as soon as that ends, wherever its sticks are, in any mode.
+    fn controller_start_pause(&self, id: &str) -> Option<String> {
         use uxduck_core::domain::{
             link::{LaunchStage, LinkStatus},
             vehicle::Presence,
         };
         let controller = self.state.controllers.get(id)?;
         controller.claim.as_ref()?;
-        let Some(vehicle) = controller.target.as_deref().and_then(|id| self.vehicle(id)) else {
-            return controller
-                .input_pause
+        let vehicle = self.vehicle(controller.target.as_deref()?)?;
+        let link = self.state.links.get(&vehicle.link_id)?;
+        let down = link.status != LinkStatus::Up || vehicle.presence != Presence::Online;
+        if self.live.restarting.contains(&link.id) && down {
+            let failed = link
+                .launch
                 .as_ref()
-                .map(|_| "Controller paused: the simulation is unavailable.".into());
-        };
-        if !self.live.restarting.contains(&vehicle.link_id) {
-            return None;
-        }
-        let Some(link) = self.state.links.get(&vehicle.link_id) else {
-            return Some("Controller paused: the simulation is unavailable.".into());
-        };
-        if link
-            .launch
-            .as_ref()
-            .is_some_and(|l| l.stage == LaunchStage::Failed)
-        {
-            return Some("Controller paused: startup failed. Start again to retry, or release the controller.".into());
-        }
-        if self.is_launching(&vehicle.link_id)
-            || vehicle.presence != Presence::Online
-            || link.status != LinkStatus::Up
-        {
-            return Some("Controller paused while the simulation restarts.".into());
-        }
-        let Some((sticks, buttons_held)) = self.mapped_controller_input(controller) else {
-            return Some("Controller paused: waiting for every mapped stick input.".into());
-        };
-        let airborne = vehicle.armed
-            && (self.off_the_ground(&vehicle.id, true)
-                || link
-                    .launch
-                    .as_ref()
-                    .is_some_and(|l| l.stage == LaunchStage::Flying));
-        let throttle_safe = if airborne {
-            sticks.throttle.abs() < 0.15
-        } else {
-            sticks.throttle <= -0.9
-        };
-        if !sticks.neutral() || !throttle_safe {
-            return Some(if airborne {
-                "Controller paused: centre roll, pitch and yaw, and set throttle near 50% to resume."
+                .is_some_and(|l| l.stage == LaunchStage::Failed);
+            return Some(if failed {
+                "Controller paused: the simulation didn't start. Start it again, or release the controller.".into()
             } else {
-                "Controller paused: centre roll, pitch and yaw, and lower throttle to idle to resume."
-            }.into());
+                "Controller paused while the simulation restarts.".into()
+            });
         }
-        if buttons_held {
-            return Some("Controller paused: release the buttons to resume.".into());
-        }
-        None
+        self.is_launching(&link.id)
+            .then(|| format!("Controller paused until {} has started.", vehicle.name))
     }
 
-    /// No missing/non-finite input may become a neutral fallback during handover.
+    /// A controller's sticks through its mapping, and whether a button is
+    /// held; none while any mapped input is missing or not finite.
     pub(crate) fn mapped_controller_input(
         &self,
         controller: &Controller,
@@ -1214,8 +1169,8 @@ impl Engine {
                 .map(|a| a.value)
                 .filter(|v| v.is_finite())
         };
-        if [mapping.roll, mapping.pitch, mapping.yaw, mapping.throttle]
-            .iter()
+        if mapping
+            .stick_bindings()
             .chain(mapping.rc_channels.iter().map(|b| &b.input))
             .any(|b| read(b).is_none())
         {
@@ -1227,9 +1182,9 @@ impl Engine {
         ))
     }
 
-    /// Called by both hosts' expiry beat. Throttle-only movements do not
-    /// generate neutral reports, so handover must also be retried here.
-    fn resume_restart_controllers(&mut self) {
+    /// Called by both hosts' expiry beat: hands controllers back once their
+    /// simulation has started, and by a take-off as it ends.
+    pub(crate) fn resume_started_controllers(&mut self) {
         let ids: Vec<String> = self
             .state
             .controllers
@@ -1238,7 +1193,7 @@ impl Engine {
             .map(|c| c.id.clone())
             .collect();
         for id in ids {
-            let pause = self.controller_restart_pause(&id);
+            let pause = self.controller_start_pause(&id);
             if self
                 .state
                 .controllers
@@ -1251,26 +1206,36 @@ impl Engine {
                 }
             }
         }
-        self.live
+        let back: Vec<String> = self
+            .live
             .restarting
-            .retain(|id| self.state.links.contains_key(id));
+            .iter()
+            .filter(|id| self.restarted(id))
+            .cloned()
+            .collect();
+        for id in back {
+            self.live.restarting.remove(&id);
+        }
+    }
+
+    /// Whether a simulator pressed to start again is up with its vehicle
+    /// back, or is gone.
+    fn restarted(&self, link_id: &str) -> bool {
+        use uxduck_core::domain::{link::LinkStatus, vehicle::Presence};
+        let Some(link) = self.state.links.get(link_id) else {
+            return true;
+        };
+        link.status == LinkStatus::Up
+            && self
+                .state
+                .vehicles
+                .values()
+                .any(|v| v.link_id == link_id && v.presence == Presence::Online)
     }
 
     /// Tells the data plane what a controller drives now, if anything.
-    fn route(&mut self, controller_id: &str) {
-        // New claims and target changes cannot bypass an automatic launch.
-        if let Some(link) = self
-            .state
-            .controllers
-            .get(controller_id)
-            .and_then(|c| c.target.as_deref())
-            .and_then(|id| self.vehicle(id))
-            .map(|v| v.link_id.clone())
-            && self.is_launching(&link)
-        {
-            self.live.restarting.insert(link);
-        }
-        let pause = self.controller_restart_pause(controller_id);
+    pub(crate) fn route(&mut self, controller_id: &str) {
+        let pause = self.controller_start_pause(controller_id);
         self.set_controller_pause(controller_id, pause);
         let route = self
             .state
@@ -1283,12 +1248,28 @@ impl Engine {
                     && !self.live.input_lost.contains_key(controller_id)
             })
             .and_then(|c| {
+                let vehicle_id = c.target.clone()?;
+                let pilot_input_method = self.pilot_input_method(&vehicle_id);
                 Some(ControlRoute {
-                    vehicle_id: c.target.clone()?,
+                    gripper: self.gripper_route(&vehicle_id, pilot_input_method),
+                    vehicle_id,
                     mapping: mapping(self, &c.mapping_id)?,
-                    pilot_input_method: self.pilot_input_method(c.target.as_deref()?),
+                    pilot_input_method,
                 })
             });
+        if let Some(waiting) = self.live.position_sends.get_mut(controller_id) {
+            waiting.next = None;
+        }
+        match &route {
+            Some(route) => {
+                self.live
+                    .routed_gripper
+                    .insert(controller_id.to_owned(), route.gripper.clone());
+            }
+            None => {
+                self.live.routed_gripper.remove(controller_id);
+            }
+        }
         self.links.route_controller(controller_id, route);
     }
 
@@ -1363,8 +1344,8 @@ impl Engine {
         }
     }
 
-    /// A connection's selected vehicle. Following controllers switch now
-    /// at neutral, or when their sticks next return to neutral.
+    /// A connection's selected vehicle. Following controllers switch to it
+    /// now, wherever their sticks are.
     fn select(&mut self, connection: ConnectionId, vehicle_id: Option<String>) {
         let vehicle_id = vehicle_id.and_then(|id| self.vehicle(&id).map(|v| v.id.clone()));
         match &vehicle_id {
@@ -1409,9 +1390,8 @@ impl Engine {
             return;
         };
         // Use the explicit switch's checks and routing, including exclusive
-        // targets, RC mappings and the throttle gate for a first vehicle.
-        // A refused switch stays pending; the UI offers an explicit retry
-        // which reports the reason, and future neutral input retries it.
+        // targets and RC mappings. A refused switch stays pending; the UI
+        // offers an explicit retry which reports the reason.
         let _ = set_target(
             self,
             connection,
@@ -1424,11 +1404,44 @@ impl Engine {
     }
 
     /// Page-owned input is disconnected immediately, with no reload grace.
+    /// The page let its keyboard go because UXDuck left the front (S291):
+    /// a warning, with its tone, while the vehicle is armed; else quietly.
+    fn say_keyboard_unfocused(&mut self, connection: ConnectionId) {
+        let Some(target) = self
+            .live
+            .keyboards
+            .get(&connection)
+            .and_then(|id| self.state.controllers.get(id))
+            .and_then(|controller| controller.target.clone())
+        else {
+            return;
+        };
+        let armed = self.vehicle(&target).is_some_and(|v| v.armed);
+        let name = self.target_name(&target);
+        self.raise(Raise {
+            severity: if armed {
+                Severity::Warning
+            } else {
+                Severity::Info
+            },
+            kind: NotificationKind::Transient,
+            subject: Subject::Vehicle { id: target },
+            title: format!("Keyboard control of {name} turned off: UXDuck isn't the app in front"),
+            body: Some(if armed {
+                format!("It no longer sends stick input. {name}'s own failsafe takes over.")
+            } else {
+                "Turn it on again in the Cockpit.".to_owned()
+            }),
+            actions: Vec::new(),
+            condition: None,
+            report: None,
+        });
+    }
+
     fn stop_keyboard(&mut self, connection: ConnectionId) {
         if let Some(id) = self.live.keyboards.remove(&connection) {
             // Releasing a keyboard is not a physical device being unplugged.
             self.release(&id, connection, None);
-            self.live.neutral.remove(&id);
             self.controller_disconnected(&id);
             self.links
                 .controller_input(crate::controller_input::InputEvent::Disconnected { id });
@@ -1516,7 +1529,7 @@ impl Engine {
 
     /// Releases the controllers no window took back in time.
     pub fn expire_detached_claims(&mut self, now_us: u64) {
-        self.resume_restart_controllers();
+        self.resume_started_controllers();
         let gone: Vec<(String, ConnectionId)> = self
             .live
             .detached
@@ -1549,9 +1562,9 @@ impl Engine {
                         controller.name
                     ),
                     body: Some(if controller.id.starts_with("keyboard:") {
-                        "Open the vehicle's Cockpit tab and press Fly with keyboard to enable it again.".into()
+                        "Open the vehicle's Cockpit tab and press Control with keyboard to enable it again.".into()
                     } else {
-                        "You have to re-enable it to fly with it again: centre the sticks, then press Use in the Controllers tab.".into()
+                        "To control a vehicle with it again, press Use in the vehicle's Cockpit.".into()
                     }),
                     actions: Vec::new(),
                     condition: Some(reclaim(&controller.id)),
@@ -1583,8 +1596,10 @@ impl Engine {
         let controller = match self.state.controllers.get(id).cloned() {
             Some(mut known) => {
                 // The USB radio mapping was briefly every radio's, and reads
-                // an ExpressLRS joystick's arm switch as its throttle.
-                let usb_radio = known.mapping_id == InputMapping::radio().id;
+                // an ExpressLRS joystick's arm switch as its throttle. Not
+                // once someone has set it up: their edits are theirs.
+                let usb_radio = known.mapping_id == InputMapping::radio().id
+                    && !self.state.input_mappings.contains_key(&known.mapping_id);
                 let refit = !layout_known
                     && fitting != known.mapping_id
                     && (usb_radio
@@ -1614,6 +1629,7 @@ impl Engine {
                 mode: TargetMode::FollowsSelection,
                 target: None,
                 input_pause: None,
+                holding: None,
                 pending_target: None,
                 mapping_id: fitting,
                 version: 1,
@@ -1656,8 +1672,9 @@ impl Engine {
         } else {
             Severity::Warning
         };
+        // "Open Controllers" was clipped in the notice (maintainer, 2026-10-31).
         let actions = vec![NotificationAction {
-            label: "Open Controllers".into(),
+            label: "Open".into(),
             action: Action::OpenControllers {
                 controller_id: id.to_owned(),
             },
@@ -1723,6 +1740,8 @@ impl Engine {
     /// takes over.
     pub fn controller_disconnected(&mut self, id: &str) {
         self.live.input_lost.remove(id);
+        // A hold ends with the controller.
+        self.set_holding(id, None);
         let previous = self.state.controllers.get(id).cloned();
         if let Some(controller) = previous
             .as_ref()
@@ -1752,7 +1771,6 @@ impl Engine {
             }
             return;
         };
-        self.live.neutral.remove(id);
         if let Some(mut controller) = self.state.controllers.get(id).cloned() {
             controller.connected = false;
             controller.version += 1;
@@ -1785,7 +1803,6 @@ impl Engine {
         self.live
             .input_lost
             .insert(id.to_owned(), self.clock.now_us());
-        self.live.neutral.remove(id);
         controller.connected = false;
         controller.version += 1;
         self.commit_as(
@@ -1845,17 +1862,59 @@ impl Engine {
     }
 
     /// Whether a controller's sticks are centred, as the data plane sees
-    /// them through its mapping.
+    /// them through its mapping. Nothing waits for it (maintainer,
+    /// 2026-10-29); a centring retries a selection it could not follow yet,
+    /// such as a vehicle another controller drove.
     pub fn controller_neutral(&mut self, id: &str, neutral: bool) {
         // Connected emits a provisional neutral value before Present has
         // installed the fresh axes. It must not switch a recovering target.
         if self.live.input_lost.contains_key(id) {
             return;
         }
-        self.live.neutral.insert(id.to_owned(), neutral);
         if neutral {
             self.follow_selection(id);
         }
+    }
+
+    /// The client a controller's commands go as, and its target, while a
+    /// press or a move would send one: connected, routed, not paused.
+    fn controller_sends(&self, id: &str) -> Option<(Controller, ConnectionId, String)> {
+        let controller = self.state.controllers.get(id)?;
+        if !controller.connected
+            || self.live.input_lost.contains_key(id)
+            || controller.input_pause.is_some()
+        {
+            return None;
+        }
+        let connection = self.live.claimant.get(id).copied()?;
+        let target = controller.target.clone()?;
+        Some((controller.clone(), connection, target))
+    }
+
+    /// A button or position bound with a hold went down. While it is held
+    /// the controller says what it will send, for the app to show the hold
+    /// filling; nothing is said where its command would not go.
+    pub fn controller_holding(&mut self, id: &str, command: Command, hold_ms: u32) {
+        if self.controller_sends(id).is_some() {
+            self.set_holding(id, Some(Hold { command, hold_ms }));
+        }
+    }
+
+    /// The hold under way ended, let go early or complete.
+    pub fn controller_let_go(&mut self, id: &str) {
+        self.set_holding(id, None);
+    }
+
+    fn set_holding(&mut self, id: &str, holding: Option<Hold>) {
+        let Some(mut controller) = self.state.controllers.get(id).cloned() else {
+            return;
+        };
+        if controller.holding == holding {
+            return;
+        }
+        controller.holding = holding;
+        controller.version += 1;
+        self.commit_as(daemon(), Change::ControllerUpserted { controller });
     }
 
     /// A button went down: its command goes to the target, as the claiming
@@ -1866,47 +1925,24 @@ impl Engine {
         button: Option<GamepadButton>,
         code: Option<u32>,
     ) {
-        let Some(controller) = self.state.controllers.get(id).cloned() else {
+        let Some((controller, connection, target)) = self.controller_sends(id) else {
             return;
         };
-        if !controller.connected
-            || self.live.input_lost.contains_key(id)
-            || controller.input_pause.is_some()
-        {
-            return;
-        }
-        let (Some(connection), Some(target)) =
-            (self.live.claimant.get(id).copied(), controller.target)
+        let Some(binding) =
+            mapping(self, &controller.mapping_id).and_then(|m| m.button(button, code).cloned())
         else {
             return;
         };
-        let Some(binding) = mapping(self, &controller.mapping_id).and_then(|m| {
-            m.buttons.into_iter().find(|b| match b.code {
-                Some(wanted) => code == Some(wanted),
-                None => button == Some(b.button),
-            })
-        }) else {
-            return;
-        };
-        self.send_for_controller(connection, target, &binding.command);
+        self.send_for_controller(&controller, connection, target, &binding.command);
     }
 
-    /// An axis moved into a position: its command goes to the target, as
-    /// for a button. The position is found in the controller's mapping now,
-    /// so one the data plane held from an older version sends nothing.
+    /// An axis settled in a position: its command goes to the target, as
+    /// for a button, once the controller's last position command is
+    /// answered (`PositionSend`). The position is found in the
+    /// controller's mapping now, so one the data plane held from an older
+    /// version sends nothing.
     pub fn controller_positioned(&mut self, id: &str, position: &PositionBinding) {
-        let Some(controller) = self.state.controllers.get(id).cloned() else {
-            return;
-        };
-        if !controller.connected
-            || self.live.input_lost.contains_key(id)
-            || controller.input_pause.is_some()
-        {
-            return;
-        }
-        let (Some(connection), Some(target)) =
-            (self.live.claimant.get(id).copied(), controller.target)
-        else {
+        let Some((controller, connection, target)) = self.controller_sends(id) else {
             return;
         };
         let Some(found) = mapping(self, &controller.mapping_id)
@@ -1914,20 +1950,100 @@ impl Engine {
         else {
             return;
         };
-        self.send_for_controller(connection, target, &found.command);
+        if let Some(waiting) = self.live.position_sends.get_mut(id)
+            && self
+                .state
+                .receipts
+                .get(&waiting.receipt_id)
+                .is_some_and(|r| r.status == ReceiptStatus::Sent)
+        {
+            waiting.next = Some(found);
+            return;
+        }
+        self.live.position_sends.remove(id);
+        if let Some(receipt_id) =
+            self.send_for_controller(&controller, connection, target, &found.command)
+        {
+            self.live.position_sends.insert(
+                id.to_owned(),
+                PositionSend {
+                    receipt_id,
+                    next: None,
+                },
+            );
+        }
     }
 
-    fn send_for_controller(&mut self, connection: ConnectionId, target: String, command: &Command) {
-        let request = ClientRequest::CommandSend(CommandSendParams {
-            vehicle_id: target,
+    /// A command ended: a position settled while it was on its way goes
+    /// now, through every check again.
+    pub(crate) fn position_answered(&mut self, receipt_id: &str) {
+        let Some(id) = self
+            .live
+            .position_sends
+            .iter()
+            .find(|(_, waiting)| waiting.receipt_id == receipt_id)
+            .map(|(id, _)| id.clone())
+        else {
+            return;
+        };
+        let next = self.live.position_sends.remove(&id).and_then(|w| w.next);
+        if let Some(position) = next {
+            self.controller_positioned(&id, &position);
+        }
+    }
+
+    /// Sends as the claiming client: the receipt of a command that went,
+    /// still to be answered. A refusal that is no receipt, such as one
+    /// asking to confirm, is said in a notice: the pilot pressed a button
+    /// and must hear why nothing happened.
+    fn send_for_controller(
+        &mut self,
+        controller: &Controller,
+        connection: ConnectionId,
+        target: String,
+        command: &Command,
+    ) -> Option<String> {
+        let params = CommandSendParams {
+            vehicle_id: target.clone(),
             command: command.into(),
             confirm: false,
             force: false,
             override_preflight: Vec::new(),
-            command_id: None,
-            sent_at_ms: None,
+        };
+        let error = match crate::commands::send_checked(
+            self,
+            connection,
+            params,
+            &[Capability::Control],
+            true,
+        ) {
+            Ok((_, sent)) => return sent,
+            Err(error) => error,
+        };
+        let name = self.target_name(&target);
+        // Held back here, never refused by the vehicle: that is a receipt.
+        let body = if error.data.kind == ErrorKind::ConfirmationRequired {
+            format!(
+                "UXDuck can't hear {name} right now, so it asks before sending this. Send it from the Cockpit to confirm."
+            )
+        } else {
+            error.message
+        };
+        self.raise(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Transient,
+            subject: Subject::Vehicle { id: target },
+            title: format!(
+                "UXDuck held back {} from {} to {name}",
+                command.label(),
+                controller.name
+            ),
+            body: Some(body),
+            actions: Vec::new(),
+            condition: None,
+            report: None,
         });
-        let _ = crate::commands::handle(self, connection, request, &[Capability::Control], true);
+        None
     }
 }
 
@@ -1952,7 +2068,7 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
 
 impl Engine {
     pub(crate) fn ensure_identity_settled(&self) -> Result<(), ApiError> {
-        if !self.awaiting_operator.is_empty() || !self.awaiting_identity.is_empty() {
+        if !self.awaiting_identity.is_empty() {
             return Err(ApiError::new(
                 ErrorKind::Busy,
                 "Wait for the operator or account change to finish before claiming control.",
@@ -1963,6 +2079,10 @@ impl Engine {
 
     /// A profile change never transfers an existing control claim, including
     /// one held through a reload grace period or another window of that actor.
+    /// It never touches the account either (ADR-0033, one account per
+    /// computer): only control is handed over. Becoming the operator a claim
+    /// already belongs to, as a reloaded window does after taking its
+    /// controllers back, hands nothing over.
     pub(crate) fn ensure_operator_handover(
         &self,
         connection: ConnectionId,
@@ -1972,40 +2092,39 @@ impl Engine {
         if actor.operator_id.as_deref() == next {
             return Ok(());
         }
-        // The personal session is shared by this daemon. Another window
-        // cannot sign its person out while any controller is still held.
-        // Restoring a window for that same person preserves their session.
         let local_operator = self
             .connections
             .get(&connection)
             .and_then(|c| c.admitted.as_ref())
             .is_some_and(crate::Admitted::is_operator);
-        let can_resume = actor.operator_id.is_none()
-            && (self.account_identity.operator_id.as_deref() == next
-                || (self.account_identity.operator_id.is_none()
-                    && self.account_identity.signed_in));
-        if local_operator && !can_resume && !self.remote.leases.is_empty() {
-            return Err(ApiError::new(
-                ErrorKind::ConfirmationRequired,
-                "End remote control before switching operators. Telemetry and recordings will continue.",
-            ));
-        }
-        let changes_person = local_operator
-            && self.account_identity.signed_in
-            && !(actor.operator_id.is_none()
-                && self.account_identity.operator_id.as_deref() == next);
         if self.state.controllers.values().any(|controller| {
             controller.claim.as_ref().is_some_and(|claim| {
-                changes_person
-                    || self.live.claimant.get(&controller.id) == Some(&connection)
-                    || (local_operator
-                        && actor.operator_id.is_some()
-                        && claim.operator_id == actor.operator_id)
+                claim.operator_id.as_deref() != next
+                    && (self.live.claimant.get(&controller.id) == Some(&connection)
+                        || (local_operator
+                            && actor.operator_id.is_some()
+                            && claim.operator_id == actor.operator_id))
             })
         }) {
             return Err(ApiError::new(
                 ErrorKind::ConfirmationRequired,
                 "Release your controllers before switching operators. Telemetry and recordings will continue.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Signing in or out changes the account every operator here acts
+    /// under, so an operator's window asks for every controller first.
+    pub(crate) fn ensure_account_handover(&self, connection: ConnectionId) -> Result<(), ApiError> {
+        self.ensure_operator_handover(connection, None)?;
+        if self.actor(connection).operator_id.is_some()
+            && self.account_identity.signed_in
+            && self.state.controllers.values().any(|c| c.claim.is_some())
+        {
+            return Err(ApiError::new(
+                ErrorKind::ConfirmationRequired,
+                "Release the controllers before changing account sessions. Telemetry and recordings will continue.",
             ));
         }
         Ok(())

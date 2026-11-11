@@ -388,6 +388,9 @@ pub struct Sample<'a> {
     /// In [`TIMESCALE`] units.
     pub duration: u32,
     pub key: bool,
+    /// When it is shown against when it is decoded, in [`TIMESCALE`]
+    /// units: B-frames' reordering. 0 without.
+    pub composition_offset: i32,
 }
 
 /// `moof` and `mdat` for pictures starting at `decode_time` (in
@@ -419,8 +422,10 @@ pub fn fragment_with_sound(
         let size = (mdat_body.len() - start) as u32;
         // Keyframes depend on nothing; the rest are not sync samples.
         let flags: u32 = if sample.key { 0x0200_0000 } else { 0x0101_0000 };
-        entries.push((sample.duration, size, flags));
+        entries.push((sample.duration, size, flags, sample.composition_offset));
     }
+    // Composition offsets only for pictures reordered (B-frames), signed.
+    let reordered = entries.iter().any(|e| e.3 != 0);
     let mfhd = full_box(*b"mfhd", 0, 0, &sequence.to_be_bytes());
     // Default base is the moof.
     let tfhd = full_box(*b"tfhd", 0, 0x02_0000, &1u32.to_be_bytes());
@@ -429,13 +434,21 @@ pub fn fragment_with_sound(
         #[allow(clippy::cast_possible_truncation, reason = "a fragment's pictures")]
         let mut b = (entries.len() as u32).to_be_bytes().to_vec();
         b.extend_from_slice(&offset.to_be_bytes());
-        for (duration, size, flags) in &entries {
+        for (duration, size, flags, offset) in &entries {
             b.extend_from_slice(&duration.to_be_bytes());
             b.extend_from_slice(&size.to_be_bytes());
             b.extend_from_slice(&flags.to_be_bytes());
+            if reordered {
+                b.extend_from_slice(&offset.to_be_bytes());
+            }
         }
-        // Data offset, and each sample's duration, size and flags.
-        full_box(*b"trun", 0, 0x0701, &b)
+        // Data offset, and each sample's duration, size, flags and, when
+        // reordered, composition offset (version 1: signed).
+        if reordered {
+            full_box(*b"trun", 1, 0x0F01, &b)
+        } else {
+            full_box(*b"trun", 0, 0x0701, &b)
+        }
     };
     let video_bytes = mdat_body.len();
     // The sound's traf: its frames' sizes, each a frame long.
@@ -725,11 +738,13 @@ mod tests {
                     annex_b: &k,
                     duration: 1800,
                     key: true,
+                    composition_offset: 0,
                 },
                 Sample {
                     annex_b: &delta,
                     duration: 1800,
                     key: false,
+                    composition_offset: 0,
                 },
             ],
         );
@@ -748,6 +763,7 @@ mod tests {
                 annex_b: &k,
                 duration: 1800,
                 key: true,
+                composition_offset: 0,
             }],
         );
         let file = [init.clone(), first.clone(), second.clone()].concat();

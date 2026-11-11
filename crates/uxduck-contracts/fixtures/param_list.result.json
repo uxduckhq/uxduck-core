@@ -9,6 +9,14 @@
       "setId": "arducopter-4.5.7",
       "title": "Copter 4.5.7",
       "matched": "exact"
+    },
+    "held": {
+      "status": "downloading",
+      "count": 1,
+      "total": 900,
+      "complete": false,
+      "syncedAtUs": 1790000000000000,
+      "note": "Downloading: 40 of 900 so far; these are the 1 held before it began. Ask again in a few seconds for all of them."
     }
   },
   "parameters": [
@@ -20,5 +28,6 @@
       "units": "mAh"
     }
   ],
-  "total": 1
+  "total": 2,
+  "nextOffset": 1
 }

@@ -4,6 +4,8 @@
 //! this schema, which is ours so upstream can change without our wire
 //! changing (P1).
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// The ArduPilot firmware a vehicle runs, which decides its parameters (P3).
@@ -259,7 +261,9 @@ impl std::fmt::Display for Version {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Match {
-    /// A set the person bound to this vehicle, or to its firmware.
+    /// Before ADR-0044 F9, a person's set that replaced ArduPilot's. No
+    /// longer given: the person's set is layered over ArduPilot's, which
+    /// keeps its own match; kept so older journals read.
     Own,
     /// Generated from the commit the vehicle was built from.
     Commit,
@@ -293,60 +297,157 @@ pub struct ChoosingFor<'a> {
     pub commit: Option<&'a str>,
 }
 
-/// P3's order: a set bound to this vehicle; one bound to its firmware; one
-/// whose commit matches; the catalogue's for the exact version; the nearest
-/// older release of the same major and minor; then `latest`. Never another
-/// firmware's.
+/// Which of one kind of set describes a vehicle (ADR-0044 F10).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
+pub enum SetChoice {
+    /// Chosen by P3's order and the person's bindings (P5).
+    #[default]
+    Automatic,
+    /// This set, by id, whatever the vehicle runs.
+    Set { id: String },
+    /// None of this kind.
+    None,
+}
+
+impl SetChoice {
+    #[must_use]
+    pub fn is_automatic(&self) -> bool {
+        *self == Self::Automatic
+    }
+}
+
+/// The sets a person chose for one vehicle (ADR-0044 F10): ArduPilot's and
+/// their own, each automatic unless they chose otherwise. Kept with the
+/// vehicle, so it is journaled and synced with it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefinitionsChoice {
+    #[serde(default, skip_serializing_if = "SetChoice::is_automatic")]
+    pub ardupilot: SetChoice,
+    #[serde(default, skip_serializing_if = "SetChoice::is_automatic")]
+    pub own: SetChoice,
+}
+
+impl DefinitionsChoice {
+    #[must_use]
+    pub fn is_automatic(&self) -> bool {
+        self.ardupilot.is_automatic() && self.own.is_automatic()
+    }
+}
+
+/// The sets chosen for a vehicle (ADR-0044 F9): ArduPilot's, with how well
+/// it fits, and the person's, which is read over it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Chosen<'c> {
+    pub ardupilot: Option<(&'c Candidate, Match)>,
+    pub own: Option<&'c Candidate>,
+}
+
+/// Each kind as `choice` says. Automatically, the person's is the first of:
+/// a set bound to this vehicle, one whose commit matches, one bound to its
+/// firmware; ArduPilot's is P3's order: the catalogue's set whose commit
+/// matches, the one for the exact version, the nearest older release of the
+/// same major and minor, then `latest`. Never another firmware's.
 #[must_use]
 pub fn choose<'c>(
     candidates: &'c [Candidate],
     vehicle: &ChoosingFor<'_>,
-) -> Option<(&'c Candidate, Match)> {
-    let same = candidates
-        .iter()
-        .filter(|c| c.firmware == vehicle.firmware)
-        .collect::<Vec<_>>();
+    choice: &DefinitionsChoice,
+) -> Chosen<'c> {
+    let same = || candidates.iter().filter(|c| c.firmware == vehicle.firmware);
     let commit_matches = |c: &Candidate| {
         matches!((c.commit.as_deref(), vehicle.commit), (Some(a), Some(b))
             if !b.is_empty() && (a.starts_with(b) || b.starts_with(a)))
     };
-    if let Some(c) = same
-        .iter()
-        .find(|c| c.own && c.vehicle_id.as_deref() == Some(vehicle.vehicle_id))
-    {
-        return Some((c, Match::Own));
-    }
-    if let Some(c) = same.iter().find(|c| c.own && commit_matches(c)) {
-        return Some((c, Match::Own));
-    }
-    if let Some(c) = same
-        .iter()
-        .find(|c| c.own && c.vehicle_id.is_none() && c.commit.is_none())
-    {
-        return Some((c, Match::Own));
-    }
-    let catalogue = same.iter().filter(|c| !c.own);
-    if let Some(c) = catalogue.clone().find(|c| commit_matches(c)) {
-        return Some((c, Match::Commit));
-    }
-    let released = |c: &&&Candidate| c.version.as_deref().and_then(Version::parse);
-    if let Some(version) = vehicle.version {
-        if let Some(c) = catalogue.clone().find(|c| released(c) == Some(version)) {
-            return Some((c, Match::Exact));
+    let own = || same().filter(|c| c.own);
+    let catalogue = || same().filter(|c| !c.own);
+    let released = |c: &Candidate| c.version.as_deref().and_then(Version::parse);
+    let fit = |c: &Candidate| {
+        if commit_matches(c) {
+            Match::Commit
+        } else if vehicle.version.is_some() && released(c) == vehicle.version {
+            Match::Exact
+        } else {
+            Match::Approximate
         }
-        let nearest = catalogue
-            .clone()
-            .filter_map(|c| released(&c).map(|v| (v, c)))
-            .filter(|(v, _)| v.major == version.major && v.minor == version.minor && *v < version)
-            .max_by_key(|(v, _)| *v);
-        if let Some((_, c)) = nearest {
-            return Some((c, Match::Approximate));
+    };
+    let own = match &choice.own {
+        SetChoice::None => None,
+        SetChoice::Set { id } => own().find(|c| c.id == *id),
+        SetChoice::Automatic => own()
+            .find(|c| c.vehicle_id.as_deref() == Some(vehicle.vehicle_id))
+            .or_else(|| own().find(|c| commit_matches(c)))
+            .or_else(|| own().find(|c| c.vehicle_id.is_none() && c.commit.is_none())),
+    };
+    let ardupilot = match &choice.ardupilot {
+        SetChoice::None => None,
+        SetChoice::Set { id } => catalogue().find(|c| c.id == *id).map(|c| (c, fit(c))),
+        SetChoice::Automatic => {
+            let nearest = vehicle.version.and_then(|version| {
+                catalogue()
+                    .filter_map(|c| released(c).map(|v| (v, c)))
+                    .filter(|(v, _)| {
+                        v.major == version.major && v.minor == version.minor && *v < version
+                    })
+                    .max_by_key(|(v, _)| *v)
+                    .map(|(_, c)| c)
+            });
+            catalogue()
+                .find(|c| commit_matches(c))
+                .or_else(|| {
+                    catalogue()
+                        .find(|c| vehicle.version.is_some() && released(c) == vehicle.version)
+                })
+                .or(nearest)
+                .or_else(|| catalogue().find(|c| c.version.as_deref() == Some("latest")))
+                .map(|c| (c, fit(c)))
         }
+    };
+    Chosen { ardupilot, own }
+}
+
+/// One of the sets describing a vehicle, with its name for people.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    /// "Copter 4.5.7", or a person's label.
+    pub title: String,
+    pub set: Arc<DefinitionSet>,
+}
+
+/// What describes a vehicle's parameters (ADR-0044 F9): the person's set
+/// over ArduPilot's. A name in both reads the person's, a name only in
+/// ArduPilot's reads ArduPilot's, and a name in neither is undescribed.
+#[derive(Clone, Debug, Default)]
+pub struct Layered {
+    pub own: Option<Layer>,
+    pub ardupilot: Option<Layer>,
+}
+
+impl Layered {
+    fn layers(&self) -> impl Iterator<Item = &Layer> {
+        self.own.iter().chain(self.ardupilot.iter())
     }
-    catalogue
-        .clone()
-        .find(|c| c.version.as_deref() == Some("latest"))
-        .map(|c| (*c, Match::Approximate))
+
+    /// The definition of `name` for this vehicle, as [`DefinitionSet::find`].
+    #[must_use]
+    pub fn find(&self, name: &str, helicopter: bool) -> Option<&ParamDefinition> {
+        self.described(name, helicopter)
+            .map(|(definition, _)| definition)
+    }
+
+    /// The definition of `name` and the set it came from.
+    #[must_use]
+    pub fn described(&self, name: &str, helicopter: bool) -> Option<(&ParamDefinition, &Layer)> {
+        self.layers()
+            .find_map(|layer| layer.set.find(name, helicopter).map(|d| (d, layer)))
+    }
+
+    /// Every name either set describes; a name in both comes twice.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.layers()
+            .flat_map(|layer| layer.set.parameters.iter().map(|p| p.name.as_str()))
+    }
 }
 
 /// Words that mean the same in ArduPilot's names and descriptions (P8).
@@ -415,22 +516,35 @@ pub enum DefinitionsStatus {
     Failed,
 }
 
-/// Which set describes a vehicle's parameters, and how well it fits. Keyed
-/// by vehicle id.
+/// Which sets describe a vehicle's parameters, and how well ArduPilot's
+/// fits. Keyed by vehicle id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VehicleDefinitions {
     pub vehicle_id: String,
     pub status: DefinitionsStatus,
+    /// The firmware the vehicle runs, whose sets can be chosen for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<Firmware>,
+    /// ArduPilot's set, from the catalogue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_id: Option<String>,
-    /// The set's name for people: "Copter 4.5.7", or a person's label.
+    /// Its name for people: "Copter 4.5.7".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched: Option<Match>,
-    /// The one quiet line the Parameters tab shows, when there is one: an
-    /// approximate set, or why there is none.
+    /// The person's set, read over ArduPilot's (ADR-0044 F9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_set_id: Option<String>,
+    /// Its label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_title: Option<String>,
+    /// What was chosen for the vehicle (F10).
+    #[serde(default, skip_serializing_if = "DefinitionsChoice::is_automatic")]
+    pub choice: DefinitionsChoice,
+    /// The one quiet line the Parameters tab shows, when there is one: the
+    /// sets used, an approximate set, or why there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -461,6 +575,9 @@ pub struct OwnSet {
     /// When it was last fetched from its URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetched_at_us: Option<u64>,
+    /// The firmware profile it came with (S254): removed with it, not alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 impl OwnSet {
@@ -592,7 +709,9 @@ mod tests {
             commit: Some("deadbeef"),
         };
         let chosen = |all: &[Candidate], vehicle: &ChoosingFor<'_>| {
-            choose(all, vehicle).map(|(c, m)| (c.id.clone(), m))
+            choose(all, vehicle, &DefinitionsChoice::default())
+                .ardupilot
+                .map(|(c, m)| (c.id.clone(), m))
         };
         assert_eq!(
             chosen(&all, &vehicle),
@@ -623,8 +742,141 @@ mod tests {
             vehicle_id: Some("v1".into()),
             own: true,
         });
-        assert_eq!(chosen(&all, &vehicle), Some(("fork".into(), Match::Own)));
+        let both = choose(&all, &vehicle, &DefinitionsChoice::default());
+        assert_eq!(both.own.map(|c| c.id.as_str()), Some("fork"));
+        assert_eq!(
+            both.ardupilot.map(|(c, m)| (c.id.as_str(), m)),
+            Some(("c-4.5.6", Match::Commit)),
+            "the person's set is layered over ArduPilot's, not in its place"
+        );
         vehicle.firmware = Firmware::ArduSub;
-        assert_eq!(chosen(&all, &vehicle), None, "never another firmware's");
+        assert_eq!(
+            choose(&all, &vehicle, &DefinitionsChoice::default()),
+            Chosen::default(),
+            "never another firmware's"
+        );
+    }
+
+    fn own(id: &str, vehicle_id: Option<&str>, commit: Option<&str>) -> Candidate {
+        Candidate {
+            id: id.into(),
+            firmware: Firmware::ArduCopter,
+            version: None,
+            commit: commit.map(Into::into),
+            vehicle_id: vehicle_id.map(Into::into),
+            own: true,
+        }
+    }
+
+    #[test]
+    fn a_vehicle_chooses_each_kind_of_set_on_its_own() {
+        let all = vec![
+            candidate("c-4.5.6", Firmware::ArduCopter, "4.5.6"),
+            candidate("c-4.5.7", Firmware::ArduCopter, "4.5.7"),
+            candidate("p-4.5.7", Firmware::ArduPlane, "4.5.7"),
+            own("everyone", None, None),
+            own("by-commit", None, Some("deadbeef")),
+            own("mine", Some("v1"), None),
+        ];
+        let vehicle = ChoosingFor {
+            vehicle_id: "v1",
+            firmware: Firmware::ArduCopter,
+            version: Version::parse("4.5.7"),
+            commit: Some("deadbeef"),
+        };
+        let ids = |choice: DefinitionsChoice| {
+            let chosen = choose(&all, &vehicle, &choice);
+            (
+                chosen.ardupilot.map(|(c, m)| (c.id.clone(), m)),
+                chosen.own.map(|c| c.id.clone()),
+            )
+        };
+        assert_eq!(
+            ids(DefinitionsChoice::default()),
+            (Some(("c-4.5.7".into(), Match::Exact)), Some("mine".into())),
+            "bound to the vehicle first"
+        );
+        let pinned = DefinitionsChoice {
+            ardupilot: SetChoice::Set {
+                id: "c-4.5.6".into(),
+            },
+            own: SetChoice::Set {
+                id: "everyone".into(),
+            },
+        };
+        assert_eq!(
+            ids(pinned),
+            (
+                Some(("c-4.5.6".into(), Match::Approximate)),
+                Some("everyone".into())
+            ),
+            "a pinned version says how well it fits"
+        );
+        let off = DefinitionsChoice {
+            ardupilot: SetChoice::None,
+            own: SetChoice::None,
+        };
+        assert_eq!(ids(off), (None, None));
+        let elsewhere = DefinitionsChoice {
+            ardupilot: SetChoice::Set {
+                id: "p-4.5.7".into(),
+            },
+            own: SetChoice::Set { id: "gone".into() },
+        };
+        assert_eq!(
+            ids(elsewhere),
+            (None, None),
+            "never another firmware's, nor a set that is not there"
+        );
+    }
+
+    fn layer(title: &str, names: &[(&str, &str)]) -> Layer {
+        let mut set = set(&[]);
+        set.parameters = names
+            .iter()
+            .map(|(name, display)| ParamDefinition {
+                name: (*name).into(),
+                display_name: (*display).into(),
+                ..ParamDefinition::default()
+            })
+            .collect();
+        set.sort();
+        Layer {
+            title: title.into(),
+            set: Arc::new(set),
+        }
+    }
+
+    #[test]
+    fn the_persons_set_is_read_over_ardupilots() {
+        let layered = Layered {
+            own: Some(layer(
+                "Acme additions",
+                &[("MYFORK_GAIN", "Fork gain"), ("RTL_ALT", "Acme's RTL")],
+            )),
+            ardupilot: Some(layer(
+                "Copter 4.5.7",
+                &[
+                    ("RTL_ALT", "RTL Altitude"),
+                    ("FS_THR_ENABLE", "Throttle failsafe"),
+                ],
+            )),
+        };
+        let from = |name| {
+            layered
+                .described(name, false)
+                .map(|(d, l)| (d.display_name.as_str(), l.title.as_str()))
+        };
+        assert_eq!(from("MYFORK_GAIN"), Some(("Fork gain", "Acme additions")));
+        assert_eq!(from("RTL_ALT"), Some(("Acme's RTL", "Acme additions")));
+        assert_eq!(
+            from("FS_THR_ENABLE"),
+            Some(("Throttle failsafe", "Copter 4.5.7"))
+        );
+        assert_eq!(from("NOPE"), None, "in neither: undescribed");
+        let mut names: Vec<&str> = layered.names().collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names, ["FS_THR_ENABLE", "MYFORK_GAIN", "RTL_ALT"]);
     }
 }

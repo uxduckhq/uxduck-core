@@ -1,0 +1,7 @@
+{
+  "method": "terrain/putArea",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "areaId": "ta3c9e1f0a2b4d6e8f"
+  }
+}

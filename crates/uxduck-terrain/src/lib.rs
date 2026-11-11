@@ -18,6 +18,7 @@
 //!   a degree square at the dataset's own resolution ([`chunk`]).
 
 pub mod cache;
+pub mod card;
 pub mod chunk;
 pub mod cover;
 pub mod dataset;
@@ -25,6 +26,7 @@ pub mod grid;
 pub mod lookup;
 pub mod manifest;
 pub mod publish;
+pub mod seabed;
 
 pub use cache::{Answer, Arrived, FetchError, Order, Problem, Terrain, Unavailable};
 pub use dataset::{Cell, ChunkKey, Dataset, Tile};

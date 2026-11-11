@@ -8,7 +8,7 @@
   "start": { "heightM": 50 },
   "steps": [
     {
-      "text": "Choose LOITER in the Mode menu in the Cockpit tab.",
+      "text": "Choose LOITER under Modes in the Cockpit tab.",
       "hint": "Loiter flies it forward like a plane and circles where it is.",
       "hintAfterS": 60,
       "all": [

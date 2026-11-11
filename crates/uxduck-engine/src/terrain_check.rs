@@ -45,7 +45,7 @@ const LEG_POINTS: usize = 4;
 #[derive(Debug, Default)]
 pub(crate) struct Checks {
     running: Vec<Check>,
-    last: BTreeMap<String, TerrainCheckResult>,
+    pub(crate) last: BTreeMap<String, TerrainCheckResult>,
     auto_at: BTreeMap<String, u64>,
     /// Vehicles whose loaded terrain was checked on this connection, with
     /// when their terrain was last reported.
@@ -372,8 +372,9 @@ impl Engine {
     }
 
     fn auto_terrain_check(&mut self, vehicle_id: &str, extra: Vec<(f64, f64)>) {
-        // With terrain off there is nothing to compare its answers with.
-        if self.terrain.cache.is_none() {
+        // With terrain off there is nothing to compare its answers with; a
+        // simulated submarine holds the seabed, not a land dataset (ADR-0043 U9).
+        if self.terrain.cache.is_none() || self.is_simulated_submarine(vehicle_id) {
             return;
         }
         let now = self.clock.now_us();

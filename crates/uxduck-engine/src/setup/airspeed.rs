@@ -886,7 +886,7 @@ impl Engine {
                 succeeded: false,
                 text: format!(
                     "Airspeed ratio stopped before it settled: {} Its ratio is {ratio} (was \
-                     {before}); its automatic calibration is turned off.",
+                     {before}). Its automatic calibration is turned off.",
                     why.trim_start_matches("Stopped: ")
                 ),
             };

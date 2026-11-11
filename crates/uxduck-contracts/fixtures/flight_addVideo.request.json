@@ -1,0 +1,7 @@
+{
+  "method": "flight/addVideo",
+  "params": {
+    "flightId": "fl3c2a",
+    "path": "/Users/pilot/Movies/Screen Recording 2026-10-28.mov"
+  }
+}

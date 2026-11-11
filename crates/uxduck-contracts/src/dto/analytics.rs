@@ -154,6 +154,15 @@ pub struct AnalyticsPerformanceParams {
     pub map_2d_fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map_3d_fps: Option<u32>,
+    /// Average processor time a visible 3D map took to draw a frame; omitted when none was drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_frame_ms: Option<u32>,
+    /// Visible 3D maps' frames that took over 50 ms to draw, keeping them under 20 frames a second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_slow_frames: Option<u32>,
+    /// Whether a visible 3D map draws lightly, for a weak GPU or by choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_3d_light: Option<bool>,
     /// The renderer's commit, or dev, independently of the connected daemon's release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_build: Option<String>,
@@ -282,6 +291,8 @@ pub enum SettingName {
     AutoDelete,
     /// When cameras are recorded (S40).
     VideoRecording,
+    /// How cameras that send no IDR are re-encoded for live view.
+    VideoReencoder,
     /// A keyboard shortcut was changed, cleared or reset (S51).
     Shortcuts,
     /// A skipped confirmation was reset (S53).
@@ -389,6 +400,10 @@ pub enum AppEvent {
     FeatureUsed {
         feature: Feature,
     },
+    /// Dictation listened (ADR-0012 V11): where, never what was said.
+    DictationUsed {
+        surface: DictationSurface,
+    },
     /// An error the person saw, by its code, such as `map-unavailable`.
     ErrorShown {
         code: String,
@@ -400,9 +415,37 @@ pub enum AppEvent {
         platform: DownloadPlatform,
         from: DownloadFrom,
     },
+    /// The sign-in form appeared: in Settings, or in the composer for a
+    /// message that needs an account. No email or code enters analytics.
+    SignInShown {
+        from: SignInFrom,
+    },
+    /// A sign-in code was emailed.
+    SignInCodeSent {
+        from: SignInFrom,
+    },
+    /// A sign-in code was checked.
+    SignInCodeChecked {
+        from: SignInFrom,
+        outcome: SignInOutcome,
+    },
     /// A simulated vehicle started in the browser (S20, the funnel's step 3).
     SimulationStarted {
         vehicle: crate::dto::link::SimVehicle,
+    },
+    /// A talk-mode turn ended (ADR-0012 V11): how soon its reply was heard
+    /// and whether the person cut it short, never its words or sound.
+    TalkTurn {
+        mode: TalkMode,
+        /// The model it ran on, by its own name.
+        model: String,
+        /// From sending to the reply's first sound; absent when none played.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_audio_ms: Option<u32>,
+        /// Tool calls the agent made for it.
+        tools: u32,
+        /// Stopped by a new turn, Escape or leaving talk mode.
+        interrupted: bool,
     },
     /// A tile added to or removed from a type's Telemetry layout (S73): what
     /// people want each type to show. Only with analytics allowed; a page
@@ -423,6 +466,48 @@ pub enum AppEvent {
         handled: bool,
         frames: Vec<ErrorFrame>,
     },
+}
+
+/// How a talk-mode turn was ended: sent by hand, or by open mic (ADR-0012 V8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TalkMode {
+    Push,
+    Open,
+}
+
+/// Where dictation listened (ADR-0012 V3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationSurface {
+    /// The chat's composer.
+    Composer,
+    /// The command palette.
+    Palette,
+    /// A map's place search.
+    PlaceSearch,
+    /// Feedback's text box.
+    Feedback,
+}
+
+/// Where a sign-in started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInFrom {
+    Settings,
+    /// The composer, holding a message that needs an account.
+    Composer,
+}
+
+/// How checking a sign-in code ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInOutcome {
+    SignedIn,
+    /// The server turned the code down: wrong, expired or too many tries.
+    Refused,
+    /// The server could not be asked, or failed.
+    Failed,
 }
 
 /// What happened to a tile (S73).
@@ -485,6 +570,8 @@ pub enum CommandName {
     Land,
     Reboot,
     GoTo,
+    SetHome,
+    SetEkfOrigin,
     Long,
 }
 
@@ -566,6 +653,23 @@ pub enum DaemonEvent {
         /// Earlier reasoning the provider set aside; more than zero is a bug.
         #[serde(default)]
         thinking_dropped: u32,
+        /// Said aloud in talk mode (ADR-0012 V11); `model` is the one it
+        /// ran on.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spoken: bool,
+    },
+    AgentTitle {
+        model: String,
+        generated: bool,
+        ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
     },
     ApprovalResolved {
         decision: ApprovalDecision,
@@ -579,6 +683,16 @@ pub enum DaemonEvent {
     PracticeEnded {
         exercise: String,
         result: String,
+    },
+    /// A flight was synced to the account (ADR-0046 B10): by hand, or as it
+    /// ended with automatic sync on.
+    FlightSynced {
+        simulated: bool,
+        automatic: bool,
+    },
+    /// The account refused an upload (B10).
+    SyncRefused {
+        reason: crate::dto::settings::SyncRefusal,
     },
     /// A command ended, whoever sent it.
     CommandSent {
@@ -768,6 +882,19 @@ mod tests {
         assert_eq!(frame["lineno"], 12);
         assert!(is_error_type("TypeError"));
         assert!(!is_error_type("Type Error: x"));
+    }
+
+    #[test]
+    fn dictation_says_where_it_listened_and_nothing_said() {
+        let (name, properties) = AnalyticsEvent::App(AppEvent::DictationUsed {
+            surface: DictationSurface::PlaceSearch,
+        })
+        .split();
+        assert_eq!(name, "dictation_used");
+        assert_eq!(
+            serde_json::Value::Object(properties),
+            serde_json::json!({"surface": "place_search"})
+        );
     }
 
     #[test]

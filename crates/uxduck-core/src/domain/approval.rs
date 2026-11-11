@@ -44,6 +44,10 @@ pub struct Approval {
     /// it is an operator's override, recorded on the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preflight: Vec<crate::domain::preflight::CheckRef>,
+    /// The chat's tool call waiting on it, when an in-app agent asked: the
+    /// chat answers it in place rather than the notification tray.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
     pub state: ApprovalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember: Option<Remember>,

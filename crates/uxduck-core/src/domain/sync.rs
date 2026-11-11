@@ -43,18 +43,21 @@ impl SyncCategory {
             "operator" | "plugin" => Self::Settings,
             "thread" | "item" | "folder" => Self::Chats,
             "place" => Self::Places,
-            "vehicle" | "history" | "snapshot" | "link" | "own-set" => Self::Vehicles,
+            "vehicle" | "history" | "snapshot" | "link" | "own-set" | "dialect"
+            | "firmware-profile" => Self::Vehicles,
             "plan" => Self::Plans,
             _ => return None,
         })
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncState {
-    /// Off until someone turns it on (ADR-0002: the exporter is off by
-    /// default).
+    /// On unless the person turned it off (maintainer, 2026-11-06: "lets
+    /// auto sync it - not get people to opt in"). A computer turned off has
+    /// a `device_id`, so it stays off; one from before, off without one,
+    /// is turned on once.
     pub enabled: bool,
     #[serde(default)]
     pub activation: Activation,
@@ -79,8 +82,31 @@ pub struct SyncState {
     pub pulled: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_synced_at_us: Option<u64>,
+    /// The account this browser's work belongs to, from its first sync
+    /// (ADR-0033): another account signed in here does not receive it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
     #[serde(default)]
     pub version: u64,
+}
+
+impl Default for SyncState {
+    /// On from the start; its device id is minted when it is first needed.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            activation: Activation::default(),
+            skipped: Vec::new(),
+            device_id: String::new(),
+            exported_through: 0,
+            exported: 0,
+            pulled_through: 0,
+            pulled: 0,
+            last_synced_at_us: None,
+            account_id: String::new(),
+            version: 0,
+        }
+    }
 }
 
 impl SyncState {
@@ -107,6 +133,23 @@ pub struct LibraryVehicle {
     /// Its size on the map in centimetres, as the person gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_cm: Option<u32>,
+    /// Its colour, as given or chosen (ADR-0029 P19), so it is the same on
+    /// every computer of the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<crate::domain::vehicle::VehicleColour>,
+    /// Which parameter descriptions it uses, as a person chose (ADR-0044
+    /// F10).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::param_definitions::DefinitionsChoice::is_automatic"
+    )]
+    pub definitions: crate::domain::param_definitions::DefinitionsChoice,
+    /// Which MAVLink dialects it uses, as a person chose (F13).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::domain::dialect::DialectChoice::is_automatic"
+    )]
+    pub dialects: crate::domain::dialect::DialectChoice,
     /// The computer that published this copy.
     pub device: String,
     /// When that computer changed it.

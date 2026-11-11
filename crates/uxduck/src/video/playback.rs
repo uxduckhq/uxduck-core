@@ -82,6 +82,100 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
     std::fs::rename(&partial, mp4)
 }
 
+/// Where a video added from elsewhere (S208) keeps its playable copy:
+/// named after the file's path, length and time, so a changed file is
+/// made again.
+#[must_use]
+pub fn added_copy(cache: &Path, path: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    path.hash(&mut hasher);
+    if let Ok(meta) = std::fs::metadata(path) {
+        meta.len().hash(&mut hasher);
+        meta.modified().ok().hash(&mut hasher);
+    }
+    cache.join(format!("added-{:016x}.mp4", hasher.finish()))
+}
+
+/// One copy made at a time, for the HTTP route and for adding alike.
+static PREPARING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Makes the playable copy `mp4` of a video added from elsewhere, unless
+/// one is there: its pictures and sound put into MP4, from 192-byte
+/// packets too, or its pictures encoded again as H.264 by the media helper
+/// when a browser cannot play them, without the sound.
+///
+/// # Errors
+/// The file cannot be read, the media helper is missing or fails, or the
+/// copy cannot be written.
+pub fn prepare(path: &Path, play: super::created::Play, mp4: &Path) -> std::io::Result<()> {
+    use super::created::Play;
+    let _one_at_a_time = PREPARING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if mp4.is_file() {
+        return Ok(());
+    }
+    if let Some(dir) = mp4.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let ts = mp4.with_extension("ts.part");
+    let made = match play {
+        Play::Direct => return Ok(()),
+        Play::Remux => return convert(path, mp4),
+        Play::Remux192 => {
+            let mut input = std::fs::File::open(path)?;
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes)?;
+            let start = (0..192.min(bytes.len()))
+                .find(|&i| bytes.get(i + 4) == Some(&0x47))
+                .unwrap_or(0);
+            let stripped: Vec<u8> = bytes[start..]
+                .as_chunks::<192>()
+                .0
+                .iter()
+                .flat_map(|p| p[4..].iter().copied())
+                .collect();
+            std::fs::write(&ts, stripped)
+        }
+        Play::Transcode => {
+            let helper = super::capture::program().map_err(std::io::Error::other)?;
+            let output = std::process::Command::new(helper)
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+                .arg(path)
+                .args([
+                    "-map", "0:v:0", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-bf", "0", "-g", "50", "-f", "mpegts",
+                ])
+                .arg(&ts)
+                .stdin(std::process::Stdio::null())
+                .output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "the media helper could not convert the video: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )))
+            }
+        }
+    };
+    let converted = made.and_then(|()| convert(&ts, mp4));
+    let _ = std::fs::remove_file(&ts);
+    converted
+}
+
+/// Starts making a playable copy now, on a thread of its own: said in the
+/// log if it fails, and tried again when the video is first played.
+pub fn prepare_soon(cache: &Path, path: &Path, play: super::created::Play) {
+    let (mp4, path) = (added_copy(cache, path), path.to_owned());
+    std::thread::spawn(move || {
+        if let Err(e) = prepare(&path, play, &mp4) {
+            tracing::warn!(path = %path.display(), "added video not prepared: {e}");
+        }
+    });
+}
+
 /// Marks a copy as played now, so the cache keeps it.
 pub fn mark_used(mp4: &Path) {
     if let Ok(file) = std::fs::File::options().write(true).open(mp4) {

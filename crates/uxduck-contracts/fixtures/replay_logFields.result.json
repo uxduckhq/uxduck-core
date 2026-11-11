@@ -1,0 +1,26 @@
+{
+  "name": "00000012.BIN",
+  "messages": [
+    {
+      "name": "BAT",
+      "columns": [
+        { "name": "Volt", "unit": "V" },
+        { "name": "Curr", "unit": "A" },
+        { "name": "RemPct", "unit": "%" }
+      ],
+      "records": 116,
+      "rateHz": 2.0
+    },
+    {
+      "name": "VIBE",
+      "columns": [
+        { "name": "VibeX", "unit": "m/s/s" },
+        { "name": "VibeZ", "unit": "m/s/s" },
+        { "name": "Clip" }
+      ],
+      "instances": [0, 1],
+      "records": 234,
+      "rateHz": 4.0
+    }
+  ]
+}

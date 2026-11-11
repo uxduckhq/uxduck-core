@@ -56,6 +56,20 @@ pub enum VehicleCommand {
         #[arg(long)]
         remove: Vec<String>,
     },
+    /// Hides offline vehicles from every list until they are seen again,
+    /// keeping their names, flights and history; `uxduck vehicle unhide`
+    /// shows them sooner.
+    Hide {
+        /// Their names or ids.
+        #[arg(required = true)]
+        vehicles: Vec<String>,
+    },
+    /// Shows hidden vehicles again.
+    Unhide {
+        /// Their names or ids.
+        #[arg(required = true)]
+        vehicles: Vec<String>,
+    },
 }
 
 pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliError> {
@@ -138,12 +152,30 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
             }
             Ok(())
         }
+        VehicleCommand::Hide { vehicles } => hide(&mut client, &vehicles, true).await,
+        VehicleCommand::Unhide { vehicles } => hide(&mut client, &vehicles, false).await,
     }
+}
+
+/// Hides vehicles, or shows them again (S247).
+async fn hide(client: &mut LocalClient, vehicles: &[String], hidden: bool) -> Result<(), CliError> {
+    for wanted in vehicles {
+        let id = resolve(client, wanted).await?;
+        let vehicle = client
+            .call("vehicle/hide", json!({ "id": id, "hidden": hidden }))
+            .await?;
+        if hidden {
+            println!("Hid {} until it is seen again.", vehicle_text(&vehicle));
+        } else {
+            println!("{} is shown again.", vehicle_text(&vehicle));
+        }
+    }
+    Ok(())
 }
 
 /// "Alpha: Site B, Survey", or "Alpha: no labels".
 fn labels_line(vehicle: &Value) -> String {
-    let name = vehicle["name"].as_str().unwrap_or("The vehicle");
+    let name = vehicle_text(vehicle);
     let labels: Vec<&str> = vehicle["labels"]
         .as_array()
         .map(|all| all.iter().filter_map(Value::as_str).collect())
@@ -155,13 +187,37 @@ fn labels_line(vehicle: &Value) -> String {
     }
 }
 
-/// A vehicle by id, or by name in any case.
+/// A vehicle's name where no tag can be drawn beside it: "Alpha", or
+/// "Alpha (replay)" for its replay, which has its name (S238).
+pub(crate) fn vehicle_text(vehicle: &Value) -> String {
+    let name = vehicle["name"].as_str().unwrap_or("The vehicle");
+    if vehicle["replay"] == true {
+        format!("{name} (replay)")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// A vehicle by id, or by name in any case: "Alpha" is the live one,
+/// "Alpha (replay)" its replay, and a replay alone answers to its name.
 pub(crate) async fn resolve(client: &mut LocalClient, wanted: &str) -> Result<String, CliError> {
     let list = client.call("vehicle/list", json!({})).await?;
     let vehicles = list["vehicles"].as_array().cloned().unwrap_or_default();
     vehicles
         .iter()
         .find(|v| v["id"] == wanted)
+        .or_else(|| {
+            vehicles.iter().find(|v| {
+                v["aliases"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == wanted))
+            })
+        })
+        .or_else(|| {
+            vehicles
+                .iter()
+                .find(|v| vehicle_text(v).eq_ignore_ascii_case(wanted))
+        })
         .or_else(|| {
             vehicles.iter().find(|v| {
                 v["name"]
@@ -276,6 +332,15 @@ fn date(us: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replay_says_so_after_its_name() {
+        assert_eq!(vehicle_text(&json!({ "name": "Sim 2" })), "Sim 2");
+        assert_eq!(
+            vehicle_text(&json!({ "name": "Sim 2", "replay": true })),
+            "Sim 2 (replay)"
+        );
+    }
 
     #[test]
     fn dates_go_both_ways() {

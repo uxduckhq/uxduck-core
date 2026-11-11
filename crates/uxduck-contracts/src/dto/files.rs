@@ -99,6 +99,12 @@ pub struct FilesUploadParams {
     pub path: String,
     /// The file, base64, up to 4 MB.
     pub content_base64: String,
+    /// Keeps the file there now among the vehicle's Files on this computer
+    /// before replacing it, as a finished copy marked "Before saving"
+    /// (S260, ADR-0027 F15). Nothing is kept when there is no file there
+    /// yet. UXDuck Web keeps no copies and refuses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

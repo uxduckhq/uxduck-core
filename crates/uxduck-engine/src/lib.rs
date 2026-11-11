@@ -19,19 +19,24 @@ pub mod analytics;
 mod app;
 mod app_update;
 pub mod approvals;
+mod attachments;
 mod checklist;
 pub mod commands;
+pub mod companions;
 pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
+mod dialects;
 mod display;
 pub mod edge;
 mod engaged_sim_usage;
 pub mod feedback;
 pub mod finds;
+mod firmware_profiles;
 mod flight_time;
 mod flight_usage;
 mod forwarding;
+mod gripper;
 mod grounded;
 mod history;
 mod idle_simulations;
@@ -45,7 +50,9 @@ pub mod markers;
 pub mod mavlink_inspect;
 mod messages;
 pub mod mission_history;
+mod mission_reads;
 pub mod nmea;
+mod operations;
 pub mod pairing;
 pub mod param_definitions;
 mod photos;
@@ -54,6 +61,7 @@ pub mod plan_checks;
 pub mod plan_examples;
 pub mod plan_files;
 pub mod plan_patterns;
+mod plan_runs;
 pub mod plane;
 mod plans;
 mod plugin_checks;
@@ -62,8 +70,7 @@ pub mod plugins;
 pub mod practice;
 mod preflight;
 mod recordings;
-mod remote;
-pub mod remote_view;
+mod replay;
 pub mod restart;
 pub(crate) mod rpc;
 pub mod runtime;
@@ -76,20 +83,26 @@ pub mod firmware {
         FirmwarePort, FirmwareReport, InstallOrder, InstallSource, ReleasesFound, ReleasesOrder,
     };
 }
+mod autotune;
 pub mod sim;
 mod snapshots;
+mod spoken;
 pub mod state;
 mod supervision;
 pub mod sync;
 mod telemetry;
 mod telemetry_window;
+pub mod terms;
 pub mod terrain;
 mod terrain_check;
 mod terrain_keep;
+mod terrain_put;
+mod terrain_vehicle;
 pub mod trace;
 pub mod traffic;
 pub mod transfers;
 pub mod tray;
+mod tuning;
 pub mod vehicle_files;
 mod vehicles;
 mod version;
@@ -208,8 +221,15 @@ struct Shutdown {
 }
 
 #[derive(Debug)]
+struct ReadCapabilities {
+    mission_read_float_bits: bool,
+    replay_step_marks: bool,
+}
+
+#[derive(Debug)]
 struct Admitted {
     kind: ClientKind,
+    reads: ReadCapabilities,
     /// Admitted as an operator: full control, never escalates.
     operator: bool,
     /// Its client record; `granted` follows the record's capabilities.
@@ -249,9 +269,18 @@ struct Connection {
     recent: std::collections::VecDeque<TraceFrame>,
     /// A page on screen, as it last said with `client/visibility` (S107).
     visible: bool,
+    /// A page on screen with the focus, as it last said.
+    focused: bool,
     /// The order it was admitted in or last said whether it is seen:
     /// `app/focus` brings forward the page seen last.
     seen: u64,
+}
+
+impl Connection {
+    /// An operator on this computer, not an agent or a plugin.
+    fn is_local_operator(&self) -> bool {
+        self.admitted.as_ref().is_some_and(Admitted::is_operator)
+    }
 }
 
 #[allow(
@@ -264,6 +293,7 @@ pub struct Engine {
     random: Box<dyn Random>,
     persistence: Box<dyn Persistence>,
     agent: Box<dyn AgentPort>,
+    agent_connections: Vec<uxduck_contracts::dto::thread::AgentConnection>,
     credentials: Box<dyn Credentials>,
     links: Box<dyn LinkPort>,
     system: Box<dyn runtime::System>,
@@ -294,6 +324,7 @@ pub struct Engine {
     transfers: transfers::Pending,
     /// Simulated vehicles taking off to start in the air (S33).
     launches: launch::Launches,
+    plan_runs: plan_runs::PlanRuns,
     /// Parameter definition sets in memory, and the port that fetches them
     /// (S67).
     definitions: param_definitions::Definitions,
@@ -309,9 +340,13 @@ pub struct Engine {
     location: location::Location,
     /// Other aircraft near the vehicles (S168).
     traffic: traffic::Traffic,
+    /// The replay open now (ADR-0039).
+    replays: replay::Replays,
+    /// Files being attached to chat messages (S246).
+    uploads: attachments::Uploads,
     places: places::Places,
+    companions: companions::Companions,
     marker_live: markers::Live,
-    remote_viewing: remote_view::RemoteViewing,
     /// A client asked for a restart.
     restart: bool,
     app_update: app_update::Updates,
@@ -329,23 +364,36 @@ pub struct Engine {
     feedback: Box<dyn feedback::FeedbackPort>,
     /// Feedback requests answered when the root reports back, by report id.
     awaiting_feedback: BTreeMap<String, (ConnectionId, Value)>,
+    /// Reports the agent is filing, by report id, with their chat (S294).
+    agent_filing: BTreeMap<String, String>,
     /// Account calls waiting for the root (S27).
     awaiting_account: BTreeMap<String, (ConnectionId, Value)>,
-    awaiting_operator: BTreeMap<String, Option<String>>,
     awaiting_identity: std::collections::BTreeSet<String>,
+    /// The computer's one sign-in, whichever operator is chosen (ADR-0033).
     account_identity: uxduck_contracts::dto::account::AccountState,
+    /// The operator a local operator connection chose last: a window that
+    /// reloads takes it back, and a local CLI follows it.
+    chosen_operator: Option<String>,
+    /// The models the hosted model offers this account, from `/v1/me` (S29);
+    /// none until the server says, or from an API that does not.
+    hosted_models: Option<Vec<String>>,
     /// Account orders that fetch a shared plugin to install (S59).
     awaiting_shared_installs: std::collections::BTreeSet<String>,
-    /// Account orders that list the account's computers (S78).
-    awaiting_computers: std::collections::BTreeSet<String>,
     /// Account orders for watch links (S95), and what to do with each answer.
     awaiting_watch: BTreeMap<String, watch_link::Awaiting>,
+    /// When the next order to end this computer's watch links may go out
+    /// (UXD-44): a pending one is not asked again before then.
+    watch_end_after_us: u64,
+    /// This computer's watch links that have not ended, by id, with when each
+    /// ends in ms: it keeps its edge connection only while one has not. None
+    /// until the account says, and again once signed out.
+    live_links: Option<BTreeMap<String, u64>>,
+    /// When the account may next be asked for them after a failed ask.
+    live_links_after_us: u64,
     /// Guests watching through each watch link, from the relay (S95).
     watch_viewers: Vec<uxduck_contracts::dto::edge::WatchViewers>,
     /// This computer's connection to its account (S78), as the root's task reports it.
     edge_status: uxduck_contracts::dto::edge::EdgeStatus,
-    /// Control from away (S80): leases and the commands' ids.
-    remote: remote::Remote,
     /// Which vehicles are supervised, and whose heartbeat is withheld (S81).
     supervision: supervision::Supervision,
     /// Practice attempts being set up (S100).
@@ -416,9 +464,14 @@ pub struct Engine {
     turns: BTreeMap<String, u64>,
     /// When each turn began, by turn id, for its length in analytics.
     turn_started: BTreeMap<u64, u64>,
+    /// Spoken turns, by turn id, and the model each ran on in place of the
+    /// chat's (ADR-0012 V5).
+    spoken_turns: BTreeMap<u64, String>,
     /// What each turn used, reported by the host before it finishes.
     turn_stats: BTreeMap<u64, runtime::TurnStats>,
     next_turn: u64,
+    /// Live origin for a saved follow-up. After restart it waits for explicit resume.
+    pending_origins: HashMap<String, ConnectionId>,
     /// Text streamed into agent messages still in progress. Not journaled;
     /// merged into snapshots so a late subscriber sees what has streamed.
     streaming: HashMap<String, String>,
@@ -428,7 +481,14 @@ pub struct Engine {
     tracers: BTreeSet<ConnectionId>,
     /// Live telemetry by vehicle id; not journaled.
     telemetry: BTreeMap<String, uxduck_core::domain::telemetry::VehicleTelemetry>,
+    /// How each vehicle's link is doing, by vehicle id, and when the data
+    /// plane said so (S261); not journaled.
+    link_health: BTreeMap<String, (uxduck_core::domain::telemetry::LinkHealth, u64)>,
     telemetry_history: telemetry_window::Window,
+    /// Each vehicle's rate controller samples, for the response graph (S330).
+    responses: tuning::Responses,
+    /// Each vehicle's last AutoTune (S332).
+    autotunes: autotune::AutoTunes,
     telemetry_subscribers: BTreeSet<ConnectionId>,
     subscribers: BTreeMap<ConnectionId, BTreeSet<EntityType>>,
     sessions: Sessions,
@@ -438,6 +498,10 @@ pub struct Engine {
     /// Links removed in this run, so a late report from the data plane
     /// about one brings no vehicle back. Link ids are not reused.
     pub(crate) removed_links: BTreeSet<String>,
+    /// Vehicles the data plane hears, since their link reopened, under the
+    /// earlier id it gave them before their UID: it does not know their
+    /// lasting id yet, so orders addressed to it do not reach them.
+    pub(crate) heard_provisionally: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -472,6 +536,7 @@ impl Engine {
             random,
             persistence: ports.persistence,
             agent: ports.agent,
+            agent_connections: Vec::new(),
             credentials: ports.credentials,
             links: ports.links,
             system: ports.system,
@@ -488,15 +553,18 @@ impl Engine {
             approving_preflight: None,
             transfers: transfers::Pending::default(),
             launches: launch::Launches::default(),
+            plan_runs: plan_runs::PlanRuns::default(),
             definitions: param_definitions::Definitions::default(),
             video: video::Video::default(),
             finding: finds::Finding::default(),
             interface: interface::Interface::default(),
             location: location::Location::default(),
             traffic: traffic::Traffic::default(),
+            replays: replay::Replays::default(),
+            uploads: attachments::Uploads::default(),
             places: places::Places::default(),
+            companions: companions::Companions::default(),
             marker_live: markers::Live::default(),
-            remote_viewing: remote_view::RemoteViewing::default(),
             live: controllers::Live::default(),
             restart: false,
             app_update: app_update::Updates::default(),
@@ -507,16 +575,19 @@ impl Engine {
             analytics_internal: false,
             feedback: Box::new(feedback::NoFeedback),
             awaiting_feedback: BTreeMap::new(),
+            agent_filing: BTreeMap::new(),
             awaiting_account: BTreeMap::new(),
-            awaiting_operator: BTreeMap::new(),
             awaiting_identity: std::collections::BTreeSet::new(),
             account_identity: uxduck_contracts::dto::account::AccountState::default(),
+            chosen_operator: None,
+            hosted_models: None,
             awaiting_shared_installs: std::collections::BTreeSet::new(),
-            awaiting_computers: std::collections::BTreeSet::new(),
             awaiting_watch: BTreeMap::new(),
+            watch_end_after_us: 0,
+            live_links: None,
+            live_links_after_us: 0,
             watch_viewers: Vec::new(),
             edge_status: edge::signed_out(),
-            remote: remote::Remote::default(),
             supervision: supervision::Supervision::default(),
             practice: practice::Practice::default(),
             files: vehicle_files::Files::default(),
@@ -552,20 +623,26 @@ impl Engine {
             since_checkpoint: 0,
             turns: BTreeMap::new(),
             turn_started: BTreeMap::new(),
+            spoken_turns: BTreeMap::new(),
             turn_stats: BTreeMap::new(),
             next_turn: 0,
+            pending_origins: HashMap::new(),
             streaming: HashMap::new(),
             next_connection: 0,
             connections: BTreeMap::new(),
             display: display::DisplayRelay::default(),
             tracers: BTreeSet::new(),
             telemetry: BTreeMap::new(),
+            link_health: BTreeMap::new(),
             telemetry_history: telemetry_window::Window::default(),
+            responses: tuning::Responses::default(),
+            autotunes: autotune::AutoTunes::default(),
             telemetry_subscribers: BTreeSet::new(),
             subscribers: BTreeMap::new(),
             sessions: Sessions::restored(loaded.sessions),
             network: uxduck_contracts::dto::network::NetworkStatus::default(),
             removed_links: BTreeSet::new(),
+            heard_provisionally: BTreeSet::new(),
         };
         engine.started_us = engine.clock.now_us();
         // A phone forgotten just before a crash may have left its session
@@ -579,21 +656,29 @@ impl Engine {
             .state
             .items
             .values()
-            .filter(|item| item.status == ItemStatus::InProgress)
+            .filter(|item| matches!(item.status, ItemStatus::InProgress | ItemStatus::Steering))
             .cloned()
             .collect();
         for mut item in interrupted {
-            item.status = ItemStatus::Interrupted;
+            item.status = if item.status == ItemStatus::Steering {
+                ItemStatus::Queued
+            } else if item.kind == uxduck_core::domain::thread::ItemKind::UserMessage {
+                ItemStatus::Completed
+            } else {
+                ItemStatus::Interrupted
+            };
             item.version += 1;
             engine.commit_as(Actor::default(), Change::ItemUpserted { item });
         }
         engine.close_interrupted_flights();
+        engine.drop_replay_vehicles();
         engine.start_data_plane();
         engine.reset_controllers();
         engine.restore_after_restart();
         engine.retire_ground_testing_notices();
         engine.start_plugins();
         engine.expire_stale_approvals();
+        engine.publish_dialects();
         engine
     }
 
@@ -633,6 +718,7 @@ impl Engine {
                 executable: None,
                 name: String::new(),
                 visible: false,
+                focused: false,
                 seen: 0,
             },
         );
@@ -696,14 +782,15 @@ impl Engine {
         self.disconnect_display(id);
         self.abandon_approvals(id);
         self.release_claims_of(id);
-        self.release_leases_of(id);
         self.drop_video_watches(id);
         self.stop_finding_for(id);
-        self.drop_remote_watch(id);
         self.feature_watchers.remove(&id);
         self.item_watchers.remove(&id);
         self.location_disconnected(id);
         self.traffic_disconnected(id);
+        self.terrain_watchers_disconnected(id);
+        self.replay_disconnected(id);
+        self.attachments_disconnected(id);
         self.markers_disconnected(id);
         self.tray_watchers.remove(&id);
         self.app_update.watchers.remove(&id);
@@ -760,18 +847,28 @@ impl Engine {
                     self.state.operators.get(id).map(|operator| {
                         uxduck_core::events::ActorIdentity {
                             operator_name: operator.name.clone(),
+                            // Signed in on this computer, which every local
+                            // operator works under (ADR-0033).
                             account_id: (self.account_identity.signed_in
-                                && connection
-                                    .admitted
-                                    .as_ref()
-                                    .is_some_and(Admitted::is_operator)
-                                && self.account_identity.operator_id.as_ref() == Some(id))
+                                && connection.is_local_operator())
                             .then(|| self.account_identity.account_id.clone())
                             .flatten(),
                         }
                     })
                 }),
             })
+    }
+
+    /// The person a command is sent by, as named now (ADR-0033): only an
+    /// operator on this computer, so an agent's or a plugin's command never
+    /// reads as the person it acts for, and one from away keeps its sender
+    /// in `remote`.
+    fn sender(&self, connection: ConnectionId) -> Option<uxduck_core::events::ActorIdentity> {
+        let person = self
+            .connections
+            .get(&connection)
+            .is_some_and(Connection::is_local_operator);
+        person.then(|| self.actor(connection).identity).flatten()
     }
 
     fn commit_as(&mut self, actor: Actor, change: Change) -> Event {
@@ -784,6 +881,9 @@ impl Engine {
         self.persistence.append(&event);
         // Built with `seq + 1`, so it always applies.
         let _ = self.state.apply(&event);
+        self.dialects_after(&event.change);
+        self.gripper_after(&event.change);
+        self.plan_run_after(&event.change);
         self.since_checkpoint += 1;
         if self.since_checkpoint >= self.config.checkpoint_every {
             self.checkpoint();
@@ -792,6 +892,17 @@ impl Engine {
         self.wake_sync_for(&event);
         self.review_idle_simulations();
         self.push_tray();
+        if let Change::VehicleRemoved { id } = &event.change {
+            let id = id.clone();
+            self.terrain_vehicle_gone(&id);
+        }
+        // Its replays show it as it is now (S238), whoever changed it.
+        if let Change::VehicleUpserted { vehicle } = &event.change
+            && !vehicle.replay
+        {
+            let id = vehicle.id.clone();
+            self.follow_original(&id);
+        }
         event
     }
 
@@ -809,7 +920,11 @@ impl Engine {
                 change => entity_changes(change),
             }
             .into_iter()
-            .filter(|change| types.contains(&change.entity) && self.may_see(id, change))
+            .filter(|change| {
+                types.contains(&change.entity)
+                    && self.may_see(id, change)
+                    && (change.entity != EntityType::Mission || self.reads_mission_float_bits(id))
+            })
             .collect();
             let delta = StateDelta {
                 seq: event.seq,
@@ -1299,7 +1414,13 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         // Settings need the engine's default close policy, so `broadcast`
         // builds them; sync is read with `sync/get`, not pushed (S16). A
         // checklist is pushed with the vehicle's preflight checks (S193).
-        Change::SettingsChanged { .. }
+        // Dialects and firmware profiles are read with their list methods,
+        // as people's sets are (ADR-0044).
+        Change::DialectUpserted { .. }
+        | Change::DialectRemoved { .. }
+        | Change::FirmwareProfileUpserted { .. }
+        | Change::FirmwareProfileRemoved { .. }
+        | Change::SettingsChanged { .. }
         | Change::ChecklistUpdated { .. }
         | Change::SyncChanged { .. }
         | Change::EdgeConnection { .. }
@@ -1312,8 +1433,14 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::LinkLibraryRemoved { .. }
         | Change::BaselineUpserted { .. }
         | Change::BaselineRemoved { .. }
+        // Read with `param/sets` (S217).
+        | Change::SavedParamsUpserted { .. }
+        | Change::SavedParamsRemoved { .. }
         | Change::FlightUpserted { .. }
+        | Change::OperationUpserted { .. }
+        | Change::OperationRemoved { .. }
         | Change::FlightRemoved { .. }
+        | Change::FlightForgotten { .. }
         | Change::FlightReplaced { .. }
         | Change::PluginCalled { .. }
         | Change::PluginPublished { .. }

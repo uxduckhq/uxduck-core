@@ -2,19 +2,27 @@
 
 pub mod checklist;
 pub mod client;
+mod companion;
 mod fake_board;
 pub mod find;
+pub mod firmware;
 pub mod link_spec;
 pub mod marker;
+pub mod mavlink;
 pub mod mission;
 mod new_plugin;
+pub mod operation;
 pub mod params;
 pub mod plan;
 pub mod practice;
 mod practice_replay;
 pub mod preflight;
+pub mod replay;
+#[cfg(test)]
+mod replay_wire_tests;
 pub mod setup;
 mod sim_build;
+mod sim_own;
 pub mod terrain;
 mod traffic;
 pub mod vehicle;
@@ -56,6 +64,11 @@ pub enum Command {
     /// such as on a Raspberry Pi beside a radio. It never quits on its own.
     /// `uxduck forward --in serial:/dev/ttyAMA0@57600 --out udp:192.168.1.20:15010`
     Forward(ForwardArgs),
+    /// A computer on the vehicle that carries no vehicle traffic, such as a
+    /// second Raspberry Pi: once a second it sends its temperature, CPU,
+    /// memory and storage to the ground station as an onboard computer.
+    /// `uxduck companion --to udp:192.168.1.20:15010 --computer-id 192`
+    Companion(companion::CompanionArgs),
     /// A Model Context Protocol server on stdio, for coding agents: add
     /// `uxduck mcp` to Claude Code or Codex. Reading vehicles needs nothing;
     /// commands wait until an operator allows them. Start UXDuck yourself
@@ -115,6 +128,16 @@ pub enum Command {
     },
     /// Sign out; everything on this computer keeps working.
     Logout,
+    /// Read and agree to UXDuck's Terms of Service, which UXDuck asks of an
+    /// operator before it arms a real vehicle for them.
+    Terms {
+        /// Local operator ID; needed when this computer has several.
+        #[arg(long, value_name = "ID")]
+        operator: Option<String>,
+        /// Agree without the prompt, having read the terms.
+        #[arg(long)]
+        agree: bool,
+    },
     /// Your UXDuck account.
     Account {
         #[command(subcommand)]
@@ -158,6 +181,18 @@ pub enum Command {
     /// `uxduck preflight Alpha --check plan --severity block` to change one
     /// of UXDuck's own.
     Preflight(preflight::PreflightArgs),
+    /// Plays a flight back in UXDuck (ADR-0039): `uxduck replay` for the
+    /// replay open now or the last flight, `uxduck replay <flight id>`,
+    /// `uxduck replay flight.tlog`,
+    /// with `--play`, `--speed 5` and `--at 90`; `--close` shows live again.
+    Replay(replay::ReplayArgs),
+    /// Operations (ADR-0039 R16): `uxduck operation list`, `rename <id>
+    /// "Night survey"`, `add <id> <flight id>…`, `create --name … <flight
+    /// id>…`, `remove <id> <flight id>…`.
+    Operation {
+        #[command(subcommand)]
+        command: operation::OperationCommand,
+    },
     /// A vehicle's own checklist (S193): `uxduck checklist Alpha`, `add
     /// "Propellers tight"`, `add "Battery" --rule "battery.voltage_v >=
     /// 22.2" --hold 3`, `tick 1`, `reset`, `export`, `import list.md`,
@@ -201,6 +236,18 @@ pub enum Command {
     Video {
         #[command(subcommand)]
         command: video::VideoCommand,
+    },
+    /// MAVLink: `uxduck mavlink dialects` lists, adds, binds or removes
+    /// the dialects of a fork's own messages.
+    Mavlink {
+        #[command(subcommand)]
+        command: mavlink::MavlinkCommand,
+    },
+    /// A fork's firmware profiles: `uxduck firmware add <url>` reads the one
+    /// file its CI publishes naming its parameter descriptions and dialects.
+    Firmware {
+        #[command(subcommand)]
+        command: firmware::FirmwareCommand,
     },
     /// Parameters: `uxduck params definitions` lists, adds, generates or
     /// removes the sets that say what a fork's parameters mean.
@@ -293,8 +340,9 @@ impl OpenArgs {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, clap::Args)]
 pub struct DaemonArgs {
-    /// Loopback port: tries 45000 normally, 45100 with --dev, then a free
-    /// port if occupied. An explicit port must be free; 0 picks a free one.
+    /// Loopback port: reuse this profile's last port, otherwise try 45000
+    /// normally or 45100 with --dev, then a free port if occupied.
+    /// An explicit port overrides the saved choice and must be free; 0 picks a new one.
     #[arg(long, env = "UXDUCK_PORT")]
     port: Option<u16>,
     /// The dev server's origin, allowed and used as the UI address with `--dev`.
@@ -319,12 +367,14 @@ pub struct DaemonArgs {
     /// hosted model otherwise, and `fake`, to test without either.
     #[arg(long, env = "UXDUCK_AGENT_PROVIDER", default_value = DEFAULT_PROVIDER)]
     agent_provider: String,
-    /// Models offered in the selector, comma-separated; the first is the default.
+    /// Models offered in the selector with your own keys or the fake,
+    /// comma-separated; the first is the default. The hosted model offers
+    /// what the account server says.
     #[arg(
         long,
         env = "UXDUCK_AGENT_MODELS",
         value_delimiter = ',',
-        default_value = "gpt-6-sol,gpt-6-luna,gpt-6-astra,claude-opus-5-5,claude-sonnet-5-5"
+        default_value = uxduck_agent::models::DEFAULT_MODELS
     )]
     agent_models: Vec<String>,
     /// Another OpenAI-compatible endpoint, such as a proxy.
@@ -449,7 +499,7 @@ pub enum DaemonAction {
     /// Restart the running daemon: a final checkpoint, then the same
     /// program in its place. Clients reconnect on their own.
     Restart {
-        /// Restart even while a vehicle is armed.
+        /// Confirm interruption of connected vehicles and active work.
         #[arg(long)]
         yes: bool,
     },
@@ -475,8 +525,9 @@ pub enum ShutdownChoice {
 
 #[derive(Debug, clap::Args)]
 pub struct ForwardArgs {
-    /// Where vehicles are heard: `udp:HOST:PORT` (listens),
-    /// `udpout:HOST:PORT` (sends to a UDP server), `serial:DEVICE[@BAUD]`,
+    /// Where vehicles are heard: `udp:HOST:PORT` or `udpin:HOST:PORT`
+    /// (listens), `udpout:HOST:PORT` (sends to a UDP server),
+    /// `serial:DEVICE[@BAUD]` or `DEVICE[,BAUD]` such as `/dev/ttyUSB0,57600`,
     /// `tcp:HOST:PORT` (connects) or `tcpin:HOST:PORT` (listens). Repeat for
     /// several.
     #[arg(long = "in", required = true, value_name = "LINK")]
@@ -490,6 +541,15 @@ pub struct ForwardArgs {
     /// Forward only this vehicle's traffic (its VID). Repeat for several.
     #[arg(long = "vehicle", value_name = "VID")]
     vehicles: Vec<String>,
+    /// This computer is on the vehicle: send its temperature, CPU, memory
+    /// and storage out of every `--out` once a second, as an onboard
+    /// computer (MAVLink's `ONBOARD_COMPUTER_STATUS`).
+    #[arg(long)]
+    onboard: bool,
+    /// The onboard computer id to send as, 191 to 194; the first free one
+    /// when left out. Pin it when several computers cannot hear each other.
+    #[arg(long, requires = "onboard", value_parser = clap::value_parser!(u8).range(191..=194))]
+    computer_id: Option<u8>,
     #[command(flatten)]
     daemon: DaemonArgs,
 }
@@ -550,7 +610,7 @@ pub enum WatchLinkAction {
     /// Makes a link and prints its address, once: share it with whoever
     /// should watch.
     Make {
-        /// Who flies, shown on the page.
+        /// The operator's name, shown on the page.
         #[arg(long)]
         flown_by: String,
         /// Only this vehicle, by name or id; every vehicle on this computer
@@ -597,48 +657,14 @@ pub enum AccountCommand {
     /// Email yourself a link that deletes your account. Nothing is deleted
     /// until you open it and confirm.
     Delete,
-    /// The computers on your account, online or when last seen, and how
-    /// this one is connected.
-    Computers {
-        /// Print the answer as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// One of the account's computers, live through the cloud, as someone
-    /// watching from anywhere sees it: the first online one unless named,
-    /// each vehicle with how old its values are.
-    Watch {
-        /// The computer's name or id.
-        computer: Option<String>,
-        /// Open this vehicle in detail, by name or id.
-        #[arg(long)]
-        vehicle: Option<String>,
-        /// Print once, after a few seconds, and stop.
-        #[arg(long)]
-        once: bool,
-    },
-    /// A command to a vehicle on another of your computers, through the
-    /// cloud: what that computer's "Allow remote control" allows, with the
-    /// same receipt as at the computer.
-    Command {
-        /// The computer's name or id.
-        computer: String,
-        /// The vehicle's name or id.
-        vehicle: String,
-        /// Take the vehicle's control lease first, as mission and critical
-        /// commands need; it ends when this command does.
-        #[arg(long)]
-        take_control: bool,
-        #[command(subcommand)]
-        action: VehicleAction,
-    },
     /// Watch links (S95): anyone with one watches this computer, or one
     /// vehicle on it, in a browser, read only, until it ends.
     WatchLink {
         #[command(subcommand)]
         action: WatchLinkAction,
     },
-    /// The flights your account keeps, from any of your computers.
+    /// The flights saved to your account, from any of your computers.
+    #[command(name = "logbook", visible_alias = "flights")]
     Flights {
         /// Print the answer as JSON.
         #[arg(long)]
@@ -649,7 +675,7 @@ pub enum AccountCommand {
     Flight {
         /// The computer's name or id.
         computer: String,
-        /// The flight, as `uxduck account flights` lists it.
+        /// The flight, as `uxduck account logbook` lists it.
         id: String,
         /// Where to write the tlog.
         #[arg(long, default_value = "flight.tlog")]
@@ -672,8 +698,9 @@ pub enum AccountCommand {
         #[arg(long, default_value = "recording.mp4")]
         out: PathBuf,
     },
-    /// "Connect this computer to my account": `on`, as it starts, or `off`.
-    Connect {
+    /// "Live sharing from this computer": `on`, as it starts, or `off`.
+    /// Off, nothing live leaves the computer and its watch links end.
+    LiveSharing {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
@@ -714,13 +741,18 @@ pub enum SimCommand {
         /// A SITL build of your own.
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Allow this build to listen on the network if it cannot keep
+        /// connections local. Other computers may connect and control it.
+        #[arg(long, requires = "binary")]
+        allow_network: bool,
         /// Forget its stored parameters each time it starts.
         #[arg(long)]
         wipe: bool,
         #[arg(long)]
         name: Option<String>,
     },
-    /// Stops a simulated vehicle, by its link's id.
+    /// Stops a simulated vehicle, by its link's id. It is kept, stopped,
+    /// until it is started again or its link is removed.
     Stop { id: String },
     /// Starts a simulated vehicle again from where it started, by its
     /// link's id: after a crash, or to begin afresh. It keeps its name.
@@ -746,6 +778,20 @@ pub enum SimCommand {
     },
     /// The SITL builds UXDuck found, with their frames.
     Builds,
+    /// Builds the commit an ArduPilot checkout has checked out as a
+    /// simulator UXDuck can start, with UXDuck's local-only network patch,
+    /// in a worktree of its own (macOS and Linux). Prints the program's
+    /// path, for `uxduck sim start --binary` or New simulation's own build.
+    Build {
+        checkout: PathBuf,
+        /// `multicopter`, `plane`, `rover`, `submarine` or `airship`.
+        #[arg(long, default_value = "multicopter")]
+        vehicle: String,
+        /// When no version of the patch fits the release, build it without
+        /// one: while it runs, other computers on your network can reach it.
+        #[arg(long)]
+        allow_network: bool,
+    },
     /// The catalogue's prebuilt builds for this computer (S18).
     Catalogue {
         /// Fetch it again.
@@ -858,6 +904,11 @@ pub enum DevCommand {
         /// Say "Leak Detected!" every 10 s, as `ArduSub` does (S72).
         #[arg(long)]
         leak: bool,
+        /// Send a fork's own messages, as `crates/uxduck-mavlink/fixtures/acme_fork.xml`
+        /// describes them: `ACME_STATUS` (43001) and a `SYS_STATUS` with one more
+        /// extension (S252).
+        #[arg(long)]
+        fork_messages: bool,
         /// No MAVLink FTP: parameters come by the list, without defaults
         /// (S74), and the Files tab has nothing to show (S121).
         #[arg(long)]
@@ -931,6 +982,17 @@ pub enum DevCommand {
         /// outputs until the test's time runs out.
         #[arg(long)]
         motors: bool,
+        /// List a copter's ESC parameters with this `MOT_PWM_TYPE` (0 PWM,
+        /// 6 `DShot600`) and `ESC_CALIBRATION` 0 (S216). Set to 3, it
+        /// restarts by itself eight seconds later with it back at 0, as a
+        /// person replugging its battery would have it.
+        #[arg(long)]
+        escs: Option<u8>,
+        /// List `SCR_ENABLE` with this value (0 off, 1 Lua) and a
+        /// `hello.lua` in `/APM/scripts` (S259). It answers
+        /// `MAV_CMD_SCRIPTING`'s restart and says "Scripting: restarted".
+        #[arg(long)]
+        scripting: Option<u8>,
         /// Be a plane with an airspeed sensor (S190): it sits on the ground
         /// until armed and circles once armed; it zeroes its sensor as
         /// `ArduPlane` does, and with `ARSPD_AUTOCAL` on in flight its ratio
@@ -967,7 +1029,8 @@ pub enum DevCommand {
     },
     /// Sends a tlog's frames over UDP with their recorded timing, as the
     /// vehicle sent them: a feedback report's `flight.tlog` brings back
-    /// the vehicle's side of the moment (S31).
+    /// the vehicle's side of the moment (S31). Frames ground stations sent
+    /// (UXDuck's own, which its tlogs keep, ADR-0050 L1) are left out.
     Replay {
         tlog: PathBuf,
         /// Where to send, such as the daemon's UDP link.
@@ -1046,17 +1109,42 @@ pub enum VehicleAction {
     /// Goes to a place and holds there, at a height above home, sea
     /// level or the terrain (`DO_REPOSITION` in GUIDED).
     GoTo {
-        #[arg(long)]
+        // West and south are negative: `--lon -121.88` is a value, not a flag.
+        #[arg(long, allow_hyphen_values = true)]
         lat: f64,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         lon: f64,
-        /// Metres, in `--frame`.
-        #[arg(long, default_value_t = 30.0)]
+        /// Metres, in `--frame`; negative is below it (a submarine's dive).
+        #[arg(long, default_value_t = 30.0, allow_hyphen_values = true)]
         altitude: f64,
         /// What the height is measured from: `above-home`, `amsl` or
         /// `above-ground`.
         #[arg(long, default_value = "above-home")]
         frame: String,
+    },
+    /// Moves home (`DO_SET_HOME`): to `--lat` and `--lon`, on the ground
+    /// there unless `--altitude` says otherwise; without them, to where the
+    /// vehicle is now.
+    SetHome {
+        #[arg(long, allow_hyphen_values = true, requires = "lon")]
+        lat: Option<f64>,
+        #[arg(long, allow_hyphen_values = true, requires = "lat")]
+        lon: Option<f64>,
+        /// Metres above mean sea level; the ground's height there, from
+        /// UXDuck's terrain, when left out.
+        #[arg(long, allow_hyphen_values = true, requires = "lat")]
+        altitude: Option<f64>,
+    },
+    /// Sets the EKF origin, for a vehicle without GPS
+    /// (`DO_SET_GLOBAL_ORIGIN`). ArduPilot takes it only while it has none.
+    SetEkfOrigin {
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        /// Metres above mean sea level; the ground's height there when left out.
+        #[arg(long, allow_hyphen_values = true)]
+        altitude: Option<f64>,
     },
 }
 
@@ -1125,7 +1213,7 @@ async fn run_command(cli: Cli) -> ExitCode {
             ..
         })) => daemon_action(&data_dir, action).await,
         Some(Command::Daemon(args)) => {
-            run_daemon(args, data_dir, cli.dev, Vec::new(), false, owned).await
+            run_daemon(args, data_dir, cli.dev, (Vec::new(), None), false, owned).await
         }
         Some(Command::Forward(args)) => {
             let links = match link_spec::forward_links(
@@ -1140,7 +1228,18 @@ async fn run_command(cli: Cli) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            run_daemon(args.daemon, data_dir, cli.dev, links, true, owned).await
+            let onboard = args.onboard.then_some(crate::daemon::onboard::Onboard {
+                component_id: args.computer_id,
+            });
+            run_daemon(
+                args.daemon,
+                data_dir,
+                cli.dev,
+                (links, onboard),
+                true,
+                owned,
+            )
+            .await
         }
         Some(Command::Update {
             command:
@@ -1185,6 +1284,9 @@ async fn run_command(cli: Cli) -> ExitCode {
             arm_anyway,
         }) => vehicle_command(&data_dir, action, vehicle, confirm, (yes, arm_anyway)).await,
         Some(Command::Preflight(args)) => preflight::run(&data_dir, args).await,
+        Some(Command::Replay(args)) => replay::run(&data_dir, args).await,
+        Some(Command::Companion(args)) => companion::run(args).await,
+        Some(Command::Operation { command }) => operation::run(&data_dir, command).await,
         Some(Command::Checklist(args)) => checklist::run(&data_dir, args).await,
         Some(Command::Trace) => trace(&data_dir).await,
         Some(Command::Debug {
@@ -1194,6 +1296,8 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Dev { command }) => dev(command).await,
         Some(Command::Sim { command }) => sim(&data_dir, command).await,
         Some(Command::Params { command }) => params::run(&data_dir, command).await,
+        Some(Command::Mavlink { command }) => mavlink::run(&data_dir, command).await,
+        Some(Command::Firmware { command }) => firmware::run(&data_dir, command).await,
         Some(Command::Vehicle { command }) => vehicle::run(&data_dir, command).await,
         Some(Command::Practice { command }) => practice::run(&data_dir, command).await,
         Some(Command::Plan { command }) => plan::run(&data_dir, command).await,
@@ -1214,6 +1318,9 @@ async fn run_command(cli: Cli) -> ExitCode {
             product_updates,
         }) => login(&data_dir, email, operator.as_deref(), product_updates).await,
         Some(Command::Logout) => logout(&data_dir).await,
+        Some(Command::Terms { operator, agree }) => {
+            terms(&data_dir, operator.as_deref(), agree).await
+        }
         Some(Command::Account { command }) => account(&data_dir, command).await,
         Some(Command::Config {
             command: ConfigCommand::Set { name, value },
@@ -1297,6 +1404,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             repeat_warning,
             vibration_high,
             leak,
+            fork_messages,
             no_ftp,
             drop_ftp,
             terrain,
@@ -1314,6 +1422,8 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             radio_reversed_roll,
             radio_pace,
             motors,
+            escs,
+            scripting,
             airspeed,
             airspeed_unzeroed,
             px4,
@@ -1330,6 +1440,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 repeat_warning,
                 vibration_high,
                 leak,
+                fork_messages,
                 no_ftp,
                 drop_ftp,
                 terrain,
@@ -1345,6 +1456,8 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 accel: (accel_uncalibrated, accel_fails),
                 radio: radio.then_some((radio_reversed_roll, radio_pace)),
                 motors,
+                escs,
+                scripting,
                 airspeed: airspeed.then_some(!airspeed_unzeroed),
                 px4: px4.then_some(px4_plane),
             };
@@ -1411,11 +1524,19 @@ async fn login(
         .call("account/signIn", serde_json::json!({ "email": email }))
         .await?;
     eprintln!("A code is on its way to {email}.");
+    eprintln!(
+        "By entering the code, you agree to UXDuck's Terms of Service ({TERMS_URL}) and acknowledge its Privacy Policy ({PRIVACY_URL})."
+    );
     let code = prompt("Code: ")?;
     let state = client
         .call(
             "account/verify",
-            serde_json::json!({ "email": email, "code": code, "productUpdates": product_updates }),
+            serde_json::json!({
+                "email": email,
+                "code": code,
+                "productUpdates": product_updates,
+                "termsVersion": uxduck_contracts::version::TERMS_VERSION,
+            }),
         )
         .await?;
     let email = state["email"].as_str().unwrap_or(email.as_str());
@@ -1424,6 +1545,81 @@ async fn login(
     } else {
         eprintln!("Signed in as {email}");
     }
+    Ok(())
+}
+
+const TERMS_URL: &str = "https://uxduck.com/terms";
+const PRIVACY_URL: &str = "https://uxduck.com/privacy";
+
+/// `uxduck terms`: agrees to the Terms of Service for an operator, as the
+/// app asks before it arms a real vehicle (ADR-0047), with no window.
+async fn terms(
+    data_dir: &std::path::Path,
+    operator: Option<&str>,
+    agree: bool,
+) -> Result<(), CliError> {
+    use uxduck_contracts::dto::operator::{Operator, OperatorListResult};
+    use uxduck_contracts::version::TERMS_VERSION;
+
+    let mut client = LocalClient::connect(data_dir).await?;
+    client.initialize().await?;
+    let id = if let Some(id) = operator {
+        id.to_owned()
+    } else {
+        let listed: OperatorListResult =
+            serde_json::from_value(client.call("operator/list", serde_json::json!({})).await?)
+                .map_err(|error| CliError::Protocol(error.to_string()))?;
+        match listed.operators.as_slice() {
+            [one] => one.id.clone(),
+            [] => {
+                let created: Operator = serde_json::from_value(
+                    client
+                        .call(
+                            "operator/create",
+                            serde_json::json!({ "name": uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME }),
+                        )
+                        .await?,
+                )
+                .map_err(|error| CliError::Protocol(error.to_string()))?;
+                created.id
+            }
+            several => {
+                let names: Vec<String> = several
+                    .iter()
+                    .map(|o| format!("{} ({})", o.name, o.id))
+                    .collect();
+                return Err(CliError::Usage(format!(
+                    "Choose who agrees with --operator ID: {}.",
+                    names.join(", ")
+                )));
+            }
+        }
+    };
+    eprintln!("UXDuck's Terms of Service, version {TERMS_VERSION}: {TERMS_URL}");
+    eprintln!(
+        "You are the operator of your vehicles, and 18 or older, or a parent or guardian agrees for you and supervises your flights. UXDuck is not certified by any aviation authority and is not meant to be the only way you control, navigate or watch a vehicle. What it shows can be wrong, late or missing, and its agent can be wrong. UXDuck is provided as is, and its liability is limited as the terms say."
+    );
+    if !agree && !prompt("Type \"agree\" to agree to them: ")?.eq_ignore_ascii_case("agree") {
+        return Err(CliError::Usage(
+            "Not agreed. UXDuck won't arm a real vehicle for this operator until they do.".into(),
+        ));
+    }
+    client
+        .call("operator/switch", serde_json::json!({ "operatorId": id }))
+        .await?;
+    let agreed: Operator = serde_json::from_value(
+        client
+            .call(
+                "terms/accept",
+                serde_json::json!({ "version": TERMS_VERSION, "context": "real-vehicle" }),
+            )
+            .await?,
+    )
+    .map_err(|error| CliError::Protocol(error.to_string()))?;
+    eprintln!(
+        "{} agreed to the Terms of Service ({TERMS_VERSION}).",
+        agreed.name
+    );
     Ok(())
 }
 
@@ -1600,9 +1796,8 @@ async fn account(data_dir: &std::path::Path, command: AccountCommand) -> Result<
         AccountCommand::Sessions { json } => sessions(data_dir, json).await,
         AccountCommand::SignOut { id, others } => sign_out_session(data_dir, id, others).await,
         AccountCommand::Delete => request_deletion(data_dir).await,
-        AccountCommand::Computers { json } => computers(data_dir, json).await,
         AccountCommand::WatchLink { action } => watch_link(data_dir, action).await,
-        AccountCommand::Connect { state } => connect_to_account(data_dir, state == "on").await,
+        AccountCommand::LiveSharing { state } => live_sharing(data_dir, state == "on").await,
         AccountCommand::Flights { json } => crate::uploader::list(data_dir, Stored::Flights, json)
             .await
             .map_err(CliError::Usage),
@@ -1621,27 +1816,6 @@ async fn account(data_dir: &std::path::Path, command: AccountCommand) -> Result<
                 .await
                 .map_err(CliError::Usage)
         }
-        AccountCommand::Watch {
-            computer,
-            vehicle,
-            once,
-        } => crate::watch::watch(data_dir, computer.as_deref(), vehicle.as_deref(), once)
-            .await
-            .map_err(CliError::Usage),
-        AccountCommand::Command {
-            computer,
-            vehicle,
-            take_control,
-            action,
-        } => crate::watch::command(
-            data_dir,
-            &computer,
-            &vehicle,
-            action_json(&action),
-            take_control,
-        )
-        .await
-        .map_err(CliError::Usage),
     }
 }
 
@@ -1692,7 +1866,7 @@ async fn watch_link(data_dir: &std::path::Path, action: WatchLinkAction) -> Resu
                     })
                     .unwrap_or_default();
                 println!(
-                    "{}  {}  flown by {}  {} watching  {ends_in}",
+                    "{}  {}  operator {}  {} watching  {ends_in}",
                     link["id"].as_str().unwrap_or_default(),
                     link["vehicleName"].as_str().unwrap_or("every vehicle"),
                     link["flownBy"].as_str().unwrap_or_default(),
@@ -1710,64 +1884,7 @@ async fn watch_link(data_dir: &std::path::Path, action: WatchLinkAction) -> Resu
     Ok(())
 }
 
-async fn computers(data_dir: &std::path::Path, as_json: bool) -> Result<(), CliError> {
-    let mut client = LocalClient::connect(data_dir).await?;
-    client.initialize().await?;
-    let listed = client
-        .call("account/computers", serde_json::json!({}))
-        .await?;
-    if as_json {
-        println!("{listed}");
-        return Ok(());
-    }
-    let edge = &listed["edge"];
-    match edge["state"].as_str() {
-        Some("signed-out") => {
-            eprintln!("You're not signed in. Run `uxduck login` first.");
-            return Ok(());
-        }
-        Some("off") => println!(
-            "This computer is not connected to your account (`uxduck account connect on`)."
-        ),
-        Some("connected") => println!(
-            "This computer is connected to your account{}.",
-            edge["roundTripMs"]
-                .as_u64()
-                .map(|ms| format!(", {ms} ms away"))
-                .unwrap_or_default()
-        ),
-        _ => println!(
-            "Connecting this computer to your account{}",
-            edge["problem"]
-                .as_str()
-                .map_or_else(|| "…".into(), |why| format!(": {why}"))
-        ),
-    }
-    let this = listed["thisComputer"].as_str();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-    for computer in listed["computers"].as_array().into_iter().flatten() {
-        let name = computer["name"].as_str().unwrap_or("A computer");
-        let mark = if computer["id"].as_str() == this {
-            " (this one)"
-        } else {
-            ""
-        };
-        let state = if computer["online"] == true {
-            "online".to_owned()
-        } else {
-            computer["lastSeenAtMs"].as_u64().map_or_else(
-                || "offline".to_owned(),
-                |at| format!("last seen {}", ago(now_ms.saturating_sub(at))),
-            )
-        };
-        println!("  {name}{mark}: {state}");
-    }
-    Ok(())
-}
-
-async fn connect_to_account(data_dir: &std::path::Path, on: bool) -> Result<(), CliError> {
+async fn live_sharing(data_dir: &std::path::Path, on: bool) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
     let state = client
@@ -1782,29 +1899,18 @@ async fn connect_to_account(data_dir: &std::path::Path, on: bool) -> Result<(), 
     client
         .call(
             "settings/update",
-            serde_json::json!({ "expectedVersion": version, "connectToAccount": on }),
+            serde_json::json!({ "expectedVersion": version, "liveSharing": on }),
         )
         .await?;
     eprintln!(
         "{}",
         if on {
-            "This computer connects to your account while you are signed in."
+            "Live sharing is on: watch links can show this computer while you are signed in."
         } else {
-            "This computer no longer connects to your account."
+            "Live sharing is off: nothing live leaves this computer, and its watch links end."
         }
     );
     Ok(())
-}
-
-/// A duration in the past, roughly: "12 s ago", "3 min ago", "2 h ago", "4 days ago".
-fn ago(ms: u64) -> String {
-    let s = ms / 1000;
-    match s {
-        0..60 => format!("{s} s ago"),
-        60..3600 => format!("{} min ago", s / 60),
-        3600..86_400 => format!("{} h ago", s / 3600),
-        _ => format!("{} days ago", s / 86_400),
-    }
 }
 
 async fn logout(data_dir: &std::path::Path) -> Result<(), CliError> {
@@ -1828,6 +1934,7 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
             speedup,
             in_air,
             binary,
+            allow_network,
             wipe,
             name,
         } => {
@@ -1850,6 +1957,7 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
                 "speedup": speedup,
                 "inAirM": in_air,
                 "binary": binary.as_ref().map(|b| b.display().to_string()),
+                "allowNetwork": allow_network,
                 "wipe": wipe,
                 "name": name,
             });
@@ -1883,6 +1991,18 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
             rpc_call(data_dir, "snapshot/start", Some(&params)).await
         }
         SimCommand::Builds => rpc_call(data_dir, "sim/binaries", None).await,
+        SimCommand::Build {
+            checkout,
+            vehicle,
+            allow_network,
+        } => {
+            let data_dir = data_dir.to_owned();
+            tokio::task::spawn_blocking(move || {
+                sim_own::build(&data_dir, &checkout, &vehicle, allow_network)
+            })
+            .await
+            .map_err(|e| CliError::Protocol(e.to_string()))?
+        }
         SimCommand::Catalogue { refresh } => {
             let params = serde_json::json!({ "refresh": refresh }).to_string();
             rpc_call(data_dir, "sim/catalogue", Some(&params)).await
@@ -1964,7 +2084,51 @@ pub(crate) fn action_json(action: &VehicleAction) -> Value {
             "altitudeM": altitude,
             "altitudeFrame": frame,
         }),
+        VehicleAction::SetHome {
+            lat: Some(lat),
+            lon: Some(lon),
+            altitude,
+        } => serde_json::json!({
+            "type": "set-home",
+            "place": { "latitudeDeg": lat, "longitudeDeg": lon, "altitudeAmslM": altitude },
+        }),
+        VehicleAction::SetHome { .. } => serde_json::json!({ "type": "set-home" }),
+        VehicleAction::SetEkfOrigin { lat, lon, altitude } => serde_json::json!({
+            "type": "set-ekf-origin",
+            "place": { "latitudeDeg": lat, "longitudeDeg": lon, "altitudeAmslM": altitude },
+        }),
     }
+}
+
+/// A place given without a height goes on the ground there: its height
+/// from `terrain/at`, or an error saying why there is none.
+async fn on_the_ground(client: &mut LocalClient, command: &mut Value) -> Result<(), CliError> {
+    let Some(place) = command.get_mut("place") else {
+        return Ok(());
+    };
+    if !place["altitudeAmslM"].is_null() {
+        return Ok(());
+    }
+    let ground = client
+        .call(
+            "terrain/at",
+            serde_json::json!({
+                "latitudeDeg": place["latitudeDeg"],
+                "longitudeDeg": place["longitudeDeg"],
+            }),
+        )
+        .await?;
+    let Some(height) = ground["heightM"].as_f64() else {
+        let why = ground["detail"]
+            .as_str()
+            .unwrap_or("there is no height there");
+        return Err(CliError::Usage(format!(
+            "not sent: the ground's height isn't known ({why}). Give it with --altitude"
+        )));
+    };
+    eprintln!("The ground there is {height} m above sea level.");
+    place["altitudeAmslM"] = height.into();
+    Ok(())
 }
 
 /// `uxduck command`: one `command/send`, and its receipt. A command that
@@ -1976,9 +2140,10 @@ async fn vehicle_command(
     confirm: bool,
     (yes, arm_anyway): (bool, bool),
 ) -> Result<(), CliError> {
-    let command = action_json(&action);
+    let mut command = action_json(&action);
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
+    on_the_ground(&mut client, &mut command).await?;
     let vehicle_id = if let Some(id) = vehicle {
         id
     } else {
@@ -2211,7 +2376,7 @@ pub(crate) async fn start_daemon(
     if let Ok(client) = LocalClient::connect(data_dir).await {
         return Ok(client);
     }
-    let exe = std::env::current_exe()
+    let exe = crate::paths::executable()
         .map_err(|e| CliError::Usage(format!("cannot find uxduck to start it: {e}")))?;
     let mut command = std::process::Command::new(exe);
     let mut diagnostic = tempfile::NamedTempFile::new()?;
@@ -2281,7 +2446,8 @@ async fn open(
         }
         // The desktop app when chosen (S110), else a page already open comes
         // forward (S107), else a new page in a browser. Opened again while
-        // it ran, the tray says so under its icon; never at first start.
+        // it ran in the menu bar only, the tray says so under its icon;
+        // never at first start, nor when a window or page shows.
         let opened = client
             .call(
                 "app/open",
@@ -2866,15 +3032,25 @@ async fn replay(tlog: &std::path::Path, to: &str, speed: f64) -> Result<(), CliE
         return Err(CliError::Usage("--speed must be above 0".into()));
     }
     let bytes = std::fs::read(tlog)?;
-    let records = uxduck_mavlink::tlog::read(&bytes);
+    let every = uxduck_mavlink::tlog::read(&bytes);
+    let total = every.len();
+    let records = uxduck_mavlink::tlog::without_ground_stations(every);
     let Some(first) = records.first().map(|(at, _)| *at) else {
         return Err(CliError::Usage(format!(
-            "{} holds no frames",
+            "{} holds no verified autopilot telemetry. UDP replay requires a recorded \
+             autopilot heartbeat and excludes commands, transfers, unknown messages and \
+             unidentified senders. Use in-app Replay to inspect this log without transmitting it.",
             tlog.display()
         )));
     };
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
-    eprintln!("replaying {} frames to {target}", records.len());
+    eprintln!(
+        "replaying {} verified telemetry frames to {target}; omitted {} frames that are not \
+         verified autopilot telemetry (commands, transfers, unknown messages or senders). \
+         Use in-app Replay to inspect the full log without transmitting it.",
+        records.len(),
+        total - records.len()
+    );
     let started = tokio::time::Instant::now();
     for (at, frame) in &records {
         #[allow(
@@ -3007,6 +3183,7 @@ struct FakeOptions {
     repeat_warning: bool,
     vibration_high: bool,
     leak: bool,
+    fork_messages: bool,
     no_ftp: bool,
     drop_ftp: bool,
     terrain: bool,
@@ -3023,6 +3200,10 @@ struct FakeOptions {
     radio: Option<(bool, f64)>,
     /// Its frame listed for the motor test (S188).
     motors: bool,
+    /// Its ESCs' `MOT_PWM_TYPE`, listed for their calibration (S216).
+    escs: Option<u8>,
+    /// Its `SCR_ENABLE`, listed with a script (S259).
+    scripting: Option<u8>,
     /// A plane with an airspeed sensor (S190), zeroed or not.
     airspeed: Option<bool>,
     /// PX4 (S191): a plane, or a quad.
@@ -3079,6 +3260,7 @@ async fn fake_vehicle(
         repeat_warning,
         vibration_high,
         leak,
+        fork_messages,
         no_ftp,
         drop_ftp,
         terrain,
@@ -3090,6 +3272,8 @@ async fn fake_vehicle(
         accel: (accel_uncalibrated, accel_fails),
         radio,
         motors,
+        escs,
+        scripting,
         airspeed,
         px4,
     } = options;
@@ -3111,6 +3295,7 @@ async fn fake_vehicle(
     vehicle.repeat_warning = repeat_warning;
     vehicle.vibration_high = vibration_high;
     vehicle.leak = leak;
+    vehicle.fork_messages = fork_messages;
     vehicle.ftp = !no_ftp;
     vehicle.files.drop_every = drop_ftp.then_some(7);
     vehicle.terrain = terrain.then(|| {
@@ -3133,6 +3318,12 @@ async fn fake_vehicle(
         (accel_uncalibrated, accel_fails),
         (radio, motors, airspeed),
     );
+    if let Some(pwm_type) = escs {
+        vehicle.add_escs(pwm_type);
+    }
+    if let Some(enabled) = scripting {
+        vehicle.add_scripting(enabled);
+    }
     if let Some(plane) = px4 {
         vehicle.make_px4(plane, !accel_uncalibrated);
         if let Some(px4) = &mut vehicle.px4 {
@@ -3186,7 +3377,10 @@ async fn run_daemon(
     args: DaemonArgs,
     data_dir: PathBuf,
     dev: bool,
-    links: Vec<uxduck_contracts::dto::link::LinkAddParams>,
+    (links, onboard): (
+        Vec<uxduck_contracts::dto::link::LinkAddParams>,
+        Option<crate::daemon::onboard::Onboard>,
+    ),
     headless: bool,
     exit_on_stdin_close: bool,
 ) -> Result<(), CliError> {
@@ -3247,6 +3441,7 @@ async fn run_daemon(
         },
         headless,
         links,
+        onboard,
         update_check: !args.no_update_check,
         analytics: crate::analytics::Config::from_env(
             dev,
@@ -3484,5 +3679,98 @@ mod plugin_test_checks {
             .into_iter()
             .collect();
         assert!(own_test(dir.path(), &produced).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod go_to_arguments {
+    use clap::Parser;
+
+    use super::{Cli, Command, VehicleAction};
+
+    #[test]
+    fn west_south_and_below_are_values_not_flags() {
+        let cli = Cli::try_parse_from([
+            "uxduck",
+            "command",
+            "go-to",
+            "--lat",
+            "-33.85",
+            "--lon",
+            "-121.88",
+            "--altitude",
+            "-20",
+        ])
+        .expect("negative numbers are values");
+        let Some(Command::Send { action, .. }) = cli.command else {
+            panic!("{cli:?}")
+        };
+        let VehicleAction::GoTo {
+            lat, lon, altitude, ..
+        } = action
+        else {
+            panic!("{action:?}")
+        };
+        assert_eq!((lat, lon, altitude), (-33.85, -121.88, -20.0));
+    }
+
+    #[test]
+    fn home_goes_on_the_ground_at_a_place_or_where_the_vehicle_is() {
+        let action = |args: &[&str]| {
+            let cli = Cli::try_parse_from([["uxduck", "command"].as_slice(), args].concat())
+                .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            let Some(Command::Send { action, .. }) = cli.command else {
+                panic!("{cli:?}")
+            };
+            super::action_json(&action)
+        };
+        assert_eq!(
+            action(&["set-home"]),
+            serde_json::json!({ "type": "set-home" })
+        );
+        let there = action(&["set-home", "--lat", "-35.36", "--lon", "149.16"]);
+        assert_eq!(there["place"]["longitudeDeg"], 149.16);
+        // Looked up from the terrain before it is sent.
+        assert!(there["place"]["altitudeAmslM"].is_null());
+        let given = action(&[
+            "set-ekf-origin",
+            "--lat",
+            "-35.36",
+            "--lon",
+            "149.16",
+            "--altitude",
+            "584",
+        ]);
+        assert_eq!(given["type"], "set-ekf-origin");
+        assert_eq!(given["place"]["altitudeAmslM"], 584.0);
+        // A height needs a place; a latitude needs a longitude.
+        for args in [
+            ["uxduck", "command", "set-home", "--altitude", "10"].as_slice(),
+            ["uxduck", "command", "set-home", "--lat", "1"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod logbook_arguments {
+    use clap::Parser;
+
+    use super::{AccountCommand, Cli, Command};
+
+    #[test]
+    fn logbook_is_the_name_and_flights_still_works() {
+        for name in ["logbook", "flights"] {
+            let cli = Cli::try_parse_from(["uxduck", "account", name, "--json"])
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let Some(Command::Account {
+                command: AccountCommand::Flights { json },
+            }) = cli.command
+            else {
+                panic!("{name}: {cli:?}")
+            };
+            assert!(json, "{name}");
+        }
     }
 }

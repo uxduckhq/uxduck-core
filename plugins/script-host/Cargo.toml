@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 extism-pdk = "1.4"
 boa_engine = { version = "0.22", default-features = false }
+serde = "1"
 serde_json = "1"
 getrandom = "0.4"
 

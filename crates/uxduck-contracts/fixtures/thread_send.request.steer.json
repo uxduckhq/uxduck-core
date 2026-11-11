@@ -1,0 +1,4 @@
+{
+  "method": "thread/send",
+  "params": { "threadId": "th9a8b7c6d5e4f3a2b", "text": "Keep this read only", "behavior": "steer" }
+}

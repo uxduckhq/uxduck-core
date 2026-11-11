@@ -15,13 +15,15 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, optional = true, features = ["stream"] }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
 eventsource-stream = { workspace = true, optional = true }
 
 [features]
 default = ["http"]
 # The OpenAI Responses and Anthropic Messages providers over HTTP. Off in
 # hosts that bring their own transport (the cloud host on Workers, S16).
-http = ["dep:reqwest", "dep:eventsource-stream"]
+http = ["dep:reqwest", "dep:eventsource-stream", "dep:tokio", "dep:tokio-tungstenite"]
 # The names these had before they shared one HTTP client.
 openai = ["http"]
 anthropic = ["http"]

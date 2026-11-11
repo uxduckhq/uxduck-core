@@ -3,7 +3,7 @@
 //! fixtures and the tests use the same code, so what is published is what
 //! the cache reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::chunk::{Chunk, VOID};
 use crate::dataset::{CELL_DEGREES, CHUNKS_PER_SIDE, Cell, ChunkKey, Dataset, Tile};
@@ -156,7 +156,7 @@ impl ReleaseBuilder {
                 source: source.into(),
                 heights: dataset.geoid().into(),
                 cells: BTreeMap::new(),
-                sea_cells: Vec::new(),
+                sea_cells: BTreeSet::new(),
             },
             cells: BTreeMap::new(),
         }
@@ -212,7 +212,7 @@ impl ReleaseBuilder {
             sea.dedup();
             let all = usize::try_from(CELL_DEGREES * CELL_DEGREES).unwrap_or(25);
             if tiles.is_empty() && sea.len() == all {
-                self.release.sea_cells.push(cell.name());
+                self.release.sea_cells.insert(cell.name());
                 continue;
             }
             let index = cell_index(self.release.dataset, &self.release.id, cell, tiles, sea);
@@ -220,7 +220,6 @@ impl ReleaseBuilder {
             self.release.cells.insert(cell.name(), file_ref(&bytes));
             keep(self.release.cell_path(cell), bytes);
         }
-        self.release.sea_cells.sort();
         self.release
     }
 }

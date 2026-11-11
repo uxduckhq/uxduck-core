@@ -1,0 +1,7 @@
+{
+  "method": "flight/remove",
+  "params": {
+    "id": "fl0123456789abcdef",
+    "video": true
+  }
+}

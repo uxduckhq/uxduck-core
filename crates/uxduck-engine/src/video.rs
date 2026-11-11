@@ -132,6 +132,14 @@ pub trait VideoPort: Send + std::fmt::Debug {
     }
     /// Finishes a recording; the daemon reports its size when it has.
     fn stop_recording(&mut self, _recording_id: &str) {}
+    /// Deletes an ended recording's file in the media folder, with what
+    /// UXDuck kept for it (S348). One already gone is deleted.
+    ///
+    /// # Errors
+    /// Why it is still there, in words.
+    fn delete_recording(&mut self, _recording_id: &str, _file: &str) -> Result<(), String> {
+        Err("Recordings need UXDuck Desktop.".into())
+    }
     /// Cuts a recording interrupted by a crash, its file named, back to
     /// its last whole fragment: its size and length, or `None` if nothing
     /// is left.
@@ -269,9 +277,9 @@ pub(crate) struct Video {
     opened: std::collections::BTreeSet<String>,
     /// The recording in progress for each camera (S40).
     pub(crate) recording: BTreeMap<String, String>,
-    /// Cameras whose vehicle's own camera was told to record (S145): its
-    /// vehicle and the receipt.
-    pub(crate) camera_recording: BTreeMap<String, (String, String)>,
+    /// Vehicles whose onboard cameras were told to record (S145): the start
+    /// receipt, shared by every stream because the command targets all cameras.
+    pub(crate) camera_recording: BTreeMap<String, String>,
     /// Each configured capture run, independent of updates to its source counters.
     capture_epochs: BTreeMap<String, u64>,
     /// Permission failures need an explicit selection to request/recheck access.
@@ -309,6 +317,33 @@ fn default_name(source: &VideoSource) -> String {
         .url
         .as_deref()
         .map_or_else(|| udp_name(&source.id, source.port, &source.sender), redact)
+}
+
+/// The id of the camera waiting on a UDP port added by hand, before any
+/// stream arrives there: `udp-5601`. The first stream to arrive, whose id is
+/// `udp-5601-<sender>`, becomes it.
+fn waiting_id(port: u16) -> String {
+    format!("udp-{port}")
+}
+
+/// A camera added on a UDP port that nothing has sent to yet.
+fn is_waiting(source: &VideoSource) -> bool {
+    source.id == waiting_id(source.port)
+        && source.url.is_none()
+        && source.capture.is_none()
+        && source.file.is_none()
+}
+
+/// A name typed by hand: trimmed, empty for none, at most 80 characters.
+fn hand_name(name: Option<&str>) -> Result<Option<String>, ApiError> {
+    let name = name.map(str::trim).filter(|n| !n.is_empty());
+    if name.is_some_and(|n| n.chars().count() > 80) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "a camera's name is at most 80 characters",
+        ));
+    }
+    Ok(name.map(str::to_owned))
 }
 
 fn not_found(id: &str) -> ApiError {
@@ -426,7 +461,7 @@ impl Engine {
         for mut source in receiving {
             source.state = VideoState::Stopped;
             source.state_detail = None;
-            source.counters.bitrate_bps = 0;
+            source.counters.stop();
             source.changed_at_us = now;
             source.version += 1;
             self.commit_as(actor(), Change::VideoSourceUpserted { source });
@@ -552,6 +587,7 @@ impl Engine {
             let now = self.clock.now_us();
             let source = VideoSource {
                 recording_requested: false,
+                reencoding: None,
                 id: id.clone(),
                 name: redact(uri),
                 named_by_hand: false,
@@ -619,8 +655,17 @@ impl Engine {
         } else {
             VideoState::Receiving
         };
+        // The first stream on a port added by hand becomes the camera
+        // waiting there, with the name, vehicle and settings given to it.
+        let waiting = (before.is_none()
+            && id.starts_with(&format!("{}-", waiting_id(report.port))))
+        .then(|| self.state.video_sources.get(&waiting_id(report.port)))
+        .flatten()
+        .filter(|s| is_waiting(s))
+        .cloned();
         let mut source = before.clone().unwrap_or_else(|| VideoSource {
             recording_requested: false,
+            reencoding: None,
             id: id.clone(),
             name: udp_name(&id, report.port, &report.sender),
             named_by_hand: false,
@@ -650,6 +695,17 @@ impl Engine {
             changed_at_us: now,
             version: 0,
         });
+        if let Some(waiting) = waiting {
+            source.name = waiting.name;
+            source.named_by_hand = waiting.named_by_hand;
+            source.vehicle_id = waiting.vehicle_id;
+            source.assigned_by_hand = waiting.assigned_by_hand;
+            source.vehicle_camera = waiting.vehicle_camera;
+            source.vehicle_camera_by_hand = waiting.vehicle_camera_by_hand;
+            source.record_alone = waiting.record_alone;
+            source.added_by_hand = true;
+            self.commit_as(actor(), Change::VideoSourceRemoved { id: waiting.id });
+        }
         let was_stopped = before
             .as_ref()
             .is_some_and(|b| b.state == VideoState::Stopped);
@@ -733,6 +789,44 @@ impl Engine {
         }
     }
 
+    /// A camera that sends no IDR could not be re-encoded for live view.
+    /// The encoder now re-encoding a camera that sends no IDR, or none.
+    pub fn video_reencoding(&mut self, source_id: &str, encoder: Option<String>) {
+        let Some(mut source) = self.state.video_sources.get(source_id).cloned() else {
+            return;
+        };
+        if source.reencoding == encoder {
+            return;
+        }
+        source.reencoding = encoder;
+        source.version += 1;
+        self.commit_as(actor(), Change::VideoSourceUpserted { source });
+    }
+
+    /// How cameras that send no IDR are re-encoded (Settings › Cameras).
+    #[must_use]
+    pub fn video_reencoder(&self) -> uxduck_core::domain::video::Reencoder {
+        self.state.settings.video_reencoder
+    }
+
+    pub fn video_reencode_failed(&mut self, source_id: &str, why: String) {
+        let Some(source) = self.state.video_sources.get(source_id).cloned() else {
+            return;
+        };
+        self.raise(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Transient,
+            subject: Subject::VideoSource {
+                id: source.id.clone(),
+            },
+            title: format!("Can't play {} live", source.name),
+            body: Some(why),
+            actions: Vec::new(),
+            condition: None,
+            report: None,
+        });
+    }
+
     fn notify_new_video(&mut self, source: &VideoSource) {
         let from = source
             .vehicle_id
@@ -774,7 +868,7 @@ impl Engine {
         if let Some(live) = self.video.live.get(source_id) {
             source.counters = live.clone();
         }
-        source.counters.bitrate_bps = 0;
+        source.counters.stop();
         if source.state != VideoState::Stopped {
             source.changed_at_us = self.clock.now_us();
         }
@@ -1275,6 +1369,7 @@ impl Engine {
             // The same source shape and lifecycle as a manually added camera.
             VideoSource {
                 recording_requested: false,
+                reencoding: None,
                 id: format!("vs{}", &self.random.token()[..16]),
                 name: input.name.clone(),
                 named_by_hand: false,
@@ -1394,6 +1489,7 @@ impl Engine {
         let now = self.clock.now_us();
         let mut source = previous.unwrap_or_else(|| VideoSource {
             recording_requested: false,
+            reencoding: None,
             id: format!("vs{}", &self.random.token()[..16]),
             name: input.name.clone(),
             named_by_hand: false,
@@ -1513,37 +1609,49 @@ impl Engine {
         Ok(source)
     }
 
-    fn video_add(&mut self, url: &str) -> Result<VideoAddResult, ApiError> {
+    /// Listens on a UDP port added by hand, kept in settings; the port
+    /// UXDuck listens on anyway needs no adding.
+    fn add_video_port(&mut self, port: u16) -> Result<(), ApiError> {
+        let mut settings = self.state.settings.clone();
+        // The port UXDuck listens on anyway needs no adding, but a
+        // camera on it can still be named before it sends.
+        if self.video.listening != Some(port) && !settings.video_ports.contains(&port) {
+            if settings.video_ports.len() >= MAX_VIDEO_PORTS {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    format!("UXDuck listens on at most {MAX_VIDEO_PORTS} ports added by hand"),
+                ));
+            }
+            let before = settings.video_ports.clone();
+            settings.video_ports.push(port);
+            settings.version += 1;
+            let after = settings.video_ports.clone();
+            self.commit_as(actor(), Change::SettingsChanged { settings });
+            self.listen_video_ports(&before, &after);
+        }
+        if let Some(error) = self.video.extra_errors.get(&port) {
+            return Err(ApiError::new(ErrorKind::PortInUse, error.clone()));
+        }
+        Ok(())
+    }
+
+    fn video_add(&mut self, params: &VideoAddParams) -> Result<VideoAddResult, ApiError> {
+        let url = params.url.as_str();
+        let name = hand_name(params.name.as_deref())?;
+        if let Some(vehicle_id) = &params.vehicle_id
+            && !self.state.vehicles.contains_key(vehicle_id)
+        {
+            return Err(ApiError::new(
+                ErrorKind::NotFound,
+                format!("no vehicle {vehicle_id}"),
+            ));
+        }
         match input(url)? {
             Input::Udp(port) => {
-                let mut settings = self.state.settings.clone();
-                if !settings.video_ports.contains(&port) {
-                    if settings.video_ports.len() >= MAX_VIDEO_PORTS {
-                        return Err(ApiError::new(
-                            ErrorKind::InvalidValue,
-                            format!(
-                                "UXDuck listens on at most {MAX_VIDEO_PORTS} ports added by hand"
-                            ),
-                        ));
-                    }
-                    if self.video.listening == Some(port) {
-                        return Err(ApiError::new(
-                            ErrorKind::InvalidValue,
-                            format!("UXDuck already listens on UDP {port}"),
-                        ));
-                    }
-                    let before = settings.video_ports.clone();
-                    settings.video_ports.push(port);
-                    settings.version += 1;
-                    let after = settings.video_ports.clone();
-                    self.commit_as(actor(), Change::SettingsChanged { settings });
-                    self.listen_video_ports(&before, &after);
-                }
-                if let Some(error) = self.video.extra_errors.get(&port) {
-                    return Err(ApiError::new(ErrorKind::PortInUse, error.clone()));
-                }
+                self.add_video_port(port)?;
+                let source = self.camera_on_port(port, name, params.vehicle_id.clone());
                 Ok(VideoAddResult {
-                    source: None,
+                    source: Some((&source).into()),
                     port: Some(port),
                 })
             }
@@ -1554,18 +1662,21 @@ impl Engine {
                     .video_sources
                     .values()
                     .find(|s| s.url.as_deref() == Some(url.as_str()))
+                    .cloned()
                 {
+                    let same = self.name_and_assign(same, name, params.vehicle_id.clone());
                     return Ok(VideoAddResult {
-                        source: Some(same.into()),
+                        source: Some((&same).into()),
                         port: None,
                     });
                 }
                 let now = self.clock.now_us();
                 let source = VideoSource {
                     recording_requested: false,
+                    reencoding: None,
                     id: format!("vs{}", &self.random.token()[..16]),
-                    name: redact(&url),
-                    named_by_hand: false,
+                    name: name.clone().unwrap_or_else(|| redact(&url)),
+                    named_by_hand: name.is_some(),
                     port,
                     sender: format!("{host}:{port}"),
                     container: uxduck_core::domain::video::VideoContainer::Rtp,
@@ -1578,8 +1689,8 @@ impl Engine {
                         "Connecting to {}",
                         uxduck_core::domain::video::redact(&url)
                     )),
-                    vehicle_id: None,
-                    assigned_by_hand: false,
+                    vehicle_id: params.vehicle_id.clone(),
+                    assigned_by_hand: params.vehicle_id.is_some(),
                     vehicle_camera: false,
                     vehicle_camera_by_hand: false,
                     record_alone: false,
@@ -1610,6 +1721,106 @@ impl Engine {
         }
     }
 
+    /// The camera a UDP port added by hand stands for (S39): the one waiting
+    /// there, else the first already arriving, else a new one waiting for
+    /// its first picture, so it can be named and given its vehicle before
+    /// anything is switched on (maintainer, 2026-10-29).
+    fn camera_on_port(
+        &mut self,
+        port: u16,
+        name: Option<String>,
+        vehicle_id: Option<String>,
+    ) -> VideoSource {
+        let existing = self
+            .state
+            .video_sources
+            .get(&waiting_id(port))
+            .or_else(|| {
+                self.state
+                    .video_sources
+                    .values()
+                    .filter(|s| {
+                        s.port == port && s.url.is_none() && s.capture.is_none() && s.file.is_none()
+                    })
+                    .min_by_key(|s| s.first_seen_us)
+            })
+            .cloned();
+        if let Some(source) = existing {
+            return self.name_and_assign(source, name, vehicle_id);
+        }
+        let now = self.clock.now_us();
+        let id = waiting_id(port);
+        let source = VideoSource {
+            recording_requested: false,
+            reencoding: None,
+            name: name.clone().unwrap_or_else(|| udp_name(&id, port, "")),
+            named_by_hand: name.is_some(),
+            id,
+            port,
+            sender: String::new(),
+            container: uxduck_core::domain::video::VideoContainer::Ts,
+            codec: None,
+            width: None,
+            height: None,
+            frame_rate: None,
+            state: VideoState::Stopped,
+            state_detail: Some(format!("Waiting for video on UDP {port}")),
+            assigned_by_hand: vehicle_id.is_some(),
+            vehicle_id,
+            vehicle_camera: false,
+            vehicle_camera_by_hand: false,
+            record_alone: false,
+            klv: false,
+            url: None,
+            added_by_hand: true,
+            capture: None,
+            file: None,
+            tracks: Vec::new(),
+            audio: None,
+            counters: uxduck_core::domain::video::VideoCounters::default(),
+            first_seen_us: now,
+            // Long ago, so its first picture says "Video from …".
+            changed_at_us: 0,
+            version: 1,
+        };
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        source
+    }
+
+    /// Applies what was typed with a camera added again: a name, a vehicle.
+    fn name_and_assign(
+        &mut self,
+        mut source: VideoSource,
+        name: Option<String>,
+        vehicle_id: Option<String>,
+    ) -> VideoSource {
+        if name.is_none() && vehicle_id.is_none() {
+            return source;
+        }
+        if let Some(name) = name {
+            source.name = name;
+            source.named_by_hand = true;
+        }
+        if let Some(vehicle_id) = vehicle_id {
+            source.vehicle_id = Some(vehicle_id);
+            source.assigned_by_hand = true;
+        }
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.review_recordings();
+        source
+    }
+
     fn video_remove(&mut self, params: &VideoRemoveParams) -> Result<(), ApiError> {
         if let Some(port) = params.port {
             let mut settings = self.state.settings.clone();
@@ -1625,6 +1836,14 @@ impl Engine {
             let after = settings.video_ports.clone();
             self.commit_as(actor(), Change::SettingsChanged { settings });
             self.listen_video_ports(&before, &after);
+            if self.state.video_sources.contains_key(&waiting_id(port)) {
+                self.commit_as(
+                    actor(),
+                    Change::VideoSourceRemoved {
+                        id: waiting_id(port),
+                    },
+                );
+            }
         }
         if let Some(id) = &params.source_id {
             let source = self
@@ -1674,7 +1893,21 @@ impl Engine {
             self.video.remote_watches.remove(id);
             self.video.live.remove(id);
             self.video.by_hand.remove(id);
+            // A camera still waiting was its port: nothing else is there.
+            let waiting = is_waiting(source).then_some(source.port);
             self.commit_as(actor(), Change::VideoSourceRemoved { id: id.clone() });
+            if let Some(port) = waiting
+                && self.state.settings.video_ports.contains(&port)
+                && !self.state.video_sources.values().any(|s| s.port == port)
+            {
+                let mut settings = self.state.settings.clone();
+                let before = settings.video_ports.clone();
+                settings.video_ports.retain(|p| *p != port);
+                settings.version += 1;
+                let after = settings.video_ports.clone();
+                self.commit_as(actor(), Change::SettingsChanged { settings });
+                self.listen_video_ports(&before, &after);
+            }
         }
         Ok(())
     }
@@ -1754,8 +1987,13 @@ impl Engine {
         for mut source in sources {
             let recording = self.recording_intent(&source).is_some()
                 && source.capture.as_ref().is_none_or(|c| c.enabled);
-            if source.recording_requested != recording {
+            // Nobody watching (after a restart, say): nothing re-encodes it.
+            let stale_reencoding = source.reencoding.is_some() && !watched.contains(&source.id);
+            if source.recording_requested != recording || stale_reencoding {
                 source.recording_requested = recording;
+                if stale_reencoding {
+                    source.reencoding = None;
+                }
                 source.version += 1;
                 self.commit_as(
                     actor(),
@@ -1871,7 +2109,7 @@ impl Engine {
                     }
                     source.state = VideoState::Stopped;
                     source.state_detail = Some(detail);
-                    source.counters.bitrate_bps = 0;
+                    source.counters.stop();
                     source.version += 1;
                     self.commit_as(actor(), Change::VideoSourceUpserted { source });
                 }
@@ -2046,9 +2284,9 @@ pub(crate) fn handle(
             engine.video_unwatch(connection, &token);
             to_value(&Empty {})
         }
-        ClientRequest::VideoAdd(VideoAddParams { url }) => {
+        ClientRequest::VideoAdd(params) => {
             require(Capability::Config)?;
-            to_value(&engine.video_add(&url)?)
+            to_value(&engine.video_add(&params)?)
         }
         ClientRequest::VideoRemove(params) => {
             require(Capability::Config)?;

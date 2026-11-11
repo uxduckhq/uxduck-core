@@ -95,7 +95,7 @@
       "title": "Plan on the vehicle"
     },
     {
-      "detail": "Alpha's mission doesn't fly above terrain.",
+      "detail": "Alpha's mission has no heights above terrain.",
       "gates": false,
       "id": "uxduck:terrain",
       "severity": "warn",

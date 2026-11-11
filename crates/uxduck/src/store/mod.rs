@@ -34,6 +34,16 @@ pub enum StoreError {
     },
     #[error("the database: {0}")]
     Sqlite(#[from] sqlite::SqliteError),
+    #[error(
+        "the checkpoint at event {seq} does not parse ({error}), and the event log cannot rebuild it ({log}). Nothing was changed: the previous version of UXDuck still reads it"
+    )]
+    Checkpoint {
+        seq: u64,
+        error: serde_json::Error,
+        log: String,
+    },
+    #[error("setting aside the checkpoint that does not parse: {0}")]
+    SetAside(std::io::Error),
 }
 
 enum Command {
@@ -126,7 +136,26 @@ pub fn open(data_dir: &Path) -> Result<(Store, Loaded), StoreError> {
         );
     }
 
-    let checkpoint = sqlite::load_checkpoint(&db)?;
+    if let Some(first) = read.unreadable.first() {
+        tracing::warn!(
+            lines = read.unreadable.len(),
+            line = first.line,
+            error = %first.error,
+            code = "event-log-unreadable",
+            "kept lines of the event log this build cannot read"
+        );
+    }
+
+    let checkpoint = match sqlite::checkpoint_row(&db)? {
+        None => None,
+        Some((seq, text)) => match sqlite::parse_checkpoint(&text) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                set_aside_checkpoint(data_dir, seq, &text, error, &read)?;
+                None
+            }
+        },
+    };
     let checkpoint_seq = checkpoint.as_ref().map_or(0, |c| c.seq);
     let restored = state::restore(checkpoint, read.events.iter().cloned());
     if let Some(gap) = restored.gap {
@@ -171,6 +200,51 @@ pub fn open(data_dir: &Path) -> Result<(Store, Loaded), StoreError> {
         },
         loaded,
     ))
+}
+
+/// A checkpoint this build cannot read is rebuilt from the event log when
+/// the log holds every event up to it, from the first. Its JSON is kept in
+/// `backups/` for a build that can read it. Otherwise nothing is changed
+/// and the daemon does not start, rather than start without the operator's
+/// world.
+fn set_aside_checkpoint(
+    data_dir: &Path,
+    seq: u64,
+    text: &str,
+    error: serde_json::Error,
+    read: &event_log::Read,
+) -> Result<(), StoreError> {
+    let complete = read
+        .events
+        .iter()
+        .zip(1..)
+        .all(|(event, expected)| event.seq == expected);
+    let last = read.events.last().map_or(0, |e| e.seq);
+    if !complete || last < seq || !read.unreadable.is_empty() {
+        let first = read.events.first().map_or(0, |e| e.seq);
+        return Err(StoreError::Checkpoint {
+            seq,
+            error,
+            log: format!(
+                "it holds events {first} to {last}{}, {} unreadable lines",
+                if complete { "" } else { " with holes" },
+                read.unreadable.len()
+            ),
+        });
+    }
+    let backups = data_dir.join("backups");
+    let kept = backups.join(format!("unreadable-checkpoint-{seq}.json"));
+    std::fs::create_dir_all(&backups)
+        .and_then(|()| std::fs::write(&kept, text))
+        .map_err(StoreError::SetAside)?;
+    tracing::error!(
+        seq,
+        %error,
+        kept = %kept.display(),
+        code = "store-checkpoint-unreadable",
+        "the checkpoint does not parse; rebuilding it from the event log"
+    );
+    Ok(())
 }
 
 /// The writer loop: take a batch, append it to the log, hand it to the OS,
@@ -285,6 +359,7 @@ mod tests {
                     display: None,
                     account_id: None,
                     controller_mappings: Vec::new(),
+                    terms: None,
                     version: 1,
                 },
             },
@@ -322,6 +397,52 @@ mod tests {
         store.close();
         let db = sqlite::open(&dir.path().join("uxduck.db")).unwrap();
         assert_eq!(sqlite::operator_names(&db).unwrap(), ["Ana", "Ben", "Cy"]);
+        assert_eq!(sqlite::projected_seq(&db).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_forgotten_flight_stays_removed_after_native_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let flight = serde_json::from_value(serde_json::json!({
+            "id": "fl1", "vehicleId": "v1", "vehicleName": "Alpha",
+            "vehicleType": "Quadrotor", "armedAtUs": 10, "endedAtUs": 50,
+            "end": "disarmed", "recordedHere": true, "keep": true, "version": 1
+        }))
+        .unwrap();
+        let changes = [
+            Change::FlightUpserted { flight },
+            Change::FlightRemoved { id: "fl1".into() },
+            Change::FlightForgotten { id: "fl1".into() },
+        ];
+        let (store, _) = open(dir.path()).unwrap();
+        let mut handle = store.handle.clone();
+        let mut state = State::default();
+        for (index, change) in changes.into_iter().enumerate() {
+            let event = Event {
+                seq: index as u64 + 1,
+                ts_us: 100,
+                actor: Actor::default(),
+                change,
+            };
+            state.apply(&event).unwrap();
+            handle.append(&event);
+            if index == 0 {
+                handle.checkpoint(&state);
+            }
+        }
+        store.close();
+        let (store, loaded) = open(dir.path()).unwrap();
+        assert!(loaded.state.flights.is_empty());
+        assert!(loaded.state.forgotten_flights.contains("fl1"));
+        assert_eq!(loaded.state.seq, 3);
+        let mut handle = store.handle.clone();
+        handle.checkpoint(&loaded.state);
+        store.close();
+        let (store, loaded) = open(dir.path()).unwrap();
+        assert!(loaded.state.flights.is_empty());
+        assert!(loaded.state.forgotten_flights.contains("fl1"));
+        store.close();
+        let db = sqlite::open(&dir.path().join("uxduck.db")).unwrap();
         assert_eq!(sqlite::projected_seq(&db).unwrap(), 3);
     }
 
@@ -410,6 +531,163 @@ mod tests {
         assert!(!dir.path().join("events.ndjson.damaged-3").exists());
         let log = std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap();
         assert_eq!(log.lines().count(), 3, "nothing truncated");
+    }
+
+    /// A camera as 0.8.0 wrote it, before its counters had `recoveryPoints`.
+    const CAMERA_0_8_0: &str = r#"{"id":"udp-5600-127.0.0.1:5000","name":"udp://127.0.0.1:5600","port":5600,"sender":"127.0.0.1:5000","container":"ts","state":"stopped","counters":{"bitrateBps":0,"datagrams":40,"pictures":20,"keyframes":2,"lost":0,"damaged":0,"pesLengthMismatches":0,"pesLengthMaxExcess":0,"nalsDropped":0},"firstSeenUs":1,"changedAtUs":1,"version":1}"#;
+
+    fn write_checkpoint(dir: &Path, seq: u64, state: &str) {
+        let db = sqlite::open(&dir.join("uxduck.db")).unwrap();
+        db.execute(
+            "INSERT INTO checkpoint (id, seq, state, written_at_us) VALUES (1, ?1, ?2, 0)",
+            rusqlite::params![seq.cast_signed(), state],
+        )
+        .unwrap();
+    }
+
+    fn log_of(events: &[Event]) -> String {
+        let mut log = String::new();
+        for event in events {
+            log.push_str(&serde_json::to_string(event).unwrap());
+            log.push('\n');
+        }
+        log
+    }
+
+    /// FB-58 follow-up: 0.8.1-beta.2 could read neither a 0.8.0 checkpoint
+    /// with a camera nor the camera's event, so it cut the log off there
+    /// and would not start.
+    #[test]
+    fn a_camera_checkpoint_and_event_from_0_8_0_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let camera_event = format!(
+            r#"{{"seq":1,"tsUs":1,"actor":{{"clientId":"daemon"}},"change":{{"type":"videoSourceUpserted","source":{CAMERA_0_8_0}}}}}"#
+        );
+        let log = format!("{camera_event}\n{}", log_of(&[upsert(2, "Ana")]));
+        std::fs::write(dir.path().join("events.ndjson"), &log).unwrap();
+        write_checkpoint(
+            dir.path(),
+            1,
+            &format!(
+                r#"{{"seq":1,"operators":{{}},"videoSources":{{"udp-5600-127.0.0.1:5000":{CAMERA_0_8_0}}}}}"#
+            ),
+        );
+
+        let (store, loaded) = open(dir.path()).unwrap();
+        store.close();
+        assert_eq!(loaded.state.seq, 2);
+        assert_eq!(loaded.state.operators.len(), 1);
+        let camera = &loaded.state.video_sources["udp-5600-127.0.0.1:5000"];
+        assert_eq!(camera.counters.pictures, 20);
+        assert_eq!(camera.counters.recovery_points, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap(),
+            log
+        );
+    }
+
+    /// Every release's sample (`uxduck-engine/tests/stored`) opens as the
+    /// daemon opens its data folder, with nothing cut off or set aside.
+    #[test]
+    fn every_release_sample_opens() {
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../uxduck-engine/tests/stored");
+        let mut opened = 0;
+        for sample in std::fs::read_dir(&samples).unwrap() {
+            let sample = sample.unwrap().path();
+            let dir = tempfile::tempdir().unwrap();
+            let log = std::fs::read_to_string(sample.join("events.ndjson")).unwrap();
+            std::fs::write(dir.path().join("events.ndjson"), &log).unwrap();
+            let checkpoint = std::fs::read_to_string(sample.join("checkpoint.json")).unwrap();
+            let seq: u64 = serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap()["seq"]
+                .as_u64()
+                .unwrap();
+            write_checkpoint(dir.path(), seq, &checkpoint);
+
+            let (store, loaded) =
+                open(dir.path()).unwrap_or_else(|e| panic!("{}: {e}", sample.display()));
+            store.close();
+            assert_eq!(loaded.state.seq, seq, "{}", sample.display());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap(),
+                log,
+                "{}",
+                sample.display()
+            );
+            assert!(!dir.path().join("backups").exists(), "{}", sample.display());
+            opened += 1;
+        }
+        assert!(opened > 0, "no samples in {}", samples.display());
+    }
+
+    /// The log holds every event from the first, so a checkpoint this
+    /// build cannot read is rebuilt from it and kept aside.
+    #[test]
+    fn a_checkpoint_that_does_not_parse_is_rebuilt_from_a_whole_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = [upsert(1, "Ana"), upsert(2, "Ben"), upsert(3, "Cy")];
+        std::fs::write(dir.path().join("events.ndjson"), log_of(&events)).unwrap();
+        let unreadable = r#"{"seq":2,"operators":7}"#;
+        write_checkpoint(dir.path(), 2, unreadable);
+
+        let (store, loaded) = open(dir.path()).unwrap();
+        store.close();
+        assert_eq!(loaded.state.seq, 3);
+        assert_eq!(loaded.state.operators.len(), 3);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("backups/unreadable-checkpoint-2.json"))
+                .unwrap(),
+            unreadable
+        );
+    }
+
+    /// Without the events before it, the checkpoint cannot be rebuilt: the
+    /// daemon does not start, and nothing is changed for a build that can
+    /// read it.
+    #[test]
+    fn a_checkpoint_that_does_not_parse_is_left_alone_without_the_whole_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = log_of(&[upsert(1, "Ana"), upsert(2, "Ben")]);
+        std::fs::write(dir.path().join("events.ndjson"), &log).unwrap();
+        let unreadable = r#"{"seq":5,"operators":7}"#;
+        write_checkpoint(dir.path(), 5, unreadable);
+
+        let error = open(dir.path()).unwrap_err();
+        assert!(
+            matches!(error, StoreError::Checkpoint { seq: 5, .. }),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap(),
+            log
+        );
+        let db = sqlite::open(&dir.path().join("uxduck.db")).unwrap();
+        assert_eq!(
+            sqlite::checkpoint_row(&db).unwrap(),
+            Some((5, unreadable.to_owned()))
+        );
+        assert!(!dir.path().join("backups").exists());
+    }
+
+    /// An unreadable event after the checkpoint is a hole: the state stops
+    /// before it and the whole log is kept aside, as for any hole.
+    #[test]
+    fn an_unreadable_event_after_the_checkpoint_keeps_the_whole_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = format!(
+            "{}{}\n{}",
+            log_of(&[upsert(1, "Ana")]),
+            r#"{"seq":2,"tsUs":2,"change":{"type":"fromANewerBuild"}}"#,
+            log_of(&[upsert(3, "Cy")])
+        );
+        std::fs::write(dir.path().join("events.ndjson"), &log).unwrap();
+
+        let (store, loaded) = open(dir.path()).unwrap();
+        store.close();
+        assert_eq!(loaded.state.seq, 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("events.ndjson.damaged-2")).unwrap(),
+            log
+        );
     }
 
     /// Forgetting answers only once the delete is written, even with the

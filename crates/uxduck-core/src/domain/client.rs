@@ -12,6 +12,9 @@ pub enum ClientKind {
     Agent,
     ThirdParty,
     Exporter,
+    /// Someone away through the account's relay (S80). Remote control is
+    /// gone (ADR-0048): kept so their records read; admitted as any other
+    /// client that is not an operator.
     RemoteOperator,
     /// A plugin the daemon runs (ADR-0006), never a socket client.
     Plugin,

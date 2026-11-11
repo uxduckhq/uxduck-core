@@ -15,6 +15,8 @@ pub enum ClientKind {
     Agent,
     ThirdParty,
     Exporter,
+    /// Someone away through the account's relay, before remote control
+    /// was removed (ADR-0048); recorded clients may still say it.
     RemoteOperator,
     /// A plugin the daemon runs (ADR-0006), never a socket client.
     Plugin,
@@ -47,10 +49,16 @@ pub struct ClientInfo {
 }
 
 /// What the client supports.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent additive negotiated wire capabilities, not mutually exclusive state; separate fields and defaults preserve compatibility"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     pub protocol_version: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mission_read_float_bits: bool,
     /// Every protocol version the client talks, when it talks more than
     /// `protocolVersion` (ADR-0025 D4: an interface talks the current
     /// protocol and the two before it). The daemon admits a client that
@@ -66,6 +74,17 @@ pub struct ClientCapabilities {
     /// Notification methods the client does not render.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opt_out_notifications: Vec<String>,
+    /// It reads a marker's `shape`, `colour`, `dashed` and `outlineOnly`,
+    /// and the look `building` with its `outline` and `heightM` (ADR-0052,
+    /// ADR-0053). UXDuck's page from before them is told to update: it
+    /// rejects a building and shows a line, an area or a circle as a point.
+    #[serde(default)]
+    pub marker_shapes: bool,
+    /// It reads a replay mark of kind `step`, a mission step reached
+    /// (S343). UXDuck's page from before it rejects the whole replay when
+    /// a mark has that kind, so the daemon leaves those marks out for it.
+    #[serde(default)]
+    pub replay_step_marks: bool,
 }
 
 /// Parameters of `initialize`.
@@ -77,11 +96,17 @@ pub struct InitializeParams {
 }
 
 /// What the daemon supports.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each says whether the daemon has a feature"
+)]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonCapabilities {
     pub video: bool,
     pub mcp: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mission_read_float_bits: bool,
     /// Where it runs (ADR-0001 D16). In a browser it has no real vehicles,
     /// links, forwarding or plugins, and the UI hides them.
     #[serde(default)]
@@ -89,6 +114,33 @@ pub struct DaemonCapabilities {
     /// It starts simulated vehicles: `link/add` with a `simulator` link.
     #[serde(default)]
     pub simulator: bool,
+    /// A mapping may leave roll, pitch or yaw unused (`InputMapping::unused`).
+    #[serde(default)]
+    pub unused_controls: bool,
+    /// It arms a real vehicle only for an operator who agreed to the current
+    /// Terms of Service, and takes `terms/accept` (ADR-0047).
+    #[serde(default)]
+    pub terms: bool,
+    #[serde(default)]
+    pub survey_planning: bool,
+    /// Terrain areas are polygons, enabled or disabled (ADR-0051 A5):
+    /// `terrain/keepArea` and `terrain/areaSize` take points. It also
+    /// writes them to vehicles' cards (A6 to A10): `terrain/putArea` and
+    /// `settings/update`'s `vehicleTerrainAreas`. An older daemon reads
+    /// as false, and neither is sent to it.
+    #[serde(default)]
+    pub terrain_polygons: bool,
+    /// It keeps a marker's `shape`, `colour`, `dashed` and `outlineOnly`,
+    /// and a building's look, `outline` and `heightM` (ADR-0052, ADR-0053).
+    /// An older daemon ignores them and keeps a plain point.
+    #[serde(default)]
+    pub marker_shapes: bool,
+    /// It sends and reads MAVLink command numbers as they are, losing none:
+    /// a mission item's `MAV_CMD` and `MAV_FRAME`, and the command and
+    /// frame of `COMMAND_LONG` and `COMMAND_INT`. It does not mean the
+    /// autopilot accepts them.
+    #[serde(default)]
+    pub raw_mission_numbers: bool,
 }
 
 /// Where a daemon runs (ADR-0001 D16).

@@ -22,6 +22,26 @@ impl From<dto::LaunchAction> for s::LaunchAction {
     }
 }
 
+impl From<s::SyncContent> for dto::SyncContent {
+    fn from(v: s::SyncContent) -> Self {
+        match v {
+            s::SyncContent::Summaries => Self::Summaries,
+            s::SyncContent::Logs => Self::Logs,
+            s::SyncContent::Video => Self::Video,
+        }
+    }
+}
+
+impl From<dto::SyncContent> for s::SyncContent {
+    fn from(v: dto::SyncContent) -> Self {
+        match v {
+            dto::SyncContent::Summaries => Self::Summaries,
+            dto::SyncContent::Logs => Self::Logs,
+            dto::SyncContent::Video => Self::Video,
+        }
+    }
+}
+
 impl From<s::ClosePolicy> for dto::ClosePolicy {
     fn from(v: s::ClosePolicy) -> Self {
         match v {
@@ -140,7 +160,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
                     }),
             )
             .collect(),
-        simulator_log_max_bytes: Some(settings.simulator_log_max_bytes),
+        simulator_log_max_bytes: Some(settings.simulator_log_limit()),
         shell_path: settings.shell_path.clone(),
         launch_action: Some(settings.launch_action.into()),
         usage_analytics: settings.usage_analytics,
@@ -148,14 +168,9 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         share_flight_data: settings.share_flight_data,
         video_ports: settings.video_ports.clone(),
         video_recording: settings.video_recording.into(),
+        video_reencoder: settings.video_reencoder.into(),
         show_in_menu_bar: settings.show_in_menu_bar,
-        connect_to_account: settings.connect_to_account,
-        watch_from_account: settings.watch_from_account,
-        remote_control: settings
-            .remote_control
-            .iter()
-            .map(|c| (*c).into())
-            .collect(),
+        live_sharing: settings.live_sharing,
         network_address: settings.network_address.clone(),
         network_addresses: if settings.network_addresses.is_empty() {
             settings.network_address.iter().cloned().collect()
@@ -168,6 +183,8 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         save_flights: settings.save_flights,
         upload_while_armed: settings.upload_while_armed,
         upload_video_while_flying: settings.upload_video_while_flying,
+        sync_content: settings.sync_content.into(),
+        wait_for_unmetered: settings.wait_for_unmetered,
         start_at_login: settings.start_at_login,
         login_item: None,
         message_notify_severity: settings.message_notify_severity,
@@ -182,11 +199,21 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
             .map(|a| crate::dto::terrain::TerrainArea {
                 id: a.id.clone(),
                 name: a.name.clone(),
-                south_deg: a.south_deg,
-                west_deg: a.west_deg,
-                north_deg: a.north_deg,
-                east_deg: a.east_deg,
+                points: a
+                    .points
+                    .iter()
+                    .map(|p| crate::dto::plan::LatLon {
+                        latitude_deg: p.latitude_deg,
+                        longitude_deg: p.longitude_deg,
+                    })
+                    .collect(),
+                enabled: a.enabled,
             })
+            .collect(),
+        vehicles_without_terrain_areas: settings
+            .vehicles_without_terrain_areas
+            .iter()
+            .cloned()
             .collect(),
         vehicle_terrain_datasets: settings
             .vehicle_terrain_datasets

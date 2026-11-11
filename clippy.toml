@@ -14,6 +14,9 @@ doc-valid-idents = [
   "MAVProxy",
   "QGroundControl",
   "WebCodecs",
+  "DataFlash",
+  "AutoTune",
+  "QuikTune",
 ]
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true

@@ -12,6 +12,7 @@ impl From<&core::Thread> for dto::Thread {
             operator_id: value.operator_id.clone(),
             vehicle_id: value.vehicle_id.clone(),
             model: value.model.clone(),
+            effort: value.effort.clone(),
             auto_approve: value.auto_approve,
             created_at_us: value.created_at_us,
             updated_at_us: value.updated_at_us,
@@ -20,7 +21,6 @@ impl From<&core::Thread> for dto::Thread {
             sort_key: value.sort_key.clone(),
             pinned: value.pinned,
             archived: value.archived,
-            exclude_from_learning: value.exclude_from_learning,
             deleted_at_us: value.deleted_at_us,
         }
     }
@@ -40,11 +40,14 @@ impl From<core::ItemKind> for dto::ItemKind {
 impl From<core::ItemStatus> for dto::ItemStatus {
     fn from(value: core::ItemStatus) -> Self {
         match value {
+            core::ItemStatus::Queued => Self::Queued,
+            core::ItemStatus::Steering => Self::Steering,
             core::ItemStatus::InProgress => Self::InProgress,
             core::ItemStatus::Completed => Self::Completed,
             core::ItemStatus::Failed => Self::Failed,
             core::ItemStatus::Cancelled => Self::Cancelled,
             core::ItemStatus::Interrupted => Self::Interrupted,
+            core::ItemStatus::Superseded => Self::Superseded,
         }
     }
 }
@@ -90,6 +93,7 @@ impl From<&core::Item> for dto::Item {
                 sent: f.sent,
             }),
             attachments: value.attachments.iter().map(Into::into).collect(),
+            spoken: value.spoken.is_some(),
         }
     }
 }
@@ -103,6 +107,10 @@ impl From<&core::Attachment> for dto::Attachment {
             unit: value.unit.clone(),
             plugin: value.plugin.clone(),
             help: value.help.clone(),
+            file: value.file.as_ref().map(|f| dto::AttachedFile {
+                id: f.id.clone(),
+                bytes: f.bytes,
+            }),
         }
     }
 }
@@ -116,6 +124,10 @@ impl From<&dto::Attachment> for core::Attachment {
             unit: value.unit.clone(),
             plugin: value.plugin.clone(),
             help: value.help.clone(),
+            file: value.file.as_ref().map(|f| core::AttachedFile {
+                id: f.id.clone(),
+                bytes: f.bytes,
+            }),
         }
     }
 }

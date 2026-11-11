@@ -1,0 +1,1 @@
+{ "method": "terms/accept", "params": { "version": "2026-11-03", "context": "real-vehicle" } }

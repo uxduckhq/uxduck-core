@@ -36,11 +36,23 @@ impl VehicleClass {
             Self::Rover
         } else if t.contains("wing") || t.contains("vtol") || t.contains("plane") {
             Self::Plane
-        } else if t.contains("rotor") || t.contains("copter") || t.contains("heli") {
+        } else if t.contains("rotor")
+            || t.contains("copter")
+            || t.contains("heli")
+            || t == "coaxial"
+        {
             Self::Copter
         } else {
             Self::Other
         }
+    }
+
+    /// A rover, boat or submarine: it keeps to the ground or the water,
+    /// whatever its height above home says, so it is never flying. An
+    /// unknown type may fly.
+    #[must_use]
+    pub const fn never_flies(self) -> bool {
+        matches!(self, Self::Rover | Self::Boat | Self::Sub)
     }
 }
 
@@ -251,6 +263,7 @@ mod tests {
         for (mav, class) in [
             ("Quadrotor", VehicleClass::Copter),
             ("Helicopter", VehicleClass::Copter),
+            ("Coaxial", VehicleClass::Copter),
             ("Airship", VehicleClass::Airship),
             ("Blimp", VehicleClass::Airship),
             ("VtolTiltrotor", VehicleClass::Plane),
@@ -260,6 +273,11 @@ mod tests {
             ("Antenna", VehicleClass::Other),
         ] {
             assert_eq!(VehicleClass::of(mav), class, "{mav}");
+            assert_eq!(
+                class.never_flies(),
+                matches!(mav, "GroundRover" | "SurfaceBoat" | "Submarine"),
+                "{mav}"
+            );
         }
     }
 }

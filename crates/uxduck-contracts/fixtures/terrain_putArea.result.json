@@ -1,0 +1,61 @@
+{
+  "vehicleId": "veh-7f3a",
+  "used": true,
+  "dataset": "alos",
+  "chosen": false,
+  "spacingM": 100,
+  "enabled": true,
+  "pending": 0,
+  "loaded": 672,
+  "blocks": [],
+  "files": {
+    "path": "terrain",
+    "files": [
+      {
+        "name": "S36E149.DAT",
+        "size": 2318336
+      }
+    ],
+    "listedAtUs": 1762300003000000
+  },
+  "areas": [
+    {
+      "areaId": "ta3c9e1f0a2b4d6e8f",
+      "name": "Canberra field",
+      "vehicleId": "veh-7f3a",
+      "vehicleName": "Sim 1",
+      "state": "writing",
+      "blocks": 96,
+      "written": 40,
+      "skipped": 0,
+      "bytes": 196608,
+      "rateBps": 52000
+    },
+    {
+      "areaId": "ta0123456789abcdef",
+      "vehicleId": "veh-7f3a",
+      "vehicleName": "Sim 1",
+      "state": "written",
+      "blocks": 12,
+      "written": 11,
+      "skipped": 1,
+      "bytes": 0,
+      "writtenAtUs": 1762300001000000,
+      "detail": "1 block left off: ALOS has no height there"
+    }
+  ],
+  "cardBlocks": [
+    {
+      "corners": [
+        { "latitudeDeg": -35.3632621, "longitudeDeg": 149.1652374 },
+        { "latitudeDeg": -35.3389867, "longitudeDeg": 149.1652374 },
+        { "latitudeDeg": -35.3389867, "longitudeDeg": 149.1993018 },
+        { "latitudeDeg": -35.3632621, "longitudeDeg": 149.1993018 }
+      ],
+      "state": "written",
+      "areaId": "ta3c9e1f0a2b4d6e8f"
+    }
+  ],
+  "cardBlocksOmitted": 95,
+  "areasAutomatic": true
+}

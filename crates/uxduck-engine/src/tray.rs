@@ -17,7 +17,7 @@ use uxduck_contracts::dto::tray::{
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
-use uxduck_core::domain::client::{Capability, NetworkAccess};
+use uxduck_core::domain::client::{Capability, ClientKind, NetworkAccess};
 use uxduck_core::domain::link::LinkStatus;
 use uxduck_core::domain::notification::{
     Action, NotificationKind, NotificationState, Severity, Subject,
@@ -53,6 +53,12 @@ pub fn docs_url() -> String {
             .into()
         })
 }
+
+/// A failed menu item's notice: its condition is this and the item's id.
+const MENU_BAR_ACTION: &str = "menu-bar-action:";
+const MENU_BAR_FAILED: &str = "Could not complete the menu-bar action";
+/// The menu items that open UXDuck's desktop window.
+const OPENS_WINDOW: [&str; 2] = ["open", "feedback"];
 
 /// How long a screenshot for "Send feedback…" waits to be picked up.
 const SCREENSHOT_US: u64 = 5 * 60 * 1_000_000;
@@ -91,16 +97,20 @@ pub(crate) fn handle(
             to_value(&menu)
         }
         ClientRequest::TrayActivate(params) => {
+            // One notice per menu item: a repeated failure replaces the last,
+            // and the item working, or a window opening, clears it (FB-97).
+            let condition = format!("{MENU_BAR_ACTION}{}", params.item);
             let result = activate(engine, connection, params, granted);
+            engine.resolve(&condition);
             if let Err(error) = &result {
                 engine.raise(Raise {
                     severity: Severity::Warning,
                     kind: NotificationKind::Transient,
                     subject: Subject::System,
-                    title: "Could not complete the menu-bar action".into(),
+                    title: MENU_BAR_FAILED.into(),
                     body: Some(error.message.clone()),
                     actions: Vec::new(),
-                    condition: None,
+                    condition: Some(condition),
                     report: None,
                 });
             }
@@ -151,7 +161,6 @@ fn activate(
         }
         "updates" => open_page(engine, "/about#updates")?,
         "simulations" => open_page(engine, "/vehicles#simulated")?,
-        "stop-simulations" => stop_all_simulations(engine, connection, granted)?,
         "docs" => TrayAction::OpenUrl { url: docs_url() },
         // The whole data folder: recordings, logs, the database (S108).
         "show-files" => {
@@ -199,28 +208,19 @@ fn activate(
                 stop_simulation(engine, connection, id, granted)?;
                 return Ok(TrayAction::Done);
             }
+            if let Some(id) = other.strip_prefix("start-simulation:") {
+                crate::sim::handle(
+                    engine,
+                    connection,
+                    ClientRequest::SimRestart(uxduck_contracts::dto::link::IdParams {
+                        id: id.into(),
+                    }),
+                    granted,
+                )?;
+                return Ok(TrayAction::Done);
+            }
             if let Some(id) = other.strip_prefix("open-simulation:") {
-                if !engine
-                    .state
-                    .links
-                    .get(id)
-                    .is_some_and(|link| link.kind.is_simulator())
-                {
-                    return Err(ApiError::new(
-                        ErrorKind::NotFound,
-                        "This simulation has stopped",
-                    ));
-                }
-                let vehicle = engine
-                    .state
-                    .vehicles
-                    .values()
-                    .find(|vehicle| vehicle.link_id == id)
-                    .ok_or_else(|| {
-                        ApiError::new(ErrorKind::NotFound, "This simulation has no vehicle yet")
-                    })?;
-                let page = format!("/vehicles/{}", vehicle.id);
-                return open_page(engine, &page);
+                return open_simulation(engine, id);
             }
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -254,30 +254,6 @@ fn toggle_login_item(engine: &mut Engine) -> Result<TrayAction, ApiError> {
     })
 }
 
-fn stop_all_simulations(
-    engine: &mut Engine,
-    connection: ConnectionId,
-    granted: &[Capability],
-) -> Result<TrayAction, ApiError> {
-    let ids: Vec<String> = engine
-        .state
-        .links
-        .values()
-        .filter(|link| link.kind.is_simulator())
-        .map(|link| link.id.clone())
-        .collect();
-    let mut failures = Vec::new();
-    for id in ids {
-        if let Err(error) = stop_simulation(engine, connection, &id, granted) {
-            failures.push(error.message);
-        }
-    }
-    if !failures.is_empty() {
-        return Err(ApiError::new(ErrorKind::Internal, failures.join(". ")));
-    }
-    Ok(TrayAction::Done)
-}
-
 fn item(id: &str, label: &str, separator_before: bool) -> TrayItem {
     TrayItem {
         id: id.into(),
@@ -295,6 +271,28 @@ pub const LOGIN_ITEMS_SETTINGS: &str =
 
 fn open_page(engine: &mut Engine, page: &str) -> Result<TrayAction, ApiError> {
     Ok(opened(engine.open_app(Some(page), &[], None)?))
+}
+
+fn open_simulation(engine: &mut Engine, id: &str) -> Result<TrayAction, ApiError> {
+    if !engine
+        .state
+        .links
+        .get(id)
+        .is_some_and(|link| link.kind.is_simulator())
+    {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            "This simulation has stopped",
+        ));
+    }
+    let vehicle = engine
+        .state
+        .vehicles
+        .values()
+        .find(|vehicle| vehicle.link_id == id)
+        .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "This simulation has no vehicle yet"))?;
+    let page = format!("/vehicles/{}", vehicle.id);
+    open_page(engine, &page)
 }
 
 /// What the tray does after `open_app`: nothing when UXDuck opened, else
@@ -358,6 +356,42 @@ fn link_words(status: LinkStatus) -> &'static str {
 }
 
 impl Engine {
+    /// A client was admitted. A page or the desktop shell is a window seen.
+    /// The shell means the menu items that open a window have worked after
+    /// all: their failures go, including those raised before they had a
+    /// condition (0.11.0 and earlier), which said the window was missing
+    /// while it was open (FB-97).
+    pub(crate) fn window_admitted(&mut self, kind: ClientKind) {
+        self.opened.window_seen |= matches!(kind, ClientKind::OperatorUi | ClientKind::Shell);
+        if kind != ClientKind::Shell {
+            return;
+        }
+        for item in OPENS_WINDOW {
+            self.resolve(&format!("{MENU_BAR_ACTION}{item}"));
+        }
+        let stale: Vec<_> = self
+            .state
+            .notifications
+            .values()
+            .filter(|n| {
+                n.condition.is_none()
+                    && n.title == MENU_BAR_FAILED
+                    && n.body
+                        .as_deref()
+                        .is_some_and(|body| body.starts_with("UXDuck's desktop window is missing"))
+            })
+            .cloned()
+            .collect();
+        for mut notification in stale {
+            notification.state = NotificationState::Resolved;
+            notification.version += 1;
+            self.commit_as(
+                crate::plugins::daemon(),
+                Change::NotificationUpserted { notification },
+            );
+        }
+    }
+
     /// A tray that cannot recover must be visible in the app as well as stderr.
     pub fn tray_failed(&mut self, reason: &str) {
         self.raise(Raise {
@@ -492,10 +526,10 @@ impl Engine {
             .map(|_| item("updates", "UXDuck update…", true))
     }
 
-    /// The newest vehicle warning or alarm raised while no window was
-    /// visible, still active: the system's notification for it.
+    /// The newest vehicle warning or alarm raised while no window had the
+    /// focus, still active: the system's notification for it.
     fn unseen_alert(&self) -> Option<TrayAlert> {
-        let since = self.idle_simulations.unseen_since_us?;
+        let since = self.idle_simulations.unfocused_since_us?;
         self.state
             .notifications
             .values()
@@ -612,6 +646,10 @@ impl Engine {
                 .vehicles
                 .values()
                 .find(|vehicle| vehicle.link_id == link.id);
+            // Hidden until it is started again (S247, S264).
+            if vehicle.is_some_and(|vehicle| vehicle.hidden) {
+                continue;
+            }
             let name = vehicle.map_or(link.name.as_str(), |vehicle| vehicle.name.as_str());
             let status = if link.status == LinkStatus::Down
                 || link.launch.as_ref().is_some_and(|launch| {
@@ -619,7 +657,7 @@ impl Engine {
                 }) {
                 "Failed"
             } else if link.status == LinkStatus::Stopped {
-                "Not started"
+                "Stopped"
             } else if vehicle.is_none() || link.status == LinkStatus::Configured {
                 "Starting…"
             } else {
@@ -636,25 +674,15 @@ impl Engine {
                 &format!("{name} · {status}"),
                 items.is_empty(),
             );
-            // One from the last run is not running: stopping removes it.
-            let stop_words = if link.status == LinkStatus::Stopped {
-                "Remove simulation"
+            // A stopped one starts again; deleting one asks first, in the app.
+            let (action, words) = if link.status == LinkStatus::Stopped {
+                ("start-simulation", "Start simulation")
             } else {
-                "Stop simulation"
+                ("stop-simulation", "Stop simulation")
             };
-            simulation.children = vec![
-                open,
-                item(&format!("stop-simulation:{}", link.id), stop_words, false),
-            ];
+            simulation.children = vec![open, item(&format!("{action}:{}", link.id), words, false)];
             items.push(simulation);
         }
-        let mut stop_all = item("stop-simulations", "Stop all simulations", items.is_empty());
-        stop_all.enabled = self
-            .state
-            .links
-            .values()
-            .any(|link| link.kind.is_simulator());
-        items.push(stop_all);
         items
     }
 
@@ -682,7 +710,8 @@ impl Engine {
         }
     }
 
-    /// UXDuck was opened again while it ran: the tray says so.
+    /// UXDuck was opened again while it ran and showed nothing, in
+    /// menu-bar-only mode: the tray says it is running.
     pub(crate) fn tray_reopened(&mut self) {
         let frame = json!({ "jsonrpc": "2.0", "method": "tray/reopened", "params": {} });
         let watchers: Vec<ConnectionId> = self.tray_watchers.iter().copied().collect();

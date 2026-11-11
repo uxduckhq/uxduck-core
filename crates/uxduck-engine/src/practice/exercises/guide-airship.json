@@ -15,7 +15,7 @@
       "all": [{ "check": "commandSent", "command": "arm" }, { "check": "armed" }]
     },
     {
-      "text": "Choose HOLD in the Mode menu in the Cockpit tab.",
+      "text": "Choose HOLD under Modes in the Cockpit tab.",
       "hint": "HOLD stops it moving.",
       "hintAfterS": 45,
       "all": [

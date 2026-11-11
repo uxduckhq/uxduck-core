@@ -138,6 +138,8 @@ pub enum Basemap {
     Imagery,
     /// Grey streets, light or dark with the theme.
     Streets,
+    /// Hillshaded relief with contour lines, for the lie of the land.
+    Terrain,
 }
 
 /// What a tab shows.
@@ -183,9 +185,12 @@ pub enum TabKind {
     Vehicles,
     /// The focused vehicle's parameters.
     Parameters,
-    /// The focused vehicle's mission.
+    /// The focused vehicle's mission, retired for the Missions page
+    /// (ADR-0029 P16): tidying drops it from stored layouts.
     Mission,
-    /// Gamepads: claims, targets and mappings.
+    /// Gamepads: claims, targets and mappings, retired for the Cockpit's
+    /// controllers page (ADR-0005, 2026-11-04): tidying makes it a Cockpit
+    /// in its place when the layout has none, and drops it otherwise.
     Controllers,
     /// Only in layouts stored before S75 (the 3D view, S35): tidying makes
     /// it a 3D map tab in its place, where the vehicle flies as its model
@@ -235,8 +240,8 @@ pub enum TabKind {
     Places,
     /// The Flights page as a tab.
     Flights,
-    /// The Missions page as a tab: every mission, where `Mission` is the
-    /// focused vehicle's.
+    /// The Missions page as a tab: the plans and every vehicle's mission
+    /// (ADR-0029 P16).
     Missions,
     /// The ground under a plan, or the selected vehicle's mission, with its
     /// heights and clearance (ADR-0029 P9). Opened below the map.
@@ -256,6 +261,10 @@ pub enum TabKind {
     /// preflight checks, as a tab of its own when it is long. It follows
     /// the selected vehicle, or the one it is pinned to.
     Checklist,
+    /// The focused vehicle's tuning (S329, ADR-0054 T1): Feel, the gains
+    /// per axis and snapshots, a view of its parameters. It follows the
+    /// selected vehicle, or the one it is pinned to.
+    Tuning,
 }
 
 impl TabKind {
@@ -300,20 +309,23 @@ impl TabKind {
             Self::Airspace => "airspace",
             Self::Setup => "setup",
             Self::Checklist => "checklist",
+            Self::Tuning => "tuning",
         }
     }
 
     /// The kind whose group a new tab of this kind opens in, when there is
-    /// one: the inspector beside Messages, the camera below the maps with
-    /// Parameters (maintainer, 2026-10-16), and Setup beside Parameters
-    /// (S184), and the checklist beside the Cockpit, where Arm is (S193).
+    /// one: the inspector beside Messages, the camera and the checklist
+    /// beside the Cockpit (the camera below the maps, maintainer, 2026-10-16,
+    /// with Parameters until S267 took Parameters out of the built-in
+    /// layouts; the checklist where Arm is, S193; Tuning, used in flight,
+    /// S329), and Setup beside Parameters (S184).
     /// The web's `JOINS`.
     #[must_use]
     pub const fn joins(self) -> Option<Self> {
         match self {
             Self::Inspector => Some(Self::Messages),
-            Self::Camera | Self::Setup => Some(Self::Parameters),
-            Self::Checklist => Some(Self::Control),
+            Self::Camera | Self::Checklist | Self::Tuning => Some(Self::Control),
+            Self::Setup => Some(Self::Parameters),
             _ => None,
         }
     }
@@ -338,6 +350,13 @@ pub struct Tab {
     /// own. Kept with the tab, so each Camera tab comes back as it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<String>,
+    /// How a Camera tab shows its vehicle's cameras (maintainer,
+    /// 2026-10-30): one, one large over the others, or all in a grid. None
+    /// chooses from how many there are and whether one was chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_view: Option<CameraView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_camera: Option<MapCameraOptions>,
     /// The panel a Plugin tab shows (S101): `<plugin id>/<panel id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel: Option<String>,
@@ -350,6 +369,59 @@ pub struct Tab {
     /// What a Chart tab draws (S113).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart: Option<ChartSpec>,
+    /// The part a Tuning tab was last asked to show (S333).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<TuningSection>,
+}
+
+/// A part of the Tuning tab (S333). Roll, Pitch and Yaw are How it flies
+/// on that axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuningSection {
+    Steps,
+    Autotune,
+    Roll,
+    Pitch,
+    Yaw,
+    Feel,
+    Gains,
+}
+
+/// How a Camera tab shows its vehicle's cameras.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraView {
+    /// One camera as large as the tab allows.
+    Single,
+    /// One camera large, the vehicle's others small under it.
+    Focus,
+    /// Every camera of the vehicle, the same size, fitted to the tab.
+    Grid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapCameraOptions {
+    pub viewpoint: MapViewpoint,
+    pub following: bool,
+    pub resume: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag_to_pan: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapViewpoint {
+    Cockpit,
+    Rear,
+    Tail,
+    Orbit,
+    Behind,
+    Below,
+    Camera,
+    Home,
+    Above,
 }
 
 /// A Chart tab's series and time span (S113).
@@ -386,7 +458,7 @@ impl ChartSpec {
     /// Drops series with an empty or overlong item, repeats and those past
     /// eight; gives a colour out of range the first one free; forgets a span
     /// not offered.
-    fn tidy(&mut self) {
+    pub fn tidy(&mut self) {
         let mut seen: Vec<String> = vec![];
         self.series.retain(|s| {
             let keep = !s.item.is_empty()
@@ -435,6 +507,10 @@ enum StoredTab {
         #[serde(default)]
         camera: Option<String>,
         #[serde(default)]
+        camera_view: Option<CameraView>,
+        #[serde(default)]
+        map_camera: Option<MapCameraOptions>,
+        #[serde(default)]
         panel: Option<String>,
         #[serde(default)]
         item: Option<String>,
@@ -442,6 +518,8 @@ enum StoredTab {
         camera_behind: bool,
         #[serde(default)]
         chart: Option<ChartSpec>,
+        #[serde(default)]
+        section: Option<TuningSection>,
     },
 }
 
@@ -456,10 +534,13 @@ impl From<StoredTab> for Tab {
                 hidden,
                 three_d,
                 camera,
+                camera_view,
+                map_camera,
                 panel,
                 item,
                 camera_behind,
                 chart,
+                section,
             } => Self {
                 id,
                 // A Map drawn in 3D before 2026-10-04 is a 3D map tab, in its place.
@@ -471,10 +552,13 @@ impl From<StoredTab> for Tab {
                 vehicle_id,
                 hidden,
                 camera,
+                camera_view,
+                map_camera,
                 panel,
                 item,
                 camera_behind,
                 chart,
+                section,
             },
         }
     }
@@ -490,10 +574,13 @@ impl Tab {
             vehicle_id: None,
             hidden: false,
             camera: None,
+            camera_view: None,
+            map_camera: None,
             panel: None,
             item: None,
             camera_behind: false,
             chart: None,
+            section: None,
         }
     }
 
@@ -513,16 +600,19 @@ impl Tab {
             vehicle_id: self.vehicle_id.clone(),
             hidden: self.hidden,
             camera: None,
+            camera_view: None,
+            map_camera: None,
             panel: None,
             item: None,
             camera_behind: false,
             chart: None,
+            section: None,
         })
     }
 
-    /// Drops a pin, camera or panel that is empty or too long, a camera on
-    /// a tab other than a Camera tab, and a panel on one other than a
-    /// Plugin tab.
+    /// Drops a pin, camera or panel that is empty or too long, a camera or
+    /// camera view on a tab other than a Camera tab, and a panel on one
+    /// other than a Plugin tab.
     fn drop_bad_ids(&mut self) {
         let bad = |id: &Option<String>| {
             id.as_ref()
@@ -533,6 +623,12 @@ impl Tab {
         }
         if self.kind != TabKind::Camera || bad(&self.camera) {
             self.camera = None;
+        }
+        if self.kind != TabKind::Camera {
+            self.camera_view = None;
+        }
+        if self.kind != TabKind::Map3d {
+            self.map_camera = None;
         }
         if self.kind != TabKind::Plugin || bad(&self.panel) {
             self.panel = None;
@@ -549,6 +645,9 @@ impl Tab {
             }
         } else {
             self.chart = None;
+        }
+        if self.kind != TabKind::Tuning {
+            self.section = None;
         }
     }
 }
@@ -633,7 +732,11 @@ pub struct LayoutPreset {
 /// unchanged, the number matching the page's.
 /// 11 (2026-10-22): Simple and both phone presets include Mission as a tab.
 /// 12 (2026-10-23): combine Mission tabs with Airspace in built-in presets.
-pub const LAYOUT_PRESET_VERSION: u32 = 12;
+/// 13 (2026-10-25): no Mission tab; the Missions page took its place.
+/// 14 (2026-11-01, S267): Simple is the two maps above the Cockpit and
+/// Controllers; Advanced leaves out vehicle setup's tools and the camera.
+/// 15 (2026-11-04): no Controllers tab; the controllers are in the Cockpit.
+pub const LAYOUT_PRESET_VERSION: u32 = 15;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
@@ -809,21 +912,34 @@ impl DockNode {
     }
 
     /// Makes the first tab of this kind (an unpinned one first) the one its
-    /// group shows, and shows it if hidden. Whether there was one.
-    fn show(&mut self, kind: TabKind) -> bool {
+    /// group shows, and shows it if hidden. Its id, when there was one.
+    fn show(&mut self, kind: TabKind) -> Option<String> {
         let tabs = self.tabs();
         let of_kind: Vec<&&Tab> = tabs.iter().filter(|t| t.kind == kind).collect();
-        let Some(target) = of_kind
+        let target = of_kind
             .iter()
             .find(|t| t.vehicle_id.is_none() && !t.hidden)
             .or_else(|| of_kind.iter().find(|t| !t.hidden))
             .or_else(|| of_kind.first())
-            .map(|t| t.id.clone())
-        else {
-            return false;
-        };
+            .map(|t| t.id.clone())?;
         self.show_id(&target);
-        true
+        Some(target)
+    }
+
+    /// Asks the tab with this id to show a part of it (S333).
+    fn set_section(&mut self, id: &str, section: TuningSection) {
+        match self {
+            Self::Group { tabs, .. } => {
+                if let Some(tab) = tabs.iter_mut().find(|t| t.id == id) {
+                    tab.section = Some(section);
+                }
+            }
+            Self::Split { children, .. } => {
+                for child in children {
+                    child.node.set_section(id, section);
+                }
+            }
+        }
     }
 
     fn show_id(&mut self, id: &str) {
@@ -842,13 +958,12 @@ impl DockNode {
         }
     }
 
-    /// Adds a tab, showing, to the first group without the chat. Whether
-    /// there was one.
+    /// Adds a tab, showing, to the first group that takes it
+    /// ([`takes_new`]). Whether there was one.
     fn add_to_first_group(&mut self, tab: &Tab) -> bool {
         match self {
             Self::Group { tabs, active } => {
-                // Nothing joins the chat.
-                if tabs.iter().any(|t| t.kind == TabKind::Chat) {
+                if !takes_new(tabs) {
                     return false;
                 }
                 tabs.push(tab.clone());
@@ -861,15 +976,12 @@ impl DockNode {
         }
     }
 
-    /// Adds a tab to the first group holding a tab of `kind` and not the
-    /// chat, showing it. Whether there was one.
+    /// Adds a tab to the first group holding a tab of `kind` that takes it
+    /// ([`takes_new`]), showing it. Whether there was one.
     fn add_to_group_with(&mut self, kind: TabKind, tab: &Tab) -> bool {
         match self {
             Self::Group { tabs, active } => {
-                // Nothing joins the chat.
-                if !tabs.iter().any(|t| t.kind == kind)
-                    || tabs.iter().any(|t| t.kind == TabKind::Chat)
-                {
+                if !tabs.iter().any(|t| t.kind == kind) || !takes_new(tabs) {
                     return false;
                 }
                 tabs.push(tab.clone());
@@ -880,6 +992,67 @@ impl DockNode {
                 .iter_mut()
                 .any(|child| child.node.add_to_group_with(kind, tab)),
         }
+    }
+
+    /// Makes the first tab of kind `from` one of kind `to`, in its place.
+    fn retype_first(&mut self, from: TabKind, to: TabKind) -> bool {
+        match self {
+            Self::Group { tabs, .. } => tabs
+                .iter_mut()
+                .find(|t| t.kind == from)
+                .map(|tab| tab.kind = to)
+                .is_some(),
+            Self::Split { children, .. } => children
+                .iter_mut()
+                .any(|child| child.node.retype_first(from, to)),
+        }
+    }
+
+    /// Puts a tab in a group of its own beside the first group showing a
+    /// map: after it, at half its share, when that group is in a row; else
+    /// in a row with it, in its place. Whether there was a map. The web's
+    /// `besideMap`.
+    fn add_beside_map(&mut self, tab: &Tab) -> bool {
+        if shows_map(self) {
+            let map = std::mem::replace(self, Self::group(Vec::new()));
+            *self = Self::Split {
+                direction: Direction::Row,
+                children: vec![
+                    DockChild {
+                        size: SIZE_TOTAL / 2,
+                        node: map,
+                    },
+                    DockChild {
+                        size: SIZE_TOTAL / 2,
+                        node: Self::group(vec![tab.clone()]),
+                    },
+                ],
+            };
+            return true;
+        }
+        let Self::Split {
+            direction,
+            children,
+        } = self
+        else {
+            return false;
+        };
+        let Some(at) = children.iter().position(|c| shows_map(&c.node)) else {
+            return children.iter_mut().any(|c| c.node.add_beside_map(tab));
+        };
+        if *direction == Direction::Row {
+            let half = children[at].size / 2;
+            children[at].size -= half;
+            children.insert(
+                at + 1,
+                DockChild {
+                    size: half,
+                    node: Self::group(vec![tab.clone()]),
+                },
+            );
+            return true;
+        }
+        children[at].node.add_beside_map(tab)
     }
 
     /// Whether a tab of this kind is anywhere in this part.
@@ -899,7 +1072,7 @@ impl DockNode {
         match self {
             Self::Group { tabs, active } => {
                 let mut shown = tabs.get(active).map(|t| t.id.clone());
-                // A Vehicle tab is Telemetry with Control beside it, Telemetry showing.
+                // A Vehicle tab is Telemetry with Cockpit beside it, Telemetry showing.
                 let tabs: Vec<Tab> = tabs
                     .into_iter()
                     .flat_map(|tab| {
@@ -926,8 +1099,13 @@ impl DockNode {
                     .collect();
                 let mut kept: Vec<Tab> = Vec::with_capacity(tabs.len());
                 for mut tab in tabs {
-                    // Get started is in the chat now; its old tab goes.
-                    if tab.kind == TabKind::GetStarted {
+                    // Get started is in the chat now, a vehicle's mission in the
+                    // Missions page (ADR-0029 P16) and controllers in the
+                    // Cockpit (ADR-0005, 2026-11-04): their old tabs go.
+                    if matches!(
+                        tab.kind,
+                        TabKind::GetStarted | TabKind::Mission | TabKind::Controllers
+                    ) {
                         continue;
                     }
                     let chat_again = tab.kind == TabKind::Chat
@@ -1021,9 +1199,28 @@ fn scaled(children: Vec<(u32, DockNode)>) -> Vec<DockChild> {
         .collect()
 }
 
+/// Whether a group takes a new tab: none with the chat, and none showing a
+/// map, so a tab opened from the palette, a menu or the AI never covers the
+/// map (FB-95, the maintainer, 2026-11-04). The web's `takesNew`.
+fn takes_new(tabs: &[Tab]) -> bool {
+    !tabs.iter().any(|t| {
+        t.kind == TabKind::Chat || (matches!(t.kind, TabKind::Map | TabKind::Map3d) && !t.hidden)
+    })
+}
+
+/// Whether this part is a group showing a flat or 3D map.
+fn shows_map(node: &DockNode) -> bool {
+    matches!(node, DockNode::Group { tabs, .. } if tabs.iter().any(|t| matches!(t.kind, TabKind::Map | TabKind::Map3d) && !t.hidden))
+}
+
 /// A tidy tree. The chat may be left out: the person closed it, and a new
 /// chat brings it back (maintainer, 2026-10-02).
-fn normalised_dock(dock: DockNode) -> DockNode {
+fn normalised_dock(mut dock: DockNode) -> DockNode {
+    // Without a Cockpit, a Controllers tab becomes one in its place, so its
+    // controllers stay where they were reached.
+    if !dock.contains(TabKind::Control) {
+        dock.retype_first(TabKind::Controllers, TabKind::Control);
+    }
     let mut seen = Vec::new();
     dock.tidy(&mut seen)
         .unwrap_or_else(|| Layout::initial().dock)
@@ -1055,10 +1252,11 @@ impl Layout {
         }
     }
 
-    /// The map and the 3D map (always, maintainer 2026-10-18) above
-    /// Control (with Mission, Controllers, History and Parameters) beside Telemetry
-    /// (with Messages, Flight display Instruments and Airspace): four panes, with
-    /// Advanced's everyday tools as tabs (maintainer, 2026-10-18).
+    /// The map and the 3D map (always, maintainer 2026-10-18) side by side
+    /// above the Cockpit, which holds the controllers (ADR-0005,
+    /// 2026-11-04), and nothing else (maintainer, 2026-11-01, S267): every other tool is in the
+    /// add-panel menu, and the UI adds a Camera tab when a vehicle has a
+    /// camera set up.
     #[must_use]
     pub fn simple_dock() -> DockNode {
         DockNode::Split {
@@ -1082,32 +1280,7 @@ impl Layout {
                 },
                 DockChild {
                     size: 440,
-                    node: DockNode::Split {
-                        direction: Direction::Row,
-                        children: vec![
-                            DockChild {
-                                size: 500,
-                                node: DockNode::of(&[
-                                    TabKind::Control,
-                                    TabKind::Mission,
-                                    TabKind::Controllers,
-                                    TabKind::History,
-                                    TabKind::Parameters,
-                                    TabKind::Camera,
-                                ]),
-                            },
-                            DockChild {
-                                size: 500,
-                                node: DockNode::of(&[
-                                    TabKind::Telemetry,
-                                    TabKind::Messages,
-                                    TabKind::FlightDisplay,
-                                    TabKind::Instruments,
-                                    TabKind::Airspace,
-                                ]),
-                            },
-                        ],
-                    },
+                    node: DockNode::of(&[TabKind::Control]),
                 },
             ],
         }
@@ -1120,13 +1293,14 @@ impl Layout {
         DockNode::of(&[TabKind::Map])
     }
 
-    /// A flight tool's layout (maintainer, 2026-10-03): on top, the map and
-    /// the camera; below, Instruments (with the classic instruments and the
-    /// mission) and Messages (with parameters, controllers, then the MAVLink
-    /// inspector and a Chart at the end; maintainer, 2026-10-12); on the
-    /// right, Control short above Telemetry (with
-    /// history and Airspace, maintainer 2026-10-21). No chat: it opens on request as the left column
-    /// (maintainer, 2026-10-05). "Reset layout" brings it back.
+    /// A flight tool's layout, lean for pros (maintainer, 2026-11-01, S267):
+    /// the map and the 3D map side by side on top; below, the Cockpit (with
+    /// the controllers), Instruments with the classic instruments, and Telemetry
+    /// with Messages. Vehicle setup's tools (Parameters, Files, the MAVLink
+    /// inspector, History) are in the add-panel menu and the vehicle's page,
+    /// and the UI adds a Camera tab when a vehicle has a camera set up. No
+    /// chat: it opens on request as the left column (maintainer,
+    /// 2026-10-05). "Reset layout" brings it back.
     #[must_use]
     pub fn flight_dock() -> DockNode {
         let split = |direction, children: Vec<(u16, DockNode)>| DockNode::Split {
@@ -1137,67 +1311,29 @@ impl Layout {
                 .collect(),
         };
         split(
-            Direction::Row,
+            Direction::Column,
             vec![
                 (
-                    720,
+                    580,
                     split(
-                        Direction::Column,
+                        Direction::Row,
                         vec![
-                            (
-                                620,
-                                split(
-                                    Direction::Row,
-                                    vec![
-                                        (500, DockNode::of(&[TabKind::Map])),
-                                        (500, DockNode::of(&[TabKind::Map3d])),
-                                    ],
-                                ),
-                            ),
-                            (
-                                380,
-                                split(
-                                    Direction::Row,
-                                    vec![
-                                        (
-                                            390,
-                                            DockNode::of(&[
-                                                TabKind::FlightDisplay,
-                                                TabKind::Instruments,
-                                                TabKind::Mission,
-                                            ]),
-                                        ),
-                                        (
-                                            610,
-                                            DockNode::of(&[
-                                                TabKind::Messages,
-                                                TabKind::Parameters,
-                                                TabKind::Controllers,
-                                                TabKind::Inspector,
-                                                TabKind::Chart,
-                                                TabKind::Camera,
-                                            ]),
-                                        ),
-                                    ],
-                                ),
-                            ),
+                            (500, DockNode::of(&[TabKind::Map])),
+                            (500, DockNode::of(&[TabKind::Map3d])),
                         ],
                     ),
                 ),
                 (
-                    280,
+                    420,
                     split(
-                        Direction::Column,
+                        Direction::Row,
                         vec![
-                            (400, DockNode::of(&[TabKind::Control])),
+                            (380, DockNode::of(&[TabKind::Control])),
                             (
-                                600,
-                                DockNode::of(&[
-                                    TabKind::Telemetry,
-                                    TabKind::History,
-                                    TabKind::Airspace,
-                                ]),
+                                320,
+                                DockNode::of(&[TabKind::FlightDisplay, TabKind::Instruments]),
                             ),
+                            (300, DockNode::of(&[TabKind::Telemetry, TabKind::Messages])),
                         ],
                     ),
                 ),
@@ -1227,9 +1363,18 @@ impl Layout {
 
     /// Shows a tab of this kind, as "+" does: the first one there is, an
     /// unpinned one first, shown again if hidden; else a new one in the
-    /// group of the kind it joins (the inspector beside Messages, the camera with Parameters), the
-    /// first group without the chat, or beside everything. Opens the pane.
+    /// group of the kind it joins (the inspector beside Messages, the camera with the Cockpit), the
+    /// first group without the chat or a map, beside the map, or beside
+    /// everything. Opens the pane.
     pub fn open(&mut self, kind: TabKind) {
+        self.open_tab(Tab::of(kind));
+    }
+
+    /// Shows a tab as [`Self::open`] does; one given a chart or an item is
+    /// always a new one, shown with what it was given (S43), and one given
+    /// only a vehicle is the tab of the kind pinned to it, else a new one.
+    pub fn open_tab(&mut self, tab: Tab) {
+        let kind = tab.kind;
         if kind == TabKind::Chat {
             return;
         }
@@ -1238,7 +1383,31 @@ impl Layout {
             self.dock = Self::flight_dock_keeping_chat(&self.dock);
         }
         self.pane_open = true;
-        if self.dock.show(kind) {
+        let drawn = tab.chart.is_some() || tab.item.is_some();
+        if !drawn
+            && tab.vehicle_id.is_none()
+            && let Some(id) = self.dock.show(kind)
+        {
+            if let Some(section) = tab.section {
+                self.dock.set_section(&id, section);
+            }
+            return;
+        }
+        // Asked again for a vehicle's tab: the one pinned to it, not another.
+        let pinned = (!drawn && tab.vehicle_id.is_some())
+            .then(|| {
+                self.dock
+                    .tabs()
+                    .into_iter()
+                    .find(|t| t.kind == kind && t.vehicle_id == tab.vehicle_id)
+                    .map(|t| t.id.clone())
+            })
+            .flatten();
+        if let Some(id) = pinned {
+            self.dock.show_id(&id);
+            if let Some(section) = tab.section {
+                self.dock.set_section(&id, section);
+            }
             return;
         }
         let mut id = kind.slug().to_owned();
@@ -1247,14 +1416,11 @@ impl Layout {
             id = format!("{}-{n}", kind.slug());
             n += 1;
         }
-        let tab = Tab {
-            id,
-            ..Tab::of(kind)
-        };
+        let tab = Tab { id, ..tab };
         let joined = kind
             .joins()
             .is_some_and(|with| self.dock.add_to_group_with(with, &tab));
-        if !joined && !self.dock.add_to_first_group(&tab) {
+        if !joined && !self.dock.add_to_first_group(&tab) && !self.dock.add_beside_map(&tab) {
             let dock = std::mem::replace(&mut self.dock, DockNode::of(&[TabKind::Chat]));
             self.dock = normalised_dock(DockNode::Split {
                 direction: Direction::Row,
@@ -1277,6 +1443,7 @@ impl Layout {
     #[must_use]
     pub fn normalised(mut self) -> Self {
         // Saved names are user-owned; built-ins follow each shipped revision.
+        // A built-in whose default did not change keeps its arrangement.
         for saved in &mut self.saved {
             if let Some(preset) = &mut saved.preset
                 && preset.version > 0
@@ -1286,9 +1453,12 @@ impl Layout {
                     LayoutPresetKind::Simple => Self::simple_dock(),
                     LayoutPresetKind::Advanced => Self::flight_dock(),
                 };
+                preset.version = LAYOUT_PRESET_VERSION;
+                if preset.base == dock {
+                    continue;
+                }
                 saved.dock = dock.clone();
                 preset.base = dock.clone();
-                preset.version = LAYOUT_PRESET_VERSION;
                 if self.current.as_ref() == Some(&saved.id) {
                     self.dock = dock;
                     self.pane_open = true;
@@ -1407,7 +1577,7 @@ pub struct Operator {
     /// `received:HEARTBEAT` or `sent:COMMAND_LONG`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inspector_pinned: Vec<String>,
-    /// The actions the Control tab shows as buttons, in the operator's
+    /// The actions the Cockpit tab shows as buttons, in the operator's
     /// order, per vehicle type: modes they pinned and the commands they
     /// kept. A type not here shows UXDuck's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1433,8 +1603,26 @@ pub struct Operator {
     /// same computer keeps theirs. Recorded when they claim one with it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controller_mappings: Vec<ControllerMapping>,
+    /// The Terms of Service they last agreed to on this computer
+    /// (ADR-0047), recorded by UXDuck when they agree and never set by a
+    /// client; synced with the operator. UXDuck arms a real vehicle for
+    /// them only once it is the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<TermsAcceptance>,
     /// Bumped on every change; writes carry the version they started from.
     pub version: u64,
+}
+
+/// An operator's agreement to the Terms of Service (ADR-0047).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TermsAcceptance {
+    /// `TERMS_VERSION` as it was when they agreed.
+    pub version: String,
+    pub accepted_at_ms: u64,
+    /// The account signed in on this computer when they agreed, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 const fn place_search_default() -> bool {
@@ -1560,7 +1748,7 @@ pub fn clean_inspector_pinned(pinned: &[String]) -> Option<Vec<String>> {
     Some(kept)
 }
 
-/// The Control tab's buttons for one type of vehicle, in order, by action
+/// The Cockpit tab's buttons for one type of vehicle, in order, by action
 /// id such as `vehicle:arm` or `vehicle:mode:guided`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1634,9 +1822,9 @@ impl Operator {
 /// under the account's limit for one synced change.
 pub const MAX_DISPLAY_BYTES: usize = 256 * 1024;
 
-/// The most buttons on the Control tab for one type of vehicle.
+/// The most buttons on the Cockpit tab for one type of vehicle.
 pub const MAX_CONTROL_ACTIONS: usize = 40;
-/// The longest action id on the Control tab, in characters.
+/// The longest action id on the Cockpit tab, in characters.
 pub const MAX_CONTROL_ACTION_CHARS: usize = 64;
 
 /// Each type once, sorted, with each action once in the order given;
@@ -1740,7 +1928,7 @@ mod tests {
             "paneShare": 70,
             "splitShare": 40,
             "groups": [
-                { "tabs": ["map", "mission"], "active": 1 },
+                { "tabs": ["map", "history"], "active": 1 },
                 { "tabs": ["vehicle"], "active": 0 }
             ]
         });
@@ -1753,7 +1941,7 @@ mod tests {
                 child(
                     420,
                     DockNode::Group {
-                        tabs: vec![Tab::of(TabKind::Map), Tab::of(TabKind::Mission)],
+                        tabs: vec![Tab::of(TabKind::Map), Tab::of(TabKind::History)],
                         active: 1
                     }
                 ),
@@ -1795,7 +1983,7 @@ mod tests {
         // The flight layout has no chat: the map first on the top row.
         let flight = serde_json::to_value(Layout::flight_dock()).unwrap();
         assert_eq!(flight["type"], "split");
-        let top = &flight["children"][0]["node"]["children"][0]["node"]["children"];
+        let top = &flight["children"][0]["node"]["children"];
         assert_eq!(top[0]["node"]["tabs"][0]["kind"], "map");
         assert!(!Layout::flight_dock().contains(TabKind::Chat));
     }
@@ -1817,7 +2005,7 @@ mod tests {
                             1,
                             DockNode::Split {
                                 direction: Direction::Column,
-                                children: vec![child(5, group(&[TabKind::Mission]))],
+                                children: vec![child(5, group(&[TabKind::History]))],
                             },
                         ),
                     ]),
@@ -1842,7 +2030,7 @@ mod tests {
             row(vec![
                 child(250, group(&[TabKind::Chat, TabKind::Map])),
                 child(250, group(&[TabKind::Telemetry, TabKind::Control])),
-                child(250, group(&[TabKind::Mission])),
+                child(250, group(&[TabKind::History])),
                 child(
                     250,
                     DockNode::Group {
@@ -1852,10 +2040,13 @@ mod tests {
                             vehicle_id: None,
                             hidden: false,
                             camera: None,
+                            camera_view: None,
+                            map_camera: None,
                             panel: None,
                             item: None,
                             camera_behind: false,
                             chart: None,
+                            section: None,
                         }],
                         active: 0,
                     }
@@ -2038,6 +2229,64 @@ mod tests {
     }
 
     #[test]
+    fn camera_view_is_kept_on_camera_tabs_only() {
+        let stored = serde_json::json!({
+            "paneOpen": true,
+            "dock": {
+                "type": "group",
+                "tabs": [
+                    {"id": "camera", "kind": "camera", "cameraView": "grid"},
+                    {"id": "camera-2", "kind": "camera", "camera": "front", "cameraView": "single"},
+                    {"id": "map", "kind": "map", "cameraView": "focus"}
+                ],
+                "active": 0
+            },
+            "saved": []
+        });
+        let layout: Layout = serde_json::from_value(stored).unwrap();
+        let DockNode::Group { tabs, .. } = &layout.dock else {
+            panic!("a group")
+        };
+        let views: Vec<Option<CameraView>> = tabs.iter().map(|t| t.camera_view).collect();
+        assert_eq!(
+            views,
+            vec![Some(CameraView::Grid), Some(CameraView::Single), None]
+        );
+        let again: Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        assert_eq!(again, layout);
+    }
+
+    #[test]
+    fn map_cameras_are_kept_on_their_own_3d_tabs_only() {
+        let options =
+            serde_json::json!({ "viewpoint": "behind", "following": false, "resume": true });
+        let stored = serde_json::json!({
+            "paneOpen": true, "dock": { "type": "group", "active": 0, "tabs": [
+                { "id": "one", "kind": "map-3d", "mapCamera": options },
+                { "id": "two", "kind": "map-3d" },
+                { "id": "flat", "kind": "map", "mapCamera": options }
+            ] }, "saved": []
+        });
+        let layout: Layout = serde_json::from_value(stored).unwrap();
+        let DockNode::Group { tabs, .. } = &layout.dock else {
+            panic!("a group")
+        };
+        assert_eq!(
+            tabs[0].map_camera,
+            Some(MapCameraOptions {
+                viewpoint: MapViewpoint::Behind,
+                following: false,
+                resume: true,
+                drag_to_pan: None,
+            })
+        );
+        assert!(tabs[1].map_camera.is_none() && tabs[2].map_camera.is_none());
+        let restored: Layout =
+            serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        assert_eq!(restored, layout);
+    }
+
+    #[test]
     fn a_map_stored_in_3d_is_a_3d_map_tab_in_its_place() {
         // Before 2026-10-04 a Map tab carried `threeD`; now 3D is a kind of its own.
         let stored = serde_json::json!({
@@ -2047,7 +2296,7 @@ mod tests {
                 "tabs": [
                     {"id": "map", "kind": "map", "threeD": true, "vehicleId": "v1"},
                     {"id": "t2", "kind": "map"},
-                    "mission"
+                    "history"
                 ],
                 "active": 0
             },
@@ -2067,7 +2316,7 @@ mod tests {
             vec![
                 ("map", TabKind::Map3d),
                 ("t2", TabKind::Map),
-                ("mission", TabKind::Mission)
+                ("history", TabKind::History)
             ]
         );
         assert_eq!(*active, 0);
@@ -2095,10 +2344,13 @@ mod tests {
             vehicle_id: vehicle.map(Into::into),
             hidden: false,
             camera: None,
+            camera_view: None,
+            map_camera: None,
             panel: None,
             item: None,
             camera_behind: false,
             chart: None,
+            section: None,
         };
         let layout = Layout {
             pane_open: true,
@@ -2115,7 +2367,7 @@ mod tests {
                     DockNode::group(vec![
                         tab("map", TabKind::Map, None),
                         tab("t1", TabKind::Map, Some("v2")),
-                        tab("t1", TabKind::Mission, None),
+                        tab("t1", TabKind::History, None),
                     ]),
                 ),
             ]),
@@ -2235,6 +2487,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_mission_tab_is_dropped_for_the_missions_page() {
+        let stored = serde_json::json!({
+            "paneOpen": true,
+            "dock": {"type": "group", "active": 1, "tabs": [
+                {"id": "map", "kind": "map"},
+                {"id": "mission", "kind": "mission"},
+                {"id": "history", "kind": "history"}
+            ]}
+        });
+        let layout: Layout = serde_json::from_value(stored).unwrap();
+        assert!(!layout.dock.contains(TabKind::Mission));
+        assert!(layout.dock.contains(TabKind::History));
+    }
+
+    #[test]
     fn the_first_run_is_simple_without_home_or_chat() {
         let layout = Layout::initial();
         assert_eq!(
@@ -2248,7 +2515,10 @@ mod tests {
             layout.dock.contains(TabKind::Map3d),
             "the 3D map always shows"
         );
-        assert!(layout.dock.contains(TabKind::Mission));
+        assert!(
+            !layout.dock.contains(TabKind::Mission),
+            "the Missions page replaced the Mission tab"
+        );
         assert!(!layout.dock.contains(TabKind::Inspector));
         assert!(
             !layout.dock.contains(TabKind::Home),
@@ -2258,6 +2528,110 @@ mod tests {
             !layout.dock.contains(TabKind::Chat),
             "the chat opens on request"
         );
+        let kinds: Vec<TabKind> = layout.dock.tabs().iter().map(|tab| tab.kind).collect();
+        assert_eq!(
+            kinds,
+            [TabKind::Map, TabKind::Map3d, TabKind::Control],
+            "the two maps above the Cockpit, and nothing else (S267, ADR-0005 2026-11-04)"
+        );
+    }
+
+    #[test]
+    fn a_stored_controllers_tab_goes_or_becomes_the_cockpit() {
+        let stored = |dock: DockNode| {
+            let mut layout = Layout::initial();
+            layout.dock = dock;
+            let back: Layout =
+                serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+            back.dock
+                .tabs()
+                .iter()
+                .map(|tab| tab.kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stored(DockNode::of(&[
+                TabKind::Map,
+                TabKind::Control,
+                TabKind::Controllers
+            ])),
+            [TabKind::Map, TabKind::Control],
+            "beside a Cockpit it goes"
+        );
+        assert_eq!(
+            stored(DockNode::of(&[
+                TabKind::Map,
+                TabKind::Controllers,
+                TabKind::Telemetry
+            ])),
+            [TabKind::Map, TabKind::Control, TabKind::Telemetry],
+            "without one it becomes the Cockpit, in its place"
+        );
+    }
+
+    #[test]
+    fn version_13_built_ins_migrate_and_one_whose_default_held_stays() {
+        let old_simple = DockNode::Split {
+            direction: Direction::Column,
+            children: vec![
+                DockChild {
+                    size: 560,
+                    node: DockNode::of(&[TabKind::Map, TabKind::Map3d]),
+                },
+                DockChild {
+                    size: 440,
+                    node: DockNode::of(&[
+                        TabKind::Control,
+                        TabKind::Controllers,
+                        TabKind::History,
+                        TabKind::Parameters,
+                        TabKind::Camera,
+                        TabKind::Telemetry,
+                    ]),
+                },
+            ],
+        };
+        let old_advanced = DockNode::of(&[TabKind::Map, TabKind::Parameters, TabKind::Inspector]);
+        let mut layout = Layout::initial();
+        layout.dock = old_simple.clone();
+        layout.saved[0].dock = old_simple.clone();
+        let preset = layout.saved[0].preset.as_mut().unwrap();
+        preset.version = 13;
+        preset.base = old_simple;
+        layout.saved.push(SavedLayout {
+            id: "preset-advanced".into(),
+            name: "Advanced".into(),
+            dock: DockNode::of(&[TabKind::Map, TabKind::Parameters]),
+            preset: Some(LayoutPreset {
+                kind: LayoutPresetKind::Advanced,
+                version: 13,
+                base: old_advanced,
+            }),
+        });
+        let back: Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        assert_eq!(back.dock, Layout::simple_dock());
+        assert_eq!(back.saved[0].dock, Layout::simple_dock());
+        assert_eq!(back.saved[1].dock, Layout::flight_dock());
+        assert!(!back.saved[1].dock.contains(TabKind::Parameters));
+        for saved in &back.saved {
+            let preset = saved.preset.as_ref().unwrap();
+            assert_eq!(preset.version, LAYOUT_PRESET_VERSION);
+            assert_eq!(preset.base, saved.dock);
+        }
+        // A built-in stored with this default already keeps its arrangement.
+        let mut advanced = Layout::flight_dock();
+        if let DockNode::Split { children, .. } = &mut advanced {
+            children[0].size = 600;
+            children[1].size = 400;
+        }
+        layout.saved[1].dock = advanced.clone();
+        layout.saved[1].preset.as_mut().unwrap().base = Layout::flight_dock();
+        layout.current = Some("preset-advanced".into());
+        layout.dock = advanced.clone();
+        let back: Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        assert_eq!(back.dock, advanced, "the arrangement on screen stays");
+        assert_eq!(back.saved[1].dock, advanced);
+        assert_eq!(back.saved[0].dock, Layout::simple_dock());
     }
 
     #[test]
@@ -2341,41 +2715,54 @@ mod tests {
 
     /// The group with the map in the flight layout.
     fn map_group(layout: &Layout) -> DockNode {
-        let DockNode::Split { children, .. } = &layout.dock else {
-            panic!("the flight layout");
-        };
-        let DockNode::Split { children: rows, .. } = &children[0].node else {
+        let DockNode::Split { children: rows, .. } = &layout.dock else {
             panic!("the top row over the bottom one");
         };
         let DockNode::Split { children: top, .. } = &rows[0].node else {
-            panic!("the map and the camera");
+            panic!("the map and the 3D map");
         };
         top[0].node.clone()
     }
 
+    /// The Cockpit's group in the flight layout, below the maps.
+    fn cockpit_group(layout: &Layout) -> DockNode {
+        let DockNode::Split { children: rows, .. } = &layout.dock else {
+            panic!("the top row over the bottom one");
+        };
+        let DockNode::Split {
+            children: bottom, ..
+        } = &rows[1].node
+        else {
+            panic!("the bottom row");
+        };
+        bottom[0].node.clone()
+    }
+
     #[test]
     fn opening_a_tab_shows_the_one_there_or_adds_one_beside_the_map() {
-        // None yet: the flight layout opens in the home's place and the tab joins its first group.
+        // None yet: the flight layout opens in the home's place and the tab
+        // joins its first group without a map, so the map stays in view.
         let mut layout = Layout {
             dock: DockNode::of(&[TabKind::Home]),
             ..Layout::initial()
         };
         layout.open(TabKind::Vehicles);
         assert!(layout.pane_open);
+        assert_eq!(map_group(&layout), DockNode::of(&[TabKind::Map]));
         let added = DockNode::Group {
-            tabs: vec![Tab::of(TabKind::Map), Tab::of(TabKind::Vehicles)],
+            tabs: vec![Tab::of(TabKind::Control), Tab::of(TabKind::Vehicles)],
             active: 1,
         };
-        assert_eq!(map_group(&layout), added);
+        assert_eq!(cockpit_group(&layout), added);
 
         // One there, behind another: it shows, and none is added.
-        layout.open(TabKind::Map);
+        layout.open(TabKind::Control);
         assert!(matches!(
-            map_group(&layout),
+            cockpit_group(&layout),
             DockNode::Group { active: 0, .. }
         ));
         layout.open(TabKind::Vehicles);
-        assert_eq!(map_group(&layout), added);
+        assert_eq!(cockpit_group(&layout), added);
 
         // The chat alone: the flight layout, the AI kept on its right.
         let mut alone = Layout {
@@ -2392,6 +2779,38 @@ mod tests {
         // The chat is never opened as a second tab.
         alone.open(TabKind::Chat);
         assert_eq!(alone.dock.shape(), shape);
+    }
+
+    /// Asked twice for a vehicle's tab, one tab pinned to it; the tab that
+    /// follows the selection is left alone (Ben, 2026-11-01: Telemetry
+    /// opened twice).
+    #[test]
+    fn a_vehicles_tab_asked_for_again_is_the_one_pinned_to_it() {
+        let mut layout = Layout {
+            dock: DockNode::of(&[TabKind::Home]),
+            ..Layout::initial()
+        };
+        layout.open(TabKind::Telemetry);
+        let pinned = |vehicle: &str| Tab {
+            vehicle_id: Some(vehicle.to_owned()),
+            ..Tab::of(TabKind::Telemetry)
+        };
+        let telemetry = |layout: &Layout| -> Vec<Option<String>> {
+            layout
+                .dock
+                .tabs()
+                .into_iter()
+                .filter(|t| t.kind == TabKind::Telemetry)
+                .map(|t| t.vehicle_id.clone())
+                .collect()
+        };
+        layout.open_tab(pinned("sim-2"));
+        layout.open_tab(pinned("sim-2"));
+        let shown = telemetry(&layout);
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert!(shown.contains(&None) && shown.contains(&Some("sim-2".to_owned())));
+        layout.open_tab(pinned("sim-1"));
+        assert_eq!(telemetry(&layout).len(), 3, "another vehicle, another tab");
     }
 
     #[test]
@@ -2450,13 +2869,114 @@ mod tests {
         with_chat.open(TabKind::Inspector);
         assert_eq!(
             with_chat.dock.shape(),
-            "Row([chat:chat:,messages:messages:],[map:map:,inspector:inspector:])"
+            "Row([chat:chat:,messages:messages:],[map:map:],[inspector:inspector:])"
+        );
+    }
+
+    /// FB-95: a tab opened, from the palette, a menu or the AI, never goes
+    /// in a map's group, so the map stays in view; with no other group it
+    /// opens beside the map.
+    #[test]
+    fn a_new_tab_never_covers_the_map() {
+        // Simple: the two maps on top, the Cockpit below; Telemetry joins the Cockpit.
+        let mut simple = Layout {
+            pane_open: true,
+            dock: Layout::simple_dock(),
+            ..Layout::initial()
+        };
+        simple.open(TabKind::Telemetry);
+        assert_eq!(
+            simple.dock.shape(),
+            "Column(Row([map:map:],[map-3d:map-3d:]),[control:control:,telemetry:telemetry:])"
+        );
+
+        // The map with the AI on its right: beside the map, half its share.
+        let mut beside_chat = Layout {
+            pane_open: true,
+            dock: DockNode::Split {
+                direction: Direction::Row,
+                children: vec![
+                    DockChild {
+                        size: 700,
+                        node: DockNode::of(&[TabKind::Map]),
+                    },
+                    DockChild {
+                        size: 300,
+                        node: DockNode::of(&[TabKind::Chat]),
+                    },
+                ],
+            },
+            ..Layout::initial()
+        };
+        beside_chat.open(TabKind::Telemetry);
+        let DockNode::Split { children, .. } = &beside_chat.dock else {
+            panic!("a row");
+        };
+        assert_eq!(
+            beside_chat.dock.shape(),
+            "Row([map:map:],[telemetry:telemetry:],[chat:chat:])"
+        );
+        assert_eq!(
+            children.iter().map(|c| c.size).collect::<Vec<_>>(),
+            [350, 350, 300]
+        );
+
+        // The map above the AI: the map's place split in two.
+        let mut above_chat = Layout {
+            pane_open: true,
+            dock: DockNode::Split {
+                direction: Direction::Column,
+                children: vec![
+                    DockChild {
+                        size: 600,
+                        node: DockNode::of(&[TabKind::Map]),
+                    },
+                    DockChild {
+                        size: 400,
+                        node: DockNode::of(&[TabKind::Chat]),
+                    },
+                ],
+            },
+            ..Layout::initial()
+        };
+        above_chat.open(TabKind::Messages);
+        assert_eq!(
+            above_chat.dock.shape(),
+            "Column(Row([map:map:],[messages:messages:]),[chat:chat:])"
+        );
+
+        // A group whose map is hidden shows no map, so it takes the tab.
+        let hidden = Tab {
+            hidden: true,
+            ..Tab::of(TabKind::Map)
+        };
+        let mut unticked = Layout {
+            pane_open: true,
+            dock: DockNode::Split {
+                direction: Direction::Row,
+                children: vec![
+                    DockChild {
+                        size: 500,
+                        node: DockNode::of(&[TabKind::Map3d]),
+                    },
+                    DockChild {
+                        size: 500,
+                        node: DockNode::group(vec![hidden, Tab::of(TabKind::Messages)]),
+                    },
+                ],
+            },
+            ..Layout::initial()
+        };
+        unticked.open(TabKind::Telemetry);
+        assert_eq!(
+            unticked.dock.shape(),
+            "Row([map-3d:map-3d:],[map:map:h,messages:messages:,telemetry:telemetry:])"
         );
     }
 
     #[test]
-    fn the_camera_opens_with_parameters() {
-        // In the flight layout the camera joins Parameters' group below the
+    fn the_camera_opens_with_the_cockpit() {
+        // In the flight layout the camera joins the Cockpit's group below the
         // maps, so the top row stays the two maps.
         let mut layout = Layout {
             pane_open: true,
@@ -2464,11 +2984,15 @@ mod tests {
             ..Layout::initial()
         };
         layout.open(TabKind::Camera);
-        assert!(layout.dock.shape().contains(
-            "[messages:messages:,parameters:parameters:,controllers:controllers:,inspector:inspector:,chart:chart:,camera:camera:]"
-        ));
+        assert!(
+            layout
+                .dock
+                .shape()
+                .contains("[control:control:,camera:camera:]")
+        );
         assert!(layout.dock.shape().contains("[map-3d:map-3d:]"));
-        // Without Parameters, the first group without the chat, as any tab.
+        // Without the Cockpit, as any tab: never in the chat's or the map's
+        // group, so beside the map.
         let mut flat = Layout {
             pane_open: true,
             dock: DockNode::Split {
@@ -2489,7 +3013,7 @@ mod tests {
         flat.open(TabKind::Camera);
         assert_eq!(
             flat.dock.shape(),
-            "Row([chat:chat:],[map:map:,camera:camera:])"
+            "Row([chat:chat:],[map:map:],[camera:camera:])"
         );
     }
 
@@ -2561,6 +3085,7 @@ mod tests {
             display: None,
             account_id: None,
             controller_mappings: Vec::new(),
+            terms: None,
             version: 1,
         })
         .unwrap();

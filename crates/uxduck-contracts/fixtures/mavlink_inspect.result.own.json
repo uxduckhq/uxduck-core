@@ -1,0 +1,39 @@
+{
+  "decoded": true,
+  "messages": [
+    {
+      "direction": "received",
+      "id": 43001,
+      "name": "ACME_STATUS",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 2.5,
+      "count": 40,
+      "ageMs": 120,
+      "fields": {
+        "time_usec": 7,
+        "voltage": 12.5,
+        "mode": 3,
+        "flags": 5,
+        "name": "pod",
+        "temperature": 0
+      },
+      "labels": {
+        "mode": "ACME_MODE_SURVEY",
+        "flags": "ACME_FLAG_ARMED | ACME_FLAG_HOT"
+      },
+      "ownDialect": "Acme r12",
+      "change": "new"
+    },
+    {
+      "direction": "received",
+      "id": 42999,
+      "name": "#42999",
+      "systemId": 1,
+      "componentId": 1,
+      "hz": 1.5,
+      "count": 20,
+      "ageMs": 300
+    }
+  ]
+}

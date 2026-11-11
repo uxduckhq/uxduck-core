@@ -2,6 +2,7 @@
 
 pub mod app_browser;
 pub mod browser;
+pub mod computer_status;
 pub mod credentials;
 pub mod host;
 pub mod login_item;

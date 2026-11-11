@@ -87,7 +87,7 @@ pub enum UpdateError {
     #[error("the manifest is not valid: {0}")]
     Invalid(String),
     #[error(
-        "the manifest was published at {offered}, before one already seen ({seen}); it may be replayed, so it is ignored"
+        "the manifest was published at {offered}, before one already seen ({seen}). It may be replayed, so it is ignored"
     )]
     Replayed { offered: String, seen: String },
 }

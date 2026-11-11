@@ -31,6 +31,7 @@ impl From<&core::VideoCounters> for dto::VideoCounters {
             datagrams: v.datagrams,
             pictures: v.pictures,
             keyframes: v.keyframes,
+            recovery_points: v.recovery_points,
             lost: v.lost,
             damaged: v.damaged,
             pes_length_mismatches: v.pes_length_mismatches,
@@ -38,6 +39,13 @@ impl From<&core::VideoCounters> for dto::VideoCounters {
             nals_dropped: v.nals_dropped,
             klv: v.klv,
             klv_bad: v.klv_bad,
+            hold_us: v.hold_us,
+            jitter_us: v.jitter_us,
+            camera_clock: v.camera_clock.map(|c| match c {
+                core::CameraClock::SenderReports => dto::CameraClock::SenderReports,
+                core::CameraClock::Klv => dto::CameraClock::Klv,
+            }),
+            camera_delay_us: v.camera_delay_us,
         }
     }
 }
@@ -59,6 +67,7 @@ impl From<&core::VideoSource> for dto::VideoSource {
     fn from(v: &core::VideoSource) -> Self {
         Self {
             recording_requested: v.recording_requested,
+            reencoding: v.reencoding.clone(),
             id: v.id.clone(),
             name: v.name.clone(),
             named_by_hand: v.named_by_hand,
@@ -103,6 +112,26 @@ impl From<core::RecordPolicy> for dto::RecordPolicy {
     }
 }
 
+impl From<core::Reencoder> for dto::Reencoder {
+    fn from(v: core::Reencoder) -> Self {
+        match v {
+            core::Reencoder::Automatic => Self::Automatic,
+            core::Reencoder::Hardware => Self::Hardware,
+            core::Reencoder::Software => Self::Software,
+        }
+    }
+}
+
+impl From<dto::Reencoder> for core::Reencoder {
+    fn from(v: dto::Reencoder) -> Self {
+        match v {
+            dto::Reencoder::Automatic => Self::Automatic,
+            dto::Reencoder::Hardware => Self::Hardware,
+            dto::Reencoder::Software => Self::Software,
+        }
+    }
+}
+
 impl From<dto::RecordPolicy> for core::RecordPolicy {
     fn from(v: dto::RecordPolicy) -> Self {
         match v {
@@ -138,6 +167,11 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
             camera_receipt_id: v.camera_receipt_id.clone(),
             sound: v.sound,
             file_name: v.file_name.clone(),
+            flight_id: v.flight_id.clone(),
+            alignment: v.alignment.as_ref().map(|a| dto::VideoAlignment {
+                by: a.by.into(),
+                own_start_us: a.own_start_us,
+            }),
             trigger: match v.trigger {
                 core::RecordingTrigger::ByHand => dto::RecordingTrigger::ByHand,
                 core::RecordingTrigger::Armed => dto::RecordingTrigger::Armed,
@@ -225,6 +259,17 @@ impl From<&core::VideoFileInput> for dto::VideoFileInput {
             name: v.name.clone(),
             repeat: v.repeat,
             demo_id: v.demo_id.clone(),
+        }
+    }
+}
+
+impl From<core::AlignedBy> for dto::AlignedBy {
+    fn from(by: core::AlignedBy) -> Self {
+        match by {
+            core::AlignedBy::Klv => Self::Klv,
+            core::AlignedBy::Metadata => Self::Metadata,
+            core::AlignedBy::VehicleClock => Self::VehicleClock,
+            core::AlignedBy::Hand => Self::Hand,
         }
     }
 }

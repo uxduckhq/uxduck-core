@@ -1,9 +1,10 @@
 //! Terrain kept offline, and for missions (S120, ADR-0026 T6).
 //!
-//! Areas are rectangles kept in the daemon's settings and fetched from the
-//! default dataset into the host's store (the data folder, or the browser's
-//! Origin Private File System for UXDuck Web); at start they are checked
-//! again, which reads what is kept and fetches only what is missing.
+//! Areas are polygons kept in the daemon's settings (ADR-0051 A5) and, while
+//! enabled, fetched from the default dataset into the host's store (the data
+//! folder, or the browser's Origin Private File System for UXDuck Web); at
+//! start they are checked again, which reads what is kept and fetches only
+//! what is missing. A disabled area is kept in the settings, not its terrain.
 //!
 //! A mission's terrain is fetched when it is uploaded: every chunk within
 //! 1 km of any leg, sampled along each leg, from the vehicle's dataset. A
@@ -14,17 +15,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::link::IdParams;
+use uxduck_contracts::dto::plan::LatLon as LatLonDto;
 use uxduck_contracts::dto::terrain::{
-    TerrainArea as AreaDto, TerrainAreaSize, TerrainAreaStatus, TerrainAreasResult, TerrainBounds,
-    TerrainKeepAreaParams, TerrainKeeping,
+    TerrainArea as AreaDto, TerrainAreaSize, TerrainAreaStatus, TerrainAreasResult,
+    TerrainKeepAreaParams, TerrainKeeping, TerrainPolygon,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::mission::MissionItem;
+use uxduck_core::domain::plan::LatLon;
 use uxduck_core::domain::settings::TerrainArea;
 use uxduck_core::events::Change;
-use uxduck_terrain::cover::{self, Bounds, LEG_BUFFER_M, MAX_CHUNKS};
+use uxduck_terrain::cover::{self, LEG_BUFFER_M, Polygon, PolygonProblem};
 use uxduck_terrain::{ChunkKey, Unavailable};
 
 use crate::rpc::handlers::to_value;
@@ -57,45 +60,42 @@ struct Upload {
     job: u64,
 }
 
-fn bounds(b: &TerrainBounds) -> Result<Bounds, ApiError> {
-    let bounds = Bounds {
-        south: b.south_deg,
-        west: b.west_deg,
-        north: b.north_deg,
-        east: b.east_deg,
+/// The chunks under a polygon, or why it cannot be an area.
+fn chunks_under(points: &[LatLon]) -> Result<BTreeSet<ChunkKey>, ApiError> {
+    let corners: Vec<(f64, f64)> = points
+        .iter()
+        .map(|p| (p.latitude_deg, p.longitude_deg))
+        .collect();
+    let problem = |problem| {
+        ApiError::new(
+            ErrorKind::InvalidValue,
+            match problem {
+                PolygonProblem::Corners => "an area has at least three corners, and at most 500",
+                PolygonProblem::OutOfRange => "an area's corners are within ±90° and ±180°",
+                PolygonProblem::AroundTheGlobe => "an area cannot go all the way round the globe",
+                PolygonProblem::TooLarge => {
+                    "the area is too large to keep. Keep a smaller one, a few degrees across at most"
+                }
+            },
+        )
     };
-    if !bounds.valid() {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "an area runs south to north and west to east, within ±90° and ±180°",
-        ));
-    }
-    if cover::chunks_in(bounds).len() > MAX_CHUNKS {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "the area is too large to keep. Keep a smaller one, a few degrees across at most",
-        ));
-    }
-    Ok(bounds)
+    let polygon = Polygon::new(&corners).map_err(problem)?;
+    cover::chunks_under(&polygon).map_err(problem)
 }
 
 fn area_dto(a: &TerrainArea) -> AreaDto {
     AreaDto {
         id: a.id.clone(),
         name: a.name.clone(),
-        south_deg: a.south_deg,
-        west_deg: a.west_deg,
-        north_deg: a.north_deg,
-        east_deg: a.east_deg,
-    }
-}
-
-fn area_bounds(a: &TerrainArea) -> Bounds {
-    Bounds {
-        south: a.south_deg,
-        west: a.west_deg,
-        north: a.north_deg,
-        east: a.east_deg,
+        points: a
+            .points
+            .iter()
+            .map(|p| LatLonDto {
+                latitude_deg: p.latitude_deg,
+                longitude_deg: p.longitude_deg,
+            })
+            .collect(),
+        enabled: a.enabled,
     }
 }
 
@@ -128,9 +128,10 @@ pub(crate) fn handle(
             require(Capability::Read)?;
             to_value(&engine.terrain_areas())
         }
-        ClientRequest::TerrainAreaSize(wanted) => {
+        ClientRequest::TerrainAreaSize(TerrainPolygon { points }) => {
             require(Capability::Read)?;
-            let keys = cover::chunks_in(bounds(&wanted)?);
+            let points: Vec<LatLon> = points.iter().map(LatLon::from).collect();
+            let keys = chunks_under(&points)?;
             let reply = engine.replying_to.take();
             engine.terrain.keeping.sizes.push((reply, keys));
             engine.settle_keeping();
@@ -138,11 +139,14 @@ pub(crate) fn handle(
             Ok(Value::Null)
         }
         ClientRequest::TerrainKeepArea(TerrainKeepAreaParams {
+            id,
             name,
-            bounds: wanted,
+            points,
+            enabled,
         }) => {
             require(Capability::Config)?;
-            let b = bounds(&wanted)?;
+            let points: Vec<LatLon> = points.iter().map(LatLon::from).collect();
+            chunks_under(&points)?;
             let name = name.trim();
             if name.is_empty() {
                 return Err(ApiError::new(
@@ -150,19 +154,33 @@ pub(crate) fn handle(
                     "an area needs a name",
                 ));
             }
-            let area = TerrainArea {
-                id: format!("ta{}", &engine.random.token()[..16]),
-                name: name.to_owned(),
-                south_deg: b.south,
-                west_deg: b.west,
-                north_deg: b.north,
-                east_deg: b.east,
-            };
             let mut settings = engine.state.settings.clone();
-            settings.terrain_areas.push(area.clone());
+            let area = if let Some(id) = id {
+                let Some(area) = settings.terrain_areas.iter_mut().find(|a| a.id == id) else {
+                    return Err(ApiError::new(ErrorKind::NotFound, "no such area"));
+                };
+                name.clone_into(&mut area.name);
+                area.points = points;
+                area.enabled = enabled.unwrap_or(area.enabled);
+                area.clone()
+            } else {
+                let area = TerrainArea {
+                    id: format!("ta{}", &engine.random.token()[..16]),
+                    name: name.to_owned(),
+                    points,
+                    enabled: enabled.unwrap_or(true),
+                };
+                settings.terrain_areas.push(area.clone());
+                area
+            };
             settings.version += 1;
             engine.commit(connection, Change::SettingsChanged { settings });
-            engine.keep_area(&area);
+            if area.enabled {
+                engine.keep_area(&area);
+            } else {
+                engine.forget_area(&area.id);
+            }
+            engine.review_all_terrain_puts();
             engine.terrain_flush();
             to_value(&area_dto(&area))
         }
@@ -176,11 +194,8 @@ pub(crate) fn handle(
             }
             settings.version += 1;
             engine.commit(connection, Change::SettingsChanged { settings });
-            if let Some(job) = engine.terrain.keeping.areas.remove(&id)
-                && let Some(cache) = &mut engine.terrain.cache
-            {
-                cache.forget_job(job);
-            }
+            engine.forget_area(&id);
+            engine.review_all_terrain_puts();
             to_value(&Empty {})
         }
         _ => Err(ApiError::new(ErrorKind::Internal, "not a terrain method")),
@@ -229,14 +244,28 @@ impl Engine {
         if let Some(old) = self.terrain.keeping.areas.remove(&area.id) {
             cache.forget_job(old);
         }
-        let job = cache.keep(dataset, cover::chunks_in(area_bounds(area)), now);
+        // Areas are checked when kept, and rectangles kept before were valid.
+        let keys = chunks_under(&area.points).unwrap_or_default();
+        let job = cache.keep(dataset, keys, now);
         self.terrain.keeping.areas.insert(area.id.clone(), job);
     }
 
-    /// At start: every kept area checked again, reading what is kept.
+    /// No longer keeps an area's terrain: what was fetched stays until it
+    /// is needed no more.
+    fn forget_area(&mut self, id: &str) {
+        if let Some(job) = self.terrain.keeping.areas.remove(id)
+            && let Some(cache) = &mut self.terrain.cache
+        {
+            cache.forget_job(job);
+        }
+    }
+
+    /// At start: every enabled area checked again, reading what is kept.
     pub(crate) fn resume_terrain_areas(&mut self) {
         for area in self.state.settings.terrain_areas.clone() {
-            self.keep_area(&area);
+            if area.enabled {
+                self.keep_area(&area);
+            }
         }
     }
 
@@ -255,6 +284,7 @@ impl Engine {
                     .get(&area.id)
                     .and_then(|job| cache?.job(*job));
                 let (state, detail) = match &status {
+                    None if !area.enabled => (TerrainKeeping::Disabled, None),
                     None => (
                         TerrainKeeping::Incomplete,
                         Some(crate::terrain::OFF.to_owned()),
@@ -283,6 +313,7 @@ impl Engine {
                         .map_or(0, |s| u32::try_from(s.done).unwrap_or(u32::MAX)),
                     bytes: status.as_ref().map_or(0, |s| s.bytes),
                     detail,
+                    vehicles: self.terrain_area_vehicles(&area.id),
                 }
             })
             .collect();

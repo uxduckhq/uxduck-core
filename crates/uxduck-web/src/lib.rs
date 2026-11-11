@@ -8,7 +8,9 @@
 
 pub mod agent;
 pub mod gamepads;
+pub mod logs;
 pub mod root;
+pub mod sync;
 
 #[cfg(target_arch = "wasm32")]
 mod web {
@@ -82,11 +84,16 @@ mod web {
         /// `"remove"` removes every file under `key`.
         store: Function,
         agent: Function,
+        /// `(json)`: a request to the account's sync, answered with
+        /// `synced` (S16).
+        sync: Function,
     }
 
     #[wasm_bindgen]
     impl WebDaemon {
-        /// Restores from the journal and starts.
+        /// Restores from the journal and the flight logs kept with it,
+        /// `[linkId, bytes]` pairs with each link's files oldest first, and
+        /// starts.
         ///
         /// # Errors
         /// When the checkpoint cannot be read.
@@ -103,6 +110,7 @@ mod web {
             version: &str,
             checkpoint: Option<String>,
             events: &str,
+            logs: &js_sys::Array,
             post: Function,
             journal: Function,
             simulator: Function,
@@ -110,7 +118,15 @@ mod web {
             fetch: Function,
             store: Function,
             agent: Function,
+            sync: Function,
         ) -> Result<WebDaemon, JsError> {
+            let mut kept = crate::logs::Logs::new(crate::logs::CAP);
+            for pair in logs.iter() {
+                let pair = js_sys::Array::from(&pair);
+                if let Some(link_id) = pair.get(0).as_string() {
+                    kept.restore(&link_id, &Uint8Array::new(&pair.get(1)).to_vec());
+                }
+            }
             let (browser, outputs) = Browser::new(
                 version,
                 Box::new(DateClock),
@@ -118,6 +134,7 @@ mod web {
                 Box::new(CryptoRandom),
                 checkpoint.as_deref(),
                 events,
+                kept,
             )
             .map_err(|e| JsError::new(&e.0))?;
             let mut browser = browser;
@@ -132,6 +149,7 @@ mod web {
                 fetch,
                 store,
                 agent,
+                sync,
             };
             daemon.hand(outputs);
             Ok(daemon)
@@ -175,6 +193,26 @@ mod web {
         pub fn link_received(&mut self, link_id: &str, bytes: &[u8]) {
             let outputs = self.browser.link_received(link_id, bytes);
             self.hand(outputs);
+        }
+
+        /// `[linkId, bytes]` pairs: each link's frames since the last call,
+        /// as tlog bytes to append to its file.
+        #[wasm_bindgen(js_name = takeLogs)]
+        pub fn take_logs(&mut self) -> js_sys::Array {
+            self.browser
+                .take_logs()
+                .into_iter()
+                .map(|(link_id, bytes)| {
+                    js_sys::Array::of2(&JsValue::from(link_id), &Uint8Array::from(bytes.as_slice()))
+                })
+                .collect()
+        }
+
+        /// Forgets the flight logs held in memory, once their files are
+        /// cleared.
+        #[wasm_bindgen(js_name = clearLogs)]
+        pub fn clear_logs(&mut self) {
+            self.browser.clear_logs();
         }
 
         /// What `fetch` asked for: its bytes, or why there are none.
@@ -229,6 +267,26 @@ mod web {
             self.hand(outputs);
         }
 
+        /// The answer to a `sync` request: its HTTP status and body, or
+        /// status 0 and why there was none (starting `offline: ` when the
+        /// server could not be reached).
+        #[allow(
+            clippy::needless_pass_by_value,
+            reason = "wasm-bindgen passes optional strings by value"
+        )]
+        pub fn synced(
+            &mut self,
+            request: u32,
+            status: u16,
+            body: Option<String>,
+            error: Option<String>,
+        ) {
+            let outputs = self
+                .browser
+                .synced(request, status, body.as_deref(), error.as_deref());
+            self.hand(outputs);
+        }
+
         #[wasm_bindgen(js_name = agentEvent)]
         #[allow(
             clippy::needless_pass_by_value,
@@ -245,6 +303,10 @@ mod web {
             let this = JsValue::NULL;
             for output in outputs {
                 let _ = match output {
+                    Output::Sync(request) => self.sync.call1(
+                        &this,
+                        &JsValue::from(serde_json::to_string(&request).unwrap_or_default()),
+                    ),
                     Output::Agent(order) => self.agent.call1(
                         &this,
                         &JsValue::from(serde_json::to_string(&order).unwrap_or_default()),

@@ -161,8 +161,8 @@ impl TsRecorder {
         out
     }
 
-    /// A picture: the start of the file at the first keyframe, the time it
-    /// adds, and the index's entry for a keyframe; for a muxed recording,
+    /// A picture: the start of the file at the first keyframe or recovery
+    /// point, the time it adds, and the index's entry for one; for a muxed recording,
     /// the picture itself.
     pub fn push_unit(&mut self, unit: &AccessUnit) -> Written {
         let mut out = Written::default();
@@ -176,7 +176,7 @@ impl TsRecorder {
         }
         let pts = unit.timestamp_us * 9 / 100;
         if !self.started {
-            if !unit.key {
+            if !unit.start() {
                 // The datagram that brought this picture holds the next one's start.
                 let keep = self.waiting.len().saturating_sub(1);
                 self.waiting.drain(..keep);
@@ -221,15 +221,15 @@ impl TsRecorder {
         self.pictures += 1;
         match &mut self.mode {
             Mode::Received => {
-                if unit.key {
+                if unit.start() {
                     out.index
                         .extend(index_entry(self.duration_us, self.last_picture_start));
                 }
                 self.last_picture_start = self.latest_start;
             }
             Mode::Muxed(writer) => {
-                let bytes = writer.picture(&unit.data, pts, unit.key);
-                if unit.key {
+                let bytes = writer.picture(&unit.data, pts, unit.start());
+                if unit.start() {
                     out.index.extend(index_entry(self.duration_us, self.offset));
                 }
                 self.append(&mut out, &bytes);
@@ -302,9 +302,12 @@ mod tests {
             vec![0, 0, 0, 1, 0x41, 9]
         };
         AccessUnit {
+            arrived: None,
             data,
             key,
+            recovery: false,
             timestamp_us,
+            composition_us: 0,
             sps: SpsInfo {
                 id: 0,
                 codec: "avc1.64001f".into(),

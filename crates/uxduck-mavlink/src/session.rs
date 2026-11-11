@@ -36,25 +36,31 @@ const MAV_CMD_CONDITION_YAW: u16 = 115;
 /// `MAV_CMD_REQUEST_MESSAGE`.
 const AVAILABLE_MODES: u32 = 435;
 
+pub const RC_CHANNELS_HZ: u16 = 2;
+
 /// Telemetry the daemon asks each autopilot to stream, as (message id,
 /// interval in µs), when it first hears it on a link it may write to.
 /// ArduPilot's Copter, Heli and Blimp stream nothing by default (every
 /// `SRn_` rate is 0), so whatever the app needs from them has to be here.
-pub const STREAM_RATES: [(u32, u32); 19] = [
-    (33, 200_000),    // GLOBAL_POSITION_INT, 5 Hz
-    (30, 100_000),    // ATTITUDE, 10 Hz
-    (1, 1_000_000),   // SYS_STATUS, 1 Hz
-    (24, 500_000),    // GPS_RAW_INT, 2 Hz
-    (74, 250_000),    // VFR_HUD, 4 Hz
+pub const STREAM_RATES: [(u32, u32); 23] = [
+    (33, 200_000),  // GLOBAL_POSITION_INT, 5 Hz
+    (30, 100_000),  // ATTITUDE, 10 Hz
+    (1, 1_000_000), // SYS_STATUS, 1 Hz
+    (24, 500_000),  // GPS_RAW_INT, 2 Hz
+    (74, 250_000),  // VFR_HUD, 4 Hz
+    (65, 1_000_000 / RC_CHANNELS_HZ as u32),
     (36, 200_000),    // SERVO_OUTPUT_RAW, 5 Hz: surfaces and motors (S35)
     (42, 1_000_000),  // MISSION_CURRENT, 1 Hz: the item flown to (S34)
     (62, 500_000),    // NAV_CONTROLLER_OUTPUT, 2 Hz: distance to the waypoint (S43)
     (193, 1_000_000), // EKF_STATUS_REPORT, 1 Hz (S72)
     (241, 1_000_000), // VIBRATION, 1 Hz (S72)
     (147, 1_000_000), // BATTERY_STATUS, 1 Hz: battery used (S72)
+    (137, 1_000_000),
+    (245, 1_000_000),
     (136, 1_000_000), // TERRAIN_REPORT, 1 Hz: the height above terrain
     (87, 500_000),    // POSITION_TARGET_GLOBAL_INT, 2 Hz: where it is going
     (242, 5_000_000), // HOME_POSITION, every 5 s: otherwise only when it is set
+    (49, 5_000_000),  // GPS_GLOBAL_ORIGIN, every 5 s, once it has an EKF origin
     (168, 1_000_000), // WIND, 1 Hz (S72)
     (132, 500_000),   // DISTANCE_SENSOR, 2 Hz: the rangefinder (S72)
     // TERRAIN_REQUEST (S118): ArduPilot asks a ground station for terrain
@@ -179,6 +185,13 @@ pub enum Effect {
         block: crate::terrain::Block,
         mask: u64,
     },
+    /// Terrain answers that went to a vehicle (S310): the groups of a
+    /// block sent in one go, by their bits.
+    TerrainSent {
+        vehicle_id: String,
+        block: crate::terrain::Block,
+        mask: u64,
+    },
     /// A vehicle's answer to a `TERRAIN_CHECK` (S119): `Some(None)` when
     /// it has no terrain there, `None` when it did not answer.
     TerrainChecked {
@@ -195,6 +208,12 @@ pub enum Effect {
     },
     /// What changed in a vehicle's telemetry since the last tick.
     Telemetry(VehicleTelemetry),
+    /// Every rate controller sample since the last tick, uncoalesced
+    /// (S330): the response graph needs them all.
+    TuningSamples {
+        vehicle_id: String,
+        samples: Vec<uxduck_core::domain::tuning_response::Sample>,
+    },
     /// An aircraft the vehicle's receiver heard (`ADSB_VEHICLE`, S168).
     Traffic {
         vehicle_id: String,
@@ -215,12 +234,27 @@ pub enum Effect {
         /// Seen restarting in this session, rather than first heard.
         restarted: bool,
     },
+    /// The vehicle's mission, fence or rally points changed on board, not
+    /// by an upload of this session (S199): another ground station, a
+    /// script. Told by `MISSION_CURRENT`'s mission count and plan ids.
+    MissionChanged { vehicle_id: String },
     /// A parameter download ended. By MAVLink FTP each parameter's default
     /// comes too (S74); by the list, none do.
     Parameters {
         vehicle_id: String,
         result: Result<Vec<Param>, Failure>,
         defaults: BTreeMap<String, f32>,
+    },
+    /// What this session holds of the vehicle's RC calibration, which it
+    /// encodes pilot input with: whether it has read it, not yet when it
+    /// first hears the vehicle (a new connection, a daemon start) or the
+    /// vehicle restarts, and why a rover's throttle calibration can't be
+    /// used. Said whenever that changes, part way through a read too, and
+    /// under each new id.
+    RcCalibration {
+        vehicle_id: String,
+        read: bool,
+        problem: Option<String>,
     },
     /// A parameter the vehicle reported outside a download: it changed
     /// it itself, another ground station did, or it answered a read.
@@ -423,7 +457,13 @@ struct Vehicle {
     last_time_boot_ms: u32,
     params: Option<PendingTransfer<ParamDownload>>,
     rc_input: crate::rc_input::RcInput,
+    /// What `Effect::RcCalibration` last said, under which id.
+    rc_said: Option<(String, bool, Option<String>)>,
     rc_overridden: [bool; 18],
+    /// The sticks and button bits of the last `MANUAL_CONTROL` sent: held
+    /// buttons (a gripper's, S263) must be let go by a frame of their own,
+    /// since `ArduSub` keeps acting on the last bits it heard.
+    manual_sent: Option<([i16; 4], u32)>,
     /// MAVLink FTP: the parameter file, tried before the list (S74), and
     /// the vehicle's files (S121).
     ftp: FtpClient,
@@ -450,7 +490,27 @@ struct Vehicle {
     modes_heard: BTreeMap<u8, AvailableMode>,
     /// `AVAILABLE_MODES_MONITOR`'s count of changes, as last heard.
     modes_seq: Option<u8>,
+    /// `MISSION_CURRENT`'s mission count and plan ids, as last heard (S199).
+    plan_ids: Option<[u32; 4]>,
+    /// Where our own upload's effect on those is in being taken quietly.
+    after_upload: AfterUpload,
+    /// The response graph's samples since the last tick (S330).
+    tuning: crate::tuning::Feed,
 }
+
+/// After an upload of ours, `MISSION_CURRENT` reports what it stored: its
+/// count and ids are taken quietly until a second after the first one heard
+/// since it ended, as the autopilot may take a moment to report them (S199).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AfterUpload {
+    #[default]
+    Watching,
+    Ended,
+    QuietUntil(u64),
+}
+
+/// How long after our upload `MISSION_CURRENT` is still taken as its doing.
+const AFTER_UPLOAD_QUIET_US: u64 = 1_000_000;
 
 impl Vehicle {
     fn new(
@@ -492,7 +552,9 @@ impl Vehicle {
             last_time_boot_ms: 0,
             params: None,
             rc_input: crate::rc_input::RcInput::default(),
+            rc_said: None,
             rc_overridden: [false; 18],
+            manual_sent: None,
             ftp: FtpClient::new(),
             params_by_file: false,
             batch: Vec::new(),
@@ -506,7 +568,19 @@ impl Vehicle {
             modes: Vec::new(),
             modes_heard: BTreeMap::new(),
             modes_seq: None,
+            plan_ids: None,
+            after_upload: AfterUpload::Watching,
+            tuning: crate::tuning::Feed::default(),
         }
+    }
+
+    fn tuning_samples(&mut self) -> Option<Effect> {
+        let samples = self.tuning.drain();
+        let vehicle_id = self.observation.id.clone();
+        (!samples.is_empty()).then_some(Effect::TuningSamples {
+            vehicle_id,
+            samples,
+        })
     }
 
     /// `ArduSub` ignores reposition's yaw: apply the heading separately.
@@ -635,14 +709,14 @@ const STREAM_SILENCE_US: u64 = 5_000_000;
 const STREAM_BACKOFF_US: [u64; 3] = [5_000_000, 15_000_000, 60_000_000];
 
 /// Rows the autopilot sends only while it has one: a target while it has a
-/// place to go, home once it is set, wind once it can estimate it (a copter
+/// place to go, home and the EKF origin once they are set, wind once it can estimate it (a copter
 /// needs an airspeed sensor or drag fusion), distances while a rangefinder
 /// or proximity sensor is fitted and reading. Their silence says nothing
 /// about the rate, so they are never asked for again on it. A terrain
 /// request comes only while terrain is missing (S118), the fence's status
 /// only while there is a fence (S132), a gimbal's attitude only while it has
 /// one.
-const SENT_WHILE_SET: [u32; 7] = [87, 242, 168, 132, 133, 162, 285];
+const SENT_WHILE_SET: [u32; 10] = [87, 242, 49, 168, 132, 133, 162, 285, 137, 245];
 
 #[derive(Clone, Debug)]
 struct PendingCommand {
@@ -856,7 +930,10 @@ impl Session {
                 self.dropped += 1;
                 continue;
             };
-            let key = (link_id.to_owned(), peer.to_owned(), decoded.system_id);
+            let key = self.companion_address(
+                (link_id.to_owned(), peer.to_owned(), decoded.system_id),
+                decoded.component_id,
+            );
             if let Some((system, component)) = decoded.mission_target
                 && ((system != 0 && system != self.config.gcs_system_id)
                     || (component != 0 && component != crate::GCS_COMPONENT_ID)
@@ -880,6 +957,9 @@ impl Session {
                     last_seen_us: Some(received_us),
                     ..Stream::default()
                 };
+            }
+            if let Message::RadioStatus { txbuf, .. } = decoded.message {
+                self.terrain.radio_status(link_id, txbuf, received_us);
             }
             match decoded.message {
                 Message::CommandAck {
@@ -1093,9 +1173,28 @@ impl Session {
                 }
                 message => {
                     if let Message::Attitude { time_boot_ms, .. }
+                    | Message::AttitudeQuaternion { time_boot_ms, .. }
                     | Message::GlobalPositionInt { time_boot_ms, .. } = message
                     {
                         effects.extend(self.boot_time(&key, time_boot_ms, received_us));
+                    }
+                    if let Message::MissionCurrent {
+                        state,
+                        total,
+                        mission_id,
+                        fence_id,
+                        rally_id,
+                        ..
+                    } = message
+                    {
+                        let ids = [u32::from(total), mission_id, fence_id, rally_id];
+                        effects.extend(self.plan_ids(
+                            &key,
+                            decoded.component_id,
+                            ids,
+                            state,
+                            received_us,
+                        ));
                     }
                     if let Message::Attitude { yaw, .. } = message
                         && yaw.is_finite()
@@ -1107,6 +1206,7 @@ impl Session {
                     self.note_home(&key, &message, received_us);
                     if let Some(vehicle) = self.vehicles.get_mut(&key) {
                         vehicle.note_terrain(&message, received_us);
+                        vehicle.tuning.take(&message, received_us);
                         for producer in &self.producers {
                             producer.consume(
                                 decoded.component_id,
@@ -1119,6 +1219,41 @@ impl Session {
                     }
                 }
             }
+        }
+        effects.extend(self.rc_calibrations());
+        effects
+    }
+
+    /// Says what each vehicle's RC calibration now is, where that or its
+    /// id changed (`Effect::RcCalibration`).
+    fn rc_calibrations(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for vehicle in self.vehicles.values_mut() {
+            let changed = vehicle.rc_input.take_changed();
+            let id = &vehicle.observation.id;
+            if !changed
+                && vehicle
+                    .rc_said
+                    .as_ref()
+                    .is_some_and(|(said, ..)| said == id)
+            {
+                continue;
+            }
+            let read = vehicle.rc_input.ready();
+            let problem = read
+                .then(|| vehicle.rc_input.rover_throttle_problem())
+                .flatten();
+            let now = (id.clone(), read, problem);
+            if vehicle.rc_said.as_ref() == Some(&now) {
+                continue;
+            }
+            vehicle.rc_said = Some(now.clone());
+            let (vehicle_id, read, problem) = now;
+            effects.push(Effect::RcCalibration {
+                vehicle_id,
+                read,
+                problem,
+            });
         }
         effects
     }
@@ -1149,23 +1284,83 @@ impl Session {
             .map(|(other, _)| other.clone())
             .collect();
         for address in old {
-            let Some(gone) = self.vehicles.remove(&address) else {
-                continue;
-            };
-            if let Some(vehicle) = self.vehicles.get_mut(key) {
-                for alias in gone.observation.aliases {
-                    if alias != vehicle.observation.id
-                        && !vehicle.observation.aliases.contains(&alias)
-                    {
-                        vehicle.observation.aliases.push(alias);
-                    }
+            self.let_go(&address, key);
+        }
+    }
+
+    /// The autopilot heard at `key` is the one at `address`, which is let
+    /// go: its other ids and its commands go with it.
+    fn let_go(&mut self, address: &(String, String, u8), key: &(String, String, u8)) {
+        let Some(gone) = self.vehicles.remove(address) else {
+            return;
+        };
+        if let Some(vehicle) = self.vehicles.get_mut(key) {
+            for alias in gone.observation.aliases {
+                if alias != vehicle.observation.id && !vehicle.observation.aliases.contains(&alias)
+                {
+                    vehicle.observation.aliases.push(alias);
                 }
             }
-            for command in &mut self.commands {
-                if command.key == address {
-                    command.key = key.clone();
-                }
+        }
+        for command in &mut self.commands {
+            if command.key == *address {
+                command.key = key.clone();
             }
+        }
+    }
+
+    /// An autopilot heard again at another address on the same link under
+    /// the same vehicle id, such as a simulator restarted behind a new UDP
+    /// port, leaves its old address silent. That address is let go once it
+    /// would turn stale, rather than report the vehicle stale and then
+    /// offline while it is heard at the new one.
+    fn let_go_of_silent_addresses(&mut self, now_us: u64) {
+        let config = self.config;
+        let online = |vehicle: &Vehicle| {
+            presence_at(config, vehicle.observation.last_heartbeat_us, now_us) == Presence::Online
+        };
+        let silent: Vec<_> = self
+            .vehicles
+            .iter()
+            .filter(|(_, v)| !self.paused.contains(&v.observation.link_id) && !online(v))
+            .filter_map(|(address, v)| {
+                self.vehicles
+                    .iter()
+                    .find(|(key, other)| {
+                        *key != address
+                            && key.0 == address.0
+                            && other.observation.id == v.observation.id
+                            && online(other)
+                    })
+                    .map(|(key, _)| (address.clone(), key.clone()))
+            })
+            .collect();
+        for (address, key) in silent {
+            self.let_go(&address, &key);
+        }
+    }
+
+    /// Where an onboard computer that sends from its own address belongs
+    /// (S295, ADR-0049 O6): `uxduck companion` sends straight to the ground
+    /// station, not through the vehicle's address, so it is the one vehicle
+    /// on the same link with its system id. Anything else keeps its address.
+    fn companion_address(
+        &self,
+        key: (String, String, u8),
+        component_id: u8,
+    ) -> (String, String, u8) {
+        if self.vehicles.contains_key(&key)
+            || !crate::computer::COMPUTER_IDS.contains(&component_id)
+        {
+            return key;
+        }
+        let mut same = self
+            .vehicles
+            .keys()
+            .filter(|(link, _, system)| *link == key.0 && *system == key.2);
+        match (same.next(), same.next()) {
+            (Some(vehicle), None) => vehicle.clone(),
+            _ => key,
         }
     }
 
@@ -1480,6 +1675,54 @@ impl Session {
         }]
     }
 
+    /// `MISSION_CURRENT`'s mission count and plan ids (S199): a change not
+    /// of our own upload's making means the vehicle holds something else
+    /// now. The first heard is only noted, as the mission is read at boot.
+    /// ArduPilot sends no ids, so only a change in its count is seen.
+    fn plan_ids(
+        &mut self,
+        key: &(String, String, u8),
+        component_id: u8,
+        ids: [u32; 4],
+        state: u8,
+        received_us: u64,
+    ) -> Vec<Effect> {
+        // All zero with an unknown state: sent without its extension fields
+        // (MAVLink 1, an older autopilot), which says nothing.
+        if ids == [0; 4] && state == 0 {
+            return Vec::new();
+        }
+        let Some(vehicle) = self
+            .vehicles
+            .get_mut(key)
+            .filter(|v| v.autopilot_component == component_id)
+        else {
+            return Vec::new();
+        };
+        let ours = vehicle.mission_upload.is_some()
+            || match vehicle.after_upload {
+                AfterUpload::Watching => false,
+                AfterUpload::Ended => {
+                    vehicle.after_upload =
+                        AfterUpload::QuietUntil(received_us + AFTER_UPLOAD_QUIET_US);
+                    true
+                }
+                AfterUpload::QuietUntil(until) => {
+                    if received_us >= until {
+                        vehicle.after_upload = AfterUpload::Watching;
+                    }
+                    true
+                }
+            };
+        let before = vehicle.plan_ids.replace(ids);
+        if ours || before.is_none_or(|before| before == ids) {
+            return Vec::new();
+        }
+        vec![Effect::MissionChanged {
+            vehicle_id: vehicle.observation.id.clone(),
+        }]
+    }
+
     /// The vehicle says its list of modes changed (`Q_ENABLE` set, a script
     /// loaded): ask for it again. The first count heard is only noted, as
     /// the list was asked for with the first heartbeat.
@@ -1633,6 +1876,7 @@ impl Session {
         let config = self.config;
         self.peers
             .retain(|_, last| now_us.saturating_sub(*last) <= config.peer_expiry_us);
+        self.let_go_of_silent_addresses(now_us);
         let mut effects = Vec::new();
         effects.extend(self.ask_cameras(now_us));
         let mut sends = Vec::new();
@@ -1663,6 +1907,7 @@ impl Session {
                 });
                 effects.push(Effect::Telemetry(telemetry));
             }
+            effects.extend(vehicle.tuning_samples());
             let retry = vehicle.observation.uid.is_none()
                 && !paused
                 && presence == Presence::Online
@@ -1723,6 +1968,7 @@ impl Session {
         effects.extend(self.tick_transfers(now_us));
         effects.extend(self.send_terrain(now_us));
         effects.extend(self.unanswered_checks(now_us));
+        effects.extend(self.rc_calibrations());
         effects
     }
 
@@ -1802,18 +2048,23 @@ impl Session {
 
     /// Queues a block's terrain answers for a vehicle (S118), keeping
     /// those queued for it only if `mask`, its latest request, still asks
-    /// for them; the tick sends them at `per_second`.
+    /// for them; the tick sends them at `pace`, moved by the vehicle's
+    /// link's telemetry radio.
     pub fn terrain_data(
         &mut self,
         vehicle_id: &str,
         block: crate::terrain::Block,
         groups: Vec<crate::terrain::Group>,
         mask: u64,
-        per_second: u8,
+        pace: crate::terrain::Pace,
         now_us: u64,
     ) -> Vec<Effect> {
+        let Some((link_id, _, _)) = self.find(vehicle_id) else {
+            self.terrain.forget(vehicle_id);
+            return Vec::new();
+        };
         self.terrain
-            .queue(vehicle_id, block, groups, mask, per_second, now_us);
+            .queue(vehicle_id, &link_id, block, groups, mask, pace, now_us);
         self.send_terrain(now_us)
     }
 
@@ -1821,11 +2072,19 @@ impl Session {
     /// read-only link's transport drops them, as it drops every send.
     fn send_terrain(&mut self, now_us: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let mut sent: Vec<(String, crate::terrain::Block, u64)> = Vec::new();
         for (vehicle_id, block, group) in self.terrain.due(now_us) {
             let Some((link_id, peer, _)) = self.find(&vehicle_id) else {
                 self.terrain.forget(&vehicle_id);
                 continue;
             };
+            match sent
+                .iter_mut()
+                .find(|(v, b, _)| *v == vehicle_id && *b == block)
+            {
+                Some((_, _, mask)) => *mask |= 1 << group.gridbit,
+                None => sent.push((vehicle_id.clone(), block, 1 << group.gridbit)),
+            }
             let sequence = self.next_sequence();
             effects.push(Effect::Send {
                 link_id,
@@ -1838,6 +2097,14 @@ impl Session {
                 ),
             });
         }
+        effects.extend(
+            sent.into_iter()
+                .map(|(vehicle_id, block, mask)| Effect::TerrainSent {
+                    vehicle_id,
+                    block,
+                    mask,
+                }),
+        );
         effects
     }
 
@@ -1989,7 +2256,7 @@ impl Session {
             effects.push(Effect::CommandDone {
                 receipt_id: previous.order.receipt_id.clone(),
                 outcome: CommandOutcome::NotSent(
-                    "destination accepted; heading superseded by another command".into(),
+                    "destination accepted. Heading superseded by another command".into(),
                 ),
                 attempts: previous
                     .completed_attempts
@@ -2084,7 +2351,7 @@ impl Session {
             } else {
                 let reason = crate::commands::result_text(result);
                 CommandOutcome::Rejected(if pending.completed_attempts > 0 {
-                    format!("destination accepted; heading refused: {reason}")
+                    format!("destination accepted. Heading refused: {reason}")
                 } else {
                     reason.into()
                 })
@@ -2116,7 +2383,7 @@ impl Session {
                     receipt_id: pending.order.receipt_id,
                     outcome: if pending.completed_attempts > 0 {
                         CommandOutcome::Rejected(
-                            "destination accepted; heading command timed out".into(),
+                            "destination accepted. Heading command timed out".into(),
                         )
                     } else {
                         CommandOutcome::Timeout
@@ -2579,6 +2846,7 @@ impl Session {
                 let Some(upload) = vehicle.mission_upload.take() else {
                     return Vec::new();
                 };
+                vehicle.after_upload = AfterUpload::Ended;
                 let kind = upload.protocol.kind;
                 let mut effects = self.outgoing(&key, vec![Out::MissionAck(CANCELLED, kind)]);
                 effects.push(Effect::MissionUploaded {
@@ -2781,6 +3049,7 @@ impl Session {
                     Step::Failed(failure) => Err(failure),
                     _ => Ok(()),
                 };
+                vehicle.after_upload = AfterUpload::Ended;
                 vehicle
                     .mission_upload
                     .take()
@@ -2846,8 +3115,13 @@ impl Session {
                 vehicle.params = None;
                 vehicle.rc_input = crate::rc_input::RcInput::default();
                 vehicle.rc_overridden = [false; 18];
+                vehicle.manual_sent = None;
                 let lost_files = vehicle.ftp.restarted();
                 vehicle.mission_download = None;
+                // Read again after a restart anyway: what it reports now is
+                // a new baseline.
+                vehicle.plan_ids = None;
+                vehicle.after_upload = AfterUpload::Watching;
                 for stream in vehicle.streams.values_mut() {
                     *stream = Stream::default();
                 }
@@ -3006,15 +3280,20 @@ impl Session {
             sticks,
             auxiliary,
             uxduck_core::domain::settings::PilotInputMethod::Automatic,
+            0,
         )
     }
 
+    /// As `pilot_control`, by the chosen method, with `MANUAL_CONTROL`
+    /// button bits (`buttons` 0 to 15, then `buttons2`). Buttons go only
+    /// in `MANUAL_CONTROL`: none is sent where RC overrides carry the input.
     pub fn pilot_control_with_method(
         &mut self,
         vehicle_id: &str,
         sticks: [i16; 4],
         auxiliary: &[(u8, i16)],
         method: uxduck_core::domain::settings::PilotInputMethod,
+        buttons: u32,
     ) -> Vec<Effect> {
         let Some(key) = self.find(vehicle_id) else {
             return Vec::new();
@@ -3051,14 +3330,40 @@ impl Session {
             _ if !auxiliary.is_empty() => return Vec::new(),
             _ => None,
         };
-        let component = vehicle.autopilot_component;
-        if let Some(channels) = channels.filter(|_| family != Some(crate::modes::Family::Px4)) {
-            let Some(vehicle) = self.vehicles.get_mut(&key) else {
+        // ArduRover turns `MANUAL_CONTROL`'s z into its throttle channel's
+        // PWM across min to max and stops at that channel's trim: without
+        // the calibration nothing is sent, as with RC overrides, and none
+        // is assumed.
+        let rover_z = if channels.is_none() && family == Some(crate::modes::Family::Rover) {
+            if !vehicle.rc_input.ready() {
+                if !vehicle.ftp.reading_parameters() && vehicle.params.is_none() {
+                    let now_us = vehicle.observation.last_heartbeat_us;
+                    return self.download_parameters(vehicle_id, now_us);
+                }
                 return Vec::new();
+            }
+            let Some(z) = vehicle.rc_input.rover_manual_z(sticks[2]) else {
+                return self.release_control(vehicle_id);
             };
+            Some(z)
+        } else {
+            None
+        };
+        let component = vehicle.autopilot_component;
+        let Some(vehicle) = self.vehicles.get_mut(&key) else {
+            return Vec::new();
+        };
+        if let Some(channels) = channels.filter(|_| family != Some(crate::modes::Family::Px4)) {
             for (active, value) in vehicle.rc_overridden.iter_mut().zip(channels) {
                 *active |= value != u16::MAX;
             }
+        }
+        let sticks = match rover_z {
+            Some(z) => [sticks[0], sticks[1], z, sticks[3]],
+            None => sticks,
+        };
+        if channels.is_none() {
+            vehicle.manual_sent = Some((sticks, buttons));
         }
         let sequence = self.next_sequence();
         let (link_id, peer, system_id) = key;
@@ -3071,7 +3376,13 @@ impl Session {
                 channels,
             )
         } else {
-            crate::sim::manual_control_frame(self.config.gcs_system_id, system_id, sequence, sticks)
+            crate::sim::manual_control_frame(
+                self.config.gcs_system_id,
+                system_id,
+                sequence,
+                sticks,
+                buttons,
+            )
         };
         vec![Effect::Send {
             link_id,
@@ -3082,6 +3393,8 @@ impl Session {
 
     /// Return only channels UXDuck has overridden to the receiver on release,
     /// unplug or target change. Extension channels use a different sentinel.
+    /// A `MANUAL_CONTROL` sent with buttons held is followed by one with the
+    /// same sticks and none, so a held gripper stops while the link lasts.
     pub fn release_control(&mut self, vehicle_id: &str) -> Vec<Effect> {
         let Some(key) = self.find(vehicle_id) else {
             return Vec::new();
@@ -3089,8 +3402,29 @@ impl Session {
         let Some(vehicle) = self.vehicles.get_mut(&key) else {
             return Vec::new();
         };
+        let mut effects = Vec::new();
+        if let Some((sticks, buttons)) = vehicle.manual_sent.take()
+            && buttons != 0
+        {
+            let (link_id, peer, system_id) = key.clone();
+            let sequence = self.next_sequence();
+            effects.push(Effect::Send {
+                link_id,
+                peer,
+                bytes: crate::sim::manual_control_frame(
+                    self.config.gcs_system_id,
+                    system_id,
+                    sequence,
+                    sticks,
+                    0,
+                ),
+            });
+        }
+        let Some(vehicle) = self.vehicles.get_mut(&key) else {
+            return effects;
+        };
         if !vehicle.rc_overridden.iter().any(|active| *active) {
-            return Vec::new();
+            return effects;
         }
         let mut channels = [u16::MAX; 18];
         for (index, active) in vehicle.rc_overridden.iter_mut().enumerate() {
@@ -3102,7 +3436,7 @@ impl Session {
         let component = vehicle.autopilot_component;
         let sequence = self.next_sequence();
         let (link_id, peer, system_id) = key;
-        vec![Effect::Send {
+        effects.push(Effect::Send {
             link_id,
             peer,
             bytes: crate::sim::rc_override_frame(
@@ -3112,7 +3446,8 @@ impl Session {
                 sequence,
                 channels,
             ),
-        }]
+        });
+        effects
     }
 
     /// A frame for a vehicle's current address, made with the next sequence
@@ -3152,6 +3487,13 @@ impl Session {
         self.vehicles
             .range((link_id.clone(), peer.clone(), 0)..=(link_id, peer, u8::MAX))
             .map(|((_, _, system_id), v)| (*system_id, v.observation.id.as_str()))
+    }
+
+    /// Each vehicle's address (link, peer and system id) and its VID.
+    pub fn addresses(&self) -> impl Iterator<Item = (&(String, String, u8), &str)> {
+        self.vehicles
+            .iter()
+            .map(|(address, v)| (address, v.observation.id.as_str()))
     }
 
     /// Where each vehicle is reached now, for traffic to it.
@@ -3963,6 +4305,48 @@ mod tests {
         }
     }
 
+    /// A simulator restarted behind another UDP port: the same autopilot
+    /// at a new peer on the same link. The old address, now silent, is let
+    /// go instead of reporting the vehicle stale and then offline while it
+    /// is heard at the new one.
+    #[test]
+    fn a_vehicle_heard_from_a_new_port_stays_online() {
+        const NEW_PEER: &str = "127.0.0.1:5761";
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+
+        let mut pending = session.ingest("l1", NEW_PEER, &fake.heartbeat(), 1_000_000);
+        while !pending.is_empty() {
+            let mut next = Vec::new();
+            for effect in pending {
+                if let Effect::Send { bytes, .. } = effect {
+                    for reply in fake.answer(&bytes) {
+                        next.extend(session.ingest("l1", NEW_PEER, &reply, 1_000_000));
+                    }
+                }
+            }
+            pending = next;
+        }
+        assert_eq!(session.vehicle_at("l1", NEW_PEER, 1), Some(vid.as_str()));
+
+        for second in 2..30_u64 {
+            let now = second * 1_000_000;
+            session.ingest("l1", NEW_PEER, &fake.heartbeat(), now);
+            let changes = session.tick(now);
+            assert!(
+                vehicles(&changes)
+                    .iter()
+                    .all(|v| v.presence == Presence::Online && v.peer == NEW_PEER),
+                "{changes:?}"
+            );
+        }
+        assert_eq!(
+            session.vehicle_at("l1", PEER, 1),
+            None,
+            "the old address is gone"
+        );
+    }
+
     #[test]
     fn a_paused_simulator_keeps_its_vehicle_until_it_resumes() {
         let mut session = Session::new(Config {
@@ -4182,14 +4566,68 @@ mod tests {
                 .count()
         };
         // One at once, then four a second, as a serial radio's pace.
+        let pace = crate::terrain::Pace::Paced(4);
         assert_eq!(
-            sent(session.terrain_data(&vehicle_id, block, groups, u64::MAX, 4, 100)),
+            sent(session.terrain_data(&vehicle_id, block, groups, u64::MAX, pace, 100)),
             1
         );
         assert!(session.needs_tick());
         assert_eq!(sent(session.tick(600_100)), 2);
         assert_eq!(sent(session.tick(1_100_100)), 2);
-        assert_eq!(sent(session.tick(5_000_000)), 1);
+        // Each batch says which of the block's groups went.
+        let effects = session.tick(5_000_000);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::TerrainSent { block: b, mask: 0b10_0000, .. } if *b == block
+            )),
+            "{effects:?}"
+        );
+        assert_eq!(sent(effects), 1);
+    }
+
+    #[test]
+    fn a_ground_radio_with_no_room_slows_terrain_on_its_link() {
+        let mut session = Session::new(Config::default());
+        session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
+        let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let block = crate::terrain::Block {
+            lat: 530_646_790,
+            lon: -40_798_165,
+            spacing: 100,
+        };
+        let groups = (0..56)
+            .map(|gridbit| crate::terrain::Group {
+                gridbit,
+                heights: [584; 16],
+            })
+            .collect();
+        let sent = |effects: Vec<Effect>| {
+            effects
+                .into_iter()
+                .filter(|e| {
+                    matches!(e, Effect::Send { bytes, .. }
+                    if crate::framing::header(bytes).is_some_and(|h| h.message_id == 134))
+                })
+                .count()
+        };
+        // A SiK ground radio reports as system 51: its buffer is all but full.
+        let full = crate::sim::frame(
+            51,
+            68,
+            0,
+            &mavio::dialects::ardupilotmega::messages::RadioStatus {
+                txbuf: 10,
+                ..Default::default()
+            },
+        );
+        session.ingest("l1", PEER, &full, 0);
+        let pace = crate::terrain::Pace::Paced(12);
+        let mut count = sent(session.terrain_data(&vehicle_id, block, groups, u64::MAX, pace, 0));
+        for tick in 1..=10 {
+            count += sent(session.tick(tick * 100_000));
+        }
+        assert!(count <= 7, "{count} in a second: half of twelve");
     }
 
     #[test]
@@ -4276,6 +4714,32 @@ mod tests {
     }
 
     #[test]
+    fn default_receiver_and_health_streams_are_requested_without_setup() {
+        let mut session = Session::new(Config::default());
+        let effects = session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
+        assert!(sends(&effects).iter().any(|bytes| matches!(
+            decode(bytes).map(|d| d.message),
+            Some(Message::CommandLong {
+                command: 511,
+                param1: 65.0,
+                param2: 500_000.0,
+                ..
+            })
+        )));
+        for message_id in [137.0, 245.0] {
+            assert!(sends(&effects).iter().any(|bytes| matches!(
+                decode(bytes).map(|d| d.message),
+                Some(Message::CommandLong {
+                    command: 511,
+                    param1,
+                    param2: 1_000_000.0,
+                    ..
+                }) if param1 == message_id
+            )));
+        }
+    }
+
+    #[test]
     fn brief_stream_gaps_do_not_reconfigure_rates() {
         let s = 1_000_000;
         let mut session = Session::new(Config::default());
@@ -4318,6 +4782,7 @@ mod tests {
         for (message_id, name) in [
             (87.0, "POSITION_TARGET_GLOBAL_INT"),
             (242.0, "HOME_POSITION"),
+            (49.0, "GPS_GLOBAL_ORIGIN"),
             (168.0, "WIND"),
             (132.0, "DISTANCE_SENSOR"),
         ] {
@@ -4344,8 +4809,8 @@ mod tests {
         assert_eq!(
             rates(&first),
             [
-                33.0, 30.0, 1.0, 24.0, 74.0, 36.0, 42.0, 62.0, 193.0, 241.0, 147.0, 136.0, 87.0,
-                242.0, 168.0, 132.0, 133.0, 162.0, 285.0
+                33.0, 30.0, 1.0, 24.0, 74.0, 65.0, 36.0, 42.0, 62.0, 193.0, 241.0, 147.0, 137.0,
+                245.0, 136.0, 87.0, 242.0, 49.0, 168.0, 132.0, 133.0, 162.0, 285.0
             ],
             "the whole table once"
         );
@@ -4506,6 +4971,7 @@ mod tests {
                 longitude_deg: -122.384_205_6,
                 altitude_m: -5.0,
                 altitude_frame: AltitudeFrame::AboveHome,
+                loiter_radius_m: None,
                 heading: None,
             },
             force: false,
@@ -4659,7 +5125,7 @@ mod tests {
         submarine_ack(&mut session, 192, 0, 3_000);
         assert!(
             matches!(submarine_ack(&mut session, 115, 2, 4_000).as_slice(),
-            [Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. }] if why.contains("destination accepted; heading refused"))
+            [Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. }] if why.contains("destination accepted. Heading refused"))
         );
         let (mut session, order) = submarine_go_to_fixture(true);
         session.config.command_attempts = 1;
@@ -4667,7 +5133,7 @@ mod tests {
         submarine_ack(&mut session, 192, 0, 3_000);
         let effects = session.tick(3_000 + session.config.command_timeout_us);
         assert!(effects.iter().any(|effect| matches!(effect,
-            Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. } if why.contains("heading command timed out"))));
+            Effect::CommandDone { outcome: CommandOutcome::Rejected(why), attempts: 2, .. } if why.contains("Heading command timed out"))));
     }
 
     #[test]
@@ -4785,6 +5251,7 @@ mod tests {
                         longitude_deg: 149.17,
                         altitude_m,
                         altitude_frame: frame,
+                        loiter_radius_m: None,
                         heading: None,
                     },
                     force: false,
@@ -4850,6 +5317,7 @@ mod tests {
                     longitude_deg: to.1,
                     altitude_m: 30.0,
                     altitude_frame: uxduck_core::domain::telemetry::AltitudeFrame::AboveHome,
+                    loiter_radius_m: None,
                     heading: None,
                 },
                 force: false,
@@ -5033,6 +5501,98 @@ mod tests {
         assert_eq!(
             outcome,
             Some(("stop".to_owned(), CommandOutcome::Timeout, 1))
+        );
+    }
+
+    #[test]
+    fn rc_receiver_rssi_reaches_telemetry_without_a_telemetry_modem() {
+        use mavio::dialects::ardupilotmega::messages::RcChannels;
+
+        let mut session = Session::new(Config::default());
+        session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
+        for (at, rssi, expected) in [
+            (100, 127, Some(127.0)),
+            (200, 0, Some(0.0)),
+            (300, 100, Some(100.0)),
+            (400, 254, Some(254.0)),
+            (500, 255, None),
+        ] {
+            let frame = crate::sim::frame(
+                1,
+                1,
+                0,
+                &RcChannels {
+                    chancount: 1,
+                    chan1_raw: 1500,
+                    rssi,
+                    ..RcChannels::default()
+                },
+            );
+            session.ingest("l1", PEER, &frame, at);
+            let effects = session.tick(at);
+            let telemetry = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Telemetry(telemetry) => Some(telemetry),
+                    _ => None,
+                })
+                .expect("receiver channels must produce telemetry");
+            let signal = telemetry
+                .items
+                .iter()
+                .find(|item| item.key == "rc.rssi")
+                .expect("RC_CHANNELS.rssi must reach the header's receiver signal item");
+            assert_eq!(signal.value, expected);
+            assert_eq!(signal.unit, uxduck_core::domain::telemetry::Unit::None);
+            assert!(
+                telemetry
+                    .items
+                    .iter()
+                    .any(|item| item.key == "rc.1" && item.value == Some(1500.0))
+            );
+            assert!(
+                !telemetry
+                    .items
+                    .iter()
+                    .any(|item| item.key == "link.rssi_pct"),
+                "receiver RSSI must not impersonate a telemetry modem"
+            );
+        }
+    }
+
+    #[test]
+    fn every_rate_controller_sample_reaches_the_tick_uncoalesced() {
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let first = session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        converse(&mut session, &mut fake, first, 0);
+        session.tick(5);
+        let rates = [0.1_f32, 0.2, 0.3];
+        for (n, desired) in rates.into_iter().enumerate() {
+            let sequence = u8::try_from(n).unwrap();
+            let frame = crate::sim::pid_tuning_frame((1, sequence), 1, desired, desired / 2.0);
+            session.ingest("l1", PEER, &frame, 10 + u64::from(sequence));
+        }
+        let samples: Vec<_> = session
+            .tick(30)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::TuningSamples { samples, .. } => Some(samples),
+                _ => None,
+            })
+            .flatten()
+            .map(|s| (s.t_us, s.desired))
+            .collect();
+        let degrees = rates.map(|r| f64::from(r).to_degrees());
+        assert_eq!(
+            samples,
+            [(10, degrees[0]), (11, degrees[1]), (12, degrees[2])]
+        );
+        assert!(
+            !session
+                .tick(40)
+                .iter()
+                .any(|e| matches!(e, Effect::TuningSamples { .. }))
         );
     }
 
@@ -5555,9 +6115,10 @@ mod tests {
             10,
         );
         let done = converse(&mut session, &mut fake, started, 10);
+        // Four logs (the fourth a DataFlash log that reads, S212) and LASTLOG.TXT.
         assert!(done.iter().any(|e| matches!(
             e,
-            Effect::File { event: crate::files::Event::Listed { entries, .. }, .. } if entries.len() == 4
+            Effect::File { event: crate::files::Event::Listed { entries, .. }, .. } if entries.len() == 5
         )), "{done:?}");
         let started = session.file(
             &vid,
@@ -5730,6 +6291,137 @@ mod tests {
             matches!(done.as_slice(), [Effect::MissionPart { kind: 1, result: Ok(items), .. }] if *items == fence),
             "{done:?}"
         );
+    }
+
+    fn plan_item(seq: u16, kind: u8, command: u16) -> crate::decode::MissionItemInt {
+        crate::decode::MissionItemInt {
+            seq,
+            frame: 3,
+            command,
+            current: false,
+            autocontinue: true,
+            params: [0.0; 4],
+            x: -353_632_610 + i32::from(seq),
+            y: 1_491_652_300,
+            z: 20.0,
+            mission_type: kind,
+        }
+    }
+
+    fn mission_changed(effects: &[Effect]) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::MissionChanged { .. }))
+    }
+
+    #[test]
+    fn a_change_on_board_is_told_and_our_own_upload_is_not() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let heard = |session: &mut Session, fake: &mut FakeVehicle, at_s: u64| {
+            session.ingest("l1", PEER, &fake.mission_current(), at_s * 1_000_000)
+        };
+        // The first is only noted: the mission is read at boot.
+        assert!(!mission_changed(&heard(&mut session, &mut fake, 1)));
+        assert!(!mission_changed(&heard(&mut session, &mut fake, 2)));
+        // Our own upload moves the ids: taken quietly, up to a second after.
+        let plan = vec![plan_item(0, 0, 16), plan_item(1, 0, 22)];
+        let sent = session.upload_mission("u1", &vid, plan, 3_000_000);
+        let done = converse(&mut session, &mut fake, sent, 3_000_000);
+        assert!(
+            done.iter()
+                .any(|e| matches!(e, Effect::MissionUploaded { result: Ok(()), .. }))
+        );
+        for at_s in [3, 4, 5] {
+            assert!(!mission_changed(&heard(&mut session, &mut fake, at_s)));
+        }
+        // Another ground station's fence.
+        fake.replace_elsewhere(1, vec![plan_item(0, 1, 5001), plan_item(1, 1, 5001)]);
+        assert_eq!(
+            heard(&mut session, &mut fake, 6)
+                .into_iter()
+                .filter(|e| matches!(e, Effect::MissionChanged { .. }))
+                .collect::<Vec<_>>(),
+            [Effect::MissionChanged {
+                vehicle_id: vid.clone()
+            }]
+        );
+        // Told once.
+        assert!(!mission_changed(&heard(&mut session, &mut fake, 7)));
+        // Its mission, cleared elsewhere.
+        fake.replace_elsewhere(0, vec![plan_item(0, 0, 16)]);
+        assert!(mission_changed(&heard(&mut session, &mut fake, 8)));
+        // A restart: what it reports next is only noted.
+        fake.streams_on_request = false;
+        let flown = |session: &mut Session, fake: &mut FakeVehicle, at_s: u32| {
+            let mut effects = Vec::new();
+            for frame in fake.telemetry(f64::from(at_s)) {
+                if crate::framing::header(&frame).is_some_and(|h| h.message_id != 42) {
+                    let at_us = u64::from(at_s) * 1_000_000;
+                    effects.extend(session.ingest("l1", PEER, &frame, at_us));
+                }
+            }
+            effects
+        };
+        let _ = flown(&mut session, &mut fake, 8);
+        let _ = session.tick(8_000_000);
+        fake.reboot();
+        let after = flown(&mut session, &mut fake, 9);
+        assert!(
+            after.iter().any(|e| matches!(
+                e,
+                Effect::Booted {
+                    restarted: true,
+                    ..
+                }
+            )),
+            "{after:?}"
+        );
+        fake.replace_elsewhere(2, vec![plan_item(0, 2, 5100)]);
+        let restarted = session.ingest("l1", PEER, &fake.mission_current(), 9_500_000);
+        assert!(!mission_changed(&restarted), "{restarted:?}");
+    }
+
+    #[test]
+    fn without_plan_ids_only_a_new_mission_count_is_a_change() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.plan_ids = false;
+        let (mut session, _) = identified(&mut fake);
+        // No extension fields at all (MAVLink 1, an older autopilot): every
+        // field after the item is zero, which says nothing.
+        assert!(!mission_changed(&session.ingest(
+            "l1",
+            PEER,
+            &fake.mission_current(),
+            1_000_000
+        )));
+        fake.replace_elsewhere(0, vec![plan_item(0, 0, 16), plan_item(1, 0, 22)]);
+        assert!(!mission_changed(&session.ingest(
+            "l1",
+            PEER,
+            &fake.mission_current(),
+            2_000_000
+        )));
+        // As ArduPilot sends it: a state, a count and no ids.
+        fake.mission_state = 2;
+        let heard = |session: &mut Session, fake: &mut FakeVehicle, at_s: u64| {
+            session.ingest("l1", PEER, &fake.mission_current(), at_s * 1_000_000)
+        };
+        assert!(!mission_changed(&heard(&mut session, &mut fake, 3)));
+        // The same count: nothing to tell it by.
+        fake.replace_elsewhere(0, vec![plan_item(0, 0, 16), plan_item(5, 0, 16)]);
+        fake.replace_elsewhere(1, vec![plan_item(0, 1, 5001)]);
+        assert!(!mission_changed(&heard(&mut session, &mut fake, 4)));
+        // A new count is a change.
+        fake.replace_elsewhere(
+            0,
+            vec![
+                plan_item(0, 0, 16),
+                plan_item(1, 0, 22),
+                plan_item(2, 0, 16),
+            ],
+        );
+        assert!(mission_changed(&heard(&mut session, &mut fake, 5)));
     }
 
     #[test]
@@ -5985,7 +6677,6 @@ mod tests {
     fn the_radio_channels_are_telemetry() {
         let mut fake = FakeVehicle::new(1, 0xABC);
         fake.add_radio(false);
-        fake.streams_on_request = false;
         let (mut session, vid) = identified(&mut fake);
         let mut effects = session.ingest("l1", PEER, &fake.telemetry(1.0).concat(), 1_000_000);
         effects.extend(session.tick(1_000_000));
@@ -5999,8 +6690,383 @@ mod tests {
             .filter(|item| item.key.starts_with("rc."))
             .map(|item| (item.key.clone(), item.value.unwrap_or_default()))
             .collect();
-        assert_eq!(items.len(), 8, "{items:?}");
+        assert_eq!(items.len(), 9, "{items:?}");
+        assert!(items.contains(&("rc.rssi".into(), 200.0)));
         assert!(items.contains(&("rc.3".into(), 1000.0)));
+    }
+
+    #[test]
+    fn baseline_receiver_stream_does_not_start_the_calibration_script() {
+        let mut fake = FakeVehicle::new(1, 0xABC);
+        fake.add_radio(false);
+        let _ = identified(&mut fake);
+        let channels = fake
+            .telemetry(10.0)
+            .into_iter()
+            .find_map(|frame| match decode(&frame).map(|d| d.message) {
+                Some(Message::RcChannels { channels, .. }) => Some(channels),
+                _ => None,
+            })
+            .expect("requested RC channels");
+        assert_eq!(&channels[..8], &crate::fake_radio::CENTRED);
+    }
+
+    /// The gripper's held buttons (S263) ride in `MANUAL_CONTROL` beside the
+    /// sticks, and a released control sends one frame letting them go.
+    #[test]
+    fn held_buttons_travel_with_the_sticks_and_are_let_go_on_release() {
+        use uxduck_core::domain::settings::PilotInputMethod::Automatic;
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let key = session.find(&vid).unwrap();
+        session
+            .vehicles
+            .get_mut(&key)
+            .unwrap()
+            .observation
+            .vehicle_type = "Submarine".into();
+        let frame = |effects: &[Effect]| match effects {
+            [Effect::Send { bytes, .. }] => match decode(bytes).unwrap().message {
+                Message::ManualControl {
+                    target,
+                    sticks,
+                    buttons,
+                } => (target, sticks, buttons),
+                other => panic!("not MANUAL_CONTROL: {other:?}"),
+            },
+            other => panic!("one frame expected, got {}", other.len()),
+        };
+        let held =
+            session.pilot_control_with_method(&vid, [300, -200, 650, 40], &[], Automatic, 1 << 15);
+        assert_eq!(frame(&held), (1, [300, -200, 650, 40], 1 << 15));
+        let high =
+            session.pilot_control_with_method(&vid, [300, -200, 650, 40], &[], Automatic, 1 << 16);
+        assert_eq!(frame(&high).2, 1 << 16, "slots 16 to 31 go in buttons2");
+        assert_eq!(
+            frame(&session.release_control(&vid)),
+            (1, [300, -200, 650, 40], 0)
+        );
+        assert!(session.release_control(&vid).is_empty(), "let go once");
+        let none = session.pilot_control_with_method(&vid, [0, 0, 500, 0], &[], Automatic, 0);
+        assert_eq!(frame(&none).2, 0);
+        assert!(
+            session.release_control(&vid).is_empty(),
+            "nothing held, nothing sent"
+        );
+    }
+
+    fn rc_params(values: &[(&str, f32)]) -> Vec<Param> {
+        values
+            .iter()
+            .map(|(name, value)| Param {
+                name: (*name).into(),
+                value: *value,
+                kind: crate::sim::INT16,
+            })
+            .collect()
+    }
+
+    /// `ArduRover`'s PWM for `MANUAL_CONTROL`'s z on its throttle channel,
+    /// truncated as `GCS_MAVLINK::manual_override` does (Rover 4.5 to 4.7).
+    #[allow(clippy::cast_possible_truncation, reason = "as the C++ truncates")]
+    fn ardurover_pwm(z: i16, min: i32, max: i32) -> i32 {
+        (f64::from(min) + f64::from((max - min) * (i32::from(z) + 1000)) / 2000.0) as i32
+    }
+
+    /// An `ArduPilot` rover on `MANUAL_CONTROL` drives nothing until its
+    /// throttle calibration is known, asking for its parameters instead,
+    /// and nothing while it is missing or unusable; then the middle goes
+    /// out at the trim of the channel `RCMAP_THROTTLE` names, following the
+    /// vehicle's parameters as they change.
+    #[test]
+    fn a_rover_s_manual_control_waits_for_its_throttle_calibration_and_follows_it() {
+        use uxduck_core::domain::settings::PilotInputMethod::ManualControl;
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let key = session.find(&vid).unwrap();
+        session
+            .vehicles
+            .get_mut(&key)
+            .unwrap()
+            .observation
+            .vehicle_type = "GroundRover".into();
+        let middle = |session: &mut Session| {
+            let sent =
+                session.pilot_control_with_method(&vid, [0, 0, 500, 0], &[], ManualControl, 0);
+            let z = sends(&sent)
+                .iter()
+                .find_map(|bytes| match decode(bytes)?.message {
+                    Message::ManualControl { sticks, .. } => Some(sticks[2]),
+                    _ => None,
+                });
+            (sent, z)
+        };
+        let (asked, z) = middle(&mut session);
+        assert_eq!(z, None, "nothing driven before the calibration");
+        assert!(!sends(&asked).is_empty(), "its parameters are asked for");
+        assert!(middle(&mut session).0.is_empty(), "asked once");
+        // This vehicle has no RC parameters: still nothing, and no asking
+        // again.
+        converse(&mut session, &mut fake, asked, 1);
+        let (missing, z) = middle(&mut session);
+        assert_eq!(z, None);
+        assert!(sends(&missing).is_empty(), "{missing:?}");
+        let report = |session: &mut Session, name: &str, value: f32| {
+            session.ingest(
+                "l1",
+                PEER,
+                &crate::sim::param_value_frame(1, 1, 0, name, value, crate::sim::INT16, 1, 0),
+                2,
+            );
+        };
+        for (name, value) in [
+            ("RC3_MIN", 1100.0),
+            ("RC3_TRIM", 1700.0),
+            ("RC3_MAX", 1900.0),
+            ("RC2_MIN", 982.0),
+            ("RC2_TRIM", 1310.0),
+            ("RC2_MAX", 2006.0),
+            ("RCMAP_THROTTLE", 2.0),
+        ] {
+            report(&mut session, name, value);
+        }
+        let pwm = |session: &mut Session, [min, max]: [i32; 2]| {
+            middle(session).1.map(|z| ardurover_pwm(z, min, max))
+        };
+        assert_eq!(
+            pwm(&mut session, [982, 2006]),
+            Some(1310),
+            "channel 2's trim"
+        );
+        report(&mut session, "RC2_TRIM", 1500.0);
+        assert_eq!(pwm(&mut session, [982, 2006]), Some(1500), "a new trim");
+        report(&mut session, "RC2_TRIM", 2100.0);
+        assert_eq!(middle(&mut session).1, None, "a trim outside its range");
+        report(&mut session, "RCMAP_THROTTLE", 3.0);
+        assert_eq!(
+            pwm(&mut session, [1100, 1900]),
+            Some(1700),
+            "channel 3's trim"
+        );
+    }
+
+    /// The session says whether it holds the RC calibration it encodes
+    /// pilot input with, so kept parameters are never taken for it: not for
+    /// a vehicle it has just met, again when its link was closed and it is
+    /// heard again, before any boot is reported, and after a restart; yes
+    /// once a parameter read lands.
+    #[test]
+    fn the_session_says_whether_it_has_read_the_rc_calibration() {
+        let s = 1_000_000;
+        let said = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::RcCalibration {
+                        vehicle_id, read, ..
+                    } => Some((vehicle_id.clone(), *read)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.streams_on_request = false;
+        let mut session = Session::new(Config::default());
+        let met = session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        let first = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        assert_eq!(said(&met), [(first.clone(), false)], "met");
+        let identified = converse(&mut session, &mut fake, met, 0);
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        assert_ne!(first, vid);
+        assert_eq!(
+            said(&identified),
+            [(first, false), (vid.clone(), false)],
+            "said again under its lasting id"
+        );
+        let started = session.download_parameters(&vid, s);
+        let done = converse(&mut session, &mut fake, started, s);
+        assert_eq!(said(&done), [(vid.clone(), true)], "read");
+
+        session.remove_link("l1");
+        let again = session.ingest("l1", PEER, &fake.heartbeat(), 2 * s);
+        let met_again = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        assert_eq!(said(&again), [(met_again.clone(), false)], "heard again");
+        let identified = converse(&mut session, &mut fake, again, 2 * s);
+        assert_eq!(
+            said(&identified),
+            [(met_again, false), (vid.clone(), false)],
+            "identified again"
+        );
+        let started = session.download_parameters(&vid, 3 * s);
+        let done = converse(&mut session, &mut fake, started, 3 * s);
+        assert_eq!(said(&done), [(vid.clone(), true)], "read again");
+
+        session.ingest("l1", PEER, &fake.telemetry(10.0).concat(), 100 * s);
+        assert!(said(&session.tick(100 * s)).is_empty(), "booted");
+        fake.reboot();
+        let after = session.ingest("l1", PEER, &fake.telemetry(13.0).concat(), 103 * s);
+        assert_eq!(said(&after), [(vid, false)], "restarted");
+    }
+
+    /// What the session says follows the RC parameters it holds, not only
+    /// reads that complete: a refresh that breaks a rover's throttle
+    /// calibration part way, which the engine hears nothing else of, says so
+    /// at once, and its timeout leaves that said while `MANUAL_CONTROL` is
+    /// withheld.
+    #[test]
+    fn a_refresh_that_breaks_the_calibration_part_way_says_so() {
+        let s = 1_000_000;
+        let said = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::RcCalibration {
+                        vehicle_id,
+                        read,
+                        problem,
+                    } => Some((vehicle_id.clone(), *read, problem.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.streams_on_request = false;
+        let (mut session, vid) = identified(&mut fake);
+        let key = session.find(&vid).unwrap();
+        session.vehicles.get_mut(&key).unwrap().rc_input.downloaded(
+            rc_params(&[
+                ("RCMAP_THROTTLE", 3.0),
+                ("RC3_MIN", 1100.0),
+                ("RC3_TRIM", 1500.0),
+                ("RC3_MAX", 1900.0),
+            ])
+            .iter(),
+        );
+        assert_eq!(said(&session.tick(s)), [(vid.clone(), true, None)], "read");
+
+        let _asked = session.parameters_by_list(&key, s);
+        let frame =
+            crate::sim::param_value_frame(1, 1, 0, "RC3_TRIM", 2100.0, crate::sim::INT16, 300, 0);
+        let part = session.ingest("l1", PEER, &frame, s);
+        assert_eq!(
+            said(&part),
+            [(
+                vid.clone(),
+                true,
+                Some("RC3_TRIM 2100 is outside RC3_MIN to RC3_MAX".into())
+            )],
+            "{part:?}"
+        );
+        assert!(
+            !part
+                .iter()
+                .any(|e| matches!(e, Effect::ParamValue { .. } | Effect::Parameters { .. })),
+            "nothing else of it reaches the engine: {part:?}"
+        );
+        let mut ended = Vec::new();
+        for t in 2..60 {
+            ended.extend(session.ingest("l1", PEER, &fake.heartbeat(), t * s));
+            ended.extend(session.tick(t * s));
+        }
+        assert!(
+            ended
+                .iter()
+                .any(|e| matches!(e, Effect::Parameters { result: Err(_), .. })),
+            "the refresh timed out: {ended:?}"
+        );
+        assert!(said(&ended).is_empty(), "still as said: {ended:?}");
+        assert_eq!(session.vehicles[&key].rc_input.rover_manual_z(500), None);
+    }
+
+    /// `ArduRover` reads `MANUAL_CONTROL`'s z as -1000 to 1000 across its
+    /// throttle channel's range, so with the trim mid-range a rover or boat
+    /// stops at 0 and reverses with the throttle low; Copter,
+    /// Plane and Sub keep 0 to 1000.
+    #[test]
+    fn rovers_and_boats_get_throttle_centred_on_stop() {
+        use uxduck_core::domain::settings::PilotInputMethod::ManualControl;
+        for (kind, low, middle, high) in [
+            ("GroundRover", -1000, 0, 1000),
+            ("SurfaceBoat", -1000, 0, 1000),
+            ("Quadrotor", 0, 500, 1000),
+            ("Submarine", 0, 500, 1000),
+        ] {
+            let mut fake = FakeVehicle::new(1, 0xABCD);
+            let (mut session, vid) = identified(&mut fake);
+            let key = session.find(&vid).unwrap();
+            session
+                .vehicles
+                .get_mut(&key)
+                .unwrap()
+                .observation
+                .vehicle_type = kind.into();
+            session.vehicles.get_mut(&key).unwrap().rc_input.downloaded(
+                rc_params(&[
+                    ("RCMAP_THROTTLE", 3.0),
+                    ("RC3_MIN", 1000.0),
+                    ("RC3_TRIM", 1500.0),
+                    ("RC3_MAX", 2000.0),
+                ])
+                .iter(),
+            );
+            let z = |session: &mut Session, throttle: i16, buttons: u32| {
+                let sent = session.pilot_control_with_method(
+                    &vid,
+                    [0, 0, throttle, 0],
+                    &[],
+                    ManualControl,
+                    buttons,
+                );
+                let [Effect::Send { bytes, .. }] = sent.as_slice() else {
+                    panic!("{kind}: one frame expected");
+                };
+                let Message::ManualControl { sticks, .. } = decode(bytes).unwrap().message else {
+                    panic!("{kind}: not MANUAL_CONTROL");
+                };
+                sticks[2]
+            };
+            assert_eq!(z(&mut session, 0, 0), low, "{kind} low");
+            assert_eq!(z(&mut session, 500, 0), middle, "{kind} middle");
+            assert_eq!(z(&mut session, 1000, 1), high, "{kind} high");
+            // The frame letting buttons go repeats what was sent.
+            let released = session.release_control(&vid);
+            let [Effect::Send { bytes, .. }] = released.as_slice() else {
+                panic!("{kind}: no release frame");
+            };
+            let Message::ManualControl { sticks, .. } = decode(bytes).unwrap().message else {
+                panic!("{kind}: release not MANUAL_CONTROL");
+            };
+            assert_eq!(sticks[2], high, "{kind} release");
+        }
+    }
+
+    #[test]
+    fn rc_override_vehicles_never_carry_buttons() {
+        use uxduck_core::domain::settings::PilotInputMethod::RcChannelsOverride;
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.parameters.extend(
+            [
+                ("RC_MAP_ROLL", 1.0),
+                ("RC_MAP_PITCH", 2.0),
+                ("RC_MAP_THROTTLE", 3.0),
+                ("RC_MAP_YAW", 4.0),
+            ]
+            .map(|(name, value)| (name.into(), value, crate::sim::REAL32)),
+        );
+        let (mut session, vid) = identified(&mut fake);
+        let download = session.download_parameters(&vid, 0);
+        converse(&mut session, &mut fake, download, 1);
+        let sent =
+            session.pilot_control_with_method(&vid, [0, 0, 500, 0], &[], RcChannelsOverride, 1);
+        assert!(sends(&sent).iter().all(|bytes| !matches!(
+            decode(bytes).unwrap().message,
+            Message::ManualControl { .. }
+        )));
+        let released = session.release_control(&vid);
+        assert!(sends(&released).iter().all(|bytes| !matches!(
+            decode(bytes).unwrap().message,
+            Message::ManualControl { .. }
+        )));
     }
 
     #[test]
@@ -6037,12 +7103,18 @@ mod tests {
         ] {
             for method in [Automatic, ManualControl, RcChannelsOverride] {
                 let mut fake = FakeVehicle::new(1, 0xABCD);
+                // ArduRover's MANUAL_CONTROL needs its throttle calibration,
+                // which every ArduPilot reports.
                 fake.parameters.extend(
                     [
                         ("RC_MAP_ROLL", 1.0),
                         ("RC_MAP_PITCH", 2.0),
                         ("RC_MAP_THROTTLE", 3.0),
                         ("RC_MAP_YAW", 4.0),
+                        ("RCMAP_THROTTLE", 3.0),
+                        ("RC3_MIN", 1000.0),
+                        ("RC3_TRIM", 1500.0),
+                        ("RC3_MAX", 2000.0),
                     ]
                     .map(|(name, value)| (name.into(), value, crate::sim::REAL32)),
                 );
@@ -6053,8 +7125,13 @@ mod tests {
                 let observation = &mut session.vehicles.get_mut(&key).unwrap().observation;
                 observation.autopilot = autopilot.into();
                 observation.vehicle_type = kind.into();
-                let sent =
-                    session.pilot_control_with_method(&vid, [1000, -1000, 500, 1000], &[], method);
+                let sent = session.pilot_control_with_method(
+                    &vid,
+                    [1000, -1000, 500, 1000],
+                    &[],
+                    method,
+                    0,
+                );
                 if kind == "Airship" && method == ManualControl {
                     assert!(sent.is_empty());
                     continue;
@@ -6146,6 +7223,52 @@ mod tests {
         assert!(!later.iter().any(|e| matches!(e, Effect::Send { bytes, .. }
             if matches!(crate::decode::decode(bytes).map(|d| d.message),
                 Some(Message::CommandLong { command: 512, param1, .. }) if (param1 - 269.0).abs() < 0.5))));
+    }
+
+    #[test]
+    fn an_onboard_computer_sending_from_its_own_address_joins_the_vehicle_on_its_link() {
+        let mut session = Session::new(Config::default());
+        let mut vehicle = crate::sim::FakeVehicle::new(1, 0x1);
+        session.ingest("l1", PEER, &vehicle.heartbeat(), 0);
+        let status = crate::computer::ComputerStatus {
+            ram_used_mib: Some(1),
+            ram_total_mib: Some(4),
+            ..Default::default()
+        };
+        let mut joined = Vec::new();
+        for frame in [
+            crate::computer::heartbeat_frame((1, 192, 0)),
+            crate::computer::status_frame((1, 192, 1), 0, &status),
+        ] {
+            joined.extend(session.ingest("l1", "10.0.0.9:5000", &frame, 10));
+        }
+        assert!(
+            vehicles(&joined)
+                .iter()
+                .any(|v| v.component_ids.contains(&192))
+        );
+        let items: Vec<String> = session
+            .tick(200_000)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Telemetry(update) => Some(update.items),
+                _ => None,
+            })
+            .flatten()
+            .map(|i| i.key)
+            .collect();
+        assert!(
+            items.contains(&"computer_2.memory_used_pct".to_owned()),
+            "{items:?}"
+        );
+        // Not a camera or anything else, and not on another link.
+        let other = session.ingest(
+            "l2",
+            "10.0.0.9:5000",
+            &crate::computer::heartbeat_frame((1, 193, 2)),
+            20,
+        );
+        assert!(vehicles(&other).is_empty());
     }
 
     #[test]
@@ -6371,7 +7494,7 @@ mod tests {
         }
         let servos = fake.telemetry(1.5).iter().find_map(|frame| {
             match crate::decode::decode(frame).map(|d| d.message) {
-                Some(crate::decode::Message::ServoOutputs { servos }) => Some(servos),
+                Some(crate::decode::Message::ServoOutputs { servos, .. }) => Some(servos),
                 _ => None,
             }
         });

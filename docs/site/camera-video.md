@@ -57,17 +57,19 @@ The Camera tab shows the selected vehicle's cameras: one large, the others small
 
 ## An RTSP camera, or another port
 
-In a Camera tab, choose **Add a camera** and give its RTSP address, with its user and password if it has them, or another UDP port. An RTSP camera can send H.264, H.265 or MPEG-TS. From a terminal:
+In a Camera tab, choose **Add a camera** and give its RTSP address, with its user and password if it has them, or another UDP port. An RTSP camera can send H.264, H.265 or MPEG-TS. Give it a name, such as Front, to see that instead of its address. A vehicle's page lists its cameras and has **Add camera** too.
+
+A port's camera shows straight away, waiting for video, so you can name it and choose its vehicle before anything is switched on. The first stream to arrive on the port becomes it. From a terminal:
 
 ```
 uxduck video add rtsp://admin:password@192.168.144.25/main
-uxduck video add udp:5601
+uxduck video add udp:5601 --name Front
 uxduck video remove udp:5601
 ```
 
 A camera with more than one video track, such as a gimbal's day and thermal cameras, plays its first. Camera settings says how many more it offers and lets you choose; from a terminal, add `#track=2` to the address. `uxduck video list` shows each camera's tracks.
 
-H.264 plays everywhere. H.265 plays on a Mac; on Windows it needs the HEVC Video Extensions.
+H.264 plays everywhere. H.265 plays in Chrome, Edge, Firefox and Safari where the computer's graphics can decode it: Macs, most Windows computers (Edge and Firefox may also need the HEVC Video Extensions) and Linux with VA-API.
 
 UXDuck listens on 5600 by default, as QGroundControl does, so only one of them can have the port. Use another port, or none:
 
@@ -75,6 +77,12 @@ UXDuck listens on 5600 by default, as QGroundControl does, so only one of them c
 uxduck daemon --video-port 5601
 uxduck daemon --video-port off
 ```
+
+## In a window of its own
+
+In UXDuck Desktop, **Open in new window** on a camera, or **Open Front in a new window** in the command palette, shows it in a window you can move to another screen. The window has the Camera tab's choices: one camera, its vehicle's cameras in a grid, or **Every camera**, from every vehicle. Press **F** to fill the screen with it. While it is open, the Camera tab says the camera is showing in another window, with **Show window** and **Show here**. Closing the main window closes its video windows.
+
+Keyboard control keeps flying while you click in a video window, and Esc there turns it off. Switching to another app turns it off, and UXDuck says so.
 
 ## What the camera sees
 

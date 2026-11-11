@@ -38,6 +38,10 @@ pub struct Flight {
     pub vehicle_id: String,
     pub vehicle_name: String,
     pub vehicle_type: String,
+    /// A person's name for it (`flight/rename`); absent, clients name it
+    /// after its vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub simulated: bool,
     /// UXDuck first heard it already armed, so it began earlier.
@@ -69,6 +73,10 @@ pub struct Flight {
     /// Recorded on this computer, rather than had from the account.
     #[serde(default)]
     pub recorded_here: bool,
+    /// Whether this host has telemetry in the replay's time range, when
+    /// it can check without reading the log. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_available: Option<bool>,
     /// Deleted from the account after it was saved; it stays here only.
     #[serde(default)]
     pub left_account: bool,
@@ -81,6 +89,9 @@ pub struct Flight {
     /// `stored` once there, as a recording named after the flight.
     #[serde(default)]
     pub log: FlightLog,
+    /// Its camera video goes to the account with it (ADR-0046 B11).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync_video: bool,
     /// The mission it flew, if it flew one (C8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission: Option<FlightMission>,
@@ -108,6 +119,56 @@ pub enum FlightLog {
 #[serde(rename_all = "camelCase")]
 pub struct FlightUploadLogParams {
     pub id: String,
+}
+
+/// `flight/log`: one flight's part of its connection's log, as a tlog.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightLogParams {
+    pub id: String,
+}
+
+/// `flight/remove`: one ended entry, and with `video` the recordings
+/// only it reaches too (S348).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRemoveParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub video: bool,
+}
+
+/// `flight/removal`: the flights a delete would take (S348).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRemovalParams {
+    pub ids: Vec<String>,
+}
+
+/// What deleting those flights frees on this computer (S348): the
+/// telemetry recordings only they reach, and those they reach that stay
+/// because another flight reaches them or their connection is writing them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRemovalResult {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub freed_bytes: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub kept_bytes: u64,
+    /// UXDuck's own video recordings only they reach, which `video` deletes.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub video_bytes: u64,
+}
+
+/// A flight's tlog, to save as a file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightLogResult {
+    /// A file name for it, ending `.tlog`.
+    pub name: String,
+    /// The tlog's bytes in base64.
+    pub data: String,
 }
 
 /// A mission a flight flew (C8): flights of one mission share a run.
@@ -158,9 +219,23 @@ pub struct FlightKeepParams {
     /// account"), or none when `keep` is false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub always: bool,
+    /// What goes with it this once, when more than "What to sync" says
+    /// (ADR-0046 B11): its telemetry log, or its video too. A synced
+    /// flight takes what it lacks; never less than the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::dto::settings::SyncContent>,
 }
 
-/// `flight/list`: this computer's flights, newest first.
+/// `flight/rename`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightRenameParams {
+    pub id: String,
+    /// Up to 80 characters; empty goes back to its vehicle's name.
+    pub name: String,
+}
+
+/// `flight/list`: this computer's flights, newest first, a page at a time.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlightListParams {
@@ -170,6 +245,13 @@ pub struct FlightListParams {
     /// At most this many (default 100, at most 500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The page after the one that gave this `older`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Only these flights, every one found, wherever they are in the
+    /// logbook: `limit` and `before` do not apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
     /// Also totals since this time, such as the start of the month where
     /// the page is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,13 +263,17 @@ pub struct FlightListParams {
 #[serde(rename_all = "camelCase")]
 pub struct FlightListResult {
     pub flights: Vec<Flight>,
-    /// Time in the air over every flight listed or not (C9).
+    /// Pass as `before` for the next page. None when no older flight is
+    /// left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older: Option<String>,
+    /// Time in the air and time armed over every entry, listed or not (C9).
     #[serde(default)]
     pub totals: FlightTotals,
 }
 
-/// Time in the air, real and simulated apart (C9), all time and since
-/// `totalsSinceUs` (zero when not asked).
+/// Time in the air and time armed, real and simulated apart (C9), all time
+/// and since `totalsSinceUs` (zero when not asked).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlightTotals {
@@ -199,8 +285,25 @@ pub struct FlightTotals {
     pub real_air_us_since: u64,
     #[schemars(schema_with = "crate::safe::integer")]
     pub simulated_air_us_since: u64,
-    /// Flights in all, of which `flights` holds the newest.
+    /// Time armed, in the air or not, over every vehicle: a rover's, boat's
+    /// or sub's time out counts here, never in the air.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub real_armed_us: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub simulated_armed_us: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub real_armed_us_since: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub simulated_armed_us_since: u64,
+    /// Entries in all, of which `flights` holds the newest.
     pub count: u32,
+    /// Of `count`, those of vehicles that never fly: rovers, boats and subs.
+    #[serde(default)]
+    pub grounded: u32,
 }
 
 impl From<&uxduck_core::domain::flight::Flight> for Flight {
@@ -211,6 +314,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
             vehicle_id: f.vehicle_id.clone(),
             vehicle_name: f.vehicle_name.clone(),
             vehicle_type: f.vehicle_type.clone(),
+            name: f.name.clone(),
             simulated: f.simulated,
             seen_armed: f.seen_armed,
             armed_at_us: f.armed_at_us,
@@ -238,6 +342,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 .collect(),
             keep: f.keep,
             recorded_here: f.recorded_here,
+            replay_available: None,
             left_account: f.left_account,
             contact_lost_at_us: f.contact_lost_at_us,
             log: match f.log {
@@ -245,6 +350,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 uxduck_core::domain::flight::FlightLog::Asked => FlightLog::Asked,
                 uxduck_core::domain::flight::FlightLog::Stored => FlightLog::Stored,
             },
+            sync_video: f.sync_video,
             mission: f.mission.as_ref().map(|m| FlightMission {
                 mission_id: m.mission_id.clone(),
                 plan_id: m.plan_id.clone(),

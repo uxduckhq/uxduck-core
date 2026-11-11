@@ -1,0 +1,9 @@
+{
+  "method": "feedback/file",
+  "params": {
+    "kind": "problem",
+    "title": "Throttle mapping lost after restart",
+    "text": "After restarting UXDuck, the controller's throttle axis is no longer mapped and has to be set up again.",
+    "threadId": "th0123456789abcdef"
+  }
+}

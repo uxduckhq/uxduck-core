@@ -7,7 +7,7 @@
 //! of its tiles' source file and chunks with their SHA-256, so every byte
 //! UXDuck reads is checked against the signature.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,7 @@ pub struct Release {
     pub cells: BTreeMap<String, FileRef>,
     /// Cells that are all sea: no index, every height 0 m.
     #[serde(default)]
-    pub sea_cells: Vec<String>,
+    pub sea_cells: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,8 +154,7 @@ impl Release {
 
     #[must_use]
     pub fn is_sea_cell(&self, cell: Cell) -> bool {
-        let name = cell.name();
-        self.sea_cells.contains(&name)
+        self.sea_cells.contains(&cell.name())
     }
 }
 
@@ -305,7 +304,7 @@ mod tests {
                     size: 10,
                 },
             )]),
-            sea_cells: vec!["N30W040".into()],
+            sea_cells: BTreeSet::from(["N30W040".into()]),
         }
     }
 

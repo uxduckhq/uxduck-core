@@ -74,12 +74,14 @@ pub(crate) fn handle(
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
             to_value(&engine.desktop_app_status(false))
         }
-        ClientRequest::ClientVisibility(ClientVisibilityParams { visible }) => {
+        ClientRequest::ClientVisibility(ClientVisibilityParams { visible, focused }) => {
             let visible = *visible;
+            let focused = visible && focused.unwrap_or(true);
             engine.opened.seen_order += 1;
             let order = engine.opened.seen_order;
             if let Some(state) = engine.connections.get_mut(&connection) {
                 state.visible = visible;
+                state.focused = focused;
                 state.seen = order;
             }
             Ok(json!({}))
@@ -96,10 +98,14 @@ pub(crate) fn handle(
             reopened,
             target,
         }) => {
-            if *reopened {
+            let target = target.map(Into::into);
+            let opened = engine.open_app(page.as_deref(), &[], target)?;
+            let shows_nothing = page.is_none()
+                && target.unwrap_or(engine.state.settings.launch_action) == LaunchAction::MenuBar;
+            if *reopened && shows_nothing {
                 engine.tray_reopened();
             }
-            to_value(&engine.open_app(page.as_deref(), &[], target.map(Into::into))?)
+            to_value(&opened)
         }
         ClientRequest::DaemonStopPreview(_) => to_value(&engine.stop_preview()),
         // The computer's addresses are for the people at it (S97).
@@ -307,6 +313,7 @@ impl Engine {
             .values()
             .filter(|v| {
                 v.presence == Presence::Online
+                    && !v.replay
                     && !state
                         .links
                         .get(&v.link_id)

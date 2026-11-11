@@ -1,0 +1,6 @@
+{
+  "runs": 4,
+  "recommended": 3,
+  "warning": "4 at once is more than the 3 recommended for this computer (8 processors) at 3×. They may run slower than asked, and a simulator that falls behind can fly badly.",
+  "problems": ["Field has no take-off, and a simulated vehicle starts on the ground"]
+}

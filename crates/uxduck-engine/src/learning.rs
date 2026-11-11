@@ -8,7 +8,7 @@ use uxduck_contracts::dto::thread::{
     Rating as RatingDto, ThreadFeedbackParams, ThreadFeedbackResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
-use uxduck_core::domain::thread::{Feedback, Item, ItemKind, Rating};
+use uxduck_core::domain::thread::{Feedback, Item, ItemKind, ItemStatus, Rating};
 use uxduck_core::events::{Actor, Change};
 
 use crate::account::AccountAction;
@@ -85,7 +85,7 @@ pub(crate) fn feedback(
             .state
             .items_of(&item.thread_id)
             .into_iter()
-            .filter(|i| i.index <= item.index)
+            .filter(|i| i.index <= item.index && i.status != ItemStatus::Superseded)
             .map(sent_item)
             .collect();
         AccountAction::SendConversation {

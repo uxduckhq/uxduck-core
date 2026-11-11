@@ -5,6 +5,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use tokio::sync::Notify;
 
+use uxduck_contracts::dto::operator::TermsContext;
+use uxduck_contracts::version::TERMS_VERSION;
+
 use super::*;
 
 struct TestAccount {
@@ -65,9 +68,10 @@ fn test_api(
                         return (
                             old_status,
                             Json(json!({
-                                "user": { "id": "old-person", "email": "old@example.com", "name": "" },
+                                "user": { "id": "old-person", "email": "old@example.com", "name": "", "sourceAnswered": false },
                                 "productUpdates": false,
                                 "analyticsExcluded": true,
+                                "hostedModels": ["gpt-6-sol", "moonshotai/kimi-k3.1-pro"],
                             })),
                         );
                     }
@@ -95,6 +99,9 @@ fn test_api(
                 let release = verify_release.clone();
                 async move {
                 assert_eq!(body["challengeId"], "challenge-new");
+                if let Some(terms) = body.get("terms") {
+                    assert_eq!(terms, &json!({ "version": TERMS_VERSION, "client": "desktop" }));
+                }
                 if hold_verify { started.notify_one(); release.notified().await; }
                 (
                     [("set-auth-token", "new-session")],
@@ -104,6 +111,21 @@ fn test_api(
             }),
         )
         .route("/v1/me/sessions/current", put(|| async { Json(json!({})) }))
+        .route(
+            "/v1/me/terms",
+            put(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer new-session");
+                assert_eq!(
+                    body,
+                    json!({ "version": TERMS_VERSION, "context": "real-vehicle", "client": "desktop" })
+                );
+                StatusCode::NO_CONTENT
+            }),
+        )
+        .route(
+            "/v1/me/source",
+            put(|| async { (StatusCode::CONFLICT, Json(json!({ "error": "already answered" }))) }),
+        )
         .route("/v1/me/sessions", get(move |headers: HeaderMap| {
             let started = session_started.clone();
             let release = session_release.clone();
@@ -156,7 +178,9 @@ async fn setup_scenarios(
         generation: AtomicU64::new(0),
         last: Mutex::new(AccountState::default()),
         analytics_internal: Mutex::new(None),
+        hosted_models: Mutex::new(None),
         shared_dir: dir.path().join("shared"),
+        data_dir: dir.path().to_owned(),
     });
     TestAccount {
         account,
@@ -201,6 +225,44 @@ async fn internal_account_status_survives_offline_reads_and_clears_on_sign_out()
     );
 }
 
+/// Whether the account said where it heard of UXDuck (S251) comes with it;
+/// an answer, or one given elsewhere first, keeps it answered while offline.
+#[tokio::test]
+async fn the_signup_source_question_is_asked_until_answered_anywhere() {
+    let test = setup(StatusCode::OK, false).await;
+    assert_eq!(
+        pending_get(&test.account).await.unwrap().source_answered,
+        Some(false)
+    );
+    test.account
+        .act(AccountAction::SetSource {
+            source: uxduck_contracts::dto::account::SignupSource::Youtube,
+            other: None,
+        })
+        .await
+        .unwrap();
+    test.server.abort();
+    let offline = pending_get(&test.account).await.unwrap();
+    assert!(offline.offline);
+    assert_eq!(offline.source_answered, Some(true));
+}
+
+/// What the hosted model offers comes with the account (S29), and is kept
+/// while offline; an API that does not say leaves the configured list.
+#[tokio::test]
+async fn the_hosted_models_come_from_the_account_and_survive_offline_reads() {
+    let test = setup(StatusCode::OK, false).await;
+    pending_get(&test.account).await.unwrap();
+    let offered = Some(vec![
+        "gpt-6-sol".to_owned(),
+        "moonshotai/kimi-k3.1-pro".to_owned(),
+    ]);
+    assert_eq!(test.account.hosted_models(), offered);
+    test.server.abort();
+    assert!(pending_get(&test.account).await.unwrap().offline);
+    assert_eq!(test.account.hosted_models(), offered);
+}
+
 #[tokio::test]
 async fn an_old_unauthorized_response_cannot_erase_a_new_sign_in() {
     let test = setup(StatusCode::UNAUTHORIZED, true).await;
@@ -214,6 +276,7 @@ async fn an_old_unauthorized_response_cannot_erase_a_new_sign_in() {
             email: "new@example.com".into(),
             code: "123456".into(),
             product_updates: false,
+            terms_version: None,
         })
         .await
         .unwrap();
@@ -261,180 +324,49 @@ async fn a_server_failure_keeps_the_token_but_a_real_rejection_removes_it() {
     assert!(revoked.account.token().is_none());
 }
 
+/// One account per computer (ADR-0033, 2026-10-31): a sign-in an older
+/// UXDuck tied to one operator keeps working after the upgrade, for every
+/// operator, with no code asked for.
 #[tokio::test]
-async fn switching_people_clears_the_previous_cloud_session_before_returning() {
+async fn a_sign_in_tied_to_an_operator_before_the_upgrade_serves_every_operator() {
     let test = setup(StatusCode::OK, false).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
-    test.account
-        .get(
-            test.account.api.as_deref().unwrap(),
-            test.account.client.as_ref().unwrap(),
-        )
-        .await
-        .unwrap();
-    let before = test.account.last.lock().unwrap().clone();
-    assert_eq!(before.account_id.as_deref(), Some("old-person"));
-    let switched = tokio::time::timeout(
-        Duration::from_millis(200),
-        test.account.act_for(
-            AccountAction::SwitchOperator {
-                account_id: None,
-                operator_id: Some("ben".into()),
-                restoring: false,
-                device: None,
-            },
-            Some("ana"),
-            0,
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(switched, json!({}));
-    assert!(test.account.token().is_none());
-    assert_eq!(
-        test.account.credentials.account_operator().as_deref(),
-        Some("ben")
-    );
-    assert!(!test.account.last.lock().unwrap().signed_in);
-    // Selecting the old name again does not resurrect a credential.
-    test.account
-        .act_for(
-            AccountAction::SwitchOperator {
-                account_id: None,
-                operator_id: Some("ana".into()),
-                restoring: false,
-                device: None,
-            },
-            Some("ben"),
-            0,
-        )
-        .await
-        .unwrap();
-    assert!(test.account.token().is_none());
-}
+    let path = test.account.data_dir.join("credentials.json");
+    let mut stored: serde_json::Map<String, Value> =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let server = stored
+        .keys()
+        .find_map(|key| key.strip_prefix("account.token:"))
+        .unwrap()
+        .to_owned();
+    stored.insert(format!("account.operator:{server}"), json!("ana"));
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
 
-/// The same person (maintainer, 2026-10-23): choosing an operator who last
-/// signed in as the verified account held now keeps the session; another
-/// account's operator, or one with no account, still needs a fresh sign-in.
-#[tokio::test]
-async fn switching_to_an_operator_of_the_same_account_keeps_the_session() {
-    let test = setup(StatusCode::OK, false).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
-    test.account
-        .get(
-            test.account.api.as_deref().unwrap(),
-            test.account.client.as_ref().unwrap(),
-        )
-        .await
-        .unwrap();
-    let switch = |operator: &str, account: Option<&str>| AccountAction::SwitchOperator {
-        operator_id: Some(operator.into()),
-        account_id: account.map(Into::into),
-        restoring: false,
-        device: None,
-    };
-    test.account
-        .act_for(switch("ana-laptop", Some("old-person")), Some("ana"), 0)
-        .await
-        .unwrap();
+    let state = test.account.act(AccountAction::Get).await.unwrap();
+    assert_eq!(state["signedIn"], true);
+    assert_eq!(state["accountId"], "old-person");
+    assert!(state.get("operatorId").is_none());
+    let sessions = test.account.act(AccountAction::Sessions).await.unwrap();
+    assert_eq!(sessions["sessions"][0]["id"], "current-old");
     assert_eq!(test.account.token().as_deref(), Some("old-session"));
-    assert_eq!(
-        test.account.credentials.account_operator().as_deref(),
-        Some("ana-laptop")
-    );
-    assert!(test.account.last.lock().unwrap().signed_in);
-
-    // Another person's operator: the session goes before the switch returns.
-    test.account
-        .act_for(switch("ben", Some("someone-else")), Some("ana-laptop"), 0)
-        .await
-        .unwrap();
-    assert!(test.account.token().is_none());
+    assert!(test.signed_out.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn an_unknown_or_offline_account_never_keeps_the_session() {
-    for (offline, recorded) in [(true, Some("old-person")), (false, None)] {
-        let test = setup(StatusCode::OK, false).await;
-        test.account.credentials.bind_operator(Some("ana")).unwrap();
-        test.account
-            .get(
-                test.account.api.as_deref().unwrap(),
-                test.account.client.as_ref().unwrap(),
-            )
-            .await
-            .unwrap();
-        test.account.last.lock().unwrap().offline = offline;
-        test.account
-            .act_for(
-                AccountAction::SwitchOperator {
-                    operator_id: Some("ana-laptop".into()),
-                    account_id: recorded.map(Into::into),
-                    restoring: false,
-                    device: None,
-                },
-                Some("ana"),
-                0,
-            )
-            .await
-            .unwrap();
-        assert!(
-            test.account.token().is_none(),
-            "offline {offline}, recorded {recorded:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_different_operator_cannot_read_or_modify_the_active_account() {
+async fn a_verification_queued_before_a_sign_out_cannot_restore_its_token() {
     let test = setup(StatusCode::OK, false).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
-    let state = test
-        .account
-        .act_for(AccountAction::Get, Some("ben"), 0)
-        .await
-        .unwrap();
-    assert_eq!(state, json!({"signedIn":false}));
-    assert!(
-        test.account
-            .act_for(AccountAction::Sessions, Some("ben"), 0)
-            .await
-            .is_err()
-    );
-    assert!(
-        test.account
-            .act_for(
-                AccountAction::Verify {
-                    email: "new@example.com".into(),
-                    code: "123456".into(),
-                    product_updates: false
-                },
-                Some("ben"),
-                0
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(test.account.token().as_deref(), Some("old-session"));
-}
-
-#[tokio::test]
-async fn a_verification_started_before_a_switch_cannot_restore_its_token() {
-    let test = setup(StatusCode::OK, false).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
-    // The generation was captured when verification was queued. A switch
-    // invalidates that generation before the response can install a token.
+    // The generation was captured when verification was queued. A sign-out
+    // queued after it moves the generation on before the response can
+    // install a token.
     test.account.generation.fetch_add(1, Ordering::SeqCst);
     let result = test
         .account
-        .act_for(
+        .act_at(
             AccountAction::Verify {
                 email: "new@example.com".into(),
                 code: "123456".into(),
                 product_updates: false,
+                terms_version: None,
             },
-            Some("ana"),
             0,
         )
         .await;
@@ -443,19 +375,18 @@ async fn a_verification_started_before_a_switch_cannot_restore_its_token() {
 }
 
 #[tokio::test]
-async fn a_late_verification_response_cannot_sign_the_previous_person_back_in() {
+async fn a_late_verification_response_cannot_sign_back_in_after_a_sign_out() {
     let test = setup_with_verification(StatusCode::OK, false, true).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
     let account = test.account.clone();
     let pending = tokio::spawn(async move {
         account
-            .act_for(
+            .act_at(
                 AccountAction::Verify {
                     email: "new@example.com".into(),
                     code: "123456".into(),
                     product_updates: false,
+                    terms_version: None,
                 },
-                Some("ana"),
                 0,
             )
             .await
@@ -465,83 +396,38 @@ async fn a_late_verification_response_cannot_sign_the_previous_person_back_in() 
         .unwrap();
     test.account.generation.fetch_add(1, Ordering::SeqCst);
     test.account
-        .act_for(
-            AccountAction::SwitchOperator {
-                account_id: None,
-                operator_id: Some("ben".into()),
-                restoring: false,
-                device: None,
-            },
-            Some("ana"),
-            1,
-        )
+        .act_at(AccountAction::SignOut { device: None }, 1)
         .await
         .unwrap();
+    assert!(test.account.token().is_none());
     test.release.notify_one();
     assert!(pending.await.unwrap().is_err());
     assert!(test.account.token().is_none());
-    assert_eq!(
-        test.account.credentials.account_operator().as_deref(),
-        Some("ben")
-    );
+    assert!(!test.account.last.lock().unwrap().signed_in);
 }
 
 #[tokio::test]
-async fn restoring_a_legacy_profile_offline_keeps_its_existing_session() {
+async fn a_legacy_sign_in_keeps_its_session_while_offline() {
     let test = setup(StatusCode::OK, false).await;
     test.account.credentials.protect_legacy_workspace().unwrap();
     test.server.abort();
-    test.account
-        .act_for(
-            AccountAction::SwitchOperator {
-                account_id: None,
-                operator_id: Some("ana".into()),
-                restoring: true,
-                device: None,
-            },
-            None,
-            0,
-        )
-        .await
-        .unwrap();
-    assert_eq!(test.account.token().as_deref(), Some("old-session"));
-    assert_eq!(
-        test.account.credentials.account_operator().as_deref(),
-        Some("ana")
-    );
-    assert!(test.account.credentials.workspace_needs_identity());
-    // Actually changing people must not guess a new owner for legacy data.
-    assert!(
-        test.account
-            .act_for(
-                AccountAction::SwitchOperator {
-                    account_id: None,
-                    operator_id: Some("ben".into()),
-                    restoring: false,
-                    device: None,
-                },
-                Some("ana"),
-                0
-            )
-            .await
-            .is_err()
-    );
+    let state = test.account.act(AccountAction::Get).await.unwrap();
+    assert_eq!(state["signedIn"], true);
+    assert_eq!(state["offline"], true);
     assert_eq!(test.account.token().as_deref(), Some("old-session"));
 }
 
 #[tokio::test]
-async fn a_delayed_session_sign_out_cannot_sign_out_the_next_person() {
+async fn a_delayed_session_sign_out_cannot_sign_out_the_next_sign_in() {
     let test = setup_scenarios(StatusCode::OK, false, false, true).await;
-    test.account.credentials.bind_operator(Some("ana")).unwrap();
     let account = test.account.clone();
     let pending = tokio::spawn(async move {
         account
-            .act_for(
+            .act_at(
                 AccountAction::SignOutSession {
                     id: "current-old".into(),
                     device: None,
                 },
-                Some("ana"),
                 0,
             )
             .await
@@ -549,39 +435,25 @@ async fn a_delayed_session_sign_out_cannot_sign_out_the_next_person() {
     tokio::time::timeout(Duration::from_secs(5), test.started.notified())
         .await
         .unwrap();
+    // A verification queued meanwhile moves the generation on.
     test.account.generation.fetch_add(1, Ordering::SeqCst);
     test.account
-        .act_for(
-            AccountAction::SwitchOperator {
-                account_id: None,
-                operator_id: Some("ben".into()),
-                restoring: false,
-                device: None,
-            },
-            Some("ana"),
-            1,
-        )
-        .await
-        .unwrap();
-    // The switch dropped any code asked for before it; Ben asks for his own.
-    test.account
-        .act_for(
+        .act_at(
             AccountAction::SignIn {
                 email: "new@example.com".into(),
             },
-            Some("ben"),
             1,
         )
         .await
         .unwrap();
     test.account
-        .act_for(
+        .act_at(
             AccountAction::Verify {
                 email: "new@example.com".into(),
                 code: "123456".into(),
                 product_updates: false,
+                terms_version: None,
             },
-            Some("ben"),
             1,
         )
         .await
@@ -605,6 +477,7 @@ async fn a_code_signs_in_only_the_email_it_was_asked_for_once() {
         email: email.into(),
         code: "123456".into(),
         product_updates: false,
+        terms_version: None,
     };
     *test.account.challenge.lock().unwrap() = None;
     let missing = test
@@ -622,4 +495,41 @@ async fn a_code_signs_in_only_the_email_it_was_asked_for_once() {
     assert!(test.account.act(verify("other@example.com")).await.is_err());
     test.account.act(verify("new@example.com")).await.unwrap();
     assert!(test.account.challenge.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_account_records_the_terms_agreed_to_at_sign_in_and_later() {
+    let test = setup(StatusCode::OK, false).await;
+    test.account
+        .act(AccountAction::Verify {
+            email: "new@example.com".into(),
+            code: "123456".into(),
+            product_updates: false,
+            terms_version: Some(TERMS_VERSION.into()),
+        })
+        .await
+        .unwrap();
+    test.account
+        .act(AccountAction::AcceptTerms {
+            version: TERMS_VERSION.into(),
+            context: TermsContext::RealVehicle,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        test.account.last.lock().unwrap().terms_version.as_deref(),
+        Some(TERMS_VERSION)
+    );
+}
+
+#[test]
+fn verifying_says_which_terms_the_form_showed_only_when_it_showed_them() {
+    assert_eq!(
+        verify_body("challenge", "123456", None),
+        json!({ "challengeId": "challenge", "code": "123456" })
+    );
+    assert_eq!(
+        verify_body("challenge", "123456", Some("2026-11-03"))["terms"],
+        json!({ "version": "2026-11-03", "client": "desktop" })
+    );
 }

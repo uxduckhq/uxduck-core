@@ -483,7 +483,7 @@ impl ChecklistFile {
         }
         if self.steps.len() > MAX_STEPS {
             return Err(invalid(format!(
-                "the file has {} steps; a checklist holds at most {MAX_STEPS}",
+                "the file has {} steps. A checklist holds at most {MAX_STEPS}",
                 self.steps.len()
             )));
         }
@@ -615,13 +615,13 @@ impl ChecklistRecord {
                 Some(PreflightOverride::Approval { .. }) => "by an approval",
                 _ => "by the operator",
             };
-            let _ = write!(text, "; armed past {} {how}", titles.join(", "));
+            let _ = write!(text, ". Armed past {} {how}", titles.join(", "));
         }
         if !self.failing.is_empty() {
             let titles: Vec<&str> = self.failing.iter().map(|c| c.title.as_str()).collect();
             let _ = write!(
                 text,
-                "; armed from outside UXDuck while {} did not pass",
+                ". Armed from outside UXDuck while {} did not pass",
                 titles.join(", ")
             );
         }

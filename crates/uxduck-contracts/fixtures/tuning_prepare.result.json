@@ -1,0 +1,29 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "proposals": [
+    {
+      "name": "MOT_BAT_VOLT_MAX",
+      "value": 16.8,
+      "now": 0.0,
+      "why": "4 cells × 4.2 V: a full LiPo"
+    },
+    {
+      "name": "MOT_BAT_VOLT_MIN",
+      "value": 13.2,
+      "now": 0.0,
+      "why": "4 cells × 3.3 V: an empty LiPo"
+    },
+    {
+      "name": "INS_GYRO_FILTER",
+      "value": 40.0,
+      "now": 20.0,
+      "why": "40 Hz for 10 inch props, from ArduPilot's tuning setup"
+    },
+    {
+      "name": "ATC_ACC_R_MAX",
+      "value": 1100.0,
+      "now": 1100.0,
+      "why": "1100 deg/s² for 10 inch props: how fast it may start a roll, from ArduPilot's tuning setup"
+    }
+  ]
+}

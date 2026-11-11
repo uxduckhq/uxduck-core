@@ -479,6 +479,83 @@ async fn obsolete_download_progress_and_failures_cannot_replace_the_new_channel(
     assert!(pending, "the new check must remain queued");
 }
 
+#[test]
+fn only_the_staged_download_is_kept() {
+    let data = tempfile::tempdir().unwrap();
+    for folder in [
+        "app-updates/0.9.1",
+        "app-updates/0.10.0",
+        "app-updates/0.11.0-beta.3",
+        "app-updates/not-a-version",
+        "updates/sparkle/0.10.0",
+        "updates/sparkle/0.11.0-beta.3",
+    ] {
+        std::fs::create_dir_all(data.path().join(folder)).unwrap();
+        std::fs::write(data.path().join(folder).join("package.dmg"), b"package").unwrap();
+    }
+    let left = |folder: &str| {
+        let mut names: Vec<String> = std::fs::read_dir(data.path().join(folder))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    forget_downloads(data.path(), |staged| staged.to_string() == "0.11.0-beta.3");
+    assert_eq!(left("app-updates"), ["0.11.0-beta.3", "not-a-version"]);
+    assert_eq!(left("updates/sparkle"), ["0.11.0-beta.3"]);
+    // Up to date: nothing downloaded is needed any more.
+    forget_downloads(data.path(), |_| false);
+    assert_eq!(left("app-updates"), ["not-a-version"]);
+    assert!(left("updates/sparkle").is_empty());
+}
+
+#[test]
+fn a_start_forgets_this_version_and_older_ones_but_keeps_a_newer_download() {
+    let data = tempfile::tempdir().unwrap();
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let older = semver::Version::new(0, 0, 1);
+    let newer = semver::Version::new(running.major + 1, 0, 0);
+    for version in [&older, &running, &newer] {
+        let dir = data.path().join("app-updates").join(version.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.dmg"), b"package").unwrap();
+    }
+    forget_installed(data.path());
+    let left: Vec<_> = std::fs::read_dir(data.path().join("app-updates"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [newer.to_string()]);
+}
+
 fn checksum(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", uxduck_core::encoding::Hex(&Sha256::digest(bytes)))
+}
+
+/// FB-97: a ready version is said once, even when its notice was dismissed
+/// and UXDuck restarted; a newer version is said again.
+#[tokio::test]
+async fn a_ready_version_is_announced_once_across_restarts() {
+    let data = tempfile::tempdir().unwrap();
+    for (version, said) in [("9.0.0", 1), ("9.0.0", 0), ("9.1.0", 1)] {
+        let mut e = test_engine();
+        let mut ready = status(UpdatePhase::Ready);
+        ready.version = Some(version.into());
+        e.app_update_publish(ready);
+        let engine = EngineHandle::spawn(e);
+        announce(&engine, data.path(), version).await;
+        let condition = format!("app-update:{version}");
+        let count = engine
+            .run(move |e| {
+                e.state()
+                    .notifications
+                    .values()
+                    .filter(|n| n.condition.as_deref() == Some(condition.as_str()))
+                    .count()
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, said, "{version}");
+    }
 }

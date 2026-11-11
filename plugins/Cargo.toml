@@ -9,3 +9,7 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# The SDK's MAVLink codegen; see vendor/mavinspect/README.md.
+[patch.crates-io]
+mavinspect = { path = "../vendor/mavinspect" }

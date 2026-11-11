@@ -164,15 +164,12 @@ pub fn grid_info(lat_e7: i32, lon_e7: i32, spacing: u16) -> GridInfo {
     let grid_idx_y = idx_y / u32::from(SPACING_Y);
     let frac_x = (north - idx_x as f32 * spacing_f) / spacing_f;
     let frac_y = (east - idx_y as f32 * spacing_f) / spacing_f;
-    let (grid_lat, grid_lon) = offset(
-        ref_lat,
-        ref_lon,
-        f64::from(grid_idx_x as f32 * f32::from(SPACING_X) * spacing_f),
-        f64::from(grid_idx_y as f32 * f32::from(SPACING_Y) * spacing_f),
-    );
+    let (lat_degrees, lon_degrees) = (lat_degrees as i16, lon_degrees as i16);
+    let (grid_lat, grid_lon) =
+        block_corner(lat_degrees, lon_degrees, grid_idx_x, grid_idx_y, spacing);
     GridInfo {
-        lat_degrees: lat_degrees as i16,
-        lon_degrees: lon_degrees as i16,
+        lat_degrees,
+        lon_degrees,
         grid_lat,
         grid_lon,
         grid_idx_x,
@@ -182,6 +179,117 @@ pub fn grid_info(lat_e7: i32, lon_e7: i32, spacing: u16) -> GridInfo {
         frac_x,
         frac_y,
     }
+}
+
+/// The south-west corner of a block from its degree and indices, as
+/// `calculate_grid_info` finds it.
+#[must_use]
+#[allow(clippy::cast_precision_loss, reason = "ArduPilot's float")]
+pub fn block_corner(
+    lat_degrees: i16,
+    lon_degrees: i16,
+    grid_idx_x: u32,
+    grid_idx_y: u32,
+    spacing: u16,
+) -> (i32, i32) {
+    let spacing = f32::from(spacing);
+    offset(
+        i32::from(lat_degrees) * 10_000_000,
+        i32::from(lon_degrees) * 10_000_000,
+        f64::from(grid_idx_x as f32 * f32::from(SPACING_X) * spacing),
+        f64::from(grid_idx_y as f32 * f32::from(SPACING_Y) * spacing),
+    )
+}
+
+/// Where a point of a block is to ArduPilot when it reads the block's
+/// heights back: whole spacings north and east of the degree's corner, the
+/// frame `calculate_grid_info` measures in, as `terrain_gen.py` fills a
+/// block. `x` north and `y` east within the block.
+#[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a point's parts, as ArduPilot keeps them"
+)]
+pub fn block_point(
+    lat_degrees: i16,
+    lon_degrees: i16,
+    grid_idx_x: u32,
+    grid_idx_y: u32,
+    x: u8,
+    y: u8,
+    spacing: u16,
+) -> (i32, i32) {
+    let spacing = f64::from(spacing);
+    offset(
+        i32::from(lat_degrees) * 10_000_000,
+        i32::from(lon_degrees) * 10_000_000,
+        f64::from(grid_idx_x * u32::from(SPACING_X) + u32::from(x)) * spacing,
+        f64::from(grid_idx_y * u32::from(SPACING_Y) + u32::from(y)) * spacing,
+    )
+}
+
+/// `AP_Terrain::east_blocks`: blocks per row of a degree's file, the
+/// degree's width in blocks and two more.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "C's conversion, as ArduPilot"
+)]
+#[allow(clippy::cast_precision_loss, reason = "ArduPilot's float")]
+pub fn east_blocks(lat_degrees: i16, lon_degrees: i16, spacing: u16) -> u32 {
+    let lat = i32::from(lat_degrees) * 10_000_000;
+    let lon = i32::from(lon_degrees) * 10_000_000;
+    let (lat2, lon2) = offset(
+        lat,
+        (i32::from(lon_degrees) + 1) * 10_000_000,
+        0.0,
+        f64::from(2 * u32::from(spacing) * u32::from(BLOCK_Y)),
+    );
+    let (_, east) = distance_ne(lat, lon, lat2, lon2);
+    (east / (u32::from(spacing) * u32::from(SPACING_Y)) as f32) as u32
+}
+
+/// A block's degree and indices from the corner a vehicle names it by:
+/// `(lat_degrees, lon_degrees, grid_idx_x, grid_idx_y)`. A row's last
+/// block may start just past its degree's east edge and still belong to
+/// it, so the degree to the west is tried too; the one whose corner comes
+/// back nearest the vehicle's is taken.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "block indices"
+)]
+pub fn block_place(block_lat: i32, block_lon: i32, spacing: u16) -> (i16, i16, u32, u32) {
+    let info = grid_info(block_lat, block_lon, spacing);
+    let west = if info.lon_degrees <= -180 {
+        179
+    } else {
+        info.lon_degrees - 1
+    };
+    let size_x = f32::from(spacing) * f32::from(SPACING_X);
+    let size_y = f32::from(spacing) * f32::from(SPACING_Y);
+    [info.lon_degrees, west]
+        .into_iter()
+        .map(|lon_degrees| {
+            let (north, east) = distance_ne(
+                i32::from(info.lat_degrees) * 10_000_000,
+                i32::from(lon_degrees) * 10_000_000,
+                block_lat,
+                block_lon,
+            );
+            let x = (north / size_x).round().max(0.0) as u32;
+            let y = (east / size_y).round().max(0.0) as u32;
+            let (lat, lon) = block_corner(info.lat_degrees, lon_degrees, x, y, spacing);
+            let off = i64::from(lat.abs_diff(block_lat))
+                + i64::from(diff_longitude(lon, block_lon).unsigned_abs());
+            (off, (info.lat_degrees, lon_degrees, x, y))
+        })
+        .min_by_key(|&(off, _)| off)
+        .map_or((info.lat_degrees, info.lon_degrees, 0, 0), |(_, place)| {
+            place
+        })
 }
 
 /// `AP_Terrain::grid_bitnum`: the group a point of a block is in.
@@ -197,17 +305,25 @@ pub fn group_origin(gridbit: u8) -> (u8, u8) {
 }
 
 /// Where the 16 heights of a group belong, in `TERRAIN_DATA`'s order
-/// (`data[x * 4 + y]`, `x` north): each point moved from the block's
-/// corner by whole spacings, as `create_terrain.py` fills a block.
+/// (`data[x * 4 + y]`, `x` north): where the vehicle reads them back,
+/// [`block_point`], for the block it named by its corner.
 #[must_use]
 pub fn group_points(block_lat: i32, block_lon: i32, spacing: u16, gridbit: u8) -> [(i32, i32); 16] {
+    let (lat_degrees, lon_degrees, grid_idx_x, grid_idx_y) =
+        block_place(block_lat, block_lon, spacing);
     let (x0, y0) = group_origin(gridbit);
     let mut points = [(0, 0); 16];
     for x in 0..GROUP {
         for y in 0..GROUP {
-            let north = f64::from(x0 + x) * f64::from(spacing);
-            let east = f64::from(y0 + y) * f64::from(spacing);
-            points[usize::from(x * GROUP + y)] = offset(block_lat, block_lon, north, east);
+            points[usize::from(x * GROUP + y)] = block_point(
+                lat_degrees,
+                lon_degrees,
+                grid_idx_x,
+                grid_idx_y,
+                x0 + x,
+                y0 + y,
+                spacing,
+            );
         }
     }
     points
@@ -254,8 +370,14 @@ mod tests {
     fn a_group_starts_at_the_block_corner() {
         let points = group_points(530_646_790, -40_798_165, 100, 0);
         assert_eq!(points[0], (530_646_790, -40_798_165));
-        // One spacing east, then one north.
-        assert!(points[1].1 > points[0].1 && points[1].0 == points[0].0);
-        assert!(points[4].0 > points[0].0 && points[4].1 == points[0].1);
+        // One spacing east, then one north, each measured from the
+        // degree's corner as ArduPilot measures.
+        let degree = (530_000_000, -50_000_000);
+        let (n0, e0) = distance_ne(degree.0, degree.1, points[0].0, points[0].1);
+        let (n1, e1) = distance_ne(degree.0, degree.1, points[1].0, points[1].1);
+        let (n4, e4) = distance_ne(degree.0, degree.1, points[4].0, points[4].1);
+        assert!(points[1].0 == points[0].0 && (e1 - e0 - 100.0).abs() < 0.02);
+        assert!((n4 - n0 - 100.0).abs() < 0.02 && (e4 - e0).abs() < 0.02);
+        assert!((n1 - n0).abs() < 0.02);
     }
 }

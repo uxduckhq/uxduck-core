@@ -79,6 +79,10 @@ pub enum LinkKind {
         /// for the vehicle. Installed daemons only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binary: Option<String>,
+        /// Allows this own ArduPilot build to listen on the network when
+        /// local-only connections are unsupported.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_network: bool,
         /// Forgets the vehicle's stored parameters each time it starts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wipe: bool,
@@ -225,8 +229,22 @@ pub struct Link {
     /// for it until it resumes, and commands wait for that.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Where a simulated vehicle touched the 3D scenery and was paused
+    /// (`sim/crash`). Once it resumes, contact within 100 m of it across
+    /// the ground is not reported, until the vehicle has flown clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenery_hit: Option<SceneryHit>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// Where on the ground a simulated vehicle touched the 3D scenery, in
+/// degrees times 10⁷.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneryHit {
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
 }
 
 /// The take-off a simulation start runs for a vehicle started in the air.

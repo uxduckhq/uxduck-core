@@ -27,11 +27,17 @@ use uxduck_engine::runtime::{DraftOrder, PluginLoad, PluginPort, TestOrder};
 use super::data_plane::{PluginFeed, RawFrame};
 use super::engine_task::EngineHandle;
 
+#[cfg(all(test, target_os = "macos"))]
+mod signal_tests;
+
 /// A plugin's memory, at most: 256 pages of 64 KiB, 16 MiB.
 const MEMORY_PAGES: u32 = 256;
 /// Work allowed per call, including initialization. Fuel counts executed
 /// WebAssembly instructions, so host suspension cannot exhaust the budget.
-const CALL_FUEL: u64 = 100_000_000;
+/// Enough for a script to read a whole fetched page (1 MB, about 1300
+/// aircraft from adsb.lol); a runaway call stops in about a quarter of a
+/// second (maintainer, 2026-10-31).
+const CALL_FUEL: u64 = 1_000_000_000;
 
 /// The shortest tick a plugin may ask for (S101): ten calls a second.
 const MIN_TICK_MS: u32 = 100;
@@ -911,7 +917,7 @@ impl Running {
     pub fn take_frame(&mut self, frame: &RawFrame) {
         if let Some((ids, queue)) = &mut self.messages
             && ids.contains(&frame.message_id)
-            && let Some(decoded) = uxduck_mavlink::named::decode(frame.message_id, &frame.payload)
+            && let Some(decoded) = decode(frame)
         {
             if queue.held.len() >= HELD {
                 queue.held.pop_front();
@@ -1348,7 +1354,10 @@ fn load_with_clock(
     if let Some(javascript) = config {
         manifest = manifest.with_config_key("script", javascript);
     }
+    let mut runtime = wasmtime::Config::new();
+    runtime.macos_use_mach_ports(false);
     let mut plugin = extism::PluginBuilder::new(&manifest)
+        .with_wasmtime_config(runtime)
         .with_functions([clock])
         .with_fuel_limit(CALL_FUEL)
         .build()
@@ -1595,6 +1604,20 @@ impl Host {
             *wants = Wants { frames, items };
         }
     }
+}
+
+/// A frame by name and fields: with the vehicle's own dialects first
+/// (ADR-0044 F4), then ArduPilot's and plugins' dialects.
+fn decode(frame: &RawFrame) -> Option<uxduck_mavlink::named::Decoded> {
+    let own = uxduck_mavlink::custom::for_vehicle(std::slice::from_ref(&frame.vehicle_id))
+        .and_then(|own| own.decode(frame.message_id, &frame.payload));
+    if let Some(own) = own {
+        return Some(uxduck_mavlink::named::Decoded {
+            name: own.name,
+            fields: own.fields,
+        });
+    }
+    uxduck_mavlink::named::decode(frame.message_id, &frame.payload)
 }
 
 #[cfg(test)]
@@ -2216,7 +2239,10 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
             asked.fetch[0].url,
             "https://api.adsb.lol/v2/point/51.4700/-0.4500/25"
         );
-        assert_eq!(asked.store["used"], 1);
+        assert!(
+            asked.store.is_empty(),
+            "only an answer from adsb.lol counts"
+        );
         // Arming does not change the explicit 30-second interval; one at a time.
         let soon: Effects = effects(
             &mut plugin,
@@ -2264,6 +2290,7 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
         let status = heard.traffic_status.unwrap();
         assert_eq!(status.credit.as_deref(), Some("adsb.lol (ODbL)"));
         assert_eq!(status.note.as_deref(), Some("1 of 500 requests today"));
+        assert_eq!(heard.store["used"], 1);
         let again: Effects = effects(
             &mut plugin,
             "on_tick",
@@ -2308,6 +2335,68 @@ export function onFetched(input: { id: string; status?: number; body: string }) 
         )
         .unwrap();
         assert!(quiet.fetch.is_empty());
+    }
+
+    /// One aircraft as adsb.lol's `/v2/point` sends it, every field readsb
+    /// has: about 780 bytes.
+    fn readsb_aircraft(i: u32) -> String {
+        format!(
+            r#"{{"hex":"a{i:05x}","type":"adsb_icao","flight":"UAL1234 ","r":"N12345","t":"B738","desc":"BOEING 737-800","ownOp":"UNITED AIRLINES INC","year":"2015","alt_baro":12025,"alt_geom":12350,"gs":312.4,"ias":250,"tas":302,"mach":0.484,"wd":270,"ws":18,"oat":-2,"tat":11,"track":123.45,"track_rate":0.03,"roll":0.18,"mag_heading":110.21,"true_heading":123.4,"baro_rate":-1088,"geom_rate":-1056,"squawk":"4521","emergency":"none","category":"A3","nav_qnh":1013.6,"nav_altitude_mcp":11008,"nav_heading":120.94,"nav_modes":["autopilot","vnav","tcas"],"lat":{lat},"lon":{lon},"nic":8,"rc":186,"seen_pos":0.3,"version":2,"nic_baro":1,"nac_p":10,"nac_v":2,"sil":3,"sil_type":"perhour","gva":2,"sda":2,"alert":0,"spi":0,"mlat":[],"tisb":[],"messages":3412234,"seen":0.1,"rssi":-21.6,"dst":12.345,"dir":45.6}}"#,
+            lat = 37.5 + f64::from(i) * 0.001,
+            lon = -122.3 - f64::from(i) * 0.001,
+        )
+    }
+
+    /// adsb.lol's answer of `count` aircraft.
+    fn readsb_page(count: u32) -> String {
+        let aircraft: Vec<String> = (0..count).map(readsb_aircraft).collect();
+        format!(r#"{{"ac":[{}],"msg":"No error"}}"#, aircraft.join(","))
+    }
+
+    fn adsb_lol_answer(plugin: &mut extism::Plugin, body: String) -> Effects {
+        effects(
+            plugin,
+            "on_fetched",
+            &FetchedInput {
+                id: "around".into(),
+                url: "https://api.adsb.lol/v2/point/37.7700/-122.4200/54".into(),
+                status: Some(200),
+                body,
+                now_ms: wall_ms(Instant::now()),
+                ..FetchedInput::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// The plugin was stopped after its first answer over the San Francisco
+    /// Bay (2026-10-31): `on_fetched` spent its whole budget on about 50
+    /// aircraft. Now about 940, the most it reads, take under three
+    /// quarters of a call's budget; a busier answer is a problem it reports.
+    #[test]
+    fn adsb_lol_reads_a_busy_answer_within_one_call_and_says_when_one_is_too_busy() {
+        let (_dir, mut plugin) = adsb_lol();
+        let busy = readsb_page(940);
+        assert!(busy.len() < 750_000, "{} bytes", busy.len());
+        let heard = adsb_lol_answer(&mut plugin, busy);
+        assert_eq!(heard.traffic.len(), 940);
+        assert!(!heard.traffic_status.unwrap().problem);
+        let spent = plugin.fuel_consumed().unwrap();
+        assert!(spent < CALL_FUEL * 3 / 4, "{spent} of {CALL_FUEL}");
+
+        let (_dir, mut plugin) = adsb_lol();
+        let refused = adsb_lol_answer(&mut plugin, readsb_page(1250));
+        assert!(refused.traffic.is_empty());
+        let status = refused.traffic_status.unwrap();
+        assert!(status.problem);
+        assert!(
+            status
+                .note
+                .unwrap()
+                .starts_with("Too many aircraft in range for one answer"),
+        );
+        let spent = plugin.fuel_consumed().unwrap();
+        assert!(spent < CALL_FUEL / 10, "{spent} to refuse it");
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::daemon::engine_task::EngineHandle;
 
 const MAX_DIAGNOSTIC: usize = 8192;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const DEVICE_CACHE_AGE: Duration = Duration::from_secs(3);
 
 /// Device enumeration is lazy and cached. The engine never waits for a driver.
 #[derive(Debug, Default)]
@@ -55,11 +56,7 @@ impl Devices {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.0.scanning
-            && state
-                .1
-                .is_none_or(|at| at.elapsed() >= Duration::from_secs(3))
-        {
+        if !state.0.scanning && state.1.is_none_or(|at| at.elapsed() >= DEVICE_CACHE_AGE) {
             state.0.scanning = true;
             let shared = self.clone();
             runtime.spawn(async move {
@@ -84,6 +81,26 @@ impl Devices {
             });
         }
         state.0.clone()
+    }
+
+    /// The picker has often just enumerated these devices. Reuse a successful
+    /// scan within its existing freshness window instead of asking the driver
+    /// again on Connect. Expired/missing devices still take the discovery path.
+    fn recent(&self, device_id: &str) -> Option<Discovered> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.0.error.is_some()
+            || state.1.is_none_or(|at| at.elapsed() >= DEVICE_CACHE_AGE)
+            || !state.0.devices.iter().any(|d| d.id == device_id)
+        {
+            return None;
+        }
+        Some(Discovered {
+            cameras: state.0.devices.clone(),
+            sound_inputs: state.0.sound_inputs.clone(),
+        })
     }
 
     /// # Errors
@@ -135,7 +152,7 @@ pub fn program() -> Result<PathBuf, String> {
             .then_some(path)
             .ok_or_else(|| "UXDUCK_CAPTURE_FFMPEG does not point to a capture executable.".into());
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::paths::executable().map_err(|e| e.to_string())?;
     if let Some(parent) = exe.parent() {
         let path = parent.join("capture").join(name);
         if path.is_file() {
@@ -354,21 +371,57 @@ fn linux_devices(text: &str, aliases: &BTreeMap<PathBuf, PathBuf>) -> Vec<Captur
         .collect()
 }
 
-/// ALSA capture devices by card name, which survives replugging, through
-/// `plughw` so ALSA converts to the rate and channels asked for (S148).
+/// ALSA's configured sound servers and capture devices. Hardware uses card
+/// names, which survive replugging, through `plughw` for format conversion.
+/// The server routes share the microphone with other desktop applications.
 fn alsa_devices(text: &str) -> Vec<CaptureDevice> {
-    text.lines()
+    let mut devices: Vec<_> = text
+        .lines()
         .filter_map(|line| {
             let line = line.trim().trim_start_matches('*').trim();
-            let rest = line.strip_prefix("hw:CARD=")?;
-            let (card, name) = rest.split_once(" [").unwrap_or((rest, ""));
+            let (id, description) = line.split_once(" [")?;
+            // FFmpeg appends a format such as `(none)` after the closing `]`.
+            let name = description
+                .rsplit_once(']')
+                .map_or(description, |(name, _)| name)
+                .trim();
+            let (id, name) = match id {
+                "pipewire" => (
+                    "pipewire".to_owned(),
+                    "System microphone (PipeWire)".to_owned(),
+                ),
+                "pulse" => (
+                    "pulse".to_owned(),
+                    "System microphone (PulseAudio)".to_owned(),
+                ),
+                "default" => ("default".to_owned(), "System default microphone".to_owned()),
+                _ => {
+                    let card = id.strip_prefix("hw:CARD=")?;
+                    let name = if name.is_empty()
+                        || name == "Direct hardware device without any conversions"
+                    {
+                        format!("ALSA microphone ({card})")
+                    } else {
+                        name.to_owned()
+                    };
+                    (format!("plughw:CARD={card}"), name)
+                }
+            };
             Some(CaptureDevice {
-                id: format!("alsa:plughw:CARD={card}"),
-                name: name.trim_end_matches(']').trim().to_owned(),
+                id: format!("alsa:{id}"),
+                name,
                 persistent: true,
             })
         })
-        .collect()
+        .collect();
+    // A named server route is clearer than a second alias to the same input.
+    if devices
+        .iter()
+        .any(|d| matches!(d.id.as_str(), "alsa:pipewire" | "alsa:pulse"))
+    {
+        devices.retain(|d| d.id != "alsa:default");
+    }
+    devices
 }
 
 async fn discover() -> Result<Discovered, String> {
@@ -439,6 +492,9 @@ async fn discover() -> Result<Discovered, String> {
 
 fn problem(text: &str, fallback: &str) -> String {
     let lower = text.to_lowercase();
+    if lower.contains("not a video capture device") {
+        return "This Linux device does not send pictures. It may be the webcam's metadata device. Remove this entry in Camera settings, then add the camera again and choose its video device.".into();
+    }
     if lower.contains("permission") || lower.contains("not authorized") || lower.contains("denied")
     {
         return "Camera access was denied. Allow UXDuck in your system's camera privacy settings (on Linux, check device permissions), then resume capture.".into();
@@ -463,6 +519,14 @@ fn problem(text: &str, fallback: &str) -> String {
         "{fallback}. {}",
         details.chars().take(600).collect::<String>()
     )
+}
+
+fn disconnected(device_id: &str) -> &'static str {
+    if device_id.starts_with("v4l2:") {
+        "This Linux camera is unavailable. Reconnect it, or remove this entry in Camera settings and add the camera again. An older entry may point to the webcam's metadata device, which does not send pictures."
+    } else {
+        "Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically."
+    }
 }
 
 /// When the helper fails with a sound input, what to say about it, if it
@@ -661,6 +725,10 @@ pub(super) fn encoding_args() -> Vec<String> {
     args
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one capture's source, its hub, engine, permission and devices"
+)]
 pub fn spawn(
     runtime: &tokio::runtime::Handle,
     id: String,
@@ -669,8 +737,11 @@ pub fn spawn(
     hub: Arc<Hub>,
     engine: EngineHandle,
     selection: Option<super::permission::Receiver>,
+    devices: Arc<Devices>,
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
+        tracing::info!(source = %id, "starting local camera capture");
+        let mut permission_started = Instant::now();
         let mut backoff = 1u64;
         // Why the camera's own microphone, picked by itself, couldn't be
         // opened: then the pictures go on without it (S161).
@@ -693,6 +764,7 @@ pub fn spawn(
             }) {
                 Ok(access) => access,
                 Err(why) => {
+                    tracing::info!(source = %id, permission_ms = permission_started.elapsed().as_millis(), "local camera permission check failed");
                     let report_id = id.clone();
                     let config = input.clone();
                     engine.post(move |e| {
@@ -702,8 +774,9 @@ pub fn spawn(
                     return;
                 }
             };
+            tracing::info!(source = %id, permission_ms = permission_started.elapsed().as_millis(), "local camera permission ready");
             let (result, refused) =
-                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref(), &access).await;
+                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref(), &access, &devices).await;
             if refused.is_some() {
                 own_refused = refused;
                 backoff = 0;
@@ -713,6 +786,7 @@ pub fn spawn(
             engine.post(move |e| e.capture_stopped(&report_id, &config, epoch, result));
             tokio::time::sleep(Duration::from_secs(backoff)).await;
             backoff = (backoff * 2).clamp(1, 15);
+            permission_started = Instant::now();
         }
     })
 }
@@ -799,6 +873,11 @@ impl From<&str> for Stopped {
 /// One run of the capture helper until it stops: why it stopped, and, when
 /// the camera's own microphone picked by itself was what failed, why, so the
 /// next run goes on without it.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one run of the helper, start to stop"
+)]
 async fn run(
     id: &str,
     input: &CaptureInput,
@@ -807,12 +886,20 @@ async fn run(
     engine: &EngineHandle,
     own_refused: Option<&str>,
     access: &super::permission::Access,
+    devices: &Devices,
 ) -> (String, Option<String>) {
+    let started = Instant::now();
     let automatic = !input.no_sound && !input.record_sound;
     let result = async {
         let program = program()?;
-        let found = discover().await?;
-        let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or("Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically.")?;
+        let cached = devices.recent(&input.device_id);
+        let discovery_cached = cached.is_some();
+        let found = match cached {
+            Some(found) => found,
+            None => discover().await?,
+        };
+        let discovery_ms = started.elapsed().as_millis();
+        let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or_else(|| disconnected(&input.device_id))?;
         // A sound input that is missing leaves the pictures playing, and says so.
         let (mut sound, mut note) = match input.sound_input.as_ref().filter(|_| input.record_sound && !input.no_sound) {
             // Not chosen: the camera's own microphone, when it has one (S161).
@@ -834,6 +921,8 @@ async fn run(
             engine.post(move |e| e.capture_permission_issue(&report_id, &config, epoch));
         }
         let mut child = command(&program).args(args(input, &device, sound.as_ref())?).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("The camera capture helper could not start: {e}"))?;
+        let helper_started = Instant::now();
+        tracing::info!(source = id, discovery_ms, discovery_cached, "local camera capture helper started");
         let mut stdout = child.stdout.take().ok_or("The capture helper has no output pipe")?;
         let stderr = child.stderr.take().ok_or("The capture helper has no diagnostic pipe")?;
         let diagnostics = tokio::spawn(tail(stderr));
@@ -845,6 +934,7 @@ async fn run(
         let mut startup = true;
         let mut last_picture = Instant::now();
         let mut pictures = 0;
+        let mut first_bytes_ms = None;
         let failure = loop {
             let limit = if startup { Duration::from_secs(15) } else { Duration::from_secs(5) };
             let timeout = limit.saturating_sub(last_picture.elapsed());
@@ -854,6 +944,7 @@ async fn run(
                 Ok(Err(_)) => break "The camera capture pipe closed",
                 Err(_) => break "No video arrived from the camera. Check its connection, driver and selected video mode",
             };
+            first_bytes_ms.get_or_insert_with(|| helper_started.elapsed().as_millis());
             pending.extend_from_slice(&buffer[..n]);
             let whole = pending.len() / 188 * 188;
             if whole == 0 { continue; }
@@ -866,9 +957,13 @@ async fn run(
                 pictures = status.counters.pictures;
             }
             if status.counters.pictures > 0 && (startup || reported.elapsed() >= Duration::from_secs(1)) {
+                if startup {
+                    tracing::info!(source = id, discovery_ms, first_bytes_ms, first_picture_ms = helper_started.elapsed().as_millis(), startup_ms = started.elapsed().as_millis(), "local camera received its first picture");
+                }
                 let mut report = listener::report(0, &std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &status, reported.elapsed().as_secs_f64().max(0.001), before.0, before.1);
                 report.id = Some(id.to_owned());
                 report.sender = "local capture".into();
+                report.counters.hold_us = hub.hold_us(id);
                 report.note.clone_from(&note);
                 before = (status.counters.bytes, status.counters.pictures);
                 reported = Instant::now();
@@ -896,7 +991,10 @@ async fn run(
         )
     }.await;
     match result {
-        Err(Stopped(why, refused)) => (why, refused),
+        Err(Stopped(why, refused)) => {
+            tracing::info!(source = id, elapsed_ms = started.elapsed().as_millis(), reason = %why, "local camera capture stopped");
+            (why, refused)
+        }
         Ok(()) => ("Camera capture ended".into(), None),
     }
 }
@@ -904,6 +1002,43 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_reuses_recent_discovery_but_rescans_missing_expired_or_failed_devices() {
+        let camera = CaptureDevice {
+            id: "avfoundation:camera".into(),
+            name: "Camera".into(),
+            persistent: true,
+        };
+        let devices = Devices {
+            state: Mutex::new((
+                VideoDevicesResult {
+                    devices: vec![camera.clone()],
+                    sound_inputs: vec![CaptureDevice {
+                        id: "avfoundation:mic".into(),
+                        name: "Microphone".into(),
+                        persistent: true,
+                    }],
+                    ..VideoDevicesResult::default()
+                },
+                Some(Instant::now()),
+            )),
+        };
+        let found = devices.recent(&camera.id).unwrap();
+        assert_eq!(found.cameras, vec![camera.clone()]);
+        assert_eq!(found.sound_inputs[0].id, "avfoundation:mic");
+        assert!(devices.recent("avfoundation:newly-connected").is_none());
+        devices.state.lock().unwrap().1 = Instant::now().checked_sub(DEVICE_CACHE_AGE);
+        assert!(devices.recent(&camera.id).is_none());
+        devices.state.lock().unwrap().1 = None;
+        assert!(devices.recent(&camera.id).is_none());
+        {
+            let mut state = devices.state.lock().unwrap();
+            state.1 = Some(Instant::now());
+            state.0.error = Some("The driver could not enumerate devices".into());
+        }
+        assert!(devices.recent(&camera.id).is_none());
+    }
 
     #[test]
     fn identity_ignores_indices_names_screens_and_audio() {
@@ -940,6 +1075,29 @@ mod tests {
         assert!(devices[0].persistent);
         assert!(!devices[1].persistent);
         assert_eq!(devices[0].id, "v4l2:/dev/v4l/by-id/usb-camera");
+    }
+
+    #[test]
+    fn a_saved_metadata_node_explains_how_to_choose_the_video_device() {
+        let error = problem(
+            "[video4linux2,v4l2 @ fixture] Not a video capture device.\nError opening input: No such device",
+            "The camera stopped sending video",
+        );
+        assert!(error.contains("metadata device"), "{error}");
+        assert!(
+            error.contains("Remove this entry in Camera settings"),
+            "{error}"
+        );
+        assert!(error.contains("add the camera again"), "{error}");
+        // The fixed helper omits a saved metadata node before capture starts.
+        let missing = disconnected("v4l2:/dev/v4l/by-id/usb-camera-video-index1");
+        assert!(missing.contains("metadata device"), "{missing}");
+        assert!(
+            missing.contains("remove this entry in Camera settings"),
+            "{missing}"
+        );
+        assert!(missing.contains("add the camera again"), "{missing}");
+        assert!(!disconnected("avfoundation:camera").contains("metadata"));
     }
 
     #[test]
@@ -981,10 +1139,52 @@ mod tests {
     fn alsa_inputs_are_named_by_card_through_plughw() {
         let text = "Auto-detected sources for alsa:\n* default [Default ALSA Output]\n  hw:CARD=C920,DEV=0 [HD Pro Webcam C920, USB Audio]\n  sysdefault:CARD=C920 [HD Pro Webcam C920]\n  hw:CARD=PCH,DEV=0 [HDA Intel PCH, ALC3246 Analog]";
         let inputs = alsa_devices(text);
-        assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0].id, "alsa:plughw:CARD=C920,DEV=0");
-        assert_eq!(inputs[0].name, "HD Pro Webcam C920, USB Audio");
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0].id, "alsa:default");
+        assert_eq!(inputs[1].id, "alsa:plughw:CARD=C920,DEV=0");
+        assert_eq!(inputs[1].name, "HD Pro Webcam C920, USB Audio");
         assert!(inputs.iter().all(|i| i.persistent));
+    }
+
+    #[test]
+    fn linux_desktop_microphone_is_available_without_claiming_raw_hardware() {
+        // Real FFmpeg shape on the Framework Ryzen laptop. Its first raw
+        // device is busy while PipeWire owns it; the pipewire route works.
+        let inputs = alsa_devices(
+            "Auto-detected sources for alsa:\n  null [Discard all samples (playback) or generate zero samples (capture)] (none)\n  pipewire [PipeWire Sound Server] (none)\n* default [Default ALSA Output (currently PipeWire Media Server)] (none)\n  hw:CARD=Generic_1,DEV=0 [Direct hardware device without any conversions] (none)\n  plughw:CARD=Generic_1,DEV=0 [Hardware device with all software conversions] (none)\n  hw:CARD=acppdmmach,DEV=0 [Direct hardware device without any conversions] (none)",
+        );
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0].id, "alsa:pipewire");
+        assert_eq!(inputs[0].name, "System microphone (PipeWire)");
+        assert_eq!(inputs[1].id, "alsa:plughw:CARD=Generic_1,DEV=0");
+        assert_eq!(inputs[1].name, "ALSA microphone (Generic_1,DEV=0)");
+        assert_eq!(inputs[2].name, "ALSA microphone (acppdmmach,DEV=0)");
+        assert!(
+            own_microphone(
+                &CaptureDevice {
+                    id: "v4l2:/dev/video0".into(),
+                    name: "Laptop Webcam Module (2nd Gen)".into(),
+                    persistent: false,
+                },
+                &inputs
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn alsa_lists_pulse_and_preserves_informative_names_without_ffmpeg_suffixes() {
+        let inputs = alsa_devices(
+            "  pulse [PulseAudio Sound Server] (none)\n* default [Default ALSA Output] (none)\n  hw:CARD=C920,DEV=0 [HD Pro Webcam C920, USB Audio] (none)",
+        );
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].id, "alsa:pulse");
+        assert_eq!(inputs[0].name, "System microphone (PulseAudio)");
+        assert_eq!(inputs[1].name, "HD Pro Webcam C920, USB Audio");
+        assert!(
+            alsa_devices("Auto-detected sources for alsa:\n  null [Discard samples] (none)")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1044,6 +1244,17 @@ mod tests {
             "-i /dev/v4l/by-id/usb-cam -thread_queue_size 64 -f alsa -i plughw:CARD=C920,DEV=0"
         ));
         assert!(linux.contains("-map 0:v:0 -map 1:a:0"));
+        for route in ["pipewire", "pulse", "default"] {
+            let line = args(
+                &input,
+                &device("v4l2:/dev/video0"),
+                Some(&device(&format!("alsa:{route}"))),
+            )
+            .unwrap()
+            .join(" ");
+            assert!(line.contains(&format!("-f alsa -i {route}")));
+            assert!(line.contains("-map 0:v:0 -map 1:a:0"));
+        }
         // A sound input from another system is refused; none means no sound.
         assert!(
             args(

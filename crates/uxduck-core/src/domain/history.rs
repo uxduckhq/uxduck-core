@@ -110,6 +110,31 @@ pub enum HistoryEvent {
         text: String,
         record: crate::domain::checklist::ChecklistRecord,
     },
+    /// A saved parameter set applied (S217, ADR-0037 V19), in words: how
+    /// many were written, refused and skipped. Each value's change is its
+    /// own entry, with the reason "Applied <set>".
+    ParametersApplied {
+        set_id: String,
+        name: String,
+        text: String,
+    },
+    /// An AutoTune ended (S332, ADR-0054 T10): what it tuned, whether the
+    /// firmware kept it, and each gain it changed, before and after.
+    AutoTuned {
+        text: String,
+        kept: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        gains: Vec<TunedGain>,
+    },
+}
+
+/// A gain AutoTune changed (S332).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunedGain {
+    pub name: String,
+    pub from: f64,
+    pub to: f64,
 }
 
 /// Who or what changed a parameter (S74).
@@ -181,6 +206,8 @@ impl HistoryEvent {
             Self::MissionChanged { text, .. }
             | Self::FlightEnded { text, .. }
             | Self::Calibrated { text, .. }
+            | Self::ParametersApplied { text, .. }
+            | Self::AutoTuned { text, .. }
             | Self::Armed { text, .. } => text.clone(),
             Self::ParameterChanged {
                 name,

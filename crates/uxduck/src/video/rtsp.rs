@@ -1008,6 +1008,7 @@ impl ConnectionLog {
 }
 
 /// Connects, plays and relays until the connection fails.
+#[allow(clippy::too_many_lines, reason = "one arm per interleaved channel")]
 async fn play(
     source_id: &str,
     url: &str,
@@ -1077,10 +1078,14 @@ async fn play(
                     }
                 }
             }
-            // The video's and the sound's sender reports line them up (S149).
+            // The video's and the sound's sender reports line them up (S149);
+            // the video's dates its pictures by the camera's clock (S262).
             Frame::Interleaved { channel: 1, data } => {
-                if let (Some(sound), Some(report)) = (sound.as_mut(), sender_report(&data)) {
-                    sound.sync.video_report(report);
+                if let Some(report) = sender_report(&data) {
+                    source.sender_report(report);
+                    if let Some(sound) = sound.as_mut() {
+                        sound.sync.video_report(report);
+                    }
                 }
             }
             Frame::Interleaved { channel: 5, data } => {
@@ -1104,6 +1109,7 @@ async fn play(
             );
             observed.id = Some(source_id.to_owned());
             observed.note.clone_from(&note);
+            observed.counters.hold_us = hub.hold_us(source_id);
             reported = (
                 Instant::now(),
                 status.counters.bytes,

@@ -30,6 +30,8 @@ use uxduck_core::domain::telemetry::AltitudeFrame;
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change};
 
+use uxduck_contracts::dto::initialize::RunsIn;
+
 use crate::Engine;
 use crate::commands::Raise;
 use crate::runtime::CommandOrder;
@@ -42,11 +44,22 @@ pub const ACTOR: &str = "simulation-start";
 /// managed 100 in the S20 spike (docs/plan/s20-spike.md).
 const TAKE_OFF_SPEEDUP: f64 = 9.0;
 
+/// The speed-up while a browser's simulator boots and waits to be ready to
+/// arm, which is most of a quick start: about 20 s of the simulator's time
+/// for its GPS and EKF checks. Nothing moves meanwhile, so nothing looks
+/// hurried; the take-off itself goes back to `TAKE_OFF_SPEEDUP`. A computer
+/// that cannot keep up runs it as fast as it can. On a Mac mini (M-series)
+/// the browser's build kept 25 to 37 times real time (2026-11-06).
+const BROWSER_READY_SPEEDUP: f64 = 30.0;
+
 /// How long, in real time, the vehicle may take to be heard, to be ready
 /// to arm, or to climb; each is checked separately.
 const HEARD_US: u64 = 60_000_000;
 const READY_US: u64 = 120_000_000;
 const CLIMB_US: u64 = 120_000_000;
+/// How long a vehicle heard again under its earlier id may take to be
+/// known by its lasting one before the take-off goes on without it.
+const IDENTIFIED_US: u64 = 5_000_000;
 
 /// A refused mode change or take-off is tried again after this, up to
 /// `TRIES` times. Arming retries use the readiness deadline instead: home
@@ -81,6 +94,9 @@ enum Step {
     Mission,
     /// Until `SYS_STATUS` says the pre-arm checks pass.
     Ready,
+    /// `SIM_SPEEDUP` from the wait's speed-up to the take-off's, when
+    /// they differ.
+    TakeOffSpeed,
     /// A plane's `TKOFF_ALT`.
     TakeOffHeight,
     /// The mode it takes off in.
@@ -161,7 +177,7 @@ fn plan(vehicle: SimVehicle, in_air: bool, snapshot: Option<&Snapshot>) -> Vec<S
         return vec![Heard, Ready, Hold, Arm, Step::Armed];
     }
     if in_air {
-        steps.push(Ready);
+        steps.extend_from_slice(&[Ready, Step::TakeOffSpeed]);
         steps.extend_from_slice(match vehicle {
             // GUIDED, arm, take off, and hold there in GUIDED.
             SimVehicle::Multicopter | SimVehicle::Vtol => &[TakeOffMode, Arm, TakeOff, Climb, Hold],
@@ -491,7 +507,12 @@ impl Engine {
             Answer::Refused(_)
                 if matches!(
                     step,
-                    Step::SpeedUp | Step::SlowDown | Step::Mission | Step::MissionItem | Step::Mode
+                    Step::SpeedUp
+                        | Step::TakeOffSpeed
+                        | Step::SlowDown
+                        | Step::Mission
+                        | Step::MissionItem
+                        | Step::Mode
                 ) =>
             {
                 self.next_step(&link_id);
@@ -571,6 +592,7 @@ impl Engine {
             } else {
                 self.clear_launch(link_id);
             }
+            self.resume_started_controllers();
         }
     }
 
@@ -607,6 +629,38 @@ impl Engine {
     /// the simulator says nothing, so one that never speaks (`jsbsim`
     /// without `JSBSim`) fails as never connected instead of climbing for
     /// ever.
+    /// The speed a simulator about to start for a take-off should run at
+    /// from its first moment: the take-off's own, so its boot and its wait
+    /// to be ready to arm are sped up too, rather than only once it is heard
+    /// and `SIM_SPEEDUP` is written. None when its take-off is not sped up
+    /// (PX4, nothing to take off) or is already past that step.
+    #[must_use]
+    pub fn start_speedup(&self, link_id: &str) -> Option<u8> {
+        let launch = self.launches.running.get(link_id)?;
+        let at = launch.steps.iter().position(|s| *s == Step::SpeedUp)?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small whole speed-up"
+        )]
+        (launch.step <= at).then_some(self.first_speedup(link_id) as u8)
+    }
+
+    /// The speed-up a take-off starts at: faster in a browser while it waits
+    /// to be ready to arm (`BROWSER_READY_SPEEDUP`), when it has that wait.
+    fn first_speedup(&self, link_id: &str) -> f64 {
+        let waits = self
+            .launches
+            .running
+            .get(link_id)
+            .is_some_and(|l| l.steps.contains(&Step::TakeOffSpeed));
+        if waits && self.config.capabilities.runs_in == RunsIn::Browser {
+            BROWSER_READY_SPEEDUP
+        } else {
+            TAKE_OFF_SPEEDUP
+        }
+    }
+
     pub fn drive_launches(&mut self) {
         let links: Vec<String> = self.launches.running.keys().cloned().collect();
         for link_id in links {
@@ -661,6 +715,20 @@ impl Engine {
         }
     }
 
+    /// Heard again after `sim/restart` under its earlier id, the vehicle is
+    /// waited for until its UID, a moment later: until then the speed-up
+    /// would be refused, and the whole take-off flown at the simulator's
+    /// own pace (maintainer, 2026-10-29: "Start again" took 50 s where a
+    /// start took 8).
+    fn launch_heard(&mut self, link_id: &str, vehicle: &Vehicle, waited: u64) -> bool {
+        if self.heard_provisionally.contains(&vehicle.id) && waited < IDENTIFIED_US {
+            return false;
+        }
+        self.plan_for(link_id, vehicle);
+        self.next_step(link_id);
+        true
+    }
+
     /// Once the vehicle is heard: PX4 takes its own steps, also when it was
     /// started from a build of the user's own without saying it is PX4.
     fn plan_for(&mut self, link_id: &str, vehicle: &Vehicle) {
@@ -676,21 +744,8 @@ impl Engine {
     fn launch_act(&mut self, link_id: &str, step: Step, vehicle: &Vehicle, at: &At) -> bool {
         let (kind, height_m, speedup, waited) = (at.kind, at.height_m, at.speedup, at.waited);
         match step {
-            Step::Heard => {
-                self.plan_for(link_id, vehicle);
-                self.next_step(link_id);
-                true
-            }
-            Step::SpeedUp => {
-                self.launch_parameter(
-                    link_id,
-                    vehicle,
-                    "SIM_SPEEDUP",
-                    TAKE_OFF_SPEEDUP,
-                    ParamKind::Real32,
-                );
-                false
-            }
+            Step::Heard => self.launch_heard(link_id, vehicle, waited),
+            Step::SpeedUp | Step::TakeOffSpeed => self.launch_speed(link_id, vehicle, step),
             Step::Parameters => self.restore_parameters(link_id, vehicle, waited),
             Step::Mission => self.restore_mission(link_id, vehicle, waited),
             Step::MissionItem | Step::Mode => {
@@ -777,6 +832,22 @@ impl Engine {
         }
     }
 
+    /// `SIM_SPEEDUP` for the wait to be ready, or for the take-off once it
+    /// differs. True when there is nothing to change.
+    fn launch_speed(&mut self, link_id: &str, vehicle: &Vehicle, step: Step) -> bool {
+        let first = self.first_speedup(link_id);
+        let speedup = if step == Step::SpeedUp {
+            first
+        } else if first.total_cmp(&TAKE_OFF_SPEEDUP).is_eq() {
+            self.next_step(link_id);
+            return true;
+        } else {
+            TAKE_OFF_SPEEDUP
+        };
+        self.launch_parameter(link_id, vehicle, "SIM_SPEEDUP", speedup, ParamKind::Real32);
+        false
+    }
+
     /// Whether it is this high, moving on if so. True when it is.
     fn climbed_to(&mut self, link_id: &str, vehicle: &Vehicle, at: &At, to_m: f64) -> bool {
         let reached = self
@@ -813,21 +884,27 @@ impl Engine {
             self.fail_launch(link_id, why);
             return false;
         }
-        let position_ready = launch.vehicle != SimVehicle::Submarine
+        let submarine = launch.vehicle == SimVehicle::Submarine;
+        // An ArduPilot simulation also waits for its EKF to know where it
+        // is, which Position holds Arm for: sped up, ArduCopter says it is
+        // ready to arm before then.
+        let ardupilot = vehicle.autopilot == "Ardupilotmega";
+        let position_ready = (!submarine && !ardupilot)
             || self.telemetry(&vehicle.id).is_some_and(|telemetry| {
                 telemetry.items.iter().any(|item| {
                     item.key == "ekf.status"
                         && item.text.as_deref() == Some("Good")
                         && item.time_us >= started_us
                         && now.saturating_sub(item.time_us) <= 5_000_000
-                }) && telemetry.positions.iter().any(|position| {
-                    position.source == "fused"
-                        && position.time_us >= started_us
-                        && now.saturating_sub(position.time_us) <= 5_000_000
-                        && position.latitude_deg.is_finite()
-                        && position.longitude_deg.is_finite()
-                        && (position.latitude_deg != 0.0 || position.longitude_deg != 0.0)
-                })
+                }) && (!submarine
+                    || telemetry.positions.iter().any(|position| {
+                        position.source == "fused"
+                            && position.time_us >= started_us
+                            && now.saturating_sub(position.time_us) <= 5_000_000
+                            && position.latitude_deg.is_finite()
+                            && position.longitude_deg.is_finite()
+                            && (position.latitude_deg != 0.0 || position.longitude_deg != 0.0)
+                    }))
             });
         if position_ready && self.ready_to_arm(&vehicle.id, started_us) {
             self.next_step(link_id);
@@ -904,10 +981,7 @@ impl Engine {
             .and_then(|l| l.snapshot.as_ref());
         let command = if step == Step::MissionItem {
             let seq = snapshot.and_then(|s| s.current_item).unwrap_or(1);
-            Command::Long {
-                command: 224,
-                params: vec![f32::from(seq)],
-            }
+            Command::go_to_mission_item(seq)
         } else {
             let mode = snapshot
                 .and_then(|s| s.mode.clone())
@@ -1024,6 +1098,20 @@ impl Engine {
         }
     }
 
+    /// A command sent as the simulation start's for another of its flows
+    /// (a plan flown in simulation, S293), whose refusals are not told to
+    /// people one by one either. Its answer is not waited for here.
+    pub(crate) fn send_quietly(
+        &mut self,
+        link_id: &str,
+        vehicle: &Vehicle,
+        command: Command,
+    ) -> String {
+        let id = self.send_as_simulation_start(vehicle, command);
+        self.launches.orders.insert(id.clone(), link_id.to_owned());
+        id
+    }
+
     fn send_as_simulation_start(&mut self, vehicle: &Vehicle, command: Command) -> String {
         let receipt = Receipt {
             id: format!("rc{}", &self.random.token()[..16]),
@@ -1039,6 +1127,7 @@ impl Engine {
             attempts: 0,
             client_id: ACTOR.into(),
             operator_id: None,
+            sent_by: None,
             remote: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
@@ -1109,7 +1198,10 @@ impl Engine {
             subject: Subject::Link {
                 id: link_id.to_owned(),
             },
-            title: if launch.vehicle == SimVehicle::Submarine {
+            title: if matches!(
+                launch.vehicle,
+                SimVehicle::Rover | SimVehicle::Boat | SimVehicle::Submarine
+            ) {
                 format!("{name} failed to start")
             } else {
                 format!("{name} stayed on the ground")
@@ -1120,6 +1212,7 @@ impl Engine {
             condition: Some(format!("launch:{link_id}")),
             report: Some("launch-failed".into()),
         });
+        self.resume_started_controllers();
     }
 
     fn clear_launch(&mut self, link_id: &str) {
@@ -1170,6 +1263,7 @@ mod tests {
                 Heard,
                 Step::SpeedUp,
                 Ready,
+                Step::TakeOffSpeed,
                 Step::TakeOffMode,
                 Arm,
                 TakeOff,
@@ -1205,6 +1299,7 @@ mod tests {
                 Step::Heard,
                 Step::SpeedUp,
                 Step::Ready,
+                Step::TakeOffSpeed,
                 TakeOffHeight,
                 TakeOffMode,
                 Arm,

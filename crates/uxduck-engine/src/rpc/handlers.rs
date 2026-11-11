@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::{
-    Capability, ClientKind, InitializeParams, InitializeResult,
+    Capability, ClientKind, DaemonCapabilities, InitializeParams, InitializeResult,
 };
 use uxduck_contracts::dto::operator::{
     ClientSetOperatorParams, LayoutOpenParams, LayoutOpenResult, Operator as OperatorDto,
@@ -20,7 +20,7 @@ use uxduck_core::domain::operator::{self, Operator};
 use uxduck_core::events::Change;
 use uxduck_core::policy::admission;
 
-use crate::{Admitted, ConnectionId, Engine, version};
+use crate::{Admitted, ConnectionId, Engine, ReadCapabilities, version};
 
 // A flat router: one arm per method reads better than splitting it.
 #[allow(clippy::too_many_lines)]
@@ -44,9 +44,12 @@ pub(crate) fn handle(
         .and_then(|c| c.admitted.as_ref())
         .ok_or_else(|| ApiError::new(ErrorKind::NotInitialized, "call initialize first"))?;
     let operator = admitted.is_operator();
-    // From away (S80): only commands and the lease, each once.
-    if let Some(result) = engine.remote_gate(connection, &request) {
-        return result;
+    engine.check_mission_read_request(connection, &request)?;
+    // A person flies AutoTune (S332): no approval lets an agent start it.
+    if admitted.kind == uxduck_core::domain::client::ClientKind::Agent
+        && let Some(why) = crate::autotune::agent_refusal(engine, &request)
+    {
+        return Err(ApiError::new(ErrorKind::CapabilityDenied, why));
     }
     let granted = engine.granted(connection);
     // Escalation instead of rejection (ADR-0005): held, answered later.
@@ -81,14 +84,14 @@ pub(crate) fn handle(
             ErrorKind::Internal,
             "initialize is handled first",
         )),
-        ClientRequest::LeaseTake(params) => {
-            require(Read)?;
-            engine.lease(connection, &params, true, operator)
-        }
-        ClientRequest::LeaseRelease(params) => {
-            require(Read)?;
-            engine.lease(connection, &params, false, operator)
-        }
+        // Retired (ADR-0048): not in `METHODS`, so the router answers first.
+        ClientRequest::AccountComputers(_)
+        | ClientRequest::LeaseTake(_)
+        | ClientRequest::LeaseRelease(_)
+        | ClientRequest::RemoteWatch(_) => Err(ApiError::new(
+            ErrorKind::MethodNotFound,
+            "removed with the account's computers (ADR-0048)",
+        )),
         ClientRequest::TraceSubscribe(_) => {
             require_operator()?;
             engine.tracers.insert(connection);
@@ -141,6 +144,10 @@ pub(crate) fn handle(
             }
             operator_update(engine, connection, &params)
         }
+        ClientRequest::TermsAccept(params) => {
+            require_operator()?;
+            crate::terms::accept(engine, connection, &params)
+        }
         ClientRequest::OperatorRemove(params) => {
             require(Config)?;
             operator_remove(engine, connection, params)
@@ -152,14 +159,31 @@ pub(crate) fn handle(
             require(Read)?;
             layout_open(engine, connection, &params)
         }
+        ClientRequest::ComputerAdd(params) => {
+            require(Config)?;
+            engine.add_computer(connection, params)
+        }
+        ClientRequest::ComputerRemove(params) => {
+            require(Config)?;
+            engine.remove_computer(connection, params)
+        }
+        ClientRequest::ComputerCheck(params) => {
+            require(Config)?;
+            engine.check_computer(connection, params)
+        }
         request @ (ClientRequest::VehicleList(_)
         | ClientRequest::VehicleGet(_)
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
         | ClientRequest::VehicleLook(_)
+        | ClientRequest::VehicleColour(_)
+        | ClientRequest::VehicleGripper(_)
+        | ClientRequest::GripperStatus(_)
+        | ClientRequest::VehicleSimulated(_)
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
+        | ClientRequest::VehicleHide(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::LinkAdd(_)
         | ClientRequest::LinkList(_)
@@ -220,6 +244,9 @@ pub(crate) fn handle(
         | ClientRequest::PlanExamples(_)) => {
             crate::plans::handle(engine, connection, request, &granted)
         }
+        request @ (ClientRequest::PlanSimulate(_) | ClientRequest::PlanSimulateCheck(_)) => {
+            crate::plan_runs::handle(engine, connection, request, &granted)
+        }
         request @ (ClientRequest::PluginInstall(_)
         | ClientRequest::PluginRemove(_)
         | ClientRequest::PluginCommand(_)
@@ -239,6 +266,12 @@ pub(crate) fn handle(
         }
         request @ (ClientRequest::TerrainCheck(_) | ClientRequest::TerrainStatus(_)) => {
             crate::terrain_check::handle(engine, connection, request, &granted)
+        }
+        ClientRequest::TerrainVehicle(params) => {
+            crate::terrain_vehicle::handle(engine, connection, &params, &granted)
+        }
+        ClientRequest::TerrainPutArea(params) => {
+            crate::terrain_put::handle(engine, connection, &params, &granted)
         }
         request @ (ClientRequest::TerrainAreas(_)
         | ClientRequest::TerrainAreaSize(_)
@@ -279,6 +312,14 @@ pub(crate) fn handle(
         request @ ClientRequest::FeedbackSend(_) => {
             crate::feedback::handle(engine, connection, request, operator)
         }
+        ClientRequest::FeedbackFile(params) => {
+            require(Read)?;
+            crate::feedback::file(engine, &params)
+        }
+        ClientRequest::FeedbackAdd(params) => {
+            require(Read)?;
+            crate::feedback::add(engine, &params, operator)
+        }
         ClientRequest::JournalImport(params) => {
             crate::import::handle(engine, connection, params, operator)
         }
@@ -297,6 +338,7 @@ pub(crate) fn handle(
         | ClientRequest::AccountSetUpdates(_)
         | ClientRequest::AccountSetUsername(_)
         | ClientRequest::AccountSetName(_)
+        | ClientRequest::AccountSetSource(_)
         | ClientRequest::AccountSessions(_)
         | ClientRequest::AccountSignOutSession(_)
         | ClientRequest::AccountSignOutOthers(_)
@@ -304,7 +346,6 @@ pub(crate) fn handle(
         | ClientRequest::AccountShared(_)
         | ClientRequest::AccountFeedback(_)
         | ClientRequest::AccountClaimFeedback(_)
-        | ClientRequest::AccountComputers(_)
         | ClientRequest::AccountDeleteShared(_)) => {
             crate::account::handle(engine, connection, request, &granted)
         }
@@ -363,11 +404,82 @@ pub(crate) fn handle(
         | ClientRequest::SyncRestore(_)) => {
             crate::sync::handle(engine, connection, request, &granted)
         }
+        ClientRequest::FlightsFound(_) => {
+            require(Read)?;
+            let found = engine
+                .system
+                .found_flights()
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&found)
+        }
+        ClientRequest::FlightsFolder(params) => {
+            require(Config)?;
+            let found = engine
+                .system
+                .flight_folder(&params)
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&found)
+        }
+        ClientRequest::LogsCards(_) => {
+            require(Read)?;
+            let cards = engine
+                .system
+                .log_cards()
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&cards)
+        }
+        ClientRequest::LogsCopyCard(params) => {
+            require(Config)?;
+            engine
+                .system
+                .copy_card_logs(&params.path)
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            let cards = engine
+                .system
+                .log_cards()
+                .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            to_value(&cards)
+        }
+        request @ (ClientRequest::OperationList(_)
+        | ClientRequest::OperationCreate(_)
+        | ClientRequest::OperationRename(_)
+        | ClientRequest::OperationAddFlights(_)
+        | ClientRequest::OperationRemoveFlights(_)) => {
+            crate::operations::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::AttachmentBegin(_)
+        | ClientRequest::AttachmentAppend(_)
+        | ClientRequest::AttachmentFinish(_)
+        | ClientRequest::AttachmentRead(_)) => {
+            crate::attachments::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::ReplayOpen(_)
+        | ClientRequest::FlightSeries(_)
+        | ClientRequest::ReplayLogFields(_)
+        | ClientRequest::ReplayMotion(_)
+        | ClientRequest::ReplaySave(_)
+        | ClientRequest::ReplayAdd(_)
+        | ClientRequest::ReplayNudge(_)
+        | ClientRequest::FlightAddVideo(_)
+        | ClientRequest::VideoAlign(_)
+        | ClientRequest::ReplayPlay(_)
+        | ClientRequest::ReplayPause(_)
+        | ClientRequest::ReplayRestart(_)
+        | ClientRequest::ReplaySpeed(_)
+        | ClientRequest::ReplaySeek(_)
+        | ClientRequest::ReplayClose(_)
+        | ClientRequest::ReplayState(_)
+        | ClientRequest::ReplayRename(_)
+        | ClientRequest::ReplayStartTogether(_)) => {
+            crate::replay::handle(engine, connection, request, &granted)
+        }
         request @ (ClientRequest::SimStart(_)
         | ClientRequest::SimStop(_)
         | ClientRequest::SimRestart(_)
         | ClientRequest::SimPause(_)
+        | ClientRequest::SimCrash(_)
         | ClientRequest::SimBinaries(_)
+        | ClientRequest::SimFrames(_)
         | ClientRequest::SimCatalogue(_)
         | ClientRequest::SimDownload(_)
         | ClientRequest::SimDelete(_)) => crate::sim::handle(engine, connection, request, &granted),
@@ -389,10 +501,6 @@ pub(crate) fn handle(
         | ClientRequest::FindStop(_)
         | ClientRequest::FindVehicles(_)) => {
             crate::finds::handle(engine, connection, request, &granted)
-        }
-        request @ ClientRequest::RemoteWatch(_) => {
-            require(uxduck_core::domain::client::Capability::Read)?;
-            crate::remote_view::handle(engine, connection, request)
         }
         request @ (ClientRequest::VideoDevices(_)
         | ClientRequest::VideoFile(_)
@@ -422,7 +530,8 @@ pub(crate) fn handle(
         request @ (ClientRequest::ParamSearch(_)
         | ClientRequest::ParamGet(_)
         | ClientRequest::ParamList(_)
-        | ClientRequest::ParamDiff(_)) => {
+        | ClientRequest::ParamDiff(_)
+        | ClientRequest::ParamChanges(_)) => {
             crate::param_definitions::queries::handle(engine, connection, request, &granted)
         }
         ClientRequest::FlightList(params) => {
@@ -432,7 +541,35 @@ pub(crate) fn handle(
                     Read.denied_message(),
                 ));
             }
-            to_value(&engine.list_flights(&params))
+            to_value(&engine.list_flights(&params)?)
+        }
+        ClientRequest::FlightLog(params) => {
+            if !granted.contains(&Read) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Read.denied_message(),
+                ));
+            }
+            to_value(&engine.flight_log(&params.id)?)
+        }
+        ClientRequest::FlightRemove(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            engine.remove_flight(connection, &params.id, params.video)?;
+            to_value(&uxduck_contracts::dto::Empty {})
+        }
+        ClientRequest::FlightRemoval(params) => {
+            if !granted.contains(&Read) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Read.denied_message(),
+                ));
+            }
+            to_value(&engine.flight_removal(&params.ids)?)
         }
         ClientRequest::FlightKeep(params) => {
             if !granted.contains(&Config) {
@@ -441,7 +578,13 @@ pub(crate) fn handle(
                     Config.denied_message(),
                 ));
             }
-            to_value(&engine.keep_flight(connection, &params.id, params.keep, params.always)?)
+            to_value(&engine.keep_flight(
+                connection,
+                &params.id,
+                params.keep,
+                params.always,
+                params.content.map(Into::into),
+            )?)
         }
         ClientRequest::FlightEnd(params) => {
             if !granted.contains(&Config) {
@@ -452,6 +595,15 @@ pub(crate) fn handle(
             }
             to_value(&engine.end_lost_flight(&params.id)?)
         }
+        ClientRequest::FlightRename(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            to_value(&engine.rename_flight(connection, &params.id, &params.name)?)
+        }
         ClientRequest::FlightUploadLog(params) => {
             if !granted.contains(&Config) {
                 return Err(ApiError::new(
@@ -461,10 +613,40 @@ pub(crate) fn handle(
             }
             to_value(&engine.ask_flight_log(connection, &params.id)?)
         }
+        request @ (ClientRequest::ParamSets(_)
+        | ClientRequest::ParamSetSave(_)
+        | ClientRequest::ParamSetApply(_)
+        | ClientRequest::ParamSetRename(_)
+        | ClientRequest::ParamSetRemove(_)
+        | ClientRequest::ParamSetExport(_)) => {
+            crate::param_definitions::saved::handle(engine, connection, request, &granted)
+        }
+        ClientRequest::TuningState(params) => crate::tuning::handle(engine, &params, &granted),
+        ClientRequest::TuningResponse(params) => {
+            crate::tuning::handle_response(engine, &params, &granted)
+        }
+        ClientRequest::TuningLive(params) => crate::tuning::handle_live(engine, &params, &granted),
+        ClientRequest::TuningPrepare(params) => {
+            crate::tuning::handle_prepare(engine, &params, &granted)
+        }
+        request @ (ClientRequest::MavlinkDialectsList(_)
+        | ClientRequest::MavlinkDialectsAdd(_)
+        | ClientRequest::MavlinkDialectsRemove(_)
+        | ClientRequest::MavlinkDialectsBind(_)
+        | ClientRequest::MavlinkDialectsUse(_)) => {
+            crate::dialects::handle(engine, connection, request, &granted)
+        }
+        request @ (ClientRequest::FirmwareList(_)
+        | ClientRequest::FirmwareAdd(_)
+        | ClientRequest::FirmwareRemove(_)
+        | ClientRequest::FirmwareRename(_)) => {
+            crate::firmware_profiles::handle(engine, request, &granted)
+        }
         request @ (ClientRequest::ParamDefinitions(_)
         | ClientRequest::ParamDefinitionsList(_)
         | ClientRequest::ParamDefinitionsAdd(_)
-        | ClientRequest::ParamDefinitionsRemove(_)) => {
+        | ClientRequest::ParamDefinitionsRemove(_)
+        | ClientRequest::ParamDefinitionsUse(_)) => {
             crate::param_definitions::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::DaemonStopPreview(_)
@@ -517,6 +699,7 @@ pub(crate) fn handle(
         request @ (ClientRequest::KeyboardStart(_)
         | ClientRequest::KeyboardInput(_)
         | ClientRequest::KeyboardStop(_)
+        | ClientRequest::GripperHold(_)
         | ClientRequest::ControllerClaim(_)
         | ClientRequest::ControllerTakeOver(_)
         | ClientRequest::ControllerRelease(_)
@@ -545,8 +728,11 @@ pub(crate) fn handle(
             crate::commands::handle(engine, connection, request, &granted, operator)
         }
         request @ (ClientRequest::AgentConfig(_)
+        | ClientRequest::AgentConnection(_)
         | ClientRequest::ThreadCreate(_)
         | ClientRequest::ThreadSend(_)
+        | ClientRequest::ThreadEdit(_)
+        | ClientRequest::ThreadQueue(_)
         | ClientRequest::ThreadUpdate(_)
         | ClientRequest::ThreadCancel(_)
         | ClientRequest::CredentialsSet(_)
@@ -645,34 +831,12 @@ fn set_operator(
     if previous == operator_id.as_ref() {
         return Ok(json!({}));
     }
-    if !engine.awaiting_operator.is_empty() {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "An operator switch is already in progress. Try again.",
-        ));
-    }
-    if engine.account.is_some()
-        && engine
-            .connections
-            .get(&connection)
-            .and_then(|c| c.admitted.as_ref())
-            .is_some_and(crate::Admitted::is_operator)
-    {
-        let id = engine.ask_account(crate::account::AccountAction::SwitchOperator {
-            operator_id: operator_id.clone(),
-            account_id: operator_id
-                .as_ref()
-                .and_then(|id| engine.state.operators.get(id))
-                .and_then(|o| o.account_id.clone()),
-            restoring: previous.is_none(),
-            device: (!engine.state.sync.device_id.is_empty())
-                .then(|| engine.state.sync.device_id.clone()),
-        });
-        engine.awaiting_operator.insert(id, operator_id);
-        return Ok(Value::Null);
-    }
-    engine.reset_analytics_session();
+    // The computer's sign-in stays: every operator here works under it
+    // (ADR-0033, one account per computer).
     if let Some(state) = engine.connections.get_mut(&connection) {
+        if state.is_local_operator() {
+            engine.chosen_operator.clone_from(&operator_id);
+        }
         state.operator_id = operator_id;
     }
     engine.operator_changed(connection);
@@ -869,6 +1033,7 @@ fn operator_create(
         display: None,
         account_id: None,
         controller_mappings: Vec::new(),
+        terms: None,
         version: 1,
     };
     if let Some(units) = params.quantity_units {
@@ -881,7 +1046,7 @@ fn operator_create(
     to_value(&result)
 }
 
-/// The Control tab's buttons for every type, each type once and each
+/// The Cockpit tab's buttons for every type, each type once and each
 /// action once, by action id.
 fn control_actions(
     all: &[uxduck_contracts::dto::operator::ControlActions],
@@ -1029,23 +1194,34 @@ fn layout_open(
     connection: ConnectionId,
     params: &LayoutOpenParams,
 ) -> Result<Value, ApiError> {
-    let kind = params.kind.into();
+    // Controllers are in the Cockpit (ADR-0005, 2026-11-04): asked for, the
+    // Cockpit opens, and the window that sees the call shows its controllers.
+    let kind = match params.kind.into() {
+        operator::TabKind::Controllers => operator::TabKind::Control,
+        kind => kind,
+    };
     if kind == operator::TabKind::Chat {
         return Err(ApiError::new(
             ErrorKind::InvalidParams,
             "the chat is always open",
         ));
     }
+    let tab = given_tab(engine, kind, params)?;
+    let result = |operator_id| LayoutOpenResult {
+        operator_id,
+        kind: params.kind,
+        vehicle_id: tab.vehicle_id.clone(),
+        chart: tab.chart.as_ref().map(Into::into),
+        item: tab.item.clone(),
+        section: tab.section.map(Into::into),
+    };
     let from_thread = params
         .thread_id
         .as_ref()
         .and_then(|id| engine.state.threads.get(id))
         .and_then(|thread| thread.operator_id.clone());
     let Some(id) = from_thread.or_else(|| params.operator_id.clone()) else {
-        return to_value(&LayoutOpenResult {
-            operator_id: None,
-            kind: params.kind,
-        });
+        return to_value(&result(None));
     };
     let mut operator = engine
         .state
@@ -1054,14 +1230,99 @@ fn layout_open(
         .cloned()
         .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no operator {id}")))?;
     let shape = operator.layout.dock.shape();
-    operator.layout.open(kind);
+    let opened = result(Some(id));
+    operator.layout.open_tab(tab);
     // A tab added is arranging the dock, as "+" is (S65).
     operator.layout.arranged |= operator.layout.dock.shape() != shape;
     operator.version += 1;
     engine.commit(connection, Change::OperatorUpserted { operator });
-    to_value(&LayoutOpenResult {
-        operator_id: Some(id),
-        kind: params.kind,
+    to_value(&opened)
+}
+
+/// The tab `layout/open` asks for, with what it shows checked, so a tab
+/// never opens empty or on a vehicle that is not there.
+fn given_tab(
+    engine: &Engine,
+    kind: operator::TabKind,
+    params: &LayoutOpenParams,
+) -> Result<operator::Tab, ApiError> {
+    let invalid = |message: &str| ApiError::new(ErrorKind::InvalidParams, message);
+    let items: Vec<String> = params.items.iter().map(|i| i.trim().to_owned()).collect();
+    if items.iter().any(|i| i.is_empty() || i.len() > 64) {
+        return Err(invalid("each item is a telemetry key from telemetry_get"));
+    }
+    match kind {
+        _ if items.is_empty() => {}
+        operator::TabKind::Chart if items.len() <= operator::MAX_CHART_SERIES => {}
+        operator::TabKind::Readout if items.len() == 1 => {}
+        operator::TabKind::Chart => return Err(invalid("a chart draws at most 8 items")),
+        operator::TabKind::Readout => return Err(invalid("a readout shows one item")),
+        _ => return Err(invalid("items are only for a chart or a readout")),
+    }
+    if params.section.is_some() && kind != operator::TabKind::Tuning {
+        return Err(invalid("a section is only for a tuning tab"));
+    }
+    let vehicle = params
+        .vehicle_id
+        .as_deref()
+        .map(|id| {
+            engine
+                .vehicle(id)
+                .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}")))
+        })
+        .transpose()?;
+    // An item the vehicle does not report draws nothing: say which, so the
+    // agent reads the vehicle's keys instead of claiming a chart is there.
+    // A tab given no vehicle follows the chat's, so that one's keys count.
+    let shown = vehicle.or_else(|| {
+        params
+            .thread_id
+            .as_ref()
+            .and_then(|id| engine.state.threads.get(id))
+            .and_then(|thread| thread.vehicle_id.as_deref())
+            .and_then(|id| engine.vehicle(id))
+    });
+    if let Some(vehicle) = shown
+        && let Some(telemetry) = engine.telemetry(&vehicle.id)
+    {
+        let unknown: Vec<&str> = items
+            .iter()
+            .map(String::as_str)
+            .filter(|key| {
+                !key.starts_with("mavlink.") && !telemetry.items.iter().any(|i| i.key == *key)
+            })
+            .collect();
+        if !unknown.is_empty() {
+            return Err(invalid(&format!(
+                "{} does not report {}. Read its keys with telemetry_get",
+                vehicle.name,
+                unknown.join(", ")
+            )));
+        }
+    }
+    let chart = (kind == operator::TabKind::Chart && !items.is_empty()).then(|| {
+        let mut chart = operator::ChartSpec {
+            series: items
+                .iter()
+                .map(|item| operator::ChartSeries {
+                    item: item.clone(),
+                    colour: 0,
+                    hidden: false,
+                })
+                .collect(),
+            span_s: None,
+        };
+        chart.tidy();
+        chart
+    });
+    Ok(operator::Tab {
+        vehicle_id: vehicle.map(|v| v.id.clone()),
+        chart,
+        item: (kind == operator::TabKind::Readout)
+            .then(|| items.into_iter().next())
+            .flatten(),
+        section: params.section.map(Into::into),
+        ..operator::Tab::of(kind)
     })
 }
 
@@ -1131,7 +1392,8 @@ pub(crate) fn notify(
     }
 }
 
-/// A CLI command follows the current person without switching or restoring one.
+/// A CLI command follows the operator chosen last on this computer without
+/// switching or restoring one.
 fn current_cli_operator(
     engine: &Engine,
     connection: ConnectionId,
@@ -1145,13 +1407,13 @@ fn current_cli_operator(
         return None;
     }
     engine
-        .account_identity
-        .operator_id
+        .chosen_operator
         .as_ref()
         .filter(|id| engine.state.operators.contains_key(*id))
         .cloned()
 }
 
+#[allow(clippy::too_many_lines, reason = "each admission rule in order")]
 fn initialize(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -1194,6 +1456,26 @@ fn initialize(
             params.client_info.version
         )));
     }
+    // UXDuck's page from before lines, areas and buildings (ADR-0052,
+    // ADR-0053) rejects a building and shows a shape as a point.
+    if params.client_info.kind == uxduck_contracts::dto::initialize::ClientKind::OperatorUi
+        && params.client_info.name == "uxduck-web"
+        && !capabilities.marker_shapes
+    {
+        return Err(update_required(format!(
+            "This page ({}) is too old for UXDuck on this computer. Reload to update it.",
+            params.client_info.version
+        )));
+    }
+
+    if params.client_info.kind == uxduck_contracts::dto::initialize::ClientKind::OperatorUi
+        && params.client_info.name == "uxduck-web"
+        && !capabilities.mission_read_float_bits
+    {
+        return Err(update_required(
+            "This page cannot read exact mission values. Reload a matching interface before connecting to this Core.".into(),
+        ));
+    }
 
     let kind = params.client_info.kind;
     let cli_operator = current_cli_operator(engine, connection, kind);
@@ -1231,15 +1513,17 @@ fn initialize(
         ),
     };
     let granted: Vec<Capability> = core_granted.iter().copied().map(Into::into).collect();
-    engine.opened.window_seen |= matches!(kind, ClientKind::OperatorUi | ClientKind::Shell);
     engine.opened.seen_order += 1;
-    let order = engine.opened.seen_order;
     if let Some(state) = engine.connections.get_mut(&connection) {
         state.operator_id = cli_operator;
         state.name.clone_from(&params.client_info.name);
-        state.seen = order;
+        state.seen = engine.opened.seen_order;
         state.admitted = Some(Admitted {
             kind: kind.into(),
+            reads: ReadCapabilities {
+                mission_read_float_bits: capabilities.mission_read_float_bits,
+                replay_step_marks: capabilities.replay_step_marks,
+            },
             operator,
             record,
             granted: core_granted,
@@ -1247,13 +1531,23 @@ fn initialize(
             approvals: params.capabilities.approvals,
         });
     }
+    engine.window_admitted(kind.into());
     // A reloaded window takes back the controllers it held.
     engine.adopt_claims(connection);
     to_value(&InitializeResult {
         daemon_version: engine.config.daemon_version.clone(),
         protocol_version: PROTOCOL_VERSION,
         min_client_version: MIN_CLIENT_VERSION.into(),
-        capabilities: engine.config.capabilities.clone(),
+        capabilities: DaemonCapabilities {
+            mission_read_float_bits: true,
+            unused_controls: true,
+            terms: true,
+            survey_planning: true,
+            terrain_polygons: true,
+            marker_shapes: true,
+            raw_mission_numbers: true,
+            ..engine.config.capabilities.clone()
+        },
         client_id,
         granted,
         release_stage: uxduck_contracts::version::ReleaseStage::Flight,

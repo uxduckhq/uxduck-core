@@ -10,6 +10,14 @@ use std::path::Path;
 
 fn main() {
     windows_resource::embed("uxduck");
+    // Windows gives the main thread 1 MiB, where Linux and macOS give 8 MiB;
+    // parsing the command line in a debug build needs about 1 MiB, so match
+    // the others rather than overflow before main does anything.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+    }
     stamp();
     println!("cargo:rerun-if-env-changed=UXDUCK_RELEASE_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=UXDUCK_UPDATE_TEST_URL");

@@ -82,6 +82,7 @@ pub fn history(
                 crate::tlog_index::page(tlogs, link_id, system_id, params.id, before, limit)
                     .map_err(|_| bad())?;
             let fallback = fallback();
+            let own = uxduck_mavlink::custom::for_vehicle(vehicle_ids);
             Ok(MavlinkHistoryResult {
                 messages: found
                     .into_iter()
@@ -89,7 +90,12 @@ pub fn history(
                         at_us: found.at_us,
                         system_id: found.system_id,
                         component_id: found.component_id,
-                        fields: mavlink_inspect::fields(params.id, &found.payload, fallback),
+                        fields: mavlink_inspect::fields(
+                            params.id,
+                            &found.payload,
+                            own.as_deref(),
+                            fallback,
+                        ),
                         ..Default::default()
                     })
                     .collect(),

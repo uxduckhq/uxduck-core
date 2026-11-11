@@ -12,6 +12,10 @@ use crate::dto::link::{LinkPolicy, SimAutopilot, SimVehicle};
 /// connects to it with a link of its own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent simulation start options on the wire"
+)]
 pub struct SimStartParams {
     pub vehicle: SimVehicle,
     /// ArduPilot if absent. PX4 runs on an installed UXDuck on macOS and
@@ -42,6 +46,11 @@ pub struct SimStartParams {
     /// The path of a SITL build of the user's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// Allows an own ArduPilot build without local-only support to listen
+    /// on the network. Other computers may connect and control it.
+    /// Set only after the operator explicitly agrees to network access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_network: bool,
     /// Forgets the vehicle's stored parameters each time it starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wipe: bool,
@@ -104,6 +113,27 @@ pub struct SimBinary {
 #[serde(rename_all = "camelCase")]
 pub struct SimBinariesResult {
     pub binaries: Vec<SimBinary>,
+}
+
+/// Ask a custom ArduPilot executable for its frames. This runs the file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFramesParams {
+    pub binary: String,
+    pub vehicle: SimVehicle,
+    /// Start a new probe. Otherwise read its last result without executing anything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFramesResult {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reading: bool,
+    /// Empty when neither the executable nor a companion file supplies a table.
+    pub frames: Vec<String>,
+    pub default_frame: Option<String>,
 }
 
 /// The simulator catalogue's manifest (S18, ADR-0011 M12): prebuilt SITL
@@ -272,6 +302,11 @@ pub struct SnapshotStartParams {
     /// The path of a SITL build of the user's own. Installed daemons only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// Allows the supplied ArduPilot build to listen on the network if
+    /// it does not support local-only connections.
+    /// Set only after the operator explicitly agrees to network access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_network: bool,
     /// Also sends the vehicle's traffic to another program (S102).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward: Option<SimForward>,
@@ -285,6 +320,18 @@ pub struct SimPauseParams {
     /// The simulated vehicle's link.
     pub id: String,
     pub paused: bool,
+}
+
+/// Contact with loaded 3D scenery: pauses an ArduPilot simulation where it
+/// touched, and stops a PX4 one. The link version prevents a late report
+/// from ending a newly restarted flight.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimCrashParams {
+    /// The simulated vehicle's link, never a real vehicle's connection.
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

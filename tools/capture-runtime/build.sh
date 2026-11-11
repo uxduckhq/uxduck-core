@@ -35,7 +35,11 @@ case "$(uname -s)" in
   # --disable-autodetect leaves out.
   MINGW*|MSYS*)
     ffmpeg_options=("${ffmpeg_options[@]/--enable-pthreads/--enable-w32threads}")
-    ffmpeg_options+=(--enable-indev=dshow --target-os=mingw32 --arch=x86_64 --extra-ldflags=-static)
+    # Media Foundation's H.264 encoder: the GPU's, for re-encoding a camera
+    # that sends no IDR (ADR-0017), with Windows' own software one behind it.
+    # Its encoder takes Direct3D 11 frames, so it needs D3D11VA too, which
+    # --disable-autodetect leaves out.
+    ffmpeg_options+=(--enable-indev=dshow --target-os=mingw32 --arch=x86_64 --extra-ldflags=-static --enable-d3d11va --enable-mediafoundation --enable-encoder=h264_mf)
     program=ffmpeg.exe
     ;;
   # ALSA for a camera's sound input needs libasound's headers to build.

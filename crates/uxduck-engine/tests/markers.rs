@@ -653,7 +653,7 @@ fn turning_off_account_watching_hides_all_markers() {
         &mut engine,
         &mut window,
         "settings/update",
-        json!({ "expectedVersion": 0, "watchFromAccount": false }),
+        json!({ "expectedVersion": 0, "liveSharing": false }),
     );
     assert!(off.get("error").is_none(), "{off}");
     assert!(engine.edge_markers().is_empty(), "global watching is off");
@@ -661,8 +661,426 @@ fn turning_off_account_watching_hides_all_markers() {
         &mut engine,
         &mut window,
         "settings/update",
-        json!({ "expectedVersion": off["result"]["version"], "watchFromAccount": true }),
+        json!({ "expectedVersion": off["result"]["version"], "liveSharing": true }),
     );
     assert!(on.get("error").is_none(), "{on}");
     assert_eq!(engine.edge_markers().len(), 2);
+}
+
+#[test]
+fn a_building_is_a_marker_with_an_outline_a_heading_and_a_height() {
+    let mut engine = engine();
+    let mut one = join(&mut engine, "operator-ui");
+    let mut two = join(&mut engine, "operator-ui");
+    subscribe(&mut engine, &mut two);
+
+    let plain = call(
+        &mut engine,
+        &mut one,
+        "marker/add",
+        json!({ "look": "building", "latitudeDeg": -35.36, "longitudeDeg": 149.16 }),
+    )["result"]
+        .clone();
+    assert_eq!(plain["name"], "Building");
+    assert_eq!(
+        plain["outline"],
+        json!({ "type": "rectangle", "widthM": 10.0, "depthM": 10.0 }),
+        "10 by 10 m until drawn"
+    );
+    assert_eq!(plain["heightM"], 10.0);
+
+    let barn = call(
+        &mut engine,
+        &mut one,
+        "marker/add",
+        json!({ "name": "Barn", "latitudeDeg": -35.37, "longitudeDeg": 149.17, "headingDeg": 30.0,
+                "outline": { "type": "rectangle", "widthM": 24.0, "depthM": 12.0 }, "heightM": 8.0 }),
+    )["result"]
+        .clone();
+    assert_eq!(barn["look"], "building", "an outline makes a building");
+    assert_eq!(barn["headingDeg"], 30.0);
+    let delta = pushed(&mut two, "state/delta");
+    assert_eq!(delta.len(), 2, "every window sees both");
+
+    let turned = call(
+        &mut engine,
+        &mut two,
+        "marker/update",
+        json!({ "id": barn["id"], "expectedVersion": 1, "headingDeg": 45.0 }),
+    )["result"]
+        .clone();
+    assert_eq!(turned["headingDeg"], 45.0);
+    assert_eq!(
+        turned["outline"], barn["outline"],
+        "turning leaves its size"
+    );
+    assert_eq!(turned["latitudeDeg"], barn["latitudeDeg"], "and its place");
+
+    let stretched = call(
+        &mut engine,
+        &mut two,
+        "marker/update",
+        json!({ "id": barn["id"], "expectedVersion": 2,
+                "outline": { "type": "corners", "cornersM": [[-12.0, -6.0], [12.0, -6.0], [12.0, 6.0], [0.0, 10.0], [-12.0, 6.0]] },
+                "heightM": 9.5 }),
+    )["result"]
+        .clone();
+    assert_eq!(stretched["outline"]["type"], "corners");
+    assert_eq!(stretched["heightM"], 9.5);
+    assert_eq!(stretched["headingDeg"], 45.0, "resizing leaves its heading");
+    assert_eq!(stretched["version"], 3);
+}
+
+#[test]
+fn a_building_needs_a_sensible_outline_and_height_and_stays_a_building() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    let at = |extra: Value| {
+        let mut params = json!({ "latitudeDeg": 0.0, "longitudeDeg": 0.0 });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        params
+    };
+    for params in [
+        at(json!({ "outline": { "type": "rectangle", "widthM": 0.1, "depthM": 10.0 } })),
+        at(json!({ "outline": { "type": "rectangle", "widthM": 10.0, "depthM": 2001.0 } })),
+        at(json!({ "outline": { "type": "round", "radiusM": 0.0 } })),
+        at(json!({ "outline": { "type": "corners", "cornersM": [[0.0, 0.0], [1.0, 0.0]] } })),
+        at(
+            json!({ "outline": { "type": "corners", "cornersM": [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]] } }),
+        ),
+        at(
+            json!({ "outline": { "type": "corners", "cornersM": [[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]] } }),
+        ),
+        at(
+            json!({ "outline": { "type": "corners", "cornersM": [[0.0, 0.0], [3000.0, 0.0], [0.0, 10.0]] } }),
+        ),
+        at(json!({ "look": "building", "heightM": 0.0 })),
+        at(json!({ "look": "building", "heightM": 1001.0 })),
+        at(json!({ "look": "flag", "heightM": 5.0 })),
+        at(json!({ "look": "building", "source": { "type": "computer" } })),
+    ] {
+        let refused = call(&mut engine, &mut window, "marker/add", params.clone());
+        assert_eq!(
+            refused["error"]["data"]["kind"], "invalid-value",
+            "{params}"
+        );
+    }
+    assert!(engine.state().markers.is_empty());
+
+    let shed = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "name": "Shed", "latitudeDeg": 0.0, "longitudeDeg": 0.0,
+                "outline": { "type": "corners", "cornersM": [[-3.0, -2.0], [3.0, -2.0], [3.0, 2.0], [-3.0, 2.0]] } }),
+    )["result"]
+        .clone();
+    let flag = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "look": "flag", "latitudeDeg": 0.0, "longitudeDeg": 0.0 }),
+    )["result"]
+        .clone();
+    for (id, params) in [
+        (&shed["id"], json!({ "look": "flag" })),
+        (&shed["id"], json!({ "source": { "type": "computer" } })),
+        (&flag["id"], json!({ "look": "building" })),
+        (&flag["id"], json!({ "heightM": 4.0 })),
+    ] {
+        let mut update = json!({ "id": id, "expectedVersion": 1 });
+        update
+            .as_object_mut()
+            .unwrap()
+            .extend(params.as_object().unwrap().clone());
+        let refused = call(&mut engine, &mut window, "marker/update", update.clone());
+        assert_eq!(
+            refused["error"]["data"]["kind"], "invalid-value",
+            "{update}"
+        );
+    }
+}
+
+#[test]
+fn the_agent_asks_before_adding_a_building_and_says_it_is_one() {
+    let mut engine = engine();
+    let _window = join(&mut engine, "operator-ui");
+    let mut agent = join(&mut engine, "agent");
+    engine.receive(
+        agent.id,
+        &json!({ "jsonrpc": "2.0", "id": 7, "method": "marker/add", "params": { "name": "Barn", "latitudeDeg": 50.1, "longitudeDeg": -1.1,
+                 "outline": { "type": "rectangle", "widthM": 24.0, "depthM": 12.0 }, "heightM": 8.0 } })
+            .to_string(),
+    );
+    assert!(
+        frames(&mut agent).iter().all(|f| f.get("id").is_none()),
+        "held for a person"
+    );
+    let approval = engine
+        .state()
+        .approvals
+        .values()
+        .find(|a| a.state == uxduck_core::domain::approval::ApprovalState::Pending)
+        .cloned()
+        .expect("an approval");
+    assert_eq!(approval.summary, "add the building Barn to the map");
+}
+
+#[test]
+fn watch_links_leave_buildings_out_until_watchers_can_draw_them() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "name": "Launch site", "look": "flag", "latitudeDeg": 50.0, "longitudeDeg": -1.0 }),
+    );
+    call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "name": "Barn", "look": "building", "latitudeDeg": 50.0, "longitudeDeg": -1.0 }),
+    );
+    let shown = engine.edge_markers();
+    assert_eq!(
+        shown.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        ["Launch site"]
+    );
+}
+
+#[test]
+fn a_line_an_area_and_a_circle_are_markers_in_colours_and_move_whole() {
+    let mut engine = engine();
+    let mut one = join(&mut engine, "operator-ui");
+    let mut two = join(&mut engine, "operator-ui");
+    subscribe(&mut engine, &mut two);
+    let point = |lat: f64, lon: f64| json!({ "latitudeDeg": lat, "longitudeDeg": lon });
+
+    let road = call(
+        &mut engine,
+        &mut one,
+        "marker/add",
+        json!({ "shape": { "type": "line", "points": [point(50.0, -1.0), point(50.0, -0.99), point(50.01, -0.99)] },
+                "colour": "orange" }),
+    )["result"]
+        .clone();
+    assert_eq!(road["name"], "Line 1", "named from its shape and count");
+    assert_eq!(road["colour"], "orange");
+    assert!(road.get("dashed").is_none(), "solid, left off the wire");
+    let (lat, lon) = (
+        road["latitudeDeg"].as_f64().unwrap(),
+        road["longitudeDeg"].as_f64().unwrap(),
+    );
+    assert!(
+        (lat - 50.001_786).abs() < 1e-5 && (lon + 0.99).abs() < 1e-9,
+        "its point is halfway along, 914 m: 715 m east, then 199 m north: {lat}, {lon}"
+    );
+
+    let field = call(
+        &mut engine,
+        &mut one,
+        "marker/add",
+        json!({ "name": "No-go", "colour": "red", "dashed": true,
+                "shape": { "type": "area", "points": [point(50.0, -1.0), point(50.0, -0.98), point(50.02, -0.98), point(50.02, -1.0), point(50.0, -1.0)] } }),
+    )["result"]
+        .clone();
+    assert_eq!(
+        field["shape"]["points"].as_array().unwrap().len(),
+        4,
+        "the repeated closing corner is dropped"
+    );
+    assert!(
+        (field["latitudeDeg"].as_f64().unwrap() - 50.01).abs() < 1e-6,
+        "at its centre"
+    );
+    assert!((field["longitudeDeg"].as_f64().unwrap() + 0.99).abs() < 1e-6);
+    assert_eq!(field["dashed"], true);
+
+    let ring = call(
+        &mut engine,
+        &mut one,
+        "marker/add",
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": { "type": "circle", "radiusM": 200.0 } }),
+    )["result"]
+        .clone();
+    assert_eq!(ring["name"], "Circle 1");
+    assert!(
+        ring.get("colour").is_none(),
+        "its usual colour unless chosen"
+    );
+    assert_eq!(
+        pushed(&mut two, "state/delta").len(),
+        3,
+        "every window sees them"
+    );
+
+    let moved = call(
+        &mut engine,
+        &mut two,
+        "marker/update",
+        json!({ "id": field["id"], "expectedVersion": 1, "latitudeDeg": 50.11, "longitudeDeg": -0.99, "outlineOnly": true }),
+    )["result"]
+        .clone();
+    let corners = moved["shape"]["points"].as_array().unwrap();
+    assert!(
+        (corners[0]["latitudeDeg"].as_f64().unwrap() - 50.1).abs() < 1e-6,
+        "moving the point moves the whole area: {corners:?}"
+    );
+    let width = |c: &[Value]| {
+        c[1]["longitudeDeg"].as_f64().unwrap() - c[0]["longitudeDeg"].as_f64().unwrap()
+    };
+    assert!(
+        (width(corners) - 0.02 * (50.0_f64.to_radians().cos() / 50.1_f64.to_radians().cos())).abs()
+            < 1e-6,
+        "keeping its width in metres"
+    );
+    assert_eq!(moved["outlineOnly"], true);
+
+    let redrawn = call(
+        &mut engine,
+        &mut two,
+        "marker/update",
+        json!({ "id": road["id"], "expectedVersion": 1, "colour": "black",
+                "shape": { "type": "line", "points": [point(51.0, -1.0), point(51.0, -0.98)] } }),
+    )["result"]
+        .clone();
+    assert!(
+        (redrawn["latitudeDeg"].as_f64().unwrap() - 51.0).abs() < 1e-9,
+        "new points, new middle"
+    );
+    assert!((redrawn["longitudeDeg"].as_f64().unwrap() + 0.99).abs() < 1e-6);
+    assert_eq!(redrawn["colour"], "black");
+}
+
+#[test]
+fn a_shape_taken_away_leaves_a_point_and_watch_links_leave_shapes_out() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    let road = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "shape": { "type": "line", "points": [
+            { "latitudeDeg": 50.0, "longitudeDeg": -1.0 }, { "latitudeDeg": 50.0, "longitudeDeg": -0.99 } ] } }),
+    )["result"]
+        .clone();
+    let ring = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": { "type": "circle", "radiusM": 200.0 } }),
+    )["result"]
+        .clone();
+    assert!(
+        engine.edge_markers().is_empty(),
+        "watch links leave lines and circles out"
+    );
+
+    let flattened = call(
+        &mut engine,
+        &mut window,
+        "marker/update",
+        json!({ "id": ring["id"], "expectedVersion": 1, "shape": null }),
+    )["result"]
+        .clone();
+    assert!(flattened.get("shape").is_none(), "a point again");
+    assert_eq!(flattened["latitudeDeg"], 50.0);
+    let shown: Vec<String> = engine.edge_markers().into_iter().map(|m| m.id).collect();
+    assert_eq!(shown, vec![ring["id"].as_str().unwrap().to_owned()]);
+    assert_ne!(shown[0], road["id"].as_str().unwrap());
+}
+
+#[test]
+fn a_drawn_shape_needs_sensible_points_and_is_drawn_by_hand() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    let point = |lat: f64, lon: f64| json!({ "latitudeDeg": lat, "longitudeDeg": lon });
+    let line = |points: Vec<Value>| json!({ "shape": { "type": "line", "points": points } });
+    let area = |points: Vec<Value>| json!({ "shape": { "type": "area", "points": points } });
+    let many: Vec<Value> = (0..501)
+        .map(|i| point(50.0, -1.0 + f64::from(i) * 1e-4))
+        .collect();
+    for params in [
+        line(vec![point(50.0, -1.0)]),
+        line(vec![point(50.0, -1.0), point(50.0, -1.0)]),
+        line(many),
+        line(vec![point(50.0, -1.0), point(52.0, -1.0)]),
+        line(vec![point(95.0, -1.0), point(50.0, -1.0)]),
+        area(vec![point(50.0, -1.0), point(50.0, -0.99)]),
+        area(vec![
+            point(50.0, -1.0),
+            point(50.0, -0.99),
+            point(50.0, -0.98),
+        ]),
+        area(vec![
+            point(50.0, -1.0),
+            point(50.01, -0.99),
+            point(50.0, -0.99),
+            point(50.01, -1.0),
+        ]),
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": { "type": "circle", "radiusM": 0.5 } }),
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "shape": { "type": "circle", "radiusM": 50_001.0 } }),
+        json!({ "shape": { "type": "circle", "radiusM": 20.0 } }),
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "source": { "type": "computer" }, "shape": { "type": "circle", "radiusM": 20.0 } }),
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "look": "building", "shape": { "type": "circle", "radiusM": 20.0 } }),
+        json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0, "colour": "magenta" }),
+    ] {
+        let refused = call(&mut engine, &mut window, "marker/add", params.clone());
+        assert!(refused["error"].is_object(), "{params}");
+    }
+    assert!(engine.state().markers.is_empty());
+
+    let road = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        line(vec![point(50.0, -1.0), point(50.0, -0.99)]),
+    )["result"]
+        .clone();
+    for params in [
+        json!({ "source": { "type": "computer" } }),
+        json!({ "latitudeDeg": 50.1, "longitudeDeg": -1.0, "shape": { "type": "line", "points": [point(50.0, -1.0), point(50.0, -0.98)] } }),
+    ] {
+        let mut update = json!({ "id": road["id"], "expectedVersion": 1 });
+        update
+            .as_object_mut()
+            .unwrap()
+            .extend(params.as_object().unwrap().clone());
+        let refused = call(&mut engine, &mut window, "marker/update", update.clone());
+        assert_eq!(
+            refused["error"]["data"]["kind"], "invalid-value",
+            "{update}"
+        );
+    }
+}
+
+#[test]
+fn the_agent_asks_before_drawing_an_area_and_says_what_it_draws() {
+    let mut engine = engine();
+    let _window = join(&mut engine, "operator-ui");
+    let mut agent = join(&mut engine, "agent");
+    engine.receive(
+        agent.id,
+        &json!({ "jsonrpc": "2.0", "id": 7, "method": "marker/add", "params": { "name": "No-go", "colour": "red",
+                 "shape": { "type": "area", "points": [
+                    { "latitudeDeg": 50.0, "longitudeDeg": -1.0 }, { "latitudeDeg": 50.0, "longitudeDeg": -0.99 },
+                    { "latitudeDeg": 50.01, "longitudeDeg": -0.99 } ] } } })
+            .to_string(),
+    );
+    assert!(
+        frames(&mut agent).iter().all(|f| f.get("id").is_none()),
+        "held for a person"
+    );
+    let approval = engine
+        .state()
+        .approvals
+        .values()
+        .find(|a| a.state == uxduck_core::domain::approval::ApprovalState::Pending)
+        .cloned()
+        .expect("an approval");
+    assert_eq!(approval.summary, "draw the area No-go on the map");
 }

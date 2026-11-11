@@ -1,0 +1,8 @@
+{
+  "method": "param/setSave",
+  "params": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "name": "other-copter.param",
+    "text": "# from another copter\nRTL_ALT,2000\nWPNAV_SPEED,1000\nMYFORK_GAIN,2\n"
+  }
+}

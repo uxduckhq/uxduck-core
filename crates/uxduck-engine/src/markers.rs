@@ -21,7 +21,8 @@ use uxduck_contracts::dto::state::{ChangeOp, EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
-use uxduck_core::domain::marker::{Marker, MarkerLook, MarkerSource};
+use uxduck_core::domain::marker::{Marker, MarkerLook, MarkerOutline, MarkerShape, MarkerSource};
+use uxduck_core::domain::plan::LatLon;
 use uxduck_core::events::Change;
 
 use crate::rpc::handlers::to_value;
@@ -67,6 +68,236 @@ const fn default_name(look: MarkerLook) -> &'static str {
         MarkerLook::Car => "Car",
         MarkerLook::Flag => "Flag",
         MarkerLook::Pin => "Marker",
+        MarkerLook::Building => "Building",
+    }
+}
+
+/// A new building's outline and height when none is given (ADR-0052 B3).
+const NEW_BUILDING: MarkerOutline = MarkerOutline::Rectangle {
+    width_m: 10.0,
+    depth_m: 10.0,
+};
+const NEW_BUILDING_HEIGHT_M: f64 = 10.0;
+const MAX_CORNERS: usize = 200;
+
+fn outline(given: MarkerOutline) -> Result<MarkerOutline, ApiError> {
+    let within = |m: f64, low: f64, high: f64| m.is_finite() && (low..=high).contains(&m);
+    match &given {
+        MarkerOutline::Rectangle { width_m, depth_m } => {
+            if !within(*width_m, 0.5, 2000.0) || !within(*depth_m, 0.5, 2000.0) {
+                return Err(invalid("a building's width and depth are 0.5 m to 2000 m"));
+            }
+        }
+        MarkerOutline::Round { radius_m } => {
+            if !within(*radius_m, 0.25, 1000.0) {
+                return Err(invalid("a round building's radius is 0.25 m to 1000 m"));
+            }
+        }
+        MarkerOutline::Corners { corners_m } => {
+            if !(3..=MAX_CORNERS).contains(&corners_m.len()) {
+                return Err(invalid("a building's outline has 3 to 200 corners"));
+            }
+            if corners_m.iter().any(|[east, north]| {
+                !within(east.abs(), 0.0, 2000.0) || !within(north.abs(), 0.0, 2000.0)
+            }) {
+                return Err(invalid(
+                    "a building's corners are within 2000 m of its point",
+                ));
+            }
+            if shoelace(corners_m).abs() < 0.25 {
+                return Err(invalid("a building's outline needs some area"));
+            }
+            if crosses(corners_m) {
+                return Err(invalid("a building's outline must not cross itself"));
+            }
+        }
+    }
+    Ok(given)
+}
+
+/// Twice the signed area of a ring.
+fn shoelace(ring: &[[f64; 2]]) -> f64 {
+    (0..ring.len())
+        .map(|i| {
+            let ([ax, ay], [bx, by]) = (ring[i], ring[(i + 1) % ring.len()]);
+            ax * by - bx * ay
+        })
+        .sum::<f64>()
+        / 2.0
+}
+
+/// Whether two edges of a ring that share no corner cross.
+fn crosses(ring: &[[f64; 2]]) -> bool {
+    let count = ring.len();
+    let side = |[ax, ay]: [f64; 2], [bx, by]: [f64; 2], [px, py]: [f64; 2]| {
+        ((bx - ax) * (py - ay) - (by - ay) * (px - ax)).signum()
+    };
+    (0..count).any(|i| {
+        let first = (ring[i], ring[(i + 1) % count]);
+        ((i + 2)..count).any(|j| {
+            if i == 0 && j == count - 1 {
+                return false;
+            }
+            let second = (ring[j], ring[(j + 1) % count]);
+            side(first.0, first.1, second.0) * side(first.0, first.1, second.1) < 0.0
+                && side(second.0, second.1, first.0) * side(second.0, second.1, first.1) < 0.0
+        })
+    })
+}
+
+const MAX_POINTS: usize = 500;
+/// A shape's points are all this close to its first (ADR-0053 D1).
+const SHAPE_WITHIN_M: f64 = 100_000.0;
+const M_PER_DEG: f64 = 111_320.0;
+
+/// East and north of `origin`, in metres, on a plane touching it.
+fn east_north(origin: LatLon, point: LatLon) -> [f64; 2] {
+    let cos = origin.latitude_deg.to_radians().cos();
+    [
+        (point.longitude_deg - origin.longitude_deg) * M_PER_DEG * cos,
+        (point.latitude_deg - origin.latitude_deg) * M_PER_DEG,
+    ]
+}
+
+fn from_east_north(origin: LatLon, [east, north]: [f64; 2]) -> LatLon {
+    let cos = origin.latitude_deg.to_radians().cos();
+    LatLon {
+        latitude_deg: origin.latitude_deg + north / M_PER_DEG,
+        longitude_deg: origin.longitude_deg + east / (M_PER_DEG * cos),
+    }
+}
+
+/// A line, an area or a circle as it is kept: a repeated closing corner
+/// dropped, its points on the globe, few enough and close enough together.
+fn shape(given: MarkerShape) -> Result<MarkerShape, ApiError> {
+    let points = |mut points: Vec<LatLon>, fewest: usize, what: &str| {
+        if points.len() > fewest && points.first() == points.last() {
+            points.pop();
+        }
+        if !(fewest..=MAX_POINTS).contains(&points.len()) {
+            return Err(invalid(&format!("{what} has {fewest} to 500 points")));
+        }
+        for point in &points {
+            position(point.latitude_deg, point.longitude_deg)?;
+        }
+        let first = points[0];
+        if points.iter().any(|p| {
+            east_north(first, *p)
+                .iter()
+                .any(|m| m.abs() > SHAPE_WITHIN_M)
+        }) {
+            return Err(invalid(&format!(
+                "{what}'s points are within 100 km of each other"
+            )));
+        }
+        Ok(points)
+    };
+    match given {
+        MarkerShape::Line { points: given } => {
+            let points = points(given, 2, "a line")?;
+            if length_m(&points) < 0.5 {
+                return Err(invalid("a line needs two points apart"));
+            }
+            Ok(MarkerShape::Line { points })
+        }
+        MarkerShape::Area { points: given } => {
+            let points = points(given, 3, "an area")?;
+            let ring: Vec<[f64; 2]> = points.iter().map(|p| east_north(points[0], *p)).collect();
+            if crosses(&ring) {
+                return Err(invalid("an area's outline must not cross itself"));
+            }
+            if shoelace(&ring).abs() < 1.0 {
+                return Err(invalid("an area needs some area"));
+            }
+            Ok(MarkerShape::Area { points })
+        }
+        MarkerShape::Circle { radius_m } => {
+            if radius_m.is_finite() && (1.0..=50_000.0).contains(&radius_m) {
+                Ok(MarkerShape::Circle { radius_m })
+            } else {
+                Err(invalid("a circle's radius is 1 m to 50 km"))
+            }
+        }
+    }
+}
+
+fn length_m(points: &[LatLon]) -> f64 {
+    points
+        .windows(2)
+        .map(|pair| {
+            let [east, north] = east_north(pair[0], pair[1]);
+            east.hypot(north)
+        })
+        .sum()
+}
+
+/// Where a line or an area's marker sits (D2): halfway along a line, at an
+/// area's centre; a circle is about the marker's own point.
+fn middle(shape: &MarkerShape) -> Option<LatLon> {
+    match shape {
+        MarkerShape::Line { points } => {
+            let mut left = length_m(points) / 2.0;
+            for pair in points.windows(2) {
+                let [east, north] = east_north(pair[0], pair[1]);
+                let leg = east.hypot(north);
+                if leg >= left && leg > 0.0 {
+                    let part = left / leg;
+                    return Some(from_east_north(pair[0], [east * part, north * part]));
+                }
+                left -= leg;
+            }
+            points.last().copied()
+        }
+        MarkerShape::Area { points } => {
+            let ring: Vec<[f64; 2]> = points.iter().map(|p| east_north(points[0], *p)).collect();
+            let twice = 2.0 * shoelace(&ring);
+            let (east, north) = (0..ring.len()).fold((0.0, 0.0), |(east, north), i| {
+                let ([ax, ay], [bx, by]) = (ring[i], ring[(i + 1) % ring.len()]);
+                let cross = ax * by - bx * ay;
+                (east + (ax + bx) * cross, north + (ay + by) * cross)
+            });
+            Some(from_east_north(
+                points[0],
+                [east / (3.0 * twice), north / (3.0 * twice)],
+            ))
+        }
+        MarkerShape::Circle { .. } => None,
+    }
+}
+
+/// A line or an area moved whole from one point to another, keeping its
+/// size and shape.
+fn moved(shape: MarkerShape, from: LatLon, to: LatLon) -> MarkerShape {
+    let shift = |points: Vec<LatLon>| {
+        points
+            .into_iter()
+            .map(|p| from_east_north(to, east_north(from, p)))
+            .collect()
+    };
+    match shape {
+        MarkerShape::Line { points } => MarkerShape::Line {
+            points: shift(points),
+        },
+        MarkerShape::Area { points } => MarkerShape::Area {
+            points: shift(points),
+        },
+        circle @ MarkerShape::Circle { .. } => circle,
+    }
+}
+
+const fn shape_word(shape: &MarkerShape) -> &'static str {
+    match shape {
+        MarkerShape::Line { .. } => "Line",
+        MarkerShape::Area { .. } => "Area",
+        MarkerShape::Circle { .. } => "Circle",
+    }
+}
+
+fn height(metres: f64) -> Result<f64, ApiError> {
+    if metres.is_finite() && (0.5..=1000.0).contains(&metres) {
+        Ok(metres)
+    } else {
+        Err(invalid("a building's height is 0.5 m to 1000 m"))
     }
 }
 
@@ -170,10 +401,63 @@ pub(crate) fn handle(
             longitude_deg,
             heading_deg,
             source: from,
+            outline: footprint,
+            height_m: tall,
+            shape: drawn,
+            colour,
+            dashed,
+            outline_only,
         }) => {
             require(Capability::Config)?;
-            let look: MarkerLook = look.map(Into::into).unwrap_or_default();
-            let name = name(given.as_deref().unwrap_or(default_name(look)))?;
+            let inferred = if footprint.is_some() || tall.is_some() {
+                MarkerLook::Building
+            } else {
+                MarkerLook::default()
+            };
+            let look: MarkerLook = look.map_or(inferred, Into::into);
+            let building = look == MarkerLook::Building;
+            if !building && (footprint.is_some() || tall.is_some()) {
+                return Err(invalid("only a building has an outline and a height"));
+            }
+            let live = from
+                .as_ref()
+                .is_some_and(|s| *s != uxduck_contracts::dto::marker::MarkerSource::Manual);
+            if building && live {
+                return Err(invalid(
+                    "a building is placed by hand and has no live source",
+                ));
+            }
+            if building && drawn.is_some() {
+                return Err(invalid("a building has an outline, not a line or an area"));
+            }
+            if live && drawn.is_some() {
+                return Err(invalid(
+                    "a line, an area or a circle is drawn by hand and has no live source",
+                ));
+            }
+            let drawn = drawn.map(|s| shape(s.into())).transpose()?;
+            let (latitude_deg, longitude_deg) =
+                match (drawn.as_ref().and_then(middle), latitude_deg, longitude_deg) {
+                    (Some(at), _, _) => (at.latitude_deg, at.longitude_deg),
+                    (None, Some(latitude_deg), Some(longitude_deg)) => {
+                        (latitude_deg, longitude_deg)
+                    }
+                    (None, _, _) => {
+                        return Err(invalid("a marker needs a latitude and a longitude"));
+                    }
+                };
+            let fallback = drawn.as_ref().map_or_else(
+                || default_name(look).to_owned(),
+                |s| {
+                    let word = shape_word(s);
+                    // One of these is free: there are fewer markers than numbers.
+                    (1..=engine.state.markers.len() + 1)
+                        .map(|n| format!("{word} {n}"))
+                        .find(|name| !engine.state.markers.values().any(|m| m.name == *name))
+                        .unwrap_or_else(|| word.to_owned())
+                },
+            );
+            let name = name(given.as_deref().unwrap_or(&fallback))?;
             position(latitude_deg, longitude_deg)?;
             let marker = Marker {
                 id: format!("mk{}", &engine.random.token()[..16]),
@@ -184,6 +468,16 @@ pub(crate) fn handle(
                 heading_deg: heading(heading_deg)?,
                 source: source(from.map(Into::into).unwrap_or_default())?,
                 watch_links: true,
+                outline: building
+                    .then(|| outline(footprint.map_or(NEW_BUILDING, Into::into)))
+                    .transpose()?,
+                height_m: building
+                    .then(|| height(tall.unwrap_or(NEW_BUILDING_HEIGHT_M)))
+                    .transpose()?,
+                shape: drawn,
+                colour: colour.map(Into::into),
+                dashed: dashed.unwrap_or(false),
+                outline_only: outline_only.unwrap_or(false),
                 created_at_us: engine.clock.now_us(),
                 version: 1,
             };
@@ -272,24 +566,94 @@ fn apply(marker: &mut Marker, params: MarkerUpdateParams) -> Result<(), ApiError
     if let Some(given) = params.name {
         marker.name = name(&given)?;
     }
+    let building = marker.look == MarkerLook::Building;
     if let Some(look) = params.look {
-        marker.look = look.into();
+        let look: MarkerLook = look.into();
+        if building != (look == MarkerLook::Building) {
+            return Err(invalid(
+                "a building stays a building and a marker a marker. Add a new one instead",
+            ));
+        }
+        marker.look = look;
+    }
+    if !building && (params.outline.is_some() || params.height_m.is_some()) {
+        return Err(invalid("only a building has an outline and a height"));
+    }
+    if building
+        && params
+            .source
+            .as_ref()
+            .is_some_and(|s| *s != uxduck_contracts::dto::marker::MarkerSource::Manual)
+    {
+        return Err(invalid(
+            "a building is placed by hand and has no live source",
+        ));
+    }
+    if let Some(given) = params.outline {
+        marker.outline = Some(outline(given.into())?);
+    }
+    if let Some(metres) = params.height_m {
+        marker.height_m = Some(height(metres)?);
     }
     if params.latitude_deg.is_some() != params.longitude_deg.is_some() {
         return Err(invalid(
             "move a marker with both a latitude and a longitude",
         ));
     }
+    let moving = params.latitude_deg.is_some();
+    match params.shape {
+        Some(Some(given)) => {
+            if building {
+                return Err(invalid("a building has an outline, not a line or an area"));
+            }
+            let given = shape(given.into())?;
+            if let Some(at) = middle(&given) {
+                if moving {
+                    return Err(invalid(
+                        "give a line or an area its points or a new position, not both",
+                    ));
+                }
+                marker.latitude_deg = at.latitude_deg;
+                marker.longitude_deg = at.longitude_deg;
+            }
+            marker.shape = Some(given);
+        }
+        Some(None) => marker.shape = None,
+        None => {}
+    }
     if let (Some(latitude_deg), Some(longitude_deg)) = (params.latitude_deg, params.longitude_deg) {
         position(latitude_deg, longitude_deg)?;
+        let to = LatLon {
+            latitude_deg,
+            longitude_deg,
+        };
+        let from = LatLon {
+            latitude_deg: marker.latitude_deg,
+            longitude_deg: marker.longitude_deg,
+        };
+        marker.shape = marker.shape.take().map(|s| moved(s, from, to));
         marker.latitude_deg = latitude_deg;
         marker.longitude_deg = longitude_deg;
+    }
+    if let Some(colour) = params.colour {
+        marker.colour = colour.map(Into::into);
+    }
+    if let Some(dashed) = params.dashed {
+        marker.dashed = dashed;
+    }
+    if let Some(outline_only) = params.outline_only {
+        marker.outline_only = outline_only;
     }
     if let Some(degrees) = params.heading_deg {
         marker.heading_deg = heading(degrees)?;
     }
     if let Some(given) = params.source {
         marker.source = source(given.into())?;
+    }
+    if marker.shape.is_some() && marker.source != MarkerSource::Manual {
+        return Err(invalid(
+            "a line, an area or a circle is drawn by hand and has no live source",
+        ));
     }
     if let Some(shown) = params.watch_links {
         marker.watch_links = shown;
@@ -623,16 +987,17 @@ impl Engine {
 
     /// The markers watch links show (M9, S182), where each is shown now: a
     /// live one where its source last put it, else where it was set.
+    /// Buildings wait until watchers can draw them (ADR-0052 B4).
     #[must_use]
     pub fn edge_markers(&self) -> Vec<uxduck_contracts::dto::edge::RemoteMarker> {
-        if !self.state.settings.watch_from_account {
+        if !self.watch_publishable() {
             return Vec::new();
         }
         let mut markers: Vec<&Marker> = self
             .state
             .markers
             .values()
-            .filter(|m| m.watch_links)
+            .filter(|m| m.watch_links && m.look != MarkerLook::Building && m.shape.is_none())
             .collect();
         markers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
         markers

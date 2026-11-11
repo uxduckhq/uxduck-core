@@ -10,13 +10,15 @@
 
 pub mod files;
 pub(crate) mod queries;
+pub(crate) mod saved;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::param_definitions::{
-    self as dto, CatalogueSet, DefinitionsAddParams, DefinitionsListResult, ParamDefinitionsResult,
+    self as dto, CatalogueSet, DefinitionsAddParams, DefinitionsListParams, DefinitionsListResult,
+    DefinitionsUseParams, ParamDefinitionsResult,
 };
 use uxduck_contracts::dto::state::{ChangeOp, EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -24,8 +26,8 @@ use uxduck_contracts::pdef;
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::param_definitions::{
-    Candidate, ChoosingFor, DefinitionSet, DefinitionSource, DefinitionsStatus, Firmware, Match,
-    OwnSet, VehicleDefinitions, Version, choose,
+    Candidate, ChoosingFor, DefinitionSet, DefinitionSource, DefinitionsStatus, Firmware, Layer,
+    Layered, Match, OwnSet, SetChoice, VehicleDefinitions, Version, choose,
 };
 use uxduck_core::events::{Actor, Change};
 
@@ -56,6 +58,12 @@ pub enum DefinitionsOrder {
     },
     /// Fetch a person's set from where their CI publishes it (S74).
     FetchOwn {
+        id: String,
+        url: String,
+    },
+    /// Fetch a firmware profile, or one of the files it names (S254):
+    /// answered as [`DefinitionsArrived::Fetched`] with the same id.
+    FetchProfile {
         id: String,
         url: String,
     },
@@ -100,6 +108,8 @@ pub(crate) struct Definitions {
     loaded: HashMap<String, Arc<DefinitionSet>>,
     asked: BTreeSet<String>,
     failed: BTreeMap<String, String>,
+    /// Firmware profiles being read, and why one last failed (S254).
+    pub(crate) profiles: HashMap<String, crate::firmware_profiles::Run>,
 }
 
 impl std::fmt::Debug for Definitions {
@@ -141,7 +151,7 @@ impl Engine {
         self.choose_all_definitions();
     }
 
-    fn ask_definitions(&mut self, order: DefinitionsOrder) -> bool {
+    pub(crate) fn ask_definitions(&mut self, order: DefinitionsOrder) -> bool {
         match self.definitions.port.as_mut() {
             Some(port) => {
                 port.request(order);
@@ -160,7 +170,11 @@ impl Engine {
             DefinitionsArrived::Catalogue(Err(why)) => {
                 self.definitions.catalogue = Catalogue::Failed(why);
             }
-            DefinitionsArrived::Fetched { id, result } => self.own_fetched(&id, result),
+            DefinitionsArrived::Fetched { id, result } => {
+                if !self.profile_fetched(&id, &result) {
+                    self.own_fetched(&id, result);
+                }
+            }
             DefinitionsArrived::Set { id, result } => {
                 self.definitions.asked.remove(&id);
                 match result {
@@ -201,19 +215,28 @@ impl Engine {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "P3's and ADR-0044 F9's cases read best in one place"
+    )]
     fn definitions_for(&mut self, vehicle_id: &str) -> Option<VehicleDefinitions> {
         let vehicle = self.state.vehicles.get(vehicle_id)?.clone();
-        let blank = |status, detail: Option<String>| VehicleDefinitions {
-            vehicle_id: vehicle.id.clone(),
-            status,
-            set_id: None,
-            title: None,
-            matched: None,
-            detail,
-        };
+        let choice = vehicle.definitions.clone();
         let Some(firmware) = Firmware::of(&vehicle.vehicle_type) else {
             // A ground station or a gimbal: nothing to describe.
             return None;
+        };
+        let blank = |status, detail: Option<String>| VehicleDefinitions {
+            vehicle_id: vehicle.id.clone(),
+            status,
+            firmware: Some(firmware),
+            set_id: None,
+            title: None,
+            matched: None,
+            own_set_id: None,
+            own_title: None,
+            choice: choice.clone(),
+            detail,
         };
         if !vehicle.autopilot.to_ascii_lowercase().contains("ardupilot") {
             return Some(blank(
@@ -221,7 +244,10 @@ impl Engine {
                 Some("Descriptions are for ArduPilot only for now.".into()),
             ));
         }
-        if matches!(self.definitions.catalogue, Catalogue::Unknown) && vehicle.firmware.is_some() {
+        let pinned = matches!(choice.ardupilot, SetChoice::Set { .. });
+        if matches!(self.definitions.catalogue, Catalogue::Unknown)
+            && (vehicle.firmware.is_some() || pinned)
+        {
             if self.ask_definitions(DefinitionsOrder::Catalogue { refresh: false }) {
                 self.definitions.catalogue = Catalogue::Loading;
             } else {
@@ -243,7 +269,7 @@ impl Engine {
             || firmware.tag_prefix().to_owned(),
             |v| format!("{} {v}", firmware.tag_prefix()),
         );
-        let Some((candidate, matched)) = choose(
+        let chosen = choose(
             &candidates,
             &ChoosingFor {
                 vehicle_id: &vehicle.id,
@@ -251,43 +277,105 @@ impl Engine {
                 version,
                 commit: vehicle.firmware_commit.as_deref(),
             },
-        ) else {
-            let (status, detail) = self.none_fits(&running);
-            return Some(blank(status, detail));
-        };
-        let candidate = candidate.clone();
-        let title = self.state.own_sets.get(&candidate.id).map_or_else(
-            || match &candidate.version {
-                Some(v) => format!("{} {v}", firmware.tag_prefix()),
-                None => firmware.tag_prefix().to_owned(),
-            },
-            |own| own.label.clone(),
+            &choice,
         );
-        let detail = match matched {
-            Match::Approximate => Some(format!(
-                "Descriptions are from {title}. This vehicle runs {}.",
+        let ardupilot = chosen.ardupilot.map(|(c, m)| (c.clone(), m));
+        let own = chosen.own.cloned();
+        if ardupilot.is_none() && own.is_none() {
+            let (status, detail) = self.none_fits(&running, &choice.ardupilot);
+            return Some(blank(status, detail));
+        }
+        let title = ardupilot.as_ref().map(|(c, _)| match &c.version {
+            Some(v) => format!("{} {v}", firmware.tag_prefix()),
+            None => firmware.tag_prefix().to_owned(),
+        });
+        let own_title = own.as_ref().map(|c| {
+            self.state
+                .own_sets
+                .get(&c.id)
+                .map_or_else(|| c.id.clone(), |s| s.label.clone())
+        });
+        let approximate = matches!(ardupilot, Some((_, Match::Approximate)));
+        let runs = if approximate {
+            format!(
+                " This vehicle runs {}.",
                 vehicle
                     .firmware
                     .as_deref()
                     .unwrap_or("a version it has not said")
-            )),
-            Match::Own => Some(format!("Descriptions from your set “{title}”.")),
-            Match::Exact | Match::Commit => None,
+            )
+        } else {
+            String::new()
         };
-        let mut chosen = VehicleDefinitions {
+        let mut detail = match (&own_title, &title) {
+            (Some(own), Some(ardupilot)) => {
+                Some(format!("Descriptions from {own} over {ardupilot}.{runs}"))
+            }
+            (Some(own), None) => Some(format!("Descriptions from {own} only.")),
+            (None, Some(ardupilot)) if approximate || !choice.ardupilot.is_automatic() => {
+                Some(format!("Descriptions are from {ardupilot}.{runs}"))
+            }
+            _ => None,
+        };
+        let mut loading = false;
+        let mut here = 0;
+        let mut failed = Vec::new();
+        let layers = [
+            ardupilot.as_ref().map(|(c, _)| c).zip(title.as_ref()),
+            own.as_ref().zip(own_title.as_ref()),
+        ];
+        for (candidate, name) in layers.into_iter().flatten() {
+            match self.fetch_chosen(candidate) {
+                Fetch::Here => here += 1,
+                Fetch::Loading => loading = true,
+                Fetch::Failed(why) => failed.push((name.clone(), why)),
+            }
+        }
+        let status = if loading {
+            DefinitionsStatus::Loading
+        } else if here == 0 {
+            DefinitionsStatus::Failed
+        } else {
+            DefinitionsStatus::Ready
+        };
+        if let Some((name, why)) = failed.first() {
+            detail = Some(if status == DefinitionsStatus::Failed {
+                format!("Descriptions could not be loaded: {why}. Names and values only.")
+            } else {
+                format!(
+                    "{} {name} could not be loaded: {why}.",
+                    detail.unwrap_or_default()
+                )
+                .trim_start()
+                .to_owned()
+            });
+        }
+        Some(VehicleDefinitions {
             vehicle_id: vehicle.id.clone(),
-            status: DefinitionsStatus::Ready,
-            set_id: Some(candidate.id.clone()),
-            title: Some(title),
-            matched: Some(matched),
+            status,
+            firmware: Some(firmware),
+            set_id: ardupilot.as_ref().map(|(c, _)| c.id.clone()),
+            title,
+            matched: ardupilot.map(|(_, m)| m),
+            own_set_id: own.map(|c| c.id),
+            own_title,
+            choice,
             detail,
-        };
-        self.fetch_chosen(&candidate, &mut chosen);
-        Some(chosen)
+        })
     }
 
-    /// Why no set fits, while the catalogue is where it is.
-    fn none_fits(&self, running: &str) -> (DefinitionsStatus, Option<String>) {
+    /// Why no set describes the vehicle, while the catalogue is where it is.
+    fn none_fits(
+        &self,
+        running: &str,
+        ardupilot: &SetChoice,
+    ) -> (DefinitionsStatus, Option<String>) {
+        if *ardupilot == SetChoice::None {
+            return (
+                DefinitionsStatus::Missing,
+                Some("No descriptions chosen for this vehicle. Names and values only.".into()),
+            );
+        }
         match &self.definitions.catalogue {
             Catalogue::Unknown => (
                 DefinitionsStatus::Loading,
@@ -297,34 +385,38 @@ impl Engine {
             Catalogue::Failed(why) => (
                 DefinitionsStatus::Missing,
                 Some(format!(
-                    "No descriptions: {why}. Names and values only. Add your own in Settings > Parameters."
+                    "No descriptions: {}. Names and values only. Add your own in Settings > Parameters.",
+                    why.trim_end_matches('.')
                 )),
             ),
-            Catalogue::Ready(_) => (
-                DefinitionsStatus::Missing,
-                Some(format!(
-                    "No descriptions for {running} yet. Names and values only."
-                )),
-            ),
+            Catalogue::Ready(_) => match ardupilot {
+                SetChoice::Set { id } => (
+                    DefinitionsStatus::Missing,
+                    Some(format!(
+                        "The catalogue has no {id} for {running}. Names and values only."
+                    )),
+                ),
+                _ => (
+                    DefinitionsStatus::Missing,
+                    Some(format!(
+                        "No descriptions for {running} yet. Names and values only."
+                    )),
+                ),
+            },
         }
     }
 
-    /// Ready if the chosen set is here; otherwise asks for it once, or says
+    /// Whether a chosen set is here; otherwise asks for it once, or says
     /// why it could not be had.
-    fn fetch_chosen(&mut self, candidate: &Candidate, chosen: &mut VehicleDefinitions) {
+    fn fetch_chosen(&mut self, candidate: &Candidate) -> Fetch {
         if self.definitions.loaded.contains_key(&candidate.id) {
-            return;
+            return Fetch::Here;
         }
         if let Some(why) = self.definitions.failed.get(&candidate.id) {
-            chosen.status = DefinitionsStatus::Failed;
-            chosen.detail = Some(format!(
-                "Descriptions could not be loaded: {why}. Names and values only."
-            ));
-            return;
+            return Fetch::Failed(why.clone());
         }
-        chosen.status = DefinitionsStatus::Loading;
         if !self.definitions.asked.insert(candidate.id.clone()) {
-            return;
+            return Fetch::Loading;
         }
         let order = if candidate.own {
             Some(DefinitionsOrder::Own {
@@ -340,19 +432,28 @@ impl Engine {
         if let Some(order) = order {
             self.ask_definitions(order);
         }
+        Fetch::Loading
     }
 
-    /// The set describing this vehicle, when it is here.
+    /// The sets describing this vehicle, the person's over ArduPilot's
+    /// (ADR-0044 F9), when they are here.
     #[must_use]
-    pub fn vehicle_definitions(&self, vehicle_id: &str) -> Option<Arc<DefinitionSet>> {
+    pub fn vehicle_definitions(&self, vehicle_id: &str) -> Option<Layered> {
         let chosen = self.state.param_definitions.get(vehicle_id)?;
         if chosen.status != DefinitionsStatus::Ready {
             return None;
         }
-        self.definitions
-            .loaded
-            .get(chosen.set_id.as_deref()?)
-            .cloned()
+        let layer = |id: &Option<String>, title: &Option<String>| {
+            Some(Layer {
+                title: title.clone().unwrap_or_default(),
+                set: self.definitions.loaded.get(id.as_deref()?)?.clone(),
+            })
+        };
+        let layered = Layered {
+            own: layer(&chosen.own_set_id, &chosen.own_title),
+            ardupilot: layer(&chosen.set_id, &chosen.title),
+        };
+        (layered.own.is_some() || layered.ardupilot.is_some()).then_some(layered)
     }
 
     /// A parameter's units, and whether a new value needs a reboot, from the
@@ -417,6 +518,7 @@ impl Engine {
             added_at_us: self.clock.now_us(),
             url: Some(url.to_owned()),
             fetched_at_us: None,
+            profile_id: None,
         };
         if !self.ask_definitions(DefinitionsOrder::FetchOwn {
             id,
@@ -444,10 +546,12 @@ impl Engine {
     /// Fetches every set that has a URL again (S74): on a refresh, daily,
     /// and for one that came from another computer.
     pub fn refresh_own_sets(&mut self) {
+        self.refresh_profiles();
         let fetch: Vec<(String, String)> = self
             .state
             .own_sets
             .values()
+            .filter(|own| own.profile_id.is_none())
             .filter_map(|own| own.url.clone().map(|url| (own.id.clone(), url)))
             .collect();
         for (id, url) in fetch {
@@ -474,6 +578,7 @@ impl Engine {
         match read {
             Ok((set, mut own)) => {
                 own.fetched_at_us = Some(self.clock.now_us());
+                own.profile_id.clone_from(&record.profile_id);
                 let _ = self.keep_own(set, own);
                 self.resolve(&condition);
             }
@@ -560,11 +665,114 @@ impl Engine {
             added_at_us,
             url,
             fetched_at_us: None,
+            profile_id: None,
         };
         Ok((set, own))
     }
 
+    /// Chooses a vehicle's sets (F10): kept with the vehicle, so journaled
+    /// and synced with it, then chosen again.
+    fn use_definitions(
+        &mut self,
+        connection: ConnectionId,
+        params: DefinitionsUseParams,
+    ) -> Result<dto::VehicleDefinitions, ApiError> {
+        let mut vehicle = self.vehicle(&params.vehicle_id).cloned().ok_or_else(|| {
+            ApiError::new(
+                ErrorKind::NotFound,
+                format!("no vehicle {}", params.vehicle_id),
+            )
+        })?;
+        let firmware = Firmware::of(&vehicle.vehicle_type).ok_or_else(|| {
+            invalid(format!(
+                "{} has no parameter descriptions to choose",
+                vehicle.name
+            ))
+        })?;
+        let mut choice = vehicle.definitions.clone();
+        if let Some(ardupilot) = params.ardupilot.map(SetChoice::from) {
+            if let SetChoice::Set { id } = &ardupilot {
+                let Catalogue::Ready(sets) = &self.definitions.catalogue else {
+                    return Err(invalid(
+                        "the catalogue is not here yet. List it with param/definitions/list",
+                    ));
+                };
+                let set = sets.iter().find(|s| s.id == *id).ok_or_else(|| {
+                    ApiError::new(ErrorKind::NotFound, format!("the catalogue has no {id}"))
+                })?;
+                if Firmware::from(set.firmware) != firmware {
+                    return Err(invalid(format!(
+                        "{id} describes {}, and {} runs {}",
+                        Firmware::from(set.firmware).tag_prefix(),
+                        vehicle.name,
+                        firmware.tag_prefix()
+                    )));
+                }
+            }
+            choice.ardupilot = ardupilot;
+        }
+        if let Some(own) = params.own.map(SetChoice::from) {
+            if let SetChoice::Set { id } = &own {
+                let set = self.state.own_sets.get(id).ok_or_else(|| {
+                    ApiError::new(ErrorKind::NotFound, format!("no definition set {id}"))
+                })?;
+                if set.firmware != firmware {
+                    return Err(invalid(format!(
+                        "“{}” describes {}, and {} runs {}",
+                        set.label,
+                        set.firmware.tag_prefix(),
+                        vehicle.name,
+                        firmware.tag_prefix()
+                    )));
+                }
+            }
+            choice.own = own;
+        }
+        let id = vehicle.id.clone();
+        if choice != vehicle.definitions {
+            vehicle.definitions = choice;
+            vehicle.version += 1;
+            self.commit(connection, Change::VehicleUpserted { vehicle });
+        }
+        self.choose_definitions(&id);
+        self.state
+            .param_definitions
+            .get(&id)
+            .map(Into::into)
+            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}")))
+    }
+
     /// Keeps a set and its record, and chooses again.
+    /// Forgets a person's set; a vehicle that chose it goes back to its
+    /// bindings. `by` is the connection that asked, if one did.
+    pub(crate) fn remove_own_set(&mut self, id: &str, by: Option<ConnectionId>) {
+        self.ask_definitions(DefinitionsOrder::RemoveOwn { id: id.to_owned() });
+        self.definitions.loaded.remove(id);
+        self.definitions.failed.remove(id);
+        let chose: Vec<_> = self
+            .state
+            .vehicles
+            .values()
+            .filter(|v| matches!(&v.definitions.own, SetChoice::Set { id: chosen } if chosen == id))
+            .cloned()
+            .collect();
+        for mut vehicle in chose {
+            vehicle.definitions.own = SetChoice::Automatic;
+            vehicle.version += 1;
+            match by {
+                Some(connection) => {
+                    self.commit(connection, Change::VehicleUpserted { vehicle });
+                }
+                None => {
+                    self.commit_as(actor(), Change::VehicleUpserted { vehicle });
+                }
+            }
+        }
+        self.commit_as(actor(), Change::OwnSetRemoved { id: id.to_owned() });
+        self.resolve(&format!("own-set:{id}"));
+        self.choose_all_definitions();
+    }
+
     fn keep_own(&mut self, set: DefinitionSet, own: OwnSet) -> Result<(), ApiError> {
         if !self.ask_definitions(DefinitionsOrder::StoreOwn {
             id: own.id.clone(),
@@ -580,6 +788,13 @@ impl Engine {
         self.choose_all_definitions();
         Ok(())
     }
+}
+
+/// Where a chosen set has got.
+enum Fetch {
+    Here,
+    Loading,
+    Failed(String),
 }
 
 /// What a person said about a set, or what its record says when fetched again.
@@ -629,7 +844,6 @@ pub(crate) fn handle(
     request: ClientRequest,
     granted: &[Capability],
 ) -> Result<Value, ApiError> {
-    let _ = connection;
     let require = |capability: Capability| {
         if granted.contains(&capability) {
             Ok(())
@@ -647,7 +861,11 @@ pub(crate) fn handle(
         }
         ClientRequest::ParamDefinitionsList(params) => {
             require(Capability::Read)?;
-            to_value(&list(engine, params.refresh))
+            to_value(&list(engine, &params))
+        }
+        ClientRequest::ParamDefinitionsUse(params) => {
+            require(Capability::Config)?;
+            to_value(&engine.use_definitions(connection, params)?)
         }
         ClientRequest::ParamDefinitionsAdd(params) => {
             require(Capability::Config)?;
@@ -662,12 +880,17 @@ pub(crate) fn handle(
                     format!("no definition set {}", params.id),
                 ));
             }
-            engine.ask_definitions(DefinitionsOrder::RemoveOwn {
-                id: params.id.clone(),
-            });
-            engine.definitions.loaded.remove(&params.id);
-            engine.definitions.failed.remove(&params.id);
-            engine.commit_as(actor(), Change::OwnSetRemoved { id: params.id });
+            if let Some(profile) = engine.state.own_sets[&params.id].profile_id.clone() {
+                return Err(invalid(format!(
+                    "this set came with the firmware profile {}. Remove the profile instead",
+                    engine
+                        .state
+                        .firmware_profiles
+                        .get(&profile)
+                        .map_or(profile.as_str(), |p| p.label.as_str())
+                )));
+            }
+            engine.remove_own_set(&params.id, Some(connection));
             engine.choose_all_definitions();
             Ok(json!({}))
         }
@@ -687,15 +910,18 @@ fn definitions_of(engine: &Engine, vehicle_id: &str) -> Result<ParamDefinitionsR
     let helicopter = vehicle.vehicle_type == "Helicopter";
     let definitions = engine
         .vehicle_definitions(&vehicle.id)
-        .map(|set| {
+        .map(|layered| {
             let prefix = format!("{}/", vehicle.id);
             engine
                 .state
                 .parameters
                 .range(prefix.clone()..)
                 .take_while(|(id, _)| id.starts_with(&prefix))
-                .filter_map(|(_, p)| set.find(&p.name, helicopter))
-                .map(Into::into)
+                .filter_map(|(_, p)| layered.described(&p.name, helicopter))
+                .map(|(definition, layer)| dto::ParamDefinition {
+                    from: Some(layer.title.clone()),
+                    ..definition.into()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -710,8 +936,16 @@ fn definitions_of(engine: &Engine, vehicle_id: &str) -> Result<ParamDefinitionsR
 }
 
 /// People's own sets, newest first, and the catalogue's state; fetching it
-/// again first when `refresh`.
-fn list(engine: &mut Engine, refresh: bool) -> DefinitionsListResult {
+/// again first when `refresh`. With a firmware, the catalogue's sets for it,
+/// fetched first if nothing has needed it yet.
+fn list(engine: &mut Engine, params: &DefinitionsListParams) -> DefinitionsListResult {
+    let refresh = params.refresh;
+    if params.firmware.is_some()
+        && matches!(engine.definitions.catalogue, Catalogue::Unknown)
+        && engine.ask_definitions(DefinitionsOrder::Catalogue { refresh: false })
+    {
+        engine.definitions.catalogue = Catalogue::Loading;
+    }
     if refresh
         && !matches!(engine.definitions.catalogue, Catalogue::Loading)
         && engine.ask_definitions(DefinitionsOrder::Catalogue { refresh: true })
@@ -739,6 +973,21 @@ fn list(engine: &mut Engine, refresh: bool) -> DefinitionsListResult {
         ),
         (Catalogue::Failed(why), true) => (dto::CatalogueState::Failed, Some(why.clone()), 0),
     };
+    let mut sets: Vec<CatalogueSet> = match (&engine.definitions.catalogue, params.firmware) {
+        (Catalogue::Ready(all), Some(firmware)) => all
+            .iter()
+            .filter(|s| s.firmware == firmware)
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
+    sets.sort_by_key(|s| {
+        std::cmp::Reverse((
+            s.version == "latest",
+            Version::parse(&s.version),
+            s.version.clone(),
+        ))
+    });
     let mut own: Vec<&OwnSet> = engine.state.own_sets.values().collect();
     own.sort_by_key(|s| std::cmp::Reverse(s.added_at_us));
     DefinitionsListResult {
@@ -746,6 +995,7 @@ fn list(engine: &mut Engine, refresh: bool) -> DefinitionsListResult {
         catalogue,
         catalogue_detail,
         catalogue_sets,
+        sets,
     }
 }
 

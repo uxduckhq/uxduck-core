@@ -7,9 +7,9 @@
 //! "Motor Test: …". Listed (`add_motors`), it has a quad X's `FRAME_CLASS`
 //! and `FRAME_TYPE`.
 
-/// The test's outputs for a quad X, by its place in the test's order:
-/// `AP_MotorsMatrix`'s quad X, A front right on output 1, B back right on
-/// 4, C back left on 2, D front left on 3.
+/// The test's outputs for a quad X, by its place in the test's order, as
+/// `ArduPilot`'s documentation draws it ("Connect ESCs and Motors"): A front
+/// right on output 1, B back right on 4, C back left on 2, D front left on 3.
 pub const QUAD_X_OUTPUTS: [usize; 4] = [1, 4, 2, 3];
 
 /// The lowest and highest output, microseconds.

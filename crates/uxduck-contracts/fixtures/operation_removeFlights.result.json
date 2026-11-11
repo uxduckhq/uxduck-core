@@ -1,0 +1,14 @@
+{
+  "operations": [
+    {
+      "id": "op9a8b7c6d5e4f3a21",
+      "auto": true,
+      "flightIds": ["fl6f2d4b0e5a7c9d13", "fl7a3e5c1f6b8d0e24"],
+      "fromUs": 1789990000000000,
+      "toUs": 1789991800000000,
+      "vehicles": 2,
+      "kept": 0,
+      "version": 1
+    }
+  ]
+}

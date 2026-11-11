@@ -2,6 +2,16 @@
 //! The native daemon uses the system clock and the OS random source; the
 //! browser worker (S20) uses `performance.now()` and `crypto.getRandomValues`.
 
+/// Why a listener cannot use an address that belongs to another device, such
+/// as the vehicle's own, and what to do instead.
+#[must_use]
+pub fn not_local_message(host: &str) -> String {
+    format!(
+        "{host} is not an address of this computer, so UXDuck can't listen on it. \
+         To connect to a device at {host}, use a client link. To hear it, listen on 0.0.0.0"
+    )
+}
+
 /// Wall-clock time.
 pub trait Clock: Send {
     /// Microseconds since the Unix epoch.
@@ -73,12 +83,16 @@ pub struct TurnRequest {
     pub vehicle: Option<(String, String)>,
     pub thread_id: String,
     pub text: String,
+    /// The exact user item; pending follow-ups are excluded from replay.
+    pub item_id: String,
     pub model: String,
+    pub title: Option<String>,
+    /// The chat's reasoning effort; none is the model's default.
+    pub effort: Option<String>,
     /// The provider's conversation so far, if any.
     pub previous_response_id: Option<String>,
     /// Whether the hosted model may keep this chat's turns: the
-    /// conversations switch, and the chat's own "Don't use this chat"
-    /// (ADR-0013 P12, S29).
+    /// conversations switch (ADR-0013 P12, S29).
     pub share: bool,
 }
 
@@ -103,8 +117,20 @@ pub struct TurnStats {
 /// them outside the engine and reports back through the engine's `agent_*`
 /// methods; its tool calls are ordinary requests on its own connection.
 pub trait AgentPort: Send {
+    /// Request a provider-owned local account action.
+    /// # Errors
+    /// Returns an actionable error when this host cannot manage AI connections.
+    fn connection(
+        &mut self,
+        _: uxduck_contracts::dto::thread::AgentConnectionParams,
+    ) -> Result<(), String> {
+        Err("AI connections require UXDuck Desktop on this computer.".into())
+    }
     fn start_turn(&mut self, turn: TurnRequest);
     fn cancel_turn(&mut self, thread_id: &str);
+    /// Add context to the active turn; hosts apply it at a safe boundary.
+    fn steer_turn(&mut self, _thread_id: &str, _turn: u64, _item: &str, _text: &str, _share: bool) {
+    }
 }
 
 /// The daemon's secrets (ADR-0009: the key lives in the daemon, never in the
@@ -218,6 +244,9 @@ pub struct ControlRoute {
     pub pilot_input_method: uxduck_core::domain::settings::PilotInputMethod,
     pub vehicle_id: String,
     pub mapping: uxduck_core::domain::controller::InputMapping,
+    /// The vehicle's gripper buttons, when it has a usable gripper and takes
+    /// `MANUAL_CONTROL` (S263): held gripper actions set these bits.
+    pub gripper: Option<uxduck_core::domain::gripper::GripperWiring>,
 }
 
 /// A parameter or mission transfer for the data plane.
@@ -275,14 +304,14 @@ pub enum TransferOrder {
         kind: crate::transfers::ProgressKind,
     },
     /// Terrain answers for a block of a vehicle's grid (S118), sent at
-    /// `per_second`. Answers queued for the block stay only if `mask`, the
+    /// `pace`. Answers queued for the block stay only if `mask`, the
     /// vehicle's latest request, still asks for them.
     TerrainData {
         vehicle_id: String,
         block: uxduck_mavlink::terrain::Block,
         groups: Vec<uxduck_mavlink::terrain::Group>,
         mask: u64,
-        per_second: u8,
+        pace: uxduck_mavlink::terrain::Pace,
     },
     /// Asks a vehicle for its own terrain height at a point (S119),
     /// reported through `Engine::terrain_checked`.
@@ -307,6 +336,12 @@ pub enum FileOp {
     Write {
         path: String,
         bytes: Vec<u8>,
+    },
+    /// Pieces written at their offsets, keeping the rest of the file
+    /// (ADR-0051 A6).
+    Patch {
+        path: String,
+        pieces: Vec<(u64, Vec<u8>)>,
     },
     Remove {
         path: String,
@@ -352,10 +387,211 @@ pub struct HistoryOf<'a> {
     pub system_id: u8,
 }
 
+/// The records a replay plays (ADR-0039 R10, R11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplayRead {
+    /// A link's tlogs, the records stamped from `from_us` to `to_us`;
+    /// `start` is the file and offset its flight began in, when the flight
+    /// knows it. Earlier flights' files are found by the start times in
+    /// their names.
+    Link {
+        link_id: String,
+        from_us: u64,
+        to_us: u64,
+        start: Option<(String, u64)>,
+    },
+    /// The part of a link's tlog `file` (by name) up to `offset`, at most
+    /// `bytes` of it, in whole records: what came before a flight, for its
+    /// parameters (ADR-0050 L7).
+    LinkBefore {
+        link_id: String,
+        file: String,
+        offset: u64,
+        bytes: u64,
+    },
+    /// The records of a link's tlog `file` (by name) stamped from `from_us`
+    /// to `to_us`, in that file alone: a flight with its disarmed time
+    /// (ADR-0050 L10), whose log ends where its file does.
+    LinkFile {
+        link_id: String,
+        file: String,
+        from_us: u64,
+        to_us: u64,
+    },
+    /// A tlog file, whole.
+    File { path: String },
+    /// A copy of a vehicle's file made in Files (S121), as
+    /// `<vehicle id>/<path on the vehicle>` under the copies' folder.
+    VehicleFile { local: String },
+}
+
 /// What only the host can answer: binding ports, its own addresses, serial
 /// devices, keeping the machine awake (ADR-0004 port ownership, wake lock).
+/// A video file as `System::probe_video` reads it (ADR-0039 R8), times
+/// in Unix microseconds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VideoProbe {
+    /// The file's own creation time.
+    pub created_us: Option<u64>,
+    pub duration_us: Option<u64>,
+    /// Its first picture's moment by its MISB ST 0601 time stamps.
+    pub klv_start_us: Option<u64>,
+    /// "H.264", "HEVC", "MPEG-2"…
+    pub codec: Option<String>,
+    pub bytes: u64,
+}
+
+/// One of a link's telemetry recordings (S348): a tlog the link wrote from
+/// `start_us` until its next one began.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkLog {
+    pub name: String,
+    pub start_us: u64,
+    pub bytes: u64,
+}
+
 pub trait System: Send {
-    /// A bounded native process read; unsupported browser hosts return none.
+    fn replay_available(&self, what: &ReplayRead) -> Option<bool> {
+        let _ = what;
+        None
+    }
+
+    /// The bytes of a replay's tlog records, whole records only.
+    ///
+    /// # Errors
+    /// Why there are none: no flight logs on this host, or the file could
+    /// not be read.
+    fn replay_read(&mut self, what: &ReplayRead) -> Result<Vec<u8>, String> {
+        let _ = what;
+        Err("Flight logs are kept by UXDuck Desktop. Open a tlog file instead.".into())
+    }
+    /// When the host's log of a link last heard from it, if it knows: a
+    /// flight left open when the host stopped (a page closed) ends there.
+    fn link_last_heard_us(&self, link_id: &str) -> Option<u64> {
+        let _ = link_id;
+        None
+    }
+    /// A replay began or stopped playing: the host runs the replay's clock
+    /// (`Engine::replay_tick`) while one plays, and nothing when none does.
+    fn replay_clock(&mut self, running: bool) {
+        let _ = running;
+    }
+    /// What a video file says of itself (ADR-0039 R8), and its playable
+    /// copy started when it needs one. UXDuck Desktop only.
+    ///
+    /// # Errors
+    /// What a person reads: the file cannot be read or played, and why.
+    fn probe_video(&mut self, path: &str) -> Result<VideoProbe, String> {
+        let _ = path;
+        Err("Adding a video needs UXDuck Desktop.".into())
+    }
+    /// Writes the next of a file attached to a chat message (S246) at
+    /// `offset`, the bytes written so far.
+    ///
+    /// # Errors
+    /// What a person reads: it could not be kept, and why.
+    fn attachment_write(
+        &mut self,
+        id: &str,
+        name: &str,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let _ = (id, name, offset, bytes);
+        Err("Attaching files needs UXDuck Desktop.".into())
+    }
+    /// An attached file is whole and kept from now on, as `name`; or,
+    /// with `keep` false, what came of it is removed.
+    ///
+    /// # Errors
+    /// What a person reads: it could not be kept, and why.
+    fn attachment_finish(&mut self, id: &str, name: &str, keep: bool) -> Result<(), String> {
+        let _ = (id, name, keep);
+        Err("Attaching files needs UXDuck Desktop.".into())
+    }
+    /// Up to `len` of an attached file's bytes from `offset`.
+    ///
+    /// # Errors
+    /// What a person reads: it is gone or could not be read.
+    fn attachment_read(&mut self, id: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let _ = (id, offset, len);
+        Err("Attached files are kept by UXDuck Desktop.".into())
+    }
+    /// Where an attached file is on this computer, for what reads files by
+    /// their path, such as a video kept with a flight.
+    ///
+    /// # Errors
+    /// What a person reads: this host keeps no files on a disk.
+    fn attachment_path(&self, id: &str) -> Result<String, String> {
+        let _ = id;
+        Err("Adding a video needs UXDuck Desktop.".into())
+    }
+    /// Keeps a log opened from elsewhere for the account, under a flight's
+    /// id (ADR-0039 R11): sent as that flight's log is. UXDuck Desktop only.
+    ///
+    /// # Errors
+    /// Why not, in words.
+    fn keep_log(&mut self, recording: &str, bytes: &[u8]) -> Result<(), String> {
+        let _ = (recording, bytes);
+        Err("Saving a log to your account needs UXDuck Desktop.".into())
+    }
+    /// Flights in other ground stations' tlogs on this computer (S215),
+    /// as last looked for; a look starts when the last is a minute old.
+    ///
+    /// # Errors
+    /// Why not, in words: no such folders here.
+    fn found_flights(
+        &mut self,
+    ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
+        Err("Flights from other apps are found by UXDuck Desktop.".into())
+    }
+    /// A folder looked in or not, added or removed (S215).
+    ///
+    /// # Errors
+    /// Why not, in words.
+    fn flight_folder(
+        &mut self,
+        params: &uxduck_contracts::dto::replay::FlightFolderParams,
+    ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
+        let _ = params;
+        Err("Flights from other apps are found by UXDuck Desktop.".into())
+    }
+    /// Vehicles' SD cards plugged in and the logs copied off them (S212).
+    ///
+    /// # Errors
+    /// Why not, in words: no files are kept here.
+    fn log_cards(&mut self) -> Result<uxduck_contracts::dto::replay::LogCardsResult, String> {
+        Err("SD cards are read by UXDuck Desktop.".into())
+    }
+    /// Starts copying a card's logs into this computer's logs.
+    ///
+    /// # Errors
+    /// Why it could not start.
+    fn copy_card_logs(&mut self, card: &str) -> Result<(), String> {
+        let _ = card;
+        Err("SD cards are read by UXDuck Desktop.".into())
+    }
+    /// The tlog a link is writing and where its next record goes, for a
+    /// flight beginning now (ADR-0039 R10). None where no tlogs are kept.
+    fn tlog_position(&self, link_id: &str) -> Option<(String, u64)> {
+        let _ = link_id;
+        None
+    }
+    /// A link's telemetry recordings on this host, oldest first (S348).
+    /// None where they are not files a flight's delete can free.
+    fn link_logs(&self, link_id: &str) -> Vec<LinkLog> {
+        let _ = link_id;
+        Vec::new()
+    }
+    /// Deletes one of a link's recordings by its name (S348).
+    ///
+    /// # Errors
+    /// Why it is still there, in words.
+    fn remove_link_log(&mut self, link_id: &str, name: &str) -> Result<(), String> {
+        let _ = (link_id, name);
+        Err("This host keeps no telemetry files.".into())
+    }
+    /// On-demand Core and owned simulation usage; unsupported browser hosts return none.
     fn process_usage(&self) -> Option<uxduck_contracts::dto::settings::CoreProcessUsage> {
         None
     }
@@ -370,17 +606,20 @@ pub trait System: Send {
     /// Exact wire packet queries.
     /// # Errors
     /// Invalid queries, unavailable capture, or unreadable recordings.
+    /// `gcs_system_id` is the system id UXDuck sends as: its own frames,
+    /// which a link's tlog holds too (ADR-0050 L1), are not received ones.
     fn packet_history(
         &self,
         link_id: &str,
         system_id: Option<u8>,
+        gcs_system_id: u8,
         params: &uxduck_contracts::dto::inspect::MavlinkHistoryParams,
         now_us: u64,
     ) -> Result<
         uxduck_contracts::dto::inspect::MavlinkHistoryResult,
         uxduck_contracts::errors::ApiError,
     > {
-        let _ = (link_id, system_id, params, now_us);
+        let _ = (link_id, system_id, gcs_system_id, params, now_us);
         Err(uxduck_contracts::errors::ApiError::new(
             uxduck_contracts::errors::ErrorKind::InvalidValue,
             "Packet queries by link/time require UXDuck installed on a computer.",
@@ -547,11 +786,15 @@ pub trait System: Send {
     ) -> Result<Vec<uxduck_contracts::dto::settings::SimulatorLogUsage>, String> {
         Ok(Vec::new())
     }
-    /// Shows the data folder in the computer's file manager (S150): the
-    /// folder.
+    /// Shows the data folder in the computer's file manager (S150), or
+    /// where a category keeps its files: what was shown.
     /// # Errors
-    /// When there is no file manager to open, or no folder.
-    fn reveal_data_dir(&mut self) -> Result<String, String> {
+    /// When there is no file manager to open, or nothing to show.
+    fn reveal_storage(
+        &mut self,
+        category: Option<uxduck_core::domain::settings::StorageCategory>,
+    ) -> Result<String, String> {
+        let _ = category;
         Err("This UXDuck keeps no files to show.".into())
     }
     /// Clears stopped simulations' logs, preserving builds and working state.
@@ -569,9 +812,33 @@ pub trait System: Send {
         let _ = instance;
         true
     }
+    /// Whether this host has the build a new simulator link would start,
+    /// so a start without one is refused before its link is added. Yes by
+    /// default: a host that runs no builds of its own.
+    ///
+    /// # Errors
+    /// What is missing and how to get it.
+    fn sim_build_ready(&self, kind: &uxduck_core::domain::link::LinkKind) -> Result<(), String> {
+        let _ = kind;
+        Ok(())
+    }
+    /// The processors this computer has, for the simulations recommended
+    /// at once (S293). Unknown by default, as in a browser.
+    fn processors(&self) -> Option<usize> {
+        None
+    }
     /// The SITL builds this host can run, probed (S17). None by default.
     fn sim_binaries(&self) -> Vec<uxduck_contracts::dto::sim::SimBinary> {
         Vec::new()
+    }
+    /// Runs a selected native executable to inspect its frame table.
+    /// # Errors
+    /// When the host cannot inspect it or its supplied table is invalid.
+    fn sim_frames(
+        &self,
+        _params: &uxduck_contracts::dto::sim::SimFramesParams,
+    ) -> Result<uxduck_contracts::dto::sim::SimFramesResult, String> {
+        Err("This UXDuck cannot read frames from a custom executable.".into())
     }
     /// The simulator catalogue for this platform as last fetched, fetching
     /// it again first when `refresh` (S18). None by default.
@@ -653,14 +920,18 @@ pub struct StorageReport {
     pub data_dir: String,
     /// Bytes and files per category.
     pub categories: Vec<(uxduck_core::domain::settings::StorageCategory, u64, u32)>,
+    /// Where each category keeps its files, as absolute paths.
+    pub places: Vec<(uxduck_core::domain::settings::StorageCategory, Vec<String>)>,
     pub free_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Deleted {
     pub files: u32,
     pub bytes: u64,
+    /// The simulations whose logs went, by id.
+    pub simulations: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

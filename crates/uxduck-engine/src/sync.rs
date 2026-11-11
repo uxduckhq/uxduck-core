@@ -11,9 +11,12 @@
 //! computer uses one once it is activated there, or all of them with
 //! `mirror-all`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME;
 use uxduck_contracts::dto::sync::{
     LibraryLink as LibraryLinkDto, LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity,
     SyncStatus,
@@ -22,6 +25,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
+use uxduck_core::domain::operator::Operator;
 use uxduck_core::domain::plan::{Plan, PlanRevision};
 use uxduck_core::domain::sync::{Activation, LibraryLink, LibraryVehicle, SyncState};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
@@ -108,6 +112,7 @@ fn recipe(link: &Link) -> Link {
         keep_alive: false,
         launch: None,
         paused: false,
+        scenery_hit: None,
         version: 0,
         ..link.clone()
     }
@@ -177,6 +182,11 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
             ("flight", &flight.id, Some(flight.version))
         }
         Change::FlightRemoved { id } => ("flight", id, None),
+        // An operation, with the first of its flights kept (R16).
+        Change::OperationUpserted { operation } => {
+            ("operation", &operation.id, Some(operation.version))
+        }
+        Change::OperationRemoved { id } => ("operation", id, None),
         // The later edit wins, wherever it was made (C3).
         Change::PlanSaved { plan, .. } => ("plan", &plan.id, Some(plan.changed_at_us)),
         Change::PlanRemoved { id } => ("plan", id, None),
@@ -190,6 +200,16 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
         Change::OwnSetUpserted { set } if set.url.is_some() => {
             ("own-set", &set.id, Some(set.updated_at_us()))
         }
+        // A person's MAVLink dialect: the whole record travels (ADR-0044).
+        Change::DialectUpserted { dialect } => {
+            ("dialect", &dialect.id, Some(dialect.updated_at_us))
+        }
+        Change::DialectRemoved { id } => ("dialect", id, None),
+        // A fork's firmware profile: each computer fetches it (S254).
+        Change::FirmwareProfileUpserted { profile } => {
+            ("firmware-profile", &profile.id, Some(profile.updated_at_us))
+        }
+        Change::FirmwareProfileRemoved { id } => ("firmware-profile", id, None),
         _ => return None,
     })
 }
@@ -214,7 +234,10 @@ pub enum Outgoing {
 /// here, with its history.
 #[must_use]
 pub fn outgoing(event: &Event) -> Outgoing {
-    if event.actor.client_id.starts_with(FROM_ACCOUNT) {
+    // Nothing of a replay goes (ADR-0039 R3).
+    if event.actor.client_id.starts_with(FROM_ACCOUNT)
+        || event.actor.client_id == crate::replay::ACTOR
+    {
         return Outgoing::Ignore;
     }
     let change = match &event.change {
@@ -232,9 +255,13 @@ pub fn outgoing(event: &Event) -> Outgoing {
         // A vehicle kept here keeps its history here (ADR-0022 H1).
         Change::HistoryUpserted { entry } if entry.local => return Outgoing::Ignore,
         Change::LinkUpserted { link } if !shared_link(link) => return Outgoing::Ignore,
+        // A vehicle's copy of its mission stays on this computer (ADR-0029 P17).
+        Change::PlanSaved { plan, .. } if plan.vehicle_copy.is_some() => return Outgoing::Ignore,
         Change::PlanSaved { plan, .. } => shared_plan(plan),
         // Flight data is off by default: only a flight someone kept goes (C9).
         Change::FlightUpserted { flight } if !flight.keep => return Outgoing::Ignore,
+        // An operation goes with the first of its flights kept (R16).
+        Change::OperationUpserted { operation } if !operation.keep => return Outgoing::Ignore,
         Change::FlightUpserted { flight } | Change::FlightReplaced { flight, .. } => {
             Change::FlightUpserted {
                 flight: shared_flight(flight),
@@ -298,7 +325,8 @@ pub(crate) fn handle(
             if let Some(enabled) = params.enabled {
                 sync.enabled = enabled;
             }
-            if sync.enabled && sync.device_id.is_empty() {
+            // Minted on any choice, so a computer turned off stays off.
+            if sync.device_id.is_empty() {
                 sync.device_id = format!("dv{}", &engine.random.token()[..16]);
             }
             if let Some(skipped) = &params.skipped {
@@ -426,6 +454,11 @@ impl Engine {
         if cursor <= self.state.sync.pulled_through && taken == 0 {
             return;
         }
+        // Flights from the account join operations as this computer's do.
+        if taken > 0 {
+            self.regroup_operations();
+            self.merge_operators();
+        }
         let mut sync = self.state.sync.clone();
         sync.pulled_through = sync.pulled_through.max(cursor);
         sync.pulled += taken;
@@ -433,6 +466,151 @@ impl Engine {
         sync.version += 1;
         self.sync_problem = None;
         self.commit_as(sync_actor("pull"), Change::SyncChanged { sync });
+    }
+
+    /// Turns sync on, once, where nobody has turned it off: a computer that
+    /// never had it on has no device id yet.
+    pub(crate) fn sync_on_unless_turned_off(&mut self, actor: Actor) {
+        if self.state.sync.enabled || !self.state.sync.device_id.is_empty() {
+            return;
+        }
+        let mut sync = self.state.sync.clone();
+        sync.enabled = true;
+        sync.device_id = format!("dv{}", &self.random.token()[..16]);
+        sync.version += 1;
+        self.commit_as(actor, Change::SyncChanged { sync });
+    }
+
+    /// Where sync has got, for a round to start from: once it is on, with
+    /// this computer's id in the account, minted the first time.
+    pub fn sync_round(&mut self) -> SyncState {
+        if self.state.sync.enabled && self.state.sync.device_id.is_empty() {
+            let mut sync = self.state.sync.clone();
+            sync.device_id = format!("dv{}", &self.random.token()[..16]);
+            sync.version += 1;
+            self.commit_as(sync_actor("device"), Change::SyncChanged { sync });
+        }
+        self.state.sync.clone()
+    }
+
+    /// The journal has been read to `through` and nothing in it was the
+    /// account's to have. The cursor is journaled only after
+    /// [`SCANNED_EVERY`] such events, so a browser that keeps only recent
+    /// events need not send everything again after a checkpoint.
+    pub fn sync_scanned(&mut self, through: u64) {
+        if through < self.state.sync.exported_through + SCANNED_EVERY {
+            return;
+        }
+        let mut sync = self.state.sync.clone();
+        sync.exported_through = through;
+        sync.version += 1;
+        self.commit_as(sync_actor("export"), Change::SyncChanged { sync });
+    }
+
+    /// Binds this computer's sync to the signed-in account the first time,
+    /// and refuses another one afterwards (ADR-0033: this computer's data
+    /// is its first account's).
+    ///
+    /// # Errors
+    /// When another account is signed in: what to tell the person.
+    pub fn sync_account(&mut self, account_id: &str) -> Result<(), String> {
+        let bound = &self.state.sync.account_id;
+        if bound == account_id {
+            return Ok(());
+        }
+        if !bound.is_empty() {
+            return Err(
+                "Signed in to a different account from the one this browser's chats belong to. Sync is paused."
+                    .into(),
+            );
+        }
+        let mut sync = self.state.sync.clone();
+        account_id.clone_into(&mut sync.account_id);
+        sync.version += 1;
+        self.commit_as(sync_actor("account"), Change::SyncChanged { sync });
+        Ok(())
+    }
+
+    /// One person is one operator on every computer of the account
+    /// (maintainer, 2026-11-06): see [`operator_merges`]. Their chats,
+    /// folders, places and snapshots move to the operator kept, and pages
+    /// acting as the other act as it.
+    fn merge_operators(&mut self) {
+        let actor = Actor {
+            client_id: "operators".into(),
+            operator_id: None,
+            identity: None,
+        };
+        for (from, into) in operator_merges(&self.state.operators) {
+            let holds_a_controller = self.state.controllers.values().any(|c| {
+                c.claim
+                    .as_ref()
+                    .is_some_and(|claim| claim.operator_id.as_deref() == Some(from.as_str()))
+            });
+            if holds_a_controller {
+                continue;
+            }
+            let owned = |owner: &Option<String>| owner.as_deref() == Some(from.as_str());
+            let mut changes: Vec<Change> = Vec::new();
+            for thread in self
+                .state
+                .threads
+                .values()
+                .filter(|t| owned(&t.operator_id))
+            {
+                let mut thread = thread.clone();
+                thread.operator_id = Some(into.clone());
+                thread.version += 1;
+                changes.push(Change::ThreadUpserted { thread });
+            }
+            for folder in self
+                .state
+                .folders
+                .values()
+                .filter(|f| owned(&f.operator_id))
+            {
+                let mut folder = folder.clone();
+                folder.operator_id = Some(into.clone());
+                folder.version += 1;
+                changes.push(Change::FolderUpserted { folder });
+            }
+            for place in self.state.places.values().filter(|p| owned(&p.operator_id)) {
+                let mut place = place.clone();
+                place.operator_id = Some(into.clone());
+                place.version += 1;
+                changes.push(Change::PlaceUpserted { place });
+            }
+            for snapshot in self
+                .state
+                .snapshots
+                .values()
+                .filter(|s| owned(&s.operator_id))
+            {
+                let mut snapshot = snapshot.clone();
+                snapshot.operator_id = Some(into.clone());
+                snapshot.version += 1;
+                changes.push(Change::SnapshotUpserted { snapshot });
+            }
+            for change in changes {
+                self.commit_as(actor.clone(), change);
+            }
+            let acting: Vec<ConnectionId> = self
+                .connections
+                .iter()
+                .filter(|(_, c)| owned(&c.operator_id))
+                .map(|(id, _)| *id)
+                .collect();
+            for connection in acting {
+                if let Some(state) = self.connections.get_mut(&connection) {
+                    state.operator_id = Some(into.clone());
+                }
+                self.operator_changed(connection);
+            }
+            if owned(&self.chosen_operator) {
+                self.chosen_operator = Some(into.clone());
+            }
+            self.commit_as(actor.clone(), Change::OperatorRemoved { id: from });
+        }
     }
 
     fn take(&mut self, pulled: &Pulled) -> bool {
@@ -443,6 +621,9 @@ impl Engine {
         };
         // Left out here (2026-10-24): taken again if it is brought back.
         if !self.state.sync.syncs(entity) {
+            return false;
+        }
+        if entity == "flight" && self.state.forgotten_flights.contains(id) {
             return false;
         }
         if entity != change.entity
@@ -494,6 +675,10 @@ impl Engine {
         if let Change::OwnSetUpserted { set } = &change.change {
             self.fetch_own_if_missing(set);
         }
+        // A profile from another computer: read here from its URL (S254).
+        if let Change::FirmwareProfileUpserted { profile } = &change.change {
+            self.fetch_profile(&profile.id);
+        }
         true
     }
 
@@ -525,6 +710,14 @@ impl Engine {
                     },
                 )
             })?,
+            "operation" => state.operations.get(id).filter(|o| o.keep).map(|o| {
+                (
+                    o.version,
+                    Change::OperationUpserted {
+                        operation: o.clone(),
+                    },
+                )
+            })?,
             "flight" => state.flights.get(id).map(|f| {
                 (
                     f.version,
@@ -553,6 +746,18 @@ impl Engine {
                 .published
                 .get(id)
                 .map(|p| (p.at_us, Change::PluginPublished { plugin: p.clone() }))?,
+            "dialect" => state.dialects.get(id).map(|d| {
+                (
+                    d.updated_at_us,
+                    Change::DialectUpserted { dialect: d.clone() },
+                )
+            })?,
+            "firmware-profile" => state.firmware_profiles.get(id).map(|p| {
+                (
+                    p.updated_at_us,
+                    Change::FirmwareProfileUpserted { profile: p.clone() },
+                )
+            })?,
             "own-set" => state
                 .own_sets
                 .get(id)
@@ -582,6 +787,9 @@ impl Engine {
             uid: vehicle.uid.clone(),
             firmware: vehicle.firmware.clone(),
             size_cm: vehicle.size_cm,
+            colour: vehicle.colour,
+            definitions: vehicle.definitions.clone(),
+            dialects: vehicle.dialects.clone(),
             device: device.to_owned(),
             updated_at_us: at,
         };
@@ -592,15 +800,27 @@ impl Engine {
             },
         );
         match self.state.vehicles.get(&entry.id) {
-            // The person's own fields follow: its name and its size.
+            // The person's own fields follow: its name, its size, its colour
+            // (kept when the account has none yet), its descriptions and
+            // dialects.
             Some(here)
-                if here.saved && (here.name != entry.name || here.size_cm != entry.size_cm) =>
+                if here.saved
+                    && (here.name != entry.name
+                        || here.size_cm != entry.size_cm
+                        || entry.colour.is_some_and(|c| here.colour != Some(c))
+                        || here.definitions != entry.definitions
+                        || here.dialects != entry.dialects) =>
             {
                 let mut here = here.clone();
                 here.name.clone_from(&entry.name);
                 here.size_cm = entry.size_cm;
+                here.colour = entry.colour.or(here.colour);
+                here.definitions.clone_from(&entry.definitions);
+                here.dialects.clone_from(&entry.dialects);
                 here.version += 1;
+                let id = here.id.clone();
                 self.commit_as(actor, Change::VehicleUpserted { vehicle: here });
+                self.choose_definitions(&id);
             }
             Some(here) if here.saved => {}
             _ if self.state.sync.activation == Activation::MirrorAll => {
@@ -794,6 +1014,9 @@ impl Engine {
             Some(here) => Vehicle {
                 name: entry.name.clone(),
                 size_cm: entry.size_cm,
+                colour: entry.colour.or(here.colour),
+                definitions: entry.definitions.clone(),
+                dialects: entry.dialects.clone(),
                 saved: true,
                 dismissed: false,
                 version: here.version + 1,
@@ -818,6 +1041,8 @@ impl Engine {
                 mode: None,
                 saved: true,
                 dismissed: false,
+                hidden: false,
+                seen_in_log: false,
                 local_only: false,
                 labels: Vec::new(),
                 bookmarks: Vec::new(),
@@ -825,11 +1050,23 @@ impl Engine {
                 traffic: false,
                 // Not in the account's library: chosen on each computer.
                 look: None,
+                colour: entry.colour,
+                gripper: None,
+                companions: Vec::new(),
                 preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
+                definitions: entry.definitions.clone(),
+                dialects: entry.dialects.clone(),
+                replay: false,
+                replay_of: None,
+                replay_at_us: None,
+                sim_evidence: false,
+                simulated: None,
                 version: 1,
             },
         };
+        let id = vehicle.id.clone();
         self.commit_as(actor, Change::VehicleUpserted { vehicle });
+        self.choose_definitions(&id);
     }
 
     /// Tells the root's sync task to look for something to send.
@@ -902,6 +1139,43 @@ impl Engine {
                 .collect(),
         }
     }
+}
+
+/// How many events with nothing for the account [`Engine::sync_scanned`]
+/// lets pass before it journals the cursor.
+pub const SCANNED_EVERY: u64 = 200;
+
+/// Which operators become which (maintainer, 2026-11-06): operators of the
+/// same name are one person, kept under the lowest id; the stand-in made
+/// for someone who never named themselves joins the account's only named
+/// operator. Every computer decides alike from the same operators.
+#[must_use]
+pub fn operator_merges(operators: &BTreeMap<String, Operator>) -> Vec<(String, String)> {
+    let key = |operator: &Operator| operator.name.trim().to_lowercase();
+    let mut lowest: BTreeMap<String, &str> = BTreeMap::new();
+    for operator in operators.values() {
+        let id = lowest.entry(key(operator)).or_insert(&operator.id);
+        if operator.id.as_str() < *id {
+            *id = &operator.id;
+        }
+    }
+    let stand_in = DEFAULT_OPERATOR_NAME.to_lowercase();
+    let named: Vec<&str> = lowest
+        .iter()
+        .filter(|(name, _)| **name != stand_in)
+        .map(|(_, id)| *id)
+        .collect();
+    operators
+        .values()
+        .filter_map(|operator| {
+            let name = key(operator);
+            let into = match named.as_slice() {
+                [only] if name == stand_in => *only,
+                _ => lowest[&name],
+            };
+            (operator.id != into).then(|| (operator.id.clone(), into.to_owned()))
+        })
+        .collect()
 }
 
 fn sync_actor(what: &str) -> Actor {

@@ -140,6 +140,11 @@ mod tests {
             undo: 6,
             redo: 7,
             version: 8,
+            vehicle_copy: Some(p::VehicleCopy {
+                vehicle_id: "v".into(),
+                mission_version: 9,
+                plan_id: Some("plan0".into()),
+            }),
         };
         let wire = dto::Plan::from(&plan);
         assert_eq!(

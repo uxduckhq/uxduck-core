@@ -111,21 +111,17 @@ pub struct Settings {
     /// When cameras are recorded.
     #[serde(default)]
     pub video_recording: crate::dto::video::RecordPolicy,
+    /// How a camera that sends no IDR is re-encoded for live view.
+    #[serde(default)]
+    pub video_reencoder: crate::dto::video::Reencoder,
     /// The tray icon while UXDuck runs on a desktop.
     #[serde(default = "on")]
     pub show_in_menu_bar: bool,
-    /// "Connect this computer to my account": while signed in, the
-    /// account sees it online (S78).
+    /// "Live sharing from this computer": while signed in, watch links can
+    /// show its vehicles live while someone watches. Off, every link ends
+    /// and nothing live leaves the computer.
     #[serde(default = "on")]
-    pub connect_to_account: bool,
-    /// "Let my account watch this computer": the vehicles someone of the
-    /// same account watches, live, while they watch (S79).
-    #[serde(default = "on")]
-    pub watch_from_account: bool,
-    /// "Allow remote control from my account": the command classes someone
-    /// of the same account may send from away (S80). Empty is off.
-    #[serde(default)]
-    pub remote_control: Vec<crate::dto::command::CommandClass>,
+    pub live_sharing: bool,
     /// Legacy first selected network address (S97). Absent is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_address: Option<String>,
@@ -144,7 +140,7 @@ pub struct Settings {
     /// person turns it on.
     #[serde(default)]
     pub store_flights: bool,
-    /// "Save every flight to my account" (C9).
+    /// "Add every flight to my logbook" (C9).
     #[serde(default)]
     pub save_flights: bool,
     /// Uploads go on while a vehicle is armed (S82).
@@ -153,6 +149,13 @@ pub struct Settings {
     /// A recording's segments go while it records; off, once it ends (S83).
     #[serde(default)]
     pub upload_video_while_flying: bool,
+    /// "What to sync" (ADR-0046 B11): what goes with each synced flight.
+    #[serde(default)]
+    pub sync_content: SyncContent,
+    /// "Wait for unmetered networks" (B12): telemetry logs and video wait
+    /// while the connection is metered.
+    #[serde(default = "on")]
+    pub wait_for_unmetered: bool,
     /// UXDuck opens at login (S108): as the system says when it was asked,
     /// else as last set here.
     #[serde(default)]
@@ -190,6 +193,9 @@ pub struct Settings {
     /// Datasets chosen for single vehicles (S119); the rest use the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vehicle_terrain_datasets: Vec<crate::dto::terrain::VehicleTerrainDataset>,
+    /// Vehicles that never get terrain areas written to them (ADR-0051 A7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vehicles_without_terrain_areas: Vec<String>,
     /// Areas whose terrain is kept offline (S120), changed with
     /// `terrain/keepArea` and `terrain/removeArea`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -249,14 +255,12 @@ pub struct SettingsUpdateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_recording: Option<crate::dto::video::RecordPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_reencoder: Option<crate::dto::video::Reencoder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_in_menu_bar: Option<bool>,
+    /// Off ends this computer's watch links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect_to_account: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch_from_account: Option<bool>,
-    /// Replaces the classes; only from this computer, never from away.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_control: Option<Vec<crate::dto::command::CommandClass>>,
+    pub live_sharing: Option<bool>,
     /// One of this computer's addresses to also listen on, for phones and
     /// tablets on that network (S97); an empty string turns it off. Only
     /// from this computer.
@@ -280,6 +284,10 @@ pub struct SettingsUpdateParams {
     pub upload_while_armed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_video_while_flying: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_content: Option<SyncContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_unmetered: Option<bool>,
     /// Registers UXDuck to start at login, or removes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_at_login: Option<bool>,
@@ -301,6 +309,18 @@ pub struct SettingsUpdateParams {
     /// Chooses one vehicle's dataset, or gives it back to the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_terrain: Option<crate::dto::terrain::VehicleTerrainDataset>,
+    /// "Keep areas off this vehicle" on or off (ADR-0051 A7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_terrain_areas: Option<VehicleTerrainAreasChoice>,
+}
+
+/// Whether a vehicle gets terrain areas written to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainAreasChoice {
+    pub vehicle_id: String,
+    /// Never writes areas to it while on.
+    pub keep_off: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -312,6 +332,19 @@ pub struct CategoryUsage {
     pub files: u32,
     /// Whether a policy may delete its old files.
     pub deletable: bool,
+    /// Where its files are, as absolute paths: folders, or files in the
+    /// data directory. Absent from older hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRevealParams {
+    /// Shows where this category keeps its files; absent shows the data
+    /// directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<StorageCategory>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -349,6 +382,61 @@ pub struct UploadStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub stored_bytes: Option<u64>,
+    /// What the account may keep, in bytes (ADR-0046 B4); unknown until asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub quota_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<StoragePlan>,
+    /// Whether camera recordings may go to the account (B4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_upload_video: Option<bool>,
+    /// Whether simulated flights may be synced (B6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_sync_simulated: Option<bool>,
+    /// Why the account refused the last upload (B5); nothing more is sent
+    /// until the plan or what it keeps changes, or someone signs in again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<SyncRefusal>,
+    /// This computer's connection is metered (ADR-0046 B12), when the
+    /// system says; telemetry logs and video wait while it is and "Wait
+    /// for unmetered networks" is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metered: Option<bool>,
+}
+
+/// What a synced flight takes to the account (ADR-0046 B11), each level
+/// with everything before it.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncContent {
+    /// Its summary: times, height, modes, who flew.
+    Summaries,
+    /// Its telemetry log too.
+    #[default]
+    Logs,
+    /// Its camera video too, on a plan that takes video.
+    Video,
+}
+
+/// The account's storage plan (ADR-0046 B3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoragePlan {
+    Free,
+    Paid,
+}
+
+/// Why the account refused an upload (ADR-0046 B5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncRefusal {
+    /// It would take the account past its quota.
+    StorageFull,
+    /// Video on a plan without it.
+    Plan,
 }
 
 /// How often each of the daemon's tasks has woken since it started (S24),
@@ -405,7 +493,8 @@ pub struct DaemonAbout {
     /// Microseconds since it started.
     #[schemars(schema_with = "crate::safe::integer")]
     pub uptime_us: u64,
-    /// Native core only; absent in browser engines and older cores. Excludes simulators.
+    /// Native Core usage, with owned simulation usage reported separately inside it.
+    /// Absent in browser engines and older cores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_usage: Option<CoreProcessUsage>,
 }
@@ -416,7 +505,27 @@ pub struct DaemonAbout {
 pub struct CoreProcessUsage {
     #[schemars(schema_with = "crate::safe::integer")]
     pub resident_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_core_count: Option<u32>,
     /// Absent until two samples, at least two seconds apart, are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_window_ms: Option<u32>,
+    /// Local native simulators owned by this core, including their guards and children.
+    /// Absent in older cores; zero count means there are no native simulations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulations: Option<SimulationProcessUsage>,
+}
+
+/// Aggregate native simulation usage. Process identities never leave the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulationProcessUsage {
+    pub count: u32,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub resident_bytes: u64,
+    /// Absent until every currently running process has an interval baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

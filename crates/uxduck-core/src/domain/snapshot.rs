@@ -65,9 +65,51 @@ pub struct SnapshotParameter {
 }
 
 impl Snapshot {
-    /// Whether it was saved flying: armed and off the ground.
+    /// Whether it was saved flying: armed and off the ground. A rover,
+    /// boat or submarine never is, whatever its height above home.
     #[must_use]
     pub fn flying(&self) -> bool {
-        self.armed && self.height_m >= super::command::FLYING_ABOVE_HOME_M
+        !matches!(
+            self.vehicle,
+            SimVehicle::Rover | SimVehicle::Boat | SimVehicle::Submarine
+        ) && self.armed
+            && self.height_m >= super::command::FLYING_ABOVE_HOME_M
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_something_that_flies_is_saved_flying() {
+        let at = |vehicle: SimVehicle| Snapshot {
+            id: "s".into(),
+            name: "Sim 1".into(),
+            vehicle,
+            autopilot: SimAutopilot::default(),
+            frame: None,
+            firmware: None,
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            ground_altitude_m: 0.0,
+            // A rover up a hill, or a boat on a lake above home.
+            height_m: 20.0,
+            heading_deg: 0.0,
+            ground_speed_mps: 0.0,
+            mode: None,
+            armed: true,
+            parameters: Vec::new(),
+            mission: Vec::new(),
+            current_item: None,
+            operator_id: None,
+            created_at_us: 0,
+            version: 1,
+        };
+        assert!(at(SimVehicle::Multicopter).flying());
+        assert!(at(SimVehicle::Airship).flying());
+        for vehicle in [SimVehicle::Rover, SimVehicle::Boat, SimVehicle::Submarine] {
+            assert!(!at(vehicle).flying(), "{vehicle:?}");
+        }
     }
 }

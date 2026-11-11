@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Notify;
 use uxduck_core::events::Event;
+use uxduck_engine::Engine;
 use uxduck_engine::sync::{Outgoing, Pulled, SyncChange, SyncPort, outgoing};
 
 use crate::adapters::credentials::FileCredentials;
@@ -157,7 +158,7 @@ impl Task {
     async fn round(&mut self) -> Result<(), Stop> {
         let state = self
             .engine
-            .run(|e| e.sync_state().clone())
+            .run(Engine::sync_round)
             .await
             .map_err(|_| Stop::Gone)?;
         if !state.enabled {

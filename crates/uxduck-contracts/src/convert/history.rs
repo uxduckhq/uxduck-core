@@ -93,6 +93,21 @@ impl From<&core::HistoryEvent> for dto::HistoryEvent {
                 text,
                 record: (&record).into(),
             },
+            core::HistoryEvent::ParametersApplied { set_id, name, text } => {
+                Self::ParametersApplied { set_id, name, text }
+            }
+            core::HistoryEvent::AutoTuned { text, kept, gains } => Self::AutoTuned {
+                text,
+                kept,
+                gains: gains
+                    .into_iter()
+                    .map(|g| dto::TunedGain {
+                        name: g.name,
+                        from: g.from,
+                        to: g.to,
+                    })
+                    .collect(),
+            },
         }
     }
 }

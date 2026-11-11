@@ -10,6 +10,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::latency::Arrival;
+
 pub const PACKET_SIZE: usize = 188;
 const SYNC_BYTE: u8 = 0x47;
 
@@ -45,6 +47,8 @@ pub struct Pes {
     pub received_length: usize,
     /// A continuity gap or transport error hit it: its bytes are incomplete.
     pub damaged: bool,
+    /// When the bytes it began in arrived, if the caller said (S262).
+    pub arrived: Option<Arrival>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,6 +72,8 @@ struct Stream {
     started: bool,
     damaged: bool,
     last_cc: Option<u8>,
+    /// When the bytes its PES in progress began in arrived.
+    arrived: Option<Arrival>,
 }
 
 #[must_use]
@@ -150,6 +156,8 @@ pub struct Demuxer {
     rest: Vec<u8>,
     pmt_pid: Option<u16>,
     streams: BTreeMap<u16, Stream>,
+    /// When the bytes being read arrived, from `push_at`.
+    arrival: Option<Arrival>,
 }
 
 impl Demuxer {
@@ -169,6 +177,17 @@ impl Demuxer {
 
     /// Bytes as they arrive, in any chunks; the PES completed by them.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Pes> {
+        self.arrival = None;
+        self.read(chunk)
+    }
+
+    /// As `push`, and each PES says when the bytes it began in arrived.
+    pub fn push_at(&mut self, chunk: &[u8], arrival: Arrival) -> Vec<Pes> {
+        self.arrival = Some(arrival);
+        self.read(chunk)
+    }
+
+    fn read(&mut self, chunk: &[u8]) -> Vec<Pes> {
         self.stats.bytes += chunk.len() as u64;
         let mut data = std::mem::take(&mut self.rest);
         data.extend_from_slice(chunk);
@@ -253,6 +272,7 @@ impl Demuxer {
             };
             stream.damaged = false;
             stream.started = true;
+            stream.arrived = self.arrival;
             stream.bytes.extend_from_slice(payload);
         } else if stream.started {
             stream.bytes.extend_from_slice(payload);
@@ -306,6 +326,7 @@ impl Demuxer {
                         started: false,
                         damaged: false,
                         last_cc: None,
+                        arrived: None,
                     },
                 );
             }
@@ -322,8 +343,9 @@ impl Demuxer {
         }
         let bytes = std::mem::take(&mut stream.bytes);
         stream.started = false;
-        let (kind, damaged) = (stream.kind, stream.damaged);
-        if let Some(pes) = self.parse_pes(pid, kind, &bytes, damaged) {
+        let (kind, damaged, arrived) = (stream.kind, stream.damaged, stream.arrived.take());
+        if let Some(mut pes) = self.parse_pes(pid, kind, &bytes, damaged) {
+            pes.arrived = arrived;
             self.stats.pes += 1;
             out.push(pes);
         }
@@ -374,6 +396,7 @@ impl Demuxer {
             declared_length,
             received_length,
             damaged,
+            arrived: None,
         })
     }
 }

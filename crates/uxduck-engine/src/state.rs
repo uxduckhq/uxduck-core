@@ -2,13 +2,15 @@
 //! last event applied (ADR-0001 D7). A checkpoint is this struct serialised;
 //! restore is a checkpoint plus the events after it (ADR-0007).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use uxduck_core::domain::approval::{Approval, ApprovalState};
 use uxduck_core::domain::client::ClientRecord;
 use uxduck_core::domain::command::Receipt;
 use uxduck_core::domain::controller::{Controller, InputMapping};
+use uxduck_core::domain::dialect::Dialect;
+use uxduck_core::domain::firmware_profile::FirmwareProfile;
 use uxduck_core::domain::history::HistoryEntry;
 use uxduck_core::domain::link::Link;
 use uxduck_core::domain::marker::Marker;
@@ -24,7 +26,7 @@ use uxduck_core::domain::settings::Settings;
 use uxduck_core::domain::snapshot::Snapshot;
 use uxduck_core::domain::sync::{LibraryLink, LibraryVehicle, SyncState};
 use uxduck_core::domain::thread::{Folder, Item, Thread};
-use uxduck_core::domain::vehicle::Vehicle;
+use uxduck_core::domain::vehicle::{Vehicle, is_callsign};
 use uxduck_core::domain::video::{VideoPhoto, VideoRecording, VideoSource};
 use uxduck_core::events::{Change, Event};
 
@@ -47,6 +49,12 @@ pub struct State {
     /// Live records and saved vehicles, by VID.
     #[serde(default)]
     pub vehicles: BTreeMap<String, Vehicle>,
+    /// Every callsign a real vehicle has gone by, with the last vehicle that
+    /// did: never given to another vehicle, though removed or renamed, so a
+    /// callsign means one aircraft in flights and history (maintainer,
+    /// 2026-10-28).
+    #[serde(default)]
+    pub retired_callsigns: BTreeMap<String, String>,
     /// The latest receipts of each vehicle; the journal keeps every one.
     #[serde(default)]
     pub receipts: BTreeMap<String, Receipt>,
@@ -147,6 +155,12 @@ pub struct State {
     /// Definition sets people added, by id (S67).
     #[serde(default)]
     pub own_sets: BTreeMap<String, OwnSet>,
+    /// MAVLink dialects people added, by id (ADR-0044, S252).
+    #[serde(default)]
+    pub dialects: BTreeMap<String, Dialect>,
+    /// Firmware profiles people added, by id (ADR-0044 F12, S254).
+    #[serde(default)]
+    pub firmware_profiles: BTreeMap<String, FirmwareProfile>,
     /// Cloud sync (S16).
     #[serde(default)]
     pub sync: SyncState,
@@ -159,10 +173,18 @@ pub struct State {
     /// Flights, by id (C8).
     #[serde(default)]
     pub flights: BTreeMap<String, uxduck_core::domain::flight::Flight>,
+    #[serde(default)]
+    pub forgotten_flights: BTreeSet<String>,
+    /// Operations, by id (ADR-0039 R16).
+    #[serde(default)]
+    pub operations: BTreeMap<String, uxduck_core::domain::operation::Operation>,
     /// Vehicles' parameter baselines, by id (C7). Retired on 2026-10-24:
     /// filled only from older journals, and read by nothing.
     #[serde(default)]
     pub baselines: BTreeMap<String, uxduck_core::domain::parameter::ParamBaseline>,
+    /// Saved parameter sets, by id (S217): on this computer only.
+    #[serde(default)]
+    pub saved_params: BTreeMap<String, uxduck_core::domain::parameter::SavedParams>,
 }
 
 /// Receipts kept per vehicle in the state (and so in snapshots).
@@ -213,10 +235,37 @@ impl State {
                 self.links.remove(id);
             }
             Change::VehicleUpserted { vehicle } => {
+                let simulated = self
+                    .links
+                    .get(&vehicle.link_id)
+                    .is_some_and(|link| link.kind.is_simulator());
+                // A vehicle heard on a new link or port went by a callsign
+                // of its own until its UID showed it is one already known:
+                // that callsign was never this vehicle's, and is free again.
+                if let Some(before) = self.vehicles.get(&vehicle.id) {
+                    for alias in vehicle
+                        .aliases
+                        .iter()
+                        .filter(|a| !before.aliases.contains(a))
+                    {
+                        self.retired_callsigns
+                            .retain(|word, id| id != alias || *word == vehicle.name);
+                    }
+                }
+                // A replay vehicle's name is its original's, or one for
+                // the replay alone: it retires nothing (S238).
+                if !simulated && !vehicle.replay && is_callsign(&vehicle.name) {
+                    self.retired_callsigns
+                        .insert(vehicle.name.clone(), vehicle.id.clone());
+                }
                 self.vehicles.insert(vehicle.id.clone(), vehicle.clone());
             }
             Change::VehicleRemoved { id } => {
-                self.vehicles.remove(id);
+                if self.vehicles.remove(id).is_some_and(|v| v.replay) {
+                    self.parameters.retain(|_, p| p.vehicle_id != *id);
+                    self.parameter_sets.remove(id);
+                    self.missions.remove(id);
+                }
                 // Its definitions go with it; heard again, they are chosen again.
                 self.param_definitions.remove(id);
                 self.preflights.remove(id);
@@ -390,6 +439,19 @@ impl State {
             Change::OwnSetRemoved { id } => {
                 self.own_sets.remove(id);
             }
+            Change::DialectUpserted { dialect } => {
+                self.dialects.insert(dialect.id.clone(), dialect.clone());
+            }
+            Change::DialectRemoved { id } => {
+                self.dialects.remove(id);
+            }
+            Change::FirmwareProfileUpserted { profile } => {
+                self.firmware_profiles
+                    .insert(profile.id.clone(), profile.clone());
+            }
+            Change::FirmwareProfileRemoved { id } => {
+                self.firmware_profiles.remove(id);
+            }
             Change::SnapshotRemoved { id } => {
                 self.snapshots.remove(id);
             }
@@ -409,7 +471,16 @@ impl State {
                 self.link_library.remove(id);
             }
             Change::FlightUpserted { flight } => {
-                self.flights.insert(flight.id.clone(), flight.clone());
+                if !self.forgotten_flights.contains(&flight.id) {
+                    self.flights.insert(flight.id.clone(), flight.clone());
+                }
+            }
+            Change::OperationUpserted { operation } => {
+                self.operations
+                    .insert(operation.id.clone(), operation.clone());
+            }
+            Change::OperationRemoved { id } => {
+                self.operations.remove(id);
             }
             Change::FlightReplaced { old_id, flight } => {
                 self.flights.remove(old_id);
@@ -426,11 +497,21 @@ impl State {
                     self.flights.remove(id);
                 }
             }
+            Change::FlightForgotten { id } => {
+                self.flights.remove(id);
+                self.forgotten_flights.insert(id.clone());
+            }
             Change::BaselineUpserted { baseline } => {
                 self.baselines.insert(baseline.id.clone(), baseline.clone());
             }
             Change::BaselineRemoved { id } => {
                 self.baselines.remove(id);
+            }
+            Change::SavedParamsUpserted { set } => {
+                self.saved_params.insert(set.id.clone(), set.clone());
+            }
+            Change::SavedParamsRemoved { id } => {
+                self.saved_params.remove(id);
             }
             Change::ControllerUpserted { controller } => {
                 self.controllers
@@ -544,6 +625,7 @@ mod tests {
                     display: None,
                     account_id: None,
                     controller_mappings: Vec::new(),
+                    terms: None,
                     version,
                 },
             },

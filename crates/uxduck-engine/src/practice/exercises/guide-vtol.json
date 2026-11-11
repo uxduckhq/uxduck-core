@@ -9,7 +9,7 @@
   "start": {},
   "steps": [
     {
-      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+      "text": "Press Go to under Guide in the Cockpit tab, then click a place on the map.",
       "hint": "Go to sends it to the place you clicked, flying forward like a plane.",
       "hintAfterS": 45,
       "all": [
@@ -18,7 +18,7 @@
       ]
     },
     {
-      "text": "Choose LOITER in the Mode menu in the Cockpit tab.",
+      "text": "Choose LOITER under Modes in the Cockpit tab.",
       "hint": "Loiter circles where it is, flying forward like a plane.",
       "hintAfterS": 45,
       "all": [

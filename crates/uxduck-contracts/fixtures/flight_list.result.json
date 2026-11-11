@@ -44,6 +44,11 @@
     "simulatedAirUs": 660000000,
     "realAirUsSince": 0,
     "simulatedAirUsSince": 660000000,
-    "count": 1
+    "realArmedUs": 0,
+    "simulatedArmedUs": 720000000,
+    "realArmedUsSince": 0,
+    "simulatedArmedUsSince": 720000000,
+    "count": 1,
+    "grounded": 0
   }
 }

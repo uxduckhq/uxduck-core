@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<!-- A test fork's dialect (ADR-0044, S252): a new message, a standard one
+     with an extension added, a standard one with its layout changed, and
+     one the same as ArduPilot's. -->
+<mavlink>
+  <include>ardupilotmega.xml</include>
+  <enums>
+    <enum name="ACME_MODE">
+      <entry value="0" name="ACME_MODE_IDLE"/>
+      <entry value="3" name="ACME_MODE_SURVEY">
+        <description>Surveying.</description>
+      </entry>
+    </enum>
+    <enum name="ACME_FLAGS" bitmask="true">
+      <entry value="1" name="ACME_FLAG_ARMED"/>
+      <entry value="0x04" name="ACME_FLAG_HOT"/>
+    </enum>
+    <enum name="ACME_UNUSED">
+      <entry value="1" name="ACME_UNUSED_ONE"/>
+    </enum>
+  </enums>
+  <messages>
+    <message id="0" name="HEARTBEAT">
+      <description>The same as ArduPilot's.</description>
+      <field type="uint8_t" name="type">Type.</field>
+      <field type="uint8_t" name="autopilot">Autopilot.</field>
+      <field type="uint8_t" name="base_mode">Base mode.</field>
+      <field type="uint32_t" name="custom_mode">Custom mode.</field>
+      <field type="uint8_t" name="system_status">Status.</field>
+      <field type="uint8_t_mavlink_version" name="mavlink_version">Version.</field>
+    </message>
+    <message id="1" name="SYS_STATUS">
+      <description>ArduPilot's, with one more extension.</description>
+      <field type="uint32_t" name="onboard_control_sensors_present">Present.</field>
+      <field type="uint32_t" name="onboard_control_sensors_enabled">Enabled.</field>
+      <field type="uint32_t" name="onboard_control_sensors_health">Health.</field>
+      <field type="uint16_t" name="load">Load.</field>
+      <field type="uint16_t" name="voltage_battery" units="mV">Voltage.</field>
+      <field type="int16_t" name="current_battery" units="cA">Current.</field>
+      <field type="int8_t" name="battery_remaining" units="%">Remaining.</field>
+      <field type="uint16_t" name="drop_rate_comm">Drops.</field>
+      <field type="uint16_t" name="errors_comm">Errors.</field>
+      <field type="uint16_t" name="errors_count1">Errors 1.</field>
+      <field type="uint16_t" name="errors_count2">Errors 2.</field>
+      <field type="uint16_t" name="errors_count3">Errors 3.</field>
+      <field type="uint16_t" name="errors_count4">Errors 4.</field>
+      <extensions/>
+      <field type="uint32_t" name="onboard_control_sensors_present_extended">Present.</field>
+      <field type="uint32_t" name="onboard_control_sensors_enabled_extended">Enabled.</field>
+      <field type="uint32_t" name="onboard_control_sensors_health_extended">Health.</field>
+      <field type="uint16_t" name="acme_payload_mv" units="mV">The payload's supply.</field>
+    </message>
+    <message id="33" name="GLOBAL_POSITION_INT">
+      <description>Acme's, with altitudes in centimetres.</description>
+      <field type="uint32_t" name="time_boot_ms" units="ms">Time.</field>
+      <field type="int32_t" name="lat" units="degE7">Latitude.</field>
+      <field type="int32_t" name="lon" units="degE7">Longitude.</field>
+      <field type="int16_t" name="alt_cm" units="cm">Altitude.</field>
+      <field type="int16_t" name="relative_alt_cm" units="cm">Above home.</field>
+      <field type="uint16_t" name="hdg" units="cdeg">Heading.</field>
+    </message>
+    <message id="43001" name="ACME_STATUS">
+      <description>Acme payload status.</description>
+      <field type="uint64_t" name="time_usec" units="us">Time.</field>
+      <field type="float" name="voltage" units="V">Supply.</field>
+      <field type="uint8_t" name="mode" enum="ACME_MODE">What the payload is doing.</field>
+      <field type="uint8_t" name="flags" enum="ACME_FLAGS">Flags.</field>
+      <field type="char[8]" name="name">Its name.</field>
+      <extensions/>
+      <field type="int16_t" name="temperature" units="cdegC">Temperature.</field>
+    </message>
+  </messages>
+</mavlink>

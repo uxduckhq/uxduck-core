@@ -1,0 +1,86 @@
+{
+  "id": "op5f1c0a91b2d3e4f5",
+  "name": "Ana K",
+  "units": "metric",
+  "quantityUnits": {
+    "distance": "kilometers",
+    "altitude": "meters",
+    "speed": "meters-per-second",
+    "verticalSpeed": "meters-per-second",
+    "temperature": "celsius"
+  },
+  "coordinateFormat": "decimal",
+  "altitudeFrame": "above-home",
+  "layout": {
+    "paneOpen": false,
+    "dock": {
+      "type": "split",
+      "direction": "row",
+      "children": [
+        {
+          "size": 500,
+          "node": {
+            "type": "group",
+            "tabs": [
+              {
+                "id": "chat",
+                "kind": "chat"
+              }
+            ],
+            "active": 0
+          }
+        },
+        {
+          "size": 500,
+          "node": {
+            "type": "group",
+            "tabs": [
+              {
+                "id": "map",
+                "kind": "map"
+              }
+            ],
+            "active": 0
+          }
+        }
+      ]
+    },
+    "saved": [],
+    "arranged": false,
+    "flightOpened": false
+  },
+  "placeSearch": true,
+  "basemap": "imagery",
+  "shortcuts": [
+    {
+      "action": "open-map",
+      "shortcut": "Alt+G"
+    },
+    {
+      "action": "send-feedback",
+      "shortcut": null
+    }
+  ],
+  "skippedConfirmations": ["vehicle:take-off"],
+  "terms": {
+    "version": "2026-11-03",
+    "acceptedAtMs": 1793750400000,
+    "accountId": "usr_8f2c1a"
+  },
+  "version": 2,
+  "telemetryLayouts": [],
+  "vehicleTelemetry": [],
+  "parameterGroups": [
+    {
+      "name": "Battery",
+      "parameters": ["BATT_CAPACITY"]
+    },
+    {
+      "name": "Hover tuning",
+      "parameters": ["ATC_RAT_RLL_P", "ATC_RAT_PIT_P"]
+    }
+  ],
+  "inspectorPinned": ["received:HEARTBEAT", "sent:COMMAND_LONG"],
+  "controlActions": [],
+  "controllerMappings": []
+}

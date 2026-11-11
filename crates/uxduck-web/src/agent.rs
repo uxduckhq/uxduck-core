@@ -12,7 +12,7 @@ use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uxduck_agent::conversation::{self, Entry};
-use uxduck_agent::provider::openai;
+use uxduck_agent::provider::{anthropic, openai};
 use uxduck_agent::{
     Host, Provider, ProviderError, ProviderEvent, ProviderRequest, Turn, TurnOutcome, Wire,
     run_turn,
@@ -25,24 +25,43 @@ use uxduck_engine::agent::ToolOutcome;
 use uxduck_engine::runtime::{TurnRequest, TurnStats};
 use uxduck_engine::{ConnectionId, Engine};
 
-/// An account hint from one page. The HTTP transport checks its account id
-/// against the current server session before every inference request.
+/// An account hint from one page: the browser's one account, whichever
+/// operator the page acts as (ADR-0033, 2026-10-31). The HTTP transport
+/// checks its account id against the current server session before every
+/// inference request. `operator_id` is the page's operator: a change ends
+/// that page's saved conversations, and it no longer decides who may use AI.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Account {
     pub operator_id: Option<String>,
     pub account_id: Option<String>,
     pub revision: Option<String>,
+    /// Server-offered models from the page's account read; inference still authorizes every request.
+    #[serde(default)]
+    pub hosted_models: Option<Vec<String>>,
 }
 impl Account {
+    /// Models offered by the server, none until it has said; the API
+    /// authorizes every request again.
+    fn supports(&self, model: &str) -> bool {
+        self.hosted_models
+            .as_ref()
+            .is_some_and(|models| models.iter().any(|offered| offered == model))
+    }
+
     #[must_use]
     pub fn valid(&self) -> bool {
         [&self.operator_id, &self.account_id, &self.revision]
             .into_iter()
             .all(|v| v.as_ref().is_none_or(|v| !v.is_empty() && v.len() <= 128))
-            && self.operator_id.is_some()
             && self.account_id.is_some()
             && self.revision.is_some()
+            && self.hosted_models.as_ref().is_none_or(|models| {
+                models.len() <= 128
+                    && models
+                        .iter()
+                        .all(|model| !model.is_empty() && model.len() <= 128)
+            })
     }
 }
 
@@ -56,7 +75,14 @@ pub enum Output {
         chat: String,
         share: bool,
         continues: Option<String>,
+        /// The hosted model's API for this model: `responses` or `messages`.
+        path: &'static str,
         body: Value,
+        websocket: bool,
+    },
+    Send {
+        request: u64,
+        event: Value,
     },
     Abort {
         request: u64,
@@ -82,12 +108,17 @@ enum Action {
     ToolStart(String, Value, Reply<String>),
     Rpc(String, Value, Reply<Result<Value, Value>>),
     ToolFinish(String, Result<Value, Value>),
+    InputApplied(String),
+    SocketSend(u64, Value),
     Model(
         u64,
         ProviderRequest,
         mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+        uxduck_agent::input::Inputs,
+        bool,
     ),
     Finished(TurnOutcome, String),
+    TitleFinished(u64, uxduck_agent::turn::TitleOutcome),
 }
 type Queue = Arc<Mutex<Vec<(Arc<Scope>, Action)>>>;
 fn push(queue: &Queue, scope: &Arc<Scope>, action: Action) {
@@ -99,10 +130,22 @@ fn push(queue: &Queue, scope: &Arc<Scope>, action: Action) {
     }
 }
 struct BrowserHost {
+    inputs: uxduck_agent::input::Inputs,
     scope: Arc<Scope>,
     queue: Queue,
+    mission_reads: Mutex<uxduck_contracts::dto::mission_read::MissionReadSession>,
 }
 impl Host for BrowserHost {
+    fn can_file_feedback(&self) -> bool {
+        false
+    }
+    fn inputs(&self) -> uxduck_agent::input::Inputs {
+        self.inputs.clone()
+    }
+    fn input_applied(&self, id: String) -> BoxFuture<'_, ()> {
+        push(&self.queue, &self.scope, Action::InputApplied(id));
+        futures::future::ready(()).boxed()
+    }
     fn message_start(&self) -> BoxFuture<'_, String> {
         let (tx, rx) = oneshot::channel();
         push(&self.queue, &self.scope, Action::MessageStart(tx));
@@ -130,16 +173,39 @@ impl Host for BrowserHost {
         async move { rx.await.unwrap_or_default() }.boxed()
     }
     fn call(&self, method: String, mut params: Value) -> BoxFuture<'_, Result<Value, Value>> {
-        if matches!(method.as_str(), "layout/open" | "plugin/draft")
-            && let Some(fields) = params.as_object_mut()
+        if let Err(error) = self
+            .mission_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .before_request(&method, &params)
+        {
+            return futures::future::ready(Err(json!(error))).boxed();
+        }
+        let mission_bearing =
+            uxduck_contracts::dto::mission_read::mission_read_request(&method, &params);
+        if matches!(
+            method.as_str(),
+            "layout/open" | "plugin/draft" | "feedback/file" | "feedback/add"
+        ) && let Some(fields) = params.as_object_mut()
         {
             fields.insert("threadId".into(), Value::String(self.scope.thread.clone()));
         }
         let (tx, rx) = oneshot::channel();
-        push(&self.queue, &self.scope, Action::Rpc(method, params, tx));
+        push(
+            &self.queue,
+            &self.scope,
+            Action::Rpc(method.clone(), params, tx),
+        );
         async move {
-            rx.await
-                .unwrap_or_else(|_| Err(json!({"code":-32603,"message":"The agent stopped."})))
+            let result = rx
+                .await
+                .unwrap_or_else(|_| Err(json!({"code":-32603,"message":"The agent stopped."})))?;
+            self.mission_reads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .accept_result(&method, mission_bearing, &result)
+                .map_err(|error| json!(error))?;
+            Ok(result)
         }
         .boxed()
     }
@@ -155,13 +221,28 @@ impl Host for BrowserHost {
     }
 }
 struct BrowserProvider {
+    wire: Wire,
     scope: Arc<Scope>,
     queue: Queue,
     next: Arc<AtomicU64>,
 }
 impl Provider for BrowserProvider {
+    fn respond_with_input(
+        &self,
+        request: ProviderRequest,
+        inputs: uxduck_agent::input::Inputs,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let (tx, rx) = mpsc::unbounded();
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        push(
+            &self.queue,
+            &self.scope,
+            Action::Model(id, request, tx, inputs, false),
+        );
+        rx.boxed()
+    }
     fn wire(&self) -> Wire {
-        Wire::OpenAi
+        self.wire
     }
     fn respond(
         &self,
@@ -169,7 +250,36 @@ impl Provider for BrowserProvider {
     ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
         let (tx, rx) = mpsc::unbounded();
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        push(&self.queue, &self.scope, Action::Model(id, request, tx));
+        push(
+            &self.queue,
+            &self.scope,
+            Action::Model(
+                id,
+                request,
+                tx,
+                uxduck_agent::input::Inputs::default(),
+                false,
+            ),
+        );
+        rx.boxed()
+    }
+    fn respond_once_private(
+        &self,
+        request: ProviderRequest,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let (tx, rx) = mpsc::unbounded();
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        push(
+            &self.queue,
+            &self.scope,
+            Action::Model(
+                id,
+                request,
+                tx,
+                uxduck_agent::input::Inputs::default(),
+                true,
+            ),
+        );
         rx.boxed()
     }
 }
@@ -179,12 +289,24 @@ struct Connection {
     next: u64,
 }
 struct Running {
+    inputs: uxduck_agent::input::Inputs,
     scope: Arc<Scope>,
     abort: AbortHandle,
+    title: Option<(String, String)>,
+}
+struct TitleJob {
+    scope: Arc<Scope>,
+    abort: AbortHandle,
+    item: String,
+    model: String,
 }
 struct Stream {
+    socket: Option<uxduck_agent::provider::socket::SocketRound>,
+    inputs: uxduck_agent::input::Inputs,
     scope: Arc<Scope>,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+    /// Claude's answer so far; Responses events stand alone.
+    answer: Option<anthropic::Answer>,
 }
 struct Saved {
     account: Account,
@@ -200,6 +322,7 @@ pub struct Runtime {
     queue: Queue,
     tasks: FuturesUnordered<BoxFuture<'static, ()>>,
     running: HashMap<String, Running>,
+    titles: HashMap<u64, TitleJob>,
     connections: HashMap<ConnectionId, Connection>,
     streams: HashMap<u64, Stream>,
     saved: HashMap<String, Saved>,
@@ -215,19 +338,27 @@ impl std::fmt::Debug for Runtime {
     }
 }
 impl Runtime {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a turn from request to first call, in order"
+    )]
     pub fn start(&mut self, engine: &mut Engine, request: TurnRequest, account: Account, now: u64) {
         let fail = |engine: &mut Engine, why: &str| {
             engine.agent_error(None, &request.thread_id, why);
             engine.agent_turn_finish(&request.thread_id, request.turn, None);
         };
-        if !account.valid() || account.operator_id != request.operator_id {
+        if !account.valid() {
+            fail(engine, crate::root::NO_ACCOUNT);
+            return;
+        }
+        if request.model.is_empty() {
             fail(
                 engine,
-                "Sign in with this operator’s account to use AI. Request access from your account page if needed.",
+                "UXDuck is still checking which AI models your account can use. Send your message again in a moment.",
             );
             return;
         }
-        if !["gpt-6-luna", "gpt-6-sol"].contains(&request.model.as_str()) {
+        if !account.supports(&request.model) {
             fail(engine, "Choose a supported hosted model for this chat.");
             return;
         }
@@ -260,10 +391,15 @@ impl Runtime {
             .collect();
         let before = items
             .iter()
-            .rposition(|i| i.kind == ItemKind::UserMessage)
+            .position(|i| i.id == request.item_id)
             .unwrap_or(items.len());
-        let covers: Vec<_> = items[..before].iter().map(|i| i.id.clone()).collect();
+        let covers: Vec<_> = items[..before]
+            .iter()
+            .filter(|i| i.in_history())
+            .map(|i| i.id.clone())
+            .collect();
         let context = request.vehicle.as_ref().map(|(id, name)| format!("This thread is about the vehicle \"{name}\" (id {id}). Use vehicle_get with that id for its details and telemetry_get for where it is and its battery, attitude and GPS."));
+        let wire = Wire::for_model(&request.model);
         let kept = self.saved.remove(&request.thread_id).filter(|s| {
             s.account == scope.account && s.model == request.model && s.covers == covers
         });
@@ -274,13 +410,14 @@ impl Runtime {
                 s.response,
             ),
             None => (
-                conversation::rebuild(Wire::OpenAi, &entries(&items[..before])),
+                conversation::rebuild(wire, &entries(&items[..before])),
                 false,
                 None,
             ),
         };
         let turn = Turn {
             model: request.model.clone(),
+            effort: request.effort.clone(),
             text: request.text,
             conversation,
             context,
@@ -288,11 +425,17 @@ impl Runtime {
             previous,
             cache_key: Some(format!("web-{}", request.thread_id)),
         };
+        let inputs = uxduck_agent::input::Inputs::default();
         let host = BrowserHost {
+            inputs: inputs.clone(),
             scope: scope.clone(),
             queue: self.queue.clone(),
+            mission_reads: Mutex::new(
+                uxduck_contracts::dto::mission_read::MissionReadSession::default(),
+            ),
         };
         let provider = BrowserProvider {
+            wire,
             scope: scope.clone(),
             queue: self.queue.clone(),
             next: self.next.clone(),
@@ -300,11 +443,18 @@ impl Runtime {
         let queue = self.queue.clone();
         let task_scope = scope.clone();
         let (abort, registration) = AbortHandle::new_pair();
-        self.running
-            .insert(request.thread_id, Running { scope, abort });
+        self.running.insert(
+            request.thread_id,
+            Running {
+                inputs,
+                scope,
+                abort,
+                title: request.title.map(|text| (request.item_id, text)),
+            },
+        );
         self.tasks.push(async move {
             let work = async move {
-                let init = host.call("initialize".into(), json!({"clientInfo":{"name":"uxduck-browser-agent","version":env!("CARGO_PKG_VERSION"),"kind":"agent"},"capabilities":{"protocolVersion":PROTOCOL_VERSION}})).await;
+                let init = host.call("initialize".into(), json!({"clientInfo":{"name":"uxduck-browser-agent","version":env!("CARGO_PKG_VERSION"),"kind":"agent"},"capabilities":{"protocolVersion":PROTOCOL_VERSION,"missionReadFloatBits":true,"replayStepMarks":true}})).await;
                 let outcome = if init.is_ok() { run_turn(&provider, &host, turn).await } else {
                     TurnOutcome { result: Err(uxduck_agent::TurnError::Provider(ProviderError::Account("The browser agent could not initialize.".into()))),
                         response_id: None, conversation: Vec::new(), context_sent: false, stats: uxduck_agent::TurnStats::default() }
@@ -314,7 +464,29 @@ impl Runtime {
             let _ = Abortable::new(work, registration).await;
         }.boxed());
     }
+    pub fn steer(&mut self, thread: &str, turn: u64, id: String, text: String, share: bool) {
+        if let Some(run) = self.running.get(thread)
+            && run.scope.turn == turn
+        {
+            run.inputs
+                .push(uxduck_agent::input::Input { id, text, share });
+        }
+    }
     pub fn cancel(&mut self, engine: &mut Engine, thread: &str, outputs: &mut Vec<Output>) {
+        let jobs: Vec<_> = self
+            .titles
+            .iter()
+            .filter(|(_, job)| job.scope.thread == thread)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in jobs {
+            self.finish_title(
+                engine,
+                id,
+                uxduck_agent::turn::TitleOutcome::default(),
+                outputs,
+            );
+        }
         let Some(run) = self.running.remove(thread) else {
             return;
         };
@@ -323,7 +495,7 @@ impl Runtime {
         let ids: Vec<_> = self
             .streams
             .iter()
-            .filter(|(_, s)| s.scope.thread == thread)
+            .filter(|(_, s)| Arc::ptr_eq(&s.scope, &run.scope))
             .map(|(id, _)| *id)
             .collect();
         for request in ids {
@@ -340,6 +512,20 @@ impl Runtime {
         origin: ConnectionId,
         outputs: &mut Vec<Output>,
     ) {
+        let jobs: Vec<_> = self
+            .titles
+            .iter()
+            .filter(|(_, job)| job.scope.origin == origin)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in jobs {
+            self.finish_title(
+                engine,
+                id,
+                uxduck_agent::turn::TitleOutcome::default(),
+                outputs,
+            );
+        }
         let threads: Vec<_> = self
             .running
             .iter()
@@ -354,34 +540,84 @@ impl Runtime {
         self.saved.retain(|_, saved| &saved.account != account);
     }
     pub fn event(&mut self, request: u64, data: Option<&str>, error: Option<&str>) {
-        let Some(stream) = self.streams.get(&request) else {
+        let Some(stream) = self.streams.get_mut(&request) else {
             return;
         };
         if !stream.scope.live.load(Ordering::SeqCst) {
             self.streams.remove(&request);
             return;
         }
-        let result = if let Some(error) = error {
-            Some(Err(ProviderError::Account(
+        if let (Some(socket), Some(data)) = (&mut stream.socket, data) {
+            let value = serde_json::from_str::<Value>(data);
+            let result = value
+                .map_err(|_| ProviderError::Transport("An unreadable model event arrived.".into()))
+                .and_then(|value| {
+                    if value["type"] == "uxduck.response.done" {
+                        socket.settled(&stream.inputs);
+                        return if socket.ready {
+                            Ok((socket.finish(), Vec::new(), true))
+                        } else {
+                            Err(ProviderError::Transport(
+                                "The response ended before completion.".into(),
+                            ))
+                        };
+                    }
+                    socket
+                        .event(&value, &stream.inputs)
+                        .map(|(events, send)| (events, send, false))
+                });
+            let done = match result {
+                Ok((events, send, done)) => {
+                    for event in events {
+                        let _ = stream.tx.unbounded_send(Ok(event));
+                    }
+                    for event in send {
+                        push(
+                            &self.queue,
+                            &stream.scope,
+                            Action::SocketSend(request, event),
+                        );
+                    }
+                    done
+                }
+                Err(error) => {
+                    let _ = stream.tx.unbounded_send(Err(error));
+                    true
+                }
+            };
+            if done {
+                self.streams.remove(&request);
+            }
+            return;
+        }
+        let results = if let Some(error) = error {
+            vec![Err(ProviderError::Account(
                 error.chars().take(1000).collect(),
-            )))
+            ))]
         } else if let Some(data) = data {
             match serde_json::from_str::<Value>(data) {
-                Ok(value) => openai::event(&value).transpose(),
-                Err(_) => Some(Err(ProviderError::Transport(
+                Ok(value) => match stream.answer.as_mut() {
+                    Some(answer) => anthropic::event(&value, answer).map_or_else(
+                        |error| vec![Err(error)],
+                        |events| events.into_iter().map(Ok).collect(),
+                    ),
+                    None => openai::event(&value).transpose().into_iter().collect(),
+                },
+                Err(_) => vec![Err(ProviderError::Transport(
                     "The server sent an unreadable response.".into(),
-                ))),
+                ))],
             }
         } else {
-            Some(Err(ProviderError::Transport(
+            vec![Err(ProviderError::Transport(
                 "The response ended before completion. Try again.".into(),
-            )))
+            ))]
         };
-        if let Some(result) = result {
+        for result in results {
             let done = matches!(result, Ok(ProviderEvent::Completed { .. }) | Err(_));
             let _ = stream.tx.unbounded_send(result);
             if done {
                 self.streams.remove(&request);
+                return;
             }
         }
     }
@@ -389,6 +625,47 @@ impl Runtime {
     pub fn drive(&mut self, engine: &mut Engine, now: u64, outputs: &mut Vec<Output>) -> bool {
         self.now.store(now / 1000, Ordering::SeqCst);
         let mut progress = false;
+        let expired: Vec<_> = self
+            .titles
+            .iter()
+            .filter(|(_, job)| {
+                now / 1000 >= job.scope.began.saturating_add(30_000)
+                    || !engine.agent_title_requested(&job.scope.thread, &job.item)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.finish_title(
+                engine,
+                id,
+                uxduck_agent::turn::TitleOutcome::default(),
+                outputs,
+            );
+            progress = true;
+        }
+        for (request, stream) in &mut self.streams {
+            if let Some(socket) = &mut stream.socket
+                && socket.accepts_input()
+            {
+                let mut pending = stream.inputs.drain().into_iter();
+                if let Some(input) = pending.next() {
+                    if !stream.inputs.sharing() {
+                        outputs.push(Output::Send {
+                            request: *request,
+                            event: json!({"type":"uxduck.share","share":false}),
+                        });
+                    }
+                    outputs.push(Output::Send {
+                        request: *request,
+                        event: socket.steer(input),
+                    });
+                    progress = true;
+                }
+                for input in pending {
+                    stream.inputs.push(input);
+                }
+            }
+        }
         for connection in self.connections.values_mut() {
             while let Ok(text) = connection.inbox.try_recv() {
                 if let Ok(frame) = serde_json::from_str::<Value>(&text)
@@ -434,6 +711,8 @@ impl Runtime {
         outputs: &mut Vec<Output>,
     ) {
         match action {
+            Action::SocketSend(request, event) => outputs.push(Output::Send { request, event }),
+            Action::InputApplied(id) => engine.agent_input_applied(&scope.thread, scope.turn, &id),
             Action::MessageStart(reply) => {
                 let _ =
                     reply.send(engine.agent_message_start(Some(scope.connection), &scope.thread));
@@ -473,32 +752,65 @@ impl Runtime {
                     );
                 }
             }
-            Action::Model(request, args, tx) => {
+            Action::Model(request, args, tx, inputs, private) => {
+                let websocket = !private && args.model.starts_with("gpt-6");
+                let share = !private && scope.share && inputs.sharing();
+                let (path, mut body, answer) = match Wire::for_model(&args.model) {
+                    Wire::OpenAi => ("responses", openai::body(&args), None),
+                    Wire::Anthropic => (
+                        "messages",
+                        anthropic::body(&args),
+                        Some(anthropic::Answer::default()),
+                    ),
+                };
+                if private && let Some(body) = body.as_object_mut() {
+                    body.remove("fallbacks");
+                }
                 self.streams.insert(
                     request,
                     Stream {
+                        socket: websocket
+                            .then(|| uxduck_agent::provider::socket::SocketRound::new(&args)),
+                        inputs,
                         scope: scope.clone(),
                         tx,
+                        answer,
                     },
                 );
                 outputs.push(Output::Request {
                     request,
                     account_id: scope.account.account_id.clone().unwrap_or_default(),
                     chat: format!("web-{}", scope.thread),
-                    share: scope.share,
+                    share,
                     continues: args.continues.clone(),
-                    body: openai::body(&args),
+                    path,
+                    body,
+                    websocket,
                 });
             }
             Action::Finished(outcome, model) => self.finish(engine, scope, outcome, model),
+            Action::TitleFinished(id, outcome) => self.finish_title(engine, id, outcome, outputs),
         }
     }
-    fn finish(&mut self, engine: &mut Engine, scope: &Scope, outcome: TurnOutcome, model: String) {
+    fn finish(
+        &mut self,
+        engine: &mut Engine,
+        scope: &Arc<Scope>,
+        outcome: TurnOutcome,
+        model: String,
+    ) {
+        let title = self
+            .running
+            .get(&scope.thread)
+            .filter(|run| Arc::ptr_eq(&run.scope, scope))
+            .and_then(|run| run.title.clone());
+        let title = title.filter(|_| outcome.result.is_ok());
         if outcome.result.is_ok() {
             let covers = engine
                 .state()
                 .items_of(&scope.thread)
                 .iter()
+                .filter(|i| i.in_history())
                 .map(|i| i.id.clone())
                 .collect();
             let context = engine.state().threads.get(&scope.thread).and_then(|t| t.vehicle_id.as_ref()).and_then(|id| engine.vehicle(id)).map(|v| format!("This thread is about the vehicle \"{}\" (id {}). Use vehicle_get with that id for its details and telemetry_get for where it is and its battery, attitude and GPS.",v.name,v.id));
@@ -506,7 +818,7 @@ impl Runtime {
                 scope.thread.clone(),
                 Saved {
                     account: scope.account.clone(),
-                    model,
+                    model: model.clone(),
                     covers,
                     context,
                     conversation: outcome.conversation,
@@ -529,11 +841,106 @@ impl Runtime {
         scope.live.store(false, Ordering::SeqCst);
         self.connections.remove(&scope.connection);
         engine.disconnect(scope.connection);
+        if let Some((item, text)) = title
+            && engine.agent_title_requested(&scope.thread, &item)
+        {
+            self.start_title(scope, item, text, model);
+        }
+    }
+    fn start_title(&mut self, parent: &Scope, item: String, text: String, model: String) {
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let scope = Arc::new(Scope {
+            thread: parent.thread.clone(),
+            turn: parent.turn,
+            connection: parent.connection,
+            origin: parent.origin,
+            live: AtomicBool::new(true),
+            account: parent.account.clone(),
+            share: false,
+            now: self.now.clone(),
+            began: self.now.load(Ordering::SeqCst),
+        });
+        let provider = BrowserProvider {
+            wire: Wire::for_model(&model),
+            scope: scope.clone(),
+            queue: self.queue.clone(),
+            next: self.next.clone(),
+        };
+        let (abort, registration) = AbortHandle::new_pair();
+        self.titles.insert(
+            id,
+            TitleJob {
+                scope: scope.clone(),
+                abort,
+                item,
+                model: model.clone(),
+            },
+        );
+        let queue = self.queue.clone();
+        self.tasks.push(
+            async move {
+                let work = async move {
+                    let outcome = uxduck_agent::turn::generate_title(
+                        &provider,
+                        &model,
+                        &text,
+                        Some(format!("web-{}", scope.thread)),
+                    )
+                    .await;
+                    push(&queue, &scope, Action::TitleFinished(id, outcome));
+                };
+                let _ = Abortable::new(work, registration).await;
+            }
+            .boxed(),
+        );
+    }
+    fn finish_title(
+        &mut self,
+        engine: &mut Engine,
+        id: u64,
+        outcome: uxduck_agent::turn::TitleOutcome,
+        outputs: &mut Vec<Output>,
+    ) {
+        let Some(job) = self.titles.remove(&id) else {
+            return;
+        };
+        job.scope.live.store(false, Ordering::SeqCst);
+        job.abort.abort();
+        let requests: Vec<_> = self
+            .streams
+            .iter()
+            .filter(|(_, stream)| Arc::ptr_eq(&stream.scope, &job.scope))
+            .map(|(id, _)| *id)
+            .collect();
+        for request in requests {
+            self.streams.remove(&request);
+            outputs.push(Output::Abort { request });
+        }
+        engine.agent_title_finish(&job.scope.thread, &job.item, outcome.title.as_deref());
+        engine.agent_title_stats(
+            &job.model,
+            outcome.title.is_some(),
+            self.now
+                .load(Ordering::SeqCst)
+                .saturating_sub(job.scope.began),
+            outcome
+                .usage
+                .map(|usage| {
+                    stats(&uxduck_agent::TurnStats {
+                        rounds: 1,
+                        usage,
+                        ..Default::default()
+                    })
+                })
+                .as_ref(),
+        );
     }
 }
+
 fn entries(items: &[Item]) -> Vec<Entry> {
     items
         .iter()
+        .filter(|item| item.in_history())
         .filter_map(|item| match item.kind {
             ItemKind::UserMessage => Some(Entry::User(uxduck_core::domain::thread::for_agent(
                 &item.text,
@@ -568,5 +975,152 @@ fn stats(s: &uxduck_agent::TurnStats) -> TurnStats {
         fell_back: s.fell_back,
         compacted: s.compacted,
         thinking_dropped: s.usage.thinking_dropped,
+    }
+}
+
+#[cfg(test)]
+mod mission_read_tests {
+    #![allow(clippy::unwrap_used, reason = "in-memory browser host fixtures")]
+    use super::*;
+    use uxduck_engine::runtime::{Clock, Forget, Ports, Random};
+
+    struct Tick;
+    impl Clock for Tick {
+        fn now_us(&self) -> u64 {
+            1_000
+        }
+    }
+    struct Counter(u8);
+    impl Random for Counter {
+        fn fill(&mut self, bytes: &mut [u8]) {
+            for byte in bytes {
+                self.0 = self.0.wrapping_add(37);
+                *byte = self.0;
+            }
+        }
+    }
+
+    fn host() -> BrowserHost {
+        let mut engine = Engine::new(
+            uxduck_engine::EngineConfig {
+                daemon_version: "0.13.0".into(),
+                capabilities: uxduck_contracts::dto::initialize::DaemonCapabilities::default(),
+                ui_url: "http://127.0.0.1:45000".into(),
+                checkpoint_every: 100,
+                models: vec![],
+                agent_provider: "fake".into(),
+                about: uxduck_engine::HostAbout::default(),
+            },
+            Box::new(Tick),
+            Box::new(Counter(0)),
+            Ports::with_persistence(Box::new(Forget)),
+            uxduck_engine::Loaded::default(),
+        );
+        let (outbox, _inbox) = mpsc::unbounded();
+        let connection = engine.connect(Transport::Internal, Trust::LocalUser, outbox);
+        BrowserHost {
+            inputs: uxduck_agent::input::Inputs::default(),
+            queue: Arc::default(),
+            mission_reads: Mutex::new(
+                uxduck_contracts::dto::mission_read::MissionReadSession::default(),
+            ),
+            scope: Arc::new(Scope {
+                thread: "test-thread".into(),
+                turn: 1,
+                connection,
+                origin: connection,
+                live: AtomicBool::new(true),
+                account: Account::default(),
+                share: false,
+                now: Arc::new(AtomicU64::new(0)),
+                began: 0,
+            }),
+        }
+    }
+
+    fn answer(host: &BrowserHost, method: &str, result: Value) {
+        let mut queue = host.queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|(_, action)| matches!(action, Action::Rpc(name, _, _) if name == method))
+            .unwrap();
+        let (_, Action::Rpc(_, _, reply)) = queue.remove(index) else {
+            panic!("expected RPC action")
+        };
+        reply.send(Ok(result)).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one browser host protocol scenario")]
+    fn mission_read_host_preserves_bits_and_latches_pending_and_presend_quarantine() {
+        let host = host();
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../uxduck-contracts/tests/goldens/mission-read.json"
+        )))
+        .unwrap();
+        let golden = |method: &str| -> Value {
+            let frame: Value =
+                serde_json::from_str(fixture["frames"][method].as_str().unwrap()).unwrap();
+            frame["result"].clone()
+        };
+        let good = host.call("mission/refresh".into(), json!({ "id": "v" }));
+        answer(&host, "mission/refresh", golden("mission/refresh"));
+        let result = good.now_or_never().unwrap().unwrap();
+        for part in ["items", "fence", "rally"] {
+            for field in [
+                "param1",
+                "param2",
+                "param3",
+                "param4",
+                "latitudeDeg",
+                "longitudeDeg",
+                "altitudeM",
+            ] {
+                assert_eq!(
+                    result[part][1][field].as_f64().unwrap().to_bits(),
+                    (-0.0_f64).to_bits()
+                );
+                assert_eq!(result[part][3][field]["nonFiniteF64"], "7ff8000000000001");
+            }
+        }
+        let late = host.call("mission/history".into(), json!({ "id": "v" }));
+        let bad = host.call("mission/refresh".into(), json!({ "id": "v" }));
+        let mut broken = golden("mission/refresh");
+        broken["items"][0]["param4"] = Value::Null;
+        answer(&host, "mission/refresh", broken);
+        assert_eq!(
+            bad.now_or_never().unwrap().unwrap_err()["data"]["kind"],
+            "update-required"
+        );
+        answer(&host, "mission/history", golden("mission/history"));
+        assert_eq!(
+            late.now_or_never().unwrap().unwrap_err()["data"]["kind"],
+            "update-required"
+        );
+        for method in [
+            "mission/refresh",
+            "mission/history",
+            "mission/upload",
+            "mission/restore",
+            "plan/upload",
+            "state/subscribe",
+        ] {
+            let refused = host
+                .call(method.into(), json!({ "entities": ["mission"] }))
+                .now_or_never()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(refused["data"]["kind"], "update-required");
+            assert!(host.queue.lock().unwrap().is_empty());
+        }
+        let other = host.call("vehicle/list".into(), json!({}));
+        answer(&host, "vehicle/list", json!({ "vehicles": [] }));
+        assert_eq!(
+            other.now_or_never().unwrap().unwrap(),
+            json!({ "vehicles": [] })
+        );
+        assert!(host.scope.live.load(Ordering::SeqCst));
+        assert!(host.queue.lock().unwrap().is_empty());
     }
 }

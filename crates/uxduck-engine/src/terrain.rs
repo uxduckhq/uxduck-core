@@ -23,7 +23,7 @@ use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
 use uxduck_core::domain::settings::TerrainDataset as Setting;
-use uxduck_mavlink::terrain::{Block, Group};
+use uxduck_mavlink::terrain::{Block, Group, Pace};
 use uxduck_terrain::grid;
 use uxduck_terrain::lookup::Ground;
 use uxduck_terrain::lookup::nearest_metre;
@@ -48,7 +48,7 @@ pub(crate) struct TerrainState {
     waiting: Vec<Waiting>,
     /// Vehicles' requests still being answered: the latest mask of each
     /// block, by vehicle (S118).
-    blocks: BTreeMap<(String, Block), u64>,
+    pub(crate) blocks: BTreeMap<(String, Block), u64>,
     /// Cache faults and affected blocks share one availability notice.
     pub(crate) problems: BTreeMap<String, Problem>,
     pub(crate) missing: BTreeMap<(String, Block), MissingTerrain>,
@@ -56,10 +56,16 @@ pub(crate) struct TerrainState {
     pub(crate) checks: crate::terrain_check::Checks,
     /// Areas kept offline and missions' terrain (S120).
     pub(crate) keeping: crate::terrain_keep::Keeping,
+    /// The seabed simulated submarines are answered from (ADR-0043 U9).
+    pub(crate) seabed: uxduck_terrain::seabed::Seabed,
+    /// What each vehicle asked for and was sent this session (S310).
+    pub(crate) seen: crate::terrain_vehicle::Seen,
+    /// Areas written to vehicles' cards this session (S312).
+    pub(crate) puts: crate::terrain_put::Puts,
 }
 
 pub(crate) struct MissingTerrain {
-    why: String,
+    pub(crate) why: String,
     latitude_deg: f64,
     longitude_deg: f64,
 }
@@ -68,7 +74,9 @@ const TERRAIN_NOTICE: &str = "terrain:availability";
 
 /// Answers a second on a network link (QGroundControl's pace) and on a
 /// serial radio, which a telemetry radio's 57600 baud shares with
-/// everything else.
+/// everything else, until the link's radio reports how much room it has.
+/// A simulator's link never leaves the computer: its answers go at once,
+/// so each block is answered before ArduPilot asks again two seconds on.
 const NETWORK_PER_S: u8 = 12;
 const SERIAL_PER_S: u8 = 4;
 
@@ -98,7 +106,7 @@ pub fn dataset(d: TerrainDataset) -> Dataset {
     }
 }
 
-fn wire(d: Dataset) -> TerrainDataset {
+pub(crate) fn wire(d: Dataset) -> TerrainDataset {
     match d {
         Dataset::Alos => TerrainDataset::Alos,
         Dataset::Copernicus => TerrainDataset::Copernicus,
@@ -192,6 +200,14 @@ pub(crate) fn handle(
 }
 
 impl Engine {
+    pub(crate) fn terrain_unavailable_for(&self, vehicle_id: &str) -> Option<String> {
+        self.terrain
+            .missing
+            .iter()
+            .find(|((vehicle, _), _)| vehicle == vehicle_id)
+            .map(|(_, missing)| missing.why.clone())
+    }
+
     /// Where terrain files are kept and fetched from, and the key the
     /// manifest must be signed with. Reads the kept manifest and fetches
     /// the bucket's at once.
@@ -208,6 +224,10 @@ impl Engine {
     /// latest mask replaces any older one for the block.
     pub fn terrain_requested(&mut self, vehicle_id: &str, block: Block, mask: u64) {
         let mask = mask & grid::ALL_GROUPS;
+        self.terrain_vehicle_asked(vehicle_id, block, mask);
+        if mask != 0 {
+            self.terrain_put_asked(vehicle_id, block);
+        }
         let key = (vehicle_id.to_owned(), block);
         if mask == 0 {
             self.terrain.blocks.remove(&key);
@@ -221,21 +241,25 @@ impl Engine {
             block,
             groups: Vec::new(),
             mask,
-            per_second: self.terrain_pace(vehicle_id),
+            pace: self.terrain_pace(vehicle_id),
         });
         self.answer_vehicles(Some(&key));
         self.terrain_flush();
     }
 
-    /// Answers a second for a vehicle, by the link it is on.
-    fn terrain_pace(&self, vehicle_id: &str) -> u8 {
-        let serial = self
+    /// How fast a vehicle's answers go, by the link it is on.
+    fn terrain_pace(&self, vehicle_id: &str) -> Pace {
+        let kind = self
             .state
             .vehicles
             .get(vehicle_id)
             .and_then(|v| self.state.links.get(&v.link_id))
-            .is_some_and(|l| matches!(l.kind, LinkKind::Serial { .. }));
-        if serial { SERIAL_PER_S } else { NETWORK_PER_S }
+            .map(|l| &l.kind);
+        match kind {
+            Some(LinkKind::Serial { .. }) => Pace::Paced(SERIAL_PER_S),
+            Some(kind) if kind.is_simulator() => Pace::Free,
+            _ => Pace::Paced(NETWORK_PER_S),
+        }
     }
 
     /// Answers what can be answered of the vehicles' requests: one block,
@@ -250,6 +274,12 @@ impl Engine {
             let Some(&mask) = self.terrain.blocks.get(&key) else {
                 continue;
             };
+            // A simulated submarine dives over the seabed (ADR-0043 U9);
+            // a real one is never sent seabed heights.
+            if self.is_simulated_submarine(&key.0) {
+                self.answer_from_seabed(&key, mask, now);
+                continue;
+            }
             // Each vehicle from its own dataset (S119).
             let dataset = self.terrain_dataset_of(&key.0);
             let Some(cache) = &mut self.terrain.cache else {
@@ -290,6 +320,9 @@ impl Engine {
                             why.get_or_insert((detail, (lat, lon)));
                         }
                     }
+                    if why.is_some() {
+                        break;
+                    }
                 }
                 if let Some(why) = why {
                     // Never a guessed height: the vehicle asks again.
@@ -313,7 +346,7 @@ impl Engine {
                     block: *block,
                     groups: ready,
                     mask,
-                    per_second: self.terrain_pace(vehicle_id),
+                    pace: self.terrain_pace(vehicle_id),
                 });
             }
             match missing {
@@ -335,9 +368,96 @@ impl Engine {
         }
     }
 
+    /// A submarine on a simulator's link.
+    pub(crate) fn is_simulated_submarine(&self, vehicle_id: &str) -> bool {
+        self.state.vehicles.get(vehicle_id).is_some_and(|v| {
+            v.vehicle_type == "Submarine"
+                && self
+                    .state
+                    .links
+                    .get(&v.link_id)
+                    .is_some_and(|l| l.kind.is_simulator())
+        })
+    }
+
+    /// A simulated submarine's block from GMRT's seabed: heights over mean
+    /// sea level, negative under the sea. Missing tiles are fetched and the
+    /// vehicle asks again, as for land.
+    fn answer_from_seabed(&mut self, key: &(String, Block), mask: u64, now: u64) {
+        let (vehicle_id, block) = key;
+        let mut ready = Vec::new();
+        let mut left = 0u64;
+        let mut missing: Option<(String, (f64, f64))> = None;
+        for gridbit in (0..56u8).filter(|bit| mask & (1 << bit) != 0) {
+            let mut heights = [0i16; 16];
+            let mut done = true;
+            for (i, (lat, lon)) in grid::group_points(block.lat, block.lon, block.spacing, gridbit)
+                .into_iter()
+                .enumerate()
+            {
+                let (lat, lon) = (f64::from(lat) * 1e-7, f64::from(lon) * 1e-7);
+                match self.terrain.seabed.at(lat, lon, now) {
+                    None => done = false,
+                    Some(Ok(h)) => heights[i] = nearest_metre(h),
+                    Some(Err(why)) => {
+                        done = false;
+                        let why = match why {
+                            Unavailable::Offline => {
+                                "the seabed is not kept on this computer and there is no connection"
+                                    .to_owned()
+                            }
+                            Unavailable::Failed(detail) => detail,
+                        };
+                        missing.get_or_insert((why, (lat, lon)));
+                    }
+                }
+            }
+            if done {
+                ready.push(Group { gridbit, heights });
+            } else {
+                left |= 1 << gridbit;
+            }
+        }
+        if left == 0 {
+            self.terrain.blocks.remove(key);
+        } else {
+            self.terrain.blocks.insert(key.clone(), left);
+        }
+        if !ready.is_empty() {
+            self.links.transfer(TransferOrder::TerrainData {
+                vehicle_id: vehicle_id.clone(),
+                block: *block,
+                groups: ready,
+                mask,
+                pace: self.terrain_pace(vehicle_id),
+            });
+        }
+        match missing {
+            Some((why, (lat, lon))) => {
+                self.terrain.missing.insert(
+                    key.clone(),
+                    MissingTerrain {
+                        why,
+                        latitude_deg: lat,
+                        longitude_deg: lon,
+                    },
+                );
+            }
+            None if left == 0 => {
+                self.terrain.missing.remove(key);
+            }
+            None => {}
+        }
+    }
+
     /// The host read or fetched what the cache asked for.
     pub fn terrain_arrived(&mut self, arrived: Arrived) {
         let now = self.clock.now_us();
+        if self.terrain.seabed.arrived(&arrived, now) {
+            self.answer_vehicles(None);
+            self.terrain_flush();
+            return;
+        }
         if let Some(cache) = &mut self.terrain.cache {
             cache.arrived(arrived, now);
         }
@@ -360,6 +480,7 @@ impl Engine {
         self.answer_vehicles(None);
         self.settle_terrain_checks();
         self.settle_keeping();
+        self.resume_terrain_puts();
         self.terrain_flush();
     }
 
@@ -382,6 +503,12 @@ impl Engine {
 
     /// Hands the cache's orders to the host and raises its problems.
     pub(crate) fn terrain_flush(&mut self) {
+        let seabed = self.terrain.seabed.take_orders();
+        if let Some(port) = &mut self.terrain.port {
+            for order in seabed {
+                port.order(order);
+            }
+        }
         let Some(cache) = &mut self.terrain.cache else {
             return;
         };
@@ -418,6 +545,7 @@ impl Engine {
                 .insert(problem.condition.clone(), problem);
         }
         self.terrain_notice();
+        self.push_watched_vehicle_terrain();
     }
 
     /// A cache fault and the vehicles affected by it are one warning, updated

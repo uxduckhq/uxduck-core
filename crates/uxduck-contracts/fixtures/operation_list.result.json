@@ -1,0 +1,30 @@
+{
+  "operations": [
+    {
+      "id": "op3c9a1e7b2d4f6a80",
+      "name": "Night survey",
+      "flightIds": ["fl3c9a1e7b2d4f6a80", "fl4d0b2f8c3e5a7b91", "fl5e1c3a9d4f6b8c02"],
+      "fromUs": 1790000000000000,
+      "toUs": 1790007200000000,
+      "vehicles": 2,
+      "kept": 1,
+      "clockOffsets": [
+        {
+          "flightId": "fl5e1c3a9d4f6b8c02",
+          "offsetUs": -1500000
+        }
+      ],
+      "version": 3
+    },
+    {
+      "id": "op9a8b7c6d5e4f3a21",
+      "auto": true,
+      "flightIds": ["fl6f2d4b0e5a7c9d13", "fl7a3e5c1f6b8d0e24"],
+      "fromUs": 1789990000000000,
+      "toUs": 1789991800000000,
+      "vehicles": 2,
+      "kept": 0,
+      "version": 1
+    }
+  ]
+}

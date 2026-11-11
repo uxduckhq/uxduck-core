@@ -79,7 +79,14 @@ impl FakeProvider {
         self
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scripted answer per test phrase, read top to bottom"
+    )]
     fn answer(input: &[Input]) -> Result<Vec<ProviderEvent>, String> {
+        if let Some(events) = Self::file(input)? {
+            return Ok(events);
+        }
         if let Some(events) = Self::attached(input) {
             return Ok(events);
         }
@@ -88,10 +95,13 @@ impl FakeProvider {
         }
         for respond in [
             Self::writes,
+            |input: &[Input]| Ok(Self::tuning(input)),
             Self::parameters,
             Self::history,
             Self::instruments,
+            Self::chart,
             Self::suggestion,
+            Self::filing,
         ] {
             if let Some(events) = respond(input)? {
                 return Ok(events);
@@ -151,7 +161,7 @@ impl FakeProvider {
                     format!(
                         "You have {} vehicle(s): {}.",
                         described.len(),
-                        described.join("; ")
+                        described.join(", ")
                     )
                 };
                 return Ok(vec![ProviderEvent::TextDelta(text)]);
@@ -335,6 +345,63 @@ impl FakeProvider {
 
     /// A message with chips (ADR-0020 H2): answers from the first one, so a
     /// test sees what reached the model.
+    /// A file attached to the message (S246): asked to replay it, open it
+    /// as a replay; asked to read it, read its first line.
+    fn file(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
+        for item in input {
+            let Input::ToolOutput { call_id, output } = item else {
+                continue;
+            };
+            let answer: Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
+            let failed = answer["message"].as_str();
+            let text = match (call_id.as_str(), failed) {
+                (REPLAY_FILE | READ_FILE, Some(why)) => format!("I could not use the file: {why}"),
+                (REPLAY_FILE, None) => format!(
+                    "I opened {} as a replay, paused at its start.",
+                    answer["sources"][0]["name"].as_str().unwrap_or("it")
+                ),
+                (READ_FILE, None) => format!(
+                    "{} begins: {}",
+                    answer["name"].as_str().unwrap_or("It"),
+                    answer["text"]
+                        .as_str()
+                        .and_then(|t| t.lines().next())
+                        .unwrap_or("")
+                ),
+                _ => continue,
+            };
+            return Ok(Some(vec![ProviderEvent::TextDelta(text)]));
+        }
+        let Some((asked, id)) = input.iter().rev().find_map(|item| {
+            let Input::UserText(text) = item else {
+                return None;
+            };
+            let (asked, attached) = text.split_once("\n\nAttached by the operator:")?;
+            let (_, after) = attached.split_once(", attachment `")?;
+            let (id, _) = after.split_once('`')?;
+            Some((asked.to_lowercase(), id.to_owned()))
+        }) else {
+            return Ok(None);
+        };
+        let (call_id, name) = if asked.contains("replay") {
+            (REPLAY_FILE, "replay_open")
+        } else if asked.contains("read") {
+            (READ_FILE, "attachment_read")
+        } else {
+            return Ok(None);
+        };
+        let params = if name == "replay_open" {
+            json!({ "attachment": id })
+        } else {
+            json!({ "id": id })
+        };
+        Ok(Some(vec![ProviderEvent::ToolCall {
+            call_id: call_id.into(),
+            name: TOOL_CALL_NAME.into(),
+            arguments: json!({ "name": name, "params": params }).to_string(),
+        }]))
+    }
+
     fn attached(input: &[Input]) -> Option<Vec<ProviderEvent>> {
         input.iter().find_map(|item| {
             let Input::UserText(text) = item else {
@@ -384,9 +451,13 @@ impl FakeProvider {
                             .unwrap_or_default(),
                         definition["displayName"].as_str().unwrap_or(name),
                         definition["description"].as_str().unwrap_or_default(),
-                        answer["describedBy"]["definitions"]["title"]
-                            .as_str()
-                            .unwrap_or("its set"),
+                        {
+                            let set = &answer["describedBy"]["definitions"];
+                            set["ownTitle"]
+                                .as_str()
+                                .or_else(|| set["title"].as_str())
+                                .unwrap_or("its set")
+                        },
                     ),
                     None => format!(
                         "{name} is {value}, but this vehicle's set does not describe it, so I cannot say what it does."
@@ -488,8 +559,85 @@ impl FakeProvider {
 }
 
 impl FakeProvider {
+    /// Asked to chart vibration (Ben, 2026-10-31): open a chart of its
+    /// three axes that follows the selected vehicle (Ben, 2026-11-01: not
+    /// pinned to one), and say what opened only when it did.
+    fn chart(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
+        for item in input.iter().rev() {
+            let Input::ToolOutput { call_id, output } = item else {
+                continue;
+            };
+            if call_id == CHART_OPEN {
+                let answer: Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
+                let text = answer["message"].as_str().map_or_else(
+                    || "The chart of vibration in X, Y and Z is open.".to_owned(),
+                    |why| format!("I could not open the chart: {why}"),
+                );
+                return Ok(Some(vec![ProviderEvent::TextDelta(text)]));
+            }
+        }
+        let asked = input.iter().rev().find_map(|item| match item {
+            Input::UserText(text) => Some(text.to_lowercase()),
+            Input::ToolOutput { .. } => None,
+        });
+        Ok(asked
+            .is_some_and(|text| text.contains("chart") && text.contains("vibration"))
+            .then(|| {
+                vec![ProviderEvent::ToolCall {
+                    call_id: CHART_OPEN.into(),
+                    name: "layout_open".into(),
+                    arguments: json!({
+                        "kind": "chart",
+                        "items": ["vibration.x_mps2", "vibration.y_mps2", "vibration.z_mps2"],
+                    })
+                    .to_string(),
+                }]
+            }))
+    }
+}
+
+impl FakeProvider {
     /// Asked for airspeed on a rover (S73): offer to suggest it; told to
     /// suggest it, write the card and say it waits for them.
+    /// A bug told of is filed without asking (S294), and the answer goes on
+    /// to what can be done now without announcing it.
+    fn filing(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
+        for item in input {
+            if let Input::ToolOutput { call_id, output } = item
+                && call_id == FILE
+            {
+                let answer: Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
+                let text = answer["message"].as_str().map_or_else(
+                    || {
+                        "Until it's fixed, open Controllers and map the throttle again after a restart."
+                            .to_owned()
+                    },
+                    |why| format!("I could not file it: {why}"),
+                );
+                return Ok(Some(vec![ProviderEvent::TextDelta(text)]));
+            }
+        }
+        let asked = input.iter().rev().find_map(|item| match item {
+            Input::UserText(text) => Some(text.to_lowercase()),
+            Input::ToolOutput { .. } => None,
+        });
+        Ok(match asked {
+            Some(text) if text.contains("throttle") && text.contains("restart") => {
+                Some(vec![ProviderEvent::ToolCall {
+                    call_id: FILE.into(),
+                    name: "feedback_file".into(),
+                    arguments: json!({
+                        "kind": "problem",
+                        "title": "Throttle mapping lost after restart",
+                        "text": "The controller's throttle mapping is gone after every restart of UXDuck, so it has to be mapped again each time."
+                    })
+                    .to_string(),
+                }])
+            }
+            _ => None,
+        })
+    }
+
     fn suggestion(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
         for item in input {
             if let Input::ToolOutput { call_id, output } = item
@@ -530,11 +678,162 @@ impl FakeProvider {
     }
 }
 
+impl FakeProvider {
+    /// Asked why it wobbles (S333): read the vehicle's tuning, open Tuning
+    /// at the axis that oscillates and propose its rate P back at its
+    /// default, which a person approves.
+    fn tuning(input: &[Input]) -> Option<Vec<ProviderEvent>> {
+        let outputs: Vec<(&str, Value)> = input
+            .iter()
+            .filter_map(|item| match item {
+                Input::ToolOutput { call_id, output } => Some((
+                    call_id.as_str(),
+                    serde_json::from_str(output).unwrap_or(Value::Null),
+                )),
+                Input::UserText(_) => None,
+            })
+            .collect();
+        if let Some((call_id, answer)) = outputs
+            .iter()
+            .find(|(call_id, _)| call_id.starts_with(TUNING_SET))
+        {
+            let said = &call_id[TUNING_SET.len()..];
+            let opened = outputs
+                .iter()
+                .any(|(id, open)| *id == TUNING_OPEN && open.get("message").is_none());
+            let text = match answer["message"].as_str() {
+                Some(why) => format!("{said} I could not propose the change: {why}"),
+                None if opened => {
+                    format!(
+                        "{said} Tuning is open at that axis. Approve the change to put it back."
+                    )
+                }
+                None => format!("{said} Approve the change to put it back."),
+            };
+            return Some(vec![ProviderEvent::TextDelta(text)]);
+        }
+        for (call_id, answer) in &outputs {
+            if *call_id == TUNING_LIST {
+                let Some(id) = answer["vehicles"][0]["id"].as_str() else {
+                    return Some(vec![ProviderEvent::TextDelta(
+                        "There is no vehicle to look at.".into(),
+                    )]);
+                };
+                return Some(vec![ProviderEvent::ToolCall {
+                    call_id: TUNING_STATE.into(),
+                    name: TOOL_CALL_NAME.into(),
+                    arguments: json!({ "name": "tuning_state", "params": { "vehicleId": id } })
+                        .to_string(),
+                }]);
+            }
+            if *call_id == TUNING_STATE {
+                return Some(tuning_proposal(answer));
+            }
+        }
+        let asked = input.iter().rev().find_map(|item| match item {
+            Input::UserText(text) => Some(text.to_lowercase()),
+            Input::ToolOutput { .. } => None,
+        });
+        asked.is_some_and(|text| text.contains("wobble")).then(|| {
+            vec![ProviderEvent::ToolCall {
+                call_id: TUNING_LIST.into(),
+                name: "vehicle_list".into(),
+                arguments: "{}".into(),
+            }]
+        })
+    }
+}
+
+/// From a vehicle's tuning: the axis oscillating and its rate P, opened in
+/// Tuning and put back at its default for a person to approve.
+fn tuning_proposal(state: &Value) -> Vec<ProviderEvent> {
+    let say = |text: String| vec![ProviderEvent::TextDelta(text)];
+    let Some(flown) = state["flying"].as_array().and_then(|axes| {
+        axes.iter()
+            .find(|a| a["summary"]["verdict"] == "oscillating")
+    }) else {
+        return say(
+            "No axis oscillated in the last minute it flew: open Tuning, fly it in Loiter and ask again.".into(),
+        );
+    };
+    let axis = flown["axis"].as_str().unwrap_or("roll");
+    let named = format!("{}{}", axis[..1].to_uppercase(), &axis[1..]);
+    let hz = flown["summary"]["oscillationHz"]
+        .as_f64()
+        .unwrap_or_default();
+    let p = state["controllers"][0]["rates"]
+        .as_array()
+        .and_then(|rates| rates.iter().find(|r| r["axis"] == axis))
+        .and_then(|rate| rate["terms"].as_array()?.iter().find(|t| t["term"] == "p"))
+        .map(|term| &term["param"]);
+    let (Some(name), Some(value)) = (
+        p.and_then(|p| p["name"].as_str()),
+        p.and_then(|p| p["value"].as_f64()).map(single),
+    ) else {
+        return say(format!(
+            "{named} is oscillating at about {hz:.0} Hz, and it has no rate P to change."
+        ));
+    };
+    let said =
+        format!("{named} is oscillating at about {hz:.0} Hz, with its rate P ({name}) at {value}");
+    let Some(default) = p.and_then(|p| p["default"].as_f64()).map(single) else {
+        return say(format!(
+            "{said}. Its default is not known, so I propose nothing."
+        ));
+    };
+    let said = format!("{said} against its default {default}.");
+    vec![
+        ProviderEvent::ToolCall {
+            call_id: TUNING_OPEN.into(),
+            name: "layout_open".into(),
+            arguments: json!({ "kind": "tuning", "section": axis }).to_string(),
+        },
+        ProviderEvent::ToolCall {
+            call_id: format!("{TUNING_SET}{said}"),
+            name: "param_set".into(),
+            arguments: json!({
+                "vehicleId": state["vehicleId"],
+                "name": name,
+                "value": default,
+                "reason": format!("{named} oscillating at about {hz:.0} Hz"),
+            })
+            .to_string(),
+        },
+    ]
+}
+
+/// A parameter's value as the vehicle keeps it, a 32-bit float, without
+/// the digits widening it adds (0.135, not 0.13500000536441803).
+#[allow(clippy::cast_possible_truncation)]
+fn single(value: f64) -> f64 {
+    (value as f32).to_string().parse().unwrap_or(value)
+}
+
+/// Tool call ids that carry a tuning question across turns (S333); the
+/// proposal's words ride in the write's id.
+const TUNING_LIST: &str = "call_tuning_list";
+const TUNING_STATE: &str = "call_tuning_state";
+const TUNING_OPEN: &str = "call_tuning_open";
+const TUNING_SET: &str = "call_tuning_set:";
+
 /// The tool call id of a suggestion card.
 const SUGGEST: &str = "call_suggest";
 
+/// The tool call id of a report the agent files by itself (S294).
+const FILE: &str = "call_feedback_file";
+
+/// Tool call ids for an attached file replayed or read (S246).
+const REPLAY_FILE: &str = "call_replay_file";
+const READ_FILE: &str = "call_read_file";
+
+/// Deferred tools run through this one.
+const TOOL_CALL_NAME: &str = crate::tools::TOOL_CALL;
+
 /// The tool call id of a request to show the instruments.
 const INSTRUMENTS: &str = "call_instruments";
+
+/// The tool call id of a request to chart vibration.
+const CHART_OPEN: &str = "call_chart_open";
 
 /// The script the fake agent drafts: the distance from home, and with
 /// `warn` a notice once it is within 100 m.
@@ -704,6 +1003,7 @@ impl Provider for FakeProvider {
             response_id: format!("fake_resp_{n}"),
             output,
             usage: Usage::default(),
+            usage_known: true,
         });
         let sleep = self.sleep.clone();
         stream::iter(chunks)

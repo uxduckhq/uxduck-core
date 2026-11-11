@@ -1,0 +1,7 @@
+{
+  "method": "firmware/rename",
+  "params": {
+    "id": "firmware-5c0e2a91d7b3",
+    "name": "Acme r12"
+  }
+}

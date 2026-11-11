@@ -9,11 +9,14 @@ use uxduck_contracts::dto::command::{
     ModeListParams, ModeListResult, Receipt as ReceiptDto,
 };
 use uxduck_contracts::dto::link::IdParams;
+use uxduck_contracts::dto::terrain::TerrainAtParams;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::{
-    Command, GoToHeading, OfflineBehaviour, Receipt, ReceiptStatus, RefusalReason,
+    Command, GoToHeading, MAV_CMD_DO_PAUSE_CONTINUE, MAV_CMD_DO_SET_MISSION_CURRENT,
+    MAV_CMD_MISSION_START, MAV_CMD_SCRIPTING, OfflineBehaviour, PlaceAmsl, Receipt, ReceiptStatus,
+    RefusalReason,
 };
 use uxduck_core::domain::modes::{self, AvailableMode, Family, is_vtol};
 use uxduck_core::domain::notification::{
@@ -23,8 +26,10 @@ use uxduck_core::domain::notification::{
 use uxduck_core::domain::parameter::parameter_id;
 use uxduck_core::domain::preflight::PreflightOverride;
 use uxduck_core::domain::telemetry::AltitudeFrame;
+use uxduck_core::domain::telemetry_layout::VehicleClass;
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change};
+use uxduck_terrain::lookup::Ground;
 
 use crate::rpc::handlers::to_value;
 use crate::runtime::CommandOrder;
@@ -80,27 +85,7 @@ pub(crate) fn handle(
     };
     match request {
         ClientRequest::CommandSend(params) => {
-            require(Capability::Control)?;
-            if params.force && !operator {
-                return Err(ApiError::new(
-                    ErrorKind::CapabilityDenied,
-                    "only an operator may force a command",
-                ));
-            }
-            // Arming past failing preflight checks is a person's (ADR-0038
-            // K4): an agent's or a plugin's arming is put to an operator.
-            if !params.override_preflight.is_empty() && !operator {
-                return Err(ApiError::new(
-                    ErrorKind::CapabilityDenied,
-                    "only an operator may arm past failing preflight checks",
-                ));
-            }
-            if let Some(vehicle) = engine.vehicle(&params.vehicle_id)
-                && let Some(why) = unsafe_place(&params.command.clone().into(), flies(vehicle))
-            {
-                return Err(ApiError::new(ErrorKind::InvalidValue, why));
-            }
-            send(engine, connection, params, operator)
+            send_checked(engine, connection, params, granted, operator).map(|(value, _)| value)
         }
         ClientRequest::CommandList(IdParams { id }) => {
             require(Capability::Read)?;
@@ -122,6 +107,192 @@ pub(crate) fn handle(
     }
 }
 
+/// `command/send`: its checks, then the send. With what it answers, the
+/// receipt of a command that went to the vehicle, still to be answered.
+pub(crate) fn send_checked(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: CommandSendParams,
+    granted: &[Capability],
+    operator: bool,
+) -> Result<(Value, Option<String>), ApiError> {
+    if !granted.contains(&Capability::Control) {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            Capability::Control.denied_message(),
+        ));
+    }
+    if params.force && !operator {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "only an operator may force a command",
+        ));
+    }
+    // Arming past failing preflight checks is a person's (ADR-0038
+    // K4): an agent's or a plugin's arming is put to an operator.
+    if !params.override_preflight.is_empty() && !operator {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "only an operator may arm past failing preflight checks",
+        ));
+    }
+    let params = home_under_an_armed_vehicle(engine, params)?;
+    if let Some(vehicle) = engine.vehicle(&params.vehicle_id)
+        && let Some(why) = unsafe_place(&params.command.clone().into(), flies(vehicle))
+    {
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
+    }
+    send(engine, connection, params, operator)
+}
+
+/// Home where an armed vehicle is goes on the ground under it, at UXDuck's
+/// terrain height there: ArduPilot's own "where it is now" takes its height
+/// in the air too and locks it, so it would land, and arm next time, below
+/// home. A disarmed vehicle is on the ground, so it keeps its own.
+fn home_under_an_armed_vehicle(
+    engine: &mut Engine,
+    mut params: CommandSendParams,
+) -> Result<CommandSendParams, ApiError> {
+    let Some(vehicle) = engine.vehicle(&params.vehicle_id) else {
+        return Ok(params);
+    };
+    if !vehicle.armed
+        || !matches!(
+            Command::from(params.command.clone()),
+            Command::SetHome { place: None }
+        )
+    {
+        return Ok(params);
+    }
+    let name = vehicle.name.clone();
+    let position = engine.telemetry(&params.vehicle_id).and_then(|telemetry| {
+        telemetry
+            .positions
+            .iter()
+            .filter(|p| {
+                p.source == "fused"
+                    && p.latitude_deg.is_finite()
+                    && p.longitude_deg.is_finite()
+                    && (p.latitude_deg != 0.0 || p.longitude_deg != 0.0)
+            })
+            .max_by_key(|p| p.time_us)
+            .map(|p| (p.latitude_deg, p.longitude_deg))
+    });
+    let Some((latitude_deg, longitude_deg)) = position else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{name} hasn't said where it is, so home can't go under it. Pick home on the map"
+            ),
+        ));
+    };
+    let dataset = engine.terrain_dataset_of(&params.vehicle_id);
+    let ground = engine
+        .terrain_answer(
+            dataset,
+            &TerrainAtParams {
+                latitude_deg,
+                longitude_deg,
+                dataset: None,
+            },
+        )
+        .and_then(|answer| match answer.ground {
+            Ok(Ground::Height(height)) => Some(height),
+            Ok(Ground::Sea) => Some(0.0),
+            _ => None,
+        });
+    engine.terrain_flush();
+    let Some(altitude_amsl_m) = ground else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "UXDuck has no ground height under {name} yet, so home can't go on the ground there. Try again in a moment, or pick home on the map"
+            ),
+        ));
+    };
+    params.command = (&Command::SetHome {
+        place: Some(PlaceAmsl {
+            latitude_deg,
+            longitude_deg,
+            altitude_amsl_m,
+        }),
+    })
+        .into();
+    Ok(params)
+}
+
+/// `DO_CHANGE_SPEED`, offered with no speed; the sender fills param 2 in. A
+/// plane's airspeed (kind 0); the ground speed of the rest that go somewhere
+/// in GUIDED and AUTO, as Go to does (kind 1). Throttle unchanged (-1).
+fn change_speed(family: Option<Family>) -> Option<Command> {
+    let kind = match family? {
+        Family::Plane => 0.0,
+        Family::Copter | Family::Rover | Family::Sub | Family::Px4 => 1.0,
+        Family::Blimp => return None,
+    };
+    Some(Command::Long {
+        command: 178,
+        params: vec![kind, 0.0, -1.0],
+    })
+}
+
+/// Home, at the vehicle or a place the sender fills in; the EKF origin,
+/// advanced, offered at 0, 0 for its risk and class. PX4 takes its origin
+/// another way, so only ArduPilot is offered one.
+fn home_and_origin(family: Option<Family>) -> Vec<Command> {
+    let Some(family) = family else {
+        return Vec::new();
+    };
+    let mut commands = vec![Command::SetHome { place: None }];
+    if family != Family::Px4 {
+        commands.push(Command::SetEkfOrigin {
+            place: PlaceAmsl {
+                latitude_deg: 0.0,
+                longitude_deg: 0.0,
+                altitude_amsl_m: 0.0,
+            },
+        });
+    }
+    commands
+}
+
+/// Restart the mission, and going to one of its items, offered at item 1
+/// for its risk and class; the sender picks the item (S339). Every
+/// autopilot UXDuck knows flies a mission; ArduPilot's first item is 1,
+/// after home, and PX4's is 0. Starting it is offered from where it is;
+/// the sender may name a step. Pausing and continuing it (S340) only
+/// `ArduCopter` takes: Plane, Rover and PX4 hold by changing mode.
+fn mission_items(family: Option<Family>) -> Vec<Command> {
+    let Some(family) = family else {
+        return Vec::new();
+    };
+    let first = u16::from(family != Family::Px4);
+    let mut commands = vec![
+        Command::restart_mission(first),
+        Command::go_to_mission_item(first),
+    ];
+    // Flying it from a step (S341): Sub and Blimp have no `MISSION_START`.
+    if matches!(
+        family,
+        Family::Copter | Family::Plane | Family::Rover | Family::Px4
+    ) {
+        commands.push(Command::start_mission(None));
+    }
+    if family == Family::Copter {
+        commands.extend([Command::pause_mission(), Command::continue_mission()]);
+    }
+    // Landing via the mission (S345): Copter, Plane and PX4 jump to the
+    // nearest DO_LAND_START; Rover, Sub and Blimp have no landing sequence.
+    if matches!(family, Family::Copter | Family::Plane | Family::Px4) {
+        commands.push(Command::land_via_the_mission());
+    }
+    commands
+}
+
+/// The fastest speed sent: well over any small vehicle's, to catch a slip
+/// of units (km/h typed as m/s) rather than to limit a fast one.
+const MAX_SPEED_MPS: f32 = 150.0;
+
 /// Something that flies: a multicopter, plane, VTOL or blimp.
 fn flies(vehicle: &Vehicle) -> bool {
     matches!(
@@ -136,6 +307,21 @@ fn flies(vehicle: &Vehicle) -> bool {
 /// measured from (a rover, boat or submarine keeps its own height, which
 /// may be 0 or below). None when it may go.
 fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
+    // DO_CHANGE_SPEED: an airspeed or a ground speed, never "as fast as
+    // it can" (-1) or nothing, which an autopilot may read as a stop.
+    if let Command::Long {
+        command: 178,
+        params,
+    } = command
+    {
+        let kind = params.first().copied().unwrap_or(f32::NAN);
+        let speed = params.get(1).copied().unwrap_or(f32::NAN);
+        if ![0.0, 1.0].contains(&kind) {
+            return Some("a speed needs to say whether it is airspeed or ground speed".into());
+        }
+        return (!speed.is_finite() || speed <= 0.0 || speed > MAX_SPEED_MPS)
+            .then(|| format!("a speed of {speed} m/s isn't one it can be sent"));
+    }
     // ArduPlane's native height command uses param1 and a MAV_FRAME in
     // param2. Apply the same ground guard as Go to, for every caller.
     if let Command::Long {
@@ -150,6 +336,9 @@ fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
         }
         return (flies && [3.0, 6.0, 10.0, 11.0].contains(&frame) && height <= 0.0)
             .then(|| format!("a height of {height} m would put it on or under the ground"));
+    }
+    if let Command::SetHome { place: Some(place) } | Command::SetEkfOrigin { place } = command {
+        return unsafe_amsl_place(place);
     }
     let Command::GoTo {
         latitude_deg,
@@ -178,22 +367,51 @@ fn unsafe_place(command: &Command, flies: bool) -> Option<String> {
         .then(|| format!("a height of {altitude_m} m would put it on or under the ground"))
 }
 
+/// The lowest and highest ground on Earth, with room: a height outside
+/// them is a slip, of feet for metres or a height above home for one above
+/// the sea.
+const AMSL_RANGE_M: std::ops::RangeInclusive<f64> = -500.0..=9_000.0;
+
+/// Home or the EKF origin somewhere no client may put it.
+fn unsafe_amsl_place(place: &PlaceAmsl) -> Option<String> {
+    let PlaceAmsl {
+        latitude_deg,
+        longitude_deg,
+        altitude_amsl_m,
+    } = *place;
+    if !(latitude_deg.is_finite() && longitude_deg.is_finite())
+        || latitude_deg.abs() > 90.0
+        || longitude_deg.abs() > 180.0
+    {
+        return Some("that place is not on the map".into());
+    }
+    if latitude_deg == 0.0 && longitude_deg == 0.0 {
+        return Some("0, 0 is where a missing position reads. Choose the place again".into());
+    }
+    (!AMSL_RANGE_M.contains(&altitude_amsl_m)).then(|| {
+        format!("{altitude_amsl_m} m above sea level is not a height on the ground anywhere")
+    })
+}
+
 fn send(
     engine: &mut Engine,
     connection: ConnectionId,
     params: CommandSendParams,
     operator: bool,
-) -> Result<Value, ApiError> {
+) -> Result<(Value, Option<String>), ApiError> {
     let vehicle = engine.vehicle(&params.vehicle_id).cloned().ok_or_else(|| {
         ApiError::new(
             ErrorKind::NotFound,
             format!("no vehicle {}", params.vehicle_id),
         )
     })?;
-    let command: Command = params.command.into();
+    // A toggle goes, and is receipted, as what the vehicle needs.
+    let command = Command::from(params.command).resolved(vehicle.armed);
     // A disarmed vehicle's take-off goes after the steps it needs, the
     // first of them now (`TakeOff`).
     let mut steps = take_off_steps(engine, &vehicle, &command).unwrap_or_default();
+    let arms = command.arms_on_the_ground() || !steps.is_empty();
+    let asked = command.label();
     let command = if steps.is_empty() {
         command
     } else {
@@ -215,6 +433,7 @@ fn send(
         attempts: 0,
         client_id: actor.client_id.clone(),
         operator_id: actor.operator_id.clone(),
+        sent_by: engine.sender(connection),
         remote: None,
         created_at_us: now,
         completed_at_us: None,
@@ -226,14 +445,11 @@ fn send(
         receipt.detail = Some(why);
         receipt.completed_at_us = Some(now);
     };
-    // From away (S80): who sent it, and refused if it is too old to act on.
-    let remote = mark_remote(
-        engine,
-        connection,
-        (params.command_id.as_deref(), params.sent_at_ms),
-        &command,
-        &mut receipt,
-    );
+    // A replay vehicle is not there to send to (ADR-0039 R3).
+    if vehicle.replay {
+        not_sent(&mut receipt, crate::replay::NOTHING_SENT.into());
+        receipt.reason = Some(RefusalReason::Replay);
+    }
     // Its link is gone, read-only, or a paused simulation's (`sim/pause`).
     if receipt.status == ReceiptStatus::Sent
         && let Some(why) = engine.not_writable(&vehicle.link_id)
@@ -246,21 +462,29 @@ fn send(
         (params.confirm, params.force),
         &mut receipt,
     )?;
-    // The preflight gate, for every client (S192).
-    let (ids, away) = (&params.override_preflight, remote.is_some());
-    preflight_gate(engine, &vehicle, ids, (operator, away), &mut receipt);
+    // A real vehicle arms only for an operator who agreed to the terms
+    // (ADR-0047), asked before the preflight checks.
+    engine.terms_gate(&vehicle, arms, &mut receipt);
+    // The preflight gate, for every client (S192), whichever step arms.
+    preflight_gate(
+        engine,
+        &vehicle,
+        (&params.override_preflight, operator),
+        (arms, &asked),
+        &mut receipt,
+    );
     let result = ReceiptDto::from(&receipt);
     let id = receipt.id.clone();
     let sent = receipt.status == ReceiptStatus::Sent;
     let status = receipt.status;
     engine.commit_as(actor.clone(), Change::ReceiptUpserted { receipt });
-    if let Some(by) = &remote {
-        engine.remember_remote(by, &id);
-    }
     if !sent {
-        engine.track_command(&command, status);
-        return to_value(&result);
+        if !vehicle.replay {
+            engine.track_command(&command, status);
+        }
+        return Ok((to_value(&result)?, None));
     }
+    engine.plan_run_command_sent(connection, &vehicle, &command, &id);
     engine.links.command(CommandOrder {
         receipt_id: id.clone(),
         vehicle_id: vehicle.id,
@@ -272,9 +496,11 @@ fn send(
         engine.awaiting.insert(id.clone(), waiting);
     }
     if !steps.is_empty() {
-        engine.take_offs.insert(id, TakeOff { actor, rest: steps });
+        engine
+            .take_offs
+            .insert(id.clone(), TakeOff { actor, rest: steps });
     }
-    Ok(Value::Null)
+    Ok((Value::Null, Some(id)))
 }
 
 /// A command for a vehicle UXDuck can't hear: sent, confirmed first, or
@@ -318,19 +544,16 @@ fn offline_check(
 
 /// Holds a command that arms on the ground while a blocking preflight check
 /// does not pass: `not-sent` with reason `preflight`, listing them; or sent
-/// past them by an operator naming every one, never from away, or by an
-/// approval that listed them (ADR-0038 K3, K4).
+/// past them by an operator naming every one, or by an approval that listed
+/// them (ADR-0038 K3, K4).
 fn preflight_gate(
     engine: &Engine,
     vehicle: &Vehicle,
-    named_ids: &[String],
-    (operator, away): (bool, bool),
+    (named_ids, operator): (&[String], bool),
+    (arms, asked): (bool, &str),
     receipt: &mut Receipt,
 ) {
-    if receipt.status != ReceiptStatus::Sent
-        || vehicle.armed
-        || !receipt.command.arms_on_the_ground()
-    {
+    if receipt.status != ReceiptStatus::Sent || vehicle.armed || !arms {
         return;
     }
     let gating = engine.preflight_gating(&vehicle.id);
@@ -338,9 +561,7 @@ fn preflight_gate(
         return;
     }
     let named = |ids: &[String]| gating.iter().all(|c| ids.contains(&c.id));
-    let by = if away {
-        None
-    } else if operator && named(named_ids) {
+    let by = if operator && named(named_ids) {
         Some(PreflightOverride::Operator)
     } else {
         engine
@@ -356,13 +577,12 @@ fn preflight_gate(
         receipt.preflight_override = by;
         return;
     }
-    let label = receipt.command.label();
     receipt.status = ReceiptStatus::NotSent;
     receipt.detail = Some(crate::preflight::refusal(
-        &label,
+        asked,
         &vehicle.name,
         &gating,
-        operator && !away,
+        operator,
     ));
     receipt.completed_at_us = Some(receipt.created_at_us);
     receipt.reason = Some(RefusalReason::Preflight);
@@ -385,6 +605,9 @@ pub(crate) struct TakeOff {
 /// another mode, which `take_off_refusal` explains), not heard, or does
 /// not lift off straight up.
 fn take_off_steps(engine: &Engine, vehicle: &Vehicle, command: &Command) -> Option<Vec<Command>> {
+    if command.starts_mission() {
+        return mission_start_steps(vehicle, command);
+    }
     if !command.is_take_off()
         || vehicle.armed
         || vehicle.presence != Presence::Online
@@ -411,6 +634,46 @@ fn take_off_steps(engine: &Engine, vehicle: &Vehicle, command: &Command) -> Opti
     Some(steps)
 }
 
+/// What a mission's start sends (S341). ArduPilot refuses `MISSION_START`
+/// with a first item, so it is made current first and the start goes as
+/// `[0, 0]`; PX4 takes the item itself. Disarmed, the vehicle is armed
+/// before the start, as Mission Planner's Start Mission does: from GUIDED
+/// for a copter in AUTO, where `ArduCopter` refuses to arm. None when
+/// the command goes as it is.
+fn mission_start_steps(vehicle: &Vehicle, command: &Command) -> Option<Vec<Command>> {
+    let family = Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type)?;
+    let ardupilot = family != Family::Px4;
+    let mut steps = Vec::new();
+    if ardupilot && let Some(seq) = command.mission_start_item().filter(|seq| *seq > 0) {
+        steps.push(Command::go_to_mission_item(seq));
+    }
+    if !vehicle.armed && vehicle.presence == Presence::Online {
+        let auto = vehicle
+            .mode
+            .as_deref()
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("AUTO"));
+        if family == Family::Copter && auto {
+            steps.push(Command::SetMode {
+                mode: "GUIDED".into(),
+            });
+        }
+        steps.push(Command::Arm);
+    }
+    let start = if ardupilot {
+        Command::Long {
+            command: MAV_CMD_MISSION_START,
+            params: vec![0.0, 0.0],
+        }
+    } else {
+        command.clone()
+    };
+    if steps.is_empty() && start == *command {
+        return None;
+    }
+    steps.push(start);
+    Some(steps)
+}
+
 /// Whether the vehicle is offered Take off: a copter, PX4's multicopters
 /// and VTOLs, and a quadplane, which `ArduPlane` lifts straight up in
 /// GUIDED once armed (maintainer, 2026-10-07: a VTOL on the ground had no
@@ -431,26 +694,6 @@ fn lifts_off(engine: &Engine, vehicle: &Vehicle) -> bool {
         )),
         _ => false,
     }
-}
-
-/// A command from away (S80): names who sent it on its receipt, and makes it
-/// `not-sent` as `expired` when it arrived too old to act on.
-fn mark_remote(
-    engine: &Engine,
-    connection: ConnectionId,
-    (command_id, sent_at_ms): (Option<&str>, Option<u64>),
-    command: &Command,
-    receipt: &mut Receipt,
-) -> Option<uxduck_core::domain::command::RemoteBy> {
-    let (by, expired) = engine.remote_command(connection, command, command_id, sent_at_ms)?;
-    receipt.remote = Some(by.clone());
-    if let Some(why) = expired {
-        receipt.status = ReceiptStatus::NotSent;
-        receipt.detail = Some(why);
-        receipt.completed_at_us = Some(receipt.created_at_us);
-        receipt.reason = Some(RefusalReason::Expired);
-    }
-    Some(by)
 }
 
 /// The height "Take off" climbs to, above home.
@@ -512,6 +755,10 @@ fn mode_airframe<'a>(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the commands offered, in the menu's order"
+)]
 fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, ApiError> {
     let vehicle = engine
         .vehicle(vehicle_id)
@@ -569,6 +816,9 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             altitude_m: 0.0,
             altitude_frame: AltitudeFrame::AboveHome,
             heading: (family == Some(Family::Sub)).then_some(GoToHeading::FaceDestination),
+            // Presence advertises support to interfaces paired with an older daemon.
+            // This is an example radius, like the command's example position.
+            loiter_radius_m: (family == Some(Family::Plane)).then_some(60.0),
         });
     }
     // Plane preserves next_WP_loc's horizontal destination itself. Copter
@@ -579,22 +829,28 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             params: vec![0.0, 3.0],
         });
     }
+    commands.extend(change_speed(family));
     commands.push(Command::Rtl);
-    if matches!(
-        family,
-        Some(Family::Copter | Family::Plane | Family::Blimp | Family::Px4)
-    ) {
+    // A PX4 rover, boat or submarine has nowhere to land.
+    let keeps_down = VehicleClass::of(&vehicle.vehicle_type).never_flies();
+    if matches!(family, Some(Family::Copter | Family::Plane | Family::Blimp))
+        || (family == Some(Family::Px4) && !keeps_down)
+    {
         commands.push(Command::Land);
     }
+    commands.extend(home_and_origin(family));
+    commands.extend(mission_items(family));
     commands.push(Command::Reboot);
+    commands.extend(restart_scripts(engine, vehicle, family));
     Ok(CommandListResult {
         commands: commands
             .iter()
             .map(|command| CommandInfo {
                 command: command.into(),
                 label: command.label(),
-                description: command_description(command, family),
-                advanced: matches!(command, Command::SetMode { mode } if advanced.contains(mode)),
+                description: command_description(command, family, &vehicle.vehicle_type),
+                advanced: matches!(command, Command::SetEkfOrigin { .. })
+                    || matches!(command, Command::SetMode { mode } if advanced.contains(mode)),
                 mode_kind: match (command, family) {
                     (Command::SetMode { mode }, Some(family)) => {
                         family.kind(mode).map(|kind| match kind {
@@ -622,17 +878,41 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
     })
 }
 
-/// Descriptions shared by the command menu and the agent.
-fn command_description(command: &Command, family: Option<Family>) -> Option<String> {
+/// Restart scripts, for an ArduPilot vehicle with scripting on (S259,
+/// ADR-0027 F16).
+fn restart_scripts(engine: &Engine, vehicle: &Vehicle, family: Option<Family>) -> Option<Command> {
+    let on = engine
+        .state
+        .parameters
+        .get(&parameter_id(&vehicle.id, "SCR_ENABLE"))
+        .is_some_and(|p| (p.value - 1.0).abs() < 0.5);
+    (on && family.is_some_and(|f| f != Family::Px4)).then(Command::restart_scripts)
+}
+
+/// Descriptions shared by the command menu and the agent, for a vehicle of
+/// this `MAV_TYPE`.
+fn command_description(
+    command: &Command,
+    family: Option<Family>,
+    vehicle_type: &str,
+) -> Option<String> {
+    // A rover, boat or submarine, of either autopilot.
+    let keeps_down = VehicleClass::of(vehicle_type).never_flies();
     match (command, family) {
         (Command::SetMode { mode }, Some(family)) => {
-            family.describe(mode).map(str::to_owned)
+            family.describe_for(mode, vehicle_type).map(str::to_owned)
         }
         (Command::GoTo { .. }, _) => {
             Some("Goes to a place chosen on the map and holds there".to_owned())
         }
         (Command::Long { command: 186, .. }, Some(Family::Plane)) => Some(
             "Changes the height while keeping the current horizontal destination".to_owned(),
+        ),
+        (Command::Long { command: 178, .. }, Some(Family::Plane)) => Some(
+            "Changes the airspeed it flies at, to its destination or along its mission".to_owned(),
+        ),
+        (Command::Long { command: 178, .. }, _) => Some(
+            "Changes the speed it goes at, to its destination or along its mission".to_owned(),
         ),
         // In plain words, for someone who has never flown
         // (maintainer, 2026-10-10): the button's tooltip and the
@@ -650,16 +930,16 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
             "Climbs straight up to a set height and holds there. On the ground, it switches to GUIDED and arms first. It doesn't start the mission"
                 .to_owned(),
         ),
-        (Command::Arm, _) => Some(
-            "Arming enables the motors for takeoff. The propellers may spin.".to_owned(),
-        ),
-        (Command::Disarm, _) => {
-            Some("Stops the motors. Only on the ground: in the air it falls".to_owned())
-        }
+        (Command::Arm, _) => Some("Enables the motors to spin.".to_owned()),
+        (Command::Disarm, _) if keeps_down => Some("Stops the motors.".to_owned()),
+        (Command::Disarm, _) => Some("Stops the motors. In the air, it falls.".to_owned()),
         (Command::Rtl, Some(Family::Plane)) => {
             Some("Flies back to where it took off and circles there".to_owned())
         }
         (Command::Rtl, Some(Family::Rover | Family::Sub)) => {
+            Some("Goes back to where it started".to_owned())
+        }
+        (Command::Rtl, Some(Family::Px4)) if keeps_down => {
             Some("Goes back to where it started".to_owned())
         }
         (Command::Rtl, _) => {
@@ -675,39 +955,124 @@ fn command_description(command: &Command, family: Option<Family>) -> Option<Stri
             "A VTOL plane comes straight down where it is and lands. A plane that can't hover refuses: it lands through a mission"
                 .to_owned(),
         ),
+        (Command::SetHome { .. }, _) => Some(
+            "Moves home, where it returns to and lands and its heights are measured from: to a place on the map, on the ground there, or to where it is now"
+                .to_owned(),
+        ),
+        (Command::SetEkfOrigin { .. }, _) => Some(
+            "Sets the point its position estimate is measured from, for flying without GPS. It's taken only while the vehicle has none"
+                .to_owned(),
+        ),
+        (Command::Long { command, params }, _)
+            if *command == MAV_CMD_DO_SET_MISSION_CURRENT
+                && params.get(1).is_some_and(|p| *p >= 0.5) =>
+        {
+            Some(
+                "Starts the mission again from its first step, with its repeats reset. In a mission mode it goes there now. Otherwise the mission starts there"
+                    .to_owned(),
+            )
+        }
+        (Command::Long { command, .. }, _) if *command == MAV_CMD_DO_SET_MISSION_CURRENT => Some(
+            "Makes a step of the mission the current one. In a mission mode it goes on to it now. Otherwise the mission goes on from there"
+                .to_owned(),
+        ),
+        (command @ Command::Long { .. }, _) if command.starts_mission() => Some(
+            "Flies the mission from its current step, or a step you choose. On the ground, it arms first"
+                .to_owned(),
+        ),
+        (command @ Command::Long { .. }, _) if command.lands_via_the_mission() => Some(
+            "Flies to the mission's landing sequence, its nearest DO_LAND_START, and lands along it in AUTO. It needs a mission with a landing sequence"
+                .to_owned(),
+        ),
+        (command @ Command::Long { .. }, _) if command.pauses() => Some(
+            "Stops the vehicle where it is in its mission and holds there, until it's continued"
+                .to_owned(),
+        ),
+        (Command::Long { command, .. }, _) if *command == MAV_CMD_DO_PAUSE_CONTINUE => Some(
+            "Goes on with a paused mission from where it stopped".to_owned(),
+        ),
+        (Command::Long { command, .. }, _) if *command == MAV_CMD_SCRIPTING => Some(
+            "Stops the vehicle's Lua scripts and starts them again, reading them from its scripts folder."
+                .to_owned(),
+        ),
         (Command::Reboot, _) => {
-            Some("Restarts the autopilot. Available only while the vehicle is on the ground.".to_owned())
+            // The autopilot refuses PREFLIGHT_REBOOT_SHUTDOWN while armed.
+            Some("Restarts the autopilot. Works only while disarmed.".to_owned())
         }
         _ => None,
     }
 }
 
 /// Every family's modes, for a controller's mapping, which may drive any
-/// vehicle: each family's whole table with a VTOL's usual modes first.
+/// vehicle: each family's whole table with a VTOL's usual modes first. With
+/// a vehicle, its own family lists what the Cockpit's mode menu offers it:
+/// its airframe's modes, or those it listed itself.
 fn mode_list(engine: &Engine, vehicle_id: Option<&str>) -> ModeListResult {
-    let vehicle_family = vehicle_id
-        .and_then(|id| engine.vehicle(id))
-        .and_then(|vehicle| Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type))
-        .map(|family| family.key().to_owned());
+    let vehicle = vehicle_id.and_then(|id| engine.vehicle(id));
+    let own = vehicle.and_then(|vehicle| {
+        let family = Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type)?;
+        let listed = engine.listed_modes(vehicle);
+        Some((
+            family,
+            mode_airframe(engine, vehicle, Some(family), listed),
+            listed,
+        ))
+    });
     ModeListResult {
         families: Family::ALL
             .iter()
-            .map(|family| ModeFamily {
-                key: family.key().to_owned(),
-                name: family.title().to_owned(),
-                modes: family
-                    .offered(None)
-                    .into_iter()
-                    .map(|(mode, advanced)| ModeInfo {
-                        mode: mode.to_owned(),
-                        description: family.describe(mode).map(str::to_owned),
-                        advanced,
-                    })
-                    .collect(),
+            .map(|&family| {
+                let modes = match own {
+                    Some((mine, airframe, listed)) if mine == family => {
+                        let offered: Vec<(String, bool)> = match listed {
+                            Some(listed) => family.offered_from(Some(airframe), listed),
+                            None => family
+                                .offered(Some(airframe))
+                                .into_iter()
+                                .map(|(mode, advanced)| (mode.to_owned(), advanced))
+                                .collect(),
+                        };
+                        offered
+                            .into_iter()
+                            .map(|(mode, advanced)| ModeInfo {
+                                description: family
+                                    .describe_for(&mode, airframe)
+                                    .map(str::to_owned),
+                                mode,
+                                advanced,
+                            })
+                            .collect()
+                    }
+                    _ => family
+                        .offered(None)
+                        .into_iter()
+                        .map(|(mode, advanced)| ModeInfo {
+                            mode: mode.to_owned(),
+                            description: family.describe(mode).map(str::to_owned),
+                            advanced,
+                        })
+                        .collect(),
+                };
+                ModeFamily {
+                    key: family.key().to_owned(),
+                    name: family.title().to_owned(),
+                    modes,
+                }
             })
             .collect(),
-        vehicle_family,
+        vehicle_family: own.map(|(family, _, _)| family.key().to_owned()),
     }
+}
+
+/// What a command's failure notice is bound to: the vehicle and the
+/// command, any mode change counting as one, so the next attempt's outcome
+/// replaces or clears it.
+fn failure_condition(vehicle_id: &str, command: &Command) -> String {
+    let what = match command {
+        Command::SetMode { .. } => "set-mode".to_owned(),
+        other => other.label(),
+    };
+    format!("command:{vehicle_id}:{what}")
 }
 
 fn set_state(
@@ -765,6 +1130,10 @@ impl Engine {
         if self.renewal_done(receipt_id, &outcome) {
             return;
         }
+        // The response graph's message intervals, asked for one at a time (S330).
+        if self.tuning_order_done(receipt_id) {
+            return;
+        }
         let Some(mut receipt) = self.state.receipts.get(receipt_id).cloned() else {
             return;
         };
@@ -781,6 +1150,10 @@ impl Engine {
             ),
             Outcome::NotSent(why) => (ReceiptStatus::NotSent, Some(why)),
         };
+        let condition = failure_condition(&receipt.vehicle_id, &receipt.command);
+        // A command that went through clears an earlier refusal of it, and
+        // a new failure replaces the one before: one notice, the latest.
+        self.resolve(&condition);
         receipt.status = status;
         receipt.detail = detail;
         receipt.attempts = attempts;
@@ -804,6 +1177,10 @@ impl Engine {
                 receipt: receipt.clone(),
             },
         );
+        if was_pending {
+            self.plan_run_command_done(&receipt);
+        }
+        self.position_answered(receipt_id);
         // A take-off's next step, which answers in its place.
         if let Some(take_off) = self.take_offs.remove(receipt_id)
             && status == ReceiptStatus::Accepted
@@ -824,8 +1201,9 @@ impl Engine {
             self.launch_order_done(receipt_id, accepted, receipt.detail.clone());
             return;
         }
-        if status == ReceiptStatus::Accepted {
-            // Someone else's command: a simulated take-off leaves it be.
+        // Someone else's command: a simulated take-off leaves it be. The
+        // simulation start's own, such as a rover's HOLD, is not.
+        if status == ReceiptStatus::Accepted && receipt.client_id != crate::launch::ACTOR {
             self.hand_over_launch(&receipt.vehicle_id);
         }
         if !matches!(status, ReceiptStatus::Accepted) {
@@ -851,7 +1229,7 @@ impl Engine {
                 title,
                 body: receipt.detail.clone(),
                 actions: Vec::new(),
-                condition: None,
+                condition: Some(condition),
                 report: Some(report.into()),
             });
         }
@@ -1006,7 +1384,7 @@ impl Engine {
 
 #[cfg(test)]
 mod unsafe_place_tests {
-    use uxduck_core::domain::command::Command;
+    use uxduck_core::domain::command::{Command, PlaceAmsl};
     use uxduck_core::domain::telemetry::AltitudeFrame;
 
     use super::unsafe_place;
@@ -1017,6 +1395,7 @@ mod unsafe_place_tests {
             longitude_deg,
             altitude_m,
             altitude_frame: frame,
+            loiter_radius_m: None,
             heading: None,
         }
     }
@@ -1035,6 +1414,16 @@ mod unsafe_place_tests {
         assert_eq!(unsafe_place(&height(-1.0, 0.0), true), None);
         assert!(unsafe_place(&height(f32::NAN, 3.0), true).is_some());
         assert!(unsafe_place(&height(40.0, 2.0), true).is_some());
+        let speed = |kind: f32, mps: f32| Command::Long {
+            command: 178,
+            params: vec![kind, mps, -1.0],
+        };
+        assert_eq!(unsafe_place(&speed(0.0, 18.0), true), None);
+        assert_eq!(unsafe_place(&speed(1.0, 5.0), false), None);
+        for bad in [0.0, -1.0, f32::NAN, 400.0] {
+            assert!(unsafe_place(&speed(0.0, bad), true).is_some(), "{bad}");
+        }
+        assert!(unsafe_place(&speed(2.0, 3.0), true).is_some());
         assert!(
             unsafe_place(
                 &Command::Long {
@@ -1076,5 +1465,39 @@ mod unsafe_place_tests {
         );
         // Other commands are not places.
         assert_eq!(unsafe_place(&Command::Rtl, true), None);
+    }
+
+    #[test]
+    fn home_and_the_origin_go_only_on_the_ground_somewhere_on_the_map() {
+        let at = |latitude_deg: f64, longitude_deg: f64, altitude_amsl_m: f64| PlaceAmsl {
+            latitude_deg,
+            longitude_deg,
+            altitude_amsl_m,
+        };
+        for place in [
+            at(-35.36, 149.16, 584.0),
+            at(31.5, 35.5, -430.0),
+            at(28.0, 86.9, 8_849.0),
+        ] {
+            assert_eq!(
+                unsafe_place(&Command::SetHome { place: Some(place) }, true),
+                None
+            );
+            assert_eq!(unsafe_place(&Command::SetEkfOrigin { place }, false), None);
+        }
+        // Where it is now has no place to judge.
+        assert_eq!(unsafe_place(&Command::SetHome { place: None }, true), None);
+        for place in [
+            at(0.0, 0.0, 10.0),
+            at(91.0, 149.16, 10.0),
+            at(f64::NAN, 149.16, 10.0),
+            // Feet for metres on a mountain, or no height at all.
+            at(-35.36, 149.16, 12_000.0),
+            at(-35.36, 149.16, -600.0),
+            at(-35.36, 149.16, f64::NAN),
+        ] {
+            assert!(unsafe_place(&Command::SetHome { place: Some(place) }, true).is_some());
+            assert!(unsafe_place(&Command::SetEkfOrigin { place }, true).is_some());
+        }
     }
 }

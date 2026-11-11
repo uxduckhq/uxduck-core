@@ -4,6 +4,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::dto::plan::LatLon;
+
 /// A terrain dataset (ADR-0026 T1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -157,37 +159,44 @@ pub struct VehicleTerrainDataset {
     pub dataset: Option<TerrainDataset>,
 }
 
-/// An area whose terrain is kept on this computer for use offline (S120).
+/// An area whose terrain is kept on this computer for use offline (S120):
+/// a polygon (ADR-0051 A5), kept while it is enabled.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainArea {
     pub id: String,
     pub name: String,
-    pub south_deg: f64,
-    pub west_deg: f64,
-    pub north_deg: f64,
-    pub east_deg: f64,
+    /// Its corners in order; the last joins the first.
+    pub points: Vec<LatLon>,
+    /// Kept on this computer; a disabled area is drawn, and not kept.
+    pub enabled: bool,
 }
 
 /// Areas are compared as written; their corners are never NaN.
 impl Eq for TerrainArea {}
 
-/// A rectangle, south-west to north-east, not across the antimeridian.
+/// A polygon: at least three corners in order, the last joined to the
+/// first, at most 500. An edge goes the shorter way between its corners,
+/// so across the antimeridian when that is shorter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct TerrainBounds {
-    pub south_deg: f64,
-    pub west_deg: f64,
-    pub north_deg: f64,
-    pub east_deg: f64,
+pub struct TerrainPolygon {
+    pub points: Vec<LatLon>,
 }
 
+/// Keeps a new area, or changes one kept already by its `id`: its name,
+/// corners, and whether it is enabled.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainKeepAreaParams {
+    /// An area from `terrain/areas` to change; absent keeps a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
-    #[serde(flatten)]
-    pub bounds: TerrainBounds,
+    pub points: Vec<LatLon>,
+    /// Absent: a new area is enabled, and a changed one stays as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// What an area would take to keep, from the default dataset.
@@ -212,6 +221,8 @@ pub enum TerrainKeeping {
     Kept,
     /// Some could not be fetched; `detail` says why.
     Incomplete,
+    /// Disabled: drawn, and not kept.
+    Disabled,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -225,6 +236,109 @@ pub struct TerrainAreaStatus {
     pub bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How it stands on each vehicle it is going to or is on (ADR-0051 A8).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vehicles: Vec<VehicleTerrainArea>,
+}
+
+/// `terrain/putArea`: writes areas onto a vehicle's card now, under
+/// ADR-0051 A7's rules (never while it is armed), or removes one's blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainPutAreaParams {
+    pub vehicle_id: String,
+    /// One area from `terrain/areas`; absent: every enabled area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area_id: Option<String>,
+    /// Removes the blocks UXDuck wrote for the area from the vehicle
+    /// instead (A10's "Remove from Alpha"); needs `areaId`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remove: bool,
+}
+
+/// How an area stands on a vehicle (ADR-0051 A8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TerrainPutState {
+    /// To be written; `detail` says what it waits for (armed, an answer,
+    /// its heights, offline).
+    Waiting,
+    Writing,
+    /// On the vehicle's card: every block written and acknowledged, or
+    /// skipped.
+    Written,
+    /// Written from a dataset or release that is no longer the vehicle's.
+    Stale,
+    /// Its blocks are being removed from the card.
+    Removing,
+    Failed,
+}
+
+/// One area on one vehicle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainArea {
+    pub area_id: String,
+    /// The area's name; absent for one deleted since it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub vehicle_id: String,
+    pub vehicle_name: String,
+    pub state: TerrainPutState,
+    /// Blocks to be on the card, and those acknowledged.
+    pub blocks: u32,
+    pub written: u32,
+    /// Left off because a height was missing; `detail` says why.
+    pub skipped: u32,
+    /// Bytes this pass writes, and how fast they go.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub rate_bps: Option<u64>,
+    /// When it was last written whole, microseconds since 1970.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub written_at_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// A block of an area on the vehicle's card, for the map (A2, A8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VehicleCardBlockState {
+    /// Written and acknowledged.
+    Written,
+    /// Being written now.
+    Writing,
+    /// Still to be written.
+    Waiting,
+    /// Left off: a height was missing.
+    Skipped,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleCardBlock {
+    /// South-west, north-west, north-east and south-east.
+    pub corners: Vec<crate::dto::plan::LatLon>,
+    pub state: VehicleCardBlockState,
+    pub area_id: String,
+}
+
+/// What putting areas on a vehicle would take, while UXDuck waits for the
+/// person to agree (A7): `terrain/putArea` agrees.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainPutAsk {
+    pub areas: u32,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// At the link's pace.
+    pub seconds: u32,
+    /// Over a telemetry radio.
+    pub radio: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -237,4 +351,141 @@ pub struct TerrainAreasResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub manifest_checked_at_us: Option<u64>,
+}
+
+/// `terrain/vehicle`: one vehicle's terrain as UXDuck knows it (S310,
+/// ADR-0051 A1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainParams {
+    pub vehicle_id: String,
+    /// List the vehicle's terrain folder over MAVLink FTP as well, as its
+    /// page does when it opens: never while it is armed on a radio.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub list_files: bool,
+}
+
+/// How a block of a vehicle's grid stands this session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VehicleTerrainBlockState {
+    /// Asked for; nothing sent yet (its heights may be on their way here).
+    Asked,
+    /// Some of the groups asked for were sent.
+    Sending,
+    /// Every group the vehicle asked for was sent.
+    Sent,
+    /// Asked for, and UXDuck has no heights to answer it with; `detail`
+    /// says why.
+    Unavailable,
+}
+
+/// A block of the vehicle's grid: 28 points north by 32 east at its
+/// spacing, from the south-west corner it asked for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainBlock {
+    /// South-west, north-west, north-east and south-east, as ArduPilot
+    /// places the block's outer points.
+    pub corners: Vec<crate::dto::plan::LatLon>,
+    pub spacing_m: u16,
+    pub state: VehicleTerrainBlockState,
+    /// Groups of 4 × 4 points the vehicle asked for this session, of 56.
+    pub groups: u8,
+    /// Of those, the groups sent or no longer asked for.
+    pub groups_done: u8,
+    /// Why it cannot be answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// When the vehicle last asked for it, microseconds since 1970.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub asked_at_us: u64,
+}
+
+/// A file in the vehicle's terrain folder: one degree of its grid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainFile {
+    /// Such as `N47E035.DAT`.
+    pub name: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub size: u64,
+}
+
+/// The vehicle's terrain folder as last listed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainFiles {
+    /// `/APM/TERRAIN` on boards, `terrain` on a simulator.
+    pub path: String,
+    pub files: Vec<VehicleTerrainFile>,
+    /// When it was listed, microseconds since 1970; absent until it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub listed_at_us: Option<u64>,
+    /// Being listed now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listing: bool,
+    /// Why the last listing did not happen or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One vehicle's terrain: what it asked for and was sent this session, its
+/// own counts, its dataset, its card's files and its last check (A1). Also
+/// `terrain/vehicleChanged`'s.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one vehicle's terrain"
+)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleTerrainResult {
+    pub vehicle_id: String,
+    /// Whether the vehicle uses terrain: it asked for some, said it had
+    /// groups pending, or holds a mission above terrain.
+    pub used: bool,
+    pub dataset: TerrainDataset,
+    /// Whether the dataset was chosen for this vehicle.
+    pub chosen: bool,
+    /// Its `TERRAIN_SPACING`, once its parameters came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_m: Option<u16>,
+    /// Its `TERRAIN_ENABLE`, once its parameters came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// `TERRAIN_REPORT`'s groups waiting and in memory (`terrain.pending`,
+    /// `terrain.loaded`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded: Option<u32>,
+    /// The blocks it asked for this session, oldest first.
+    pub blocks: Vec<VehicleTerrainBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<VehicleTerrainFiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<TerrainCheckResult>,
+    /// Areas going to its card or on it (ADR-0051 A8).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<VehicleTerrainArea>,
+    /// Their blocks, for the map: at most 2000, the rest counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub card_blocks: Vec<VehicleCardBlock>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub card_blocks_omitted: u32,
+    /// "Keep areas off this vehicle" (A7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub areas_off: bool,
+    /// Areas go to it by themselves; otherwise UXDuck asks first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub areas_automatic: bool,
+    /// Waiting for the person to agree to put areas on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<TerrainPutAsk>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's signature")]
+const fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

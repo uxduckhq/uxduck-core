@@ -32,6 +32,38 @@ impl From<dto::VehicleLook> for core::VehicleLook {
     }
 }
 
+impl From<core::VehicleColour> for dto::VehicleColour {
+    fn from(value: core::VehicleColour) -> Self {
+        match value {
+            core::VehicleColour::Blue => Self::Blue,
+            core::VehicleColour::Pink => Self::Pink,
+            core::VehicleColour::Teal => Self::Teal,
+            core::VehicleColour::Purple => Self::Purple,
+            core::VehicleColour::Lilac => Self::Lilac,
+            core::VehicleColour::Orchid => Self::Orchid,
+            core::VehicleColour::Violet => Self::Violet,
+            core::VehicleColour::Sky => Self::Sky,
+            core::VehicleColour::Magenta => Self::Magenta,
+        }
+    }
+}
+
+impl From<dto::VehicleColour> for core::VehicleColour {
+    fn from(value: dto::VehicleColour) -> Self {
+        match value {
+            dto::VehicleColour::Blue => Self::Blue,
+            dto::VehicleColour::Pink => Self::Pink,
+            dto::VehicleColour::Teal => Self::Teal,
+            dto::VehicleColour::Purple => Self::Purple,
+            dto::VehicleColour::Lilac => Self::Lilac,
+            dto::VehicleColour::Orchid => Self::Orchid,
+            dto::VehicleColour::Violet => Self::Violet,
+            dto::VehicleColour::Sky => Self::Sky,
+            dto::VehicleColour::Magenta => Self::Magenta,
+        }
+    }
+}
+
 impl From<core::Presence> for dto::Presence {
     fn from(value: core::Presence) -> Self {
         match value {
@@ -65,6 +97,13 @@ impl From<&core::Vehicle> for dto::Vehicle {
             saved: v.saved,
             dismissed: v.dismissed,
             local_only: v.local_only,
+            replay: v.replay,
+            hidden: v.hidden,
+            seen_in_log: v.seen_in_log,
+            replay_of: v.replay_of.clone(),
+            replay_at_us: v.replay_at_us,
+            sim_evidence: v.sim_evidence,
+            simulated: v.simulated,
             labels: v.labels.clone(),
             bookmarks: v
                 .bookmarks
@@ -75,8 +114,11 @@ impl From<&core::Vehicle> for dto::Vehicle {
                 })
                 .collect(),
             size_cm: v.size_cm,
+            gripper: v.gripper.map(Into::into),
+            companions: v.companions.iter().map(Into::into).collect(),
             traffic: v.traffic,
             look: v.look.map(Into::into),
+            colour: v.colour.map(Into::into),
             version: v.version,
         }
     }
@@ -128,6 +170,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 in_air_m,
                 snapshot_id,
                 binary,
+                allow_network,
                 wipe,
                 with_mission,
                 traffic,
@@ -144,6 +187,7 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 in_air_m,
                 snapshot_id,
                 binary,
+                allow_network,
                 wipe,
                 with_mission,
                 traffic,
@@ -179,6 +223,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 in_air_m,
                 snapshot_id,
                 binary,
+                allow_network,
                 wipe,
                 with_mission,
                 traffic,
@@ -195,6 +240,7 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 in_air_m,
                 snapshot_id,
                 binary,
+                allow_network,
                 wipe,
                 with_mission,
                 traffic,
@@ -349,6 +395,10 @@ impl From<&core_link::Link> for link::Link {
                 detail: launch.detail.clone(),
             }),
             paused: l.paused,
+            scenery_hit: l.scenery_hit.map(|hit| link::SceneryHit {
+                latitude_e7: hit.latitude_e7,
+                longitude_e7: hit.longitude_e7,
+            }),
             version: l.version,
         }
     }

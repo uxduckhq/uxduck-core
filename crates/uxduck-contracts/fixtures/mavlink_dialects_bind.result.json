@@ -1,0 +1,100 @@
+{
+  "id": "dialect-3f9a1c2b7d4e",
+  "label": "Acme r12",
+  "files": ["acme.xml", "ardupilotmega.xml"],
+  "commits": ["2a3dc4b7", "9f00aa12"],
+  "usedBy": ["12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"],
+  "messages": [
+    {
+      "id": 1,
+      "name": "SYS_STATUS",
+      "change": "extensions",
+      "crcExtra": 124,
+      "description": "ArduPilot's, with one more extension.",
+      "fields": [
+        {
+          "name": "onboard_control_sensors_present",
+          "kind": "uint32_t"
+        },
+        {
+          "name": "voltage_battery",
+          "kind": "uint16_t",
+          "units": "mV"
+        },
+        {
+          "name": "acme_payload_mv",
+          "kind": "uint16_t",
+          "extension": true,
+          "units": "mV",
+          "description": "The payload's supply."
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "name": "GLOBAL_POSITION_INT",
+      "change": "layout",
+      "crcExtra": 17,
+      "fields": [
+        {
+          "name": "time_boot_ms",
+          "kind": "uint32_t",
+          "units": "ms"
+        },
+        {
+          "name": "alt_cm",
+          "kind": "int16_t",
+          "units": "cm"
+        }
+      ]
+    },
+    {
+      "id": 43001,
+      "name": "ACME_STATUS",
+      "change": "new",
+      "crcExtra": 201,
+      "description": "Acme payload status.",
+      "fields": [
+        {
+          "name": "mode",
+          "kind": "uint8_t",
+          "enum": "ACME_MODE",
+          "description": "What the payload is doing."
+        },
+        {
+          "name": "name",
+          "kind": "char",
+          "length": 8
+        }
+      ]
+    }
+  ],
+  "enums": [
+    {
+      "name": "ACME_MODE",
+      "entries": [
+        {
+          "value": 0,
+          "name": "ACME_MODE_IDLE"
+        },
+        {
+          "value": 3,
+          "name": "ACME_MODE_SURVEY"
+        }
+      ]
+    },
+    {
+      "name": "ACME_FLAGS",
+      "bitmask": true,
+      "entries": [
+        {
+          "value": 1,
+          "name": "ACME_FLAG_ARMED"
+        }
+      ]
+    }
+  ],
+  "unchanged": 318,
+  "addedAtUs": 1790000000000000,
+  "unread": ["GLOBAL_POSITION_INT"]
+}

@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::command::Command;
+use crate::dto::gripper::GripperAction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -25,7 +26,7 @@ pub struct Claim {
 }
 
 /// An input device the daemon owns.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Controller {
     pub id: String,
@@ -45,8 +46,22 @@ pub struct Controller {
     /// Why input is paused; the controller remains claimed and assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_pause: Option<String>,
+    /// A button or position held for its command: the command goes when
+    /// the hold is complete, and nothing goes if it is let go before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding: Option<ControllerHold>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// A hold under way on a controller, for the app to show it filling from
+/// when it hears of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerHold {
+    pub command: Command,
+    /// How long the hold takes in all.
+    pub hold_ms: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -132,6 +147,36 @@ pub struct ButtonBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<u32>,
     pub command: Command,
+    /// How long it must be held before the command goes, 100 to 10000 ms;
+    /// absent: on the press itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_ms: Option<u32>,
+}
+
+/// A button held for an action (S263, S21): it never sends a command. The
+/// gripper acts while held, only if pressed after the controller's current
+/// route began. A button is bound either to a command or to an action, not
+/// both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionBinding {
+    pub button: GamepadButton,
+    /// As for `ButtonBinding::code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<u32>,
+    pub action: HeldAction,
+}
+
+/// What a held button does: `open` and `close` hold the gripper; `talk`
+/// is held to speak to the agent in the window that claimed the controller,
+/// and let go to send (S21), which that window reads from
+/// `controller/inputs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeldAction {
+    Open,
+    Close,
+    Talk,
 }
 
 /// A position of an axis, such as a switch's, that sends a command when the
@@ -146,6 +191,10 @@ pub struct PositionBinding {
     /// The axis's raw value at the position, -1 to 1.
     pub at: f64,
     pub command: Command,
+    /// As for `ButtonBinding::hold_ms`: how long the axis must stay in the
+    /// position first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_ms: Option<u32>,
 }
 
 /// Which part of an axis provides the throttle's 0 to 100% input.
@@ -179,6 +228,16 @@ pub enum StickMode {
     Mode4,
 }
 
+/// A stick control a mapping may leave unused. Throttle is not one: centred
+/// it is 50%, so it is always read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum StickControl {
+    Roll,
+    Pitch,
+    Yaw,
+}
+
 /// Controller axes to the four sticks, and buttons to commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -203,6 +262,14 @@ pub struct InputMapping {
     pub positions: Vec<PositionBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rc_channels: Vec<RcAxisBinding>,
+    /// Controls not used, such as a rover's pitch and yaw: they read centred
+    /// and need no input. Their bindings are kept for when they are used
+    /// again. Only for a daemon with `unusedControls`; an older one ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unused: Vec<StickControl>,
+    /// Buttons held for the gripper (S263). Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionBinding>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -263,6 +330,13 @@ pub struct MappingUpdateParams {
     pub positions: Vec<PositionBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rc_channels: Vec<RcAxisBinding>,
+    /// As for `InputMapping::unused`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unused: Vec<StickControl>,
+    /// As for `InputMapping::actions`. Absent keeps the mapping's own, so a
+    /// client that knows nothing of them never drops them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<ActionBinding>>,
 }
 
 /// Makes a mapping of its own for a controller: a copy of `from` (Mode 2
@@ -294,6 +368,22 @@ pub struct AxisValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<GamepadAxis>,
     pub value: f64,
+    /// What it has shown itself to be since it was plugged in, on a device
+    /// whose layout is not known; absent until it has moved, and on a known
+    /// gamepad, whose sticks are sticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<InputKind>,
+}
+
+/// What an axis is, judged from the places it has read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputKind {
+    /// A stick, slider or knob: it has read between places.
+    Continuous,
+    /// It has only jumped between places, as a switch or a button does, or
+    /// a stick the radio sends as on and off: never one to fly with.
+    Switch,
 }
 
 /// A button the device has, where the platform can list them (macOS), or
@@ -317,6 +407,10 @@ pub struct ButtonState {
     /// reads still shows.
     #[serde(default)]
     pub seen: bool,
+    /// How many times it has gone down since it was plugged in, so a reader
+    /// counts every tap between two reads (S21's Talk button).
+    #[serde(default)]
+    pub presses: u32,
 }
 
 /// What a plugged-in controller reports right now.
@@ -332,6 +426,10 @@ pub struct ControllerInputs {
     /// (macOS), with its value now; elsewhere every axis that has moved.
     pub axes: Vec<AxisValue>,
     pub buttons: Vec<ButtonState>,
+    /// The gripper action it asks its vehicle for now (S263): requested,
+    /// not confirmed by the vehicle. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper: Option<GripperAction>,
 }
 
 /// Every plugged-in controller's raw input, for testing a gamepad and a
@@ -349,6 +447,23 @@ pub struct KeyboardStartParams {
     pub vehicle_id: String,
     /// Initial throttle input, -1 (idle) to 1 (full); 0 is the middle.
     pub throttle: f64,
+}
+
+/// Why the page released its keyboard controller (S291). Absent: the person
+/// released it, and nothing is said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyboardStopReason {
+    /// UXDuck stopped being the app in front: the keys went elsewhere.
+    AppUnfocused,
+}
+
+/// Releases this connection's keyboard controller.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardStopParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<KeyboardStopReason>,
 }
 
 /// A complete keyboard input frame. Never starts or reclaims a controller.

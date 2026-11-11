@@ -63,20 +63,14 @@ pub struct Computer {
     pub daemon_version: Option<String>,
 }
 
-/// `GET /v1/computers`: the account's computers, online first.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerList {
-    pub computers: Vec<Computer>,
-}
-
 /// This computer's connection to its account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum EdgeState {
     /// Not signed in: nothing leaves the computer.
     SignedOut,
-    /// "Connect this computer to my account" is off.
+    /// Not connected: "Live sharing from this computer" is off, or none of
+    /// its watch links is still open.
     Off,
     Connecting,
     Connected,
@@ -97,18 +91,6 @@ pub struct EdgeStatus {
     /// Why it is not connected, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
-}
-
-/// `account/computers`: the account's computers, which one this is, and how
-/// its own connection is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountComputers {
-    pub computers: Vec<Computer>,
-    /// This computer's id once it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub this_computer: Option<String>,
-    pub edge: EdgeStatus,
 }
 
 // Live telemetry's fast path (S79, ADR-0003 C8): the relay asks for what
@@ -175,6 +157,9 @@ pub struct RemoteVehicle {
     /// The model the person chose to draw it as; absent, its type's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<crate::dto::vehicle::VehicleLook>,
+    /// Its colour as the computer it is on draws it (ADR-0029 P19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<crate::dto::vehicle::VehicleColour>,
     pub presence: crate::dto::vehicle::Presence,
     pub armed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,9 +171,6 @@ pub struct RemoteVehicle {
     /// Its active notifications' titles, worst first, at most five.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
-    /// Who holds its control lease from away (S80).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease: Option<Lease>,
     /// Its cameras, and which of them are live from away now (S84).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cameras: Vec<RemoteCamera>,
@@ -291,89 +273,8 @@ pub struct EdgeDelta {
     pub relay_at_ms: u64,
 }
 
-// Remote control (S80, ADR-0003 C9, C10): commands from away go through the
-// computer's own command path; the control lease decides who may send
-// Mission and Critical ones.
-
-/// `lease/take` and `lease/release`: a vehicle's control lease.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LeaseParams {
-    pub vehicle_id: String,
-}
-
-/// Who holds a vehicle's control lease from away.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Lease {
-    pub vehicle_id: String,
-    pub user_id: String,
-    pub name: String,
-    #[schemars(schema_with = "crate::safe::integer")]
-    pub since_us: u64,
-    /// What happens if they lose connection and nobody is at the computer
-    /// (S81): "If you lose connection and nobody is at the ground station,
-    /// Copter 1 will return to launch about 15 s later."
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failsafe: Option<String>,
-}
-
-/// `edge/command`, the relay to the computer: a command from someone away,
-/// with the cloud's signed grant naming them. Answered with the receipt.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct EdgeCommand {
-    pub grant: String,
-    pub command_id: String,
-    pub vehicle_id: String,
-    pub command: crate::dto::command::Command,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub confirm: bool,
-    /// When the relay received it, on its clock.
-    #[schemars(schema_with = "crate::safe::integer")]
-    pub sent_at_ms: u64,
-}
-
-/// `edge/lease`, the relay to the computer: take or give back a vehicle's
-/// control lease. Answered with the lease, or nothing once given back.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct EdgeLease {
-    pub grant: String,
-    pub vehicle_id: String,
-    pub take: bool,
-}
-
-/// `edge/receipt`, the relay to the computer: a command's receipt by the id
-/// its sender gave it, after a connection dropped before the answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct EdgeReceipt {
-    pub grant: String,
-    pub command_id: String,
-}
-
-// Remote vehicles in the app (S86, ADR-0003 C8): an installed UXDuck
-// watches another of the account's computers through the relay as its own
-// signed-in account, for the windows that ask. Its token never reaches a
-// page, and the page opens no socket but its own UXDuck's (ADR-0008).
-
-/// `remote/watch`: what this window watches from away. One computer, and one
-/// of its vehicles in detail; no computer stops.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteWatchParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub computer_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vehicle_id: Option<String>,
-    /// One of that computer's cameras to watch live (S84).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_id: Option<String>,
-}
-
-/// `remote/changed`: the computer watched, as this UXDuck sees it through the
-/// relay. Each vehicle's `atMs` is on this computer's clock, so its age is
+/// The computer a watch page watches (S95, ADR-0023), as the link's socket
+/// brings it. Each vehicle's `atMs` is on the page's clock, so its age is
 /// now minus it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -391,17 +292,15 @@ pub struct RemoteView {
     /// The markers it shares with watchers (S182).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<RemoteMarker>,
-    /// What this window needs to play the camera it asked for (S84).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub video: Vec<RemoteVideo>,
 }
 
 // Live video from anywhere (S84, ADR-0003 C11 to C13, "Live path"): a
 // computer publishes a camera's live rendition to a cloud media node only
 // while someone away watches it, with a publish grant from the media
-// coordinator in `apps/api`; a viewer plays it by WHEP with a read grant.
-// The media node checks both grants itself against the coordinator's keys,
-// so a stream starts without a database (C6).
+// coordinator in `apps/api`. The media node checks the grant itself against
+// the coordinator's keys, so a stream starts without a database (C6). Nobody
+// away plays one since the account's own viewers went (2026-11-03): guests
+// get no video (ADR-0023 W5).
 
 /// A camera as it leaves the computer: its name, and whether it is live.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -426,40 +325,6 @@ pub struct RemoteCamera {
 pub struct EdgeWatchVideo {
     #[serde(default)]
     pub cameras: Vec<String>,
-}
-
-/// A STUN or TURN server for WebRTC, as `RTCIceServer` takes it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IceServer {
-    pub urls: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
-}
-
-/// What a window needs to play one camera from away: where, with what
-/// grant, through which servers. The grant reads this one stream and lasts
-/// minutes; the account's own token never reaches a page.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteVideo {
-    pub camera_id: String,
-    /// The WHEP endpoint on the media node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub whep_url: Option<String>,
-    /// The read grant, sent as `Authorization: Bearer`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ice_servers: Vec<IceServer>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::safe::optional_integer")]
-    pub expires_at_ms: Option<u64>,
-    /// Why it cannot play, for people: not signed in, not set up.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub problem: Option<String>,
 }
 
 /// How a computer sends a live rendition to a media node (C12).
@@ -513,29 +378,6 @@ pub struct MediaPublishGrant {
     pub expires_at_ms: u64,
 }
 
-/// `POST /v1/media/watch`, a viewer asking to play one camera.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaWatchRequest {
-    pub device_id: String,
-    pub camera_id: String,
-    /// The node the computer says it publishes to, if it said.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-}
-
-/// The answer to `POST /v1/media/watch`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaWatchGrant {
-    pub stream_id: String,
-    pub whep_url: String,
-    pub grant: String,
-    #[schemars(schema_with = "crate::safe::integer")]
-    pub expires_at_ms: u64,
-    pub ice_servers: Vec<IceServer>,
-}
-
 /// A watch link (S95, ADR-0023): anyone holding its address watches one
 /// computer, one vehicle on it or all of them, until it ends. The token is
 /// shown once, when it is made; the API keeps only its hash.
@@ -564,6 +406,10 @@ pub struct WatchLink {
 #[serde(rename_all = "camelCase")]
 pub struct WatchLinkCreate {
     pub device_id: String,
+    /// The computer's name, so a computer that has not connected yet is
+    /// known to the account: it connects only once it has a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -612,8 +458,8 @@ pub struct WatchVideoRequest {
 }
 
 /// `watchLink/create`: a watch link for this computer (S95), or for one
-/// vehicle on it. Needs the account signed in and "Let my account watch
-/// this computer" on.
+/// vehicle on it. Needs the account signed in and "Live sharing from this
+/// computer" on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchLinkCreateParams {
@@ -666,6 +512,9 @@ pub struct WatchViewersResult {
 #[serde(rename_all = "camelCase")]
 pub struct WatchLinkListResult {
     pub links: Vec<WatchLinkStatus>,
+    /// How this computer's connection for live sharing is going: links
+    /// show nothing while it is not connected.
+    pub edge: EdgeStatus,
 }
 
 /// `watchLink/revoke`.

@@ -17,6 +17,8 @@ pub const AGENT_METHODS: &[&str] = &[
     "daemon/about",
     "mavlink/inspect",
     "mavlink/history",
+    "mavlink/dialects/list",
+    "firmware/list",
     "router/events",
     "link/diagnose",
     "socket/inspect",
@@ -53,12 +55,17 @@ pub const AGENT_METHODS: &[&str] = &[
     "plan/import",
     "plan/export",
     "plan/upload",
+    // Flying plans in simulation (S293): checking is free; starting the
+    // simulated vehicles asks first unless the agent has `config`.
+    "plan/simulateCheck",
+    "plan/simulate",
     "mission/refresh",
     "mission/history",
     "mission/restore",
     // Simulated vehicles (S17): starting and stopping one asks the operator
     // first, unless the agent was given the configuration capability.
     "sim/binaries",
+    "sim/frames",
     "sim/catalogue",
     "sim/download",
     "sim/start",
@@ -85,30 +92,82 @@ pub const AGENT_METHODS: &[&str] = &[
     "param/get",
     "param/list",
     "param/diff",
+    "param/changes",
     "param/set",
+    // Which descriptions a vehicle uses (ADR-0044 F10): asks the operator
+    // first; adding and removing sets stay a person's.
+    "param/definitions/use",
+    // Which dialects a vehicle uses (F13): asks the operator first.
+    "mavlink/dialects/use",
+    // Saved parameter sets (S217, ADR-0037 V19): listing, comparing (with
+    // `param/diff`'s `setId`) and exporting freely; applying one is a
+    // parameter write and asks the operator first. Saving, renaming and
+    // deleting them are a person's.
+    "param/sets",
+    "param/setExport",
+    "param/setApply",
+    // The Tuning tab's parts and their values (S329, ADR-0054 T13), with
+    // how each axis flew (S333): read freely; gains change only through
+    // `param/set`, which asks first.
+    "tuning/state",
+    // Prepare's starting values (S331): worked out, never written.
+    "tuning/prepare",
     // A vehicle's history (S69, ADR-0022): reading it freely; offer useful
     // notes for completed work, write only with consent and config permission.
     "vehicle/history",
     "flight/list",
+    // Replay (ADR-0039 R9): open a flight to show a moment, move its clock
+    // and close it. `read` alone: nothing reaches a vehicle.
+    "replay/open",
+    "replay/seek",
+    "replay/state",
+    "replay/close",
+    "flight/series",
+    "replay/logFields",
+    "replay/add",
+    // Files the operator attached to a message (S246): text read freely; a
+    // log replayed, or a video kept with a flight after asking, by its id.
+    "attachment/read",
+    "flight/addVideo",
+    // Operations (ADR-0039 R16): reading freely, gathering after asking.
+    "operation/list",
+    "operation/create",
+    "operation/rename",
+    "operation/addFlights",
+    "operation/removeFlights",
+    // A flight's name, after asking.
+    "flight/rename",
+    // The logs on a vehicle's SD card plugged in, and those copied (S212).
+    "logs/cards",
+    // Flights in other ground stations' tlogs (S215).
+    "flights/found",
     "vehicle/addNote",
     // Labels (S106): putting them on and off asks the operator first.
     "vehicle/label",
     "vehicle/size",
     "vehicle/look",
+    "vehicle/colour",
+    // Which actuator is the gripper, asking first, and its wiring (S263).
+    "vehicle/gripper",
+    "gripper/status",
     // Parameter changes with who made each and why (S74).
     "param/history",
     // A vehicle's own messages (S26): the folded log, freely.
     "vehicle/messages",
     // The ground's height at a point (S23), freely; a vehicle's own terrain
-    // checked against it (S119).
+    // checked against it (S119), and what it asked for and was sent (S310).
     "terrain/at",
     "terrain/check",
     "terrain/status",
-    // Areas kept offline (S120): listing and sizing freely; keeping one
-    // asks first.
+    "terrain/vehicle",
+    // Areas kept offline (S120), polygons (ADR-0051 A5): listing and sizing
+    // freely; keeping, changing or disabling one asks first.
     "terrain/areas",
     "terrain/areaSize",
     "terrain/keepArea",
+    // Writing an area to a vehicle's card, or removing it (ADR-0051 A11),
+    // asks first, as a file upload does.
+    "terrain/putArea",
     // A vehicle's files (S121, ADR-0027 F6, F7): listing and reading small
     // ones freely, such as ArduPilot's `@SYS/uarts.txt`; sending and
     // deleting one asks the operator first.
@@ -135,8 +194,11 @@ pub const AGENT_METHODS: &[&str] = &[
     // Opening a tab when asked (S43), in the chat's operator's layout.
     "layout/open",
     // A suggestion card for what UXDuck cannot do (S73): the person reads
-    // and sends it; the agent cannot send feedback.
+    // and sends it. Where UXDuck sends reports, the agent files them itself
+    // instead, the title and text only, and adds to them (S294).
     "feedback/suggest",
+    "feedback/file",
+    "feedback/add",
     // Camera video (S38, ADR-0017 V15): what is arriving and why it plays
     // badly; assigning or naming a camera asks the operator first.
     "video/list",
@@ -173,6 +235,51 @@ pub const AGENT_METHODS: &[&str] = &[
 /// they cover every method, so a new one (a new setting's, say) must be
 /// placed in one or the other, and is not forgotten from MCP.
 pub const KEPT_FROM_AGENTS: &[&str] = &[
+    // The response graph's sample rate follows the Tuning tab being open (S330).
+    "tuning/live",
+    // The graph's samples, 25 a second, are more than a tool answer holds;
+    // `tuning/state` has their summaries (S333).
+    "tuning/response",
+    // Only the renderer can observe scenery contact; agents can stop/restart simulations.
+    "sim/crash",
+    // Companion computers are reached over SSH with the person's own keys
+    // and agent (S296, ADR-0049 O8): adding one, signing in to it and
+    // forgetting it are the person's.
+    "computer/add",
+    "computer/remove",
+    "computer/check",
+    // Whether a vehicle is a simulation is the person's word (ADR-0039 R14).
+    "vehicle/simulated",
+    // Agreeing to the Terms of Service is the person's (ADR-0047).
+    "terms/accept",
+    // Saving a log to the account is the person's (ADR-0039 R11).
+    "replay/save",
+    // Naming a replay is the person's (ADR-0039 R21); an agent says what
+    // it opened instead.
+    "replay/rename",
+    // Lining flights up is the bar's; the tools sent each turn are full.
+    "replay/startTogether",
+    // A flight's log as a file: bytes for the person to save, not to read.
+    "flight/log",
+    // Which folders are looked in is the person's (S215).
+    "flights/folder",
+    // Copying a card's logs is the person's, as plugging it in was.
+    "logs/copyCard",
+    // The replay bar's own controls: a person watches at their own pace.
+    "replay/play",
+    "replay/pause",
+    "replay/restart",
+    "replay/speed",
+    "replay/nudge",
+    // Where replay vehicles were, for the maps to draw them between
+    // updates; an agent reads a flight with `flight/series`.
+    "replay/motion",
+    // An added video is aligned by the person's eye (ADR-0039 R8).
+    "video/align",
+    // Uploading a file is the person's: they attach it to their message.
+    "attachment/begin",
+    "attachment/append",
+    "attachment/finish",
     // Protocol, sessions, streams and window plumbing: not tools.
     "initialize",
     "trace/subscribe",
@@ -191,9 +298,6 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "client/visibility",
     "app/focus",
     "app/open",
-    "lease/take",
-    "lease/release",
-    "remote/watch",
     "video/watch",
     "video/metadata/watch",
     "video/unwatch",
@@ -258,7 +362,6 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "sync/activate",
     "sync/restore",
     "account/shared",
-    "account/computers",
     "watchLink/create",
     "watchLink/list",
     "watchLink/viewers",
@@ -274,6 +377,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "account/setUsername",
     // The account's name is the person's own, like the username.
     "account/setName",
+    // So is where they heard of UXDuck (S251).
+    "account/setSource",
     // A vehicle's setup, preflight and checklist actions (S184 to S194):
     // starting, confirming or cancelling a procedure, spinning motors,
     // installing firmware, changing the checks and ticking a step need a
@@ -299,6 +404,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     // The agent's own conversations, which the person manages.
     "thread/create",
     "thread/send",
+    "thread/edit",
+    "thread/queue",
+    "agent/connection",
     "thread/update",
     "thread/cancel",
     "thread/delete",
@@ -312,6 +420,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "vehicle/traffic",
     "vehicle/bookmarks",
     "vehicle/dismiss",
+    "vehicle/hide",
     "link/add",
     "link/remove",
     "link/enable",
@@ -325,13 +434,26 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "param/definitions/list",
     "param/definitions/add",
     "param/definitions/remove",
+    "mavlink/dialects/add",
+    "mavlink/dialects/remove",
+    "mavlink/dialects/bind",
+    "firmware/add",
+    "firmware/remove",
+    "firmware/rename",
+    "param/setSave",
+    "param/setRename",
+    "param/setRemove",
     "flight/keep",
+    "flight/remove",
+    "flight/removal",
     "flight/end",
     "flight/uploadLog",
     "vehicle/editNote",
     "vehicle/deleteNote",
     "mission/upload",
     "controller/claim",
+    // Holding the gripper is the operator's hand on the controls (S263).
+    "gripper/hold",
     "controller/keyboardStart",
     "controller/keyboardInput",
     "controller/keyboardStop",
@@ -392,6 +514,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
 /// and runs them with `tool_call`. Every tool the instructions name stays
 /// loaded. MCP discovery searches the full generated catalogue separately.
 pub const DEFERRED_METHODS: &[&str] = &[
+    "tuning/state",
+    "tuning/prepare",
     "place/search",
     "place/locate",
     "marker/add",
@@ -407,6 +531,8 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "daemon/about",
     "mavlink/inspect",
     "mavlink/history",
+    "mavlink/dialects/list",
+    "firmware/list",
     "router/events",
     "link/diagnose",
     "socket/inspect",
@@ -422,10 +548,13 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "plan/import",
     "plan/export",
     "plan/upload",
+    "plan/simulateCheck",
+    "plan/simulate",
     "mission/refresh",
     "mission/history",
     "mission/restore",
     "sim/binaries",
+    "sim/frames",
     "sim/catalogue",
     "sim/download",
     "sim/start",
@@ -439,17 +568,45 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "param/list",
     "param/refresh",
     "flight/list",
+    "replay/open",
+    "replay/seek",
+    "replay/state",
+    "replay/close",
+    "flight/series",
+    "replay/logFields",
+    "replay/add",
+    "attachment/read",
+    "flight/addVideo",
+    "operation/list",
+    "operation/create",
+    "operation/rename",
+    "operation/addFlights",
+    "operation/removeFlights",
+    "flight/rename",
+    "logs/cards",
+    "flights/found",
     "param/diff",
+    "param/changes",
+    "param/sets",
+    "param/setExport",
+    "param/setApply",
     "param/history",
+    "param/definitions/use",
+    "mavlink/dialects/use",
     "vehicle/label",
     "vehicle/size",
     "vehicle/look",
+    "vehicle/colour",
+    "vehicle/gripper",
+    "gripper/status",
     "terrain/at",
     "terrain/check",
     "terrain/status",
+    "terrain/vehicle",
     "terrain/areas",
     "terrain/areaSize",
     "terrain/keepArea",
+    "terrain/putArea",
     "files/list",
     "files/read",
     "files/upload",
@@ -460,6 +617,10 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "settings/update",
     "operator/list",
     "operator/update",
+    // Only where UXDuck Web sends reports itself (S294).
+    "feedback/suggest",
+    // Rare, and kept the tools sent each turn under budget for set home (S308).
+    "checklist/copy",
 ];
 
 /// The tool that runs a deferred one by name.
@@ -520,18 +681,15 @@ pub fn model_tools() -> Vec<Tool> {
         .collect();
     if let Some(search) = sent.iter_mut().find(|tool| tool.method == "tool/search") {
         search.description.push_str(
-            " Also finds UXDuck's own tools that are not loaded until needed \
-             (plans and missions, simulations, terrain, files, parameter lists and \
-             history, link diagnostics) in uxduckTools; run those with tool_call.",
+            " Also finds deferred UXDuck tools in uxduckTools: plans, missions, simulations, \
+             terrain, files, parameters, history and link diagnostics. Run them with tool_call.",
         );
     }
     sent.push(Tool {
         name: TOOL_CALL.into(),
         method: String::new(),
-        description: "Runs one of UXDuck's own tools that tool_search found (plans and \
-            missions, simulations, terrain, a vehicle's files, parameter lists and history, link \
-            diagnostics), by its name with params its schema allows. It asks the operator first \
-            where the tool itself would."
+        description: "Runs a UXDuck tool found by tool_search, using its name and params schema. \
+            The tool's normal operator approvals apply."
             .into(),
         parameters: json!({
             "type": "object",
@@ -543,6 +701,23 @@ pub fn model_tools() -> Vec<Tool> {
         }),
     });
     sent
+}
+
+pub(crate) fn chat_tools(can_file_feedback: bool) -> (Vec<Tool>, Vec<Tool>) {
+    let mut all = tools();
+    let mut sent = model_tools();
+    if !can_file_feedback {
+        for catalog in [&mut all, &mut sent] {
+            catalog
+                .retain(|tool| !matches!(tool.method.as_str(), "feedback/file" | "feedback/add"));
+        }
+        sent.extend(
+            all.iter()
+                .filter(|tool| tool.method == "feedback/suggest")
+                .cloned(),
+        );
+    }
+    (all, sent)
 }
 
 /// The deferred tools matching words, best first: each word in a tool's
@@ -613,6 +788,40 @@ pub fn tools() -> Vec<Tool> {
             {
                 properties.remove("subscribe");
             }
+            // The turn names the chat itself; the chat is always open, and
+            // the duck and Get started are no one's request. The method's
+            // doc says the rest.
+            if *method == "layout/open" {
+                if let Some(object) = parameters.as_object_mut() {
+                    object.remove("description");
+                }
+                if let Some(properties) = parameters["properties"].as_object_mut() {
+                    properties.remove("threadId");
+                }
+                if let Some(kinds) = parameters
+                    .pointer_mut("/properties/kind/oneOf")
+                    .and_then(Value::as_array_mut)
+                {
+                    kinds.retain(|kind| {
+                        !matches!(kind["const"].as_str(), Some("chat" | "get-started" | "duck"))
+                    });
+                }
+            }
+            // The host names the chat, only the person attaches files, and a
+            // report the agent files is one of three kinds.
+            if matches!(*method, "feedback/file" | "feedback/add")
+                && let Some(properties) = parameters["properties"].as_object_mut()
+            {
+                properties.remove("threadId");
+                properties.remove("attachments");
+                if let Some(kind) = properties.get_mut("kind") {
+                    let description = kind["description"].clone();
+                    *kind = json!({
+                        "enum": ["problem", "suggestion", "idea"],
+                        "description": description,
+                    });
+                }
+            }
             let mut description = variant
                 .get("description")
                 .and_then(Value::as_str)
@@ -620,7 +829,8 @@ pub fn tools() -> Vec<Tool> {
                 .to_owned();
             if *method == "plugin/draft" {
                 description.push_str("\n\n");
-                description.push_str(include_str!("plugin-guide.md"));
+                // A Windows checkout gives the guide CRLF line ends: the same text everywhere.
+                description.push_str(&include_str!("plugin-guide.md").replace('\r', ""));
             }
             if *method == "vehicle/messages" {
                 // The doc comment wraps anywhere; match it as one line.
@@ -691,6 +901,18 @@ mod tests {
 
     use super::*;
 
+    /// An agent may stop a simulation, which keeps it (S264), but hiding or
+    /// deleting it stays a person's: Stop and hide is `sim/stop` then
+    /// `vehicle/hide`, and Delete is `link/remove`.
+    #[test]
+    fn agents_stop_simulations_but_never_hide_or_delete_them() {
+        assert!(AGENT_METHODS.contains(&"sim/stop"));
+        for method in ["vehicle/hide", "link/remove", "vehicle/delete"] {
+            assert!(!AGENT_METHODS.contains(&method), "{method}");
+            assert!(KEPT_FROM_AGENTS.contains(&method), "{method}");
+        }
+    }
+
     #[test]
     fn every_method_is_offered_to_agents_or_kept_from_them_on_purpose() {
         let offered: std::collections::BTreeSet<_> = AGENT_METHODS.iter().collect();
@@ -713,6 +935,47 @@ mod tests {
             .filter(|method| !ClientRequest::METHODS.contains(method))
             .collect();
         assert!(unknown.is_empty(), "no such methods: {unknown:?}");
+    }
+
+    /// Tuning (S333, ADR-0054 T13): the agent reads it, with how each axis
+    /// flew, and opens the tab at a part; the graph's samples and their rate
+    /// are the tab's, and gains change only through `param/set`.
+    #[test]
+    fn the_agent_reads_tuning_and_opens_it_at_a_part() {
+        assert!(AGENT_METHODS.contains(&"tuning/state"));
+        assert!(AGENT_METHODS.contains(&"param/set"));
+        for method in ["tuning/response", "tuning/live"] {
+            assert!(KEPT_FROM_AGENTS.contains(&method), "{method}");
+        }
+        let found = find_deferred("tuning gains oscillating", 3);
+        assert_eq!(
+            found[0].name,
+            "tuning_state",
+            "{:?}",
+            found.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        assert!(
+            found[0].description.contains("how each axis flew"),
+            "{}",
+            found[0].description
+        );
+        let open = tools()
+            .into_iter()
+            .find(|t| t.name == "layout_open")
+            .unwrap();
+        assert!(
+            open.parameters["properties"]["section"].is_object(),
+            "{}",
+            open.parameters
+        );
+        let instructions = crate::turn::INSTRUCTIONS;
+        for words in [
+            "read its tuning state first",
+            "param_set",
+            "Never start AutoTune",
+        ] {
+            assert!(instructions.contains(words), "{words}");
+        }
     }
 
     #[test]

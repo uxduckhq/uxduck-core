@@ -1,0 +1,4 @@
+{
+  "method": "account/setSource",
+  "params": { "source": "other", "other": "A flying club newsletter" }
+}

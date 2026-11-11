@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -45,6 +45,13 @@ enum Command {
     GcsSystemId(u8),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
+    /// A link's host looked up off this task; `lookup` says it is the
+    /// link's latest open.
+    Resolved {
+        link: Link,
+        address: Result<SocketAddr, String>,
+        lookup: Arc<()>,
+    },
 }
 
 #[derive(Debug)]
@@ -253,31 +260,24 @@ pub fn start(
     tlog_dir: PathBuf,
     plugin_feed: Option<PluginFeed>,
     simulators: std::sync::Arc<crate::sim::Simulators>,
+    onboard: Option<super::onboard::Onboard>,
 ) {
     let LinkInbox {
         mut commands,
+        sender,
         mut received,
         events,
-        ..
     } = inbox;
     tokio::spawn(async move {
-        let mut plane = Plane {
-            gcs: Arc::new(AtomicU8::new(config.gcs_system_id)),
-            session: Session::new(config),
-            router: Router::new(LoopConfig::default()),
-            open: HashMap::new(),
-            engine,
-            tlog_dir,
-            controls: Controls::default(),
-            plugin_feed,
-            simulators,
-            withheld: std::collections::HashSet::new(),
-        };
+        let mut plane = Plane::new(engine, config, tlog_dir, plugin_feed, simulators, sender);
+        plane.onboard = onboard.map(super::onboard::Computer::new);
         // MANUAL_CONTROL for routed controllers, 25 times a second.
         let mut manual = timer(Duration::from_millis(40));
         // The tick also flushes telemetry, so it sets the update rate: 10 Hz.
         let mut tick = timer(Duration::from_millis(100));
-        // The ground station heartbeat, 1 Hz while there are vehicles (S81).
+        // The ground station heartbeat, 1 Hz while there are vehicles (S81),
+        // and once more after the last is gone, for its link's last report
+        // (S261).
         let mut ground = timer(Duration::from_secs(1));
         // Whether a simulated vehicle's build stopped on its own, twice a
         // second while one runs.
@@ -287,7 +287,7 @@ pub fn start(
             // sleeps until a command or a frame arrives (S24).
             let steering = plane.controls.routed();
             let ticking = plane.session.needs_tick();
-            let vehicles = !plane.session.routes().is_empty();
+            let vehicles = !plane.session.routes().is_empty() || !plane.health.is_empty();
             // Simulators' builds and receiver sticks' decoders are watched.
             let simulating = plane
                 .open
@@ -342,6 +342,9 @@ pub fn start(
                         plane.session.set_gcs_system_id(id);
                     }
                     Some(Command::Pause(link_id, paused)) => plane.pause(&link_id, paused).await,
+                    Some(Command::Resolved { link, address, lookup }) => {
+                        plane.resolved(link, address, &lookup, &events).await;
+                    }
                 },
                 Some(incoming) = received.recv() => plane.incoming(incoming).await,
                 _ = manual.tick(), if steering => {
@@ -352,6 +355,10 @@ pub fn start(
                     crate::wakes::count("data plane: ground heartbeat (1 Hz)");
                     let effects = plane.ground_heartbeats();
                     plane.apply(effects).await;
+                    let effects = plane.time_syncs();
+                    plane.apply(effects).await;
+                    plane.report_link_health().await;
+                    plane.send_onboard().await;
                 }
                 _ = watch.tick(), if simulating => plane.simulators_stopped().await,
                 _ = tick.tick(), if ticking => {
@@ -385,9 +392,72 @@ struct Plane {
     simulators: std::sync::Arc<crate::sim::Simulators>,
     /// Vehicles nobody supervises: no ground heartbeat to them (S81).
     withheld: std::collections::HashSet<String>,
+    /// How each vehicle's link is doing (S261), on the clock of `started`.
+    health: uxduck_mavlink::link_health::Tracker,
+    /// The vehicle at each address last reported, for the last report of
+    /// an address that is gone.
+    reported: std::collections::BTreeMap<(String, String, u8), String>,
+    /// The monotonic clock's start, for round trips a wall clock change
+    /// cannot bend.
+    started: std::time::Instant,
+    /// This computer's status, when it is on the vehicle (S295).
+    onboard: Option<super::onboard::Computer>,
+    /// This task's own queue, for host lookups that finish off it.
+    commands: mpsc::UnboundedSender<Command>,
+    /// Links waiting for their host to be looked up, by the latest lookup.
+    resolving: HashMap<String, Arc<()>>,
+}
+
+/// Why a vehicle is not sent MAVLink's ping (S261): exactly where the
+/// ground station heartbeat is not, so it never stands in for one. Not on
+/// a read-only link or a forward (or a link not open), not to a vehicle
+/// whose heartbeat is withheld (S81), and not to a paused simulator, which
+/// would read it all at once on resuming. A replay's vehicle is never in
+/// the session.
+fn not_pinged(
+    link: Option<(bool, bool)>,
+    withheld: bool,
+    paused: bool,
+) -> Option<uxduck_core::domain::telemetry::RoundTripMissing> {
+    use uxduck_core::domain::telemetry::RoundTripMissing;
+    match link {
+        None | Some((_, true)) => Some(RoundTripMissing::NotSent),
+        Some((false, false)) => Some(RoundTripMissing::ReadOnly),
+        Some((true, false)) if withheld => Some(RoundTripMissing::Unsupervised),
+        Some((true, false)) if paused => Some(RoundTripMissing::Paused),
+        Some((true, false)) => None,
+    }
 }
 
 impl Plane {
+    fn new(
+        engine: EngineHandle,
+        config: Config,
+        tlog_dir: PathBuf,
+        plugin_feed: Option<PluginFeed>,
+        simulators: Arc<crate::sim::Simulators>,
+        commands: mpsc::UnboundedSender<Command>,
+    ) -> Self {
+        Self {
+            gcs: Arc::new(AtomicU8::new(config.gcs_system_id)),
+            session: Session::new(config),
+            router: Router::new(LoopConfig::default()),
+            open: HashMap::new(),
+            engine,
+            tlog_dir,
+            controls: Controls::default(),
+            plugin_feed,
+            simulators,
+            withheld: std::collections::HashSet::new(),
+            health: uxduck_mavlink::link_health::Tracker::default(),
+            reported: std::collections::BTreeMap::new(),
+            started: std::time::Instant::now(),
+            onboard: None,
+            commands,
+            resolving: HashMap::new(),
+        }
+    }
+
     async fn incoming(&mut self, incoming: Incoming) {
         // Close/reopen orders can overtake telemetry. Bytes from an earlier
         // transport must never enter its replacement.
@@ -439,7 +509,142 @@ impl Plane {
         effects
     }
 
+    fn now_mono_us(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// MAVLink's ping, `TIMESYNC` (S261, ADR-0004 2026-11-01): a request
+    /// from the ground station id to each vehicle the ground station
+    /// heartbeat goes to, once a second with it, and only there
+    /// ([`not_pinged`]). Its `ts1` is this plane's monotonic clock.
+    fn time_syncs(&mut self) -> Vec<Effect> {
+        let gcs = self.gcs.load(Ordering::Relaxed);
+        let now_us = self.now_mono_us();
+        let addresses: Vec<((String, String, u8), String)> = self
+            .session
+            .addresses()
+            .map(|(address, id)| (address.clone(), id.to_owned()))
+            .collect();
+        let mut effects = Vec::new();
+        for (address, vehicle_id) in addresses {
+            let link = self.open.get(&address.0).map(|o| (o.writable, o.forward));
+            let why = not_pinged(
+                link,
+                self.withheld.contains(&vehicle_id),
+                self.session.is_paused(&address.0),
+            );
+            if let Some(why) = why {
+                self.health.not_asked(&address, why);
+                continue;
+            }
+            let ts1 = self.health.asked(&address, now_us);
+            effects.extend(self.session.send_to(&vehicle_id, |system_id, sequence| {
+                uxduck_mavlink::sim::timesync_frame(
+                    (gcs, uxduck_mavlink::GCS_COMPONENT_ID, sequence),
+                    (0, ts1),
+                    (system_id, 0),
+                )
+            }));
+        }
+        effects
+    }
+
+    /// Tells the engine how each vehicle's link is doing (S261), once a
+    /// second, and forgets the addresses of vehicles no longer known, with
+    /// one last report saying nothing goes there now, so the agent and the
+    /// windows do not keep its last round trip.
+    async fn report_link_health(&mut self) {
+        let now_us = self.now_mono_us();
+        let addresses: std::collections::BTreeMap<(String, String, u8), String> = self
+            .session
+            .addresses()
+            .map(|(address, id)| (address.clone(), id.to_owned()))
+            .collect();
+        let dropped = self
+            .health
+            .retain(|address| addresses.contains_key(address), now_us);
+        let mut reports: Vec<_> = dropped
+            .into_iter()
+            .filter_map(|(address, last)| {
+                let id = self.reported.get(&address)?;
+                (!addresses.values().any(|known| known == id)).then(|| (id.clone(), last))
+            })
+            .collect();
+        reports.extend(
+            addresses
+                .iter()
+                .map(|(address, id)| (id.clone(), self.health.report(address, now_us))),
+        );
+        self.reported = addresses;
+        if reports.is_empty() {
+            return;
+        }
+        let _ = self
+            .engine
+            .run(move |e| e.link_health_observed(reports))
+            .await;
+    }
+
+    /// Opens a link. A host name is looked up on a task of its own, so a
+    /// lookup that hangs (offline, or a `.local` name) never holds up the
+    /// other links; the link opens when it is found.
     async fn open(&mut self, link: Link, incoming: &mpsc::Sender<Incoming>) {
+        self.resolving.remove(&link.id);
+        let Some((host, port)) = host(&link.kind) else {
+            return self.open_at(link, None, incoming).await;
+        };
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return self
+                .open_at(link, Some(SocketAddr::new(ip, port)), incoming)
+                .await;
+        }
+        self.close(&link.id);
+        let lookup = Arc::new(());
+        self.resolving.insert(link.id.clone(), lookup.clone());
+        let host = host.to_owned();
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let address = match tokio::net::lookup_host((host.as_str(), port)).await {
+                Ok(mut found) => found.next().ok_or_else(|| format!("cannot resolve {host}")),
+                Err(e) => Err(format!("cannot resolve {host}: {e}")),
+            };
+            let _ = commands.send(Command::Resolved {
+                link,
+                address,
+                lookup,
+            });
+        });
+    }
+
+    /// A link's host was looked up: it opens there, unless it was closed
+    /// or opened again meanwhile.
+    async fn resolved(
+        &mut self,
+        link: Link,
+        address: Result<SocketAddr, String>,
+        lookup: &Arc<()>,
+        incoming: &mpsc::Sender<Incoming>,
+    ) {
+        if !self
+            .resolving
+            .get(&link.id)
+            .is_some_and(|latest| Arc::ptr_eq(latest, lookup))
+        {
+            return;
+        }
+        self.resolving.remove(&link.id);
+        match address {
+            Ok(address) => self.open_at(link, Some(address), incoming).await,
+            Err(detail) => self.report(&link.id, LinkStatus::Down, Some(detail)).await,
+        }
+    }
+
+    async fn open_at(
+        &mut self,
+        link: Link,
+        address: Option<SocketAddr>,
+        incoming: &mpsc::Sender<Incoming>,
+    ) {
         // A simulator started again on its link (`sim/restart`) must be
         // gone before the next one takes its ports; waited for off this
         // task, for the few hundred milliseconds its guard takes.
@@ -504,7 +709,7 @@ impl Plane {
                 Err(detail) => Err((LinkStatus::Down, detail)),
             }
         } else {
-            spawn(&link.kind, self.gcs.clone(), events).await
+            spawn(&link.kind, address, self.gcs.clone(), events).await
         };
         match spawned {
             Ok(handle) => {
@@ -655,6 +860,7 @@ impl Plane {
     }
 
     fn close(&mut self, link_id: &str) {
+        self.resolving.remove(link_id);
         if self.open.remove(link_id).is_some() {
             crate::tlog_index::close(link_id);
         }
@@ -748,6 +954,16 @@ impl Plane {
             self.send(checked).await;
             return;
         }
+        if !forward && let Some(computer) = &mut self.onboard {
+            let mut coin = [0_u8; 1];
+            let _ = getrandom::fill(&mut coin);
+            computer.heard(
+                header.system_id,
+                header.component_id,
+                at_us,
+                coin[0] & 1 == 1,
+            );
+        }
         let vehicle = if forward {
             self.session
                 .forwarded(link_id, peer, frame, SystemClock.now_us());
@@ -757,9 +973,16 @@ impl Plane {
                 self.session
                     .ingest_received(link_id, peer, frame, at_us, SystemClock.now_us());
             self.apply(effects).await;
-            self.session
+            let vehicle = self
+                .session
                 .vehicle_at(link_id, peer, header.system_id)
-                .map(str::to_owned)
+                .map(str::to_owned);
+            if vehicle.is_some() {
+                let address = (link_id.to_owned(), peer.to_owned(), header.system_id);
+                let (gcs, now_us) = (self.gcs.load(Ordering::Relaxed), self.now_mono_us());
+                self.health.heard(&address, frame, gcs, now_us);
+            }
+            vehicle
         };
         if let Some(vehicle_id) = &vehicle
             && let Some(payload) = uxduck_mavlink::framing::payload(frame)
@@ -797,25 +1020,65 @@ impl Plane {
         self.send(routed).await;
     }
 
+    /// This computer's heartbeat and status (S295), out of every forward,
+    /// from each vehicle's system id.
+    async fn send_onboard(&mut self) {
+        let Some(computer) = &mut self.onboard else {
+            return;
+        };
+        let systems: Vec<u8> = self
+            .session
+            .addresses()
+            .map(|(address, _)| address.2)
+            .collect();
+        let frames = computer.frames(systems, SystemClock.now_us());
+        let sends = self
+            .open
+            .iter()
+            .filter(|(_, open)| open.forward)
+            .flat_map(|(link_id, _)| {
+                frames.iter().map(|bytes| uxduck_mavlink::router::Send {
+                    link_id: link_id.clone(),
+                    peer: None,
+                    bytes: bytes.clone(),
+                })
+            })
+            .collect();
+        self.send(Routed {
+            sends,
+            ..Routed::default()
+        })
+        .await;
+    }
+
     async fn send(&mut self, routed: Routed) {
+        let mut sent = Vec::new();
         for send in routed.sends {
             if let Some(open) = self.open.get(&send.link_id)
                 && (open.forward || open.writable)
                 && !self.session.is_paused(&send.link_id)
             {
+                let at_us = SystemClock.now_us();
                 crate::diagnostics::record(
                     &send.link_id,
                     send.peer.as_deref(),
                     InspectDirection::Sent,
                     &send.bytes,
-                    SystemClock.now_us(),
+                    at_us,
                 );
+                // A forward's tlog keeps what it hears; what it carries out
+                // is already in the vehicle's link's.
+                let keep = (!open.forward).then(|| send.bytes.clone());
                 open.handle.send(Outgoing {
                     peer: send.peer,
                     bytes: send.bytes,
                 });
+                if let Some(bytes) = keep {
+                    sent.push((send.link_id, bytes, at_us));
+                }
             }
         }
+        self.record_sent(sent);
         for detected in routed.disable {
             let link_id = detected.forward_link_id;
             tracing::warn!(link = %link_id, returned_on = %detected.received_link_id, peer = %detected.received_peer, "forward disabled by loop detection");
@@ -835,13 +1098,19 @@ impl Plane {
 
     async fn send_pilot(&mut self) {
         self.centre_stale_keyboards().await;
+        if self.controls.expire_screen_holds(SystemClock.now_us()) {
+            super::controllers::publish(self.controls.snapshot());
+        }
+        let held = self.controls.due_holds(SystemClock.now_us());
+        self.report_controls(held).await;
         let mut effects = Vec::new();
-        for (vehicle_id, sticks, auxiliary, method) in self.controls.pilot_outputs() {
+        for (vehicle_id, sticks, auxiliary, method, buttons) in self.controls.pilot_outputs() {
             effects.extend(self.session.pilot_control_with_method(
                 &vehicle_id,
                 sticks,
                 &auxiliary,
                 method,
+                buttons,
             ));
         }
         self.apply(effects).await;
@@ -889,6 +1158,16 @@ impl Plane {
                         .run(move |e| e.controller_positioned(&id, &position))
                         .await
                 }
+                Report::Holding {
+                    id,
+                    command,
+                    hold_ms,
+                } => {
+                    self.engine
+                        .run(move |e| e.controller_holding(&id, command, hold_ms))
+                        .await
+                }
+                Report::LetGo { id } => self.engine.run(move |e| e.controller_let_go(&id)).await,
             };
         }
     }
@@ -923,6 +1202,7 @@ impl Plane {
                 }
             }
         }
+        let mut sent = Vec::new();
         for effect in effects {
             match glue::route(effect) {
                 glue::Routed::Engine(report) => {
@@ -939,20 +1219,36 @@ impl Plane {
                         .get(&link_id)
                         .filter(|o| o.writable && !self.session.is_paused(&link_id))
                     {
+                        let at_us = SystemClock.now_us();
                         inspect_sent(&self.session, &link_id, &peer, &bytes);
                         crate::diagnostics::record(
                             &link_id,
                             Some(&peer),
                             InspectDirection::Sent,
                             &bytes,
-                            SystemClock.now_us(),
+                            at_us,
                         );
                         open.handle.send(Outgoing {
                             peer: Some(peer),
-                            bytes,
+                            bytes: bytes.clone(),
                         });
+                        if !open.forward {
+                            sent.push((link_id, bytes, at_us));
+                        }
                     }
                 }
+            }
+        }
+        self.record_sent(sent);
+    }
+
+    /// What went out on vehicles' links, into their tlogs (ADR-0050 L1),
+    /// once every frame of the batch has been handed to its link, so
+    /// writing never holds a send up.
+    fn record_sent(&mut self, sent: Vec<(String, Vec<u8>, u64)>) {
+        for (link_id, bytes, at_us) in sent {
+            if let Some(open) = self.open.get_mut(&link_id) {
+                record(&link_id, open, std::slice::from_ref(&bytes), at_us);
             }
         }
     }
@@ -997,7 +1293,8 @@ fn greet(sender: links::Sender, gcs: Arc<AtomicU8>) {
     });
 }
 
-/// Appends frames to the link's tlog, opening it on the first frame, and
+/// Appends frames received or sent to the link's tlog, opening it on the
+/// first frame, and
 /// indexes them for `mavlink/history` once flushed.
 fn record(link_id: &str, open: &mut Open, frames: &[Vec<u8>], at_us: u64) {
     if frames.is_empty() {
@@ -1046,34 +1343,55 @@ fn role(link: &Link) -> Role {
     }
 }
 
-fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("cannot resolve {host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("cannot resolve {host}"))
+/// The host a link kind opens at, for kinds that need its address before
+/// they start; a TCP client looks its host up itself on every connect.
+fn host(kind: &LinkKind) -> Option<(&str, u16)> {
+    match kind {
+        LinkKind::UdpListen { host, port }
+        | LinkKind::UdpForward { host, port }
+        | LinkKind::TcpServer { host, port }
+        | LinkKind::UdpClient { host, port } => Some((host, *port)),
+        _ => None,
+    }
+}
+
+/// Why a listener could not start: who holds the port, or that the address
+/// is another device's (a saved link whose address went away, such as a VPN's).
+fn listen_error(
+    protocol: Protocol,
+    host: &str,
+    port: u16,
+    error: &std::io::Error,
+) -> (LinkStatus, String) {
+    match error.kind() {
+        std::io::ErrorKind::AddrInUse => (LinkStatus::PortInUse, in_use_message(protocol, port)),
+        std::io::ErrorKind::AddrNotAvailable => (
+            LinkStatus::Down,
+            uxduck_engine::runtime::not_local_message(host),
+        ),
+        _ => (LinkStatus::Down, error.to_string()),
+    }
 }
 
 /// Starts the transport for a link kind; a UDP client's hello comes from
 /// the system id `gcs` holds.
 async fn spawn(
     kind: &LinkKind,
+    address: Option<SocketAddr>,
     gcs: Arc<AtomicU8>,
     events: links::Events,
 ) -> Result<LinkHandle, (LinkStatus, String)> {
+    let resolve =
+        |host: &str| address.ok_or_else(|| (LinkStatus::Down, format!("cannot resolve {host}")));
     match kind.clone() {
         LinkKind::UdpListen { host, port } => {
-            let address = resolve(&host, port).map_err(|e| (LinkStatus::Down, e))?;
-            links::udp_listen(address, events).await.map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AddrInUse {
-                    (LinkStatus::PortInUse, in_use_message(Protocol::Udp, port))
-                } else {
-                    (LinkStatus::Down, error.to_string())
-                }
-            })
+            let address = resolve(&host)?;
+            links::udp_listen(address, events)
+                .await
+                .map_err(|error| listen_error(Protocol::Udp, &host, port, &error))
         }
-        LinkKind::UdpForward { host, port } => {
-            let address = resolve(&host, port).map_err(|e| (LinkStatus::Down, e))?;
+        LinkKind::UdpForward { host, .. } => {
+            let address = resolve(&host)?;
             links::udp_target(address, events)
                 .await
                 .map_err(|e| (LinkStatus::Down, e.to_string()))
@@ -1085,17 +1403,13 @@ async fn spawn(
             "a USB receiver stick opens with its decoder".into(),
         )),
         LinkKind::TcpServer { host, port } => {
-            let address = resolve(&host, port).map_err(|e| (LinkStatus::Down, e))?;
-            links::tcp_server(address, events).await.map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AddrInUse {
-                    (LinkStatus::PortInUse, in_use_message(Protocol::Tcp, port))
-                } else {
-                    (LinkStatus::Down, error.to_string())
-                }
-            })
+            let address = resolve(&host)?;
+            links::tcp_server(address, events)
+                .await
+                .map_err(|error| listen_error(Protocol::Tcp, &host, port, &error))
         }
-        LinkKind::UdpClient { host, port } => {
-            let address = resolve(&host, port).map_err(|e| (LinkStatus::Down, e))?;
+        LinkKind::UdpClient { host, .. } => {
+            let address = resolve(&host)?;
             links::udp_client(address, gcs, events)
                 .await
                 .map_err(|e| (LinkStatus::Down, e.to_string()))
@@ -1106,5 +1420,156 @@ async fn spawn(
             LinkStatus::Down,
             "a simulated vehicle starts through the simulation manager".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, Plane, not_pinged};
+    use tokio::sync::mpsc;
+    use uxduck_core::domain::link::Link;
+    use uxduck_core::domain::telemetry::RoundTripMissing;
+    use uxduck_mavlink::session::Config;
+
+    fn plane(dir: &std::path::Path) -> (Plane, mpsc::UnboundedReceiver<Command>) {
+        use crate::adapters::system::{OsRandom, SystemClock};
+        use uxduck_engine::runtime::{Forget, Ports};
+        use uxduck_engine::{Engine, EngineConfig, HostAbout, Loaded};
+        let engine = Engine::new(
+            EngineConfig {
+                daemon_version: "0.1.0".into(),
+                capabilities: uxduck_contracts::dto::initialize::DaemonCapabilities::default(),
+                ui_url: "http://127.0.0.1:48091".into(),
+                checkpoint_every: 1000,
+                models: vec![],
+                agent_provider: "fake".into(),
+                about: HostAbout::default(),
+            },
+            Box::new(SystemClock),
+            Box::new(OsRandom),
+            Ports::with_persistence(Box::new(Forget)),
+            Loaded::default(),
+        );
+        let (sender, commands) = mpsc::unbounded_channel();
+        let plane = Plane::new(
+            super::EngineHandle::spawn(engine),
+            Config::default(),
+            dir.to_owned(),
+            None,
+            crate::sim::Simulators::new(dir),
+            sender,
+        );
+        (plane, commands)
+    }
+
+    fn listening_at(host: &str) -> Link {
+        serde_json::from_value(serde_json::json!({
+            "id": "li1",
+            "name": "UDP",
+            "kind": { "type": "udp-listen", "host": host, "port": 0 },
+            "policy": "read-write",
+            "topology": "auto",
+            "status": "configured",
+            "createdAtUs": 0,
+            "version": 1,
+        }))
+        .unwrap()
+    }
+
+    /// FB: a host name whose lookup hangs (offline, or a `.local` name)
+    /// held up every other link, since the data plane looked it up itself.
+    #[tokio::test]
+    async fn a_link_waiting_for_its_host_does_not_hold_up_the_data_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, mut commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+
+        plane.open(listening_at("localhost"), &events).await;
+        assert!(
+            !plane.open.contains_key("li1"),
+            "looked up off the data plane"
+        );
+
+        let Some(Command::Resolved {
+            link,
+            address,
+            lookup,
+        }) = commands.recv().await
+        else {
+            panic!("the lookup reports back");
+        };
+        assert!(address.is_ok(), "{address:?}");
+        plane.resolved(link, address, &lookup, &events).await;
+        assert!(
+            plane.open.contains_key("li1"),
+            "opens once its host is found"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_closed_while_its_host_is_looked_up_stays_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, mut commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+
+        plane.open(listening_at("localhost"), &events).await;
+        plane.close("li1");
+        let Some(Command::Resolved {
+            link,
+            address,
+            lookup,
+        }) = commands.recv().await
+        else {
+            panic!("the lookup reports back");
+        };
+        plane.resolved(link, address, &lookup, &events).await;
+        assert!(!plane.open.contains_key("li1"));
+    }
+
+    #[tokio::test]
+    async fn an_address_opens_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, _commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+
+        plane.open(listening_at("127.0.0.1"), &events).await;
+        assert!(plane.open.contains_key("li1"));
+    }
+
+    #[test]
+    fn the_ping_goes_only_where_the_ground_heartbeat_does() {
+        let writable = Some((true, false));
+        assert_eq!(not_pinged(writable, false, false), None);
+        assert_eq!(
+            not_pinged(Some((false, false)), false, false),
+            Some(RoundTripMissing::ReadOnly)
+        );
+        for forward in [Some((true, true)), Some((false, true))] {
+            assert_eq!(
+                not_pinged(forward, false, false),
+                Some(RoundTripMissing::NotSent)
+            );
+        }
+        assert_eq!(
+            not_pinged(None, false, false),
+            Some(RoundTripMissing::NotSent)
+        );
+        assert_eq!(
+            not_pinged(writable, true, false),
+            Some(RoundTripMissing::Unsupervised),
+            "withheld (S81): no ping in its place"
+        );
+        assert_eq!(
+            not_pinged(writable, true, true),
+            Some(RoundTripMissing::Unsupervised)
+        );
+        assert_eq!(
+            not_pinged(writable, false, true),
+            Some(RoundTripMissing::Paused)
+        );
+        assert_eq!(
+            not_pinged(Some((false, false)), true, true),
+            Some(RoundTripMissing::ReadOnly)
+        );
     }
 }

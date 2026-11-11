@@ -63,6 +63,10 @@ pub struct PracticeExercise {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub guide: bool,
     pub goal: String,
+    /// Flown by hand: it needs a controller or the keyboard driving the
+    /// vehicle, and says so in `unavailable` until one does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_controller: bool,
     /// What to do, step by step.
     pub steps: Vec<PracticeStep>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1,0 +1,4 @@
+{
+  "method": "mavlink/dialects/list",
+  "params": {}
+}

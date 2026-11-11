@@ -19,17 +19,25 @@ pub enum SetupRow {
     Radio,
     Airspeed,
     Motors,
+    /// The ESCs' throttle range, for a copter with PWM or `OneShot` ESCs
+    /// (V17, S216).
+    Escs,
+    /// Restarting the vehicle (V16, S216): one row at the foot of the tab,
+    /// always there, saying what is due. It has no procedure, so it is not
+    /// in `ALL`; a message or a check that needs a restart points at it.
+    Restart,
 }
 
 impl SetupRow {
-    /// Every row, in the tab's order.
-    pub const ALL: [Self; 6] = [
+    /// Every row with a procedure, in the tab's order.
+    pub const ALL: [Self; 7] = [
         Self::Firmware,
         Self::Accelerometer,
         Self::Compass,
         Self::Radio,
         Self::Airspeed,
         Self::Motors,
+        Self::Escs,
     ];
 
     /// Its name on the wire and in ids: "compass".
@@ -42,6 +50,8 @@ impl SetupRow {
             Self::Radio => "radio",
             Self::Airspeed => "airspeed",
             Self::Motors => "motors",
+            Self::Escs => "escs",
+            Self::Restart => "restart",
         }
     }
 
@@ -58,6 +68,8 @@ impl SetupRow {
             Self::Radio => Some(SetupKind::Radio),
             Self::Motors => Some(SetupKind::Motors),
             Self::Airspeed => Some(SetupKind::AirspeedZero),
+            Self::Escs => Some(SetupKind::Escs),
+            Self::Restart => None,
         }
     }
 }
@@ -97,6 +109,10 @@ pub enum SetupKind {
     /// automatic calibration on while it circles, off once the ratio has
     /// settled, and the ratio kept.
     AirspeedRatio,
+    /// The ESCs' throttle range, all at once (V17, S216): `ESC_CALIBRATION`
+    /// 3 written, the battery unplugged and plugged in, and done when the
+    /// vehicle is back with it at 0.
+    Escs,
 }
 
 impl SetupKind {
@@ -110,6 +126,7 @@ impl SetupKind {
             Self::Motors => SetupRow::Motors,
             Self::Firmware => SetupRow::Firmware,
             Self::AirspeedZero | Self::AirspeedCheck | Self::AirspeedRatio => SetupRow::Airspeed,
+            Self::Escs => SetupRow::Escs,
         }
     }
 
@@ -127,6 +144,7 @@ impl SetupKind {
             Self::AirspeedZero => "Airspeed zero",
             Self::AirspeedCheck => "Pitot check",
             Self::AirspeedRatio => "Airspeed ratio",
+            Self::Escs => "ESC calibration",
         }
     }
 }
@@ -396,7 +414,7 @@ pub struct MotorTest {
     pub order: u8,
     /// "A", or a rover's "Throttle".
     pub label: String,
-    /// Percent of its range, 1 to 30.
+    /// Percent of its range, 1 to 100.
     pub throttle: f32,
 }
 
@@ -766,6 +784,9 @@ pub enum Instruction {
     /// PX4's compass (S191): keep the side found (`position`) down and turn
     /// the vehicle slowly round.
     TurnOnThisSide,
+    /// Unplug the battery, wait five seconds and plug it in: the ESCs beep
+    /// as they learn the range (S216).
+    ReplugBattery,
 }
 
 /// Where one sensor of a procedure is.

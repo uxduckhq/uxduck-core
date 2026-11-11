@@ -14,6 +14,10 @@ use crate::dto::telemetry::AltitudeFrame;
 pub enum Command {
     Arm,
     Disarm,
+    /// Arm when disarmed, disarm when armed, as the vehicle last reported:
+    /// sent and receipted as `arm` or `disarm`. For a controller's one
+    /// button or switch.
+    ArmToggle,
     /// An ArduPilot mode by name, such as `LOITER` or `GUIDED`.
     SetMode {
         mode: String,
@@ -38,9 +42,25 @@ pub enum Command {
         /// `ellipsoid` is refused.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
+        /// `ArduPlane` loiter radius in metres: positive clockwise, negative
+        /// counterclockwise. Omitted: keep the autopilot's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loiter_radius_m: Option<f64>,
         /// Submarine heading. Omitted commands retain the existing default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<GoToHeading>,
+    },
+    /// Moves home, where it returns to and heights are from, to `place`
+    /// (on the ground: its height from `terrain/at`), else to the vehicle.
+    /// ArduPilot needs an EKF origin first. Offline: `warn`.
+    SetHome {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<PlaceAmsl>,
+    },
+    /// The EKF origin, for a vehicle without GPS; ArduPilot takes one only
+    /// while it has none. Offered at 0, 0. Offline: `warn`.
+    SetEkfOrigin {
+        place: PlaceAmsl,
     },
     /// Any `MAV_CMD` by number with up to seven parameters, as plugins send
     /// for protocols the core does not name. Offline: `warn`.
@@ -48,6 +68,15 @@ pub enum Command {
         command: u16,
         params: Vec<f32>,
     },
+}
+
+/// A place and its height above mean sea level.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAmsl {
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    pub altitude_amsl_m: f64,
 }
 
 /// How a submarine faces while going to a location. Bearings are degrees
@@ -89,21 +118,10 @@ pub struct CommandSendParams {
     /// Arms past UXDuck's failing blocking preflight checks (ADR-0038 K4):
     /// the ids of the checks the operator held Arm anyway for, from
     /// `preflight/state`. Refused unless every check holding arming is
-    /// named. Operators only, never from away; it does not force past the
-    /// vehicle's own checks.
+    /// named. Operators only; it does not force past the vehicle's own
+    /// checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub override_preflight: Vec<String>,
-    /// From away (S80): the id the sender's app gave it, so a command sent
-    /// twice is carried out once and its receipt found again by this id.
-    /// Only the relay's connections set it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_id: Option<String>,
-    /// From away: when the relay received it, on the relay's clock, in
-    /// milliseconds since the Unix epoch. Older than the command's
-    /// `maxAgeMs` when it arrives, and it is refused as `expired`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::safe::optional_integer")]
-    pub sent_at_ms: Option<u64>,
 }
 
 /// How a command may be sent from away, through the account's relay
@@ -148,6 +166,12 @@ pub enum RefusalReason {
     /// pass; `preflight` lists them. An operator may arm anyway with
     /// `overridePreflight`.
     Preflight,
+    /// The vehicle is a replay of a flight, not live: nothing is sent to it.
+    Replay,
+    /// It would arm a real vehicle while the sender's operator has not
+    /// agreed to the current Terms of Service (ADR-0047). `terms/accept`
+    /// records their agreement; an agent cannot.
+    Terms,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -195,7 +219,11 @@ pub struct Receipt {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_id: Option<String>,
-    /// Sent from away, through the account's relay (S80).
+    /// The person who sent it, as they were named then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_by: Option<crate::dto::state::ActorIdentity>,
+    /// Sent from away, through the account's relay (S80): only on receipts
+    /// from before remote control was removed (ADR-0048).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteBy>,
     #[schemars(schema_with = "crate::safe::integer")]
@@ -305,7 +333,8 @@ pub struct ModeFamily {
     /// For a heading: "Multicopters", "Planes", "Rovers and boats",
     /// "Submarines" or "PX4".
     pub name: String,
-    /// Every mode of every airframe in the family, the usual ones first.
+    /// Every mode of every airframe in the family, the usual ones first, or
+    /// for the asked vehicle's own family, those its airframe has.
     pub modes: Vec<ModeInfo>,
 }
 

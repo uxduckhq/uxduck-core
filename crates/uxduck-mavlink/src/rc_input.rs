@@ -2,13 +2,27 @@
 
 use std::collections::BTreeMap;
 
+use uxduck_core::domain::controller::RoverThrottle;
+
 use crate::modes::Family;
 use crate::transfers::Param;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct RcInput {
     parameters: BTreeMap<String, f32>,
     ready: bool,
+    /// Changed since the session last said what it holds.
+    changed: bool,
+}
+
+impl Default for RcInput {
+    fn default() -> Self {
+        Self {
+            parameters: BTreeMap::new(),
+            ready: false,
+            changed: true,
+        }
+    }
 }
 
 impl RcInput {
@@ -18,6 +32,7 @@ impl RcInput {
     pub fn note(&mut self, param: &Param) {
         if param.name.starts_with("RC") {
             self.parameters.insert(param.name.clone(), param.value);
+            self.changed = true;
         }
     }
 
@@ -27,6 +42,22 @@ impl RcInput {
             self.note(param);
         }
         self.ready = true;
+        self.changed = true;
+    }
+
+    /// Whether it changed since this was last asked.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// Why a rover's throttle calibration, as held, can't be used for
+    /// `MANUAL_CONTROL`.
+    pub fn rover_throttle_problem(&self) -> Option<String> {
+        self.rover_throttle().err()
+    }
+
+    fn rover_throttle(&self) -> Result<RoverThrottle, String> {
+        RoverThrottle::from_params(|name| self.parameters.get(name).copied().map(f64::from))
     }
 
     fn value(&self, name: &str, fallback: f32) -> Option<f32> {
@@ -83,6 +114,18 @@ impl RcInput {
             reason = "validated PWM range"
         )]
         Some(pwm.round() as u16)
+    }
+
+    /// `ArduRover`'s `MANUAL_CONTROL` z for a throttle of 0 to 1000, the
+    /// middle at its throttle channel's trim; none until every parameter
+    /// that takes is downloaded and makes sense.
+    pub fn rover_manual_z(&self, throttle: i16) -> Option<i16> {
+        if !self.ready {
+            return None;
+        }
+        self.rover_throttle()
+            .ok()
+            .map(|calibration| calibration.manual_z(throttle))
     }
 
     pub fn channels(
@@ -214,6 +257,78 @@ mod tests {
             .unwrap();
         assert_eq!(&rover[..4], &[1500, 65535, 1500, 65535]);
     }
+    /// A forward-only rover's trim is its minimum: the lower half of the
+    /// throttle overrides it at the trim, stop, as `MANUAL_CONTROL` now
+    /// sends it too, and only the upper half drives.
+    #[test]
+    fn a_forward_only_rover_s_lower_half_is_its_trim() {
+        let mut rc = RcInput::default();
+        params(
+            &mut rc,
+            &[
+                ("RC3_MIN", 1100.0),
+                ("RC3_TRIM", 1100.0),
+                ("RC3_MAX", 1900.0),
+            ],
+        );
+        let throttle = |z| rc.channels(Family::Rover, [0, 0, z, 0], &[]).unwrap()[2];
+        assert_eq!(
+            [0, 250, 500, 750, 1000].map(throttle),
+            [1100, 1100, 1100, 1500, 1900]
+        );
+    }
+    /// Where the throttle centres, the middle (z 500, where keyboard
+    /// control starts) is its trim and only z 0 is full reverse or descent;
+    /// an aircraft's runs from its lowest to its highest, its trim aside.
+    #[test]
+    fn a_centred_throttle_is_its_trim_in_the_middle_and_an_aircraft_s_runs_from_its_lowest() {
+        let mut rc = RcInput::default();
+        params(
+            &mut rc,
+            &[
+                ("RC3_MIN", 1100.0),
+                ("RC3_TRIM", 1460.0),
+                ("RC3_MAX", 1900.0),
+            ],
+        );
+        for (family, pwm) in [
+            (Family::Rover, [1100, 1460, 1900]),
+            (Family::Sub, [1100, 1460, 1900]),
+            (Family::Blimp, [1100, 1460, 1900]),
+            (Family::Copter, [1100, 1500, 1900]),
+            (Family::Plane, [1100, 1500, 1900]),
+        ] {
+            let throttle = |z| rc.channels(family, [0, 0, z, 0], &[]).unwrap()[2];
+            assert_eq!(
+                [throttle(0), throttle(500), throttle(1000)],
+                pwm,
+                "{family:?}"
+            );
+        }
+    }
+    #[test]
+    fn rover_throttle_remapped_to_channel_two_leaves_pitch_and_yaw_ignored() {
+        let mut rc = RcInput::default();
+        params(
+            &mut rc,
+            &[
+                ("RCMAP_THROTTLE", 2.0),
+                ("RCMAP_PITCH", 3.0),
+                ("RC2_MIN", 988.0),
+                ("RC2_TRIM", 1500.0),
+                ("RC2_MAX", 2010.0),
+            ],
+        );
+        let channels = rc
+            .channels(Family::Rover, [1000, 0, 1000, 1000], &[])
+            .unwrap();
+        assert_eq!(&channels[..4], &[1500, 2010, u16::MAX, u16::MAX]);
+        assert_eq!(
+            rc.channels(Family::Rover, [0, 0, 500, 0], &[]).unwrap()[1],
+            1500
+        );
+    }
+
     #[test]
     fn invalid_calibration_or_channel_map_is_not_sent() {
         let mut rc = RcInput::default();

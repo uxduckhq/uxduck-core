@@ -303,7 +303,7 @@ fn engine_with(state: State, wire: &Wire, journal: &Journal, time: &Time) -> Eng
         Box::new(Counter(0)),
         ports,
         Loaded {
-            state,
+            state: agreed(state),
             sessions: vec![],
         },
     )
@@ -854,4 +854,20 @@ fn the_answer_is_kept_across_reinstalls_and_restarts_and_reports_are_journaled_o
             .any(|id| id == "wind-check"),
         "it started again"
     );
+}
+
+/// Someone at this computer agreed to the Terms of Service (ADR-0047), so a
+/// real vehicle arms for a window that acts as no one in particular.
+fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State {
+    let operator = serde_json::from_value(json!({
+        "id": "op-agreed",
+        "name": "Agreed",
+        "units": "metric",
+        "coordinateFormat": "decimal",
+        "terms": { "version": uxduck_contracts::version::TERMS_VERSION, "acceptedAtMs": 1 },
+        "version": 1
+    }))
+    .unwrap();
+    state.operators.insert("op-agreed".into(), operator);
+    state
 }

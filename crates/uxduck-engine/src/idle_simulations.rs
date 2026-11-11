@@ -1,5 +1,6 @@
 //! A reminder, never a timeout that stops work. The native tray can show it
-//! after thirty minutes without a visible UI or another consumer.
+//! after thirty minutes without a visible UI or another consumer. Vehicles'
+//! warnings go to the system's notifications while no UI has the focus.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,15 +28,23 @@ pub(crate) struct IdleSimulations {
     /// A non-UI consumer keeps its scope until the connection ends.
     consumers: BTreeMap<ConnectionId, BTreeSet<String>>,
     all_consumers: BTreeSet<ConnectionId>,
-    /// Since when no UXDuck window has been visible: vehicles' warnings
+    /// Since when no UXDuck window has had the focus: vehicles' warnings
     /// raised since go to the system's notifications through the tray.
-    pub unseen_since_us: Option<u64>,
+    pub unfocused_since_us: Option<u64>,
 }
 
 impl Engine {
     pub(crate) fn has_visible_ui(&self) -> bool {
+        self.has_ui(|connection| connection.visible)
+    }
+
+    fn has_focused_ui(&self) -> bool {
+        self.has_ui(|connection| connection.focused)
+    }
+
+    fn has_ui(&self, test: impl Fn(&crate::Connection) -> bool) -> bool {
         self.connections.values().any(|connection| {
-            connection.visible
+            test(connection)
                 && connection.admitted.as_ref().is_some_and(|admitted| {
                     matches!(admitted.kind, ClientKind::OperatorUi | ClientKind::Shell)
                 })
@@ -55,17 +64,17 @@ impl Engine {
             .all_consumers
             .retain(|connection| self.connections.contains_key(connection));
         let previous = self.idle_simulations.reminder.clone();
-        let unseen = if self.has_visible_ui() {
+        let unfocused = if self.has_focused_ui() {
             None
         } else {
             Some(
                 self.idle_simulations
-                    .unseen_since_us
+                    .unfocused_since_us
                     .unwrap_or_else(|| self.clock.now_us()),
             )
         };
-        let unseen_changed = unseen != self.idle_simulations.unseen_since_us;
-        self.idle_simulations.unseen_since_us = unseen;
+        let unfocused_changed = unfocused != self.idle_simulations.unfocused_since_us;
+        self.idle_simulations.unfocused_since_us = unfocused;
         if self.has_visible_ui()
             || self.config.capabilities.runs_in != RunsIn::Installed
             || !self.opened.desktop
@@ -114,7 +123,7 @@ impl Engine {
                 }
             }
         }
-        if previous != self.idle_simulations.reminder || unseen_changed {
+        if previous != self.idle_simulations.reminder || unfocused_changed {
             self.push_tray();
         }
     }
@@ -184,7 +193,6 @@ impl Engine {
                 controller.claim.is_some()
                     && controller.target.as_deref().is_some_and(targets_vehicle)
             })
-            || self.remote.leases.keys().any(|id| targets_vehicle(id))
             || vehicles.iter().any(|id| self.transfers.uses_vehicle(id))
             || self.state.receipts.values().any(|receipt| {
                 receipt.status == ReceiptStatus::Sent && targets_vehicle(&receipt.vehicle_id)

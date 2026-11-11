@@ -74,7 +74,8 @@ impl FileCredentials {
         )
     }
 
-    /// The active person's token. Background data services use `get(TOKEN)`
+    /// The computer's sign-in, whichever operator is chosen (ADR-0033, one
+    /// account per computer). Background data services use `get(TOKEN)`
     /// instead, which additionally checks the dataset's immutable owner.
     pub fn account_session(&self) -> Option<String> {
         self.api.as_ref()?;
@@ -89,33 +90,7 @@ impl FileCredentials {
             .filter(|token| !token.is_empty())
     }
 
-    pub fn account_operator(&self) -> Option<String> {
-        self.load()
-            .ok()?
-            .get(&self.scoped("account.operator"))
-            .cloned()
-    }
-
-    pub fn bind_operator(&self, operator: Option<&str>) -> Result<(), String> {
-        let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut all = self.load()?;
-        let key = self.scoped("account.operator");
-        if let Some(operator) = operator {
-            all.insert(key, operator.into());
-        } else {
-            all.remove(&key);
-        }
-        self.save(&all).map_err(|e| e.to_string())
-    }
-
-    pub fn workspace_needs_identity(&self) -> bool {
-        self.load().is_ok_and(|all| {
-            !all.contains_key(&self.scoped("workspace.owner"))
-                && all.contains_key(&self.scoped("workspace.legacy"))
-        })
-    }
-
-    /// Preserve evidence of the legacy workspace before a person can switch.
+    /// Preserve evidence of the legacy workspace before another account can sign in.
     /// An unreachable server must not make the next sign-in its new owner.
     pub fn protect_legacy_workspace(&self) -> Result<(), String> {
         let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);

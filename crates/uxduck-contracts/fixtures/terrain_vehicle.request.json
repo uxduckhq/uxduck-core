@@ -1,0 +1,7 @@
+{
+  "method": "terrain/vehicle",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "listFiles": true
+  }
+}

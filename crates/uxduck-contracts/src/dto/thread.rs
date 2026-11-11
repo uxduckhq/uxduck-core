@@ -20,6 +20,10 @@ pub struct Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
     pub model: String,
+    /// How hard the model thinks, one of `AgentConfig.efforts` for its
+    /// model; absent is the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Covers non-control actions only; control always needs approval.
     pub auto_approve: bool,
     #[schemars(schema_with = "crate::safe::integer")]
@@ -40,8 +44,6 @@ pub struct Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub deleted_at_us: Option<u64>,
-    /// "Don't use this chat to improve UXDuck": never kept for learning.
-    pub exclude_from_learning: bool,
 }
 
 /// A folder of threads; folders nest (ADR-0009).
@@ -154,12 +156,19 @@ pub enum ItemKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ItemStatus {
+    /// A follow-up waiting for the current turn or explicit resume.
+    Queued,
+    /// An update waiting to be applied to the active turn.
+    Steering,
     InProgress,
     Completed,
     Failed,
     Cancelled,
     /// Still in progress when the daemon stopped.
     Interrupted,
+    /// Taken back with an operator's message they edited or stopped at once:
+    /// out of the chat and the agent's history, kept as a record.
+    Superseded,
 }
 
 /// A tool call and its receipt.
@@ -203,6 +212,9 @@ pub struct Item {
     /// What the operator attached to their message (ADR-0020 H2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The operator said it aloud in talk mode (ADR-0012 V4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spoken: bool,
 }
 
 /// Something handed to the agent with a message, from an info popover's
@@ -228,6 +240,102 @@ pub struct Attachment {
     /// The popover's text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    /// A file uploaded with `attachment/begin` (S246); `title` is its name,
+    /// up to 255 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<AttachedFile>,
+}
+
+/// A file attached to a message (S246), kept by UXDuck under its id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedFile {
+    /// From `attachment/begin`.
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+}
+
+/// The largest file `attachment/begin` takes: a long flight's video.
+pub const ATTACHMENT_MAX: u64 = 8 * 1024 * 1024 * 1024;
+
+/// The most `attachment/append` takes at once, before base64.
+pub const ATTACHMENT_CHUNK: u64 = 4 * 1024 * 1024;
+
+/// Starts uploading a file to attach to a message (S246). Its bytes follow
+/// in order with `attachment/append`, then `attachment/finish`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentBeginParams {
+    /// The file's name, such as `2026-10-30 14-02-17.tlog`.
+    pub name: String,
+    /// Its size, up to 8 GiB.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentBeginResult {
+    pub id: String,
+}
+
+/// The next of an upload's bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentAppendParams {
+    pub id: String,
+    /// Where these bytes go: the bytes received so far.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub offset: u64,
+    /// Up to 4 MiB, base64.
+    pub content_base64: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentAppendResult {
+    /// The bytes received so far.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub received: u64,
+}
+
+/// Ends an upload begun with `attachment/begin`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentFinishParams {
+    pub id: String,
+    /// Give it up and remove what came, as removing it from the input
+    /// does; only before it is sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discard: bool,
+}
+
+/// Reads an attached file as text, as `files/read` reads a vehicle's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReadParams {
+    /// The attachment's id, from the operator's message.
+    pub id: String,
+    /// Where to start, in bytes; from the start when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReadResult {
+    pub name: String,
+    /// The whole file's size.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// Up to 64 KB of it from `offset`; bytes that are not UTF-8 replaced.
+    pub text: String,
+    /// Not all of it from `offset`: read on from `offset` plus 65536.
+    pub truncated: bool,
+    /// It is not text, such as a tlog or a video: `text` is empty.
+    pub binary: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -283,6 +391,9 @@ pub struct ThreadCreateParams {
     /// Defaults to the daemon's default model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Defaults to the model's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// A user message; the agent answers in the same thread.
@@ -290,10 +401,49 @@ pub struct ThreadCreateParams {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSendParams {
     pub thread_id: String,
+    /// While working, queue by default; steer updates the active task.
+    #[serde(default, skip_serializing_if = "FollowUpBehavior::is_queue")]
+    pub behavior: FollowUpBehavior,
     pub text: String,
     /// Chips from the input (ADR-0020 H2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Said aloud in talk mode (ADR-0012 V4): the turn runs on a fast
+    /// model, with the vehicle's readings, to be answered aloud (V5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<SpokenTurn>,
+}
+
+/// What starts the words of a spoken turn as the agent gets them, before
+/// the vehicle's readings; the agent's instructions name it.
+pub const SPOKEN_MARK: &str = "[Spoken in talk mode.";
+
+/// A message said aloud in talk mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpokenTurn {
+    /// The operator's units, which the reply reads numbers in; the page
+    /// keeps them (ADR-0036).
+    pub units: super::operator::QuantityUnits,
+}
+
+/// Sends new words in place of one of the operator's earlier messages: the
+/// turn in progress stops, that message and everything after it leave the
+/// chat and the agent's history, and the new message starts at once.
+/// Follow-ups still waiting stay queued. The message's files may go again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadEditParams {
+    pub thread_id: String,
+    /// The operator's message to replace.
+    pub item_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// Said aloud, as for `ThreadSendParams::spoken`: open mic's turn
+    /// started early and replaced by the whole of what was said (S287).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<SpokenTurn>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -306,6 +456,14 @@ pub struct ThreadUpdateParams {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// A reasoning effort the model takes, or `null` for its default.
+    /// Changing the model drops an effort the new one does not take.
+    #[serde(
+        default,
+        deserialize_with = "crate::nullable::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effort: Option<Option<String>>,
     /// A vehicle id, or `null` for no vehicle.
     #[serde(
         default,
@@ -328,14 +486,27 @@ pub struct ThreadUpdateParams {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exclude_from_learning: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCancelParams {
     pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// Also take back the message the turn answers when nothing has come of
+    /// it: no tool call, and the agent has written nothing or began only
+    /// moments ago. It leaves the chat for the operator to change and send.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub take_back: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadCancelResult {
+    /// The message taken back, with what was attached, for the input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_back: Option<Item>,
 }
 
 /// Streamed text for an agent message in progress. Not journaled; the
@@ -351,6 +522,8 @@ pub struct AgentItemDelta {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spoken_turns: bool,
     /// Models the selector offers.
     pub models: Vec<String>,
     pub default_model: String,
@@ -364,6 +537,87 @@ pub struct AgentConfig {
     /// its company's key, or a signed-in UXDuck for the hosted model.
     #[serde(default)]
     pub ready_models: Vec<String>,
+    /// Local provider connections; contains no credentials or authorization URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<AgentConnection>,
+    /// The models whose reasoning effort a chat can choose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<ModelEfforts>,
+    /// The fast model spoken turns run on (ADR-0012 V5a); absent when none
+    /// is offered, and then they run on the chat's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk_model: Option<String>,
+}
+
+/// The reasoning efforts one model takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelEfforts {
+    pub model: String,
+    /// Least thinking first, such as `low`, `medium`, `high`.
+    pub levels: Vec<String>,
+    /// The one a chat that chooses none uses; absent when the provider does
+    /// not say (Claude Code), so a chat that chooses none reads "Default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConnection {
+    pub id: String,
+    pub title: String,
+    pub status: ConnectionStatus,
+    pub detail: String,
+    pub models: Vec<ConnectedModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<DeviceLogin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceLogin {
+    pub url: String,
+    pub code: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionStatus {
+    Unavailable,
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedModel {
+    /// Provider-qualified id: billing never changes implicitly.
+    pub id: String,
+    pub title: String,
+    /// The reasoning efforts the plan offers for it, least first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    /// The effort it uses when a chat chooses none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConnectionParams {
+    pub provider: String,
+    pub action: ConnectionAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionAction {
+    Refresh,
+    Connect,
+    Disconnect,
 }
 
 /// Stores a secret in the daemon's credential store. Local socket only.
@@ -374,4 +628,70 @@ pub struct CredentialsSetParams {
     pub name: String,
     /// Empty removes it.
     pub value: String,
+}
+
+/// What sending during a turn means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FollowUpBehavior {
+    #[default]
+    Queue,
+    Steer,
+}
+
+/// Manage saved follow-ups. Item operations require their current version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadQueueParams {
+    pub thread_id: String,
+    #[serde(flatten)]
+    pub action: QueueAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum QueueAction {
+    Resume,
+    Edit {
+        item_id: String,
+        #[schemars(schema_with = "crate::safe::integer")]
+        expected_version: u64,
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    Delete {
+        item_id: String,
+        #[schemars(schema_with = "crate::safe::integer")]
+        expected_version: u64,
+    },
+    Up {
+        item_id: String,
+        #[schemars(schema_with = "crate::safe::integer")]
+        expected_version: u64,
+    },
+    Down {
+        item_id: String,
+        #[schemars(schema_with = "crate::safe::integer")]
+        expected_version: u64,
+    },
+    Steer {
+        item_id: String,
+        #[schemars(schema_with = "crate::safe::integer")]
+        expected_version: u64,
+    },
+}
+
+impl FollowUpBehavior {
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if receives a reference"
+    )]
+    fn is_queue(&self) -> bool {
+        *self == Self::Queue
+    }
 }

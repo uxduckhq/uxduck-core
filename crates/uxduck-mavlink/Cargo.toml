@@ -23,7 +23,8 @@ serde_json.workspace = true
 serde.workspace = true
 flate2.workspace = true
 base64.workspace = true
-quick-xml = { workspace = true, optional = true }
+# Dialect files: plugins' (S60) and people's own (S252, custom.rs).
+quick-xml.workspace = true
 
 [features]
 default = ["native"]
@@ -32,8 +33,7 @@ default = ["native"]
 native = ["dep:tokio", "dep:serialport"]
 # Every message of the dialect by name, for plugins (S54): the dialect's
 # definitions are large, so only the installed daemon has them.
-# Vendors' dialect files are read at run time with quick-xml (S60).
-named = ["mavio/definitions", "dep:mavinspect", "dep:quick-xml"]
+named = ["mavio/definitions", "dep:mavinspect"]
 
 [lints]
 workspace = true

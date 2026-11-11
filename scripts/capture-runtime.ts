@@ -41,10 +41,15 @@ const sources = [
     dir: "x264",
   },
 ];
+const patches = [
+  "tools/capture-runtime/patch-avfoundation.py",
+  "tools/capture-runtime/patch-v4l2.py",
+];
 const recipes = [
   "tools/capture-runtime/build.sh",
-  "tools/capture-runtime/patch-avfoundation.py",
+  ...patches,
   "tools/capture-runtime/test-frame-rate.py",
+  "tools/capture-runtime/test-v4l2.py",
 ];
 const digest = createHash("sha256").update(JSON.stringify(sources)).update(target);
 for (const file of recipes) digest.update(readFileSync(join(root, file)));
@@ -127,11 +132,20 @@ try {
       );
       copyFileSync(archive, join(runtime, "sources", source.name));
     }
-    execFileSync(
-      process.platform === "win32" ? "python" : "python3",
-      [join(root, recipes[1]!), join(work, "ffmpeg")],
-      { stdio: "inherit" },
-    );
+    for (const patch of patches) {
+      execFileSync(
+        process.platform === "win32" ? "python" : "python3",
+        [join(root, patch), join(work, "ffmpeg")],
+        { stdio: "inherit" },
+      );
+    }
+    if (process.platform === "linux") {
+      execFileSync(
+        "python3",
+        [join(root, "tools/capture-runtime/test-v4l2.py"), join(work, "ffmpeg")],
+        { stdio: "inherit" },
+      );
+    }
     execFileSync(
       "bash",
       [
@@ -174,13 +188,24 @@ try {
       });
       if (!encoders.includes("libx264"))
         throw new Error("The capture helper is missing its required H.264 encoder.");
+      // The hardware encoder that re-encodes a camera with no IDR (ADR-0017).
+      const hardware =
+        process.platform === "darwin"
+          ? "h264_videotoolbox"
+          : process.platform === "win32"
+            ? "h264_mf"
+            : undefined;
+      if (hardware && !encoders.includes(hardware))
+        throw new Error(`The capture helper is missing its hardware H.264 encoder, ${hardware}.`);
       if (!/^ A\S* aac /m.test(encoders))
         throw new Error("The capture helper is missing its AAC encoder for a camera's sound.");
 
       if (process.platform === "darwin") {
-        execFileSync("python3", [join(root, recipes[2]!), join(work, "ffmpeg")], {
-          stdio: "inherit",
-        });
+        execFileSync(
+          "python3",
+          [join(root, "tools/capture-runtime/test-frame-rate.py"), join(work, "ffmpeg")],
+          { stdio: "inherit" },
+        );
         // Exercise the real AVFoundation option parser without opening a camera.
         // Camera default sends zero; VIDEO_RATE rejects it before device lookup.
         const missingCamera = spawnSync(

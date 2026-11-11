@@ -5,8 +5,11 @@ mod adapters;
 mod analytics;
 mod api;
 mod app_update;
+mod attachments;
 mod build;
+mod card_logs;
 mod cli;
+mod companions;
 mod daemon;
 mod desktop_app;
 mod dev_api;
@@ -16,13 +19,15 @@ mod errors;
 mod feedback;
 mod find;
 mod firmware;
-mod grants;
+mod found_flights;
 mod inspect;
 mod interface;
+mod listener_port;
 mod live_video;
 mod logs;
 mod marker_sources;
 mod mcp;
+mod metered;
 mod network;
 mod online;
 mod params;
@@ -32,8 +37,7 @@ mod places;
 mod plugin_bundle;
 mod ports;
 mod receiver_stick;
-mod remote_users;
-mod remote_view;
+mod replay;
 mod service;
 mod shipped;
 mod sim;
@@ -49,7 +53,6 @@ mod uploader;
 mod vehicle_files;
 mod video;
 mod wakes;
-mod watch;
 
 use std::process::ExitCode;
 
@@ -58,6 +61,11 @@ use clap::Parser;
 fn main() -> ExitCode {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    // `ssh` asking for a companion computer's password (S296): answer from
+    // the file the check wrote, and nothing else.
+    if let Some(path) = std::env::var_os(companions::ASKPASS_FILE) {
+        return companions::askpass(std::path::Path::new(&path));
+    }
     // The copied updater is a short-lived installer worker, not another daemon.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__install-update")) {
         let Some(dir) = std::env::args_os().nth(2) else {

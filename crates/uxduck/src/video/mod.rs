@@ -3,6 +3,7 @@
 //! daemon parses and relays; it never decodes a picture (V1).
 
 pub mod capture;
+pub mod created;
 pub mod demos;
 pub mod file;
 pub mod folder;
@@ -11,6 +12,7 @@ pub mod listener;
 pub mod permission;
 pub mod playback;
 pub mod recorder;
+pub mod reencode;
 pub mod rtsp;
 pub mod socket;
 
@@ -119,6 +121,7 @@ impl uxduck_engine::video::VideoPort for VideoHost {
             self.hub.clone(),
             self.engine.clone(),
             self.selections.get(source_id).map(|s| s.answer.clone()),
+            self.devices.clone(),
         );
         self.captures.insert(source_id.to_owned(), task);
     }
@@ -220,6 +223,19 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         self.hub.stop_recording(recording_id);
     }
 
+    fn delete_recording(&mut self, recording_id: &str, file: &str) -> Result<(), String> {
+        let dir = self.hub.dir();
+        match std::fs::remove_file(dir.join(file)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("Cannot delete {file}: {e}."));
+            }
+            _ => {}
+        }
+        let _ = std::fs::remove_file(recorder::index_path(dir, file));
+        let _ = std::fs::remove_file(playback::cached(&playback::cache_dir(dir), recording_id));
+        Ok(())
+    }
+
     fn recover_recording(&mut self, file: &str) -> Option<(u64, u64)> {
         recorder::recover(self.hub.dir(), file)
     }
@@ -312,6 +328,10 @@ pub async fn start(
 ) -> Arc<hub::Hub> {
     let hub = Arc::new(hub::Hub::new(dir));
     let _ = HUB.set(hub.clone());
+    // Cameras that send no IDR are re-encoded while a browser waits on one.
+    let (reencode, wanted) = tokio::sync::mpsc::unbounded_channel();
+    hub.reencode_with(reencode);
+    tokio::spawn(reencode::manage(hub.clone(), engine.clone(), wanted));
     // Playback copies unused for two weeks go (S151).
     let cache = playback::cache_dir(hub.dir());
     tokio::task::spawn_blocking(move || {

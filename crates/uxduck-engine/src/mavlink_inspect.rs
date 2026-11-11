@@ -2,7 +2,8 @@
 //! each type it sent and UXDuck sent to it, with a count and a rate, which
 //! `mavlink/inspect` reads. Each composition root owns one and records every
 //! frame with [`Inspector::record`]: a copy of its payload and a few
-//! counters, nothing decoded. Decoding waits for a read, which happens only
+//! counters. Vehicle heartbeats are checked at ingestion for live freshness;
+//! other decoding waits for a read, which happens only
 //! while someone has the inspector open, and can happen apart from the
 //! table ([`Seen::decode`]), so a table behind a lock is held only to copy.
 //!
@@ -14,11 +15,14 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry as Slot;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use uxduck_contracts::dto::dialect::MessageChange;
 use uxduck_contracts::dto::inspect::{
     InspectDirection, InspectedMessage, MavlinkHistoryResult, MavlinkInspectResult, PastMessage,
 };
+use uxduck_mavlink::custom::Messages as OwnMessages;
 use uxduck_mavlink::framing::Header;
 
 /// Message types kept per vehicle. A vehicle that sends more than this is
@@ -178,6 +182,8 @@ impl Ring {
 #[derive(Debug, Default)]
 struct Vehicle {
     latest: Messages,
+    /// Accepted vehicle heartbeats only; companion/GCS beats share message id 0.
+    heartbeat_us: Option<u64>,
     history: HashMap<(InspectDirection, u32), Ring>,
     /// What `history` holds, roughly: its entries and their payloads.
     history_bytes: usize,
@@ -254,6 +260,12 @@ impl Inspector {
         if vehicle.latest.len() >= MAX_TYPES && !vehicle.latest.contains_key(&key) {
             *vehicle = Vehicle::default();
         }
+        if direction == InspectDirection::Received
+            && header.message_id == 0
+            && vehicle_heartbeat(payload)
+        {
+            vehicle.heartbeat_us = Some(vehicle.heartbeat_us.unwrap_or(0).max(at_us));
+        }
         match vehicle.latest.entry(key) {
             Slot::Occupied(mut latest) => latest.get_mut().update(header, payload, at_us),
             Slot::Vacant(slot) => {
@@ -293,8 +305,7 @@ impl Inspector {
         vehicle_ids
             .iter()
             .filter_map(|id| self.vehicles.get(id))
-            .filter_map(|vehicle| vehicle.latest.get(&(InspectDirection::Received, 0)))
-            .map(|heartbeat| heartbeat.last_us)
+            .filter_map(|vehicle| vehicle.heartbeat_us)
             .max()
     }
 
@@ -322,6 +333,7 @@ impl Inspector {
         }
         Seen {
             now_us,
+            own: uxduck_mavlink::custom::for_vehicle(vehicle_ids),
             messages: merged
                 .into_iter()
                 .map(|((direction, id), latest)| {
@@ -331,6 +343,28 @@ impl Inspector {
                 .collect(),
         }
     }
+}
+
+/// Match the session's vehicle classification, rather than counting every HEARTBEAT.
+fn vehicle_heartbeat(payload: &[u8]) -> bool {
+    // HEARTBEAT has nine base bytes, ending in its nonzero MAVLink version.
+    // The inspector's field decoder pads truncated payloads, which cannot prove liveness.
+    if payload.len() < 9 {
+        return false;
+    }
+    let Some(beat) = uxduck_mavlink::dialect::decode(0, payload) else {
+        return false;
+    };
+    // MAV_AUTOPILOT_INVALID (8) and MAV_TYPE_GCS (6) never establish vehicle presence.
+    beat.fields
+        .get("autopilot")
+        .and_then(Value::as_u64)
+        .is_some_and(|v| v != 8)
+        && beat
+            .fields
+            .get("type")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v != 6)
 }
 
 impl Inspector {
@@ -361,6 +395,7 @@ impl Inspector {
         found.truncate(limit);
         Ok(Earlier {
             id,
+            own: uxduck_mavlink::custom::for_vehicle(vehicle_ids),
             messages: found
                 .into_iter()
                 .map(|past| {
@@ -382,6 +417,8 @@ impl Inspector {
 #[derive(Debug)]
 pub struct Earlier {
     id: u32,
+    /// The vehicle's own dialects' messages (ADR-0044).
+    own: Option<Arc<OwnMessages>>,
     messages: Vec<(u64, u8, u8, Vec<u8>)>,
     older: Option<String>,
 }
@@ -398,7 +435,7 @@ impl Earlier {
                     at_us,
                     system_id,
                     component_id,
-                    fields: fields(self.id, &payload, fallback),
+                    fields: fields(self.id, &payload, self.own.as_deref(), fallback),
                     ..Default::default()
                 })
                 .collect(),
@@ -409,10 +446,18 @@ impl Earlier {
     }
 }
 
-/// A message's fields, decoded with ArduPilot's dialect, else with
-/// `fallback`; None when neither knows it.
+/// A message's fields, decoded with the vehicle's own dialects (`own`,
+/// ADR-0044 F4), else ArduPilot's, else `fallback`; None when none knows it.
 #[must_use]
-pub fn fields(id: u32, payload: &[u8], fallback: Option<Fallback>) -> Option<Map<String, Value>> {
+pub fn fields(
+    id: u32,
+    payload: &[u8],
+    own: Option<&OwnMessages>,
+    fallback: Option<Fallback>,
+) -> Option<Map<String, Value>> {
+    if let Some(decoded) = own.and_then(|own| own.decode(id, payload)) {
+        return Some(decoded.fields);
+    }
     if let Some(decoded) = uxduck_mavlink::dialect::decode(id, payload) {
         return Some(decoded.fields);
     }
@@ -429,31 +474,39 @@ pub type Fallback<'a> = &'a dyn Fn(u32, &[u8]) -> Option<(String, Map<String, Va
 #[derive(Debug)]
 pub struct Seen {
     now_us: u64,
+    /// The vehicle's own dialects' messages (ADR-0044).
+    own: Option<Arc<OwnMessages>>,
     messages: Vec<(InspectDirection, u32, Latest, f64)>,
 }
 
 impl Seen {
     /// What the inspector shows: received first, then sent, each by name,
-    /// decoded with ArduPilot's dialect, else with `fallback`.
+    /// decoded with the vehicle's own dialects, else ArduPilot's, else with
+    /// `fallback`.
     #[must_use]
     pub fn decode(self, fallback: Option<Fallback>) -> MavlinkInspectResult {
         let now_us = self.now_us;
+        let own = self.own;
         let mut messages: Vec<InspectedMessage> = self
             .messages
             .into_iter()
             .map(|(direction, id, latest, hz)| {
-                let (name, dialect, fields) = describe(id, &latest.payload, fallback);
+                let described = describe(id, &latest.payload, own.as_deref(), fallback);
                 InspectedMessage {
                     direction,
                     id,
-                    name,
                     system_id: latest.system_id,
                     component_id: latest.component_id,
                     hz,
                     count: latest.count,
                     age_ms: now_us.saturating_sub(latest.last_us) / 1000,
-                    dialect,
-                    fields,
+                    name: described.name,
+                    dialect: described.dialect,
+                    fields: described.fields,
+                    labels: described.labels,
+                    units: described.units,
+                    own_dialect: described.own_dialect,
+                    change: described.change,
                 }
             })
             .collect();
@@ -470,20 +523,61 @@ impl Seen {
     }
 }
 
-type Described = (String, Option<String>, Option<Map<String, Value>>);
+/// What one message is, as far as anything here knows.
+#[derive(Default)]
+struct Described {
+    name: String,
+    dialect: Option<String>,
+    fields: Option<Map<String, Value>>,
+    labels: Option<Map<String, Value>>,
+    units: Option<Map<String, Value>>,
+    own_dialect: Option<String>,
+    change: Option<MessageChange>,
+}
 
-/// A message's name, dialect and fields; only its id when nothing knows it.
-fn describe(id: u32, payload: &[u8], fallback: Option<Fallback>) -> Described {
+/// A message's name, dialect and fields, from the vehicle's own dialects
+/// first; only its id when nothing knows it.
+fn describe(
+    id: u32,
+    payload: &[u8],
+    own: Option<&OwnMessages>,
+    fallback: Option<Fallback>,
+) -> Described {
+    if let Some(decoded) = own.and_then(|own| own.decode(id, payload)) {
+        return Described {
+            name: decoded.name,
+            fields: Some(decoded.fields),
+            labels: (!decoded.labels.is_empty()).then_some(decoded.labels),
+            units: (!decoded.units.is_empty()).then_some(decoded.units),
+            own_dialect: Some(decoded.dialect),
+            change: Some(match decoded.change {
+                uxduck_core::domain::dialect::MessageChange::New => MessageChange::New,
+                uxduck_core::domain::dialect::MessageChange::Layout => MessageChange::Layout,
+                uxduck_core::domain::dialect::MessageChange::Extensions => {
+                    MessageChange::Extensions
+                }
+            }),
+            ..Described::default()
+        };
+    }
     if let Some(decoded) = uxduck_mavlink::dialect::decode(id, payload) {
-        return (
-            decoded.name.to_owned(),
-            Some(decoded.dialect.name().to_owned()),
-            Some(decoded.fields),
-        );
+        return Described {
+            name: decoded.name.to_owned(),
+            dialect: Some(decoded.dialect.name().to_owned()),
+            fields: Some(decoded.fields),
+            ..Described::default()
+        };
     }
     match fallback.and_then(|decode| decode(id, payload)) {
-        Some((name, fields)) => (name, None, Some(fields)),
-        None => (format!("#{id}"), None, None),
+        Some((name, fields)) => Described {
+            name,
+            fields: Some(fields),
+            ..Described::default()
+        },
+        None => Described {
+            name: format!("#{id}"),
+            ..Described::default()
+        },
     }
 }
 
@@ -665,10 +759,23 @@ mod tests {
     fn heartbeat_freshness_uses_received_beats_and_all_vehicle_aliases() {
         let mut table = Inspector::default();
         let ids = vec!["lasting".to_owned(), "provisional".to_owned()];
+        let beat = [0, 0, 0, 0, 2, 3, 0, 3, 3];
         assert_eq!(table.heartbeat_us(&ids), None);
-        table.record("provisional", InspectDirection::Received, header(0), &[], S);
-        table.record("lasting", InspectDirection::Received, header(0), &[], 2 * S);
-        table.record("lasting", InspectDirection::Sent, header(0), &[], 3 * S);
+        table.record(
+            "provisional",
+            InspectDirection::Received,
+            header(0),
+            &beat,
+            S,
+        );
+        table.record(
+            "lasting",
+            InspectDirection::Received,
+            header(0),
+            &beat,
+            2 * S,
+        );
+        table.record("lasting", InspectDirection::Sent, header(0), &beat, 3 * S);
         table.record(
             "lasting",
             InspectDirection::Received,
@@ -685,6 +792,24 @@ mod tests {
         );
         assert_eq!(table.heartbeat_us(&ids), Some(2 * S));
         assert_eq!(table.heartbeat_us(&["provisional".into()]), Some(S));
+    }
+
+    #[test]
+    fn companion_ground_station_and_late_heartbeats_do_not_refresh_vehicle_age() {
+        let mut table = Inspector::default();
+        let beat = [0, 0, 0, 0, 2, 3, 0, 3, 3];
+        table.record("v", InspectDirection::Received, header(0), &beat, 2 * S);
+        for (at, payload) in [
+            (3 * S, vec![0, 0, 0, 0, 30, 8, 0, 3, 3]), // camera
+            (4 * S, vec![0, 0, 0, 0, 6, 3, 0, 3, 3]),  // ground station
+            (5 * S, vec![]),                           // malformed
+            (S, beat.to_vec()),                        // delayed autopilot beat
+        ] {
+            table.record("v", InspectDirection::Received, header(0), &payload, at);
+            assert_eq!(table.heartbeat_us(&ids("v")), Some(2 * S));
+        }
+        table.record("v", InspectDirection::Received, header(0), &beat, 6 * S);
+        assert_eq!(table.heartbeat_us(&ids("v")), Some(6 * S));
     }
 
     #[test]

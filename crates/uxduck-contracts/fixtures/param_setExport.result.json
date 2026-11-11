@@ -1,0 +1,4 @@
+{
+  "name": "Alpha-Field-tune.param",
+  "text": "# Alpha: Field tune, saved by UXDuck 2026-10-23 14:05 UTC, firmware ArduCopter V4.6.2\nRTL_ALT,1500\nWPNAV_SPEED,1000\n"
+}

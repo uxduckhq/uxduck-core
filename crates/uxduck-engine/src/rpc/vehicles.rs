@@ -8,8 +8,8 @@ use uxduck_contracts::dto::link::{
     SerialPort,
 };
 use uxduck_contracts::dto::vehicle::{
-    Vehicle as VehicleDto, VehicleBookmarksParams, VehicleLabelParams, VehicleListResult,
-    VehicleLookParams, VehicleSaveParams, VehicleSizeParams,
+    Vehicle as VehicleDto, VehicleBookmarksParams, VehicleColourParams, VehicleLabelParams,
+    VehicleListResult, VehicleLookParams, VehicleSaveParams, VehicleSizeParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -20,6 +20,7 @@ use uxduck_core::events::Change;
 use super::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
+#[allow(clippy::too_many_lines, reason = "one arm per method")]
 pub fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -100,6 +101,22 @@ pub fn handle(
             require(Capability::Config)?;
             look_vehicle(engine, connection, params)
         }
+        ClientRequest::VehicleColour(params) => {
+            require(Capability::Config)?;
+            colour_vehicle(engine, connection, params)
+        }
+        ClientRequest::VehicleGripper(params) => {
+            require(Capability::Config)?;
+            crate::gripper::set_gripper(engine, connection, params)
+        }
+        ClientRequest::GripperStatus(IdParams { id }) => {
+            require(Capability::Read)?;
+            crate::gripper::status(engine, &id)
+        }
+        ClientRequest::VehicleSimulated(params) => {
+            require(Capability::Config)?;
+            simulate_vehicle(engine, connection, &params)
+        }
         ClientRequest::VehicleBookmarks(params) => {
             require(Capability::Config)?;
             bookmark_vehicle(engine, connection, params)
@@ -107,6 +124,10 @@ pub fn handle(
         ClientRequest::VehicleDismiss(IdParams { id }) => {
             require(Capability::Config)?;
             dismiss_vehicle(engine, connection, &id)
+        }
+        ClientRequest::VehicleHide(params) => {
+            require(Capability::Config)?;
+            hide_vehicle(engine, connection, &params)
         }
         ClientRequest::VehicleDelete(IdParams { id }) => {
             require(Capability::Config)?;
@@ -174,9 +195,10 @@ fn telemetry_of(engine: &Engine, id: &str) -> Result<Value, ApiError> {
             ..Default::default()
         }
     });
-    to_value(&uxduck_contracts::dto::telemetry::VehicleTelemetry::from(
-        &telemetry,
-    ))
+    to_value(&uxduck_contracts::dto::telemetry::VehicleTelemetry {
+        link_health: engine.link_health_of(&vehicle.id),
+        ..uxduck_contracts::dto::telemetry::VehicleTelemetry::from(&telemetry)
+    })
 }
 
 fn found<'e>(
@@ -251,7 +273,7 @@ fn create_link_inner(
         }
     }
     let default_name = check_kind(engine, &kind, None)?;
-    let kind = crate::sim::assign_instance(engine, kind);
+    let kind = crate::sim::assign_instance(engine, kind)?;
     let name = params
         .name
         .map(|n| n.trim().to_owned())
@@ -315,6 +337,7 @@ fn create_link_inner(
         carries,
         launch: None,
         paused: false,
+        scenery_hit: None,
         created_at_us: engine.clock.now_us(),
         version: 1,
     };
@@ -330,6 +353,12 @@ fn create_link_inner(
 
 fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
+}
+
+fn link_conflict(link: &Link, message: impl Into<String>) -> ApiError {
+    let mut error = invalid(message);
+    error.data.conflicting_link_id = Some(link.id.clone().into_boxed_str());
+    error
 }
 
 fn is_ip(host: &str) -> bool {
@@ -375,36 +404,17 @@ pub(crate) fn check_kind(
         .values()
         .filter(|l| except != Some(l.id.as_str()))
         .collect();
-    let listens_on = |port: u16| {
-        links
-            .iter()
-            .any(|l| matches!(&l.kind, LinkKind::UdpListen { port: p, .. } if *p == port))
+    // Off links keep their settings, not their ports. Configured, down and
+    // port-in-use links still reserve them: their data plane may retry.
+    let listener_on = |port: u16| {
+        links.iter().copied().find(|l| {
+            !l.status.is_off()
+                && matches!(&l.kind, LinkKind::UdpListen { port: p, .. } if *p == port)
+        })
     };
     match kind {
         LinkKind::UdpListen { host, port } => {
-            if *port == 0 || !is_ip(host) {
-                return Err(invalid(
-                    "a UDP link needs an IP address and a port from 1 to 65535",
-                ));
-            }
-            if listens_on(*port) {
-                return Err(invalid(format!(
-                    "another link already listens on port {port}"
-                )));
-            }
-            let sent_here = links.iter().any(|l| {
-                matches!(&l.kind, LinkKind::UdpForward { host: to, port: p } | LinkKind::UdpClient { host: to, port: p }
-                    if p == port && engine.system.is_local_address(to))
-            });
-            if sent_here {
-                return Err(invalid(format!(
-                    "another link already sends to port {port} on this machine. Listening there would loop"
-                )));
-            }
-            engine
-                .system
-                .check_udp_bind(host, *port)
-                .map_err(|detail| ApiError::new(ErrorKind::PortInUse, detail))?;
+            check_udp_listen(engine, &links, host, *port, listener_on(*port).is_some())?;
             Ok(default_name(kind).unwrap_or_default())
         }
         LinkKind::Serial { device, baud, usb } => {
@@ -442,10 +452,19 @@ pub(crate) fn check_kind(
             }
             Ok(default_name(kind).unwrap_or_default())
         }
-        LinkKind::TcpServer { host, port } => check_tcp_server(&links, kind, host, *port),
-        LinkKind::UdpClient { host, port } => {
-            check_udp_client(engine, &links, kind, host, *port, listens_on(*port))
+        LinkKind::TcpServer { host, port } => {
+            let name = check_tcp_server(&links, kind, host, *port)?;
+            check_own_address(engine, host)?;
+            Ok(name)
         }
+        LinkKind::UdpClient { host, port } => check_udp_client(
+            engine,
+            &links,
+            kind,
+            host,
+            *port,
+            listener_on(*port).is_some(),
+        ),
         LinkKind::UdpForward { host, port } => {
             if *port == 0 || !(is_ip(host) || host == "localhost") {
                 return Err(invalid(
@@ -453,15 +472,76 @@ pub(crate) fn check_kind(
                 ));
             }
             // Never forward into our own listener: every frame would loop.
-            if listens_on(*port) && engine.system.is_local_address(host) {
-                return Err(invalid(format!(
-                    "{host}:{port} is one of this daemon's own listeners. Forwarding there would loop"
-                )));
+            if let Some(listener) = listener_on(*port)
+                && engine.system.is_local_address(host)
+            {
+                return Err(link_conflict(
+                    listener,
+                    format!(
+                        "{host}:{port} is one of this daemon's own listeners (\"{}\"). Turn that link off or choose another port. Forwarding there would loop",
+                        listener.name
+                    ),
+                ));
             }
             Ok(default_name(kind).unwrap_or_default())
         }
         LinkKind::Simulator { .. } => crate::sim::check(engine, &links, kind),
     }
+}
+
+/// A UDP listener: an IP address of this computer, one link per port, and
+/// never on a port another link sends to here, where every frame would loop.
+fn check_udp_listen(
+    engine: &Engine,
+    links: &[&Link],
+    host: &str,
+    port: u16,
+    listened_on: bool,
+) -> Result<(), ApiError> {
+    if port == 0 || !is_ip(host) {
+        return Err(invalid(
+            "a UDP link needs an IP address and a port from 1 to 65535",
+        ));
+    }
+    if listened_on {
+        return Err(invalid(format!(
+            "another link already listens on port {port}"
+        )));
+    }
+    let sent_here = links.iter().find(|l| {
+        !l.status.is_off() && matches!(&l.kind, LinkKind::UdpForward { host: to, port: p } | LinkKind::UdpClient { host: to, port: p }
+            if *p == port && engine.system.is_local_address(to))
+    });
+    if let Some(sender) = sent_here {
+        return Err(link_conflict(
+            sender,
+            format!(
+                "\"{}\" already sends to port {port} on this machine. Turn that link off or choose another port. Listening there would loop",
+                sender.name
+            ),
+        ));
+    }
+    check_own_address(engine, host)?;
+    engine
+        .system
+        .check_udp_bind(host, port)
+        .map_err(|detail| ApiError::new(ErrorKind::PortInUse, detail))
+}
+
+/// A listener's address must be one of this computer's. People often enter
+/// the vehicle's own, such as a Tailscale or radio address; the error says
+/// so and suggests every address instead.
+fn check_own_address(engine: &Engine, host: &str) -> Result<(), ApiError> {
+    let ours = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+        || engine.system.is_local_address(host);
+    if ours {
+        return Ok(());
+    }
+    let mut error = invalid(crate::runtime::not_local_message(host));
+    error.data.suggested_host = Some("0.0.0.0".into());
+    Err(error)
 }
 
 /// A TCP listener: an IP address, and one link per port.
@@ -528,6 +608,9 @@ fn enable_link(engine: &mut Engine, connection: ConnectionId, id: &str) -> Resul
         return crate::sim::restart(engine, connection, id);
     }
     if link.status.is_off() {
+        // Other links may have claimed this address while this one was off.
+        // Refuse before saving or opening anything, leaving its switch off.
+        check_kind(engine, &link.kind, Some(id))?;
         link.status = LinkStatus::Configured;
         link.status_detail = None;
         link.version += 1;
@@ -733,6 +816,45 @@ fn dismiss_vehicle(
     to_value(&result)
 }
 
+/// `vehicle/hide` (S247): an offline vehicle out of every list until it is
+/// seen again or unhidden, kept with everything it has. A replay vehicle
+/// goes with its replay instead.
+fn hide_vehicle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: &uxduck_contracts::dto::vehicle::VehicleHideParams,
+) -> Result<Value, ApiError> {
+    let mut vehicle = found(engine, &params.id)?.clone();
+    if vehicle.replay {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "a replay vehicle goes when its replay closes. Hide the vehicle it replays",
+        ));
+    }
+    // Only one that is gone can be hidden: hidden while heard, it would be
+    // shown again at once (maintainer, 2026-10-30).
+    if params.hidden && vehicle.presence != uxduck_core::domain::vehicle::Presence::Offline {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!(
+                "{} is still connected. You can hide it once it goes offline.",
+                vehicle.name
+            ),
+        ));
+    }
+    if vehicle.hidden != params.hidden {
+        vehicle.hidden = params.hidden;
+        vehicle.version += 1;
+        engine.commit(
+            connection,
+            Change::VehicleUpserted {
+                vehicle: vehicle.clone(),
+            },
+        );
+    }
+    to_value(&VehicleDto::from(&vehicle))
+}
+
 /// Forgets an offline vehicle. A vehicle still heard would vanish while it
 /// flies: its link reports only changes, so nothing would bring it back.
 fn delete_vehicle(
@@ -751,6 +873,9 @@ fn delete_vehicle(
         ));
     }
     let id = vehicle.id.clone();
+    // Deleted, it is not flying: an open flight of it ends.
+    let now = engine.clock.now_us();
+    engine.end_flights_of(&id, now);
     engine.commit(connection, Change::VehicleRemoved { id });
     Ok(json!({}))
 }
@@ -767,7 +892,33 @@ fn save_vehicle(
         local_only,
     }: VehicleSaveParams,
 ) -> Result<Value, ApiError> {
-    let before = found(engine, &id)?.clone();
+    let mut before = found(engine, &id)?.clone();
+    // A replay vehicle is a view of its original (ADR-0039 R3, S238): its
+    // original is the one renamed. With none here, the name is the
+    // replay's, for as long as it is open.
+    if before.replay {
+        let original = before
+            .replay_of
+            .clone()
+            .and_then(|of| engine.state.vehicles.get(&of).cloned());
+        if let Some(original) = original {
+            before = original;
+        } else {
+            let Some(name) = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()) else {
+                return to_value(&VehicleDto::from(&before));
+            };
+            if name.chars().count() > 64 {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "a vehicle name has up to 64 characters",
+                ));
+            }
+            let renamed = engine
+                .rename_replay_vehicle(&before.id, name)
+                .unwrap_or(before);
+            return to_value(&VehicleDto::from(&renamed));
+        }
+    }
     let mut vehicle = before.clone();
     if let Some(name) = name {
         let name = name.trim();
@@ -777,10 +928,11 @@ fn save_vehicle(
                 "a vehicle name has up to 64 characters",
             ));
         }
-        // An empty name puts back one nobody chose: a callsign
-        // (maintainer, 2026-10-07; callsigns 2026-10-10).
+        // An empty name puts back one nobody chose: a callsign, or a
+        // simulation's "Sim n" (maintainer, 2026-10-07; callsigns
+        // 2026-10-10; simulations 2026-10-28).
         vehicle.name = if name.is_empty() {
-            engine.free_callsign(Some(&vehicle.id))
+            engine.unchosen_name(&vehicle.link_id, Some(&vehicle.id))
         } else {
             name.to_owned()
         };
@@ -933,6 +1085,27 @@ fn size_vehicle(
 
 /// `vehicle/look`: the model it is drawn as (ADR-0035 M5), or none for its
 /// type's. As its size, neither saves it nor goes in its history.
+/// `vehicle/simulated`: the person's word over the vehicle's own (ADR-0039
+/// R14).
+fn simulate_vehicle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: &uxduck_contracts::dto::vehicle::VehicleSimulatedParams,
+) -> Result<Value, ApiError> {
+    let mut vehicle = found(engine, &params.id)?.clone();
+    if vehicle.simulated != params.simulated {
+        vehicle.simulated = params.simulated;
+        vehicle.version += 1;
+        engine.commit(
+            connection,
+            Change::VehicleUpserted {
+                vehicle: vehicle.clone(),
+            },
+        );
+    }
+    to_value(&VehicleDto::from(&vehicle))
+}
+
 fn look_vehicle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -942,6 +1115,28 @@ fn look_vehicle(
     let mut vehicle = found(engine, &id)?.clone();
     if vehicle.look != look {
         vehicle.look = look;
+        vehicle.version += 1;
+        engine.commit(
+            connection,
+            Change::VehicleUpserted {
+                vehicle: vehicle.clone(),
+            },
+        );
+    }
+    to_value(&VehicleDto::from(&vehicle))
+}
+
+/// `vehicle/colour`: the colour it is drawn in. As its look, neither saves
+/// it nor goes in its history.
+fn colour_vehicle(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    VehicleColourParams { id, colour }: VehicleColourParams,
+) -> Result<Value, ApiError> {
+    let colour = Some(colour.into());
+    let mut vehicle = found(engine, &id)?.clone();
+    if vehicle.colour != colour {
+        vehicle.colour = colour;
         vehicle.version += 1;
         engine.commit(
             connection,
@@ -1020,8 +1215,9 @@ fn web_address(url: &str) -> bool {
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// `link/remove`: any link but a simulation's, which has one way to end so
-/// there is no telling the two apart: `sim/stop`.
+/// `link/remove`: any link. For a simulation it is Delete simulation
+/// (S264): `sim/stop` keeps it, this is the one way it goes, with an
+/// unsaved vehicle's history.
 fn remove_link_asked(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -1033,10 +1229,7 @@ fn remove_link_asked(
         .get(id)
         .is_some_and(|l| l.kind.is_simulator())
     {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "This connection closes by itself when you stop the simulation.",
-        ));
+        engine.give_up_practice_on(id, connection);
     }
     remove_link(engine, connection, id)
 }
@@ -1050,6 +1243,10 @@ pub(crate) fn remove_link(
         return Err(ApiError::new(ErrorKind::NotFound, format!("no link {id}")));
     }
     engine.links.close(id);
+    // A simulation's vehicle is gone with it: its flight ends now.
+    if engine.state.links[id].kind.is_simulator() {
+        engine.end_flights_on_simulation(id);
+    }
     engine.forget_flights_on(id);
     let on_link: Vec<_> = engine
         .state
@@ -1083,6 +1280,7 @@ pub(crate) fn remove_link(
     engine.commit(connection, Change::LinkRemoved { id: id.to_owned() });
     engine.removed_links.insert(id.to_owned());
     engine.drop_launch(id);
+    engine.drop_plan_run(id);
     engine.resolve(&format!("link-loop:{id}"));
     // A simulated vehicle's forward goes with it (S102).
     let forwards: Vec<String> = engine

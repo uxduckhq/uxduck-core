@@ -14,6 +14,7 @@
       "datagrams": 0,
       "pictures": 0,
       "keyframes": 0,
+      "recoveryPoints": 0,
       "lost": 0,
       "damaged": 0,
       "pesLengthMismatches": 0,

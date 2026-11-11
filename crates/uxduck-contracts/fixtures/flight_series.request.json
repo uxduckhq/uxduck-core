@@ -1,0 +1,8 @@
+{
+  "method": "flight/series",
+  "params": {
+    "flightId": "fl3c9a1e7b2d4f6a80",
+    "keys": ["battery.voltage_v", "position.fused.above-home"],
+    "maxPoints": 500
+  }
+}

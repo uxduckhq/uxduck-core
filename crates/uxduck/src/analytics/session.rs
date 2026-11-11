@@ -28,6 +28,7 @@ impl Session {
                     | "engagement_started"
                     | "app_active_time"
                     | "feature_used"
+                    | "dictation_used"
                     | "download_clicked"
                     | "setting_changed"
                     | "feedback_opened"

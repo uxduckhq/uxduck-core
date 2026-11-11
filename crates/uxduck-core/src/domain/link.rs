@@ -76,6 +76,10 @@ pub enum LinkKind {
         /// for the vehicle. Installed daemons only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binary: Option<String>,
+        /// Explicit consent for this own ArduPilot build to listen on the
+        /// network when it cannot keep its connections local.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_network: bool,
         /// Forgets the vehicle's stored parameters each time it starts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wipe: bool,
@@ -239,8 +243,28 @@ pub struct Link {
     /// runs no time until it resumes. Never set for a real vehicle.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Where a simulated vehicle touched the 3D scenery and was paused
+    /// (`sim/crash`). Once it resumes, contact within [`SCENERY_CLEAR_M`]
+    /// of it is not reported, until the vehicle has flown clear of it.
+    /// Never set for a real vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenery_hit: Option<SceneryHit>,
     pub created_at_us: u64,
     pub version: u64,
+}
+
+/// How far from a scenery hit, in metres across the ground, the vehicle
+/// must go before contact counts again: past a wrong building, bridge or
+/// patch of terrain, since contact found there may be the scenery's fault.
+pub const SCENERY_CLEAR_M: f64 = 100.0;
+
+/// Where on the ground a simulated vehicle touched the 3D scenery, in
+/// degrees times 10⁷ (MAVLink's units), so a link stays comparable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneryHit {
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
 }
 
 /// What a link's bytes are (S172, ADR-0034): MAVLink from vehicles, or

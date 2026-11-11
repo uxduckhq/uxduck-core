@@ -12,7 +12,12 @@ use uxduck_core::domain::command::ReceiptStatus;
 use uxduck_core::domain::settings::LaunchAction;
 use uxduck_core::domain::vehicle::Presence;
 
+use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+
 use crate::{ConnectionId, Engine, rpc::handlers::to_value};
+
+/// An announced version's notification condition, before the version.
+const UPDATE_NOTICE: &str = "app-update:";
 
 #[derive(Default)]
 pub(crate) struct Updates {
@@ -29,6 +34,7 @@ struct Consent {
     version: String,
     when_idle: bool,
     stop_simulations: bool,
+    interrupt_activity: bool,
 }
 
 pub(crate) fn handle(
@@ -58,6 +64,7 @@ pub(crate) fn handle(
         ClientRequest::UpdateLater(_) => {
             engine.app_update.consent = None;
             engine.app_update.dismissed = true;
+            engine.app_update_resolve_notices(|_| true);
         }
         ClientRequest::UpdateInstall(params) => {
             if engine.app_update.status.phase != UpdatePhase::Ready
@@ -68,23 +75,24 @@ pub(crate) fn handle(
                     "That update is no longer ready. Check for updates again.",
                 ));
             }
-            if params.when_idle && params.stop_simulations {
+            if params.when_idle && (params.stop_simulations || params.interrupt_activity) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
-                    "Stopping simulations requires installing now, not when idle.",
+                    "Interrupting activity requires installing now, not when idle.",
                 ));
             }
             let blockers = engine.app_update_blockers_for(params.stop_simulations);
-            if !params.when_idle && !blockers.is_empty() {
+            if !params.when_idle && !params.interrupt_activity && !blockers.is_empty() {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
-                    format!("UXDuck cannot restart yet: {}", blockers.join("; ")),
+                    format!("UXDuck cannot restart yet: {}", blockers.join(", ")),
                 ));
             }
             engine.app_update.consent = Some(Consent {
                 version: params.version.clone(),
                 when_idle: params.when_idle,
                 stop_simulations: params.stop_simulations,
+                interrupt_activity: params.interrupt_activity,
             });
             engine.app_update.dismissed = false;
         }
@@ -131,7 +139,7 @@ impl Engine {
 
     fn app_update_blockers_for(&self, stop_simulations: bool) -> Vec<String> {
         let mut blockers = Vec::new();
-        for vehicle in self.state.vehicles.values() {
+        for vehicle in self.state.vehicles.values().filter(|v| !v.replay) {
             let simulated = self
                 .state
                 .links
@@ -163,10 +171,8 @@ impl Engine {
             };
             blockers.push(reason.into());
         }
-        if self.state.controllers.values().any(|c| c.claim.is_some())
-            || !self.remote.leases.is_empty()
-        {
-            blockers.push("A controller or remote control session is active".into());
+        if self.state.controllers.values().any(|c| c.claim.is_some()) {
+            blockers.push("A controller is active".into());
         }
         if self
             .state
@@ -227,11 +233,19 @@ impl Engine {
         let mut status = self.app_update.status.clone();
         status.current.clone_from(&self.config.daemon_version);
         status.push_updates = true;
+        status.can_install_anyway = true;
         let blockers_without_simulations = self.app_update_blockers_for(true);
         let blockers = self.app_update_blockers();
         status.can_install_with_simulations =
             !blockers.is_empty() && blockers_without_simulations.is_empty();
         status.blockers = if self
+            .app_update
+            .consent
+            .as_ref()
+            .is_some_and(|c| c.interrupt_activity)
+        {
+            Vec::new()
+        } else if self
             .app_update
             .consent
             .as_ref()
@@ -264,8 +278,61 @@ impl Engine {
             self.app_update.consent = None;
             self.app_update.dismissed = false;
         }
+        // A version that is installed, gone from the channel or replaced
+        // by a newer one is no longer news (FB-97).
+        let running = self.config.daemon_version.clone();
+        let ready = (status.phase == UpdatePhase::Ready).then(|| status.version.clone());
+        let current = status.phase == UpdatePhase::Current;
+        self.app_update_resolve_notices(|version| {
+            current
+                || version == running
+                || ready
+                    .as_ref()
+                    .is_some_and(|r| r.as_deref() != Some(version))
+        });
         self.app_update.status = status;
         self.push_tray();
+    }
+
+    /// Says once that a downloaded version is ready, in the notifications,
+    /// when nothing in flight would be interrupted by it. The host remembers
+    /// the versions it announced, so a restart doesn't say it again.
+    /// Returns whether it was said, now or before.
+    pub fn app_update_announce(&mut self, version: &str) -> bool {
+        if self.app_update.status.phase != UpdatePhase::Ready
+            || self.app_update.status.version.as_deref() != Some(version)
+            || !self.app_update_blockers().is_empty()
+        {
+            return false;
+        }
+        self.raise(crate::commands::Raise {
+            severity: Severity::Info,
+            kind: NotificationKind::Transient,
+            subject: Subject::System,
+            title: format!("UXDuck {version} is available"),
+            body: Some(
+                "Install it from Update available, or in Settings › About. Nothing installs without your permission."
+                    .into(),
+            ),
+            actions: Vec::new(),
+            condition: Some(format!("{UPDATE_NOTICE}{version}")),
+            report: None,
+        });
+        true
+    }
+
+    fn app_update_resolve_notices(&mut self, stale: impl Fn(&str) -> bool) {
+        let versions: Vec<String> = self
+            .state
+            .notifications
+            .values()
+            .filter_map(|n| n.condition.as_deref()?.strip_prefix(UPDATE_NOTICE))
+            .filter(|version| stale(version))
+            .map(str::to_owned)
+            .collect();
+        for version in versions {
+            self.resolve(&format!("{UPDATE_NOTICE}{version}"));
+        }
     }
 
     #[must_use]
@@ -320,9 +387,10 @@ impl Engine {
             && self.app_update.consent.as_ref().is_some_and(|consent| {
                 self.app_update.status.version.as_deref() == Some(consent.version.as_str())
                     && (!consent.when_idle || !self.has_update_ui())
-                    && self
-                        .app_update_blockers_for(consent.stop_simulations)
-                        .is_empty()
+                    && (consent.interrupt_activity
+                        || self
+                            .app_update_blockers_for(consent.stop_simulations)
+                            .is_empty())
             })
     }
 

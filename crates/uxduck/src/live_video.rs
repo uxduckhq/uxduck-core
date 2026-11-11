@@ -16,8 +16,7 @@
 //! The live rendition yields to telemetry and commands on the uplink: the
 //! relay's round trip is the same uplink they use, and when it grows, or
 //! the publisher falls 200 ms behind, video steps down a rung: bitrate
-//! first, then frame rate, then resolution. It climbs back slowly, and not
-//! while commands from away are being sent.
+//! first, then frame rate, then resolution. It climbs back slowly.
 //!
 //! What is stored is never this: the camera's original is recorded here
 //! without re-encoding (S40) and stored later (S83).
@@ -197,11 +196,6 @@ impl Uplink {
     /// The publisher fell 200 ms behind and pictures were dropped.
     pub fn fell_behind(&mut self, now: Instant) -> bool {
         self.congested(now)
-    }
-
-    /// A command from away went to a vehicle: video does not climb now.
-    pub fn command(&mut self, now: Instant) {
-        self.clean_since = Some(now);
     }
 
     fn congested(&mut self, now: Instant) -> bool {
@@ -523,11 +517,6 @@ impl Live {
         if uplink.round_trip(ms, Instant::now()) {
             let _ = self.rung.send(uplink.rung());
         }
-    }
-
-    /// A command from away is going to a vehicle.
-    pub fn command(&self) {
-        self.shared.uplink().command(Instant::now());
     }
 
     /// Each camera wanted now, live on a node or with its problem.
@@ -998,18 +987,6 @@ mod tests {
             t += Duration::from_secs(3);
         }
         assert_eq!(uplink.rung(), LADDER.len() - 1);
-        // Commands from away hold it down: no climb while they come.
-        let quiet = t + Duration::from_secs(60);
-        uplink.round_trip(60, quiet);
-        for s in 1..30 {
-            if s % 10 == 0 {
-                uplink.command(quiet + Duration::from_secs(s));
-            }
-            assert!(
-                !uplink.round_trip(60, quiet + Duration::from_secs(s)),
-                "climbed at {s} s with commands going"
-            );
-        }
     }
 
     fn target(protocol: Contribution, url: &str) -> Target {

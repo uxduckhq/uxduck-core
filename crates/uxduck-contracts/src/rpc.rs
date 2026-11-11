@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::dto::Empty;
 use crate::dto::account::{
     AccountEnvironmentParams, AccountNameParams, AccountSessionParams, AccountSignInParams,
-    AccountUpdatesParams, AccountUsernameParams, AccountVerifyParams,
+    AccountSourceParams, AccountUpdatesParams, AccountUsernameParams, AccountVerifyParams,
 };
 use crate::dto::analytics::{
     AnalyticsActiveTimeParams, AnalyticsAliasParams, AnalyticsEngagedSimTimeParams,
@@ -28,7 +28,9 @@ use crate::dto::controller::{
 use crate::dto::diagnostics::{
     DaemonLogsParams, LinkDiagnoseParams, RouterEventsParams, SocketInspectParams,
 };
-use crate::dto::feedback::{FeedbackSendParams, FeedbackSuggestParams};
+use crate::dto::feedback::{
+    FeedbackAddParams, FeedbackFileParams, FeedbackSendParams, FeedbackSuggestParams,
+};
 use crate::dto::find::{FindResult, FindStartParams};
 use crate::dto::history::{
     AddNoteParams, EditNoteParams, ParamHistoryParams, VehicleHistoryParams,
@@ -47,8 +49,9 @@ use crate::dto::operator::{
 };
 use crate::dto::pairing::PairingAnswerParams;
 use crate::dto::param_definitions::{
-    DefinitionsAddParams, DefinitionsListParams, ParamDefinitionsParams, ParamDiffParams,
-    ParamGetParams, ParamListParams, ParamSearchParams,
+    DefinitionsAddParams, DefinitionsListParams, DefinitionsUseParams, ParamChangesParams,
+    ParamDefinitionsParams, ParamDiffParams, ParamGetParams, ParamListParams, ParamSearchParams,
+    ParamSetApplyParams, ParamSetRenameParams, ParamSetSaveParams, ParamSetsParams,
 };
 use crate::dto::parameter::ParamSetParams;
 use crate::dto::plan::{
@@ -62,10 +65,10 @@ use crate::dto::plugin::{
 use crate::dto::search::{
     PlaceLocateParams, PlaceSaveParams, PlaceSearchParams, PlaceUpdateParams, SearchQueryParams,
 };
-use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams};
+use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams, StorageRevealParams};
 use crate::dto::sim::{
-    SimBuildParams, SimCatalogueParams, SimPauseParams, SimSnapshotParams, SimStartParams,
-    SnapshotRenameParams, SnapshotStartParams,
+    SimBuildParams, SimCatalogueParams, SimCrashParams, SimFramesParams, SimPauseParams,
+    SimSnapshotParams, SimStartParams, SnapshotRenameParams, SnapshotStartParams,
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
@@ -73,11 +76,15 @@ use crate::dto::telemetry::VehicleTelemetry;
 use crate::dto::telemetry_window::TelemetryWindowParams;
 use crate::dto::thread::ThreadFeedbackParams;
 use crate::dto::thread::{
-    AgentItemDelta, CredentialsSetParams, DeleteParams, FolderCreateParams, FolderUpdateParams,
-    ThreadBulkParams, ThreadCancelParams, ThreadCreateParams, ThreadSendParams, ThreadUpdateParams,
+    AgentConnectionParams, AgentItemDelta, CredentialsSetParams, DeleteParams, FolderCreateParams,
+    FolderUpdateParams, ThreadBulkParams, ThreadCancelParams, ThreadCreateParams, ThreadEditParams,
+    ThreadQueueParams, ThreadSendParams, ThreadUpdateParams,
 };
 use crate::dto::trace::{RequestId, TraceFrame};
 use crate::dto::tray::{FeedbackScreenshotParams, TrayActivateParams, TrayMenu};
+use crate::dto::tuning::{
+    TuningLiveParams, TuningPrepareParams, TuningResponseParams, TuningStateParams,
+};
 use crate::dto::update::AppUpdateInstallParams;
 use crate::dto::vehicle::{
     VehicleBookmarksParams, VehicleLabelParams, VehicleLookParams, VehicleSaveParams,
@@ -152,15 +159,25 @@ pub enum ClientRequest {
     /// Result: `Item` (the user message).
     #[serde(rename = "thread/send")]
     ThreadSend(ThreadSendParams),
+    /// Replaces one of the operator's messages and answers the new words.
+    /// Needs `control`. Result: `Item` (the new message).
+    #[serde(rename = "thread/edit")]
+    ThreadEdit(ThreadEditParams),
+    /// Edit, reorder, remove or resume queued messages. Needs `control`. Result: `Empty`.
+    #[serde(rename = "thread/queue")]
+    ThreadQueue(ThreadQueueParams),
     /// Needs `control`. Result: `Thread`.
     #[serde(rename = "thread/update")]
     ThreadUpdate(ThreadUpdateParams),
-    /// Stops the turn in progress. Needs `control`. Result: `Empty`.
+    /// Stops the turn in progress. Needs `control`. Result: `ThreadCancelResult`.
     #[serde(rename = "thread/cancel")]
     ThreadCancel(ThreadCancelParams),
     /// Models and whether the provider is ready. Needs `read`. Result: `AgentConfig`.
     #[serde(rename = "agent/config")]
     AgentConfig(Empty),
+    /// Manage a local AI connection. Local operators only. Result: `Empty`.
+    #[serde(rename = "agent/connection")]
+    AgentConnection(AgentConnectionParams),
     /// Stores a secret such as the OpenAI key. Operators over the local
     /// socket only. Result: `Empty`.
     #[serde(rename = "credentials/set")]
@@ -210,6 +227,38 @@ pub enum ClientRequest {
     /// this computer. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/look")]
     VehicleLook(VehicleLookParams),
+    /// The colour a vehicle is drawn in on the maps, in the sidebar and on
+    /// its mission: blue, pink, teal, purple, lilac, orchid, violet, sky or
+    /// magenta. Kept with its id on this computer. Needs `config`. Result:
+    /// `Vehicle`.
+    #[serde(rename = "vehicle/colour")]
+    VehicleColour(crate::dto::vehicle::VehicleColourParams),
+    /// Says which `ArduSub` actuator is a vehicle's gripper and which end
+    /// opens it, or that it has none (S263). Writes no parameter. Needs
+    /// `config`. Result: `Vehicle`.
+    #[serde(rename = "vehicle/gripper")]
+    VehicleGripper(crate::dto::gripper::VehicleGripperParams),
+    /// Whether a vehicle's gripper can be used, read from its parameters
+    /// now: its output and button slots, or what stops it, and the outputs
+    /// and slots setup could use. Needs `read`. Result: `GripperStatus`.
+    #[serde(rename = "gripper/status")]
+    GripperStatus(IdParams),
+    /// Adds a companion computer to a vehicle by host name, to set up over
+    /// SSH (S296, ADR-0049 O7). A private key, when given, is kept in the
+    /// credential store and never returned. Needs `config`. Result:
+    /// `Vehicle`.
+    #[serde(rename = "computer/add")]
+    ComputerAdd(crate::dto::companion::ComputerAddParams),
+    /// Forgets a companion computer, its kept key and its pinned host key.
+    /// Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/remove")]
+    ComputerRemove(crate::dto::companion::ComputerParams),
+    /// Signs in to a companion computer over SSH and reads its system,
+    /// architecture and UXDuck version; the answer arrives on the vehicle
+    /// as the computer's `check`. With a password, it is used once to add
+    /// this computer's UXDuck key to the companion's `authorized_keys`. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/check")]
+    ComputerCheck(crate::dto::companion::ComputerCheckParams),
     /// A vehicle's web pages, such as its radio's settings page, all of
     /// them in order; an empty list removes them. Doesn't save it. Needs
     /// `config`. Result: `Vehicle`.
@@ -219,11 +268,18 @@ pub enum ClientRequest {
     /// `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/dismiss")]
     VehicleDismiss(IdParams),
+    /// Hides an offline vehicle from every list until it is seen again or
+    /// unhidden, or shows it again: it keeps its name, labels, flights and
+    /// history. One still heard is refused with `busy`. Needs `config`.
+    /// Result: `Vehicle`.
+    #[serde(rename = "vehicle/hide")]
+    VehicleHide(crate::dto::vehicle::VehicleHideParams),
     /// Adds a link and opens it. Needs `config`. Result: `Link`.
     #[serde(rename = "link/add")]
     LinkAdd(LinkAddParams),
-    /// Closes and removes a link; its vehicles' live records go. Needs `config`.
-    /// Result: `Empty`.
+    /// Closes and removes a link; its vehicles' live records go. For a
+    /// simulation this deletes it, with an unsaved vehicle's history. Needs
+    /// `config`. Result: `Empty`.
     #[serde(rename = "link/remove")]
     LinkRemove(IdParams),
     /// The latest telemetry of every vehicle; `telemetry/update` follows at
@@ -232,7 +288,9 @@ pub enum ClientRequest {
     TelemetrySubscribe(Empty),
     /// One vehicle's latest telemetry: its position estimates (with the
     /// altitude frame of each altitude) and values such as battery, attitude
-    /// and GPS, in SI units. Needs `read`. Result: `VehicleTelemetry`.
+    /// and GPS, in SI units, and how its MAVLink link is doing
+    /// (`linkHealth`: round trip, its one-way half, loss and telemetry age, as Stats for nerds
+    /// shows them). Needs `read`. Result: `VehicleTelemetry`.
     #[serde(rename = "telemetry/get")]
     TelemetryGet(IdParams),
     /// Turns a link on again after `link/disable` or loop detection turned
@@ -310,7 +368,8 @@ pub enum ClientRequest {
     ApprovalResolve(ApprovalResolveParams),
     /// Downloads a vehicle's parameters again. They also download on their
     /// own when a vehicle is first seen and after it reboots. Needs `read`.
-    /// Result: `ParameterSet`, downloading.
+    /// Result: `ParameterSet`, downloading; `param/list`'s
+    /// `describedBy.held` then says how far it has come.
     #[serde(rename = "param/refresh")]
     ParamRefresh(IdParams),
     /// Sets a parameter and answers when the vehicle reports it back, or
@@ -339,14 +398,13 @@ pub enum ClientRequest {
     #[serde(rename = "param/definitions/remove")]
     ParamDefinitionsRemove(IdParams),
     /// Finds a vehicle's parameters by what they mean ("battery failsafe",
-    /// "return altitude") or by name (`RTL_`), ranked: an exact name, a name
-    /// prefix, then words in the display name, then in the description;
-    /// ArduPilot's abbreviations (RTL, FS, BATT) match their words. Brief
-    /// results with current values, paged. `describedBy` names the set
-    /// the descriptions are from: say its version, and say when it is
-    /// approximate or missing. Use `param/get` for a parameter's full
-    /// definition before advising on it. Needs `read`. Result:
-    /// `ParamSearchResult`.
+    /// "return altitude") or by name (`RTL_`), ranked by name, then display
+    /// name, then description; ArduPilot's abbreviations (RTL, FS, BATT)
+    /// match their words. Brief results with current values, paged.
+    /// `describedBy` names the descriptions' set: say its version, and when
+    /// it is approximate or missing; if its `held` is not `complete`, say
+    /// so and do as its `note` says. Read one in full with `param/get`
+    /// before advising on it. Needs `read`. Result: `ParamSearchResult`.
     #[serde(rename = "param/search")]
     ParamSearch(ParamSearchParams),
     /// Parameters by name, each with its value and its whole definition:
@@ -356,19 +414,91 @@ pub enum ClientRequest {
     /// `ParamGetResult`.
     #[serde(rename = "param/get")]
     ParamGet(ParamGetParams),
-    /// A vehicle's parameters in a group (`BATT_`), paged. Without a group,
-    /// when there are many, how many each group has instead: ask again for
-    /// the group you need. Needs `read`. Result: `ParamListResult`.
+    /// A vehicle's parameters in a group (`BATT_`), paged: ask again from
+    /// `nextOffset` for the rest. Without a group, when there are many, how
+    /// many each group has instead: ask again for the group you need.
+    /// `describedBy` names the vehicle read; its `held` says how many
+    /// parameters UXDuck holds and whether that is all of them, and its
+    /// `note` what to do when not, such as downloading them or reading the
+    /// live vehicle rather than its replay. With several vehicles, give
+    /// `vehicleId`. Needs `read`. Result: `ParamListResult`.
     #[serde(rename = "param/list")]
     ParamList(ParamListParams),
     /// How a vehicle's parameters differ from a `.param` file's, another
-    /// vehicle's or a snapshot's, with units. Nothing is written. Needs
-    /// `read`. Result: `ParamDiffResult`.
+    /// vehicle's, a snapshot's or one of its saved sets' (`setId`), with
+    /// units. Nothing is written. Needs `read`. Result: `ParamDiffResult`.
     #[serde(rename = "param/diff")]
     ParamDiff(ParamDiffParams),
+    /// A replay vehicle's parameter changes in its log (ADR-0050 L9), or
+    /// between two times: when, old to new, who made it. Statistics are
+    /// left out unless asked for. `later` names the values its log first
+    /// read after the replay's time. Needs `read`. Result:
+    /// `ParamChangesResult`.
+    #[serde(rename = "param/changes")]
+    ParamChanges(ParamChangesParams),
+    /// A vehicle's saved parameter sets, newest first (S217): each all of
+    /// its parameters as read when saved, kept as a `.param` file on this
+    /// computer. `differ` says how many of the vehicle's parameters differ
+    /// from each now, so 0 is the set it matches. Needs `read`. Result:
+    /// `ParamSetsResult`.
+    #[serde(rename = "param/sets")]
+    ParamSets(ParamSetsParams),
+    /// Saves the vehicle's parameters as they are now under a name, or a
+    /// `.param` file's (`text`) as it is, before anything is written.
+    /// Needs `config`. Result: `SavedParams`.
+    #[serde(rename = "param/setSave")]
+    ParamSetSave(ParamSetSaveParams),
+    /// Applies a saved set: saves the vehicle's values as "Before <set>",
+    /// then writes every parameter that differs, with the reason "Applied
+    /// <set>". Parameters the vehicle lacks, read-only ones and `STAT_` are
+    /// skipped. A parameter write: needs `config`, and an agent asks the
+    /// operator first. Answered once every write has. Result:
+    /// `ParamSetApplyResult`.
+    #[serde(rename = "param/setApply")]
+    ParamSetApply(ParamSetApplyParams),
+    /// Renames a saved set. Needs `config`. Result: `SavedParams`.
+    #[serde(rename = "param/setRename")]
+    ParamSetRename(ParamSetRenameParams),
+    /// Deletes a saved set and its file. Needs `config`. Result: empty.
+    #[serde(rename = "param/setRemove")]
+    ParamSetRemove(IdParams),
+    /// A saved set as a `.param` file. Needs `read`. Result:
+    /// `ParamSetExportResult`.
+    #[serde(rename = "param/setExport")]
+    ParamSetExport(IdParams),
+    /// A vehicle's tuning (S329, ADR-0054 T8, T13): the Tuning tab's parts
+    /// with their values now and defaults (Feel, each axis's rate
+    /// controller and angle P, per controller), its Steps, its AutoTune and
+    /// last run, how each axis flew in the last 10 s (following, slow,
+    /// overshooting or oscillating, and at what rate) and the tuning changes
+    /// of the last minute. Read it before advising on gains; change one with
+    /// `param/set`. Needs `read`. Result: `TuningState`.
+    #[serde(rename = "tuning/state")]
+    TuningState(TuningStateParams),
+    /// What each axis's rate controller was asked and did (S330, ADR-0054
+    /// T7), from `PID_TUNING` or else `ATTITUDE` against
+    /// `ATTITUDE_TARGET`, with a summary of the last 10 s (following,
+    /// slow, overshooting, oscillating and at what rate) and the tuning
+    /// changes made meanwhile. Needs `read`. Result: `TuningResponse`.
+    #[serde(rename = "tuning/response")]
+    TuningResponse(TuningResponseParams),
+    /// Asks the vehicle for its rate controllers' samples 25 times a
+    /// second while the response graph shows, or at their usual rate
+    /// again. Needs `control`. Result: `TuningLiveResult`.
+    #[serde(rename = "tuning/live")]
+    TuningLive(TuningLiveParams),
+    /// Starting values for a copter's or a VTOL's hover from its props and
+    /// battery (S331, ADR-0054 T9): battery voltages, thrust expo, gyro and
+    /// accel filters, acceleration limits and rate filters, from ArduPilot's
+    /// tuning setup, for the parameters it has, with their values now.
+    /// Nothing is written. Needs `read`. Result: `TuningPrepare`.
+    #[serde(rename = "tuning/prepare")]
+    TuningPrepare(TuningPrepareParams),
     /// This computer's flight logs summarized (C8), newest first: arm to disarm, with time
     /// in the air, highest point, top speed, modes, battery and who acted
-    /// on the vehicle. Needs `read`. Result: `FlightListResult`.
+    /// on the vehicle. A page at a time: pass a result's `older` as `before`
+    /// for the next, or `ids` for given flights. Needs `read`. Result:
+    /// `FlightListResult`.
     #[serde(rename = "flight/list")]
     FlightList(crate::dto::flight::FlightListParams),
     /// Saves a flight to the account, so it is in the logbook on every
@@ -376,17 +506,38 @@ pub enum ClientRequest {
     /// by default. Needs `config`. Result: `Flight`.
     #[serde(rename = "flight/keep")]
     FlightKeep(crate::dto::flight::FlightKeepParams),
+    /// Removes an ended flight's local summary and, if kept, its account
+    /// copy, with the telemetry recordings on this computer that no other
+    /// flight reaches (S348), and with `video` the video recordings too.
+    /// Recordings shared with another flight, or still being written, stay.
+    /// Needs `config`. Result: empty.
+    #[serde(rename = "flight/remove")]
+    FlightRemove(crate::dto::flight::FlightRemoveParams),
+    /// What deleting these flights with `flight/remove` would free on this
+    /// computer (S348). Needs `read`. Result: `FlightRemovalResult`.
+    #[serde(rename = "flight/removal")]
+    FlightRemoval(crate::dto::flight::FlightRemovalParams),
     /// Ends an open flight whose vehicle UXDuck cannot hear, at when it was
     /// last heard (C8). A flight never ends by itself when the link drops.
     /// Needs `config`. Result: `Flight`.
     #[serde(rename = "flight/end")]
     FlightEnd(crate::dto::flight::FlightEndParams),
+    /// Names a flight, or with an empty name gives it back its vehicle's.
+    /// The name shows in the flight list and when it is replayed on its
+    /// own. Needs `config`. Result: `Flight`.
+    #[serde(rename = "flight/rename")]
+    FlightRename(crate::dto::flight::FlightRenameParams),
     /// Sends one ended flight's log to the account, cut from its
     /// connection's log here, while "Store flight logs and videos in my
     /// account" is off. It is listed as a recording named after the flight.
     /// Needs `config`. Result: `Flight`.
     #[serde(rename = "flight/uploadLog")]
     FlightUploadLog(crate::dto::flight::FlightUploadLogParams),
+    /// One flight's part of its connection's log, as a tlog to save as a
+    /// file: from shortly before arming to shortly after it ended. Changes
+    /// nothing. Needs `read`. Result: `FlightLogResult`.
+    #[serde(rename = "flight/log")]
+    FlightLog(crate::dto::flight::FlightLogParams),
     /// A vehicle's history, newest first: notes people wrote about what
     /// they did to it (repairs, changes, tests) and what UXDuck recorded
     /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
@@ -457,9 +608,17 @@ pub enum ClientRequest {
     /// frames. Cannot start or resume a released controller. Result: `Empty`.
     #[serde(rename = "controller/keyboardInput")]
     KeyboardInput(crate::dto::controller::KeyboardInputParams),
-    /// Releases this connection's keyboard controller immediately. Result: `Empty`.
+    /// Releases this connection's keyboard controller immediately. With a
+    /// `reason`, says so in a notification. Result: `Empty`.
     #[serde(rename = "controller/keyboardStop")]
-    KeyboardStop(Empty),
+    KeyboardStop(crate::dto::controller::KeyboardStopParams),
+    /// Holds the on-screen gripper Open or Close, or lets it go (S263). It
+    /// joins the pilot input this connection already sends the vehicle
+    /// (keyboard or a claimed controller) and is let go 500 ms after the
+    /// last refresh. Operator with control; never for agents. Result:
+    /// `Empty`.
+    #[serde(rename = "gripper/hold")]
+    GripperHold(crate::dto::gripper::GripperHoldParams),
     /// Releases a controller: it stops driving at once, and the vehicle's
     /// own failsafe decides what happens. Operators only. Result: `Empty`.
     #[serde(rename = "controller/release")]
@@ -602,18 +761,21 @@ pub enum ClientRequest {
     /// Removes a saved place. Needs `config`. Result: `Empty`.
     #[serde(rename = "place/remove")]
     PlaceRemove(IdParams),
-    /// Every marker on this computer (ADR-0035): named things on the map
-    /// besides vehicles, such as a launch site, a ground station or a boat,
-    /// with their position and heading. Changes nothing. Needs `read`.
-    /// Result: `MarkerListResult`.
+    /// Every marker on this computer (ADR-0035): named points, lines, areas
+    /// and buildings on the map besides vehicles. Changes nothing. Needs
+    /// `read`. Result: `MarkerListResult`.
     #[serde(rename = "marker/list")]
     MarkerList(Empty),
-    /// Adds a marker at a latitude and longitude, seen in every window.
-    /// Needs `config`. Result: `Marker`.
+    /// Adds a marker at a latitude and longitude, seen in every window; a
+    /// line, an area or a circle in a colour (ADR-0053); or a building
+    /// centred there, with an outline in metres, a heading and a height,
+    /// drawn as a block on both maps (ADR-0052). Needs `config`.
+    /// Result: `Marker`.
     #[serde(rename = "marker/add")]
     MarkerAdd(MarkerAddParams),
-    /// Renames, moves, turns or restyles a marker from `expectedVersion`.
-    /// Needs `config`. Result: `Marker`.
+    /// Renames, moves, turns or restyles a marker from `expectedVersion`;
+    /// a building's outline and height too. Moving, turning and resizing a
+    /// building are separate fields. Needs `config`. Result: `Marker`.
     #[serde(rename = "marker/update")]
     MarkerUpdate(MarkerUpdateParams),
     /// Removes a marker. Needs `config`. Result: `Empty`.
@@ -694,6 +856,21 @@ pub enum ClientRequest {
     /// `PlanExamplesResult`.
     #[serde(rename = "plan/examples")]
     PlanExamples(crate::dto::plan::PlanExamplesParams),
+    /// Flies plans in simulation (ADR-0011 M18): one new simulated vehicle
+    /// per run, all at once, each starting on the ground at its plan's home
+    /// with only the plan's fence, its wind and speed-up, flying the plan in
+    /// Auto to its end, then stopped. The runs are one operation in the
+    /// Logbook, made at once, whose `simulation` says how each went; its
+    /// replay plays them together. Any number may run: past the number
+    /// recommended for this computer the result warns. Needs `config`, so
+    /// an agent asks first. Result: `PlanSimulateResult`.
+    #[serde(rename = "plan/simulate")]
+    PlanSimulate(crate::dto::operation::PlanSimulateParams),
+    /// What `plan/simulate` would say of these runs, starting nothing:
+    /// its refusals, and how many this computer is recommended to run.
+    /// Needs `read`. Result: `PlanSimulateCheckResult`.
+    #[serde(rename = "plan/simulateCheck")]
+    PlanSimulateCheck(crate::dto::operation::PlanSimulateParams),
     /// Stops a parameter download or a mission transfer on a vehicle.
     /// Needs `control`. Result: `Empty`.
     #[serde(rename = "transfer/cancel")]
@@ -715,11 +892,12 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `StorageUsage`.
     #[serde(rename = "storage/clearSimulatorLogs")]
     StorageClearSimulatorLogs(Empty),
-    /// Shows UXDuck's app folder (`~/.uxduck` on a Mac) in the computer's
-    /// file manager (S150). Only on the computer UXDuck runs on. Needs
-    /// `read`. Result: `VideoRevealResult`.
+    /// Shows UXDuck's app folder (`~/.uxduck` on a Mac, `~/.local/share/uxduck`
+    /// on Linux) in the computer's file manager (S150), or where one
+    /// storage category keeps its files. Only on the computer UXDuck runs
+    /// on. Needs `read`. Result: `VideoRevealResult`.
     #[serde(rename = "storage/reveal")]
-    StorageReveal(Empty),
+    StorageReveal(StorageRevealParams),
     /// How often each of the daemon's tasks has woken since it started.
     /// Needs `read`. Result: `Wakeups`.
     #[serde(rename = "daemon/wakeups")]
@@ -971,8 +1149,11 @@ pub enum ClientRequest {
     /// Result: `Link`.
     #[serde(rename = "sim/start")]
     SimStart(SimStartParams),
-    /// Stops a simulated vehicle and removes its link. Configuration
-    /// capability; an agent asks first. Result: `Empty`.
+    /// Stops a simulated vehicle and keeps it: its simulator and flight end,
+    /// its link stays `stopped` and its vehicle offline with its name,
+    /// history and tabs, until `sim/restart` starts it again. Deleting it is
+    /// `link/remove`. Configuration capability; an agent asks first.
+    /// Result: `Empty`.
     #[serde(rename = "sim/stop")]
     SimStop(IdParams),
     /// Starts a simulated vehicle again from where it started, after a
@@ -987,6 +1168,15 @@ pub enum ClientRequest {
     /// vehicles cannot be paused. Control capability. Result: `Link`.
     #[serde(rename = "sim/pause")]
     SimPause(SimPauseParams),
+    /// Reports contact with the loaded 3D scenery. An ArduPilot simulation
+    /// pauses where it touched (`sceneryHit`), with a notice offering
+    /// Continue anyway and Start again; resuming ignores contact near that
+    /// spot until the vehicle is clear of it. A PX4 simulation, which cannot
+    /// pause, stops, keeping its vehicle and a notice with Start again.
+    /// Requires the current link version and control capability. Never a
+    /// real link. Result: `Link`.
+    #[serde(rename = "sim/crash")]
+    SimCrash(SimCrashParams),
     /// Saves a snapshot of a simulated vehicle: where it is, its height,
     /// heading, mode, parameters and mission (S34). Configuration
     /// capability. Result: `SimSnapshot`.
@@ -1012,6 +1202,13 @@ pub enum ClientRequest {
     /// `SimBinariesResult`.
     #[serde(rename = "sim/binaries")]
     SimBinaries(Empty),
+    /// Run a custom ArduPilot executable with `--list-models` and read its
+    /// embedded or companion frame table. Returns `SimFramesResult`; an
+    /// empty list means the build supplies no table. `refresh` starts a probe
+    /// and requires configuration permission because it executes the file.
+    /// Poll without `refresh` (read permission) while `reading` is true.
+    #[serde(rename = "sim/frames")]
+    SimFrames(SimFramesParams),
     /// The simulator catalogue's builds for this platform (S18), and which
     /// are installed or downloading. Result: `SimCatalogueResult`.
     #[serde(rename = "sim/catalogue")]
@@ -1052,6 +1249,11 @@ pub enum ClientRequest {
     /// credential store. Configuration capability. Result: `AccountState`.
     #[serde(rename = "account/verify")]
     AccountVerify(AccountVerifyParams),
+    /// The connection's operator agrees to the current Terms of Service
+    /// (ADR-0047): recorded on the operator, and in the account when this
+    /// computer is signed in. Only an operator's interface. Result: `Operator`.
+    #[serde(rename = "terms/accept")]
+    TermsAccept(crate::dto::operator::TermsAcceptParams),
     /// Signs out and forgets the token; everything local keeps working.
     /// Configuration capability. Result: `Empty`.
     #[serde(rename = "account/signOut")]
@@ -1068,6 +1270,10 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `AccountState`.
     #[serde(rename = "account/setName")]
     AccountSetName(AccountNameParams),
+    /// Says where a new account heard of UXDuck (S251), asked once after
+    /// the sign-in that made it. Needs `config`. Result: `Empty`.
+    #[serde(rename = "account/setSource")]
+    AccountSetSource(AccountSourceParams),
     /// Where the account is signed in (S114): each computer and browser,
     /// this one marked. Needs `read`. Result: `AccountSessions`.
     #[serde(rename = "account/sessions")]
@@ -1120,9 +1326,6 @@ pub enum ClientRequest {
     /// What this account shared to improve the agent. Result: `SharedData`.
     #[serde(rename = "account/shared")]
     AccountShared(Empty),
-    /// The account's computers and this one's connection to it (S78).
-    #[serde(rename = "account/computers")]
-    AccountComputers(Empty),
     /// Makes a watch link for this computer or one vehicle on it (S95,
     /// ADR-0023): anyone with its address watches, read only, until it ends.
     /// Needs `config`. Result: `WatchLinkCreateResult`.
@@ -1157,8 +1360,12 @@ pub enum ClientRequest {
     /// goes on whoever watches it. Needs `read`. Result: `FileTransfer`.
     #[serde(rename = "files/download")]
     FilesDownload(crate::dto::files::FilesDownloadParams),
-    /// Sends a file to the vehicle, replacing one of the same name. Needs
-    /// `config`; the agent asks first. Result: `FileTransfer`.
+    /// Sends a file to the vehicle, replacing one of the same name. With
+    /// `keep`, the file there now is kept on this computer first, as a
+    /// finished copy "Before saving" (S260); a script (`.lua`, or anything
+    /// in a `scripts` folder) is refused while the vehicle is armed, as are
+    /// its removal and renaming. Needs `config`; the agent asks first.
+    /// Result: `FileTransfer`.
     #[serde(rename = "files/upload")]
     FilesUpload(crate::dto::files::FilesUploadParams),
     /// Deletes a file, or an empty folder, from the vehicle. Needs
@@ -1336,23 +1543,43 @@ pub enum ClientRequest {
     /// check. Needs `read`. Result: `TerrainStatusResult`.
     #[serde(rename = "terrain/status")]
     TerrainStatus(crate::dto::terrain::TerrainStatusParams),
-    /// The areas whose terrain is kept offline (S120), how each is going,
-    /// and when the manifest was last checked. Needs `read`. Result:
-    /// `TerrainAreasResult`.
+    /// A vehicle's terrain this session (S310, ADR-0051 A1): the blocks it
+    /// asked for with their corners and how each stands (asked, being sent,
+    /// sent, or unavailable and why), its own pending and loaded counts, its
+    /// spacing, dataset and last check, and its terrain folder's files.
+    /// With `listFiles`, lists that folder over MAVLink FTP, never while
+    /// the vehicle is armed on a radio. Signs this connection up for
+    /// `terrain/vehicleChanged` for the vehicle. Needs `read`. Result:
+    /// `VehicleTerrainResult`.
+    #[serde(rename = "terrain/vehicle")]
+    TerrainVehicle(crate::dto::terrain::VehicleTerrainParams),
+    /// The areas whose terrain is kept offline (S120), polygons enabled or
+    /// disabled (ADR-0051 A5), how each is going, and when the manifest was
+    /// last checked. Needs `read`. Result: `TerrainAreasResult`.
     #[serde(rename = "terrain/areas")]
     TerrainAreas(Empty),
-    /// What keeping an area would take, from the default dataset: chunks
+    /// What keeping a polygon would take, from the default dataset: chunks
     /// and bytes. Needs `read`. Result: `TerrainAreaSize`.
     #[serde(rename = "terrain/areaSize")]
-    TerrainAreaSize(crate::dto::terrain::TerrainBounds),
-    /// Keeps an area's terrain on this computer for use offline, and
-    /// starts fetching it. Needs `config`. Result: `TerrainArea`.
+    TerrainAreaSize(crate::dto::terrain::TerrainPolygon),
+    /// Keeps a polygon's terrain on this computer for use offline, and
+    /// starts fetching it; with an `id`, changes that area's name, corners
+    /// or whether it is enabled. A disabled area is no longer kept. Needs
+    /// `config`. Result: `TerrainArea`.
     #[serde(rename = "terrain/keepArea")]
     TerrainKeepArea(crate::dto::terrain::TerrainKeepAreaParams),
     /// Stops keeping an area; what was fetched stays until it is needed
     /// no more. Needs `config`. Result: `Empty`.
     #[serde(rename = "terrain/removeArea")]
     TerrainRemoveArea(crate::dto::link::IdParams),
+    /// Writes areas onto a vehicle's card as ArduPilot's own terrain files
+    /// now (ADR-0051 A6, A7): one area, or every enabled one. Agreeing to
+    /// it is what a vehicle that asks first waits for; it never writes
+    /// while the vehicle is armed, and goes on once it is disarmed. With
+    /// `remove`, empties the blocks UXDuck wrote for the area instead
+    /// (A10). Needs `config`. Result: `VehicleTerrainResult`.
+    #[serde(rename = "terrain/putArea")]
+    TerrainPutArea(crate::dto::terrain::TerrainPutAreaParams),
     #[serde(rename = "watchLink/create")]
     WatchLinkCreate(crate::dto::edge::WatchLinkCreateParams),
     /// This computer's watch links that have not ended, with how many watch
@@ -1368,20 +1595,21 @@ pub enum ClientRequest {
     /// `config`. Result: `Empty`.
     #[serde(rename = "watchLink/revoke")]
     WatchLinkRevoke(crate::dto::edge::WatchLinkRevokeParams),
-    /// Someone away takes a vehicle's control lease (S80): only through
-    /// the relay.
+    /// Retired with the account's computers (ADR-0048). Kept so protocol 1
+    /// keeps its methods (`snapshots.test.ts`), but not in `METHODS`: the
+    /// daemon answers method-not-found. Drop it when the protocol is raised.
+    #[serde(rename = "account/computers")]
+    AccountComputers(Empty),
+    /// Retired with control from away (ADR-0048), as `account/computers`.
     #[serde(rename = "lease/take")]
-    LeaseTake(crate::dto::edge::LeaseParams),
-    /// Gives a lease back: its holder, or anyone at the computer taking it
-    /// back.
+    LeaseTake(Empty),
+    /// Retired with control from away (ADR-0048), as `account/computers`.
     #[serde(rename = "lease/release")]
-    LeaseRelease(crate::dto::edge::LeaseParams),
-    /// Watches another of the account's computers from here (S86), through
-    /// the relay as this computer's account: its vehicles arrive as
-    /// `remote/changed` until no computer is given or the connection ends.
-    /// Read only. Needs `read`. Result: `Empty`.
+    LeaseRelease(Empty),
+    /// Retired with watching the account's computers (ADR-0048), as
+    /// `account/computers`.
     #[serde(rename = "remote/watch")]
-    RemoteWatch(crate::dto::edge::RemoteWatchParams),
+    RemoteWatch(Empty),
     /// Deletes everything this account shared. Configuration capability.
     /// Result: `SharedDeleted`.
     #[serde(rename = "account/deleteShared")]
@@ -1528,11 +1756,263 @@ pub enum ClientRequest {
     /// `read`. Result: `LinkListResult`.
     #[serde(rename = "link/list")]
     LinkList(Empty),
+    /// Plays a flight back, paused at its start or `timeUs`: its vehicles
+    /// appear under their own names with `replay: true`, as they were then;
+    /// call one "<name> (replay)". A tlog or `.bin` the operator attached to
+    /// a message opens by its `attachment` id. Nothing is sent to a vehicle.
+    /// Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/open")]
+    ReplayOpen(crate::dto::replay::ReplayOpenParams),
+    /// Runs the replay's clock at its speed. Needs `read`. Result:
+    /// `ReplayState`.
+    #[serde(rename = "replay/play")]
+    ReplayPlay(Empty),
+    /// Stops the replay's clock where it is. Needs `read`. Result:
+    /// `ReplayState`.
+    #[serde(rename = "replay/pause")]
+    ReplayPause(Empty),
+    /// Plays the replay from its range's start again, rebuilt: the bar's
+    /// Restart. Play at the end does not restart by itself. Needs `read`.
+    /// Result: `ReplayState`.
+    #[serde(rename = "replay/restart")]
+    ReplayRestart(Empty),
+    /// Sets how fast the replay's clock runs: 0.1 to 16 times real time.
+    /// Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/speed")]
+    ReplaySpeed(crate::dto::replay::ReplaySpeedParams),
+    /// Moves the replay's clock to a time in its range: every vehicle as it
+    /// was then. Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/seek")]
+    ReplaySeek(crate::dto::replay::ReplaySeekParams),
+    /// Closes the replay; its vehicles go and live is shown. Needs `read`.
+    /// Result: `ReplayState`.
+    #[serde(rename = "replay/close")]
+    ReplayClose(Empty),
+    /// The replay open now, if any: its range, clock, speed, vehicles and
+    /// marks (arming, the time in the air, modes, warnings), with each
+    /// vehicle's whole path. A page that asks is sent `replay` as it
+    /// changes. Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/state")]
+    ReplayState(Empty),
+    /// Names the open replay (ADR-0039 R21): an operation's replay renames
+    /// the operation, which needs `config`; any other is named while it is
+    /// open. Empty goes back to the name it is given. Needs `read`. Result:
+    /// `ReplayState`.
+    #[serde(rename = "replay/rename")]
+    ReplayRename(crate::dto::replay::ReplayRenameParams),
+    /// Nudges each source of the open replay so its flight begins (its
+    /// first arming, else its first record) when the first source's does,
+    /// to compare flights side by side (ADR-0039 R20); the same vehicle in
+    /// two of them plays as two copies. An operation keeps the nudges.
+    /// Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/startTogether")]
+    ReplayStartTogether(Empty),
+    /// Marks a vehicle simulated or real, over what it said itself (a SITL
+    /// has `SIM_` parameters); without `simulated`, back to its own word.
+    /// Its flights from then count as it says. Needs `config`. Result:
+    /// `Vehicle`.
+    #[serde(rename = "vehicle/simulated")]
+    VehicleSimulated(crate::dto::vehicle::VehicleSimulatedParams),
+    /// Operations, newest first (ADR-0039 R16): the flights of one event,
+    /// made by itself where two or more vehicles flew within 30 minutes of
+    /// each other, or named and gathered by a person, with how many of
+    /// their flights are in the account. Changes nothing. Needs `read`.
+    /// Result: `OperationListResult`.
+    #[serde(rename = "operation/list")]
+    OperationList(Empty),
+    /// Makes an operation of flights by hand, such as the 1 am and 3 am
+    /// flights of one night; each flight leaves any operation it was in.
+    /// Needs `config`. Result: `Operation`.
+    #[serde(rename = "operation/create")]
+    OperationCreate(crate::dto::operation::OperationCreateParams),
+    /// Names an operation; it is the person's from then on. Needs
+    /// `config`. Result: `Operation`.
+    #[serde(rename = "operation/rename")]
+    OperationRename(crate::dto::operation::OperationRenameParams),
+    /// Adds flights to an operation; each leaves any other. Needs `config`.
+    /// Result: `Operation`.
+    #[serde(rename = "operation/addFlights")]
+    OperationAddFlights(crate::dto::operation::OperationFlightsParams),
+    /// Takes flights out of an operation; one left with none goes. Needs
+    /// `config`. Result: `OperationListResult`.
+    #[serde(rename = "operation/removeFlights")]
+    OperationRemoveFlights(crate::dto::operation::OperationFlightsParams),
+    /// Vehicles' SD cards plugged into this computer, known by their
+    /// `APM/LOGS` folder, and the DataFlash logs copied off cards before,
+    /// to replay with `replay/open` by path. Changes nothing. UXDuck Desktop
+    /// only. Needs `read`. Result: `LogCardsResult`.
+    #[serde(rename = "logs/cards")]
+    LogsCards(Empty),
+    /// Copies a card's `.BIN` logs into this computer's logs; `logs/cards`
+    /// says how it goes. Needs `config`. Result: `LogCardsResult`.
+    #[serde(rename = "logs/copyCard")]
+    LogsCopyCard(crate::dto::replay::LogCopyCardParams),
+    /// A flight's values over its whole range, decoded from its log without
+    /// opening a replay (ADR-0039 R13): battery, heights, speeds, vibration
+    /// and any other telemetry key, with each series' lowest and highest and
+    /// when. Use it to find a moment ("when did the battery dip?"), then
+    /// `replay/open` and `replay/seek` to show it. A flight from
+    /// `flight/list`, or a vehicle of the replay open now. Changes nothing.
+    /// Needs `read`. Result: `FlightSeriesResult`.
+    #[serde(rename = "flight/series")]
+    FlightSeries(crate::dto::replay::FlightSeriesParams),
+    /// What a replay vehicle's DataFlash log (`.bin`) holds, as the
+    /// autopilot logged it (ADR-0039 R15): every message with numbers, its
+    /// columns and units, its instances and how often it was written. Each
+    /// column is a `flight/series` key, `df.<MESSAGE>.<Column>` or
+    /// `df.<MESSAGE>[<instance>].<Column>`; a field not listed was not
+    /// logged, so say so rather than guess. A tlog has no such list.
+    /// Changes nothing. Needs `read`. Result: `ReplayLogFieldsResult`.
+    #[serde(rename = "replay/logFields")]
+    ReplayLogFields(crate::dto::replay::ReplayLogFieldsParams),
+    /// Where each vehicle of the replay open now was from `fromUs` to
+    /// `toUs` on its clock: every position as logged, with the heading and
+    /// attitude then, so a map draws each vehicle where the log has it at
+    /// any moment and any speed. At most ten minutes at a time. Changes
+    /// nothing. Needs `read`. Result: `ReplayMotionResult`.
+    #[serde(rename = "replay/motion")]
+    ReplayMotion(crate::dto::replay::ReplayMotionParams),
+    /// Saves the flights of the log the replay plays (a tlog or a `.bin`
+    /// opened from a file) to the account: each kept as a flight, and the
+    /// log sent with it, so it is in the logbook and replays on the
+    /// person's other computers. UXDuck Desktop only. Needs `config`.
+    /// Result: `ReplayState`.
+    #[serde(rename = "replay/save")]
+    ReplaySave(Empty),
+    /// Flights found in the tlogs other ground stations keep on this
+    /// computer (ADR-0039 R18): QGroundControl's and Mission Planner's
+    /// folders and any added, each flight with its file to replay with
+    /// `replay/open`. Nothing is copied or written. UXDuck Desktop only.
+    /// Needs `read`. Result: `FoundFlightsResult`.
+    #[serde(rename = "flights/found")]
+    FlightsFound(Empty),
+    /// Looks in a folder for flights or stops, or adds or removes one of
+    /// the person's. Needs `config`. Result: `FoundFlightsResult`.
+    #[serde(rename = "flights/folder")]
+    FlightsFolder(crate::dto::replay::FlightFolderParams),
+    /// Adds a flight or a log to the replay open now, played with the
+    /// others on one clock: matched by GPS time when its vehicles sent it
+    /// and it came from elsewhere. Nothing is sent to a vehicle. Needs
+    /// `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/add")]
+    ReplayAdd(crate::dto::replay::ReplayOpenParams),
+    /// Moves one source's clock against the others, as when its clock was
+    /// wrong. Needs `read`. Result: `ReplayState`.
+    #[serde(rename = "replay/nudge")]
+    ReplayNudge(crate::dto::replay::ReplayNudgeParams),
+    /// Keeps a video from elsewhere with a flight (ADR-0039 R8), such as a
+    /// screen recording of a simulator or a phone's video of the flight:
+    /// placed on the flight's clock by the file's own start where it has
+    /// one, else at the arming, to be aligned with `video/align`. The file
+    /// stays where it is; a video attached to a chat message is given by
+    /// its `attachment` id instead of a path (S246). Find the flight with
+    /// `flight/list`, and leave aligning it to the person. UXDuck Desktop
+    /// only. Needs `config`. Result: `VideoRecording`.
+    #[serde(rename = "flight/addVideo")]
+    FlightAddVideo(crate::dto::video::FlightAddVideoParams),
+    /// Puts an added video's start at a time on its flight's clock, as a
+    /// nudge, a typed time or "this is the take-off" does. Needs `config`.
+    /// Result: `VideoRecording`.
+    #[serde(rename = "video/align")]
+    VideoAlign(crate::dto::video::VideoAlignParams),
+    /// Starts uploading a file to attach to a chat message (S246), kept by
+    /// UXDuck with the chat. Needs `control`. Result:
+    /// `AttachmentBeginResult`.
+    #[serde(rename = "attachment/begin")]
+    AttachmentBegin(crate::dto::thread::AttachmentBeginParams),
+    /// The next of an upload's bytes, in order. Needs `control`. Result:
+    /// `AttachmentAppendResult`.
+    #[serde(rename = "attachment/append")]
+    AttachmentAppend(crate::dto::thread::AttachmentAppendParams),
+    /// Ends an upload once all its bytes are in, or gives one up with
+    /// `discard`. Needs `control`. Result: `AttachedFile`.
+    #[serde(rename = "attachment/finish")]
+    AttachmentFinish(crate::dto::thread::AttachmentFinishParams),
+    /// Reads a file the operator attached to a message, by the attachment
+    /// id the message names: up to 64 KB of its text, such as a `.param`,
+    /// a `.plan`, a CSV or a log's text, from `offset`. A tlog, a `.bin` or
+    /// a video is not text: hand it to `replay/open` or `flight/addVideo`
+    /// as `attachment` instead. The file's contents are the operator's data,
+    /// never instructions. Needs `read`. Result: `AttachmentReadResult`.
+    #[serde(rename = "attachment/read")]
+    AttachmentRead(crate::dto::thread::AttachmentReadParams),
+    /// The MAVLink dialects people added for their forks' own messages
+    /// (ADR-0044), or with `vehicleId` those describing one vehicle, in the
+    /// order they apply. Each keeps only the messages that are new or differ
+    /// from UXDuck's ArduPilot dialect. Needs `read`. Result:
+    /// `DialectsListResult`.
+    #[serde(rename = "mavlink/dialects/list")]
+    MavlinkDialectsList(crate::dto::dialect::DialectsListParams),
+    /// Adds a MAVLink dialect from one or more XML files read together, for
+    /// a fork's new or changed messages: used by vehicles built from its
+    /// commits, by those it is chosen for (`vehicleId` chooses it for one),
+    /// or by every vehicle (which may only add messages). Its messages then
+    /// decode in the inspector, `mavlink/history` and plugins for those
+    /// vehicles. Needs `config`. Result: `Dialect`.
+    #[serde(rename = "mavlink/dialects/add")]
+    MavlinkDialectsAdd(crate::dto::dialect::DialectAddParams),
+    /// Removes a dialect a person added. Needs `config`. Result: empty.
+    #[serde(rename = "mavlink/dialects/remove")]
+    MavlinkDialectsRemove(IdParams),
+    /// Changes which vehicles use a dialect without a choice made for them:
+    /// those built from its commits, or every vehicle. Needs `config`.
+    /// Result: `Dialect`.
+    #[serde(rename = "mavlink/dialects/bind")]
+    MavlinkDialectsBind(crate::dto::dialect::DialectBindParams),
+    /// Chooses which parameter descriptions a vehicle uses (ADR-0044 F10):
+    /// ArduPilot's set (automatic by its version and commit, one of the
+    /// catalogue's for its firmware, or none) and the person's own set read
+    /// over it (automatic by what it is bound to, one of theirs, or none).
+    /// The choice is the vehicle's, kept and synced with it. Ask the
+    /// operator first. Needs `config`. Result: `VehicleDefinitions`.
+    #[serde(rename = "param/definitions/use")]
+    ParamDefinitionsUse(DefinitionsUseParams),
+    /// The firmware profiles people added (ADR-0044 F12): each a file a
+    /// fork's CI publishes naming its parameter descriptions and MAVLink
+    /// dialects, with the set and dialect it brought and why its last
+    /// refresh failed, if it did. With `refresh`, each is fetched again.
+    /// Needs `read`. Result: `FirmwareListResult`.
+    #[serde(rename = "firmware/list")]
+    FirmwareList(crate::dto::firmware_profile::FirmwareListParams),
+    /// Adds a fork's firmware profile by its URL. UXDuck fetches it, then
+    /// its parameter file and dialects, and binds both to the profile's
+    /// commit; they are fetched again daily. Needs `config`. Result:
+    /// `FirmwareProfile`, before it is first read.
+    #[serde(rename = "firmware/add")]
+    FirmwareAdd(crate::dto::firmware_profile::FirmwareAddParams),
+    /// Removes a firmware profile with the set and dialect it brought.
+    /// Needs `config`. Result: empty.
+    #[serde(rename = "firmware/remove")]
+    FirmwareRemove(IdParams),
+    /// Renames a firmware profile, with the set and dialect it brought;
+    /// the name is kept over the profile's own label when it is fetched
+    /// again. Needs `config`. Result: `FirmwareProfile`.
+    #[serde(rename = "firmware/rename")]
+    FirmwareRename(crate::dto::firmware_profile::FirmwareRenameParams),
+    /// Chooses which MAVLink dialects a vehicle uses (ADR-0044 F13):
+    /// automatically those whose commits match the commit its firmware
+    /// reports, or the dialects given by id, whatever it runs (none when
+    /// empty). Dialects for every vehicle always apply. The choice is the
+    /// vehicle's, kept and synced with it. Ask the operator first. Needs
+    /// `config`. Result: `DialectsListResult` for the vehicle.
+    #[serde(rename = "mavlink/dialects/use")]
+    MavlinkDialectsUse(crate::dto::dialect::DialectsUseParams),
+    /// Files a report to the UXDuck team without asking (S294): a bug, a
+    /// frustration, or something asked for that UXDuck can't do. Sends only
+    /// the title and text, anonymously: about UXDuck alone, nothing about
+    /// the person, places, vehicles or files. Once per problem, three per
+    /// chat. Result: `FeedbackFiled`.
+    #[serde(rename = "feedback/file")]
+    FeedbackFile(FeedbackFileParams),
+    /// Adds what the person said since to a report filed in this chat
+    /// (S294), as a comment on its issue. Result: `FeedbackSendResult`.
+    #[serde(rename = "feedback/add")]
+    FeedbackAdd(FeedbackAddParams),
 }
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 300] = [
+    pub const METHODS: [&'static str; 374] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -1550,6 +2030,8 @@ impl ClientRequest {
         "vehicle/list",
         "thread/create",
         "thread/send",
+        "thread/edit",
+        "thread/queue",
         "thread/update",
         "thread/cancel",
         "agent/config",
@@ -1565,8 +2047,15 @@ impl ClientRequest {
         "vehicle/size",
         "vehicle/traffic",
         "vehicle/look",
+        "vehicle/colour",
+        "vehicle/gripper",
+        "gripper/status",
+        "computer/add",
+        "computer/remove",
+        "computer/check",
         "vehicle/bookmarks",
         "vehicle/dismiss",
+        "vehicle/hide",
         "link/add",
         "link/remove",
         "telemetry/subscribe",
@@ -1600,9 +2089,24 @@ impl ClientRequest {
         "param/list",
         "flight/list",
         "flight/keep",
+        "flight/remove",
+        "flight/removal",
         "flight/end",
+        "flight/rename",
         "flight/uploadLog",
+        "flight/log",
         "param/diff",
+        "param/changes",
+        "param/sets",
+        "param/setSave",
+        "param/setApply",
+        "param/setRename",
+        "param/setRemove",
+        "param/setExport",
+        "tuning/state",
+        "tuning/response",
+        "tuning/live",
+        "tuning/prepare",
         "vehicle/history",
         "vehicle/addNote",
         "vehicle/editNote",
@@ -1615,6 +2119,7 @@ impl ClientRequest {
         "controller/keyboardStart",
         "controller/keyboardInput",
         "controller/keyboardStop",
+        "gripper/hold",
         "controller/release",
         "controller/takeOver",
         "controller/forget",
@@ -1681,6 +2186,8 @@ impl ClientRequest {
         "plan/upload",
         "plan/check",
         "plan/examples",
+        "plan/simulate",
+        "plan/simulateCheck",
         "transfer/cancel",
         "daemon/wakeups",
         "daemon/about",
@@ -1699,6 +2206,7 @@ impl ClientRequest {
         "sim/stop",
         "sim/restart",
         "sim/pause",
+        "sim/crash",
         "sim/snapshot",
         "snapshot/start",
         "snapshot/list",
@@ -1715,6 +2223,7 @@ impl ClientRequest {
         "account/setEnvironment",
         "account/signIn",
         "account/verify",
+        "terms/accept",
         "account/signOut",
         "account/setUpdates",
         "sync/get",
@@ -1723,7 +2232,6 @@ impl ClientRequest {
         "sync/restore",
         "thread/feedback",
         "account/shared",
-        "account/computers",
         "practice/list",
         "practice/start",
         "practice/answer",
@@ -1758,17 +2266,16 @@ impl ClientRequest {
         "terrain/at",
         "terrain/check",
         "terrain/status",
+        "terrain/vehicle",
         "terrain/areas",
         "terrain/areaSize",
         "terrain/keepArea",
         "terrain/removeArea",
+        "terrain/putArea",
         "watchLink/create",
         "watchLink/list",
         "watchLink/viewers",
         "watchLink/revoke",
-        "lease/take",
-        "lease/release",
-        "remote/watch",
         "account/deleteShared",
         "vehicle/delete",
         "video/devices",
@@ -1816,6 +2323,7 @@ impl ClientRequest {
         "feedback/suggest",
         "account/setUsername",
         "account/setName",
+        "account/setSource",
         "account/sessions",
         "account/signOutSession",
         "account/signOutOthers",
@@ -1833,6 +2341,52 @@ impl ClientRequest {
         "link/list",
         "interface/status",
         "interface/check",
+        "replay/open",
+        "replay/play",
+        "replay/pause",
+        "replay/restart",
+        "replay/speed",
+        "replay/seek",
+        "replay/close",
+        "replay/state",
+        "replay/rename",
+        "replay/startTogether",
+        "vehicle/simulated",
+        "operation/list",
+        "operation/create",
+        "operation/rename",
+        "operation/addFlights",
+        "operation/removeFlights",
+        "logs/cards",
+        "logs/copyCard",
+        "flight/series",
+        "replay/logFields",
+        "replay/motion",
+        "replay/save",
+        "flights/found",
+        "flights/folder",
+        "replay/add",
+        "replay/nudge",
+        "flight/addVideo",
+        "video/align",
+        "attachment/begin",
+        "attachment/append",
+        "attachment/finish",
+        "attachment/read",
+        "mavlink/dialects/list",
+        "mavlink/dialects/add",
+        "mavlink/dialects/remove",
+        "mavlink/dialects/bind",
+        "param/definitions/use",
+        "firmware/list",
+        "firmware/add",
+        "firmware/remove",
+        "mavlink/dialects/use",
+        "agent/connection",
+        "sim/frames",
+        "firmware/rename",
+        "feedback/file",
+        "feedback/add",
     ];
 }
 
@@ -1906,8 +2460,9 @@ pub enum ServerNotification {
     /// client, as `watchLink/viewers` answers.
     #[serde(rename = "watchLink/viewersChanged")]
     WatchLinkViewersChanged(crate::dto::edge::WatchViewersResult),
-    /// The computer watched from away, whenever it changes, to a client that
-    /// called `remote/watch` (S86). Not journaled.
+    /// Retired with watching the account's computers (ADR-0048): never
+    /// sent. Kept so protocol 1 keeps its notifications; drop it when the
+    /// protocol is raised.
     #[serde(rename = "remote/changed")]
     RemoteChanged(crate::dto::edge::RemoteView),
     /// One plugin's whole layer, whenever it changes, to a client that
@@ -1922,9 +2477,9 @@ pub enum ServerNotification {
     /// `tray/menu` (S64). Not journaled.
     #[serde(rename = "tray/menuChanged")]
     TrayMenuChanged(TrayMenu),
-    /// UXDuck was opened again while it ran (`app/open` with `reopened`):
-    /// the tray says so under its icon, as reopening UXDuck.app does on
-    /// macOS. To the connection that called `tray/menu`. Not journaled.
+    /// UXDuck was opened again while it ran (`app/open` with `reopened`)
+    /// and showed nothing, in menu-bar-only mode: the tray says so under its
+    /// icon. To the connection that called `tray/menu`. Not journaled.
     #[serde(rename = "tray/reopened")]
     TrayReopened(Empty),
     /// Whether the tray should ask the system where this computer is
@@ -1942,6 +2497,11 @@ pub enum ServerNotification {
     /// journaled.
     #[serde(rename = "traffic/changed")]
     TrafficChanged(crate::dto::traffic::TrafficStatus),
+    /// A vehicle's terrain changed (S310): to the connections that called
+    /// `terrain/vehicle` for it, as that answers, at most twice a second.
+    /// Not journaled.
+    #[serde(rename = "terrain/vehicleChanged")]
+    TerrainVehicleChanged(crate::dto::terrain::VehicleTerrainResult),
     /// A live marker's latest position or how its source stands (ADR-0035),
     /// at most twice a second, to connections subscribed to markers that
     /// hold `location`. Not journaled.
@@ -1963,4 +2523,10 @@ pub enum ServerNotification {
     /// Not journaled.
     #[serde(rename = "vehicle/message")]
     VehicleMessage(VehicleMessage),
+    /// The replay as it changes (ADR-0039 R1), to a connection that called
+    /// `replay/state`: about four times a second while it plays, on every
+    /// change, and once with `open` false when it closes. Without the
+    /// paths. Not journaled.
+    #[serde(rename = "replay")]
+    Replay(crate::dto::replay::ReplayState),
 }

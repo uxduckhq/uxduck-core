@@ -52,6 +52,24 @@ uxduck forward --in serial:/dev/ttyAMA0@57600 --out udp:192.168.1.20:15010
 
 `--in` also takes `udpout:HOST:PORT` (a UDP server), `tcp:HOST:PORT` and `tcpin:HOST:PORT` (listens for TCP).
 
+## See how a computer on the vehicle is doing
+
+When the Pi is on the vehicle, add `--onboard`:
+
+```
+uxduck forward --in serial:/dev/ttyAMA0@57600 --out udp:192.168.1.20:15010 --onboard
+```
+
+Once a second it sends its CPU temperature, CPU use, memory, storage and uptime over MAVLink with the vehicle's telemetry, so no SSH is needed. The vehicle's page lists it under **Companion computers**; a computer that stops answering is greyed. Temperatures follow your units in Settings.
+
+A second computer that carries no vehicle traffic, such as a Pi for vision, only reports:
+
+```
+uxduck companion --to udp:192.168.1.20:15010 --computer-id 192
+```
+
+Each computer on a vehicle needs its own number from 191 to 194. The forwarding Pi takes 191 unless you give it `--computer-id`; give each companion the next one. Add `--system-id` when the vehicle's system id is not 1.
+
 ## Change or turn off a link
 
 On **Fleet**, each link has a switch and a pencil. The switch turns a link off or on without removing it. The pencil opens the link's settings in place: change its port, device, access or name and choose **Save**. **Remove** is in the settings.

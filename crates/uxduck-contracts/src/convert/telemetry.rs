@@ -114,6 +114,32 @@ impl From<&core::VehicleTelemetry> for dto::VehicleTelemetry {
             vehicle_id: t.vehicle_id.clone(),
             positions: t.positions.iter().map(Into::into).collect(),
             items: t.items.iter().map(Into::into).collect(),
+            link_health: None,
+        }
+    }
+}
+
+impl From<core::RoundTripMissing> for dto::RoundTripMissing {
+    fn from(value: core::RoundTripMissing) -> Self {
+        match value {
+            core::RoundTripMissing::Waiting => Self::Waiting,
+            core::RoundTripMissing::NoReply => Self::NoReply,
+            core::RoundTripMissing::ReadOnly => Self::ReadOnly,
+            core::RoundTripMissing::Unsupervised => Self::Unsupervised,
+            core::RoundTripMissing::Paused => Self::Paused,
+            core::RoundTripMissing::NotSent => Self::NotSent,
+        }
+    }
+}
+
+impl From<&core::LinkHealth> for dto::LinkHealth {
+    fn from(h: &core::LinkHealth) -> Self {
+        Self {
+            round_trip_ms: h.round_trip_ms,
+            one_way_ms: h.round_trip_ms.map(|ms| ms / 2.0),
+            round_trip_missing: h.round_trip_missing.map(Into::into),
+            loss_percent: h.loss_percent,
+            age_ms: h.age_ms,
         }
     }
 }

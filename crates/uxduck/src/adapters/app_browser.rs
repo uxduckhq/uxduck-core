@@ -1,18 +1,13 @@
-//! Which browser opens UXDuck's own pages (ADR-0025 D2). The app is built and
-//! tested for Chromium browsers (Chrome, Edge, Brave, Arc and the like), so
-//! when the default browser is another one (Safari, Firefox) and a Chromium
-//! browser is installed, UXDuck's pages open there. Links to anything else
-//! keep the default browser. `uxduck` and `uxduck-tray` both include this
-//! file by path, so it uses only std and `serde_json`.
-//!
-//! - macOS: the default when it is Chromium, else the first of `CHROMIUM`
-//!   installed.
-//! - Windows: the default when it is Chromium, else Edge, which Windows
-//!   always has.
-//! - Linux: the default when it is Chromium, else the first of `CHROMIUM` on
-//!   `PATH`.
+//! Opens pages in the person's default browser (ADR-0025 D2). Chromium
+//! discovery remains for older interfaces' explicit "Open in Chrome" action.
+//! The tray includes only `default_browser.rs`; discovery here uses std and
+//! `serde_json` and stays available to the daemon's compatibility endpoints.
 
 use std::process::{Command, Stdio};
+
+#[path = "default_browser.rs"]
+mod default_browser;
+pub use default_browser::open;
 
 /// A Chromium browser UXDuck's pages open in, and its name for the page
 /// that offers "Open in Chrome".
@@ -223,7 +218,7 @@ impl Chromium {
     /// When the browser could not be started.
     pub fn open(&self, url: &str) -> std::io::Result<()> {
         match &self.open {
-            How::Default => default(url),
+            How::Default => open(url),
             How::Bundle(id) => {
                 let status = Command::new("open")
                     .args(["-b", id, url])
@@ -237,7 +232,7 @@ impl Chromium {
                     Err(std::io::Error::other(format!("{} did not open", self.name)))
                 }
             }
-            How::Edge => default(&format!("microsoft-edge:{url}")),
+            How::Edge => open(&format!("microsoft-edge:{url}")),
             How::Program(program) => Command::new(program)
                 .arg(url)
                 .stdin(Stdio::null())
@@ -249,65 +244,9 @@ impl Chromium {
     }
 }
 
-/// Opens a URL. One of UXDuck's own pages opens in the Chromium browser
-/// `chromium` finds, else in the default browser, whose page then says
-/// which browsers UXDuck works in. Any other URL opens in the default
-/// browser.
-///
-/// # Errors
-/// When no browser could be started.
-pub fn open(url: &str) -> std::io::Result<()> {
-    if is_own(url)
-        && let Some(browser) = chromium()
-        && browser.open(url).is_ok()
-    {
-        return Ok(());
-    }
-    default(url)
-}
-
-/// The platform's default browser.
-fn default(url: &str) -> std::io::Result<()> {
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    } else if cfg!(windows) {
-        // `start` would split the URL at `&`.
-        let mut command = Command::new("rundll32");
-        command.args(["url.dll,FileProtocolHandler", url]);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
-}
-
-/// Whether a URL is one of UXDuck's own pages: served on this computer.
-fn is_own(url: &str) -> bool {
-    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|prefix| url.starts_with(prefix))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_pages_on_this_computer_are_uxduck_s_own() {
-        assert!(is_own("http://127.0.0.1:45000/?bootstrap=x"));
-        assert!(is_own("http://localhost:5173/home"));
-        assert!(!is_own("https://uxduck.com/docs?from=tray"));
-        assert!(!is_own("http://127.0.0.1.example.com/"));
-    }
 
     #[test]
     fn chromium_browsers_are_told_by_their_identifier() {

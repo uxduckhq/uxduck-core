@@ -20,20 +20,31 @@
 //! asks, and only the tools the model that finished asked for are run.
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "http")]
 use std::sync::Arc;
+#[cfg(feature = "http")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "http")]
 use futures::stream::{self, BoxStream, StreamExt};
+#[cfg(feature = "http")]
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+#[cfg(feature = "http")]
+use super::Provider;
+#[cfg(feature = "http")]
 use super::http::{self, client};
-use super::{Provider, ProviderError, ProviderEvent, ProviderRequest, Usage};
+use super::{ProviderError, ProviderEvent, ProviderRequest, Usage};
+#[cfg(feature = "http")]
 use crate::conversation::Wire;
 
+#[cfg(feature = "http")]
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com/v1";
+#[cfg(feature = "http")]
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Tolerating a mismatched history, and refusal fallbacks.
+#[cfg(feature = "http")]
 const BETAS: &str = "thinking-binding-controls-2026-08-01,server-side-fallback-2026-07-01";
 
 /// Models that think adaptively, so take `block_binding` and `effort`.
@@ -58,6 +69,7 @@ const FALLS_BACK: [&str; 4] = [
     "claude-fable-5-1",
 ];
 
+#[cfg(feature = "http")]
 #[derive(Clone, Debug)]
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -65,8 +77,10 @@ pub struct AnthropicProvider {
     headers: HeaderMap,
     /// Sends `X-UXDuck-Continues` (the hosted model only).
     hosted: bool,
+    allow_fallback: bool,
 }
 
+#[cfg(feature = "http")]
 impl AnthropicProvider {
     /// With a developer's own key; `api_base` defaults to Anthropic's.
     #[must_use]
@@ -110,6 +124,7 @@ impl AnthropicProvider {
                 .to_owned(),
             headers,
             hosted,
+            allow_fallback: true,
         }
     }
 }
@@ -150,7 +165,7 @@ pub fn body(request: &ProviderRequest) -> Value {
             "type": "adaptive",
             "block_binding": { "prefix_mismatch_behavior": "drop_block" },
         });
-        if let Some(effort) = request.effort {
+        if let Some(effort) = &request.effort {
             body["output_config"] = json!({ "effort": effort });
         }
     }
@@ -160,13 +175,15 @@ pub fn body(request: &ProviderRequest) -> Value {
     body
 }
 
-/// One response as it streams.
+/// One response as it streams; give it each event in turn.
 #[derive(Debug, Default)]
-struct Answer {
+pub struct Answer {
     id: Option<String>,
     blocks: BTreeMap<usize, Value>,
     partial: HashMap<usize, String>,
     usage: Usage,
+    usage_input: bool,
+    usage_output: bool,
 }
 
 fn block_index(value: &Value) -> Option<usize> {
@@ -203,6 +220,8 @@ fn usage_from(value: &Value, usage: &mut Usage) {
 fn started(message: &Value, answer: &mut Answer) {
     answer.id = message["id"].as_str().map(str::to_owned);
     usage_from(&message["usage"], &mut answer.usage);
+    answer.usage_input |= message["usage"]["input_tokens"].as_u64().is_some();
+    answer.usage_output |= message["usage"]["output_tokens"].as_u64().is_some();
     let dropped = message["input_transformations"]
         .as_array()
         .map_or(0, |list| {
@@ -235,7 +254,10 @@ fn replayable(blocks: Vec<Value>) -> Vec<Value> {
 /// One streamed event: what to pass on, if anything yet. Tool calls wait
 /// for the end of the answer, since a fallback partway through voids the
 /// ones before it.
-fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, ProviderError> {
+///
+/// # Errors
+/// A refusal, or an error event.
+pub fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, ProviderError> {
     match value
         .get("type")
         .and_then(Value::as_str)
@@ -282,6 +304,8 @@ fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, Provi
         }
         "message_delta" => {
             usage_from(&value["usage"], &mut answer.usage);
+            answer.usage_input |= value["usage"]["input_tokens"].as_u64().is_some();
+            answer.usage_output |= value["usage"]["output_tokens"].as_u64().is_some();
             if value.pointer("/delta/stop_reason") == Some(&json!("refusal")) {
                 return Err(ProviderError::Refused(
                     "Claude declined to answer this.".into(),
@@ -303,6 +327,7 @@ fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, Provi
                 response_id: answer.id.clone().unwrap_or_default(),
                 output: vec![json!({ "role": "assistant", "content": content })],
                 usage: answer.usage.clone(),
+                usage_known: answer.usage_input && answer.usage_output,
             });
             return Ok(out);
         }
@@ -328,7 +353,37 @@ fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, Provi
     Ok(Vec::new())
 }
 
+#[cfg(feature = "http")]
 impl Provider for AnthropicProvider {
+    fn respond_once_private(
+        &self,
+        request: ProviderRequest,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let mut provider = self.clone();
+        provider.allow_fallback = false;
+        if provider.hosted {
+            provider.headers.insert(
+                HeaderName::from_static("x-uxduck-share"),
+                HeaderValue::from_static("none"),
+            );
+        }
+        provider.respond(request)
+    }
+
+    fn respond_with_input(
+        &self,
+        request: ProviderRequest,
+        inputs: crate::input::Inputs,
+    ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+        let mut provider = self.clone();
+        if provider.hosted && !inputs.sharing() {
+            provider.headers.insert(
+                HeaderName::from_static("x-uxduck-share"),
+                HeaderValue::from_static("none"),
+            );
+        }
+        provider.respond(request)
+    }
     fn wire(&self) -> Wire {
         Wire::Anthropic
     }
@@ -348,7 +403,12 @@ impl Provider for AnthropicProvider {
             headers.insert(HeaderName::from_static("x-uxduck-continues"), previous);
         }
         let url = format!("{}/messages", self.api_base);
-        let body = body(&request);
+        let mut body = body(&request);
+        if !self.allow_fallback
+            && let Some(fields) = body.as_object_mut()
+        {
+            fields.remove("fallbacks");
+        }
         stream::once(async move { http::post(&client, &url, headers, &body).await })
             .flat_map(|opened| match opened {
                 Err(error) => stream::once(async move { Err(error) }).boxed(),
@@ -403,7 +463,7 @@ mod tests {
             ],
             tools: tools(),
             max_output_tokens: 32_000,
-            effort: Some("medium"),
+            effort: Some("medium".into()),
             continues: None,
             cache_key: None,
         }
@@ -475,6 +535,7 @@ mod tests {
             response_id,
             output,
             usage,
+            ..
         } = &out[2]
         else {
             panic!("{out:?}");

@@ -1,0 +1,62 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "nowUs": 1762300000120000,
+  "live": true,
+  "axes": [
+    {
+      "axis": "roll",
+      "source": "pid",
+      "samples": [
+        {
+          "tUs": 1762300000040000,
+          "desired": 12.5,
+          "achieved": 11.8,
+          "p": 0.021,
+          "i": 0.004,
+          "d": -0.002,
+          "ff": 0.0
+        },
+        {
+          "tUs": 1762300000080000,
+          "desired": 12.5,
+          "achieved": 12.4,
+          "p": 0.002,
+          "i": 0.004,
+          "d": -0.001,
+          "ff": 0.0
+        }
+      ],
+      "summary": {
+        "verdict": "following",
+        "askedDegps": 42.0,
+        "trackingErrorPct": 8.5,
+        "overshootPct": 4.0
+      }
+    },
+    {
+      "axis": "yaw",
+      "source": "attitude",
+      "samples": [
+        {
+          "tUs": 1762300000100000,
+          "desired": 0.0,
+          "achieved": 0.3
+        }
+      ],
+      "summary": {
+        "verdict": "oscillating",
+        "askedDegps": 0.0,
+        "oscillationHz": 12.0,
+        "oscillationDegps": 18.0
+      }
+    }
+  ],
+  "marks": [
+    {
+      "tUs": 1762300000060000,
+      "name": "ATC_RAT_RLL_P",
+      "from": 0.135,
+      "to": 0.405
+    }
+  ]
+}

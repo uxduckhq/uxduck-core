@@ -30,6 +30,9 @@ const MAX_ENTRIES: u32 = 200;
 /// and fold into one entry, so a value that flaps and a person trying
 /// values read as one line each, not a hundred.
 const SITTING_US: u64 = 10 * 60 * 1_000_000;
+/// How far a log's time for a change may be from the history's for the
+/// same change: both are this computer's clock, read moments apart.
+const SAME_CHANGE_US: u64 = 5 * 1_000_000;
 
 fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
@@ -105,6 +108,21 @@ impl Engine {
             .vehicles
             .get(vehicle_id)
             .is_none_or(|v| v.local_only || !v.saved)
+    }
+
+    /// When one of these parameters last changed, by the vehicle's history.
+    pub(crate) fn param_changed_at(&self, vehicle_id: &str, names: &[String]) -> Option<u64> {
+        let aliases = self.state.vehicles.get(vehicle_id).map(|v| &v.aliases);
+        self.state
+            .history
+            .values()
+            .filter(|e| e.vehicle_id == vehicle_id || aliases.is_some_and(|a| a.contains(&e.vehicle_id)))
+            .filter(|e| e.deleted.is_none())
+            .filter(|e| {
+                matches!(param_change(e), Some(HistoryEvent::ParameterChanged { name, .. }) if names.contains(name))
+            })
+            .map(last_change_us)
+            .max()
     }
 
     /// Records an event in a vehicle's history (H3).
@@ -400,6 +418,38 @@ impl Engine {
             },
         );
         Ok(entry)
+    }
+
+    /// The reason typed for a change UXDuck made to `name` at `at_us`, as
+    /// a log saw it (UXD-169): kept in the vehicle's history (S74), not in
+    /// the log. The entry whose sitting covers the time, nearest first.
+    pub(crate) fn param_reason(&self, vehicle_id: &str, name: &str, at_us: u64) -> Option<String> {
+        let aliases = self
+            .state
+            .vehicles
+            .get(vehicle_id)
+            .map(|v| v.aliases.clone())
+            .unwrap_or_default();
+        self.state
+            .history
+            .values()
+            .filter(|e| e.vehicle_id == vehicle_id || aliases.contains(&e.vehicle_id))
+            .filter(|e| e.deleted.is_none())
+            .filter(|e| {
+                (e.happened_at_us.saturating_sub(SAME_CHANGE_US)
+                    ..=last_change_us(e).saturating_add(SAME_CHANGE_US))
+                    .contains(&at_us)
+            })
+            .filter_map(|e| match param_change(e) {
+                Some(HistoryEvent::ParameterChanged {
+                    name: changed,
+                    reason: Some(reason),
+                    ..
+                }) if changed == name => Some((e.happened_at_us.abs_diff(at_us), reason)),
+                _ => None,
+            })
+            .min_by_key(|(off, _)| *off)
+            .map(|(_, reason)| reason.clone())
     }
 
     /// A vehicle's parameter changes, newest first (S74).

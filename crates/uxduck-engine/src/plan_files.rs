@@ -207,6 +207,9 @@ fn qgc_pattern(item: &Value, patterns: &mut Vec<PlanPattern>) -> Option<()> {
                         .get("Refly90Degrees")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    margin_m: 0.0,
+                    start: None,
+                    shortest: false,
                 },
             )
         }
@@ -364,10 +367,10 @@ fn read_qgc_plan(name: &str, plan: &Value, parts: &mut Parts) {
         for (index, item) in items.iter().enumerate() {
             match item.get("type").and_then(Value::as_str) {
                 Some("SimpleItem") => match qgc_simple_item(item) {
-                    Some(item) => read.push(item),
-                    None => parts
+                    Ok(item) => read.push(item),
+                    Err(reason) => parts
                         .skipped
-                        .push(format!("{name}: item {} could not be read.", index + 1)),
+                        .push(format!("{name}: item {} {reason}.", index + 1)),
                 },
                 Some("ComplexItem") if qgc_pattern(item, &mut parts.patterns).is_some() => {
                     // Its place among the items: made from the pattern on save.
@@ -396,8 +399,15 @@ fn read_qgc_plan(name: &str, plan: &Value, parts: &mut Parts) {
                         .and_then(Value::as_array);
                     match generated {
                         Some(list) => {
-                            let simple: Vec<PlanItem> =
-                                list.iter().filter_map(qgc_simple_item).collect();
+                            let mut simple = Vec::new();
+                            for generated in list {
+                                match qgc_simple_item(generated) {
+                                    Ok(item) => simple.push(item),
+                                    Err(reason) => parts
+                                        .skipped
+                                        .push(format!("{name}: an item of the {kind} {reason}.")),
+                                }
+                            }
                             parts.skipped.push(format!(
                                 "{name}: the {kind} became its {} items. It cannot be changed as a {kind} yet.",
                                 simple.len()
@@ -521,18 +531,57 @@ fn read_qgc_plan(name: &str, plan: &Value, parts: &mut Parts) {
     }
 }
 
-fn qgc_simple_item(item: &Value) -> Option<PlanItem> {
-    let command = u16::try_from(item.get("command")?.as_u64()?).ok()?;
-    let frame = u8::try_from(item.get("frame").and_then(Value::as_u64).unwrap_or(3)).ok()?;
-    let params = item.get("params")?.as_array()?;
+/// A QGroundControl simple item, or why it was left out.
+///
+/// QGroundControl keeps an item's height in `Altitude` and how it is
+/// measured in `AltitudeMode`: 1 above home, 2 above sea level, 3 above
+/// terrain worked out by QGroundControl itself, 4 above terrain in the
+/// vehicle's terrain frame, 5 not a height. An item in mode 3 is saved in the
+/// sea-level frame with `params[6]` the sum QGroundControl made, or `null`
+/// until it knew the ground, so it is read as its height above terrain in
+/// the terrain frame instead. A positioned item never gets a height it did
+/// not have.
+fn qgc_simple_item(item: &Value) -> Result<PlanItem, String> {
+    let unreadable = || "could not be read".to_string();
+    let command = item
+        .get("command")
+        .and_then(Value::as_u64)
+        .and_then(|command| u16::try_from(command).ok())
+        .ok_or_else(unreadable)?;
+    let mut frame = u8::try_from(item.get("frame").and_then(Value::as_u64).unwrap_or(3))
+        .map_err(|_| unreadable())?;
+    let params = item
+        .get("params")
+        .and_then(Value::as_array)
+        .ok_or_else(unreadable)?;
     let param = |i: usize| number(params.get(i));
-    Some(PlanItem {
+    let height = number(item.get("Altitude"));
+    let mut altitude = param(6);
+    match item.get("AltitudeMode").map(Value::as_u64) {
+        None => {}
+        Some(Some(1 | 2 | 4 | 5)) => altitude = altitude.or(height),
+        Some(Some(3)) => {
+            frame = PlanFrame::AboveTerrain.mav_frame();
+            altitude = Some(height.ok_or_else(|| {
+                "is above terrain but has no height, so it was left out".to_string()
+            })?);
+        }
+        Some(_) => {
+            return Err(
+                "uses a QGroundControl altitude mode UXDuck cannot keep, so it was left out".into(),
+            );
+        }
+    }
+    if altitude.is_none() && command_has_position(command) {
+        return Err("has no height, so it was left out".into());
+    }
+    Ok(PlanItem {
         command,
         frame,
         params: [param(0), param(1), param(2), param(3)],
         latitude_deg: param(4).unwrap_or(0.0),
         longitude_deg: param(5).unwrap_or(0.0),
-        altitude_m: param(6).unwrap_or(0.0),
+        altitude_m: altitude.unwrap_or(0.0),
         autocontinue: item
             .get("autoContinue")
             .and_then(Value::as_bool)
@@ -1238,6 +1287,123 @@ mod tests {
         assert_eq!(imported.skipped.len(), 2, "{:?}", imported.skipped);
         assert!(imported.skipped[0].contains("survey"));
         assert!(imported.skipped[1].contains("StructureScan"));
+    }
+
+    /// Items 1, 4, 6, 8 and 11 of QGroundControl's
+    /// `test/plans/ArduPilotSITL-ArduCopter.plan`, an item 6 saved after
+    /// QGroundControl knew the ground there, and two it cannot have written.
+    const QGC_ALTITUDE_MODES: &str = r#"{
+  "fileType": "Plan", "groundStation": "QGroundControl", "version": 1,
+  "mission": {"version": 2, "firmwareType": 3, "vehicleType": 2, "globalPlanAltitudeMode": 0,
+    "cruiseSpeed": 15, "hoverSpeed": 5, "plannedHomePosition": [-35.363261, 149.16523, 584.0],
+    "items": [
+      {"type": "SimpleItem", "command": 22, "frame": 3, "params": [0, 0, 0, null, -35.3605661, 149.16523, 30], "autoContinue": true, "doJumpId": 1, "AMSLAltAboveTerrain": null, "Altitude": 30, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.363261, 149.1982764, 734.0], "autoContinue": true, "doJumpId": 4, "AMSLAltAboveTerrain": null, "Altitude": 734.0, "AltitudeMode": 2},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.3902103, 149.1982764, null], "autoContinue": true, "doJumpId": 6, "AMSLAltAboveTerrain": null, "Altitude": 80, "AltitudeMode": 3},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.3902103, 149.1982764, 689.0], "autoContinue": true, "doJumpId": 7, "AMSLAltAboveTerrain": 689.0, "Altitude": 80, "AltitudeMode": 3},
+      {"type": "SimpleItem", "command": 16, "frame": 10, "params": [0, 0, 0, null, -35.3902103, 149.1321836, 50], "autoContinue": true, "doJumpId": 8, "AMSLAltAboveTerrain": null, "Altitude": 50, "AltitudeMode": 4},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.37, 149.15, 100], "autoContinue": true, "doJumpId": 9, "AMSLAltAboveTerrain": null, "Altitude": 100, "AltitudeMode": 9},
+      {"type": "SimpleItem", "command": 16, "frame": 3, "params": [0, 0, 0, null, -35.37, 149.16, null], "autoContinue": true, "doJumpId": 10},
+      {"type": "SimpleItem", "command": 21, "frame": 3, "params": [0, 0, 0, null, -35.3605661, 149.16523, 0], "autoContinue": true, "doJumpId": 11, "AMSLAltAboveTerrain": null, "Altitude": 0, "AltitudeMode": 1}
+    ]},
+  "geoFence": {"version": 2, "polygons": [], "circles": []},
+  "rallyPoints": {"version": 2, "points": []}
+}"#;
+
+    #[test]
+    fn qgc_altitude_modes_keep_their_meaning() {
+        let imported = import(
+            &[file("ArduPilotSITL-ArduCopter.plan", QGC_ALTITUDE_MODES)],
+            PlanVehicleType::Multicopter,
+        )
+        .unwrap();
+        let heights: Vec<(u16, Option<PlanFrame>, f64)> = imported
+            .body
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.command,
+                    PlanFrame::from_mav_frame(item.frame),
+                    item.altitude_m,
+                )
+            })
+            .collect();
+        assert_eq!(
+            heights,
+            [
+                (22, Some(PlanFrame::AboveHome), 30.0),
+                (16, Some(PlanFrame::AboveSeaLevel), 734.0),
+                (16, Some(PlanFrame::AboveTerrain), 80.0),
+                (16, Some(PlanFrame::AboveTerrain), 80.0),
+                (16, Some(PlanFrame::AboveTerrain), 50.0),
+                (21, Some(PlanFrame::AboveHome), 0.0),
+            ]
+        );
+        assert_eq!(imported.body.frame, PlanFrame::AboveTerrain);
+        assert_eq!(
+            imported.skipped,
+            [
+                "ArduPilotSITL-ArduCopter.plan: item 6 uses a QGroundControl altitude mode UXDuck cannot keep, so it was left out.",
+                "ArduPilotSITL-ArduCopter.plan: item 7 has no height, so it was left out.",
+            ]
+        );
+        let mut over_terrain = imported.body.clone();
+        over_terrain
+            .items
+            .retain(|item| item.frame != PlanFrame::AboveSeaLevel.mav_frame());
+        let mut ground = |_: LatLon| Some(Some(609.0));
+        let below: Vec<_> = crate::plan_checks::check(&over_terrain, &mut ground)
+            .into_iter()
+            .filter(|check| check.code == "below-ground")
+            .collect();
+        assert!(below.is_empty(), "{below:?}");
+    }
+
+    /// QGroundControl's `test/plans/ArduPilotSITL-ArduCopter.plan`, whole.
+    const QGC_ARDUCOPTER_SITL: &str = r#"{
+  "fileType": "Plan", "groundStation": "QGroundControl", "version": 1,
+  "mission": {"version": 2, "firmwareType": 3, "vehicleType": 2, "globalPlanAltitudeMode": 0,
+    "cruiseSpeed": 15, "hoverSpeed": 5, "plannedHomePosition": [-35.363261, 149.16523, 584.0],
+    "items": [
+      {"type": "SimpleItem", "command": 22, "frame": 3, "params": [0, 0, 0, null, -35.3605661, 149.16523, 30], "autoContinue": true, "doJumpId": 1, "AMSLAltAboveTerrain": null, "Altitude": 30, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 16, "frame": 3, "params": [0, 0, 0, null, -35.3497863, 149.1817532, 60], "autoContinue": true, "doJumpId": 2, "AMSLAltAboveTerrain": null, "Altitude": 60, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 178, "frame": 2, "params": [1, 10, -1, 0, 0, 0, 0], "autoContinue": true, "doJumpId": 3},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.363261, 149.1982764, 734.0], "autoContinue": true, "doJumpId": 4, "AMSLAltAboveTerrain": null, "Altitude": 734.0, "AltitudeMode": 2},
+      {"type": "SimpleItem", "command": 201, "frame": 3, "params": [0, 0, 0, 0, -35.3902103, 149.1982764, 0], "autoContinue": true, "doJumpId": 5, "AMSLAltAboveTerrain": null, "Altitude": 0, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, null, -35.3902103, 149.1982764, null], "autoContinue": true, "doJumpId": 6, "AMSLAltAboveTerrain": null, "Altitude": 80, "AltitudeMode": 3},
+      {"type": "SimpleItem", "command": 19, "frame": 3, "params": [30, 0, 50, 0, -35.3902103, 149.16523, 100], "autoContinue": true, "doJumpId": 7, "AMSLAltAboveTerrain": null, "Altitude": 100, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 16, "frame": 10, "params": [0, 0, 0, null, -35.3902103, 149.1321836, 50], "autoContinue": true, "doJumpId": 8, "AMSLAltAboveTerrain": null, "Altitude": 50, "AltitudeMode": 4},
+      {"type": "SimpleItem", "command": 82, "frame": 3, "params": [0, 0, 0, 0, -35.363261, 149.1321836, 70], "autoContinue": true, "doJumpId": 9, "AMSLAltAboveTerrain": null, "Altitude": 70, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 16, "frame": 3, "params": [0, 0, 0, null, -35.3408032, 149.143199, 15], "autoContinue": true, "doJumpId": 10, "AMSLAltAboveTerrain": null, "Altitude": 15, "AltitudeMode": 1},
+      {"type": "SimpleItem", "command": 21, "frame": 3, "params": [0, 0, 0, null, -35.3605661, 149.16523, 0], "autoContinue": true, "doJumpId": 11, "AMSLAltAboveTerrain": null, "Altitude": 0, "AltitudeMode": 1}
+    ]},
+  "geoFence": {"version": 2, "polygons": [], "circles": []},
+  "rallyPoints": {"version": 2, "points": []}
+}"#;
+
+    #[test]
+    fn qgc_sitl_plan_has_nothing_below_the_ground_around_its_look_at() {
+        let imported = import(
+            &[file("ArduPilotSITL-ArduCopter.plan", QGC_ARDUCOPTER_SITL)],
+            PlanVehicleType::Multicopter,
+        )
+        .unwrap();
+        assert!(imported.skipped.is_empty(), "{:?}", imported.skipped);
+        assert_eq!(imported.body.items[4].command, 201);
+        // Rising from home's 584 m to about 611 m at the plan's south edge.
+        let mut ground = |at: LatLon| {
+            Some(Some(
+                584.0 + (-35.363_261 - at.latitude_deg).max(0.0) * 1000.0,
+            ))
+        };
+        let checks = crate::plan_checks::check(&imported.body, &mut ground);
+        assert!(
+            !checks
+                .iter()
+                .any(|check| check.severity == crate::plan_checks::Severity::Error),
+            "{checks:?}"
+        );
     }
 
     #[test]

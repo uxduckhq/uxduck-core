@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use uxduck_core::domain::practice::Exercise;
 
-const SOURCES: [&str; 27] = [
+const SOURCES: [&str; 30] = [
     include_str!("exercises/read-the-panel.json"),
     include_str!("exercises/read-the-panel-vtol.json"),
     include_str!("exercises/bring-it-home.json"),
@@ -23,6 +23,10 @@ const SOURCES: [&str; 27] = [
     include_str!("exercises/timed-delivery.json"),
     include_str!("exercises/hold-the-box.json"),
     include_str!("exercises/through-the-gates.json"),
+    // By hand for a quadplane and a plane (S100 follow-up, 2026-10-31).
+    include_str!("exercises/hold-the-box-vtol.json"),
+    include_str!("exercises/through-the-gates-vtol.json"),
+    include_str!("exercises/through-the-gates-plane.json"),
     include_str!("exercises/parameter-puzzle.json"),
     // Practice with plans (S132).
     include_str!("exercises/land-through-a-landing-sequence.json"),
@@ -89,6 +93,9 @@ mod tests {
                 "timed-delivery",
                 "hold-the-box",
                 "through-the-gates",
+                "hold-the-box-vtol",
+                "through-the-gates-vtol",
+                "through-the-gates-plane",
                 "parameter-puzzle",
                 "land-through-a-landing-sequence",
                 "fence-breach",

@@ -1,7 +1,8 @@
 //! Which chunks cover an area or a mission (S120, ADR-0026 T6): areas kept
-//! offline are rectangles; a mission needs every chunk within 1 km of any
-//! leg, sampled along each leg, not only at its waypoints, so a long leg
-//! over unseen ground is covered.
+//! offline are polygons (ADR-0051 A5), covered by every chunk they touch;
+//! a mission needs every chunk within 1 km of any leg, sampled along each
+//! leg, not only at its waypoints, so a long leg over unseen ground is
+//! covered.
 
 use std::collections::BTreeSet;
 
@@ -73,30 +74,194 @@ pub fn chunks_in(bounds: Bounds) -> BTreeSet<ChunkKey> {
     );
     for y in s..=n {
         for x in w..=e {
-            let per = i32::from(CHUNKS_PER_SIDE);
-            #[allow(clippy::cast_possible_truncation, reason = "whole degrees")]
-            let tile = Tile {
-                lat: y.div_euclid(per) as i16,
-                lon: x.div_euclid(per) as i16,
-            };
-            // Row 0 is the tile's north edge.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "0 to 7"
-            )]
-            let key = ChunkKey {
-                tile,
-                row: (per - 1 - y.rem_euclid(per)) as u8,
-                col: x.rem_euclid(per) as u8,
-            };
-            keys.insert(key);
+            keys.insert(chunk(y, x));
             if keys.len() > MAX_CHUNKS {
                 return keys;
             }
         }
     }
     keys
+}
+
+/// Eighths of a degree round the globe.
+const EIGHTHS_AROUND: i32 = 2880;
+/// A polygon's bounding box is looked through only this many chunks.
+const MAX_BOX_CHUNKS: i64 = 160_000;
+/// No area has more corners than this.
+pub const MAX_POINTS: usize = 500;
+
+/// Why a polygon cannot be an area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolygonProblem {
+    /// Fewer than three corners, or more than `MAX_POINTS`.
+    Corners,
+    /// A corner outside ±90° and ±180°, or not a number.
+    OutOfRange,
+    /// It goes all the way round the globe, as round a pole.
+    AroundTheGlobe,
+    /// It touches more than `MAX_CHUNKS`.
+    TooLarge,
+}
+
+/// A polygon on the globe: its corners in order, as (latitude, longitude),
+/// the last joined to the first. Each edge is the shorter way between its
+/// corners, so one across the antimeridian goes across it; its longitudes
+/// are kept unwrapped, continuous from the first corner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Polygon {
+    points: Vec<(f64, f64)>,
+}
+
+impl Polygon {
+    /// # Errors
+    /// When the corners do not make an area on the globe.
+    pub fn new(corners: &[(f64, f64)]) -> Result<Self, PolygonProblem> {
+        if corners.len() < 3 || corners.len() > MAX_POINTS {
+            return Err(PolygonProblem::Corners);
+        }
+        if corners
+            .iter()
+            .any(|(lat, lon)| !(-90.0..=90.0).contains(lat) || !(-180.0..=180.0).contains(lon))
+        {
+            return Err(PolygonProblem::OutOfRange);
+        }
+        let shorter = |delta: f64| delta - 360.0 * (delta / 360.0).round();
+        let mut points: Vec<(f64, f64)> = Vec::with_capacity(corners.len());
+        for &(lat, lon) in corners {
+            let lon = match points.last() {
+                Some(&(_, last)) => last + shorter(lon - last),
+                None => lon,
+            };
+            points.push((lat, lon));
+        }
+        let (first, last) = (points[0].1, points[points.len() - 1].1);
+        if (last + shorter(first - last) - first).abs() > 1.0 {
+            return Err(PolygonProblem::AroundTheGlobe);
+        }
+        Ok(Self { points })
+    }
+
+    /// The corners, longitudes unwrapped.
+    #[must_use]
+    pub fn points(&self) -> &[(f64, f64)] {
+        &self.points
+    }
+
+    fn edges(&self) -> impl Iterator<Item = ((f64, f64), (f64, f64))> + '_ {
+        self.points
+            .iter()
+            .copied()
+            .zip(self.points.iter().copied().cycle().skip(1))
+    }
+
+    /// Whether a point, its longitude on the polygon's own unwrapped
+    /// range, is inside (even-odd, so a concave or crossed polygon too).
+    fn contains(&self, lat: f64, lon: f64) -> bool {
+        let mut inside = false;
+        for ((lat0, lon0), (lat1, lon1)) in self.edges() {
+            if (lat0 > lat) != (lat1 > lat)
+                && lon < lon0 + (lat - lat0) / (lat1 - lat0) * (lon1 - lon0)
+            {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+}
+
+/// Whether a segment passes through the inside of a box, south-west to
+/// north-east (Liang–Barsky): running along its edge is not, so an area
+/// drawn on a chunk's edge does not take the chunk beside it.
+fn crosses_box(
+    from: (f64, f64),
+    to: (f64, f64),
+    south_west: (f64, f64),
+    north_east: (f64, f64),
+) -> bool {
+    let (d_lat, d_lon) = (to.0 - from.0, to.1 - from.1);
+    let (mut enter, mut leave) = (0.0_f64, 1.0_f64);
+    for (p, q) in [
+        (-d_lat, from.0 - south_west.0),
+        (d_lat, north_east.0 - from.0),
+        (-d_lon, from.1 - south_west.1),
+        (d_lon, north_east.1 - from.1),
+    ] {
+        if p == 0.0 {
+            if q <= 0.0 {
+                return false;
+            }
+        } else if p < 0.0 {
+            enter = enter.max(q / p);
+        } else {
+            leave = leave.min(q / p);
+        }
+    }
+    enter < leave
+}
+
+/// The chunks a polygon touches: under it, or crossed by its edges.
+///
+/// # Errors
+/// `TooLarge` past `MAX_CHUNKS`.
+pub fn chunks_under(polygon: &Polygon) -> Result<BTreeSet<ChunkKey>, PolygonProblem> {
+    let step = 1.0 / f64::from(CHUNKS_PER_SIDE);
+    let (mut south, mut west) = (f64::INFINITY, f64::INFINITY);
+    let (mut north, mut east) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(lat, lon) in polygon.points() {
+        (south, north) = (south.min(lat), north.max(lat));
+        (west, east) = (west.min(lon), east.max(lon));
+    }
+    // Eighths of a degree, south to north and west to east.
+    #[allow(clippy::cast_possible_truncation, reason = "within ±2880")]
+    let (rows, cols) = (
+        ((south / step).floor() as i32).max(-720)..=((north / step).floor() as i32).min(719),
+        (west / step).floor() as i32..=(east / step).floor() as i32,
+    );
+    let height = i64::from(rows.end() - rows.start() + 1);
+    if height * i64::from(cols.end() - cols.start() + 1) > MAX_BOX_CHUNKS {
+        return Err(PolygonProblem::TooLarge);
+    }
+    let mut keys = BTreeSet::new();
+    for y in rows {
+        for x in cols.clone() {
+            let south_west = (f64::from(y) * step, f64::from(x) * step);
+            let north_east = (south_west.0 + step, south_west.1 + step);
+            let touches = polygon
+                .edges()
+                .any(|(a, b)| crosses_box(a, b, south_west, north_east))
+                || polygon.contains(south_west.0 + step / 2.0, south_west.1 + step / 2.0);
+            if !touches {
+                continue;
+            }
+            let x = (x + EIGHTHS_AROUND / 2).rem_euclid(EIGHTHS_AROUND) - EIGHTHS_AROUND / 2;
+            keys.insert(chunk(y, x));
+            if keys.len() > MAX_CHUNKS {
+                return Err(PolygonProblem::TooLarge);
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// The chunk at eighths of a degree `y` north and `x` east.
+fn chunk(y: i32, x: i32) -> ChunkKey {
+    let per = i32::from(CHUNKS_PER_SIDE);
+    #[allow(clippy::cast_possible_truncation, reason = "whole degrees")]
+    let tile = Tile {
+        lat: y.div_euclid(per) as i16,
+        lon: x.div_euclid(per) as i16,
+    };
+    // Row 0 is the tile's north edge.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "0 to 7"
+    )]
+    ChunkKey {
+        tile,
+        row: (per - 1 - y.rem_euclid(per)) as u8,
+        col: x.rem_euclid(per) as u8,
+    }
 }
 
 /// The chunks within `buffer_m` of any leg between the points, sampled
@@ -188,6 +353,98 @@ mod tests {
             .union(&chunks_in(Bounds::around(53.05, -4.1, 2000.0)))
             .count();
         assert!(keys.len() > ends);
+    }
+
+    fn polygon(corners: &[(f64, f64)]) -> BTreeSet<ChunkKey> {
+        chunks_under(&Polygon::new(corners).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_rectangle_as_a_polygon_takes_what_the_rectangle_did() {
+        let tile = polygon(&[(53.0, -5.0), (53.0, -4.0), (54.0, -4.0), (54.0, -5.0)]);
+        let rectangle = chunks_in(Bounds {
+            south: 53.0,
+            west: -5.0,
+            north: 54.0,
+            east: -4.0,
+        });
+        assert_eq!(tile.len(), 64);
+        assert_eq!(tile, rectangle);
+        // Inside one chunk, and across a tile's corner, as above.
+        let one = polygon(&[(53.01, -4.1), (53.01, -4.01), (53.1, -4.05)]);
+        assert_eq!(names(&one), ["N53W005/77.uxdt"]);
+        let four = polygon(&[
+            (52.99, -4.01),
+            (52.99, -3.99),
+            (53.01, -3.99),
+            (53.01, -4.01),
+        ]);
+        assert_eq!(four.len(), 4);
+    }
+
+    #[test]
+    fn a_concave_polygon_leaves_out_the_chunks_in_its_notch() {
+        // A U over N53W005, a degree across: its notch, the middle half of
+        // the tile's columns over its northern three quarters, is open.
+        let u = polygon(&[
+            (53.0, -5.0),
+            (53.0, -4.0),
+            (54.0, -4.0),
+            (54.0, -4.25),
+            (53.25, -4.25),
+            (53.25, -4.75),
+            (54.0, -4.75),
+            (54.0, -5.0),
+        ]);
+        // Columns 2 to 5 of rows 0 to 5 are in the notch: 24 chunks out.
+        assert_eq!(u.len(), 64 - 24, "{:?}", names(&u));
+        assert!(u.iter().all(|k| k.row >= 6 || k.col < 2 || k.col > 5));
+        // A thin diagonal: only the chunks it crosses, not its box's.
+        let line = polygon(&[(53.0, -5.0), (53.01, -5.0), (54.0, -4.01), (53.99, -4.0)]);
+        assert!(line.len() < 64 / 2, "{}", line.len());
+        assert!(line.len() >= 8, "{}", line.len());
+    }
+
+    #[test]
+    fn a_polygon_across_the_antimeridian_goes_the_short_way() {
+        // Fiji's Taveuni, from 179.8° E to 179.8° W: the chunks either side,
+        // not the 359° the other way round.
+        let keys = polygon(&[
+            (-16.9, 179.8),
+            (-16.9, -179.8),
+            (-16.7, -179.8),
+            (-16.7, 179.8),
+        ]);
+        let mut lons: Vec<i16> = keys.iter().map(|k| k.tile.lon).collect();
+        lons.dedup();
+        assert_eq!(lons, [-180, 179], "{:?}", names(&keys));
+        // Three eighths of a degree south to north, two either side.
+        assert_eq!(keys.len(), 12, "{:?}", names(&keys));
+        assert_eq!(
+            Polygon::new(&[(80.0, -120.0), (80.0, 0.0), (80.0, 120.0)]),
+            Err(PolygonProblem::AroundTheGlobe)
+        );
+    }
+
+    #[test]
+    fn a_polygon_needs_three_corners_on_the_globe_and_a_size_to_keep() {
+        assert_eq!(
+            Polygon::new(&[(1.0, 1.0), (2.0, 2.0)]),
+            Err(PolygonProblem::Corners)
+        );
+        assert_eq!(
+            Polygon::new(&[(1.0, 1.0), (91.0, 2.0), (1.0, 3.0)]),
+            Err(PolygonProblem::OutOfRange)
+        );
+        assert_eq!(
+            Polygon::new(&[(1.0, f64::NAN), (2.0, 2.0), (1.0, 3.0)]),
+            Err(PolygonProblem::OutOfRange)
+        );
+        let europe = Polygon::new(&[(35.0, -10.0), (35.0, 30.0), (60.0, 30.0), (60.0, -10.0)]);
+        assert_eq!(
+            chunks_under(&europe.unwrap()),
+            Err(PolygonProblem::TooLarge)
+        );
     }
 
     #[test]

@@ -1,0 +1,31 @@
+{
+  "describedBy": {
+    "vehicleId": "47511900-7665-5ac5-9f3f-0ef13835549f",
+    "vehicleName": "Alpha (replay)",
+    "replay": true
+  },
+  "changes": [
+    {
+      "name": "RTL_ALT",
+      "atUs": 1790000020050000,
+      "from": 1500.0,
+      "to": 3000.0,
+      "by": "uxduck"
+    },
+    {
+      "name": "WPNAV_SPEED",
+      "atUs": 1790000300000000,
+      "from": 500.0,
+      "to": 750.0,
+      "by": "groundStation",
+      "systemId": 254
+    }
+  ],
+  "statisticsLeftOut": 1,
+  "later": [
+    {
+      "name": "BATT_CAPACITY",
+      "readAtUs": 1790000400000000
+    }
+  ]
+}

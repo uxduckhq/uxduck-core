@@ -1,0 +1,6 @@
+{
+  "method": "mavlink/dialects/remove",
+  "params": {
+    "id": "dialect-3f9a1c2b7d4e"
+  }
+}

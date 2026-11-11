@@ -1,0 +1,4 @@
+{
+  "method": "sim/frames",
+  "params": { "binary": "/downloads/arducopter", "vehicle": "multicopter", "refresh": true }
+}

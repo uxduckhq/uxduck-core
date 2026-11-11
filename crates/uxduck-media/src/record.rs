@@ -50,6 +50,9 @@ pub struct Recorder {
     waited_us: u64,
     /// When the first picture plays, on the stream's clock.
     start_us: u64,
+    /// How long before it was shown the first picture was decoded, so the
+    /// first picture still shows at 0 with B-frames.
+    first_composition_us: u32,
     /// The camera's sound, when the recording has it.
     sound: Option<AudioConfig>,
     /// Frames of sound not yet in a fragment.
@@ -88,6 +91,12 @@ fn step(from_us: u64, to_us: u64) -> u64 {
 
 fn ticks(us: u64) -> u64 {
     us * u64::from(TIMESCALE) / 1_000_000
+}
+
+/// When a picture is decoded: before it is shown, with B-frames.
+fn decoded_us(unit: &AccessUnit) -> u64 {
+    unit.timestamp_us
+        .saturating_sub(u64::from(unit.composition_us))
 }
 
 impl Recorder {
@@ -162,7 +171,7 @@ impl Recorder {
                 return Vec::new();
             };
             let sets = ParameterSets::of(codec, &unit.data);
-            if !unit.key || !sets.complete(codec) {
+            if !unit.start() || !sets.complete(codec) {
                 return Vec::new();
             }
             let size = |v: Option<u32>| v.and_then(|v| u16::try_from(v).ok()).unwrap_or(0);
@@ -173,6 +182,7 @@ impl Recorder {
                 height: size(unit.sps.display_height.or(unit.sps.coded_height)),
             });
             self.start_us = unit.timestamp_us;
+            self.first_composition_us = unit.composition_us;
             self.pending.push(unit);
             return if self.expect_sound {
                 Vec::new()
@@ -187,8 +197,8 @@ impl Recorder {
         let span = self.pending.first().map_or(0, |first| {
             unit.timestamp_us.saturating_sub(first.timestamp_us)
         });
-        let out = if !self.pending.is_empty() && (unit.key || span >= MAX_FRAGMENT_US) {
-            self.flush(Some(unit.timestamp_us))
+        let out = if !self.pending.is_empty() && (unit.start() || span >= MAX_FRAGMENT_US) {
+            self.flush(Some(decoded_us(&unit)))
         } else {
             Vec::new()
         };
@@ -225,15 +235,20 @@ impl Recorder {
         [init, self.flush(None)].concat()
     }
 
+    /// The pictures so far as a fragment; `next_us` is when the next
+    /// picture is decoded.
     fn flush(&mut self, next_us: Option<u64>) -> Vec<u8> {
         let pending = std::mem::take(&mut self.pending);
         let mut durations = Vec::with_capacity(pending.len());
+        // Each picture lasts until the next is decoded: in decode order,
+        // as they are stored, so B-frames don't stretch the recording.
         for (i, unit) in pending.iter().enumerate() {
-            let next = pending.get(i + 1).map(|n| n.timestamp_us).or(next_us);
-            let step_us = next.map_or(self.last_step_us, |n| step(unit.timestamp_us, n));
+            let next = pending.get(i + 1).map(|n| decoded_us(n)).or(next_us);
+            let step_us = next.map_or(self.last_step_us, |n| step(decoded_us(unit), n));
             self.last_step_us = step_us;
             durations.push(step_us);
         }
+        let first = i64::from(self.first_composition_us);
         let samples: Vec<Sample<'_>> = pending
             .iter()
             .zip(&durations)
@@ -241,11 +256,19 @@ impl Recorder {
                 annex_b: &unit.data,
                 #[allow(clippy::cast_possible_truncation, reason = "a second at most")]
                 duration: ticks(*us) as u32,
-                key: unit.key,
+                // A recovery point too: a player starts there (Chrome does).
+                key: unit.start(),
+                // Shown when it was, the first picture at 0.
+                #[allow(clippy::cast_possible_truncation, reason = "under a second")]
+                composition_offset: ((i64::from(unit.composition_us) - first)
+                    * i64::from(TIMESCALE)
+                    / 1_000_000) as i32,
             })
             .collect();
-        // The sound that plays before the next fragment starts.
-        let take = next_us.map_or(self.pending_sound.len(), |next| {
+        // The sound that plays before the next fragment starts: by when it
+        // is shown, as the pictures' first is.
+        let next_shown = next_us.map(|n| n + u64::from(self.first_composition_us));
+        let take = next_shown.map_or(self.pending_sound.len(), |next| {
             self.pending_sound
                 .partition_point(|u| u.timestamp_us < next)
         });
@@ -301,9 +324,12 @@ mod tests {
 
     fn unit(key: bool, timestamp_us: u64, data: Vec<u8>) -> Arc<AccessUnit> {
         Arc::new(AccessUnit {
+            arrived: None,
             data,
             key,
+            recovery: false,
             timestamp_us,
+            composition_us: 0,
             sps: SpsInfo {
                 id: 0,
                 codec: "avc1.64001f".into(),
@@ -349,6 +375,43 @@ mod tests {
         assert_eq!(r.pictures, 5);
     }
 
+    /// The composition offsets in a fragment's video `trun`, version 1.
+    fn offsets(fragment: &[u8]) -> Vec<i32> {
+        let at = fragment.windows(4).position(|w| w == b"trun").unwrap() + 4;
+        assert_eq!(fragment[at], 1, "signed offsets");
+        assert_eq!(fragment[at + 2] & 0x08, 0x08, "offsets present");
+        let count = u32::from_be_bytes(fragment[at + 4..at + 8].try_into().unwrap()) as usize;
+        (0..count)
+            .map(|i| {
+                let entry = at + 12 + i * 16;
+                i32::from_be_bytes(fragment[entry + 12..entry + 16].try_into().unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn b_frames_last_one_frame_each_and_show_in_their_order() {
+        // Shown I 0, B 40, B 80, P 120 ms; decoded I, P, B, B, each 40 ms
+        // after the one before, from 40 ms before the I is shown.
+        let reordered = |unit: Arc<AccessUnit>, decoded_us: u64| {
+            let mut unit = (*unit).clone();
+            unit.composition_us = u32::try_from(unit.timestamp_us - decoded_us).unwrap();
+            Arc::new(unit)
+        };
+        let delta = |shown: u64| unit(false, shown, vec![0, 0, 0, 1, 0x41, 1]);
+        let mut r = Recorder::new();
+        let mut file = r.push(reordered(keyframe(1_040_000), 1_000_000));
+        file.extend(r.push(reordered(delta(1_160_000), 1_040_000)));
+        file.extend(r.push(reordered(delta(1_080_000), 1_080_000)));
+        file.extend(r.push(reordered(delta(1_120_000), 1_120_000)));
+        let start = file.len();
+        file.extend(r.push(reordered(keyframe(1_200_000), 1_160_000)));
+        assert_eq!(r.duration_us, 160_000, "not stretched by going back");
+        // The I at 0, the P 120 ms on, the Bs at 40 and 80: offsets from
+        // when each is decoded, the first picture's taken off.
+        assert_eq!(offsets(&file[start..]), [0, 7_200, -3_600, -3_600]);
+    }
+
     #[test]
     fn a_clock_that_jumps_back_keeps_the_file_moving_forward() {
         let mut r = Recorder::new();
@@ -385,9 +448,12 @@ mod sound_tests {
             vec![0, 0, 0, 1, 0x41, 1]
         };
         Arc::new(AccessUnit {
+            arrived: None,
             data,
             key,
+            recovery: false,
             timestamp_us,
+            composition_us: 0,
             sps: SpsInfo {
                 id: 0,
                 codec: "avc1.64001f".into(),

@@ -18,9 +18,14 @@ use boa_engine::builtins::promise::PromiseState;
 use boa_engine::context::time::JsInstant;
 use boa_engine::context::{Clock, ContextBuilder};
 use boa_engine::module::{MapModuleLoader, Module};
-use boa_engine::object::builtins::JsPromise;
-use boa_engine::{Context, JsObject, JsString, JsValue, Source, js_string};
+use boa_engine::object::FunctionObjectBuilder;
+use boa_engine::object::builtins::{JsArray, JsPromise};
+use boa_engine::{
+    Context, JsArgs, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Source,
+    js_string,
+};
 use extism_pdk::{FnResult, plugin_fn};
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// The SDK's helpers, the very file `packages/sdk` exports.
 const SDK: &str = include_str!("../../../packages/sdk/src/runtime.js");
@@ -80,6 +85,120 @@ fn settle(promise: &JsPromise, context: &mut Context) -> Result<(), extism_pdk::
     }
 }
 
+/// JSON text as a value, natively. Boa's own `JSON.parse` checks the text,
+/// then parses and runs it as a script: thousands of instructions a byte,
+/// so a feed's answer of a few dozen aircraft spent a call's whole budget.
+/// Built as it is read, with no tree in between, so a fetched page of 1 MB
+/// fits the plugin's memory.
+fn from_json(text: &str, context: &mut Context) -> JsResult<JsValue> {
+    let mut reader = serde_json::Deserializer::from_str(text);
+    let value = ToJs(context)
+        .deserialize(&mut reader)
+        .and_then(|value| reader.end().map(|()| value))
+        .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+    Ok(value)
+}
+
+/// Reads one JSON value into the engine (`from_json`).
+struct ToJs<'a>(&'a mut Context);
+
+impl<'de> DeserializeSeed<'de> for ToJs<'_> {
+    type Value = JsValue;
+
+    fn deserialize<D: Deserializer<'de>>(self, reader: D) -> Result<JsValue, D::Error> {
+        reader.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ToJs<'_> {
+    type Value = JsValue;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("JSON")
+    }
+
+    fn visit_unit<E>(self) -> Result<JsValue, E> {
+        Ok(JsValue::null())
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<JsValue, E> {
+        Ok(JsValue::new(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<JsValue, E> {
+        #[allow(clippy::cast_precision_loss, reason = "as JavaScript reads it")]
+        Ok(i32::try_from(value).map_or_else(|_| JsValue::new(value as f64), JsValue::new))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<JsValue, E> {
+        #[allow(clippy::cast_precision_loss, reason = "as JavaScript reads it")]
+        Ok(i32::try_from(value).map_or_else(|_| JsValue::new(value as f64), JsValue::new))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<JsValue, E> {
+        Ok(JsValue::new(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<JsValue, E> {
+        Ok(JsString::from(value).into())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<JsValue, A::Error> {
+        let mut values = Vec::with_capacity(items.size_hint().unwrap_or(0));
+        while let Some(value) = items.next_element_seed(ToJs(self.0))? {
+            values.push(value);
+        }
+        Ok(JsArray::from_iter(values, self.0).into())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<JsValue, A::Error> {
+        let object = JsObject::with_object_proto(self.0.intrinsics());
+        while let Some(key) = fields.next_key::<std::borrow::Cow<'de, str>>()? {
+            let value = fields.next_value_seed(ToJs(self.0))?;
+            // As JSON.parse: an own property, `__proto__` included.
+            object
+                .create_data_property_or_throw(JsString::from(&*key), value, self.0)
+                .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        }
+        Ok(object.into())
+    }
+}
+
+/// `JSON.parse` by `from_json`; Boa's own still takes a reviver, which
+/// needs the source text of each value.
+fn replace_json_parse(context: &mut Context) -> JsResult<()> {
+    let json = context.global_object().get(js_string!("JSON"), context)?;
+    let json = json
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("no JSON"))?
+        .clone();
+    let original = json.get(js_string!("parse"), context)?;
+    let original = original
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("no JSON.parse"))?
+        .clone();
+    let parse = NativeFunction::from_copy_closure_with_captures(
+        |this, args, original: &JsObject, context| {
+            if args.get_or_undefined(1).is_callable() {
+                return original.call(this, args, context);
+            }
+            let text = args
+                .get_or_undefined(0)
+                .to_string(context)?
+                .to_std_string()
+                .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+            from_json(&text, context)
+        },
+        original,
+    );
+    let parse = FunctionObjectBuilder::new(context.realm(), parse)
+        .name(js_string!("parse"))
+        .length(2)
+        .build();
+    json.set(js_string!("parse"), parse, true, context)?;
+    Ok(())
+}
+
 fn start() -> Result<Script, extism_pdk::Error> {
     let source = extism_pdk::config::get("script")?
         .ok_or_else(|| fail("no script was given to the script host"))?;
@@ -89,6 +208,7 @@ fn start() -> Result<Script, extism_pdk::Error> {
         .module_loader(loader.clone())
         .build()
         .map_err(fail)?;
+    replace_json_parse(&mut context).map_err(fail)?;
     let sdk = Module::parse(Source::from_bytes(SDK), None, &mut context).map_err(fail)?;
     loader.insert("@uxduck/sdk", sdk);
     let module = Module::parse(
@@ -125,19 +245,11 @@ fn call(name: &str, input: &str, empty: &str) -> FnResult<String> {
             .get(js_string!("JSON"), context)
             .map_err(fail)?;
         let json = json.as_object().ok_or_else(|| fail("no JSON"))?.clone();
-        let parse = json.get(js_string!("parse"), context).map_err(fail)?;
         let stringify = json.get(js_string!("stringify"), context).map_err(fail)?;
-        let parse = parse.as_callable().ok_or_else(|| fail("no JSON.parse"))?;
         let stringify = stringify
             .as_callable()
             .ok_or_else(|| fail("no JSON.stringify"))?;
-        let argument = parse
-            .call(
-                &JsValue::undefined(),
-                &[JsString::from(input).into()],
-                context,
-            )
-            .map_err(fail)?;
+        let argument = from_json(input, context).map_err(fail)?;
         let result = function
             .call(&JsValue::undefined(), &[argument], context)
             .map_err(|why| fail(format!("{name}: {why}")))?;

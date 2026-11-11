@@ -97,6 +97,14 @@ pub struct ErrorData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub current_version: Option<u64>,
+    /// For a listener given another device's address: the address to listen
+    /// on instead, `0.0.0.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_host: Option<String>,
+    /// A saved connection whose active endpoint conflicts with this request.
+    /// Clients can offer to show it without interpreting the error message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_link_id: Option<Box<str>>,
 }
 
 /// The JSON-RPC error object.
@@ -118,6 +126,8 @@ impl ApiError {
                 kind,
                 min_client_version: None,
                 current_version: None,
+                suggested_host: None,
+                conflicting_link_id: None,
             },
         }
     }

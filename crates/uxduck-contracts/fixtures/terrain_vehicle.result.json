@@ -1,0 +1,95 @@
+{
+  "vehicleId": "veh-7f3a",
+  "used": true,
+  "dataset": "alos",
+  "chosen": false,
+  "spacingM": 100,
+  "enabled": true,
+  "pending": 16,
+  "loaded": 504,
+  "blocks": [
+    {
+      "corners": [
+        {
+          "latitudeDeg": -35.3632621,
+          "longitudeDeg": 149.1652374
+        },
+        {
+          "latitudeDeg": -35.3389867,
+          "longitudeDeg": 149.1652374
+        },
+        {
+          "latitudeDeg": -35.3389867,
+          "longitudeDeg": 149.1993018
+        },
+        {
+          "latitudeDeg": -35.3632621,
+          "longitudeDeg": 149.1993018
+        }
+      ],
+      "spacingM": 100,
+      "state": "sending",
+      "groups": 56,
+      "groupsDone": 40,
+      "askedAtUs": 1762300000000000
+    },
+    {
+      "corners": [
+        {
+          "latitudeDeg": -35.3416,
+          "longitudeDeg": 149.1652374
+        },
+        {
+          "latitudeDeg": -35.3173,
+          "longitudeDeg": 149.1652374
+        },
+        {
+          "latitudeDeg": -35.3173,
+          "longitudeDeg": 149.1993018
+        },
+        {
+          "latitudeDeg": -35.3416,
+          "longitudeDeg": 149.1993018
+        }
+      ],
+      "spacingM": 100,
+      "state": "unavailable",
+      "groups": 56,
+      "groupsDone": 0,
+      "detail": "it is not kept on this computer and there is no connection",
+      "askedAtUs": 1762300002000000
+    }
+  ],
+  "files": {
+    "path": "/APM/TERRAIN",
+    "files": [
+      {
+        "name": "S36E149.DAT",
+        "size": 2318336
+      }
+    ],
+    "listedAtUs": 1762300003000000
+  },
+  "lastCheck": {
+    "vehicleId": "veh-7f3a",
+    "dataset": "alos",
+    "verdict": "agrees",
+    "differenceM": 0.4,
+    "points": [
+      {
+        "latitudeDeg": -35.3632621,
+        "longitudeDeg": 149.1652374,
+        "vehicleM": 584.5,
+        "expectedM": 584.4,
+        "answered": true
+      }
+    ],
+    "checkedAtUs": 1762300004000000
+  },
+  "ask": {
+    "areas": 2,
+    "bytes": 1835008,
+    "seconds": 360,
+    "radio": true
+  }
+}

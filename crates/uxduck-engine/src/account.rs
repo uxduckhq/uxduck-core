@@ -6,7 +6,7 @@
 //! daemon, is signed out and says accounts are not available there.
 
 use serde_json::Value;
-use uxduck_contracts::dto::account::{AccountEnvironment, AccountState};
+use uxduck_contracts::dto::account::{AccountEnvironment, AccountState, SignupSource};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
@@ -18,17 +18,14 @@ use crate::{ConnectionId, Engine};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountAction {
     Get,
-    /// Forget a different person's sign-in before acknowledging a local switch.
-    SwitchOperator {
-        operator_id: Option<String>,
-        /// The account the operator switched to last signed in as: when it is
-        /// the one signed in now, the same person keeps their sign-in.
-        account_id: Option<String>,
-        restoring: bool,
-        device: Option<String>,
-    },
     /// Recorded flight-log summaries; a read-only `AccountFlights`.
     Flights,
+    /// A flight log in the account joined on this computer for a replay
+    /// (ADR-0039 R12): answered with `{"path": …}`.
+    ReplayLog {
+        device_id: String,
+        id: String,
+    },
     /// One synced entity's copies in the account (C5).
     Versions {
         entity: String,
@@ -45,6 +42,8 @@ pub enum AccountAction {
         email: String,
         code: String,
         product_updates: bool,
+        /// The terms version the form said continuing agrees to.
+        terms_version: Option<String>,
     },
     /// Signs out; this computer's watch links end first (S95, W9).
     SignOut {
@@ -60,6 +59,17 @@ pub enum AccountAction {
     /// Sets the account's name.
     SetName {
         name: String,
+    },
+    /// Records in the account that its person agreed to the terms
+    /// (ADR-0047); sent by the engine when an operator agrees.
+    AcceptTerms {
+        version: String,
+        context: uxduck_contracts::dto::operator::TermsContext,
+    },
+    /// Where a new account heard of UXDuck (S251).
+    SetSource {
+        source: SignupSource,
+        other: Option<String>,
     },
     /// Where the account is signed in (S114): an `AccountSessions`.
     Sessions,
@@ -88,9 +98,6 @@ pub enum AccountAction {
         rating: &'static str,
         comment: Option<String>,
     },
-    /// The account's computers (S78): a `ComputerList`, which the engine
-    /// answers with this computer's own state as `AccountComputers`.
-    Computers,
     /// The account's feedback reports: an `AccountFeedbackList`.
     SentFeedback,
     /// Reports sent signed out, kept in the account by their keys
@@ -152,8 +159,6 @@ pub struct AccountOrder {
     /// Answered with [`Engine::account_done`].
     pub id: String,
     pub action: AccountAction,
-    /// Captured by the engine, never supplied as a claimed cloud identity.
-    pub operator_id: Option<String>,
     /// Orders without a requesting connection operate on the computer's workspace.
     pub workspace: bool,
 }
@@ -190,6 +195,7 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
             email: p.email.trim().to_lowercase(),
             code: p.code.trim().to_owned(),
             product_updates: p.product_updates,
+            terms_version: p.terms_version,
         },
         ClientRequest::AccountSignOut(_) => AccountAction::SignOut {
             device: (!engine.state.sync.device_id.is_empty())
@@ -203,6 +209,10 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
         },
         ClientRequest::AccountSetName(p) => AccountAction::SetName {
             name: p.name.trim().to_owned(),
+        },
+        ClientRequest::AccountSetSource(p) => AccountAction::SetSource {
+            source: p.source,
+            other: p.other,
         },
         ClientRequest::AccountSessions(_) => AccountAction::Sessions,
         ClientRequest::AccountSignOutSession(p) => AccountAction::SignOutSession {
@@ -225,7 +235,6 @@ fn action_of(engine: &Engine, request: ClientRequest) -> Result<AccountAction, A
                 reports: p.reports.into_iter().map(|r| (r.id, r.key)).collect(),
             }
         }
-        ClientRequest::AccountComputers(_) => AccountAction::Computers,
         ClientRequest::AccountDeleteShared(_) => AccountAction::DeleteShared,
         _ => return Err(ApiError::new(ErrorKind::Internal, "not an account method")),
     })
@@ -247,7 +256,6 @@ pub(crate) fn handle(
             | AccountAction::Environment
             | AccountAction::Shared
             | AccountAction::SentFeedback
-            | AccountAction::Computers
             | AccountAction::Sessions
     ) {
         Capability::Read
@@ -274,22 +282,18 @@ pub(crate) fn handle(
             AccountAction::Sessions => {
                 to_value(&uxduck_contracts::dto::account::AccountSessions::default())
             }
-            AccountAction::Computers => to_value(&uxduck_contracts::dto::edge::AccountComputers {
-                computers: Vec::new(),
-                this_computer: None,
-                edge: crate::edge::signed_out(),
-            }),
             _ => Err(ApiError::new(
                 ErrorKind::InvalidValue,
                 "signing in needs UXDuck Desktop",
             )),
         };
     }
-    let computers = action == AccountAction::Computers;
-    let id = engine.ask_account(action);
-    if computers {
-        engine.awaiting_computers.insert(id);
+    // Nothing more is published from the moment signing out is asked for,
+    // before the account has heard of it (W9).
+    if matches!(action, AccountAction::SignOut { .. }) {
+        engine.signed_out_of_account();
     }
+    engine.ask_account(action);
     Ok(Value::Null)
 }
 
@@ -328,13 +332,7 @@ fn allow_private_account(
             | ClientRequest::AccountSignOutSession(_)
             | ClientRequest::AccountSignOutOthers(_)
     ) {
-        engine.ensure_operator_handover(connection, None)?;
-        if !engine.remote.leases.is_empty() {
-            return Err(ApiError::new(
-                ErrorKind::ConfirmationRequired,
-                "End remote control before changing account sessions.",
-            ));
-        }
+        engine.ensure_account_handover(connection)?;
     }
     Ok(())
 }
@@ -370,53 +368,27 @@ fn allow_environment_change(engine: &Engine) -> Result<(), ApiError> {
 }
 
 impl Engine {
-    /// Private session state from the native account task. Attribution only
-    /// uses it when the acting connection selected that same operator.
-    /// Notes on the signed-in operator which verified account they are, so
-    /// another operator of the same account, here or synced from another
-    /// computer, can be chosen without signing in again.
-    fn record_operator_account(&mut self) {
-        let identity = &self.account_identity;
-        let (true, Some(account), Some(operator_id)) = (
-            identity.signed_in && !identity.offline,
-            identity.account_id.clone(),
-            identity.operator_id.clone(),
-        ) else {
-            return;
-        };
-        let Some(mut operator) = self.state.operators.get(&operator_id).cloned() else {
-            return;
-        };
-        if operator.account_id.as_deref() == Some(account.as_str()) {
-            return;
-        }
-        operator.account_id = Some(account);
-        operator.version += 1;
-        let actor = uxduck_core::events::Actor {
-            client_id: "uxduck-account".into(),
-            operator_id: None,
-            identity: None,
-        };
-        self.commit_as(
-            actor,
-            uxduck_core::events::Change::OperatorUpserted { operator },
-        );
-    }
-
+    /// The computer's one sign-in, from the native account task: every local
+    /// operator acts under it (ADR-0033, one account per computer).
     pub fn set_account_identity(&mut self, state: AccountState) {
         if self.account_identity == state {
             return;
         }
-        if (
-            self.account_identity.signed_in,
-            &self.account_identity.account_id,
-            &self.account_identity.operator_id,
-        ) != (state.signed_in, &state.account_id, &state.operator_id)
-        {
+        // A new analytics identity only when the account changes: signing in
+        // or out, or another account. Reading the same one again, online or
+        // not, keeps it.
+        let another_account = matches!(
+            (&self.account_identity.account_id, &state.account_id),
+            (Some(before), Some(after)) if before != after
+        );
+        if self.account_identity.signed_in != state.signed_in || another_account {
             self.reset_analytics_session();
         }
+        let lost_session = self.account_identity.signed_in && !state.signed_in;
         self.account_identity = state;
-        self.record_operator_account();
+        if lost_session {
+            self.signed_out_of_account();
+        }
         let frame = crate::rpc::router::notification(
             &uxduck_contracts::rpc::ServerNotification::AccountChanged(
                 uxduck_contracts::dto::Empty {},
@@ -447,11 +419,6 @@ impl Engine {
     /// [`Engine::account_done`]; returns the order's id.
     pub(crate) fn ask_account(&mut self, action: AccountAction) -> String {
         let workspace = self.replying_to.is_none();
-        let operator_id = self
-            .replying_to
-            .as_ref()
-            .and_then(|(connection, _)| self.connections.get(connection))
-            .and_then(|connection| connection.operator_id.clone());
         let id = format!("ac{}", &self.random.token()[..16]);
         if matches!(
             action,
@@ -470,7 +437,6 @@ impl Engine {
             port.request(AccountOrder {
                 id: id.clone(),
                 action,
-                operator_id,
                 workspace,
             });
         }
@@ -491,8 +457,8 @@ impl Engine {
         {
             self.feedback_sent(&item);
         }
-        let result = if self.awaiting_computers.remove(id) {
-            self.computers_listed(result)
+        let result = if let Some((connection, params)) = self.replays.awaiting.remove(id) {
+            self.account_log_joined(connection, &params, result)
         } else if let Some(awaiting) = self.awaiting_watch.remove(id) {
             self.watch_done(awaiting, result)
         } else {
@@ -501,44 +467,23 @@ impl Engine {
         let Some((connection, request_id)) = self.awaiting_account.remove(id) else {
             return;
         };
-        let mut switched = false;
-        let result = if let Some(operator_id) = self.awaiting_operator.remove(id) {
-            result.and_then(|_| {
-                self.ensure_operator_handover(connection, operator_id.as_deref())?;
-                if operator_id
-                    .as_ref()
-                    .is_some_and(|id| !self.state.operators.contains_key(id))
-                {
-                    return Err(ApiError::new(
-                        ErrorKind::NotFound,
-                        "That operator was removed.",
-                    ));
-                }
-                let restoring_current = self
+        // `operatorId` stays in an account's answer for older pages: the
+        // asking operator, who works under the computer's sign-in.
+        let result = result.map(|mut value| {
+            if value.get("signedIn").is_some()
+                && let Some(operator) = self
                     .connections
                     .get(&connection)
-                    .is_some_and(|c| c.operator_id.is_none())
-                    && self.account_identity.signed_in
-                    && self.account_identity.operator_id == operator_id;
-                if !restoring_current {
-                    self.reset_analytics_session();
-                }
-                if let Some(state) = self.connections.get_mut(&connection) {
-                    switched = state.operator_id != operator_id;
-                    state.operator_id = operator_id;
-                }
-                Ok(serde_json::json!({}))
-            })
-        } else {
-            result
-        };
+                    .and_then(|c| c.operator_id.clone())
+            {
+                value["operatorId"] = Value::String(operator);
+            }
+            value
+        });
         let frame = match result {
             Ok(value) => serde_json::json!({ "jsonrpc": "2.0", "id": request_id, "result": value }),
             Err(error) => crate::rpc::router::error(&request_id, &error),
         };
         self.send(connection, &frame);
-        if switched {
-            self.operator_changed(connection);
-        }
     }
 }

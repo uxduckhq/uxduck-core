@@ -113,7 +113,14 @@ fn reversal(name: &str) -> bool {
 pub(super) fn stream(on: bool) -> Command {
     Command::Long {
         command: MAV_CMD_SET_MESSAGE_INTERVAL,
-        params: vec![RC_CHANNELS, if on { RC_EVERY_US } else { 0.0 }],
+        params: vec![
+            RC_CHANNELS,
+            if on {
+                RC_EVERY_US
+            } else {
+                1_000_000.0 / f32::from(uxduck_mavlink::session::RC_CHANNELS_HZ)
+            },
+        ],
     }
 }
 
@@ -997,7 +1004,7 @@ fn radio_words(radio: &Radio, succeeded: bool) -> String {
             .map(|w| format!("{} {} → {}", w.name, w.from, w.to)),
     );
     if succeeded {
-        format!("Radio calibrated: {}", parts.join("; "))
+        format!("Radio calibrated: {}", parts.join(", "))
     } else {
         let refused: Vec<String> = radio
             .writes
@@ -1006,9 +1013,9 @@ fn radio_words(radio: &Radio, succeeded: bool) -> String {
             .map(|w| w.name.clone())
             .collect();
         format!(
-            "Radio calibration partly written: {} not taken; {}",
+            "Radio calibration partly written ({} not taken): {}",
             names(&refused),
-            parts.join("; ")
+            parts.join(", ")
         )
     }
 }
@@ -1131,7 +1138,7 @@ mod tests {
         }];
         assert_eq!(
             radio_words(&r, true),
-            "Radio calibrated: roll channel 1 1004–1996 (reversed); channel 3 1000–2000; \
+            "Radio calibrated: roll channel 1 1004–1996 (reversed), channel 3 1000–2000, \
              RC1_REVERSED 0 → 1"
         );
     }

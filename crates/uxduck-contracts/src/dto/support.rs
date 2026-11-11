@@ -79,7 +79,53 @@ pub struct SupportDetails {
     pub window: String,
     pub locale: String,
     pub performance: SupportPerformance,
+    /// Page-owned diagnostics remain available when the browser runtime cannot answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_runtime: Option<SupportBrowserRuntime>,
     /// Named missing measurements, so unsupported and failed reads are explicit.
     #[serde(default)]
     pub unavailable: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBrowserRuntime {
+    pub page_age_ms: u32,
+    pub navigation: String,
+    pub discarded: bool,
+    pub used_before: bool,
+    pub visibility: String,
+    pub visibility_changes: u32,
+    pub worker_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_age_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reply_age_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_telemetry_age_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation_age_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation: Option<String>,
+    /// Last known simulator counts survive loss of the engine connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_simulation_count: Option<u32>,
+    /// At most 80 metadata-only events; never request/response bodies or user text.
+    #[serde(default)]
+    pub events: Vec<SupportBrowserEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBrowserEvent {
+    pub at_ms: u32,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u32>,
 }

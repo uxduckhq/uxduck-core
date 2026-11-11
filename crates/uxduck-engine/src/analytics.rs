@@ -51,6 +51,9 @@ fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
         && [sample.map_2d_fps, sample.map_3d_fps]
             .iter()
             .all(|fps| fps.is_none_or(|fps| fps <= 1000))
+        && [sample.map_3d_frame_ms, sample.map_3d_slow_frames]
+            .iter()
+            .all(|value| value.is_none_or(|value| value <= 60_000))
         && sample.ui_build.as_deref().is_none_or(is_token)
 }
 
@@ -393,6 +396,24 @@ impl Engine {
         }
     }
 
+    pub fn agent_title_stats(
+        &mut self,
+        model: &str,
+        generated: bool,
+        ms: u64,
+        stats: Option<&crate::runtime::TurnStats>,
+    ) {
+        self.track(DaemonEvent::AgentTitle {
+            model: token_or_other(model.rsplit(['/', ':']).next().unwrap_or_default()),
+            generated,
+            ms,
+            input_tokens: stats.as_ref().map(|s| s.input_tokens),
+            output_tokens: stats.as_ref().map(|s| s.output_tokens),
+            cache_read_tokens: stats.as_ref().map(|s| s.cache_read_tokens),
+            cache_write_tokens: stats.as_ref().map(|s| s.cache_write_tokens),
+        });
+    }
+
     pub(crate) fn turn_began(&mut self, turn: u64) {
         let now = self.clock.now_us();
         self.turn_started.insert(turn, now);
@@ -415,11 +436,15 @@ impl Engine {
                 _ => {}
             }
         }
-        let model = self
-            .state
-            .threads
-            .get(thread_id)
-            .map_or_else(|| "other".into(), |t| token_or_other(&t.model));
+        let spoken = self.spoken_turns.remove(&turn);
+        let model = spoken
+            .as_deref()
+            .or_else(|| self.state.threads.get(thread_id).map(|t| t.model.as_str()))
+            // OpenRouter's `vendor/model` ids count by their model's own name.
+            .map_or_else(
+                || "other".into(),
+                |model| token_or_other(model.rsplit('/').next().unwrap_or_default()),
+            );
         let outcome = if cancelled {
             TurnOutcome::Cancelled
         } else if failed {
@@ -444,6 +469,7 @@ impl Engine {
             fell_back: stats.fell_back,
             compacted: stats.compacted,
             thinking_dropped: stats.thinking_dropped,
+            spoken: spoken.is_some(),
         });
     }
 
@@ -458,13 +484,16 @@ impl Engine {
             ReceiptStatus::Interrupted => CommandOutcome::Interrupted,
         };
         let command = match command {
-            Command::Arm => CommandName::Arm,
+            // A toggle is sent, and so counted, as Arm or Disarm.
+            Command::Arm | Command::ArmToggle => CommandName::Arm,
             Command::Disarm => CommandName::Disarm,
             Command::SetMode { .. } => CommandName::SetMode,
             Command::Rtl => CommandName::Rtl,
             Command::Land => CommandName::Land,
             Command::Reboot => CommandName::Reboot,
             Command::GoTo { .. } => CommandName::GoTo,
+            Command::SetHome { .. } => CommandName::SetHome,
+            Command::SetEkfOrigin { .. } => CommandName::SetEkfOrigin,
             Command::Long { .. } => CommandName::Long,
         };
         self.track(DaemonEvent::CommandSent { command, outcome });
@@ -543,6 +572,7 @@ mod tests {
         let fields = json!({
             "map_2d_count": 1, "map_3d_count": 1, "globe_count": 0, "map_vehicle_count": 10,
             "map_2d_fps": 60, "map_3d_fps": 30, "map_3d_trails": "off",
+            "map_3d_frame_ms": 18, "map_3d_slow_frames": 4, "map_3d_light": false,
             "renderer_cpu_percent": 210, "gpu_cpu_percent": 35, "ui_build": "abcdef1",
             "cpu_window_ms": 30000, "cpu_sample_age_ms": 0, "app_window_count": 1
         });
@@ -557,6 +587,9 @@ mod tests {
         assert_eq!(encoded["map_3d_fps"], 30);
         assert_eq!(encoded["renderer_cpu_percent"], 210);
         assert_eq!(encoded["map_3d_trails"], "off");
+        assert_eq!(encoded["map_3d_frame_ms"], 18);
+        assert_eq!(encoded["map_3d_slow_frames"], 4);
+        assert_eq!(encoded["map_3d_light"], false);
 
         for (field, value) in [
             ("map_2d_count", json!(10001)),
@@ -565,6 +598,8 @@ mod tests {
             ("map_vehicle_count", json!(10001)),
             ("map_2d_fps", json!(1001)),
             ("map_3d_fps", json!(1001)),
+            ("map_3d_frame_ms", json!(60_001)),
+            ("map_3d_slow_frames", json!(60_001)),
             ("renderer_cpu_percent", json!(10001)),
             ("gpu_cpu_percent", json!(10001)),
             ("cpu_window_ms", json!(86_400_001)),

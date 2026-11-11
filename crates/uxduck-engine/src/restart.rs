@@ -19,15 +19,17 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::ReceiptStatus;
-use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
+use uxduck_core::domain::notification::{
+    Action, NotificationAction, NotificationKind, Severity, Subject,
+};
 use uxduck_core::domain::parameter::TransferStatus;
 use uxduck_core::domain::settings::{ClosePolicy, Settings, StorageCategory};
-use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::{Actor, Change};
 use uxduck_core::policy::admission::Trust;
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
+use crate::runtime::Deleted;
 use crate::{ConnectionId, Engine, OnLastClientClosed, upsert};
 
 /// Below this much free space the daemon warns: 1 GiB, or 5 % of the disk
@@ -77,20 +79,13 @@ pub(crate) fn handle(
             denied("only an operator client may restart the daemon")
         }
         ClientRequest::DaemonRestart(DaemonRestartParams { confirm }) => {
-            let armed: Vec<String> = engine
-                .state
-                .vehicles
-                .values()
-                .filter(|v| v.armed && v.presence != Presence::Offline)
-                .map(|v| v.name.clone())
-                .collect();
-            if !armed.is_empty() && !confirm {
+            let activity = engine.app_update_blockers();
+            if !activity.is_empty() && !confirm {
                 return Err(ApiError::new(
                     ErrorKind::ConfirmationRequired,
                     format!(
-                        "{} {} armed. Restarting drops controllers and cuts the connection for about a second. Restart anyway?",
-                        armed.join(", "),
-                        if armed.len() == 1 { "is" } else { "are" }
+                        "{}. Restarting disconnects vehicles and interrupts controllers, simulations, recordings and unfinished work. Restart anyway?",
+                        activity.join(", "),
                     ),
                 ));
             }
@@ -115,13 +110,13 @@ pub(crate) fn handle(
             }
             to_value(&engine.storage_usage()?)
         }
-        ClientRequest::StorageReveal(_) => {
+        ClientRequest::StorageReveal(params) => {
             if !granted.contains(&Capability::Read) {
                 return denied(&Capability::Read.denied_message());
             }
             let folder = engine
                 .system
-                .reveal_data_dir()
+                .reveal_storage(params.category.map(Into::into))
                 .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
             to_value(&uxduck_contracts::dto::video::VideoRevealResult { folder })
         }
@@ -229,6 +224,7 @@ fn inspector(engine: &Engine, request: &ClientRequest) -> Result<Value, ApiError
         return to_value(&engine.system.packet_history(
             link_id,
             vehicle.map(|v| v.system_id),
+            engine.state.settings.gcs_system_id,
             params,
             engine.clock.now_us(),
         )?);
@@ -306,12 +302,9 @@ fn desktop(
     Ok(())
 }
 
-/// "Allow remote control from my account" (S80): only at the computer, so
-/// someone away cannot let themselves in; the supervision grace period
-/// (S81); and the ground station system id.
-fn remote_control(
-    engine: &Engine,
-    connection: ConnectionId,
+/// Flights in the account (S82), the supervision grace period (S81) and the
+/// ground station system id.
+fn flights_and_supervision(
     params: &SettingsUpdateParams,
     settings: &mut uxduck_core::domain::settings::Settings,
 ) -> Result<(), ApiError> {
@@ -327,6 +320,12 @@ fn remote_control(
     }
     if let Some(on) = params.upload_video_while_flying {
         settings.upload_video_while_flying = on;
+    }
+    if let Some(content) = params.sync_content {
+        settings.sync_content = content.into();
+    }
+    if let Some(on) = params.wait_for_unmetered {
+        settings.wait_for_unmetered = on;
     }
     if let Some(grace) = params.supervision_grace_s {
         if !(5..=120).contains(&grace) {
@@ -346,20 +345,6 @@ fn remote_control(
         }
         settings.gcs_system_id = id;
     }
-    let Some(classes) = &params.remote_control else {
-        return Ok(());
-    };
-    if engine.remote_sender(connection).is_some() {
-        return Err(ApiError::new(
-            ErrorKind::CapabilityDenied,
-            "Remote control can only be turned on or off at the computer itself.",
-        ));
-    }
-    let mut classes: Vec<uxduck_core::domain::command::CommandClass> =
-        classes.iter().map(|c| (*c).into()).collect();
-    classes.sort();
-    classes.dedup();
-    settings.remote_control = classes;
     Ok(())
 }
 
@@ -488,6 +473,11 @@ fn storage_policies(
     settings: &mut Settings,
     params: &SettingsUpdateParams,
 ) -> Result<(), ApiError> {
+    if params.auto_delete.is_some() || params.simulator_log_max_bytes.is_some() {
+        // The first choice keeps the default limit unless it sets another.
+        settings.simulator_log_max_bytes = settings.simulator_log_limit();
+        settings.storage_cleanup_chosen = true;
+    }
     if let Some(list) = &params.auto_delete {
         let mut days = auto_delete_days(list.clone())?;
         settings.simulator_log_retention_days = days.remove(&StorageCategory::SimulatorLogs);
@@ -528,6 +518,10 @@ fn update_channel(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "each setting in turn, as the request names them"
+)]
 fn update_settings(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -568,16 +562,13 @@ fn update_settings(
     if let Some(on) = params.usage_analytics {
         settings.usage_analytics = on;
     }
-    if let Some(on) = params.connect_to_account {
-        settings.connect_to_account = on;
-    }
     // Turned off, nobody away may watch: this computer's watch links end (S95, W9).
-    let ends_watch_links = params.watch_from_account == Some(false) && settings.watch_from_account;
-    if let Some(on) = params.watch_from_account {
-        settings.watch_from_account = on;
+    let ends_watch_links = params.live_sharing == Some(false) && settings.live_sharing;
+    if let Some(on) = params.live_sharing {
+        settings.live_sharing = on;
     }
 
-    remote_control(engine, connection, &params, &mut settings)?;
+    flights_and_supervision(&params, &mut settings)?;
     network_address(engine, connection, &params, &mut settings)?;
     desktop(engine, &mut settings, &params)?;
     if let Some(on) = params.share_conversations {
@@ -600,11 +591,26 @@ fn update_settings(
             }
         }
     }
+    // ADR-0051 A7: "Keep areas off this vehicle".
+    if let Some(choice) = &params.vehicle_terrain_areas {
+        if choice.keep_off {
+            settings
+                .vehicles_without_terrain_areas
+                .insert(choice.vehicle_id.clone());
+        } else {
+            settings
+                .vehicles_without_terrain_areas
+                .remove(&choice.vehicle_id);
+        }
+    }
     if let Some(on) = params.share_flight_data {
         settings.share_flight_data = on;
     }
     if let Some(policy) = params.video_recording {
         settings.video_recording = policy.into();
+    }
+    if let Some(reencoder) = params.video_reencoder {
+        settings.video_reencoder = reencoder.into();
     }
     if let Some(ports) = params.video_ports {
         settings.video_ports = video_ports(ports)?;
@@ -631,10 +637,19 @@ fn update_settings(
     if let Some(choice) = &params.vehicle_terrain {
         engine.terrain_dataset_chosen(&choice.vehicle_id);
     }
-    if before.simulator_log_max_bytes != settings.simulator_log_max_bytes {
+    if params.vehicle_terrain_areas.is_some()
+        || params.vehicle_terrain.is_some()
+        || params.terrain_dataset.is_some()
+    {
+        engine.review_all_terrain_puts();
+    }
+    if before.auto_delete_days != settings.auto_delete_days
+        || before.simulator_log_retention_days != settings.simulator_log_retention_days
+        || before.simulator_log_limit() != settings.simulator_log_limit()
+    {
         engine.check_storage();
     }
-    to_value(&engine.settings_dto(&settings))
+    to_value(&engine.settings_dto(&engine.state().settings))
 }
 
 impl Engine {
@@ -719,6 +734,21 @@ impl Engine {
         }
     }
 
+    /// A simulation's name: its link's, or its vehicle's.
+    fn simulation_name(&self, simulation_id: &str) -> Option<String> {
+        self.state
+            .links
+            .get(simulation_id)
+            .map(|link| link.name.clone())
+            .or_else(|| {
+                self.state
+                    .vehicles
+                    .values()
+                    .find(|v| v.link_id == simulation_id)
+                    .map(|v| v.name.clone())
+            })
+    }
+
     fn storage_usage(&self) -> Result<StorageUsage, ApiError> {
         let report = self.system.storage();
         let mut simulator_logs = self
@@ -726,18 +756,7 @@ impl Engine {
             .simulator_logs()
             .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
         for sim in &mut simulator_logs {
-            sim.name = self
-                .state
-                .links
-                .get(&sim.simulation_id)
-                .map(|link| link.name.clone())
-                .or_else(|| {
-                    self.state
-                        .vehicles
-                        .values()
-                        .find(|v| v.link_id == sim.simulation_id)
-                        .map(|v| v.name.clone())
-                });
+            sim.name = self.simulation_name(&sim.simulation_id);
         }
         Ok(StorageUsage {
             data_dir: report.data_dir,
@@ -755,6 +774,12 @@ impl Engine {
                         bytes,
                         files,
                         deletable: category.deletable(),
+                        places: report
+                            .places
+                            .iter()
+                            .find(|(c, _)| c == category)
+                            .map(|(_, places)| places.clone())
+                            .unwrap_or_default(),
                     }
                 })
                 .collect(),
@@ -762,6 +787,50 @@ impl Engine {
             total_bytes: report.total_bytes,
             upload: self.upload_status.clone(),
         })
+    }
+
+    /// What automatic cleanup removed, by category and simulation, and
+    /// where each file is named.
+    fn cleanup_body(
+        &self,
+        removed: &std::collections::BTreeMap<StorageCategory, Deleted>,
+    ) -> String {
+        let mut lines: Vec<String> = removed
+            .iter()
+            .map(|(category, deleted)| {
+                let from = if deleted.simulations.is_empty() {
+                    String::new()
+                } else {
+                    let names: Vec<String> = deleted
+                        .simulations
+                        .iter()
+                        .map(|id| {
+                            self.simulation_name(id).unwrap_or_else(|| {
+                                format!("Simulation {}", id.chars().take(8).collect::<String>())
+                            })
+                        })
+                        .collect();
+                    format!(" from {}", crate::preflight::and_list(&names))
+                };
+                format!(
+                    "{}{from}: {}, {}.",
+                    cleanup_label(*category),
+                    file_count(deleted.files),
+                    megabytes(deleted.bytes)
+                )
+            })
+            .collect();
+        if removed.contains_key(&StorageCategory::SimulatorLogs) {
+            lines.push(
+                "Old simulator logs will be removed quietly from now on. To keep them all, choose No size limit in Settings > Storage."
+                    .into(),
+            );
+        }
+        lines.push(
+            "Each file removed is named in logs/daemon.log in UXDuck's folder. Telemetry logs and recordings are never removed automatically. Change these limits in Settings > Storage."
+                .into(),
+        );
+        lines.join("\n")
     }
 
     /// Checks free space, and applies the auto-delete policy. The host
@@ -781,30 +850,58 @@ impl Engine {
             )
             .collect();
         let now = self.clock.now_us();
-        let (mut files, mut bytes) = (0, 0);
+        let mut removed = std::collections::BTreeMap::<StorageCategory, Deleted>::new();
+        let mut add = |category, deleted: Deleted| {
+            let total = removed.entry(category).or_default();
+            total.files += deleted.files;
+            total.bytes += deleted.bytes;
+            total.simulations.extend(deleted.simulations);
+        };
         for (category, days) in policy {
-            let deleted = self
-                .system
-                .delete_older_than(category, now.saturating_sub(u64::from(days) * DAY_US));
-            files += deleted.files;
-            bytes += deleted.bytes;
+            add(
+                category,
+                self.system
+                    .delete_older_than(category, now.saturating_sub(u64::from(days) * DAY_US)),
+            );
         }
-        let limited = self
-            .system
-            .limit_simulator_logs(self.state.settings.simulator_log_max_bytes);
-        files += limited.files;
-        bytes += limited.bytes;
-        if files > 0 {
+        let limit = self.state.settings.simulator_log_limit();
+        if limit > 0 {
+            add(
+                StorageCategory::SimulatorLogs,
+                self.system.limit_simulator_logs(limit),
+            );
+        }
+        removed.retain(|_, deleted| deleted.files > 0);
+        // Simulator logs are told about once; daemon.log still names each file.
+        if removed.contains_key(&StorageCategory::SimulatorLogs) {
+            if self.state.settings.simulator_cleanup_told {
+                removed.remove(&StorageCategory::SimulatorLogs);
+            } else {
+                let mut settings = self.state.settings.clone();
+                settings.simulator_cleanup_told = true;
+                settings.version += 1;
+                self.commit_as(daemon(), Change::SettingsChanged { settings });
+            }
+        }
+        if !removed.is_empty() {
+            let files: u32 = removed.values().map(|d| d.files).sum();
+            let bytes: u64 = removed.values().map(|d| d.bytes).sum();
             self.raise(Raise {
                 severity: Severity::Info,
                 kind: NotificationKind::Transient,
                 subject: Subject::System,
-                title: format!("Deleted {files} files ({})", megabytes(bytes)),
-                body: Some(
-                    "Your storage settings remove files by age or size. You can change that in Settings."
-                        .into(),
+                title: format!(
+                    "Automatic cleanup: removed {} ({})",
+                    file_count(files),
+                    megabytes(bytes)
                 ),
-                actions: Vec::new(),
+                body: Some(self.cleanup_body(&removed)),
+                actions: vec![NotificationAction {
+                    label: "Storage".into(),
+                    action: Action::OpenUrl {
+                        url: "/settings#storage".into(),
+                    },
+                }],
                 condition: None,
                 report: None,
             });
@@ -839,6 +936,32 @@ impl Engine {
 
     /// The restart safety rules (ADR-0007), applied on every start.
     pub(crate) fn restore_after_restart(&mut self) {
+        // The old seven-day / 5 GB defaults did not record consent. Reset
+        // those once, preserving custom policies that required an explicit choice.
+        // Telemetry logs and recordings are never deleted automatically
+        // (2026-11-01), so policies chosen for them before are dropped.
+        let mut settings = self.state.settings.clone();
+        settings
+            .auto_delete_days
+            .retain(|category, _| category.deletable());
+        if !settings.storage_cleanup_chosen {
+            if settings.simulator_log_retention_days == Some(7) {
+                settings.simulator_log_retention_days = None;
+            }
+            if settings.simulator_log_max_bytes == 5_000_000_000 {
+                settings.simulator_log_max_bytes = 0;
+            }
+            settings.storage_cleanup_chosen = !settings.auto_delete_days.is_empty()
+                || settings.simulator_log_retention_days.is_some()
+                || settings.simulator_log_max_bytes != 0;
+        }
+        settings.merge_sync_switches();
+        settings.merge_live_sharing();
+        if settings != self.state.settings {
+            settings.version += 1;
+            self.commit_as(daemon(), Change::SettingsChanged { settings });
+        }
+        self.sync_on_unless_turned_off(daemon());
         let now = self.clock.now_us();
         let waiting: Vec<_> = self
             .state
@@ -889,6 +1012,24 @@ impl Engine {
             mission.status = TransferStatus::Failed;
             self.commit_as(daemon(), Change::MissionUpserted { mission });
         }
+    }
+}
+
+/// What automatic cleanup calls a category it removed files from.
+fn cleanup_label(category: StorageCategory) -> &'static str {
+    match category {
+        StorageCategory::SimulatorLogs => "Simulator logs",
+        StorageCategory::Logs => "Application logs",
+        StorageCategory::Backups => "Backups before upgrades",
+        _ => "Other files",
+    }
+}
+
+fn file_count(files: u32) -> String {
+    if files == 1 {
+        "1 file".into()
+    } else {
+        format!("{files} files")
     }
 }
 

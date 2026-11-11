@@ -11,6 +11,8 @@ impl From<s::SetupRow> for dto::SetupRow {
             s::SetupRow::Radio => Self::Radio,
             s::SetupRow::Airspeed => Self::Airspeed,
             s::SetupRow::Motors => Self::Motors,
+            s::SetupRow::Escs => Self::Escs,
+            s::SetupRow::Restart => Self::Restart,
         }
     }
 }
@@ -24,6 +26,8 @@ impl From<dto::SetupRow> for s::SetupRow {
             dto::SetupRow::Radio => Self::Radio,
             dto::SetupRow::Airspeed => Self::Airspeed,
             dto::SetupRow::Motors => Self::Motors,
+            dto::SetupRow::Escs => Self::Escs,
+            dto::SetupRow::Restart => Self::Restart,
         }
     }
 }
@@ -41,6 +45,7 @@ impl From<s::SetupKind> for dto::SetupKind {
             s::SetupKind::AirspeedZero => Self::AirspeedZero,
             s::SetupKind::AirspeedCheck => Self::AirspeedCheck,
             s::SetupKind::AirspeedRatio => Self::AirspeedRatio,
+            s::SetupKind::Escs => Self::Escs,
         }
     }
 }
@@ -58,6 +63,7 @@ impl From<dto::SetupKind> for s::SetupKind {
             dto::SetupKind::AirspeedZero => Self::AirspeedZero,
             dto::SetupKind::AirspeedCheck => Self::AirspeedCheck,
             dto::SetupKind::AirspeedRatio => Self::AirspeedRatio,
+            dto::SetupKind::Escs => Self::Escs,
         }
     }
 }
@@ -99,6 +105,7 @@ impl From<s::Instruction> for dto::Instruction {
             s::Instruction::FlyCircles => Self::FlyCircles,
             s::Instruction::HoldOnASide => Self::HoldOnASide,
             s::Instruction::TurnOnThisSide => Self::TurnOnThisSide,
+            s::Instruction::ReplugBattery => Self::ReplugBattery,
         }
     }
 }

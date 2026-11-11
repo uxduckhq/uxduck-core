@@ -86,6 +86,17 @@ In a terminal, a command the app would confirm, such as arm, asks first. A scrip
 
 See [Confirmations](/docs/confirmations) before issuing commands.
 
+## Replay a flight
+
+```bash
+uxduck replay
+uxduck replay flight.tlog --play --speed 4
+uxduck replay --restart
+uxduck replay --close
+```
+
+Without a source it shows the replay open now, or opens the last flight when none is open. `--speed` takes 0.1 to 16. `--at` goes to seconds into the flight.
+
 ## Find the remaining commands
 
 ```sh
@@ -95,4 +106,4 @@ uxduck params definitions --help
 uxduck video --help
 ```
 
-Each subcommand lists its flags and examples. Remote watch and control workflows are still in preview; their availability depends on the build and account configuration.
+Each subcommand lists its flags and examples.

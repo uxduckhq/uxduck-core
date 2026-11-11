@@ -2,6 +2,8 @@
 //! `daemon.json`, and run until interrupted.
 
 pub mod agent;
+#[cfg(any(all(feature = "gamepad", target_os = "linux"), test))]
+mod bluetooth;
 pub mod controllers;
 pub mod data_plane;
 pub mod engine_task;
@@ -9,6 +11,7 @@ pub mod engine_task;
 mod gamepad_events;
 #[cfg(all(feature = "gamepad", target_os = "macos"))]
 pub mod hid;
+pub mod onboard;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 #[cfg(feature = "plugins")]
@@ -54,7 +57,7 @@ pub struct DaemonOptions {
     pub exit_on_stdin_close: bool,
     /// 0 picks a free port (tests).
     pub port: u16,
-    /// Only the implicit default may fall back when another user owns it.
+    /// Only the implicit default may reuse the saved port or fall back.
     pub port_fallback: bool,
     /// Development: the dev server's origin is allowed and is where
     /// `uxduck open` sends the browser.
@@ -79,6 +82,9 @@ pub struct DaemonOptions {
     pub headless: bool,
     /// Links to make sure exist at start, such as `uxduck forward`'s.
     pub links: Vec<uxduck_contracts::dto::link::LinkAddParams>,
+    /// `uxduck forward --onboard`: this computer's status goes out of every
+    /// forward (S295, ADR-0049).
+    pub onboard: Option<onboard::Onboard>,
     /// Check the release channel at start and daily (release builds only).
     pub update_check: bool,
     /// Where analytics go (ADR-0016 O16).
@@ -153,7 +159,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         path: data_dir.display().to_string(),
         source,
     })?;
-    let tcp = bind_port(options.port, options.port_fallback).await?;
+    let tcp = bind_profile_port(data_dir, options.port, options.port_fallback).await?;
     let port = tcp
         .local_addr()
         .map_or(options.port, |address| address.port());
@@ -193,7 +199,6 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     crate::tray::start(data_dir, engine.clone(), tray);
 
     start_finding(&engine, &options).await;
-    start_remote_view(&engine, data_dir).await;
     // Photos and recordings, together in `media`: the Video storage
     // category (ADR-0007, S150).
     let video = crate::video::start(options.video_port, &engine, media).await;
@@ -240,6 +245,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         dev: options.dev_origin.is_some(),
         started_us: SystemClock.now_us(),
     };
+    crate::listener_port::write(data_dir, port).map_err(|source| DaemonError::DataDir {
+        path: data_dir.display().to_string(),
+        source,
+    })?;
     paths::write_info(data_dir, &info).map_err(|source| DaemonError::DataDir {
         path: data_dir.display().to_string(),
         source,
@@ -261,6 +270,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         }
     }
 
+    // Install results live with their version now (FB-58). An older UXDuck's
+    // shared file only ever describes an install that is over.
+    let _ = std::fs::remove_file(data_dir.join("app-update-result"));
+    let installed = data_dir.clone();
+    tokio::task::spawn_blocking(move || crate::app_update::forget_installed(&installed));
     crate::app_update::start(engine.clone(), data_dir.clone(), port, options.update_check);
     watch(&engine, options.headless);
     let stop = run_until_stopped(&engine, &options, parent_closed).await;
@@ -354,6 +368,37 @@ async fn open_store_with_tray(
 
 /// How long a restarted daemon waits for its port and lock.
 const HANDOVER: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn bind_profile_port(
+    data_dir: &Path,
+    port: u16,
+    fallback: bool,
+) -> Result<tokio::net::TcpListener, DaemonError> {
+    // An explicit --port (including zero) always wins. For ordinary launches,
+    // preserving the origin also preserves existing tabs and browser storage.
+    if fallback {
+        let previous =
+            crate::listener_port::read(data_dir).map_err(|source| DaemonError::DataDir {
+                path: data_dir.display().to_string(),
+                source,
+            })?;
+        if let Some(previous) = previous {
+            match bind_port(previous, false).await {
+                Ok(listener) => return Ok(listener),
+                Err(DaemonError::Port { source, .. })
+                    if source.kind() == std::io::ErrorKind::AddrInUse =>
+                {
+                    tracing::warn!(
+                        previous,
+                        "previous loopback port is occupied; selecting another listener"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    bind_port(port, fallback).await
+}
 
 async fn bind_port(port: u16, fallback: bool) -> Result<tokio::net::TcpListener, DaemonError> {
     let deadline = std::time::Instant::now() + HANDOVER;
@@ -492,6 +537,7 @@ fn start_engine(
         data_dir.join("tlogs"),
         plugin_feed,
         simulators,
+        options.onboard,
     );
     agent::start(
         agent_inbox,
@@ -541,7 +587,7 @@ async fn start_online(
     let sync = crate::sync::start(data_dir, FileCredentials::new(data_dir), engine.clone());
     let _ = engine.run(move |e| e.set_sync(Box::new(sync))).await;
     // This computer's connection to its account (S78): idle until signed in.
-    crate::edge::start(data_dir, FileCredentials::new(data_dir), engine.clone());
+    crate::edge::start(FileCredentials::new(data_dir), engine.clone());
     // Flights to the account (S82): the spool cuts, and uploads while signed in.
     crate::uploader::start(data_dir, FileCredentials::new(data_dir), engine.clone());
     // Parameter definitions (S67): the catalogue, fetched when a vehicle
@@ -550,6 +596,11 @@ async fn start_online(
         crate::params::Host::new(data_dir, crate::params::Source::from_env(), engine.clone());
     let _ = engine
         .run(move |e| e.set_definitions(Box::new(definitions)))
+        .await;
+    // Companion computers over SSH (S296).
+    let companions = crate::companions::Host::new(data_dir, engine.clone());
+    let _ = engine
+        .run(move |e| e.set_companions(Box::new(companions)))
         .await;
     // Firmware (S189): ArduPilot's list and releases fetched when asked,
     // and the board's bootloader on USB.
@@ -582,13 +633,6 @@ async fn start_finding(engine: &EngineHandle, options: &DaemonOptions) {
     let finder = crate::find::Finder::new(engine.clone(), options.find.clone());
     let _ = engine.run(move |e| e.set_discovery(Box::new(finder))).await;
     crate::find::watch_usb(engine.clone());
-}
-
-/// Remote vehicles in the app (S86): viewers on the relay while a window
-/// watches another of the account's computers.
-async fn start_remote_view(engine: &EngineHandle, data_dir: &std::path::Path) {
-    let port = crate::remote_view::start(data_dir.to_path_buf(), engine.clone());
-    let _ = engine.run(move |e| e.set_remote_view(Box::new(port))).await;
 }
 
 async fn start_analytics(engine: &EngineHandle, options: &DaemonOptions, fresh: bool) {
@@ -695,6 +739,7 @@ fn open_interfaces(
 fn watch(engine: &EngineHandle, headless: bool) {
     tokio::spawn(expire_approvals(engine.clone()));
     tokio::spawn(check_storage(engine.clone()));
+    tokio::spawn(crate::replay::clock(engine.clone()));
     if !headless {
         tokio::spawn(check_login_item(engine.clone()));
     }
@@ -743,6 +788,8 @@ async fn expire_approvals(engine: EngineHandle) {
         if engine
             .run(move |e| {
                 e.expire_approvals(now);
+                // Watch links still to end after an unreachable account (UXD-44).
+                e.watch_links_end_tick();
                 // Motors whose press stopped coming (S188).
                 e.expire_spins(now);
                 // Firmware installs waiting for the vehicle (S189).
@@ -766,6 +813,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.review_idle_simulations();
                 // Take-offs whose simulator has gone quiet.
                 e.drive_launches();
+                // Plans flown in simulation (S293).
+                e.drive_plan_runs();
             })
             .await
             .is_err()
@@ -812,6 +861,50 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod port_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn installer_stop_start_reuses_the_fallback_while_the_default_remains_busy() {
+        let directory = tempfile::tempdir().unwrap();
+        let busy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let default = busy.local_addr().unwrap().port();
+        let first = bind_profile_port(directory.path(), default, true)
+            .await
+            .unwrap();
+        let selected = first.local_addr().unwrap().port();
+        assert_ne!(selected, default);
+        crate::listener_port::write(directory.path(), selected).unwrap();
+        drop(first);
+        // A clean stop removes daemon.json, but the reconnect hint survives.
+        assert!(!directory.path().join("daemon.json").exists());
+        let second = bind_profile_port(directory.path(), default, true)
+            .await
+            .unwrap();
+        assert_eq!(second.local_addr().unwrap().port(), selected);
+    }
+
+    #[tokio::test]
+    async fn explicit_ports_override_the_cache_and_an_occupied_cache_can_fall_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let cached = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let cached_port = cached.local_addr().unwrap().port();
+        crate::listener_port::write(directory.path(), cached_port).unwrap();
+        let explicit = bind_profile_port(directory.path(), 0, false).await.unwrap();
+        assert_ne!(explicit.local_addr().unwrap().port(), cached_port);
+        let next = bind_profile_port(directory.path(), cached_port, true)
+            .await
+            .unwrap();
+        assert_ne!(next.local_addr().unwrap().port(), cached_port);
+        assert!(next.local_addr().unwrap().ip().is_loopback());
+        assert!(
+            bind_profile_port(directory.path(), cached_port, false)
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn only_an_implicit_port_can_fall_back_to_a_private_listener() {

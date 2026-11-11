@@ -31,12 +31,18 @@ You see one result at the end, such as "Passed. Home with 31% left.", and your b
 
 Once you know the basics:
 
-- **Plan the survey**: plan a mission over the field on the Mission tab, upload it and fly it in Auto.
+- **Plan the survey**: plan a mission over the field on the Missions page, upload it and fly it in Auto.
 - **Timed delivery**: from the ground, reach the drop point, stay 20 s, and land at home within 4 minutes.
-- **Hold the box**: with a controller, keep it in the box for a minute in Loiter, then in Stabilize.
-- **Through the gates**: with a controller, fly through five gates in order.
+- **Hold the box**: by hand, keep it in the box for a minute in Loiter, then in Stabilize. On the VTOL, QLOITER then QHOVER.
+- **Through the gates**: by hand, fly through five gates in order. On the VTOL and the plane, in FBWB, with the gates 300 m out.
 - **Parameter puzzle**: it is too slow to reach the ring in time; find the parameter and fix it.
+
+## Flying by hand
+
+The exercises flown by hand need a controller or your keyboard flying the vehicle; **Open Cockpit** in the exercise opens the Cockpit's **Controls** subtab with the keyboard picked under **Fly with**; pick a controller there instead to fly with it. Get started's **Fly it by hand** opens the first of them.
+
+A vehicle in a mode that flies itself, such as GUIDED or a plane's LOITER, barely answers the sticks. While a controller or the keyboard flies it, the Cockpit's status line names it (pressed, it opens **Controls**), and **Controls** says so in one line with **Open Modes**: the assisted and manual ones are those you steer, such as QLOITER (it hovers and holds its place) on the VTOL or LOITER on a multicopter. Disarmed, the line says to arm it next, or, in a mode that flies itself, to choose a mode to steer first. Nothing changes the mode until you choose one.
 
 Only commands you send count, not the agent's. Exercises never run on a real vehicle.
 
-From a terminal: `uxduck practice list`, `uxduck practice start mode-tour --vehicle Alpha`, `uxduck practice status`. `uxduck dev replay flight.tlog --practice bring-it-home` judges a recorded flight again and prints each step and the result.
+From a terminal: `uxduck practice list`, `uxduck practice start mode-tour --vehicle "Sim 1"`, `uxduck practice status`. `uxduck dev replay flight.tlog --practice bring-it-home` judges a recorded flight again and prints each step and the result.

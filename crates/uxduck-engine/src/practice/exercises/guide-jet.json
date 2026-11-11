@@ -7,10 +7,10 @@
   "guide": true,
   "goal": "A first flight: send it somewhere, change its mode and bring it home.",
   "start": {},
-  "features": [{ "id": "home", "label": "Home", "radiusM": 550 }],
+  "features": [{ "id": "home", "label": "Home", "radiusM": 4500 }],
   "steps": [
     {
-      "text": "Press Go to in the Cockpit tab, then click a place on the map.",
+      "text": "Press Go to under Guide in the Cockpit tab, then click a place on the map.",
       "hint": "Go to sends it to the place you clicked. A jet can't stop in the air, so it circles there.",
       "hintAfterS": 45,
       "all": [
@@ -19,7 +19,7 @@
       ]
     },
     {
-      "text": "Choose LOITER in the Mode menu in the Cockpit tab.",
+      "text": "Choose LOITER under Modes in the Cockpit tab.",
       "hint": "Loiter circles where it is.",
       "hintAfterS": 45,
       "all": [

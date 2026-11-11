@@ -1,0 +1,6 @@
+{
+  "method": "replay/open",
+  "params": {
+    "path": "/Users/pilot/Documents/flight.tlog"
+  }
+}

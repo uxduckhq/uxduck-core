@@ -18,6 +18,7 @@
     "datagrams": 51230,
     "pictures": 960,
     "keyframes": 10,
+    "recoveryPoints": 0,
     "lost": 0,
     "damaged": 0,
     "pesLengthMismatches": 1920,

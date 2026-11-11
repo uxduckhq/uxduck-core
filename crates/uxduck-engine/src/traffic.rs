@@ -22,6 +22,7 @@ use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::{LinkKind, LinkStatus};
 use uxduck_core::domain::notification::{NotificationKind, NotificationState, Severity, Subject};
+use uxduck_core::domain::plugin::PluginStatus;
 use uxduck_core::domain::telemetry::AltitudeFrame as TelemetryFrame;
 use uxduck_core::domain::traffic::{AltitudeFrame, TrafficCategory, TrafficReport};
 
@@ -275,6 +276,18 @@ impl Engine {
         }
     }
 
+    /// Why a traffic plugin stopped, in its row: its last note would
+    /// otherwise read as though it were still asking.
+    fn plugin_stopped(&self, id: &str) -> Option<String> {
+        let plugin = self.state.plugins.get(id)?;
+        (plugin.enabled && plugin.status == PluginStatus::Failed).then(|| {
+            plugin.detail.as_deref().map_or_else(
+                || "The plugin stopped".to_owned(),
+                |why| format!("The plugin stopped: {why}"),
+            )
+        })
+    }
+
     fn source_exists(&self, owner: &Owner) -> bool {
         match owner {
             Owner::Vehicle(id) => self.state.vehicles.contains_key(id),
@@ -440,10 +453,14 @@ impl Engine {
                     .collect(),
                 note: match &source.owner {
                     Owner::Receiver(id) => self.receiver_note(id).map(|(note, _)| note),
-                    _ => source.status.as_ref().and_then(|s| s.note.clone()),
+                    Owner::Plugin(id) => self
+                        .plugin_stopped(id)
+                        .or_else(|| source.status.as_ref().and_then(|s| s.note.clone())),
+                    Owner::Vehicle(_) => source.status.as_ref().and_then(|s| s.note.clone()),
                 },
                 problem: match &source.owner {
                     Owner::Receiver(id) => self.receiver_note(id).is_some_and(|(_, p)| p),
+                    Owner::Plugin(id) if self.plugin_stopped(id).is_some() => true,
                     _ => source.status.as_ref().is_some_and(|s| s.problem),
                 },
                 credit: source.status.as_ref().and_then(|s| s.credit.clone()),
@@ -454,6 +471,7 @@ impl Engine {
         for plugin in self.state.plugins.values() {
             let id = Owner::Plugin(plugin.id.clone()).source_id();
             if plugin.traffic_source && !self.traffic.sources.contains_key(&id) {
+                let stopped = self.plugin_stopped(&plugin.id);
                 sources.push(TrafficSource {
                     id,
                     kind: TrafficSourceKind::Plugin,
@@ -465,8 +483,8 @@ impl Engine {
                     aircraft: 0,
                     last_heard_at_ms: None,
                     refused: Vec::new(),
-                    note: plugin.description.clone(),
-                    problem: false,
+                    problem: stopped.is_some(),
+                    note: stopped.or_else(|| plugin.description.clone()),
                     credit: None,
                 });
             }
@@ -864,7 +882,7 @@ impl Engine {
             subject,
             title: format!("{name}'s traffic is paused"),
             body: Some(format!(
-                "{what} sent more than {FLOOD_PER_SECOND} reports in a second. UXDuck ignores it for {} seconds; the other sources carry on.",
+                "{what} sent more than {FLOOD_PER_SECOND} reports in a second. UXDuck ignores it for {} seconds while the other sources carry on.",
                 PAUSE_US / 1_000_000
             )),
             actions: Vec::new(),

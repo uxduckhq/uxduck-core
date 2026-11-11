@@ -1,11 +1,12 @@
 //! The spool (S82, ADR-0003 C2, "Durable telemetry"): what is waiting to be
 //! stored in the account. The data plane writes one tlog per link per run;
-//! the spool cuts what was written since the last cut into chunks, every
-//! 30 s or 1 MB, on record boundaries, compressed with zstd. A chunk's file
-//! is written and fsynced before its row, and its row and the tlog's cursor
-//! commit together, so a crash at any point leaves either a file with no row
-//! (deleted at start, and cut again) or a row with its file. A row whose
-//! file is missing sends its tlog's cursor back to where it began.
+//! a flight synced with its log has its time cut from its connection's tlogs into
+//! chunks of its own, named by the flight's id (ADR-0046 B1), about 1 MB
+//! each on record boundaries, compressed with zstd. Connections' tlogs are
+//! no longer sent as they are written. A chunk's file is written and
+//! fsynced before its row, so a crash at any point leaves either a file
+//! with no row (deleted at start) or a row with its file. A row whose file
+//! is missing goes, and its flight's log is cut again.
 //!
 //! The tlogs themselves are the computer's record and are never touched
 //! here; a chunk's file is deleted once the account acknowledged it.
@@ -22,12 +23,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-/// Cut at least this often while a tlog grows.
-pub const CUT_EVERY_US: u64 = 30_000_000;
-/// Or once this much is waiting.
+/// A flight's log is cut into chunks of about this much.
 pub const CUT_BYTES: u64 = 1 << 20;
-/// A tlog far behind its cursor, as after uploads were waiting, is caught
-/// up a chunk of about this much at a time, not read whole.
+/// A tlog is read a chunk of about this much at a time, not whole.
 const READ_AT_MOST: u64 = CUT_BYTES;
 /// A recording's segments last about this long (ADR-0003 C14).
 pub const SEGMENT_US: u64 = 10_000_000;
@@ -182,12 +180,10 @@ impl Spool {
         self.dir.join(name)
     }
 
-    /// While flights are not stored in the account (signed out, no
-    /// server, or the setting off): the tlogs' chunks waiting here go, but
-    /// not a flight's log someone asked for (`cut_flight`), and
-    /// each tlog goes back to where its first one began, to be cut again
-    /// once they are. The tlogs are the record; the chunks were only copies.
-    /// Returns how many went.
+    /// Chunks cut from whole connections' tlogs as they were written, as
+    /// UXDuck did before flights were synced one by one (ADR-0046 B1),
+    /// go; a flight's log (`cut_flight`) and recordings stay. The tlogs are
+    /// the record; the chunks were only copies. Returns how many went.
     ///
     /// # Errors
     /// The database cannot be written.
@@ -279,133 +275,6 @@ impl Spool {
             )?;
         }
         tx.commit()
-    }
-
-    /// Cuts the chunks that are due: from every tlog, what was written since
-    /// the last cut, once it is `every_us` old (30 s, `CUT_EVERY_US`), 1 MB,
-    /// or its tlog stopped growing; at most `limit` of them, so a round's
-    /// work stays small however many tlogs are behind.
-    /// Returns how many were cut.
-    ///
-    /// # Errors
-    /// The database or a chunk's file cannot be written.
-    pub fn cut_every(
-        &mut self,
-        now_us: u64,
-        idle_us: u64,
-        every_us: u64,
-        limit: usize,
-    ) -> std::io::Result<usize> {
-        let mut cut = 0;
-        let tlogs: Vec<PathBuf> = std::fs::read_dir(&self.tlogs)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "tlog"))
-            .collect();
-        for tlog in tlogs {
-            if cut >= limit {
-                break;
-            }
-            let Some(recording) = tlog.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
-                continue;
-            };
-            let (offset, cut_at, seq) = self.cursor(&recording, now_us)?;
-            // Only what was written since the last cut is read: the
-            // tlogs of every run stay here, gigabytes of them.
-            let metadata = std::fs::metadata(&tlog)?;
-            if metadata.len() <= offset {
-                continue;
-            }
-            let behind = metadata.len() - offset;
-            let fresh = read_range(&tlog, offset, behind.min(READ_AT_MOST))?;
-            let records = uxduck_mavlink::tlog::read(&fresh);
-            let consumed: usize = records.iter().map(|(_, frame)| 8 + frame.len()).sum();
-            if consumed == 0 {
-                continue;
-            }
-            let modified_us = metadata
-                .modified()
-                .ok()
-                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(now_us, |d| u64::try_from(d.as_micros()).unwrap_or(now_us));
-            let due = consumed as u64 >= CUT_BYTES
-                || behind > READ_AT_MOST
-                || now_us.saturating_sub(cut_at) >= every_us
-                || now_us.saturating_sub(modified_us) >= idle_us;
-            if !due {
-                continue;
-            }
-            let slice = &fresh[..consumed];
-            let compressed = zstd::bulk::compress(slice, 3)?;
-            let sha256 = hex(&Sha256::digest(&compressed));
-            let next = seq + 1;
-            let name = format!("{recording}/{next:06}-{sha256}.tlog.zst");
-            let path = self.path(&name);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            {
-                use std::io::Write as _;
-                let mut file = std::fs::File::create(&path)?;
-                file.write_all(&compressed)?;
-                file.sync_all()?;
-            }
-            let first_us = records.first().map_or(0, |r| r.0);
-            let last_us = records.last().map_or(0, |r| r.0);
-            let end = offset + consumed as u64;
-            let tx = self.db.transaction().map_err(std::io::Error::other)?;
-            tx.execute(
-                "insert or replace into chunk (name, recording, seq, size, sha256, first_us, last_us, start_offset, end_offset, state, source) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'written', null)",
-                params![
-                    name,
-                    recording,
-                    next,
-                    i(compressed.len() as u64),
-                    sha256,
-                    i(first_us),
-                    i(last_us),
-                    i(offset),
-                    i(end)
-                ],
-            )
-            .map_err(std::io::Error::other)?;
-            tx.execute(
-                "insert into cursor values (?1, ?2, ?3, ?4)
-                 on conflict(recording) do update set offset = ?2, cut_at_us = ?3, seq = ?4",
-                params![recording, i(end), i(now_us), next],
-            )
-            .map_err(std::io::Error::other)?;
-            tx.commit().map_err(std::io::Error::other)?;
-            cut += 1;
-        }
-        Ok(cut)
-    }
-
-    /// A tlog's cursor: how far it was cut, when, and its last chunk;
-    /// first seen, its 30 s start now.
-    fn cursor(&self, recording: &str, now_us: u64) -> std::io::Result<(u64, u64, u32)> {
-        self.db
-            .query_row(
-                "select offset, cut_at_us, seq from cursor where recording = ?1",
-                [recording],
-                |r| Ok((u(r.get(0)?), u(r.get(1)?), r.get(2)?)),
-            )
-            .optional()
-            .map_err(std::io::Error::other)?
-            .map_or_else(
-                || {
-                    self.db
-                        .execute(
-                            "insert into cursor values (?1, 0, ?2, 0)",
-                            params![recording, i(now_us)],
-                        )
-                        .map(|_| (0, now_us, 0))
-                },
-                Ok,
-            )
-            .map_err(std::io::Error::other)
     }
 
     /// Cuts the segments that are due from `recordings` (S83): the init
@@ -585,28 +454,28 @@ impl Spool {
     }
 
     /// Under disk pressure (S83, ADR-0003 "Eviction"): deletes ended
-    /// recordings, oldest first and those wholly in the account before any
-    /// other, until `need` bytes are free. Returns what went before it
-    /// reached the account, which the caller journals and tells.
+    /// recordings wholly in the account, oldest first, until `need` bytes
+    /// are free. A recording not wholly in the account is never deleted
+    /// here (2026-11-01): it stays until the operator removes it.
     ///
     /// # Errors
-    /// The database cannot be read or written.
-    pub fn evict(&mut self, ended: &[(Recording, u64)], need: u64) -> rusqlite::Result<Vec<Lost>> {
-        let mut order: Vec<(Option<(u64, u64)>, &Recording)> = Vec::new();
+    /// The database cannot be read.
+    pub fn evict(&mut self, ended: &[(Recording, u64)], need: u64) -> rusqlite::Result<()> {
+        let mut stored = Vec::new();
         for (recording, ended_at_us) in ended {
             if recording
                 .original
                 .as_ref()
                 .unwrap_or(&recording.path)
                 .exists()
+                && self.unstored(recording, *ended_at_us)?.is_none()
             {
-                order.push((self.unstored(recording, *ended_at_us)?, recording));
+                stored.push(recording);
             }
         }
-        order.sort_by_key(|(unstored, r)| (unstored.is_some(), r.started_at_us));
+        stored.sort_by_key(|r| r.started_at_us);
         let mut freed = 0;
-        let mut lost = Vec::new();
-        for (unstored, recording) in order {
+        for recording in stored {
             if freed >= need {
                 break;
             }
@@ -615,6 +484,7 @@ impl Spool {
             if std::fs::remove_file(main).is_err() {
                 continue;
             }
+            tracing::info!(file = %main.display(), "deleted a recording already in the account to free disk space");
             let _ = std::fs::remove_file(main.with_extension("klv"));
             let _ = std::fs::remove_file(main.with_extension("idx"));
             freed += size;
@@ -624,20 +494,8 @@ impl Spool {
                     freed += copy;
                 }
             }
-            self.db.execute(
-                "update chunk set state = 'lost'
-                 where recording = ?1 and state not in ('acknowledged', 'lost')",
-                [&recording.id],
-            )?;
-            if let Some((from_us, to_us)) = unstored {
-                lost.push(Lost {
-                    recording: recording.id.clone(),
-                    from_us,
-                    to_us,
-                });
-            }
         }
-        Ok(lost)
+        Ok(())
     }
 
     /// The oldest chunks not acknowledged yet, up to `limit`.
@@ -684,6 +542,44 @@ impl Spool {
             .filter(|(chunk, _)| self.is_asked(&chunk.name))
             .take(limit)
             .collect())
+    }
+
+    /// The flights whose logs have chunks waiting, by flight id.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn asked_recordings(&self) -> rusqlite::Result<Vec<String>> {
+        let mut query = self.db.prepare(
+            "select distinct recording from chunk
+             where asked = 1 and state not in ('acknowledged', 'lost')",
+        )?;
+        query.query_map([], |r| r.get(0))?.collect()
+    }
+
+    /// A flight's log no longer wanted (ADR-0046 B2): its chunks not in the
+    /// account yet go, rows and files. Returns how many.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn drop_recording(&mut self, recording: &str) -> rusqlite::Result<usize> {
+        let names: Vec<String> = {
+            let mut query = self.db.prepare(
+                "select name from chunk
+                 where recording = ?1 and asked = 1 and state not in ('acknowledged', 'lost')",
+            )?;
+            query
+                .query_map([recording], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        self.db.execute(
+            "delete from chunk
+             where recording = ?1 and asked = 1 and state not in ('acknowledged', 'lost')",
+            [recording],
+        )?;
+        for name in &names {
+            let _ = std::fs::remove_file(self.path(name));
+        }
+        Ok(names.len())
     }
 
     fn is_asked(&self, name: &str) -> bool {
@@ -784,6 +680,35 @@ impl Spool {
                 if past {
                     break;
                 }
+            }
+        }
+        if !pending.is_empty() {
+            seq += 1;
+            self.write_asked(recording, seq, &pending, first_us, last_us)?;
+        }
+        Ok(seq)
+    }
+
+    /// A log opened from elsewhere, kept for the account under a flight's
+    /// name (ADR-0039 R11): its records as asked chunks, which the
+    /// uploader sends as it sends one flight's log. Returns how many.
+    ///
+    /// # Errors
+    /// When a chunk cannot be written.
+    pub fn keep_bytes(&mut self, recording: &str, bytes: &[u8]) -> std::io::Result<u32> {
+        let mut seq = 0u32;
+        let mut pending: Vec<u8> = Vec::new();
+        let (mut first_us, mut last_us) = (0u64, 0u64);
+        for (stamp, frame) in uxduck_mavlink::tlog::read(bytes) {
+            if pending.is_empty() {
+                first_us = stamp;
+            }
+            last_us = stamp;
+            let _ = uxduck_mavlink::tlog::record(&mut pending, stamp, frame);
+            if pending.len() as u64 >= CUT_BYTES {
+                seq += 1;
+                self.write_asked(recording, seq, &pending, first_us, last_us)?;
+                pending.clear();
             }
         }
         if !pending.is_empty() {
@@ -953,10 +878,7 @@ mod tests {
             1,
             "once"
         );
-        // The rest of the tlogs, cut as usual, then let go: the flight's stays.
-        spool
-            .cut_every(u64::MAX / 2, 0, CUT_EVERY_US, usize::MAX)
-            .unwrap();
+        // Letting go of what whole tlogs left keeps the flight's.
         spool.release().unwrap();
         let asked = spool.waiting_asked(10).unwrap();
         assert_eq!(asked.len(), 1);
@@ -983,64 +905,17 @@ mod tests {
     }
 
     #[test]
-    fn a_growing_tlog_is_cut_into_chunks_that_reassemble_it() {
-        let data = tempfile::tempdir().unwrap();
-        let tlogs = data.path().join("tlogs");
-        tlog_with(&tlogs, "udp-1", 10, 1_000_000);
-        let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
-        // Not due: fresh, small and still growing.
-        assert_eq!(
-            spool
-                .cut_every(2_000_000, u64::MAX, CUT_EVERY_US, usize::MAX)
-                .unwrap(),
-            0
-        );
-        // 30 s on: cut.
-        assert_eq!(
-            spool
-                .cut_every(2_000_000 + CUT_EVERY_US, u64::MAX, CUT_EVERY_US, usize::MAX)
-                .unwrap(),
-            1
-        );
-        tlog_with(&tlogs, "udp-1", 5, 20_000_000);
-        // It stopped growing: cut what is left.
-        assert_eq!(
-            spool
-                .cut_every(3_000_000 + CUT_EVERY_US, 0, CUT_EVERY_US, usize::MAX)
-                .unwrap(),
-            1
-        );
-        let waiting = spool.waiting(10).unwrap();
-        assert_eq!(waiting.len(), 2);
-        assert_eq!(waiting[0].0.seq, 1);
-        assert_eq!(
-            (waiting[0].0.first_us, waiting[0].0.last_us),
-            (1_000_000, 10_000_000)
-        );
-        assert!(waiting[0].0.name.starts_with("udp-1/000001-"));
-        // Together they are the tlog, byte for byte.
-        let mut joined = Vec::new();
-        for (chunk, _) in &waiting {
-            joined.extend(zstd::bulk::decompress(&spool.bytes(chunk).unwrap(), 1 << 24).unwrap());
-        }
-        assert_eq!(joined, std::fs::read(tlogs.join("udp-1.tlog")).unwrap());
-        assert_eq!(spool.backlog().unwrap().0, 2);
-
-        spool.mark(&waiting[0].0.name, State::Acknowledged).unwrap();
-        assert!(spool.bytes(&waiting[0].0).is_err(), "its file is gone");
-        assert_eq!(spool.backlog().unwrap().0, 1);
-    }
-
-    #[test]
     fn a_crash_between_file_and_row_is_cut_again() {
         let data = tempfile::tempdir().unwrap();
         let tlogs = data.path().join("tlogs");
-        tlog_with(&tlogs, "udp-1", 4, 1_000_000);
+        tlog_with(&tlogs, "udp-1-1", 4, 1_000_000);
         let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
-        spool.cut_every(1, 0, CUT_EVERY_US, usize::MAX).unwrap();
+        spool
+            .cut_flight("fl1", "udp-1", 1_000_000, 4_000_000)
+            .unwrap();
         let first = spool.waiting(1).unwrap()[0].0.clone();
         // A file with no row, as a crash before the commit leaves.
-        let stray = data.path().join("spool/udp-1/000002-dead.tlog.zst");
+        let stray = data.path().join("spool/fl1/000002-dead.tlog.zst");
         std::fs::write(&stray, b"half").unwrap();
         // A row whose file vanished.
         std::fs::remove_file(data.path().join("spool").join(&first.name)).unwrap();
@@ -1048,62 +923,41 @@ mod tests {
         let mut spool = Spool::open(data.path(), tlogs).unwrap();
         assert!(!stray.exists(), "a file with no row goes");
         assert_eq!(spool.backlog().unwrap().0, 0, "the row with no file goes");
-        // And the tlog is cut again from where that chunk began.
-        spool.cut_every(2, 0, CUT_EVERY_US, usize::MAX).unwrap();
+        // And the flight's log is cut again, the same.
+        spool
+            .cut_flight("fl1", "udp-1", 1_000_000, 4_000_000)
+            .unwrap();
         let again = spool.waiting(1).unwrap()[0].0.clone();
         assert_eq!((again.seq, again.first_us), (1, first.first_us));
         assert_eq!(again.sha256, first.sha256, "the same bytes, the same name");
     }
 
+    /// A flight deleted from the account (ADR-0046 B2): what waits of its log goes, and
+    /// other flights' logs stay.
     #[test]
-    fn a_tlog_far_behind_is_caught_up_a_chunk_at_a_time_and_a_round_cuts_at_most_its_limit() {
+    fn a_flights_log_no_longer_wanted_goes_and_the_others_stay() {
         let data = tempfile::tempdir().unwrap();
         let tlogs = data.path().join("tlogs");
-        // About 2.5 MB of one tlog, and a small second one.
-        tlog_with(&tlogs, "udp-1", 90_000, 1_000_000);
-        tlog_with(&tlogs, "udp-2", 10, 1_000_000);
-        let mut spool = Spool::open(data.path(), tlogs.clone()).unwrap();
-        assert_eq!(spool.cut_every(1, 0, CUT_EVERY_US, 1).unwrap(), 1);
-        let mut rounds = 1;
-        while spool
-            .cut_every(1 + rounds, 0, CUT_EVERY_US, usize::MAX)
-            .unwrap()
-            > 0
-        {
-            rounds += 1;
-            assert!(rounds < 10, "caught up in a few rounds");
-        }
-        let waiting = spool.waiting(100).unwrap();
-        let mut joined = Vec::new();
-        for (chunk, _) in waiting.iter().filter(|(c, _)| c.recording == "udp-1") {
-            let bytes = zstd::bulk::decompress(&spool.bytes(chunk).unwrap(), 1 << 24).unwrap();
-            assert!(bytes.len() as u64 <= READ_AT_MOST, "no chunk is read whole");
-            joined.extend(bytes);
-        }
-        assert!(
-            waiting.len() >= 4,
-            "udp-1 in pieces of about 1 MB, and udp-2"
-        );
-        assert_eq!(joined, std::fs::read(tlogs.join("udp-1.tlog")).unwrap());
-    }
-
-    #[test]
-    fn released_chunks_go_and_are_cut_again_the_same_once_flights_are_stored() {
-        let data = tempfile::tempdir().unwrap();
-        let tlogs = data.path().join("tlogs");
-        tlog_with(&tlogs, "udp-1", 4, 1_000_000);
+        tlog_with(&tlogs, "udp-1-1", 20, 1_000_000);
         let mut spool = Spool::open(data.path(), tlogs).unwrap();
-        spool.cut_every(1, 0, CUT_EVERY_US, usize::MAX).unwrap();
-        let first = spool.waiting(1).unwrap()[0].0.clone();
-        let file = data.path().join("spool").join(&first.name);
+        spool
+            .cut_flight("fl1", "udp-1", 1_000_000, 5_000_000)
+            .unwrap();
+        spool
+            .cut_flight("fl2", "udp-1", 10_000_000, 15_000_000)
+            .unwrap();
+        let mut asked = spool.asked_recordings().unwrap();
+        asked.sort();
+        assert_eq!(asked, ["fl1", "fl2"]);
+        let file = data
+            .path()
+            .join("spool")
+            .join(&spool.waiting(1).unwrap()[0].0.name);
         assert!(file.exists());
-        assert_eq!(spool.release().unwrap(), 1);
+        assert_eq!(spool.drop_recording("fl1").unwrap(), 1);
         assert!(!file.exists(), "its file goes");
-        assert_eq!(spool.backlog().unwrap().0, 0);
-        assert_eq!(spool.release().unwrap(), 0, "nothing more to let go");
-        spool.cut_every(2, 0, CUT_EVERY_US, usize::MAX).unwrap();
-        let again = spool.waiting(1).unwrap()[0].0.clone();
-        assert_eq!((again.seq, &again.sha256), (1, &first.sha256));
+        assert_eq!(spool.asked_recordings().unwrap(), ["fl2"]);
+        assert_eq!(spool.backlog().unwrap().0, 1);
     }
 
     /// A recording as the recorder writes it: the init segment, then a
@@ -1132,6 +986,7 @@ mod tests {
                     annex_b: &key,
                     duration: 90_000,
                     key: true,
+                    composition_offset: 0,
                 }],
             ));
         }
@@ -1191,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_deleted_before_it_went_is_lost_with_its_range_and_eviction_keeps_it_for_last() {
+    fn a_recording_deleted_before_it_went_is_lost_with_its_range_and_eviction_never_takes_it() {
         let data = tempfile::tempdir().unwrap();
         let video = data.path().join("video");
         std::fs::create_dir_all(&video).unwrap();
@@ -1221,19 +1076,14 @@ mod tests {
             .collect();
         // Room for one: the one already stored goes, and nothing is lost.
         let one = std::fs::metadata(&recordings[0].path).unwrap().len();
-        assert_eq!(spool.evict(&ended, one).unwrap(), []);
+        spool.evict(&ended, one).unwrap();
         assert!(!recordings[0].path.exists());
-        // Room for another: the oldest of the rest, with what it had not sent.
-        let lost = spool.evict(&ended, one).unwrap();
-        assert_eq!(
-            lost,
-            [Lost {
-                recording: "vr2".into(),
-                from_us: 200_000_000,
-                to_us: 212_000_000
-            }]
-        );
+        // Room for all of it: nothing else is wholly in the account, so
+        // nothing else goes, not even the one sent in part.
+        spool.evict(&ended, u64::MAX).unwrap();
+        assert!(recordings[1].path.exists());
         assert!(recordings[2].path.exists());
+        assert_eq!(spool.find_lost().unwrap(), []);
         // Deleted by hand: found lost on the next round, once.
         std::fs::remove_file(&recordings[2].path).unwrap();
         let lost = spool.find_lost().unwrap();
@@ -1246,6 +1096,31 @@ mod tests {
             }]
         );
         assert_eq!(spool.find_lost().unwrap(), []);
-        assert_eq!(spool.backlog().unwrap(), (0, 0));
+        assert!(
+            spool.backlog().unwrap().0 > 0,
+            "the second still waits to go"
+        );
+    }
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+
+    #[test]
+    fn an_opened_log_is_kept_as_one_flights_asked_chunks() {
+        let data = tempfile::tempdir().unwrap();
+        let mut spool = Spool::open(data.path(), data.path().join("tlogs")).unwrap();
+        let mut log = Vec::new();
+        for i in 0..100u64 {
+            let frame = uxduck_mavlink::sim::heartbeat_frame(1, 1, 0);
+            uxduck_mavlink::tlog::record(&mut log, 1_790_000_000_000_000 + i * 1_000_000, &frame)
+                .unwrap();
+        }
+        assert_eq!(spool.keep_bytes("flabc", &log).unwrap(), 1);
+        let asked = spool.waiting_asked(10).unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].0.recording, "flabc");
+        assert_eq!(asked[0].0.first_us, 1_790_000_000_000_000);
     }
 }

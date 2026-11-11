@@ -1,0 +1,42 @@
+{
+  "own": [
+    {
+      "id": "own-3f9a1c2b7d4e",
+      "label": "Acme additions",
+      "firmware": "ArduCopter",
+      "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+      "parameterCount": 1,
+      "addedAtUs": 1790000000000000
+    }
+  ],
+  "catalogue": "ready",
+  "catalogueSets": 312,
+  "sets": [
+    {
+      "id": "arducopter-latest",
+      "firmware": "ArduCopter",
+      "version": "latest",
+      "commit": "cccc0000cccc0000cccc0000cccc0000cccc0000",
+      "file": {
+        "name": "arducopter-latest.json.gz",
+        "url": "https://definitions.uxduck.com/sets/arducopter-latest.json.gz",
+        "size": 412000,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "sourceUrl": "https://github.com/ArduPilot/ardupilot/tree/cccc0000cccc0000cccc0000cccc0000cccc0000"
+    },
+    {
+      "id": "arducopter-4.5.7",
+      "firmware": "ArduCopter",
+      "version": "4.5.7",
+      "commit": "2a3dc4b7bf0000000000000000000000000000",
+      "file": {
+        "name": "arducopter-4.5.7.json.gz",
+        "url": "https://definitions.uxduck.com/sets/arducopter-4.5.7.json.gz",
+        "size": 409000,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sourceUrl": "https://github.com/ArduPilot/ardupilot/tree/2a3dc4b7bf0000000000000000000000000000"
+    }
+  ]
+}

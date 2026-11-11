@@ -104,6 +104,7 @@ impl Engine {
             attempts: 0,
             client_id: actor().client_id,
             operator_id: None,
+            sent_by: None,
             remote: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
@@ -125,29 +126,51 @@ impl Engine {
     /// to record (S145): by hand or while armed whether or not the picture
     /// arrives, since the camera records what the downlink loses; "always"
     /// while the camera sends, as UXDuck's recording does.
-    fn review_vehicle_camera(&mut self, source: &VideoSource) {
-        let wanted = source.vehicle_camera
-            && match self.recording_intent(source) {
+    fn review_vehicle_cameras(&mut self) {
+        use uxduck_core::domain::command::ReceiptStatus;
+
+        // These commands address every onboard camera, not just this source's
+        // stream. A second stream must neither start them twice nor stop them
+        // while another stream still asks for recording.
+        let wanted: std::collections::BTreeSet<_> = self
+            .state
+            .video_sources
+            .values()
+            .filter(|source| source.vehicle_camera)
+            .filter(|source| match self.recording_intent(source) {
                 Some(RecordingTrigger::Always) => source.state == VideoState::Receiving,
                 Some(_) => true,
                 None => false,
-            };
-        let running = self.video.camera_recording.get(&source.id).cloned();
-        match (wanted, running, source.vehicle_id.clone()) {
-            (true, None, Some(vehicle_id)) => {
-                if let Some(receipt) =
-                    self.tell_vehicle_camera(&vehicle_id, VIDEO_START_CAPTURE, vec![0.0, 0.0])
-                {
-                    self.video
-                        .camera_recording
-                        .insert(source.id.clone(), (vehicle_id, receipt));
-                }
+            })
+            .filter_map(|source| source.vehicle_id.clone())
+            .collect();
+        for vehicle_id in &wanted {
+            if !self.video.camera_recording.contains_key(vehicle_id)
+                && let Some(receipt) =
+                    self.tell_vehicle_camera(vehicle_id, VIDEO_START_CAPTURE, vec![0.0, 0.0])
+            {
+                self.video
+                    .camera_recording
+                    .insert(vehicle_id.clone(), receipt);
             }
-            (false, Some((vehicle_id, _)), _) => {
-                self.video.camera_recording.remove(&source.id);
+        }
+        for (vehicle_id, receipt_id) in self.video.camera_recording.clone() {
+            if wanted.contains(&vehicle_id) {
+                continue;
+            }
+            self.video.camera_recording.remove(&vehicle_id);
+            // A definitive refusal/not-sent means there is no recording from
+            // this start to stop. Unknown or timed-out starts still need Stop:
+            // the camera may have acted even when its acknowledgement was lost.
+            let refused = self.state.receipts.get(&receipt_id).is_some_and(|receipt| {
+                matches!(
+                    receipt.status,
+                    ReceiptStatus::Rejected | ReceiptStatus::NotSent
+                )
+            });
+            if !refused {
                 self.tell_vehicle_camera(&vehicle_id, VIDEO_STOP_CAPTURE, vec![0.0]);
             }
-            _ => {}
         }
     }
 
@@ -179,9 +202,9 @@ impl Engine {
             return;
         }
         self.review_video_demand();
+        self.review_vehicle_cameras();
         let sources: Vec<VideoSource> = self.state.video_sources.values().cloned().collect();
         for source in sources {
-            self.review_vehicle_camera(&source);
             let wanted = (source.state == VideoState::Receiving)
                 .then(|| self.recording_intent(&source))
                 .flatten();
@@ -216,13 +239,16 @@ impl Engine {
             trigger,
             capture: source.capture.clone(),
             file: source.file.clone(),
-            camera_receipt_id: self
-                .video
-                .camera_recording
-                .get(&source.id)
-                .map(|(_, receipt)| receipt.clone()),
+            camera_receipt_id: source
+                .vehicle_id
+                .as_ref()
+                .filter(|_| source.vehicle_camera)
+                .and_then(|id| self.video.camera_recording.get(id))
+                .cloned(),
             sound: false,
             file_name: None,
+            flight_id: None,
+            alignment: None,
             version: 1,
         };
         self.video
@@ -343,6 +369,8 @@ impl Engine {
             .video_recordings
             .values()
             .filter(|r| r.state != RecordingState::Recording)
+            // A video added from elsewhere stays where it was (S208).
+            .filter(|r| r.alignment.is_none())
             .filter(|r| settled(r.ended_at_us.unwrap_or(r.started_at_us)))
             .filter(|r| !present.contains(&r.file()))
             .map(|r| r.id.clone())
@@ -365,7 +393,7 @@ impl Engine {
         recordings
     }
 
-    fn forget(&mut self, recording: VideoRecording) {
+    pub(crate) fn forget(&mut self, recording: VideoRecording) {
         self.commit_as(
             actor(),
             Change::VideoRecordingRemoved {
@@ -375,18 +403,46 @@ impl Engine {
         self.video.forgotten.insert(recording.id.clone(), recording);
     }
 
-    /// The recordings to store in the account (S83, ADR-0003 C17): none
-    /// with "Store flights and recordings in my account" off.
+    /// The recordings to store in the account (S83, ADR-0003 C17), on a
+    /// plan that takes video (ADR-0046 B4): every one while real flights
+    /// sync automatically with "What to sync" at video (B8, B11), else
+    /// those of flights synced with their video, by the flight or its
+    /// vehicle over its time, as the Logbook counts a flight's video.
     #[must_use]
     pub fn video_for_spool(&self) -> Vec<SpoolVideo> {
         let settings = &self.state.settings;
-        if !settings.store_flights {
+        if !self.may_upload_video() {
             return Vec::new();
         }
+        let every = settings.store_flights
+            && settings.sync_content == uxduck_core::domain::settings::SyncContent::Video;
+        let flights: Vec<_> = self
+            .state
+            .flights
+            .values()
+            .filter(|f| f.keep && f.sync_video)
+            .collect();
+        let of_flight = |r: &VideoRecording| {
+            flights.iter().any(|f| {
+                let ends = r
+                    .ended_at_us
+                    .unwrap_or_else(|| r.started_at_us.saturating_add(r.duration_us));
+                let ends = if r.state == RecordingState::Recording {
+                    u64::MAX
+                } else {
+                    ends
+                };
+                (r.flight_id.as_deref() == Some(f.id.as_str())
+                    || r.vehicle_id.as_deref() == Some(f.vehicle_id.as_str()))
+                    && r.started_at_us < f.ended_at_us.unwrap_or(u64::MAX)
+                    && ends > f.armed_at_us
+            })
+        };
         self.state
             .video_recordings
             .values()
             .filter(|r| r.bytes > 0 || r.state == RecordingState::Recording)
+            .filter(|r| every || of_flight(r))
             .map(|r| {
                 let ended = r.state != RecordingState::Recording;
                 SpoolVideo {
@@ -400,9 +456,10 @@ impl Engine {
             .collect()
     }
 
-    /// Part of a recording went before it reached the account: journaled
-    /// with its exact range, and told (ADR-0003 "Eviction").
-    pub fn video_lost(&mut self, recording_id: String, from_us: u64, to_us: u64, evicted: bool) {
+    /// Part of a recording was deleted by hand before it reached the
+    /// account: journaled with its exact range, and told (ADR-0003
+    /// "Eviction"). UXDuck itself never deletes one that has not reached it.
+    pub fn video_lost(&mut self, recording_id: String, from_us: u64, to_us: u64) {
         let recording = self
             .state
             .video_recordings
@@ -415,7 +472,7 @@ impl Engine {
                 recording: recording_id,
                 from_us,
                 to_us,
-                evicted,
+                evicted: false,
             },
         );
         let Some(recording) = recording else {
@@ -438,20 +495,11 @@ impl Engine {
             subject: Subject::VideoSource {
                 id: recording.source_id.clone(),
             },
-            title: if evicted {
-                format!("Part of a recording{from} wasn't uploaded")
-            } else {
-                format!("A recording{from} was deleted before {range} reached your account")
-            },
-            body: Some(if evicted {
-                format!(
-                    "UXDuck deleted it to free disk space before {range} reached your account. \
-                     The rest of the recording, and the flight's log, are in your account."
-                )
-            } else {
+            title: format!("A recording{from} was deleted before {range} reached your account"),
+            body: Some(
                 "That part is gone. The rest of the recording, and the flight's log, are in your account."
-                    .into()
-            }),
+                    .into(),
+            ),
             actions: Vec::new(),
             condition: None,
             report: Some("recording-lost".into()),
@@ -649,9 +697,11 @@ impl Engine {
         };
         let file = recording.file();
         port.allow_playback(&token, &recording.id, &file);
-        let kept_as_ts = std::path::Path::new(&file)
-            .extension()
-            .is_some_and(|e| e == "ts");
+        // A video added from elsewhere (S208) is offered as it is played.
+        let kept_as_ts = recording.alignment.is_none()
+            && std::path::Path::new(&file)
+                .extension()
+                .is_some_and(|e| e == "ts");
         Ok(VideoPlaybackResult {
             path: format!("/recordings/{}.mp4?token={token}", recording.id),
             original_path: kept_as_ts

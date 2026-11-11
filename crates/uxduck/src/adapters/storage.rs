@@ -32,7 +32,11 @@ fn places(data_dir: &Path, category: StorageCategory) -> Vec<PathBuf> {
             [file_prefixed("uxduck.db"), file_prefixed("analytics.db")].concat()
         }
         StorageCategory::Backups => vec![data_dir.join("backups")],
-        StorageCategory::Logs => vec![data_dir.join("logs")],
+        StorageCategory::Logs => [
+            vec![data_dir.join("logs")],
+            file_prefixed("desktop-app.log"),
+        ]
+        .concat(),
         StorageCategory::Plugins => vec![data_dir.join("plugins")],
         StorageCategory::Video => vec![
             crate::paths::media_dir(data_dir),
@@ -45,6 +49,22 @@ fn places(data_dir: &Path, category: StorageCategory) -> Vec<PathBuf> {
         StorageCategory::DemoVideos => vec![data_dir.join("cache/demo-videos")],
         StorageCategory::VehicleFiles => vec![crate::vehicle_files::dir(data_dir)],
     }
+}
+
+/// The folder to show for a category, and the file to select in it: its
+/// first place that exists. None when it keeps nothing yet.
+#[must_use]
+pub fn place_to_reveal(
+    data_dir: &Path,
+    category: StorageCategory,
+) -> Option<(PathBuf, Option<PathBuf>)> {
+    let place = places(data_dir, category)
+        .into_iter()
+        .find(|p| p.exists())?;
+    if place.is_dir() {
+        return Some((place, None));
+    }
+    Some((place.parent()?.to_owned(), Some(place)))
 }
 
 /// Every file under `path`, or `path` itself.
@@ -98,9 +118,20 @@ pub fn report(data_dir: &Path) -> StorageReport {
             )
         })
         .collect();
+    let places = StorageCategory::ALL
+        .iter()
+        .map(|category| {
+            let found = places(data_dir, *category)
+                .iter()
+                .map(|place| place.display().to_string())
+                .collect();
+            (*category, found)
+        })
+        .collect();
     StorageReport {
         data_dir: data_dir.display().to_string(),
         categories,
+        places,
         free_bytes: fs4::available_space(data_dir).ok(),
         total_bytes: fs4::total_space(data_dir).ok(),
     }
@@ -124,7 +155,7 @@ pub fn delete_older(data_dir: &Path, category: StorageCategory, cutoff_us: u64) 
         if old && std::fs::remove_file(&path).is_ok() {
             deleted.files += 1;
             deleted.bytes += meta.len();
-            tracing::info!(file = %path.display(), "deleted by the storage policy");
+            tracing::info!(?category, file = %path.display(), "deleted by the storage policy");
         }
     }
     deleted
@@ -170,6 +201,9 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("tlogs")).unwrap();
         std::fs::write(dir.path().join("tlogs/a.tlog"), [0u8; 100]).unwrap();
         std::fs::write(dir.path().join("events.ndjson"), [0u8; 40]).unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        std::fs::write(dir.path().join("logs/daemon.log"), [0u8; 30]).unwrap();
+        std::fs::write(dir.path().join("desktop-app.log"), [0u8; 20]).unwrap();
         let report = report(dir.path());
         let of = |c| {
             report
@@ -181,19 +215,52 @@ mod tests {
         };
         assert_eq!(of(StorageCategory::Tlogs), 100);
         assert_eq!(of(StorageCategory::EventLog), 40);
+        assert_eq!(of(StorageCategory::Logs), 50);
         assert!(report.free_bytes.is_some());
+        let places = |c| {
+            report
+                .places
+                .iter()
+                .find(|(k, _)| *k == c)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(
+            places(StorageCategory::Tlogs),
+            [dir.path().join("tlogs").display().to_string()]
+        );
+        assert_eq!(places(StorageCategory::Logs).len(), 2);
 
         let now = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_micros();
         let now = u64::try_from(now).unwrap();
-        let kept = delete_older(dir.path(), StorageCategory::Tlogs, now - 60_000_000);
+        let kept = delete_older(dir.path(), StorageCategory::Logs, now - 60_000_000);
         assert_eq!(kept.files, 0, "written just now");
-        let never = delete_older(dir.path(), StorageCategory::EventLog, now + 60_000_000);
-        assert_eq!(never.files, 0, "the event log is never deleted");
-        let gone = delete_older(dir.path(), StorageCategory::Tlogs, now + 60_000_000);
-        assert_eq!((gone.files, gone.bytes), (1, 100));
+        for never in [
+            StorageCategory::EventLog,
+            StorageCategory::Tlogs,
+            StorageCategory::Video,
+        ] {
+            let deleted = delete_older(dir.path(), never, now + 60_000_000);
+            assert_eq!(deleted.files, 0, "{never:?} is never deleted");
+        }
+        assert!(dir.path().join("tlogs/a.tlog").exists());
+        let gone = delete_older(dir.path(), StorageCategory::Logs, now + 60_000_000);
+        assert_eq!((gone.files, gone.bytes), (2, 50));
+
+        assert_eq!(
+            place_to_reveal(dir.path(), StorageCategory::Tlogs),
+            Some((dir.path().join("tlogs"), None))
+        );
+        std::fs::write(dir.path().join("uxduck.db"), [0u8; 10]).unwrap();
+        assert_eq!(
+            place_to_reveal(dir.path(), StorageCategory::Database),
+            Some((dir.path().to_owned(), Some(dir.path().join("uxduck.db"))))
+        );
+        assert_eq!(place_to_reveal(dir.path(), StorageCategory::Backups), None);
     }
 }
 
@@ -251,6 +318,13 @@ fn simulation_dirs(data_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     }
     dirs.sort();
     Ok(dirs)
+}
+
+/// A simulation's id: its directory's name.
+fn simulation_id(dir: &Path) -> String {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn logs_in(dir: &Path) -> std::io::Result<Vec<(PathBuf, std::fs::Metadata)>> {
@@ -321,13 +395,15 @@ pub fn delete_simulator_logs(
                     continue;
                 }
                 std::fs::remove_file(&path)?;
+                tracing::info!(file = %path.display(), "deleted a stopped simulation's log");
                 deleted.files = deleted.files.saturating_add(1);
                 deleted.bytes += meta.len();
+                deleted.simulations.insert(simulation_id(&dir));
             }
         }
         Ok(deleted)
     };
-    delete().map_err(|error| format!("Could not clear all stopped simulator logs: {error}. Some files may already have been cleared; refresh Storage and try again."))
+    delete().map_err(|error| format!("Could not clear all stopped simulator logs: {error}. Some files may already have been cleared. Refresh Storage and try again."))
 }
 
 #[cfg(test)]
@@ -502,20 +578,22 @@ pub fn limit_simulator_logs(
             for (path, meta) in logs_in(&dir)? {
                 total = total.saturating_add(meta.len());
                 if !running {
-                    candidates.push((meta.modified()?, path, meta.len()));
+                    candidates.push((meta.modified()?, path, meta.len(), simulation_id(&dir)));
                 }
             }
         }
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let mut deleted = Deleted::default();
-        for (_, path, bytes) in candidates {
+        for (_, path, bytes, simulation) in candidates {
             if total <= max_bytes {
                 break;
             }
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(&path)?;
+            tracing::info!(file = %path.display(), "deleted by the simulator log size limit");
             total = total.saturating_sub(bytes);
             deleted.files = deleted.files.saturating_add(1);
             deleted.bytes = deleted.bytes.saturating_add(bytes);
+            deleted.simulations.insert(simulation);
         }
         Ok(deleted)
     };

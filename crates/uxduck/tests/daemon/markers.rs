@@ -131,6 +131,27 @@ fn a_marker_follows_nmea_sent_over_udp_and_is_kept_where_last_seen() {
 fn a_marker_follows_a_gps_receiver_on_a_serial_port_and_says_when_it_is_unplugged() {
     use serialport::{SerialPort, TTYPort};
 
+    if std::env::var_os("UXDUCK_TEST_SERIAL_MARKER").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "markers::a_marker_follows_a_gps_receiver_on_a_serial_port_and_says_when_it_is_unplugged",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("UXDUCK_TEST_SERIAL_MARKER", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "serial marker fixture child {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+
     // The pair is made after the daemon starts, so it can hang up.
     let daemon = Daemon::start(&["--no-gamepads"]);
     let (mut receiver, daemon_end) = TTYPort::pair().expect("a pseudo-terminal pair");
@@ -171,4 +192,112 @@ fn a_marker_follows_a_gps_receiver_on_a_serial_port_and_says_when_it_is_unplugge
         assert!(Instant::now() < deadline, "not failed: {now}");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn the_cli_adds_and_resizes_a_building_and_a_restart_keeps_its_outline() {
+    let daemon = Daemon::start(&["--no-gamepads"]);
+    let added = text(&daemon.cli(&[
+        "marker",
+        "add",
+        "--lat",
+        "-35.36",
+        "--lon",
+        "149.16",
+        "--name",
+        "Barn",
+        "--look",
+        "building",
+        "--width",
+        "24",
+        "--depth",
+        "12",
+        "--height",
+        "8",
+        "--heading",
+        "30",
+    ]));
+    assert!(
+        added.contains("building · -35.3600000, 149.1600000 · facing 30° · 24 × 12 m · 8 m tall"),
+        "{added}"
+    );
+    let round = text(&daemon.cli(&["marker", "set", "barn", "--radius", "6", "--height", "9.5"]));
+    assert!(round.contains("12 m across · 9.5 m tall"), "{round}");
+    let refused = daemon.cli(&[
+        "marker", "add", "--lat", "0", "--lon", "0", "--look", "flag", "--height", "4",
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("only a building has an outline and a height")
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    let daemon = daemon.kill_and_restart(&["--no-gamepads"]);
+    let listed = rpc(&daemon, "marker/list", &json!({}));
+    let barn = &listed["markers"][0];
+    assert_eq!(barn["outline"], json!({ "type": "round", "radiusM": 6.0 }));
+    assert_eq!(barn["heightM"], 9.5);
+    assert_eq!(barn["headingDeg"], 30.0);
+}
+
+#[test]
+fn the_cli_draws_a_line_and_an_area_in_colours_and_a_restart_keeps_them() {
+    let daemon = Daemon::start(&["--no-gamepads"]);
+    let road = text(&daemon.cli(&[
+        "marker",
+        "add",
+        "--name",
+        "Road",
+        "--line",
+        "50.0,-1.0 50.0,-0.99",
+        "--colour",
+        "orange",
+        "--style",
+        "dashed",
+    ]));
+    assert!(road.contains("line, 716 m · orange · dashed"), "{road}");
+    let field = text(&daemon.cli(&[
+        "marker",
+        "add",
+        "--area",
+        "50.0,-1.0 50.0,-0.99 50.01,-0.99 50.01,-1.0",
+        "--colour",
+        "red",
+    ]));
+    assert!(field.starts_with("Area 1 ("), "{field}");
+    assert!(field.contains("0.9950000 · area, 79.7 ha · red"), "{field}");
+    let solid = text(&daemon.cli(&[
+        "marker", "set", "road", "--style", "solid", "--colour", "teal",
+    ]));
+    assert!(
+        solid.contains("line, 716 m · teal") && !solid.contains("dashed"),
+        "{solid}"
+    );
+    let ring = text(&daemon.cli(&[
+        "marker", "add", "--lat", "50.0", "--lon", "-1.0", "--circle", "200", "--fill", "outline",
+    ]));
+    assert!(ring.contains("circle, 200 m · outline only"), "{ring}");
+    let refused = daemon.cli(&["marker", "add", "--line", "50.0,-1.0"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a line has 2 to 500 points"));
+
+    std::thread::sleep(Duration::from_millis(300));
+    let daemon = daemon.kill_and_restart(&["--no-gamepads"]);
+    let listed = rpc(&daemon, "marker/list", &json!({}));
+    let names: Vec<&str> = listed["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Area 1", "Circle 1", "Road"]);
+    assert_eq!(
+        listed["markers"][0]["shape"]["points"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(listed["markers"][2]["colour"], "teal");
 }

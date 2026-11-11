@@ -9,6 +9,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// The oldest client version this daemon accepts.
 pub const MIN_CLIENT_VERSION: &str = "0.1.0";
 
+/// The Terms of Service version a person agrees to (ADR-0047): the date of
+/// its last material change. Bump it only for a material change, never for
+/// a typo: every operator is asked again before UXDuck arms a real vehicle,
+/// and every signed-in account once. `packages/protocol` and the website
+/// read it from the generated contracts.
+pub const TERMS_VERSION: &str = "2026-11-03";
+
 /// What a release may be used for, on the wire in `initialize` and
 /// `daemon/about`. UXDuck now flies real vehicles and always says `flight`;
 /// the field stays because an older interface held real vehicles on the

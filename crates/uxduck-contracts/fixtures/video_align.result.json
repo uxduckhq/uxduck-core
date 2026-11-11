@@ -1,0 +1,23 @@
+{
+  "id": "vr8d1e0c4b2a9f3e71",
+  "sourceId": "file:Screen Recording 2026-10-28.mov",
+  "vehicleId": "8f2b6c1e-4a7d-5e90-b3c2-1d4e5f6a7b8c",
+  "startedAtUs": 1790000012400000,
+  "endedAtUs": 1790000102400000,
+  "durationUs": 90000000,
+  "bytes": 48213004,
+  "state": "done",
+  "trigger": "by-hand",
+  "file": {
+    "path": "/Users/pilot/Movies/Screen Recording 2026-10-28.mov",
+    "name": "Screen Recording 2026-10-28.mov",
+    "repeat": false
+  },
+  "fileName": "/Users/pilot/Movies/Screen Recording 2026-10-28.mov",
+  "flightId": "fl3c2a",
+  "alignment": {
+    "by": "hand",
+    "ownStartUs": 1790000011000000
+  },
+  "version": 2
+}

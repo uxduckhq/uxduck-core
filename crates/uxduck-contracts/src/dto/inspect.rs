@@ -66,6 +66,23 @@ pub struct InspectedMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "fields")]
     pub fields: Option<Map<String, Value>>,
+    /// The name of a field's value, by field, where a person's dialect
+    /// names it with an enum (`"mode": "ACME_MODE_SURVEY"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "fields")]
+    pub labels: Option<Map<String, Value>>,
+    /// A field's units, by field, where a person's dialect gives them
+    /// (`"voltage": "V"`); values stay in those units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "fields")]
+    pub units: Option<Map<String, Value>>,
+    /// The person's dialect it was decoded by, for this vehicle
+    /// (ADR-0044), by label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_dialect: Option<String>,
+    /// How that dialect's message differs from UXDuck's built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<super::dialect::MessageChange>,
 }
 
 /// An object of any values, or nothing. schemars writes `true` for each

@@ -4,11 +4,14 @@
 //! one per sender and does the I/O.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::aac::{adts_frames, other_audio_name};
 use crate::au::{AccessUnit, Filter};
 use crate::audio::{AudioConfig, AudioUnit};
+use crate::latency::{Arrival, CameraClock, CameraDelay, CaptureDelay, Jitter, rtp_capture_us};
 use crate::nal::{Codec, SpsInfo};
+use crate::rtcp::{SenderReport, sender_report};
 use crate::rtp::{Depacketizer, Header};
 use crate::ts::{Demuxer, StreamKind};
 use crate::udp::{Container, Packet, classify};
@@ -48,6 +51,8 @@ pub struct Counters {
     pub datagrams: u64,
     pub pictures: u64,
     pub keyframes: u64,
+    /// Recovery points that were not keyframes (intra refresh).
+    pub recovery_points: u64,
     pub lost: u64,
     pub damaged: u64,
     pub pes_length_mismatches: u64,
@@ -66,6 +71,7 @@ impl Counters {
         self.datagrams += o.datagrams;
         self.pictures += o.pictures;
         self.keyframes += o.keyframes;
+        self.recovery_points += o.recovery_points;
         self.lost += o.lost;
         self.damaged += o.damaged;
         self.pes_length_mismatches += o.pes_length_mismatches;
@@ -90,6 +96,11 @@ pub struct Status {
     /// The camera's sound, once its stream is known.
     pub audio: Option<Sound>,
     pub counters: Counters,
+    /// RFC 3550 interarrival jitter, in microseconds (S262).
+    pub jitter_us: Option<u64>,
+    /// The camera's clock and, when plausible, how late its pictures
+    /// arrive by it (S262).
+    pub camera: Option<CameraDelay>,
 }
 
 /// A 33-bit 90 kHz PTS as microseconds that keep increasing across the
@@ -171,6 +182,13 @@ pub struct Source {
     base: Counters,
     bytes: u64,
     datagrams: u64,
+    /// The RTP timestamp of the latest packet and when its picture's first
+    /// packet arrived (S262).
+    picture_from: Option<(u32, Arrival)>,
+    jitter: Jitter,
+    /// The latest sender report for the RTP video, from RTCP.
+    sender_report: Option<SenderReport>,
+    capture: CaptureDelay,
 }
 
 impl Default for Source {
@@ -201,6 +219,10 @@ impl Source {
             base: Counters::default(),
             bytes: 0,
             datagrams: 0,
+            picture_from: None,
+            jitter: Jitter::default(),
+            sender_report: None,
+            capture: CaptureDelay::default(),
         }
     }
 
@@ -247,6 +269,10 @@ impl Source {
         self.audio_frames = 0;
         self.bytes = 0;
         self.datagrams = 0;
+        self.picture_from = None;
+        self.jitter = Jitter::default();
+        self.sender_report = None;
+        self.capture = CaptureDelay::default();
     }
 
     /// Another stream in this one's place, such as a camera restarted with
@@ -266,15 +292,29 @@ impl Source {
         }
     }
 
+    /// A datagram that arrived just now.
     pub fn push(&mut self, datagram: &[u8]) -> Vec<Output> {
+        self.push_at(datagram, Arrival::now())
+    }
+
+    /// A datagram, and when it arrived.
+    pub fn push_at(&mut self, datagram: &[u8], arrival: Arrival) -> Vec<Output> {
         self.datagrams += 1;
         self.bytes += datagram.len() as u64;
+        // RTCP on the video's own port (RFC 5761): a sender report dates
+        // the pictures by the camera's clock.
+        if datagram.len() >= 8 && datagram[0] >> 6 == 2 && (200..=204).contains(&datagram[1]) {
+            if let Some(report) = sender_report(datagram) {
+                self.sender_report(report);
+            }
+            return Vec::new();
+        }
         let ts = match classify(datagram) {
             Ok(Packet::Ts { container, ts }) => {
                 self.container = Some(container);
                 ts
             }
-            Ok(Packet::Rtp { header, payload }) => return self.push_rtp(&header, payload),
+            Ok(Packet::Rtp { header, payload }) => return self.push_rtp(&header, payload, arrival),
             Err(why) => {
                 // One stray datagram among good ones is not the stream.
                 if self.container.is_none() {
@@ -284,7 +324,9 @@ impl Source {
             }
         };
         let mut out = Vec::new();
-        for pes in self.demuxer.push(ts) {
+        for pes in self.demuxer.push_at(ts, arrival) {
+            // A picture arrived with the bytes its PES began in.
+            let arrived = pes.arrived.unwrap_or(arrival);
             match pes.kind {
                 StreamKind::H264 | StreamKind::H265 => {
                     let codec = if pes.kind == StreamKind::H264 {
@@ -296,13 +338,14 @@ impl Source {
                         Some(f) if f.codec == codec => f,
                         _ => self.filter.insert(Filter::new(codec)),
                     };
-                    if let Some(unit) = filter.push(&pes.data, pes.pts, pes.damaged) {
-                        out.push(Output::Unit(Arc::new(unit)));
+                    if let Some(unit) = filter.push_timed(&pes.data, pes.pts, pes.dts, pes.damaged)
+                    {
+                        out.push(arrived_unit(unit, arrived, &mut self.jitter));
                     }
                 }
                 StreamKind::Klv => {
                     let timestamp_us = pes.pts.map_or(0, |p| (p * 100 + 4) / 9);
-                    out.push(self.klv_unit(timestamp_us, pes.data));
+                    out.push(self.klv_at(timestamp_us, pes.data, arrived));
                 }
                 StreamKind::Aac => out.extend(self.audio(&pes)),
                 StreamKind::Opus(channels) => out.extend(self.opus(&pes, channels)),
@@ -460,6 +503,13 @@ impl Source {
     /// A KLV unit, from MPEG-TS or an RTSP camera's KLV track (S91): read,
     /// counted, and passed on with its values when its checksum holds.
     pub fn klv_unit(&mut self, timestamp_us: u64, data: Vec<u8>) -> Output {
+        self.klv_at(timestamp_us, data, Arrival::now())
+    }
+
+    /// As `klv_unit`, for a unit that arrived as `arrived` says: its
+    /// Precision Time Stamp, when it has one, dates it by the camera's
+    /// clock (S262).
+    pub fn klv_at(&mut self, timestamp_us: u64, data: Vec<u8>, arrived: Arrival) -> Output {
         self.klv = true;
         // A bad checksum is counted and its values ignored.
         let values = crate::klv::parse(&data).and_then(|k| {
@@ -471,6 +521,9 @@ impl Source {
                 None
             }
         });
+        if let Some(captured) = values.as_ref().and_then(|v| v.timestamp_us) {
+            self.capture.push(CameraClock::Klv, captured, arrived);
+        }
         Output::Klv {
             timestamp_us,
             data,
@@ -478,14 +531,41 @@ impl Source {
         }
     }
 
-    fn push_rtp(&mut self, header: &Header, payload: &[u8]) -> Vec<Output> {
+    /// The video's RTCP sender report, from its RTCP channel or port: the
+    /// RTP pictures after it are dated by the camera's clock (S262).
+    pub const fn sender_report(&mut self, report: SenderReport) {
+        self.sender_report = Some(report);
+    }
+
+    fn push_rtp(&mut self, header: &Header, payload: &[u8], arrival: Arrival) -> Vec<Output> {
         self.rtp_packets += 1;
         let mut out = Vec::new();
+        let previous = self.picture_from;
+        if previous.is_none_or(|(t, _)| t != header.timestamp) {
+            self.picture_from = Some((header.timestamp, arrival));
+        }
+        // A picture this packet ended began with the first packet of its
+        // timestamp, which may be an earlier one's.
+        let began = |timestamp: u32| {
+            [previous, self.picture_from]
+                .into_iter()
+                .flatten()
+                .find_map(|(t, at)| (t == timestamp).then_some(at))
+                .unwrap_or(arrival)
+        };
         if let (Some(depacketizer), Some(filter)) = (&mut self.depacketizer, &mut self.filter) {
             for picture in depacketizer.push(header, payload) {
+                let started = began(picture.timestamp);
+                if let Some(captured) = self
+                    .sender_report
+                    .and_then(|r| rtp_capture_us(&r, picture.timestamp))
+                {
+                    self.capture
+                        .push(CameraClock::SenderReports, captured, started);
+                }
                 let pts = self.rtp_clock.pts(picture.timestamp);
                 if let Some(unit) = filter.push(&picture.annex_b, Some(pts), picture.damaged) {
-                    out.push(Output::Unit(Arc::new(unit)));
+                    out.push(arrived_unit(unit, started, &mut self.jitter));
                 }
             }
             return out;
@@ -500,11 +580,12 @@ impl Source {
         let mut chosen = None;
         for (i, (depacketizer, filter)) in self.candidates.iter_mut().enumerate() {
             for picture in depacketizer.push(header, payload) {
+                let started = began(picture.timestamp);
                 let pts = self.rtp_clock.pts(picture.timestamp);
                 let unit = filter.push(&picture.annex_b, Some(pts), picture.damaged);
                 if plausible(filter.sps()) {
                     chosen = Some(i);
-                    out.extend(unit.map(|u| Output::Unit(Arc::new(u))));
+                    out.extend(unit.map(|u| arrived_unit(u, started, &mut self.jitter)));
                 }
             }
             if chosen.is_some() {
@@ -559,6 +640,7 @@ impl Source {
         if let Some(f) = &self.filter {
             now.pictures = f.stats.units;
             now.keyframes = f.stats.keyframes;
+            now.recovery_points = f.stats.recovery_points;
             now.damaged = f.stats.damaged;
             now.nals_dropped = f.stats.nals_dropped.values().sum();
         }
@@ -581,6 +663,20 @@ impl Source {
             klv: self.klv,
             audio: self.sound(),
             counters: self.counters(),
+            jitter_us: self.jitter.us(),
+            camera: self.capture.summary(Instant::now()),
         }
     }
+}
+
+/// A picture as it goes out, dated by when its first datagram arrived and
+/// counted in the jitter by its decoding time.
+fn arrived_unit(mut unit: AccessUnit, arrived: Arrival, jitter: &mut Jitter) -> Output {
+    unit.arrived = Some(arrived.at);
+    jitter.push(
+        arrived.at,
+        unit.timestamp_us
+            .saturating_sub(u64::from(unit.composition_us)),
+    );
+    Output::Unit(Arc::new(unit))
 }

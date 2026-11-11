@@ -21,6 +21,10 @@ pub struct Host {
     simulators: std::sync::Arc<crate::sim::Simulators>,
     catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
     desktop_app: std::sync::Arc<crate::desktop_app::DesktopApp>,
+    /// A card's logs being copied (S212).
+    card_copying: crate::card_logs::Copying,
+    /// Flights in other apps' tlogs (S215).
+    found_flights: crate::found_flights::Found,
 }
 
 impl Host {
@@ -38,6 +42,8 @@ impl Host {
             simulators,
             catalogue,
             desktop_app,
+            card_copying: crate::card_logs::Copying::default(),
+            found_flights: crate::found_flights::Found::new(data_dir),
         }
     }
 }
@@ -155,7 +161,7 @@ fn wake_command() -> Option<Command> {
 
 impl System for Host {
     fn process_usage(&self) -> Option<uxduck_contracts::dto::settings::CoreProcessUsage> {
-        super::process_usage::snapshot()
+        super::process_usage::snapshot(&self.simulators.guard_pids())
     }
 
     fn start_at_login(
@@ -185,6 +191,106 @@ impl System for Host {
         crate::inspect::heartbeat_us(vehicle_ids)
     }
 
+    fn replay_read(
+        &mut self,
+        what: &uxduck_engine::runtime::ReplayRead,
+    ) -> Result<Vec<u8>, String> {
+        crate::replay::read(&self.data_dir.join("tlogs"), what)
+    }
+
+    fn found_flights(
+        &mut self,
+    ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
+        Ok(self.found_flights.found())
+    }
+
+    fn flight_folder(
+        &mut self,
+        params: &uxduck_contracts::dto::replay::FlightFolderParams,
+    ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
+        self.found_flights.change(params)
+    }
+
+    fn probe_video(&mut self, path: &str) -> Result<uxduck_engine::runtime::VideoProbe, String> {
+        let path = std::path::Path::new(path);
+        let size = std::fs::metadata(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?
+            .len();
+        let probed = crate::video::created::probe(path)?;
+        // A copy the browser can play, made now rather than when first
+        // played (S208): a long MPEG-2 file takes a while.
+        if probed.play != crate::video::created::Play::Direct
+            && let Some(hub) = crate::video::hub()
+        {
+            let cache = crate::video::playback::cache_dir(hub.dir());
+            crate::video::playback::prepare_soon(&cache, path, probed.play);
+        }
+        Ok(uxduck_engine::runtime::VideoProbe {
+            created_us: probed.created_us,
+            duration_us: probed.duration_us,
+            klv_start_us: probed.klv_start_us,
+            codec: probed.codec,
+            bytes: size,
+        })
+    }
+
+    fn attachment_write(
+        &mut self,
+        id: &str,
+        _name: &str,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        crate::attachments::write(&self.data_dir.join("attachments"), id, offset, bytes)
+    }
+
+    fn attachment_finish(&mut self, id: &str, name: &str, keep: bool) -> Result<(), String> {
+        crate::attachments::finish(&self.data_dir.join("attachments"), id, name, keep)
+    }
+
+    fn attachment_read(&mut self, id: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        crate::attachments::read(&self.data_dir.join("attachments"), id, offset, len)
+    }
+
+    fn attachment_path(&self, id: &str) -> Result<String, String> {
+        crate::attachments::path(&self.data_dir.join("attachments"), id)
+    }
+
+    fn keep_log(&mut self, recording: &str, bytes: &[u8]) -> Result<(), String> {
+        let mut spool = crate::spool::Spool::open(&self.data_dir, self.data_dir.join("tlogs"))
+            .map_err(|e| e.to_string())?;
+        spool
+            .keep_bytes(recording, bytes)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn log_cards(&mut self) -> Result<uxduck_contracts::dto::replay::LogCardsResult, String> {
+        Ok(crate::card_logs::status(&self.data_dir, &self.card_copying))
+    }
+
+    fn copy_card_logs(&mut self, card: &str) -> Result<(), String> {
+        use uxduck_engine::runtime::Clock as _;
+        let today = crate::analytics::utc_day(super::system::SystemClock.now_us());
+        self.card_copying.start(&self.data_dir, card, &today)
+    }
+
+    fn replay_clock(&mut self, running: bool) {
+        crate::replay::running(running);
+    }
+
+    fn tlog_position(&self, link_id: &str) -> Option<(String, u64)> {
+        crate::tlog_index::position(link_id)
+    }
+
+    fn link_logs(&self, link_id: &str) -> Vec<uxduck_engine::runtime::LinkLog> {
+        crate::replay::link_logs(&self.data_dir.join("tlogs"), link_id)
+    }
+
+    fn remove_link_log(&mut self, link_id: &str, name: &str) -> Result<(), String> {
+        crate::replay::remove_link_log(&self.data_dir.join("tlogs"), link_id, name)
+    }
+
     fn mavlink_history(
         &self,
         vehicle: &uxduck_engine::runtime::HistoryOf<'_>,
@@ -212,13 +318,20 @@ impl System for Host {
         &self,
         link: &str,
         system: Option<u8>,
+        gcs_system_id: u8,
         params: &uxduck_contracts::dto::inspect::MavlinkHistoryParams,
         now: u64,
     ) -> Result<
         uxduck_contracts::dto::inspect::MavlinkHistoryResult,
         uxduck_contracts::errors::ApiError,
     > {
-        crate::diagnostics::history(&self.data_dir.join("tlogs"), link, system, params, now)
+        crate::diagnostics::history(
+            &self.data_dir.join("tlogs"),
+            link,
+            (system, gcs_system_id),
+            params,
+            now,
+        )
     }
     fn router_events(
         &self,
@@ -255,6 +368,16 @@ impl System for Host {
 
     fn sim_instance_free(&self, instance: u8) -> bool {
         crate::sim::claim_instance(instance)
+    }
+
+    fn sim_build_ready(&self, kind: &uxduck_core::domain::link::LinkKind) -> Result<(), String> {
+        self.simulators.check_build(kind)
+    }
+
+    fn processors(&self) -> Option<usize> {
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZero::get)
     }
 
     fn is_local_address(&self, host: &str) -> bool {
@@ -308,10 +431,18 @@ impl System for Host {
         super::storage::report(&self.data_dir)
     }
 
-    fn reveal_data_dir(&mut self) -> Result<String, String> {
-        super::browser::reveal(&self.data_dir, None)
+    fn reveal_storage(
+        &mut self,
+        category: Option<uxduck_core::domain::settings::StorageCategory>,
+    ) -> Result<String, String> {
+        let (folder, file) = match category {
+            None => (self.data_dir.clone(), None),
+            Some(category) => super::storage::place_to_reveal(&self.data_dir, category)
+                .ok_or("Nothing is kept there yet.")?,
+        };
+        super::browser::reveal(&folder, file.as_deref())
             .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
-        Ok(self.data_dir.display().to_string())
+        Ok(folder.display().to_string())
     }
 
     fn delete_older_than(
@@ -364,6 +495,13 @@ impl System for Host {
 
     fn sim_binaries(&self) -> Vec<uxduck_contracts::dto::sim::SimBinary> {
         self.simulators.refresh_binaries()
+    }
+
+    fn sim_frames(
+        &self,
+        params: &uxduck_contracts::dto::sim::SimFramesParams,
+    ) -> Result<uxduck_contracts::dto::sim::SimFramesResult, String> {
+        self.simulators.read_frames(params)
     }
 
     fn sim_catalogue(&mut self, refresh: bool) -> uxduck_contracts::dto::sim::SimCatalogueResult {

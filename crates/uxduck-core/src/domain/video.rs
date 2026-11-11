@@ -111,15 +111,19 @@ pub struct VideoAudio {
     pub recorded: bool,
 }
 
-/// Counted since the source was first seen, except the bitrate.
+/// Counted since the source was first seen, except the bitrate. A counter
+/// missing from a checkpoint or event an older build wrote reads as 0.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct VideoCounters {
     /// Over the last second or so.
     pub bitrate_bps: u64,
     pub datagrams: u64,
     pub pictures: u64,
     pub keyframes: u64,
+    /// Recovery points that were not keyframes: a camera with periodic
+    /// intra refresh has these and no keyframe after it starts.
+    pub recovery_points: u64,
     /// Continuity gaps and transport errors: packets lost on the way.
     pub lost: u64,
     /// Pictures that lost packets.
@@ -131,10 +135,47 @@ pub struct VideoCounters {
     /// NAL units dropped: delimiters, filler, SEI, invalid headers.
     pub nals_dropped: u64,
     /// KLV local sets read, and those whose checksum failed (S41).
-    #[serde(default)]
     pub klv: u64,
-    #[serde(default)]
     pub klv_bad: u64,
+    /// How long the daemon holds a picture, from its first datagram's
+    /// arrival to its send on a `/video` socket: the median over the last
+    /// second, the longest of the browsers watching (S262). None while no
+    /// browser watches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_us: Option<u64>,
+    /// RFC 3550 interarrival jitter, from arrival against presentation
+    /// time (S262).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter_us: Option<u64>,
+    /// Where the camera says when it captured a picture; none for a camera
+    /// that sends no clock (S262).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_clock: Option<CameraClock>,
+    /// From capture by that clock to arrival, the median over the last
+    /// second; none when the two clocks are not in step (S262).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_delay_us: Option<u64>,
+}
+
+impl VideoCounters {
+    /// Nothing arriving: no bitrate, and nothing to say about how late.
+    pub const fn stop(&mut self) {
+        self.bitrate_bps = 0;
+        self.hold_us = None;
+        self.jitter_us = None;
+        self.camera_clock = None;
+        self.camera_delay_us = None;
+    }
+}
+
+/// Where a camera says when it captured a picture (S262).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraClock {
+    /// RTCP sender reports: its RTP clock at a wall-clock time.
+    SenderReports,
+    /// The Precision Time Stamp in its KLV (MISB ST 0601 tag 2).
+    Klv,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,6 +189,10 @@ pub struct VideoSource {
     /// Recomputed from policy and session intent when the daemon starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recording_requested: bool,
+    /// The encoder re-encoding it for live view now (`h264_videotoolbox`,
+    /// `libx264`, ...), for a camera that sends no IDR; none otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reencoding: Option<String>,
     /// `udp-<port>-<sender address>`, so a sender that comes back is the
     /// same source.
     pub id: String,
@@ -331,6 +376,20 @@ pub enum RecordPolicy {
     Always,
 }
 
+/// How a camera that sends no IDR is re-encoded for live view (ADR-0017):
+/// the computer's hardware encoder when it has one, else software.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reencoder {
+    /// Hardware when it works, software when it does not.
+    #[default]
+    Automatic,
+    /// Only the hardware encoder: fails rather than use the CPU.
+    Hardware,
+    /// Only software (x264), whatever hardware there is.
+    Software,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordingState {
@@ -348,6 +407,29 @@ pub enum RecordingTrigger {
     ByHand,
     Armed,
     Always,
+}
+
+/// How an added video was put on the flight's clock (ADR-0039 R8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AlignedBy {
+    /// MISB ST 0601 time stamps in the stream: exact.
+    Klv,
+    /// The file's own creation time.
+    Metadata,
+    /// The file's clock was the simulator's computer's, corrected by the
+    /// vehicle's clock offset.
+    VehicleClock,
+    /// Set by a person: a nudge, a time, or the take-off or landing.
+    Hand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAlignment {
+    pub by: AlignedBy,
+    /// Where the file's own clock put its start, before any change by hand.
+    pub own_start_us: u64,
 }
 
 /// A camera's original, kept without re-encoding in the Video storage
@@ -391,6 +473,12 @@ pub struct VideoRecording {
     /// vehicle (S150); none for one made before, which is `<id>.mp4`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+    /// A video added to a flight from elsewhere (ADR-0039 R8): the flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight_id: Option<String>,
+    /// How an added video's start was put on the flight's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<VideoAlignment>,
     pub version: u64,
 }
 

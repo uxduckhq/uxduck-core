@@ -43,6 +43,9 @@ pub struct AppUpdateStatus {
     /// True only when running simulations are the sole work blocking an install.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_install_with_simulations: bool,
+    /// This engine accepts explicit consent to interrupt current work, including real vehicles.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_install_anyway: bool,
     pub install_when_idle: bool,
     pub dismissed: bool,
 }
@@ -56,4 +59,7 @@ pub struct AppUpdateInstallParams {
     /// Explicit consent to stop running simulations during this version's restart.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stop_simulations: bool,
+    /// Explicit consent to interrupt current work and connections for this version's restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_activity: bool,
 }

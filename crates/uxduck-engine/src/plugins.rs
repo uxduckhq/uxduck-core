@@ -31,7 +31,7 @@ use crate::approvals::record_id;
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
 use crate::runtime::{DraftOrder, MessageOrder, PluginLoad, TestOrder};
-use crate::{Admitted, ConnectionId, Engine, upsert};
+use crate::{Admitted, ConnectionId, Engine, ReadCapabilities, upsert};
 
 pub(crate) fn daemon() -> Actor {
     Actor {
@@ -433,7 +433,7 @@ fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
     // Host names only (S170): no scheme, port, path or wildcard.
     if manifest.hosts.len() > MAX_HOSTS {
         return Err(format!(
-            "{} names {} hosts; a plugin may fetch from at most {MAX_HOSTS}",
+            "{} names {} hosts. A plugin may fetch from at most {MAX_HOSTS}",
             manifest.id,
             manifest.hosts.len()
         ));
@@ -625,6 +625,10 @@ impl Engine {
             connection.name.clone_from(&plugin.name);
             connection.admitted = Some(Admitted {
                 kind: ClientKind::Plugin,
+                reads: ReadCapabilities {
+                    mission_read_float_bits: false,
+                    replay_step_marks: false,
+                },
                 operator: false,
                 record,
                 granted: plugin.capabilities.clone(),
@@ -830,6 +834,8 @@ impl Engine {
             condition: Some(failed_condition(id)),
             report: Some("plugin-stopped".into()),
         });
+        // Its traffic row says it stopped (S171).
+        self.traffic_sources_changed();
         // Its checks are unknown while it is stopped (S194).
         self.plugin_checks_changed(id, false);
     }

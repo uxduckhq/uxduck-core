@@ -1,0 +1,6 @@
+{
+  "method": "replay/speed",
+  "params": {
+    "speed": 5.0
+  }
+}

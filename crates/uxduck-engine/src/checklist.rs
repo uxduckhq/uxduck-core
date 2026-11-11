@@ -368,7 +368,7 @@ fn copy(
     }
     if steps.len() > MAX_STEPS {
         return Err(invalid(format!(
-            "that makes {} steps; a checklist holds at most {MAX_STEPS}",
+            "that makes {} steps. A checklist holds at most {MAX_STEPS}",
             steps.len()
         )));
     }
@@ -620,7 +620,7 @@ impl Engine {
         } else {
             (
                 CheckStatus::Waiting,
-                format!("{holds}; it passes once that holds {seconds} s."),
+                format!("{holds}. It passes once that holds {seconds} s."),
             )
         }
     }

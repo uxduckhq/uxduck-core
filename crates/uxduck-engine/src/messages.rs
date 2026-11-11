@@ -91,6 +91,11 @@ impl Messages {
     pub(crate) fn forget(&mut self, connection: ConnectionId) {
         self.watchers.remove(&connection);
     }
+
+    /// A vehicle's log goes: a replay's, rebuilt or closed (ADR-0039 R4).
+    pub(crate) fn forget_vehicle(&mut self, vehicle_id: &str) {
+        self.logs.remove(vehicle_id);
+    }
 }
 
 /// A pre-arm failure's reason, from ArduPilot's `PreArm: …` or PX4's
@@ -100,6 +105,15 @@ fn prearm_reason(text: &str) -> Option<&str> {
         .iter()
         .find_map(|prefix| text.strip_prefix(prefix))
         .map(str::trim)
+}
+
+/// ArduPilot's scripting says "Lua: …" and "Scripting: …", and its errors
+/// name the script's file.
+fn about_scripts(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("Lua")
+        || text.starts_with("Scripting")
+        || text.to_ascii_lowercase().contains(".lua")
 }
 
 fn severity_of(level: u8) -> Severity {
@@ -216,7 +230,8 @@ impl Engine {
         let Some(vehicle) = self.vehicle(vehicle_id).cloned() else {
             return;
         };
-        let now = self.clock.now_us();
+        // A replay vehicle's at the replay's clock (ADR-0039).
+        let now = self.now_for(&vehicle);
         let boot = self.transfers.boots.get(&vehicle.id).copied();
         self.messages.next_id += 1;
         let id = self.messages.next_id;
@@ -272,6 +287,11 @@ impl Engine {
             log.startup_boot_us = boot;
         }
         self.push_message(&shown);
+        self.autotune_said(&vehicle, text, now);
+        // Nothing of a replay vehicle is told or kept beyond its log (R3).
+        if vehicle.replay {
+            return;
+        }
         // Why a calibration from a heading just failed (S185); a setup
         // procedure's own prompts and results show on its row (S186).
         if self.setup_said(&vehicle.id, text) {
@@ -408,11 +428,57 @@ impl Engine {
     }
 
     /// Whether a vehicle is one UXDuck simulates, on a simulator link.
+    /// A simulation: of UXDuck's own by its link, else as the person said,
+    /// else as it said itself (ADR-0039 R14).
     pub(crate) fn is_simulated(&self, vehicle: &Vehicle) -> bool {
         self.state
             .links
             .get(&vehicle.link_id)
             .is_some_and(|link| matches!(link.kind, LinkKind::Simulator { .. }))
+            || vehicle.simulated.unwrap_or(vehicle.sim_evidence)
+    }
+
+    /// Parameters the vehicle reported: a `SIM_` one says it is a SITL.
+    pub(crate) fn sim_evidence<'a>(
+        &mut self,
+        vehicle_id: &str,
+        mut names: impl Iterator<Item = &'a str>,
+    ) {
+        let Some(vehicle) = self.vehicle(vehicle_id) else {
+            return;
+        };
+        if vehicle.sim_evidence || vehicle.replay || !names.any(|n| n.starts_with("SIM_")) {
+            return;
+        }
+        let mut vehicle = vehicle.clone();
+        vehicle.sim_evidence = true;
+        vehicle.version += 1;
+        self.commit_as(
+            uxduck_core::events::Actor {
+                client_id: "data-plane".into(),
+                operator_id: None,
+                identity: None,
+            },
+            uxduck_core::events::Change::VehicleUpserted { vehicle },
+        );
+    }
+
+    /// What a vehicle said about its Lua scripts since UXDuck started, newest
+    /// last, at most ten (S259, ADR-0027 F14).
+    pub(crate) fn script_messages(&self, vehicle_id: &str) -> Vec<VehicleMessage> {
+        let Some(log) = self.messages.logs.get(vehicle_id) else {
+            return Vec::new();
+        };
+        let mut said: Vec<VehicleMessage> = log
+            .folded
+            .iter()
+            .rev()
+            .filter(|m| about_scripts(&m.text))
+            .take(10)
+            .cloned()
+            .collect();
+        said.reverse();
+        said
     }
 
     /// The vehicle's pre-arm reasons now, without their prefix.
@@ -440,13 +506,22 @@ impl Engine {
             else {
                 continue;
             };
+            // A restart is one row's, wherever it is asked for (S216, V16).
+            let row = if fix == Fix::Restart {
+                SetupRow::Restart
+            } else {
+                row
+            };
             let action = Action::OpenSetup {
                 vehicle_id: vehicle.id.clone(),
                 row,
             };
-            if !uxduck_core::domain::setup::offered(&vehicle.autopilot, row)
-                || actions.iter().any(|a| a.action == action)
-            {
+            let offered = if row == SetupRow::Restart {
+                uxduck_core::domain::setup::set_up(&vehicle.autopilot)
+            } else {
+                uxduck_core::domain::setup::offered(&vehicle.autopilot, row)
+            };
+            if !offered || actions.iter().any(|a| a.action == action) {
                 continue;
             }
             actions.push(NotificationAction {
@@ -485,7 +560,7 @@ impl Engine {
                 label: "Pre-arm checks".into(),
                 unit: Unit::None,
                 value: None,
-                text: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                text: (!reasons.is_empty()).then(|| reasons.join(", ")),
                 source: "messages".into(),
                 component_id: 1,
                 time_us: now,
@@ -689,5 +764,7 @@ const fn row_word(row: SetupRow) -> &'static str {
         SetupRow::Radio => "radio",
         SetupRow::Airspeed => "airspeed",
         SetupRow::Motors => "motors",
+        SetupRow::Escs => "ESCs",
+        SetupRow::Restart => "restart",
     }
 }

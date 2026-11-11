@@ -9,6 +9,9 @@
 pub mod bootloader;
 pub mod camera;
 pub mod commands;
+pub mod computer;
+pub mod custom;
+pub mod dataflash;
 pub mod decode;
 pub mod dialect;
 pub mod fake_accel;
@@ -24,8 +27,11 @@ pub mod firmware;
 pub mod framing;
 pub mod ground_traffic;
 pub mod identity;
+pub mod link_health;
+pub mod mission_log;
 #[cfg(feature = "named")]
 pub mod named;
+pub mod param_log;
 /// ArduPilot modes, shared with the engine.
 pub use uxduck_core::domain::modes;
 pub mod producers;
@@ -38,6 +44,7 @@ pub mod terrain;
 pub mod tlog;
 pub mod traffic;
 pub mod transfers;
+mod tuning;
 pub mod usb_ids;
 
 #[cfg(feature = "native")]

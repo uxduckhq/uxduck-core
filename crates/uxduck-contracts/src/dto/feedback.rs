@@ -215,6 +215,55 @@ pub struct FeedbackSuggestParams {
     pub text: String,
 }
 
+/// A report the agent files from a chat by itself (S294): what is broken,
+/// missing or awkward in UXDuck, in words about UXDuck alone. Only these
+/// words are sent, anonymously: no screenshot, chat, technical details,
+/// flight data or account go with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackFileParams {
+    /// problem, suggestion (missing) or idea (a change).
+    pub kind: FeedbackKind,
+    /// A short name for it.
+    pub title: String,
+    /// What happened or what they want, and why; up to 2,000 characters.
+    pub text: String,
+    /// The chat it is filed from; the agent's host fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// A report the agent filed (S294).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackFiled {
+    /// The report, for `feedback/add`.
+    pub report_id: String,
+    pub status: FeedbackStatus,
+    /// The Linear issue, such as `FB-12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+}
+
+/// More for a report filed from the same chat (S294), as a comment on its
+/// issue: what the person said since, or a file they chose to add.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackAddParams {
+    /// From `feedback/file`.
+    pub report_id: String,
+    /// Up to 2,000 characters.
+    #[serde(default)]
+    pub text: String,
+    /// The chat; the agent's host fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Files the person added from the chat's card, such as a screenshot.
+    /// Operators only: the agent cannot attach anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FeedbackAttachment>,
+}
+
 /// The card shown in the chat; the person sends it with `feedback/send`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -228,13 +277,16 @@ pub struct SuggestionCard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum FeedbackStatus {
+    /// Safely stored by UXDuck; background delivery to Linear is pending.
+    Received,
     /// A new issue.
     Filed,
     /// This report, or the same words within the hour, was filed already.
     Duplicate,
     /// Kept for a person to file.
     Held,
-    /// Offline: kept here and sent when UXDuck is online again.
+    /// Kept here and sent once UXDuck's servers can take it: offline, or
+    /// limited (see `FeedbackSendResult::limited`).
     Queued,
 }
 
@@ -248,6 +300,10 @@ pub struct FeedbackSendResult {
     /// What the voice note said, once the API has transcribed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
+    /// Queued because UXDuck's servers take no more reports from this
+    /// network for now, not because they could not be reached.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limited: bool,
 }
 
 /// The account's feedback, newest first (`GET /v1/feedback/mine`).

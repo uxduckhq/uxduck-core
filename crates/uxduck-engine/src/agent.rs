@@ -7,7 +7,7 @@
 use uxduck_contracts::dto::state::EntityType;
 use uxduck_contracts::dto::thread::AgentItemDelta;
 use uxduck_contracts::rpc::ServerNotification;
-use uxduck_core::domain::thread::{Attachment, Item, ItemKind, ItemStatus, ToolCall};
+use uxduck_core::domain::thread::{Attachment, Item, ItemKind, ItemStatus, Spoken, ToolCall};
 use uxduck_core::events::{Actor, Change};
 
 use crate::{ConnectionId, Engine, rpc};
@@ -21,6 +21,44 @@ pub enum ToolOutcome {
 }
 
 impl Engine {
+    #[must_use]
+    pub fn agent_title_requested(&self, thread_id: &str, item_id: &str) -> bool {
+        use uxduck_core::domain::thread::TitleState;
+
+        self.state.threads.get(thread_id).is_some_and(|thread| {
+            thread.deleted_at_us.is_none()
+                && thread.title_state
+                    == (TitleState::Requested {
+                        item_id: item_id.to_owned(),
+                    })
+        }) && self.state.items.get(item_id).is_some_and(|item| {
+            item.thread_id == thread_id && item.kind == ItemKind::UserMessage && item.in_history()
+        })
+    }
+
+    pub fn agent_title_finish(&mut self, thread_id: &str, item_id: &str, title: Option<&str>) {
+        use uxduck_core::domain::thread::{MAX_TITLE_CHARS, TitleState};
+
+        if !self.agent_title_requested(thread_id, item_id) {
+            return;
+        }
+        let Some(mut thread) = self.state.threads.get(thread_id).cloned() else {
+            return;
+        };
+        thread.title_state = TitleState::Fixed;
+        if let Some(title) = title.map(str::trim).filter(|title| {
+            !title.is_empty()
+                && title.chars().count() <= MAX_TITLE_CHARS
+                && !title
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+        }) {
+            title.clone_into(&mut thread.title);
+        }
+        thread.version += 1;
+        self.commit_as(Actor::default(), Change::ThreadUpserted { thread });
+    }
+
     /// Appends an item to a thread; the new item's id.
     pub(crate) fn add_item(
         &mut self,
@@ -31,10 +69,20 @@ impl Engine {
         text: String,
         tool_call: Option<ToolCall>,
     ) -> String {
-        self.add_message(actor, thread_id, kind, status, text, tool_call, Vec::new())
+        self.add_message(
+            actor,
+            thread_id,
+            kind,
+            status,
+            text,
+            tool_call,
+            Vec::new(),
+            None,
+        )
     }
 
-    /// As `add_item`, with what the operator attached (ADR-0020 H2).
+    /// As `add_item`, with what the operator attached (ADR-0020 H2) and
+    /// whether they said it aloud (ADR-0012 V4).
     #[allow(clippy::too_many_arguments, reason = "an item's fields")]
     pub(crate) fn add_message(
         &mut self,
@@ -45,6 +93,7 @@ impl Engine {
         text: String,
         tool_call: Option<ToolCall>,
         attachments: Vec<Attachment>,
+        spoken: Option<Spoken>,
     ) -> String {
         let index = self
             .state
@@ -64,6 +113,7 @@ impl Engine {
             response_id: None,
             feedback: None,
             attachments,
+            spoken,
         };
         let id = item.id.clone();
         self.commit_as(actor, Change::ItemUpserted { item });
@@ -84,7 +134,7 @@ impl Engine {
         self.commit_as(Actor::default(), Change::ThreadUpserted { thread });
     }
 
-    fn agent_actor(&self, agent: Option<ConnectionId>) -> Actor {
+    pub(crate) fn agent_actor(&self, agent: Option<ConnectionId>) -> Actor {
         agent.map_or_else(
             || Actor {
                 client_id: "agent".into(),
@@ -225,7 +275,7 @@ impl Engine {
             message.to_owned()
         } else {
             format!(
-                "{message}\n\nRecent tool calls completed before this error: {}. Their results are saved above. Completed actions were not undone; check the current state before retrying.",
+                "{message}\n\nRecent tool calls completed before this error: {}. Their results are saved above. Completed actions were not undone. Check the current state before retrying.",
                 completed.join(", ")
             )
         };
@@ -243,6 +293,18 @@ impl Engine {
     /// A late report from a turn that was already cancelled and replaced
     /// changes nothing.
     pub fn agent_turn_finish(&mut self, thread_id: &str, turn: u64, response_id: Option<String>) {
+        let success = response_id.is_some();
+        self.agent_turn_complete(thread_id, turn, response_id, success);
+    }
+
+    /// Runtime-backed providers have a terminal result without a Responses id.
+    pub fn agent_turn_complete(
+        &mut self,
+        thread_id: &str,
+        turn: u64,
+        response_id: Option<String>,
+        success: bool,
+    ) {
         if self.turns.get(thread_id) != Some(&turn) {
             return;
         }
@@ -250,6 +312,30 @@ impl Engine {
         self.turns.remove(thread_id);
         self.turn_ended(thread_id, turn, false);
         self.touch_thread(thread_id, response_id);
+        rpc::thread_queue::hold_steering(self, thread_id);
+        if success {
+            rpc::thread_queue::start_next(self, thread_id, None);
+        }
+    }
+
+    /// Commit only input actually included in a model request. Late turns cannot consume it.
+    pub fn agent_input_applied(&mut self, thread_id: &str, turn: u64, item_id: &str) {
+        if self.turns.get(thread_id) != Some(&turn) {
+            return;
+        }
+        let Some(mut item) = self
+            .state
+            .items
+            .get(item_id)
+            .filter(|i| i.thread_id == thread_id && i.status == ItemStatus::Steering)
+            .cloned()
+        else {
+            return;
+        };
+        item.status = ItemStatus::Completed;
+        item.version += 1;
+        self.pending_origins.remove(item_id);
+        self.commit_as(self.agent_actor(None), Change::ItemUpserted { item });
     }
 
     /// Whether a thread has a turn in progress.
@@ -269,7 +355,11 @@ impl Engine {
         for id in open {
             let text = self.streaming.remove(&id);
             self.finish_item(None, &id, |item| {
-                item.status = status;
+                item.status = if item.kind == ItemKind::UserMessage {
+                    ItemStatus::Completed
+                } else {
+                    status
+                };
                 if let Some(text) = text {
                     item.text = text;
                 }
@@ -293,5 +383,36 @@ impl Engine {
         item.version += 1;
         let actor = self.agent_actor(agent);
         self.commit_as(actor, Change::ItemUpserted { item });
+    }
+}
+
+impl crate::Engine {
+    /// Only public connection metadata crosses the engine/transport boundary.
+    pub fn agent_connections(
+        &mut self,
+        connections: Vec<uxduck_contracts::dto::thread::AgentConnection>,
+    ) {
+        self.agent_connections = connections;
+    }
+}
+
+impl crate::Engine {
+    /// Disconnect stops active tasks before the provider's credentials are revoked.
+    pub fn agent_provider_disconnected(&mut self, provider: &str) {
+        let prefix = format!("{provider}:");
+        let threads: Vec<String> = self
+            .turns
+            .keys()
+            .filter(|id| {
+                self.state
+                    .threads
+                    .get(*id)
+                    .is_some_and(|t| t.model.starts_with(&prefix))
+            })
+            .cloned()
+            .collect();
+        for id in threads {
+            let _ = crate::rpc::threads::cancel(self, &id);
+        }
     }
 }

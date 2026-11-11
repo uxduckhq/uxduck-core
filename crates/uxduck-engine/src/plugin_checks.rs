@@ -52,7 +52,7 @@ pub(crate) type Reports = BTreeMap<String, BTreeMap<(String, String), Report>>;
 pub(crate) fn check_declared(manifest: &PluginManifest) -> Result<(), String> {
     if manifest.checks.len() > MOST_CHECKS {
         return Err(format!(
-            "{} declares {} checks; a plugin declares at most {MOST_CHECKS}",
+            "{} declares {} checks. A plugin declares at most {MOST_CHECKS}",
             manifest.id,
             manifest.checks.len()
         ));
@@ -77,7 +77,7 @@ pub(crate) fn check_declared(manifest: &PluginManifest) -> Result<(), String> {
         }
         if !STALE_MS.contains(&check.stale_ms) {
             return Err(format!(
-                "check {:?}: staleMs is {} ms; it may be 1000 (a second) to 86400000 (a day)",
+                "check {:?}: staleMs is {} ms. It may be 1000 (a second) to 86400000 (a day)",
                 check.id, check.stale_ms
             ));
         }

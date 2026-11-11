@@ -1,0 +1,83 @@
+[package]
+name = "mavinspect"
+description = "Library for parsing MAVLink XML definitions"
+version = "0.6.6"
+edition = "2021"
+authors = ["Mykhailo Ziatin <ziatin@mathwithoutend.org>"]
+repository = "https://gitlab.com/mavka/libs/mavinspect"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+homepage = "https://mavka.gitlab.io/home/projects/mavinspect"
+keywords = ["MAVLink", "UAV", "drones", "parser"]
+categories = [
+    "aerospace",
+    "aerospace::protocols",
+    "aerospace::drones",
+    "aerospace::unmanned-aerial-vehicles",
+    "parsing",
+]
+resolver = "2"
+
+[dependencies]
+base64 = "0.22.1"
+crc-any = { version = "2.4.4", default-features = false }
+bitflags = "2.5.0"
+heck = "0.5.0"
+log = "0.4.21"
+parse_int = "0.9.0"
+regex = "1.10.4"
+serde = { version = "1.0.197", features = ["derive", "serde_derive"] }
+serde_yml = "0.0.12"
+specta = { version = "=2.0.0-rc.22", features = ["derive"], optional = true }
+specta-util = { version = "0.0.9", optional = true }
+textwrap = "0.16.1"
+thiserror = "2.0.9"
+quick-xml = "0.37.2"
+
+# Documentation
+document-features = "0.2.10"
+
+[dev-dependencies]
+env_logger = "0.11.3"
+
+###########################################################
+# Features
+###########################################################
+[features]
+
+## Default features (empty).
+default = []
+
+## Enables unstable API features.
+##
+## Unstable features will be marked with `⍚`.
+unstable = []
+
+## Adds [serde](https://serde.rs) support.
+##
+## With serde support all `protocol` definitions will be (de)serializable.
+serde = [
+    "bitflags/serde",
+]
+
+## Enable [specta](https://specta.dev) support.
+##
+## With specta support all `protocol` definitions can be exported using specta.
+specta = [
+    "dep:specta",
+    "dep:specta-util",
+]
+
+[lib]
+name = "mavinspect"
+path = "src/lib.rs"
+
+[[example]]
+name = "parser"
+test = true
+
+# build with all features on docs.rs so that users viewing documentation
+# can see everything
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

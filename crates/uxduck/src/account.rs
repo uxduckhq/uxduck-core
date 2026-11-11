@@ -25,6 +25,10 @@ pub const TOKEN: &str = uxduck_engine::ACCOUNT_TOKEN;
 /// session alive (the server extends a session used after a day) and
 /// forgets a token the server no longer takes.
 const REFRESH_EVERY: Duration = Duration::from_hours(24);
+/// How soon a signed-in UXDuck reads its account again while it does not
+/// know which models the hosted model offers: until then the selector has
+/// none (an offline start, or a server that did not answer).
+const MODELS_RETRY: Duration = Duration::from_secs(30);
 
 /// The engine's end: every call is a message to the account task.
 #[derive(Debug, Clone)]
@@ -56,8 +60,12 @@ struct Account {
     /// What `/v1/me` said last, for answers while offline.
     last: Mutex<AccountState>,
     analytics_internal: Mutex<Option<bool>>,
+    /// What `/v1/me` said the hosted model offers, last time it said.
+    hosted_models: Mutex<Option<Vec<String>>>,
     /// Where plugins installed from links are unpacked (S59).
     shared_dir: std::path::PathBuf,
+    /// Where account logs are joined for a replay (`cache/replay`).
+    data_dir: std::path::PathBuf,
 }
 
 struct SessionSnapshot {
@@ -80,9 +88,14 @@ struct Me {
     product_updates: bool,
     #[serde(default)]
     analytics_excluded: bool,
+    /// The models the hosted model offers this account; absent from an
+    /// older API, which leaves the configured list.
+    #[serde(default)]
+    hosted_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MeUser {
     id: String,
     email: String,
@@ -90,6 +103,11 @@ struct MeUser {
     name: String,
     #[serde(default)]
     username: Option<String>,
+    #[serde(default)]
+    source_answered: Option<bool>,
+    /// The terms version the account last agreed to (ADR-0047).
+    #[serde(default)]
+    terms_version: Option<String>,
 }
 
 /// Starts the account task.
@@ -102,7 +120,6 @@ pub fn start(
     let (tx, rx) = mpsc::unbounded_channel();
     let initial = AccountState {
         signed_in: credentials.account_session().is_some(),
-        operator_id: credentials.account_operator(),
         offline: credentials.account_session().is_some(),
         ..AccountState::default()
     };
@@ -115,16 +132,18 @@ pub fn start(
         generation: AtomicU64::new(0),
         last: Mutex::new(initial.clone()),
         analytics_internal: Mutex::new(None),
+        hosted_models: Mutex::new(None),
         shared_dir: data_dir.join("plugins").join("shared"),
+        data_dir: data_dir.to_owned(),
     });
     tokio::spawn(refresh(account.clone(), engine.clone()));
     tokio::spawn(run(account, rx, engine));
     AccountChannel { tx, initial }
 }
 
-/// Reads the account soon after start, then daily.
+/// Reads the account at start, then daily; every half minute while signed
+/// in without knowing which models the hosted model offers.
 async fn refresh(account: Arc<Account>, engine: EngineHandle) {
-    tokio::time::sleep(Duration::from_secs(5)).await;
     loop {
         if let (Some(api), Some(client)) = (account.api.as_deref(), account.client.as_ref()) {
             if let Err(error) = account.get(api, client).await {
@@ -134,6 +153,7 @@ async fn refresh(account: Arc<Account>, engine: EngineHandle) {
             let _ = engine
                 .run(move |engine| {
                     engine.set_account_identity(account.cached_state());
+                    engine.set_hosted_models(account.hosted_models());
                     if let Some(internal) = *account
                         .analytics_internal
                         .lock()
@@ -144,7 +164,8 @@ async fn refresh(account: Arc<Account>, engine: EngineHandle) {
                 })
                 .await;
         }
-        tokio::time::sleep(REFRESH_EVERY).await;
+        let unknown = account.token().is_some() && account.hosted_models().is_none();
+        tokio::time::sleep(if unknown { MODELS_RETRY } else { REFRESH_EVERY }).await;
     }
 }
 
@@ -156,15 +177,10 @@ async fn run(
     while let Some(order) = rx.recv().await {
         let account = account.clone();
         let engine = engine.clone();
-        let changes_session = match &order.action {
-            AccountAction::SwitchOperator {
-                operator_id,
-                restoring,
-                ..
-            } => !restoring || account.credentials.account_operator() != *operator_id,
-            AccountAction::SignOut { .. } | AccountAction::Verify { .. } => true,
-            _ => false,
-        };
+        let changes_session = matches!(
+            order.action,
+            AccountAction::SignOut { .. } | AccountAction::Verify { .. }
+        );
         let generation = if changes_session {
             account.generation.fetch_add(1, Ordering::SeqCst) + 1
         } else {
@@ -175,9 +191,7 @@ async fn run(
             let result = if order.workspace {
                 account.workspace_action(order.action, generation).await
             } else {
-                account
-                    .act_for(order.action, order.operator_id.as_deref(), generation)
-                    .await
+                account.act_at(order.action, generation).await
             };
             let result = if account.generation.load(Ordering::SeqCst) == generation {
                 result
@@ -188,6 +202,7 @@ async fn run(
             let _ = engine
                 .run(move |e| {
                     e.set_account_identity(account.cached_state());
+                    e.set_hosted_models(account.hosted_models());
                     if let Some(internal) = *account
                         .analytics_internal
                         .lock()
@@ -221,7 +236,7 @@ fn environment_action(action: &AccountAction) -> Option<Result<Value, ApiError>>
 fn session_changed() -> ApiError {
     ApiError::new(
         ErrorKind::InvalidValue,
-        "The active operator changed. Sign in again.",
+        "The signed-in account changed. Try again.",
     )
 }
 
@@ -230,6 +245,16 @@ fn unreachable() -> ApiError {
         ErrorKind::InvalidValue,
         "UXDuck cannot reach its server. Check the internet connection",
     )
+}
+
+/// The verify request: the challenge, the code, and the terms version the
+/// form said continuing agrees to (ADR-0047), which the account records.
+fn verify_body(challenge: &str, code: &str, terms_version: Option<&str>) -> Value {
+    let mut body = json!({ "challengeId": challenge, "code": code });
+    if let Some(version) = terms_version {
+        body["terms"] = json!({ "version": version, "client": "desktop" });
+    }
+    body
 }
 
 fn unreadable_reply() -> ApiError {
@@ -244,25 +269,11 @@ impl Account {
         self.credentials.account_session()
     }
 
-    /// Whether `account` is the verified account of the session held now;
-    /// never when that is unknown, offline or signed out.
-    fn same_account(&self, account: Option<&str>) -> bool {
-        let state = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        account.is_some()
-            && self.token().is_some()
-            && state.signed_in
-            && !state.offline
-            && state.account_id.as_deref() == account
-    }
-
     fn cached_state(&self) -> AccountState {
-        let mut state = self
-            .last
+        self.last
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        state.operator_id = self.credentials.account_operator();
-        state
+            .clone()
     }
 
     fn snapshot(&self, generation: u64) -> Result<SessionSnapshot, ApiError> {
@@ -293,6 +304,13 @@ impl Account {
         self.act_current(action, generation, &session).await
     }
 
+    fn hosted_models(&self) -> Option<Vec<String>> {
+        self.hosted_models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn remember(&self, state: &AccountState) {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
         *self
@@ -303,157 +321,20 @@ impl Account {
 
     #[cfg(test)]
     async fn act(&self, action: AccountAction) -> Result<Value, ApiError> {
-        self.act_for(
-            action,
-            self.credentials.account_operator().as_deref(),
-            self.generation.load(Ordering::SeqCst),
-        )
-        .await
+        self.act_at(action, self.generation.load(Ordering::SeqCst))
+            .await
     }
 
-    async fn act_for(
-        &self,
-        action: AccountAction,
-        operator: Option<&str>,
-        generation: u64,
-    ) -> Result<Value, ApiError> {
-        if self.generation.load(Ordering::SeqCst) != generation {
-            return Err(session_changed());
-        }
-        if let AccountAction::SwitchOperator {
-            operator_id,
-            account_id,
-            restoring,
-            device,
-        } = action
-        {
-            return self
-                .switch_operator(
-                    operator_id.as_deref(),
-                    account_id.as_deref(),
-                    restoring,
-                    generation,
-                    device,
-                )
-                .await;
-        }
-        if self.credentials.account_operator().as_deref() != operator {
-            return if matches!(action, AccountAction::Get) {
-                to_json(&AccountState::default())
-            } else {
-                Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    "Switch to this operator and sign in again to use their account.",
-                ))
-            };
-        }
+    /// Any operator of this computer acts under its one sign-in (ADR-0033,
+    /// one account per computer); only the person's own sign-in or sign-out
+    /// changes it.
+    async fn act_at(&self, action: AccountAction, generation: u64) -> Result<Value, ApiError> {
         let session = self.snapshot(generation)?;
         let result = self.act_current(action, generation, &session).await;
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err(session_changed());
         }
         result
-    }
-
-    async fn switch_operator(
-        &self,
-        operator: Option<&str>,
-        account: Option<&str>,
-        restoring: bool,
-        generation: u64,
-        device: Option<String>,
-    ) -> Result<Value, ApiError> {
-        if restoring && self.credentials.account_operator().as_deref() == operator {
-            return Ok(json!({}));
-        }
-        // The same person (maintainer, 2026-10-23): an operator who last
-        // signed in as the account the server verified for the session here
-        // keeps it, as a browser profile of the same account would.
-        if self.same_account(account) {
-            let _change = self
-                .session_change
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if self.generation.load(Ordering::SeqCst) != generation {
-                return Err(session_changed());
-            }
-            self.credentials
-                .bind_operator(operator)
-                .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
-            return Ok(json!({}));
-        }
-        // Upgrading/reloading an already signed-in page is not a person
-        // switch. Preserve its existing session, including while offline.
-        if restoring && self.credentials.account_operator().is_none() && self.token().is_some() {
-            self.credentials
-                .bind_operator(operator)
-                .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
-            return Ok(json!({}));
-        }
-        // Discover a legacy dataset owner before its old credential is lost.
-        if self.token().is_some()
-            && self.credentials.workspace_needs_identity()
-            && let (Some(api), Some(client)) = (self.api.as_deref(), self.client.as_ref())
-        {
-            let state = self.get(api, client).await?;
-            if state.offline || (state.signed_in && state.account_id.is_none()) {
-                return Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    "Connect once to verify this computer's existing cloud account before switching operators.",
-                ));
-            }
-        }
-        let token;
-        {
-            let _change = self
-                .session_change
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if self.generation.load(Ordering::SeqCst) != generation {
-                return Err(session_changed());
-            }
-            token = self.token();
-            if token.is_some() {
-                self.credentials
-                    .clone()
-                    .set(TOKEN, "")
-                    .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
-            }
-            self.credentials
-                .bind_operator(operator)
-                .map_err(|e| ApiError::new(ErrorKind::Internal, e))?;
-            // A code asked for by the previous operator does not sign this one in.
-            *self
-                .challenge
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
-            self.remember(&AccountState::default());
-        }
-        // Local credential removal completes the switch. Network revocation is
-        // best effort and never delays a person at the field.
-        if let (Some(api), Some(client), Some(token)) =
-            (self.api.clone(), self.client.clone(), token)
-        {
-            tokio::spawn(async move {
-                if let Some(device) = device {
-                    let _ = client
-                        .delete(format!(
-                            "{api}/v1/watch-links?device={}",
-                            path_part(&device)
-                        ))
-                        .bearer_auth(&token)
-                        .send()
-                        .await;
-                }
-                let _ = client
-                    .post(format!("{api}/v1/auth/sign-out"))
-                    .bearer_auth(token)
-                    .json(&json!({}))
-                    .send()
-                    .await;
-            });
-        }
-        Ok(json!({}))
     }
 
     #[allow(clippy::too_many_lines, reason = "one arm per account action")]
@@ -476,9 +357,7 @@ impl Account {
             };
         };
         match action {
-            AccountAction::SwitchOperator { .. }
-            | AccountAction::Environment
-            | AccountAction::SetEnvironment { .. } => unreachable!(),
+            AccountAction::Environment | AccountAction::SetEnvironment { .. } => unreachable!(),
             AccountAction::Get => to_json(&self.get(api, client).await?),
             // One way in (S158): the API emails an existing account a sign-in
             // code and anyone else a code that creates their account.
@@ -512,6 +391,7 @@ impl Account {
                 email,
                 code,
                 product_updates,
+                terms_version,
             } => {
                 let challenge = self
                     .challenge
@@ -528,7 +408,7 @@ impl Account {
                     })?;
                 let answer = client
                     .post(format!("{api}/v1/auth/email-code/verify"))
-                    .json(&json!({ "challengeId": challenge, "code": code }))
+                    .json(&verify_body(&challenge, &code, terms_version.as_deref()))
                     .send()
                     .await
                     .map_err(|_| unreachable())?;
@@ -586,6 +466,11 @@ impl Account {
                     ..self.get(api, client).await?
                 })
             }
+            AccountAction::ReplayLog { device_id, id } => {
+                session.signed_in()?;
+                let path = crate::replay::account_log(&self.data_dir, &device_id, &id).await?;
+                Ok(json!({ "path": path.display().to_string() }))
+            }
             AccountAction::Flights => {
                 let token = session.signed_in()?;
                 let answer = client
@@ -633,6 +518,44 @@ impl Account {
                     .map_err(|_| unreachable())?;
                 refused(answer).await?;
                 to_json(&self.get(api, client).await?)
+            }
+            AccountAction::AcceptTerms { version, context } => {
+                let token = session.signed_in()?;
+                let answer = client
+                    .put(format!("{api}/v1/me/terms"))
+                    .bearer_auth(&token)
+                    .json(&json!({ "version": version, "context": context, "client": "desktop" }))
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                refused(answer).await?;
+                self.last
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .terms_version = Some(version);
+                Ok(json!({}))
+            }
+            AccountAction::SetSource { source, other } => {
+                let token = session.signed_in()?;
+                let mut body = json!({ "source": source });
+                if let Some(other) = other {
+                    body["other"] = json!(other);
+                }
+                let answer = client
+                    .put(format!("{api}/v1/me/source"))
+                    .bearer_auth(&token)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                if answer.status() != reqwest::StatusCode::CONFLICT {
+                    refused(answer).await?;
+                }
+                self.last
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .source_answered = Some(true);
+                Ok(json!({}))
             }
             AccountAction::SetName { name } => {
                 let token = session.signed_in()?;
@@ -741,20 +664,6 @@ impl Account {
                     .map_err(|_| unreachable())?;
                 refused(answer).await?;
                 Ok(json!({ "sent": true, "notShared": false }))
-            }
-            // The account's computers (S78), online or when last seen.
-            AccountAction::Computers => {
-                let answer = client
-                    .get(format!("{api}/v1/computers"))
-                    .bearer_auth(session.signed_in()?)
-                    .send()
-                    .await
-                    .map_err(|_| unreachable())?;
-                if !answer.status().is_success() {
-                    refused(answer).await?;
-                    return Ok(json!({ "computers": [] }));
-                }
-                answer.json::<Value>().await.map_err(|_| unreadable_reply())
             }
             AccountAction::Versions { entity, id } => {
                 self.versions(api, client, session, &entity, &id).await
@@ -972,6 +881,7 @@ impl Account {
                     .bearer_auth(&token)
                     .json(&uxduck_contracts::dto::edge::WatchLinkCreate {
                         device_id: device,
+                        device_name: Some(crate::sync::computer_name()),
                         vehicle_id,
                         vehicle_name,
                         flown_by,
@@ -1216,19 +1126,27 @@ impl Account {
                     AccountState::default()
                 }
                 Ok(answer) if answer.status().is_success() => match answer.json::<Me>().await {
-                    Ok(me) => AccountState {
-                        signed_in: true,
-                        account_id: Some(me.user.id),
-                        operator_id: self.credentials.account_operator(),
-                        owns_workspace: None,
-                        analytics_excluded: me.analytics_excluded,
-                        email: Some(me.user.email),
-                        name: Some(me.user.name).filter(|n| !n.is_empty()),
-                        username: me.user.username,
-                        product_updates: Some(me.product_updates),
-                        offline: false,
-                        created: false,
-                    },
+                    Ok(me) => {
+                        *self
+                            .hosted_models
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = me.hosted_models;
+                        AccountState {
+                            signed_in: true,
+                            account_id: Some(me.user.id),
+                            operator_id: None,
+                            owns_workspace: None,
+                            analytics_excluded: me.analytics_excluded,
+                            email: Some(me.user.email),
+                            name: Some(me.user.name).filter(|n| !n.is_empty()),
+                            username: me.user.username,
+                            product_updates: Some(me.product_updates),
+                            offline: false,
+                            created: false,
+                            source_answered: me.user.source_answered,
+                            terms_version: me.user.terms_version,
+                        }
+                    }
                     Err(_) => self.offline(),
                 },
                 _ => self.offline(),
