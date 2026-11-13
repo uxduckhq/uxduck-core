@@ -74,6 +74,9 @@ pub fn route(effect: Effect) -> Routed {
         Effect::MagCal { vehicle_id, report } => {
             Routed::Engine(Box::new(move |e| e.mag_cal(&vehicle_id, report)))
         }
+        Effect::ArmingChecks { vehicle_id, checks } => {
+            Routed::Engine(Box::new(move |e| e.arming_checks(&vehicle_id, checks)))
+        }
         Effect::AccelCalPosition {
             vehicle_id,
             position,
@@ -360,6 +363,7 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         | Effect::Traffic { .. }
         | Effect::TuningSamples { .. }
         | Effect::MagCal { .. }
+        | Effect::ArmingChecks { .. }
         | Effect::AccelCalPosition { .. }
         | Effect::CommandDone { .. }
         | Effect::Send { .. } => {

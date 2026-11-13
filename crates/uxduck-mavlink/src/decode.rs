@@ -211,6 +211,14 @@ pub enum Message {
         flags: u16,
         variances: [f32; 5],
     },
+    /// `EVENT`: one of PX4's events, an id with packed arguments
+    /// (`px4_events`).
+    Event {
+        id: u32,
+        sequence: u16,
+        log_levels: u8,
+        arguments: [u8; 40],
+    },
     /// PX4's `ESTIMATOR_STATUS`: its flags as `EKF_STATUS_FLAGS`, and its
     /// innovation test ratios for velocity, horizontal and vertical position,
     /// compass and height above ground.
@@ -807,9 +815,16 @@ fn command(message: &Ardupilotmega) -> Option<Message> {
 
 /// The parameter and mission protocol messages.
 /// The health and environment messages (S72).
-/// PX4's estimator and wind, read into ArduPilot's EKF and wind rows.
+/// PX4's estimator and wind, read into ArduPilot's EKF and wind rows, and
+/// its events.
 fn px4_health(message: &Ardupilotmega) -> Option<Message> {
     Some(match message {
+        Ardupilotmega::Event(m) => Message::Event {
+            id: m.id,
+            sequence: m.sequence,
+            log_levels: m.log_levels,
+            arguments: m.arguments,
+        },
         // Its flags mean what ArduPilot's do up to the predicted positions,
         // and its GPS glitch is ArduPilot's, at another bit.
         Ardupilotmega::EstimatorStatus(m) => {

@@ -8,6 +8,10 @@ third-party licenses or notices.
   message definitions are MIT-licensed. See `licenses/MAVLink-COPYING.txt` and
   [MAVLink's licensing explanation](https://github.com/mavlink/mavlink-devguide/blob/master/en/index.md#license).
   The SDK also generates Rust message types from those definitions during builds.
+- `crates/uxduck-mavlink/px4/events.json` is taken by `scripts/px4-events.py`
+  from the events catalogue PX4 1.17.0 builds (`etc/extras/all_events.json`):
+  its health and arming check messages. PX4 is BSD-3-Clause licensed. Its
+  licence is beside the file, in `crates/uxduck-mavlink/px4/LICENSE`.
 - Other Cargo dependencies are downloaded separately, not vendored in this source
   export. Their package manifests and license files govern those components.
   `Cargo.lock` pins the versions. Binary distributors must preserve the notices

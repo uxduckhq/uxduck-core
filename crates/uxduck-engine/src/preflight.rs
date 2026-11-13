@@ -36,6 +36,8 @@ use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::domain::video::{RecordPolicy, VideoState};
 use uxduck_core::events::{Actor, Change};
 
+use uxduck_mavlink::px4_events::ArmingChecks;
+
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
@@ -65,6 +67,10 @@ pub(crate) struct Preflights {
     /// Plugins' latest reports of their checks (S194). Lost with the
     /// daemon, and with the plugin when it stops.
     pub(crate) plugin_reports: crate::plugin_checks::Reports,
+    /// What each PX4 vehicle's latest health and arming report says about
+    /// the mode it is in. Lost with the daemon: PX4 reports again when
+    /// asked.
+    px4_checks: BTreeMap<String, ArmingChecks>,
 }
 
 fn actor() -> Actor {
@@ -251,6 +257,86 @@ struct Outcome {
     status: CheckStatus,
     detail: String,
     fix: Option<CheckFix>,
+}
+
+/// PX4's own checks, from its latest health and arming report on the mode
+/// it is in (K5): what holds that mode while it can't arm in it, and its
+/// warnings.
+fn px4_checks(vehicle: &Vehicle, report: &ArmingChecks) -> Vec<Check> {
+    const WARNING: u8 = 4;
+    let name = &vehicle.name;
+    let mode = report.mode.as_deref().unwrap_or("its mode");
+    let mut checks: Vec<Check> = Vec::new();
+    for check in report
+        .checks
+        .iter()
+        .filter(|c| c.holds || c.severity <= WARNING)
+    {
+        let id = format!("vehicle:{}", check.text);
+        if checks.iter().any(|c| c.id == id) {
+            continue;
+        }
+        let fix = match fix_for(&vehicle.autopilot, &check.text) {
+            Some((row, _)) if uxduck_core::domain::setup::offered(&vehicle.autopilot, row) => {
+                CheckFix::Setup { row }
+            }
+            _ => CheckFix::Messages,
+        };
+        let said = if check.holds {
+            format!("{name} says it can't arm in {mode} until this clears.")
+        } else if report.can_arm == Some(true) {
+            format!("{name} can arm in {mode} but warns about this.")
+        } else {
+            format!("{name} warns about this.")
+        };
+        let detail = if check.description.is_empty() {
+            said
+        } else {
+            format!("{said} {}", check.description)
+        };
+        checks.push(Check {
+            id,
+            source: CheckSource::Vehicle,
+            title: check.text.clone(),
+            severity: if check.holds {
+                CheckSeverity::Block
+            } else {
+                CheckSeverity::Warn
+            },
+            status: CheckStatus::Fail,
+            detail: Some(detail),
+            fix: Some(fix),
+            plugin: None,
+        });
+    }
+    if checks.iter().any(|c| c.severity == CheckSeverity::Block) {
+        return checks;
+    }
+    let (status, detail) = match report.can_arm {
+        Some(true) => (CheckStatus::Pass, format!("It says it can arm in {mode}.")),
+        Some(false) => (
+            CheckStatus::Fail,
+            format!("It says it can't arm in {mode} yet."),
+        ),
+        None => (
+            CheckStatus::Unknown,
+            format!("It hasn't said whether it can arm in {mode}."),
+        ),
+    };
+    checks.insert(
+        0,
+        Check {
+            id: "vehicle:ready".into(),
+            source: CheckSource::Vehicle,
+            title: format!("{name}'s own checks"),
+            severity: CheckSeverity::Block,
+            status,
+            detail: Some(detail),
+            fix: None,
+            plugin: None,
+        },
+    );
+    checks
 }
 
 fn pass(detail: impl Into<String>) -> Outcome {
@@ -478,6 +564,21 @@ impl Engine {
         self.review_preflight(&id);
     }
 
+    /// Whether PX4's latest report says it can arm in the mode it is in:
+    /// unknown before it reports, and from PX4 older than 1.14.
+    pub(crate) fn px4_can_arm(&self, vehicle_id: &str) -> Option<bool> {
+        self.preflight.px4_checks.get(vehicle_id)?.can_arm
+    }
+
+    /// PX4's report on the mode it is in, as its own checks (K5).
+    pub fn arming_checks(&mut self, vehicle_id: &str, checks: ArmingChecks) {
+        let Some(id) = self.vehicle(vehicle_id).map(|v| v.id.clone()) else {
+            return;
+        };
+        self.preflight.px4_checks.insert(id.clone(), checks);
+        self.review_preflight(&id);
+    }
+
     /// The vehicle restarted: no parameter waits for it any more.
     pub(crate) fn preflight_restarted(&mut self, vehicle_id: &str) {
         let Some(id) = self.vehicle(vehicle_id).map(|v| v.id.clone()) else {
@@ -491,6 +592,9 @@ impl Engine {
     /// The vehicle's own pre-arm reasons (K5), or one row saying whether it
     /// is ready when it says nothing against it.
     fn vehicle_checks(&self, vehicle: &Vehicle) -> Vec<Check> {
+        if let Some(report) = self.preflight.px4_checks.get(&vehicle.id) {
+            return px4_checks(vehicle, report);
+        }
         let reasons = self.prearm_reasons(&vehicle.id);
         if reasons.is_empty() {
             let ready = self.telemetry(&vehicle.id).and_then(|t| {

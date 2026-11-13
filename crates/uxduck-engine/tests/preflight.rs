@@ -576,6 +576,95 @@ fn a_simulated_px4_vehicle_arms_without_an_ekf_status() {
     assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
 }
 
+#[test]
+fn px4s_report_says_what_holds_the_mode_it_is_in() {
+    use uxduck_mavlink::px4_events::{ArmingChecks, Check};
+    let mut b = bench();
+    b.seen_as("Quadrotor", "Takeoff", false, "Px4");
+    let sticks = Check {
+        text: "No manual control input".into(),
+        description: "Connect and enable stick input or use autonomous mode.".into(),
+        severity: 4,
+        modes: u32::MAX,
+        holds: false,
+    };
+    let position = Check {
+        text: "Navigation error: No valid position estimate".into(),
+        description: String::new(),
+        severity: 3,
+        modes: 8_257_660,
+        holds: true,
+    };
+    b.engine.arming_checks(
+        "v",
+        ArmingChecks {
+            mode: Some("Takeoff".into()),
+            can_arm: Some(false),
+            checks: vec![position, sticks.clone()],
+        },
+    );
+    let held = b.check("vehicle:Navigation error: No valid position estimate");
+    assert_eq!(held["status"], "fail", "{held}");
+    assert_eq!(held["severity"], "block", "{held}");
+    assert_eq!(
+        held["detail"], "Alpha says it can't arm in Takeoff until this clears.",
+        "{held}"
+    );
+    let warned = b.check("vehicle:No manual control input");
+    assert_eq!(warned["severity"], "warn", "{warned}");
+    assert_eq!(
+        warned["detail"],
+        "Alpha warns about this. Connect and enable stick input or use autonomous mode.",
+        "{warned}"
+    );
+    assert!(
+        b.checks()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["id"] != "vehicle:ready"),
+        "what holds it says why"
+    );
+    assert!(
+        gating(&b.checks()).is_empty(),
+        "the vehicle refuses by itself (K5)"
+    );
+
+    // Held by what it only warns about: it says it can't, and why it may be.
+    b.engine.arming_checks(
+        "v",
+        ArmingChecks {
+            mode: Some("Position".into()),
+            can_arm: Some(false),
+            checks: vec![sticks.clone()],
+        },
+    );
+    let ready = b.check("vehicle:ready");
+    assert_eq!(ready["status"], "fail", "{ready}");
+    assert_eq!(
+        ready["detail"], "It says it can't arm in Position yet.",
+        "{ready}"
+    );
+    assert_eq!(
+        b.check("vehicle:No manual control input")["severity"],
+        "warn"
+    );
+
+    b.engine.arming_checks(
+        "v",
+        ArmingChecks {
+            mode: Some("Hold".into()),
+            can_arm: Some(true),
+            checks: vec![sticks],
+        },
+    );
+    let ready = b.check("vehicle:ready");
+    assert_eq!(ready["status"], "pass", "{ready}");
+    assert_eq!(ready["detail"], "It says it can arm in Hold.", "{ready}");
+    let warned = b.check("vehicle:No manual control input");
+    assert_eq!(warned["severity"], "warn", "{warned}");
+}
+
 fn gating(checks: &Value) -> Vec<String> {
     checks["checks"]
         .as_array()

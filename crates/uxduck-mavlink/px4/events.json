@@ -1,0 +1,1415 @@
+{
+ "enums": {
+  "px4::battery_fault_reason_t": {
+   "bitfield": false,
+   "entries": {
+    "0": "Battery has deep discharged",
+    "1": "Battery detected voltage spikes",
+    "10": "Battery failed to arm",
+    "2": "One or more battery cells have failed",
+    "3": "Battery reported over-current",
+    "4": "Battery has reached a critical temperature which can result in a critical failure",
+    "5": "Battery temperature is below operating range",
+    "6": "Voltage mismatch, use equally charged batteries",
+    "7": "Battery firmware is not compatible with current autopilot firmware",
+    "8": "Battery model is not supported by the system",
+    "9": "Battery reported an hardware problem"
+   },
+   "type": "uint8_t"
+  },
+  "px4::esc_fault_reason_t": {
+   "bitfield": false,
+   "entries": {
+    "0": "detected over current",
+    "1": "detected over voltage",
+    "2": "Motor has reached a critical temperature",
+    "3": "Motor RPM is exceeding the limits",
+    "4": "received an invalid control command",
+    "5": "Motor stalled",
+    "6": "detected a generic hardware failure",
+    "7": "Motor is over-heating",
+    "8": "is over-heating",
+    "9": "reached a critical temperature"
+   },
+   "type": "uint8_t"
+  },
+  "px4::health_component_t": {
+   "bitfield": true,
+   "entries": {
+    "1": "None",
+    "1024": "Logging",
+    "1048576": "System",
+    "1073741824": "Open Drone ID system",
+    "128": "Remote Control (RC or Joystick)",
+    "131072": "Local position estimate",
+    "134217728": "Magnetometer",
+    "16": "Optical flow",
+    "16384": "Attitude controller",
+    "16777216": "Global position estimate",
+    "2": "Absolute pressure",
+    "2048": "Battery",
+    "2097152": "Camera",
+    "256": "Motors/ESCs",
+    "262144": "Mission",
+    "268435456": "Accelerometer",
+    "32": "Vision position estimate",
+    "32768": "Position controller",
+    "33554432": "Storage",
+    "4": "Differential pressure",
+    "4096": "Communication links",
+    "4194304": "Gimbal",
+    "512": "UTM",
+    "524288": "Avoidance",
+    "536870912": "Gyroscope",
+    "64": "Distance sensor",
+    "65536": "Attitude estimate",
+    "67108864": "Parachute",
+    "8": "GPS",
+    "8192": "Rate controller",
+    "8388608": "Payload"
+   },
+   "type": "uint32_t"
+  },
+  "px4::navigation_mode_group_t": {
+   "bitfield": true,
+   "entries": {
+    "1": "Fully manual mode (w/o any controller support)",
+    "1024": "Acro",
+    "1048576": "Precision Land",
+    "1073741824": "External 8",
+    "131072": "Takeoff",
+    "134217728": "External 5",
+    "16": "Loiter",
+    "16384": "Offboard",
+    "16777216": "External 2",
+    "2": "Altitude mode",
+    "2097152": "Orbit",
+    "262144": "Land",
+    "268435456": "External 6",
+    "32": "RTL",
+    "32768": "Stabilized",
+    "33554432": "External 3",
+    "4": "Position mode",
+    "4194304": "VTOL Takeoff",
+    "524288": "Follow Target",
+    "536870912": "External 7",
+    "67108864": "External 4",
+    "8": "Mission mode",
+    "8388608": "External 1"
+   },
+   "type": "uint32_t"
+  },
+  "px4::suggested_action_t": {
+   "bitfield": false,
+   "entries": {
+    "0": "none",
+    "1": "Land now!",
+    "2": "Reduce throttle!"
+   },
+   "type": "uint8_t"
+  }
+ },
+ "events": {
+  "16856624": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Home position not set",
+   "name": "check_modes_home_position"
+  },
+  "16901501": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Geofence RTL requires valid home",
+   "name": "check_gf_no_home"
+  },
+  "16920235": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Geofence violation: approaching or outside geofence",
+   "name": "check_gf_violation_custom_gf"
+  },
+  "17054001": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Press safety button first",
+   "name": "check_system_safety_button"
+  },
+  "17154777": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Upload a mission first.",
+   "group": "arming_check",
+   "message": "No valid mission available",
+   "name": "check_modes_mission"
+  },
+  "17231145": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Connect and enable stick input or use autonomous mode.",
+   "group": "arming_check",
+   "message": "No manual control input",
+   "name": "check_modes_manual_control"
+  },
+  "17293278": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Vertical Position Error too high",
+   "name": "check_estimator_gps_vert_pos_err_too_high"
+  },
+  "17443695": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Motor failure detected",
+   "name": "check_failure_detector_motor"
+  },
+  "17588137": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Waypoint above maximum height",
+   "name": "check_navigator_failure_hagl"
+  },
+  "17826492": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Horizontal Position Error too high",
+   "name": "check_estimator_gps_hor_pos_err_too_high"
+  },
+  "17836172": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float"
+   ],
+   "description": "The CPU load can be reduced for example by disabling unused modules (e.g. mavlink instances) or reducing the gyro update rate via IMU_GYRO_RATEMAX.",
+   "group": "health",
+   "message": "CPU load too high: {3:.1}%",
+   "name": "check_cpuload_too_high"
+  },
+  "18103665": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Gyro {3} uncalibrated",
+   "name": "check_gyro_not_calibrated"
+  },
+  "18447583": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float",
+    "float"
+   ],
+   "description": "Check the voltage supply to the FMU, it must be above {4:.2} Volt.",
+   "group": "health",
+   "message": "Avionics Power low: {3:.2} Volt",
+   "name": "check_avionics_power_low"
+  },
+  "18580211": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float",
+    "float"
+   ],
+   "description": "Current airspeed reading too high. Check if wind is below maximum airspeed and redo airspeed calibration if the measured airspeed does not correspond to wind conditions.",
+   "group": "arming_check",
+   "message": "Airspeed too high",
+   "name": "check_airspeed_too_high"
+  },
+  "18648929": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Switch to another mode first.",
+   "group": "arming_check",
+   "message": "Mode not suitable for arming",
+   "name": "check_modes_cannot_takeoff"
+  },
+  "18691879": {
+   "arguments": [
+    "uint8_t",
+    "px4::health_component_t",
+    "px4::health_component_t",
+    "px4::health_component_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Health report summary event",
+   "name": "commander_health_summary"
+  },
+  "18694246": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "int16_t",
+    "int16_t"
+   ],
+   "description": "Recalibrate the RC.",
+   "group": "arming_check",
+   "message": "RC calibration for channel {3} invalid: TRIM greater than MAX ({4} greater than {5})",
+   "name": "check_rc_trim_too_high"
+  },
+  "18865335": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Poor GPS Quality",
+   "name": "check_estimator_gps_generic"
+  },
+  "19005802": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Remaining flight time low",
+   "name": "check_battery_rem_flight_time_low"
+  },
+  "19007080": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "Available power modules: {3}. Required power modules: {4}.",
+   "group": "arming_check",
+   "message": "Power redundancy not met",
+   "name": "check_avionics_power_redundancy"
+  },
+  "19259057": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "float",
+    "float"
+   ],
+   "description": "Check the calibration. Inconsistency value: {4}. Configured Threshold: {5}.",
+   "group": "arming_check",
+   "message": "Gyro {3} inconsistent",
+   "name": "check_imu_gyro_inconsistent"
+  },
+  "19404811": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The lowest battery state of charge is below the critical threshold.",
+   "group": "arming_check",
+   "message": "Critical battery",
+   "name": "check_battery_critical"
+  },
+  "19838260": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "float",
+    "float"
+   ],
+   "description": "Check the calibration. Inconsistency value: {4}. Configured Threshold: {5}.",
+   "group": "arming_check",
+   "message": "Accel {3} inconsistent",
+   "name": "check_imu_accel_inconsistent"
+  },
+  "19865031": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The offboard component is not sending setpoints or the required estimate (e.g. position) is missing.",
+   "group": "arming_check",
+   "message": "No offboard signal",
+   "name": "check_modes_offboard_signal"
+  },
+  "19966445": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from barometer {3}",
+   "name": "check_baro_no_data"
+  },
+  "20345936": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Gyro sensor {3} missing",
+   "name": "check_gyro_missing"
+  },
+  "20380425": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Land and calibrate the compass.",
+   "group": "arming_check",
+   "message": "Stopping compass use",
+   "name": "check_estimator_mag_fault"
+  },
+  "20390844": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "float",
+    "float",
+    "float"
+   ],
+   "description": "An accelerometer recalibration might help.",
+   "group": "arming_check",
+   "message": "High Accelerometer Bias",
+   "name": "check_estimator_high_accel_bias"
+  },
+  "20842799": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Geofence violation: exceeding maximum distance to Home",
+   "name": "check_gf_violation_max_hor_dist"
+  },
+  "21039037": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Failure triggered by external system",
+   "name": "check_failure_detector_ext"
+  },
+  "21225307": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The SD card contains crash dump files, service the vehicle before continuing to fly.",
+   "group": "health",
+   "message": "Crash dumps present on SD card",
+   "name": "check_hardfault_present"
+  },
+  "21326245": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Altitude failure detected",
+   "name": "check_failure_detector_alt"
+  },
+  "21420339": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Airspeed invalid",
+   "name": "check_airspeed_invalid"
+  },
+  "21654568": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Check that all propellers are mounted correctly and are not damaged.",
+   "group": "health",
+   "message": "Imbalanced propeller detected",
+   "name": "check_failure_detector_imbalanced_prop"
+  },
+  "21752443": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Horizontal Speed Drift too high",
+   "name": "check_estimator_gps_hor_speed_drift_too_high"
+  },
+  "21826980": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The lowest battery state of charge is below the low threshold.",
+   "group": "arming_check",
+   "message": "Low battery",
+   "name": "check_battery_low"
+  },
+  "21872809": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Barometer {3} missing",
+   "name": "check_baro_missing"
+  },
+  "22050956": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "int16_t"
+   ],
+   "description": "Check the compass orientations and recalibrate.",
+   "group": "arming_check",
+   "message": "Compass inconsistent by {3} degrees",
+   "name": "check_mag_consistency"
+  },
+  "22222072": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Accelerometer {3} uncalibrated",
+   "name": "check_accel_not_calibrated"
+  },
+  "22476331": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Check the power supply",
+   "group": "health",
+   "message": "Overcurrent detected for the peripheral 5V supply",
+   "name": "check_power_oc_periph"
+  },
+  "22481569": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Arm authorization denied",
+   "name": "check_system_arm_auth_failed"
+  },
+  "22494412": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Horizontal Position Drift too high",
+   "name": "check_estimator_gps_hor_pos_drift_too_high"
+  },
+  "22720449": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "Make sure all required sensors are working, enabled and calibrated.",
+   "group": "arming_check",
+   "message": "Found {3} compass (required: {4})",
+   "name": "check_mag_sys_has_mag_missing"
+  },
+  "22831554": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Waiting for estimator to initialize",
+   "name": "check_estimator_missing_data"
+  },
+  "23035260": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "Recalibrate the compass and check the orientation.",
+   "group": "arming_check",
+   "message": "Estimator fault due to Compass {3}",
+   "name": "check_mag_fault"
+  },
+  "23187824": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from Compass {3}",
+   "name": "check_mag_no_data"
+  },
+  "23268580": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Home position required",
+   "name": "check_system_no_home_pos"
+  },
+  "23335473": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Vertical Speed Drift too high",
+   "name": "check_estimator_gps_vert_speed_drift_too_high"
+  },
+  "23579003": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "To arm, at least a data link or RC must be present.",
+   "group": "arming_check",
+   "message": "No connection to the ground control station",
+   "name": "check_rc_dl_no_dllink"
+  },
+  "23725705": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "px4::esc_fault_reason_t",
+    "px4::suggested_action_t"
+   ],
+   "description": "{5}",
+   "group": "health",
+   "message": "ESC {3}: {4}",
+   "name": "check_escs_fault"
+  },
+  "23739863": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Check the power supply",
+   "group": "health",
+   "message": "Overcurrent detected for the hipower 5V supply",
+   "name": "check_power_oc_hipower"
+  },
+  "23756917": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "uint16_t"
+   ],
+   "description": "Recalibrate the RC.",
+   "group": "arming_check",
+   "message": "RC calibration for channel {3} invalid: MIN less than {4}",
+   "name": "check_rc_min_too_small"
+  },
+  "23991930": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "System power unavailable",
+   "name": "check_missing_system_power"
+  },
+  "24439368": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Flying with USB is not safe. Disconnect it and reboot the FMU.",
+   "group": "arming_check",
+   "message": "USB connected",
+   "name": "check_system_usb_connected"
+  },
+  "24624528": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "uint16_t"
+   ],
+   "description": "Recalibrate the RC.",
+   "group": "arming_check",
+   "message": "RC calibration for channel {3} invalid: MAX greater than {4}",
+   "name": "check_rc_max_too_high"
+  },
+  "24661593": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "RTL switch engaged",
+   "name": "check_man_control_rtl_engaged"
+  },
+  "24685549": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Note that USB must be disconnected as well.",
+   "group": "health",
+   "message": "Power module not connected",
+   "name": "check_avionics_power_missing"
+  },
+  "24736883": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Vehicle is in safety configuration and denies arming.",
+   "group": "arming_check",
+   "message": "Vehicle is in safety configuration",
+   "name": "check_armable_configuration"
+  },
+  "25005055": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Accelerometer sensor {3} missing",
+   "name": "check_accel_missing"
+  },
+  "25218996": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Open Drone ID system reported being unhealthy.",
+   "group": "arming_check",
+   "message": "Open Drone ID system not ready",
+   "name": "check_open_drone_id_unhealthy"
+  },
+  "25272693": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "int16_t",
+    "int16_t"
+   ],
+   "description": "Recalibrate the RC.",
+   "group": "arming_check",
+   "message": "RC calibration for channel {3} invalid: TRIM less than MIN ({4} less than {5})",
+   "name": "check_rc_trim_too_small"
+  },
+  "25316113": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The vehicle exceeded the maximum configured roll angle.",
+   "group": "arming_check",
+   "message": "Attitude failure detected",
+   "name": "check_failure_detector_roll"
+  },
+  "25321862": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from distance sensor {3}",
+   "name": "check_distance_sensor_invalid"
+  },
+  "25491158": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS signal spoofed",
+   "name": "check_estimator_gps_spoofed"
+  },
+  "25569984": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Optical flow sensor missing",
+   "name": "check_optical_sensor_missing"
+  },
+  "25576769": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Battery {3} disconnected",
+   "name": "check_battery_disconnected"
+  },
+  "25679424": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Horizontal velocity unstable",
+   "name": "check_estimator_hor_vel_not_stable"
+  },
+  "25855193": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Kill switch engaged",
+   "name": "check_man_control_kill_engaged"
+  },
+  "25948424": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Vertical velocity unstable",
+   "name": "check_estimator_vert_vel_not_stable"
+  },
+  "25968665": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "ESC telemetry missing",
+   "name": "check_escs_telem_missing"
+  },
+  "26044037": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No CPU and RAM load information",
+   "name": "check_missing_cpuload"
+  },
+  "26084437": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "float",
+    "float",
+    "float"
+   ],
+   "description": "A Gyro recalibration might help.",
+   "group": "arming_check",
+   "message": "High Gyro Bias",
+   "name": "check_estimator_high_gyro_bias"
+  },
+  "26270848": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No airspeed data",
+   "name": "check_airspeed_no_data"
+  },
+  "26385442": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Estimator not using GPS",
+   "name": "check_estimator_gps_not_fusing"
+  },
+  "26412014": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Height estimate not stable",
+   "name": "check_estimator_hgt_not_stable"
+  },
+  "26420585": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Make sure the gyroscope is providing valid data.",
+   "group": "arming_check",
+   "message": "Angular velocity not valid",
+   "name": "check_modes_angular_velocity"
+  },
+  "26475035": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Horizontal position unstable",
+   "name": "check_estimator_hor_pos_not_stable"
+  },
+  "26592384": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The application running the mode might have crashed or the CPU load is too high.",
+   "group": "arming_check",
+   "message": "Mode is unresponsive",
+   "name": "check_external_modes_unresponsive"
+  },
+  "26743035": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Land now",
+   "group": "arming_check",
+   "message": "GNSS heading not reliable",
+   "name": "check_estimator_gnss_fault"
+  },
+  "26788467": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The available positioning data is not sufficient to execute the selected mode.",
+   "group": "arming_check",
+   "message": "Navigation error: No valid global position estimate",
+   "name": "check_modes_global_pos"
+  },
+  "26938432": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Open Drone ID system failed to report. Make sure it is setup and installed properly.",
+   "group": "arming_check",
+   "message": "Open Drone ID system missing",
+   "name": "check_open_drone_id_missing"
+  },
+  "26976193": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS PDOP too high",
+   "name": "check_estimator_gps_pdop_too_high"
+  },
+  "27095490": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "Make sure all required batteries are connected.",
+   "group": "health",
+   "message": "Battery {3} missing",
+   "name": "check_battery_missing"
+  },
+  "27227279": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Wait until the estimator initialized",
+   "group": "arming_check",
+   "message": "No valid attitude estimate",
+   "name": "check_modes_attitude"
+  },
+  "27455887": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Speed Accuracy too low",
+   "name": "check_estimator_gps_speed_acc_too_low"
+  },
+  "27737349": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Local position estimate valid but has low accuracy. Warn user.",
+   "group": "arming_check",
+   "message": "Position estimate has low accuracy",
+   "name": "check_estimator_low_position_accuracy"
+  },
+  "27773549": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Insert an SD Card to the autopilot and reboot the system.",
+   "group": "arming_check",
+   "message": "Missing FMU SD Card",
+   "name": "check_missing_fmu_sdcard"
+  },
+  "27825120": {
+   "arguments": [
+    "uint8_t",
+    "px4::health_component_t",
+    "px4::health_component_t",
+    "px4::navigation_mode_group_t",
+    "px4::navigation_mode_group_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Arming check summary event",
+   "name": "commander_arming_check_summary"
+  },
+  "27903148": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from optical flow sensor",
+   "name": "check_optical_flow_sensor_invalid"
+  },
+  "28121863": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The lowest battery state of charge is below the emergency threshold.",
+   "group": "arming_check",
+   "message": "Emergency battery level",
+   "name": "check_battery_emergency"
+  },
+  "28190816": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Wind speed is above limit ({3:.1m/s})",
+   "name": "check_wind_too_high"
+  },
+  "28255544": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from Gyro {3}",
+   "name": "check_gyro_no_data"
+  },
+  "28274646": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS Vertical Position Drift too high",
+   "name": "check_estimator_gps_vert_pos_drift_too_high"
+  },
+  "29053220": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The available positioning data is not sufficient to determine the vehicle's global position.",
+   "group": "arming_check",
+   "message": "Global position estimate required",
+   "name": "check_system_no_global_pos"
+  },
+  "29146769": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS fix too low",
+   "name": "check_estimator_gps_fix_too_low"
+  },
+  "29467116": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The available positioning data is not sufficient to execute the selected mode.",
+   "group": "arming_check",
+   "message": "Navigation error: No valid altitude estimate",
+   "name": "check_modes_local_alt"
+  },
+  "29532170": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Flight termination active",
+   "name": "check_system_flight_term_active"
+  },
+  "29557505": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "GPS jamming detected",
+   "name": "check_estimator_gps_jamming_critical"
+  },
+  "29582859": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Mission cannot be completed",
+   "name": "check_mission_failure"
+  },
+  "29871674": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Not enough GPS Satellites",
+   "name": "check_estimator_gps_num_sats_too_low"
+  },
+  "30121562": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Make sure all batteries are operational.",
+   "group": "health",
+   "message": "Battery unhealthy",
+   "name": "check_battery_unhealthy"
+  },
+  "30149368": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Parachute system reported being unhealth.",
+   "group": "health",
+   "message": "Parachute system not ready",
+   "name": "check_parachute_unhealthy"
+  },
+  "30305359": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Vehicle is in transition state",
+   "name": "check_system_vtol_in_transition"
+  },
+  "30612409": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The available positioning data is not sufficient to execute the selected mode.",
+   "group": "arming_check",
+   "message": "Navigation error: No valid position estimate",
+   "name": "check_modes_local_pos"
+  },
+  "30700832": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Geofence violation: exceeding maximum altitude above Home",
+   "name": "check_gf_violation_max_alt"
+  },
+  "30977863": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Vehicle is not in multicopter mode",
+   "name": "check_system_vtol_in_fw_mode"
+  },
+  "30998685": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Distance sensor {3} missing",
+   "name": "check_distance_sensor_missing"
+  },
+  "31198698": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float"
+   ],
+   "description": "The RAM usage can be reduced for example by disabling unused modules (e.g. mavlink instances).",
+   "group": "health",
+   "message": "RAM usage too high: {3:.1}%",
+   "name": "check_ram_usage_too_high"
+  },
+  "31343262": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "ESC {3} offline",
+   "name": "check_escs_offline"
+  },
+  "31421834": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Maximum flight time reached",
+   "name": "check_flight_time_limit"
+  },
+  "31525953": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The application running the mode is not started.",
+   "group": "arming_check",
+   "message": "Mode is not registered",
+   "name": "check_external_modes_unavailable"
+  },
+  "31958015": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "VTOL fixed-wing system failure detected. Verify reason for failure, and reboot the vehicle once confirmed safe",
+   "name": "check_vtol_fixed_wing_system_failure"
+  },
+  "32067059": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float",
+    "float"
+   ],
+   "description": "Check the voltage supply to the FMU, it must be below {4:.2} Volt.",
+   "group": "health",
+   "message": "Avionics Power high: {3:.2} Volt",
+   "name": "check_avionics_power_high"
+  },
+  "32165976": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "Compass sensor {3} missing",
+   "name": "check_mag_missing"
+  },
+  "32379714": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t",
+    "px4::battery_fault_reason_t",
+    "px4::suggested_action_t"
+   ],
+   "description": "The battery reported a failure which might be dangerous to fly with.",
+   "group": "health",
+   "message": "Battery {3}: {4}. {5}",
+   "name": "check_battery_fault"
+  },
+  "32490591": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "float",
+    "float",
+    "float",
+    "float"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Strong magnetic interference",
+   "name": "check_estimator_mag_interference"
+  },
+  "32570390": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "One or more ESCs failed to arm.",
+   "group": "health",
+   "message": "ESC failure",
+   "name": "check_failure_detector_arm_esc"
+  },
+  "32742900": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "Parachute system failed to report. Make sure it it setup and installed properly.",
+   "group": "health",
+   "message": "Parachute system missing",
+   "name": "check_parachute_missing"
+  },
+  "32935756": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Landing gear switch set in UP position",
+   "name": "check_man_control_landing_gear_up"
+  },
+  "33007247": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "health",
+   "message": "No valid data from Accelerometer {3}",
+   "name": "check_accel_no_data"
+  },
+  "33420013": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Heading estimate not stable",
+   "name": "check_estimator_heading_not_stable"
+  },
+  "33493753": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t",
+    "uint8_t"
+   ],
+   "description": "",
+   "group": "arming_check",
+   "message": "Compass {3} uncalibrated",
+   "name": "check_mag_not_calibrated"
+  },
+  "33522684": {
+   "arguments": [
+    "px4::navigation_mode_group_t",
+    "uint8_t"
+   ],
+   "description": "The vehicle exceeded the maximum configured pitch angle.",
+   "group": "arming_check",
+   "message": "Attitude failure detected",
+   "name": "check_failure_detector_pitch"
+  }
+ },
+ "source": "PX4 v1.17.0, etc/extras/all_events.json"
+}

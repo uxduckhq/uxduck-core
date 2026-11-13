@@ -1038,9 +1038,13 @@ impl Engine {
         };
         match telemetry.items.iter().find(|i| i.key == "arming.ready") {
             Some(item) => item.time_us >= started_us && item.value == Some(1.0),
-            None => self
-                .height_above_home_since(vehicle_id, started_us)
-                .is_some(),
+            // PX4 says so in its arming report, a little after it knows
+            // where it is. Asked to arm before then, it refuses.
+            None => {
+                self.height_above_home_since(vehicle_id, started_us)
+                    .is_some()
+                    && self.px4_can_arm(vehicle_id) != Some(false)
+            }
         }
     }
 

@@ -43,6 +43,8 @@ const MAV_FRAME_GLOBAL_TERRAIN_ALT_INT: u8 = 11;
 /// `AVAILABLE_MODES`: a vehicle's own list of modes, asked for by
 /// `MAV_CMD_REQUEST_MESSAGE`.
 const AVAILABLE_MODES: u32 = 435;
+/// `MAV_CMD_RUN_PREARM_CHECKS`.
+const RUN_PREARM_CHECKS: u16 = 401;
 
 pub const RC_CHANNELS_HZ: u16 = 2;
 
@@ -342,6 +344,12 @@ pub enum Effect {
         severity: u8,
         text: String,
     },
+    /// What PX4's latest health and arming report says about the mode it
+    /// is in, each time that changes.
+    ArmingChecks {
+        vehicle_id: String,
+        checks: crate::px4_events::ArmingChecks,
+    },
     /// A compass calibration's progress or result (S184).
     MagCal { vehicle_id: String, report: MagCal },
     /// The vehicle's accelerometer calibration asks this ground station to
@@ -467,6 +475,13 @@ impl<T> PendingTransfer<T> {
 struct Vehicle {
     observation: Observation,
     autopilot_component: u8,
+    /// Its heartbeat's `custom_mode`.
+    custom_mode: u32,
+    /// PX4's events, its latest health and arming report, and what was last
+    /// said of it.
+    px4_events: crate::px4_events::Events,
+    arming: Option<crate::px4_events::Report>,
+    arming_said: Option<crate::px4_events::ArmingChecks>,
     version_requests: u8,
     last_request_us: u64,
     /// Produced since the last tick; sent and cleared on the next.
@@ -566,6 +581,10 @@ impl Vehicle {
                 mode: None,
             },
             autopilot_component: component_id,
+            custom_mode: 0,
+            px4_events: crate::px4_events::Events::default(),
+            arming: None,
+            arming_said: None,
             version_requests: 0,
             last_request_us: 0,
             pending: Produced::default(),
@@ -1105,6 +1124,12 @@ impl Session {
                         uri,
                     ));
                 }
+                Message::Event {
+                    id,
+                    sequence,
+                    log_levels,
+                    arguments,
+                } => effects.extend(self.px4_event(&key, id, sequence, log_levels, arguments)),
                 message @ Message::StatusText { .. } => {
                     effects.extend(self.status_text(
                         &key,
@@ -1486,16 +1511,23 @@ impl Session {
         uid: u64,
         uid2: [u8; 18],
         versions: (u32, [u8; 8]),
-    ) -> Option<Effect> {
+    ) -> Vec<Effect> {
         let simulation = self.simulated.contains(&key.0).then_some(key.0.as_str());
-        let vehicle = self.vehicles.get_mut(key)?;
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
         if !identify(vehicle, uid, uid2, versions, simulation) {
-            return None;
+            return Vec::new();
         }
         self.moved(key);
-        self.vehicles
-            .get(key)
-            .map(|vehicle| Effect::Vehicle(Box::new(vehicle.observation.clone())))
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
+        // PX4's arming report again, for the id it may have just taken.
+        vehicle.arming_said = None;
+        std::iter::once(Effect::Vehicle(Box::new(vehicle.observation.clone())))
+            .chain(arming_said(vehicle))
+            .collect()
     }
 
     /// A heartbeat from something that is not a vehicle: ourselves looped
@@ -1519,6 +1551,55 @@ impl Session {
             effects.extend(self.ask_cameras(now_us));
         }
         effects
+    }
+
+    /// One of PX4's events: a whole health and arming report says what it
+    /// means for the mode the vehicle is in, and one with events lost on
+    /// the way asks for them again.
+    fn px4_event(
+        &mut self,
+        key: &(String, String, u8),
+        id: u32,
+        sequence: u16,
+        log_levels: u8,
+        arguments: [u8; 40],
+    ) -> Vec<Effect> {
+        let gcs = self.config.gcs_system_id;
+        let frame_sequence = self.next_sequence();
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
+        if vehicle.observation.autopilot != "Px4" {
+            return Vec::new();
+        }
+        match vehicle
+            .px4_events
+            .event(sequence, id, log_levels, arguments)
+        {
+            crate::px4_events::Heard::Nothing => Vec::new(),
+            crate::px4_events::Heard::Report(report) => {
+                vehicle.arming = Some(report);
+                arming_said(vehicle).into_iter().collect()
+            }
+            crate::px4_events::Heard::Missing { first, last } => {
+                let request = mavio::dialects::ardupilotmega::messages::RequestEvent {
+                    target_system: vehicle.observation.system_id,
+                    target_component: vehicle.autopilot_component,
+                    first_sequence: first,
+                    last_sequence: last,
+                };
+                vec![Effect::Send {
+                    link_id: vehicle.observation.link_id.clone(),
+                    peer: vehicle.observation.peer.clone(),
+                    bytes: crate::sim::frame(
+                        gcs,
+                        crate::GCS_COMPONENT_ID,
+                        frame_sequence,
+                        &request,
+                    ),
+                }]
+            }
+        }
     }
 
     /// A camera's answer: one of its streams, for its vehicle.
@@ -1905,40 +1986,10 @@ impl Session {
         if changed {
             effects.push(Effect::Vehicle(Box::new(vehicle.observation.clone())));
         }
-        // The whole table once, when the vehicle first appears; after that
-        // only rows that go missing (see `reconcile_streams`).
+        vehicle.custom_mode = *custom_mode;
+        effects.extend(arming_said(vehicle));
         if new {
-            for (message_id, interval_us) in stream_rates(&vehicle.observation.autopilot) {
-                effects.push(Effect::Send {
-                    link_id: vehicle.observation.link_id.clone(),
-                    peer: vehicle.observation.peer.clone(),
-                    bytes: set_message_interval_frame(
-                        gcs,
-                        vehicle.observation.system_id,
-                        vehicle.autopilot_component,
-                        sequence,
-                        message_id,
-                        interval_us,
-                    ),
-                });
-            }
-        }
-        // Its own list of modes, for the command list: ArduPilot 4.6 and PX4
-        // 1.15 onwards answer, older firmware says nothing and the table
-        // serves.
-        if new {
-            effects.push(Effect::Send {
-                link_id: vehicle.observation.link_id.clone(),
-                peer: vehicle.observation.peer.clone(),
-                bytes: crate::sim::request_message_frame(
-                    gcs,
-                    vehicle.observation.system_id,
-                    vehicle.autopilot_component,
-                    sequence,
-                    AVAILABLE_MODES,
-                    0.0,
-                ),
-            });
+            effects.extend(first_asks(vehicle, gcs, sequence));
         }
         if vehicle.observation.uid.is_none() && vehicle.version_requests == 0 {
             vehicle.version_requests = 1;
@@ -3224,6 +3275,8 @@ impl Session {
                 // a new baseline.
                 vehicle.plan_ids = None;
                 vehicle.after_upload = AfterUpload::Watching;
+                // Its events count again from the start.
+                vehicle.px4_events = crate::px4_events::Events::default();
                 for stream in vehicle.streams.values_mut() {
                     *stream = Stream::default();
                 }
@@ -3692,6 +3745,66 @@ impl Session {
         self.transport_peer_send_health(link_id, std::collections::BTreeSet::new());
         ids
     }
+}
+
+/// What PX4's latest report says about the mode the vehicle is in, when
+/// that is news.
+fn arming_said(vehicle: &mut Vehicle) -> Option<Effect> {
+    let checks = vehicle
+        .arming
+        .as_ref()?
+        .for_mode(vehicle.custom_mode, vehicle.observation.mode.clone());
+    if vehicle.arming_said.as_ref() == Some(&checks) {
+        return None;
+    }
+    vehicle.arming_said = Some(checks.clone());
+    Some(Effect::ArmingChecks {
+        vehicle_id: vehicle.observation.id.clone(),
+        checks,
+    })
+}
+
+/// What a vehicle is asked once, when it first appears: the whole stream
+/// table (after that only rows that go missing, see `reconcile_streams`),
+/// its own list of modes for the command list (ArduPilot 4.6 and PX4 1.15
+/// onwards answer, older firmware says nothing and the table serves), and on
+/// PX4 to run its arming checks, which it then reports
+/// (`MAV_CMD_RUN_PREARM_CHECKS`).
+fn first_asks(vehicle: &Vehicle, gcs: u8, sequence: u8) -> Vec<Effect> {
+    let observation = &vehicle.observation;
+    let (system, component) = (observation.system_id, vehicle.autopilot_component);
+    let mut frames: Vec<_> = stream_rates(&observation.autopilot)
+        .map(|(message_id, interval_us)| {
+            set_message_interval_frame(gcs, system, component, sequence, message_id, interval_us)
+        })
+        .collect();
+    frames.push(crate::sim::request_message_frame(
+        gcs,
+        system,
+        component,
+        sequence,
+        AVAILABLE_MODES,
+        0.0,
+    ));
+    if observation.autopilot == "Px4" {
+        frames.push(crate::sim::command_long_frame(
+            gcs,
+            system,
+            component,
+            sequence,
+            RUN_PREARM_CHECKS,
+            [0.0; 7],
+            0,
+        ));
+    }
+    frames
+        .into_iter()
+        .map(|bytes| Effect::Send {
+            link_id: observation.link_id.clone(),
+            peer: observation.peer.clone(),
+            bytes,
+        })
+        .collect()
 }
 
 /// What a heartbeat says about the vehicle.
@@ -4926,6 +5039,135 @@ mod tests {
                 "{name} is not asked for: {asked:?}"
             );
         }
+    }
+
+    /// PX4's `EVENT` (410), as its commander sends it.
+    fn px4_event(sequence: u16, id: u32, log_levels: u8, arguments: &[u8]) -> Vec<u8> {
+        let mut padded = [0u8; 40];
+        padded[..arguments.len()].copy_from_slice(arguments);
+        let message = mavio::dialects::ardupilotmega::messages::Event {
+            id,
+            sequence,
+            log_levels,
+            arguments: padded,
+            ..mavio::dialects::ardupilotmega::messages::Event::default()
+        };
+        crate::sim::frame(1, 1, 0, &message)
+    }
+
+    /// A whole PX4 arming report from `first` on: the mode groups it can arm
+    /// in, and no stick input (`check_modes_manual_control`).
+    fn px4_report(first: u16, can_arm: u32) -> Vec<u8> {
+        let mut summary = vec![0u8];
+        summary.extend_from_slice(&[0; 8]);
+        summary.extend_from_slice(&can_arm.to_le_bytes());
+        let mut sticks = u32::MAX.to_le_bytes().to_vec();
+        sticks.push(7);
+        [
+            px4_event(first, 27_825_120, 0x88, &summary),
+            px4_event(first.wrapping_add(1), 17_231_145, 0x44, &sticks),
+            px4_event(first.wrapping_add(2), 18_691_879, 0x88, &[0]),
+        ]
+        .concat()
+    }
+
+    fn arming_reports(effects: &[Effect]) -> Vec<(&str, &crate::px4_events::ArmingChecks)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::ArmingChecks { vehicle_id, checks } => Some((vehicle_id.as_str(), checks)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const PX4_HOLD: u32 = 4 << 16 | 3 << 24;
+
+    #[test]
+    fn px4_reports_its_arming_checks_for_the_mode_it_is_in() {
+        let mut session = Session::new(Config::default());
+        let first = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 0, PX4_HOLD),
+            0,
+        );
+        assert!(
+            commands(&first)
+                .iter()
+                .any(|(command, _)| *command == RUN_PREARM_CHECKS),
+            "asked to report its checks now"
+        );
+        // Hold, not Position.
+        let effects = session.ingest("l1", PEER, &px4_report(5, 16), 1_000);
+        let heard = arming_reports(&effects);
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!(heard[0].1.mode.as_deref(), Some("Hold"));
+        assert_eq!(heard[0].1.can_arm, Some(true));
+        assert_eq!(heard[0].1.checks.len(), 1);
+
+        let again = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 1, PX4_HOLD),
+            2_000,
+        );
+        assert!(arming_reports(&again).is_empty(), "nothing new");
+        let position = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 2, 3 << 16),
+            3_000,
+        );
+        let heard = arming_reports(&position);
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!(heard[0].1.mode.as_deref(), Some("Position"));
+        assert_eq!(heard[0].1.can_arm, Some(false));
+    }
+
+    #[test]
+    fn px4_reports_again_under_its_lasting_id_and_after_a_restart() {
+        let mut session = Session::new(Config::default());
+        let first = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 0, PX4_HOLD),
+            0,
+        );
+        session.ingest("l1", PEER, &px4_report(5, 16), 1_000);
+
+        // Its UID gives it its lasting id: the report again, under that id.
+        let id_of = |effects: &[Effect]| {
+            effects.iter().find_map(|effect| match effect {
+                Effect::Vehicle(observation) => Some(observation.id.clone()),
+                _ => None,
+            })
+        };
+        let provisional = id_of(&first).unwrap();
+        let identified = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::autopilot_version_frame(1, 1, 0, 0xABCD, 0x010F_0000),
+            1_500,
+        );
+        let lasting = id_of(&identified).unwrap();
+        assert_ne!(lasting, provisional);
+        let reported: Vec<&str> = arming_reports(&identified)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(reported, [lasting.as_str()]);
+
+        // Restarted, it numbers its events from the start again.
+        let attitude =
+            |time_boot_ms| crate::sim::attitude_frame((1, 0), (0.0, 0.0, 0.0), time_boot_ms);
+        session.ingest("l1", PEER, &attitude(50_000), 4_000);
+        session.ingest("l1", PEER, &attitude(1_000), 5_000);
+        // Nowhere it can arm, now.
+        let effects = session.ingest("l1", PEER, &px4_report(5, 0), 6_000);
+        let heard = arming_reports(&effects);
+        assert_eq!(heard.len(), 1, "heard after the restart: {heard:?}");
+        assert_eq!(heard[0].1.can_arm, Some(false));
     }
 
     #[test]
