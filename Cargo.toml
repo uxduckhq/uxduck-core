@@ -37,6 +37,7 @@ minisign = "0.10"
 minisign-verify = "0.3"
 # Parameter definition sets are published gzipped (S67).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lzma-rs = "0.3"
 # ArduPilot's apm.pdef.xml parameter definitions (S67).
 quick-xml = "0.42"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

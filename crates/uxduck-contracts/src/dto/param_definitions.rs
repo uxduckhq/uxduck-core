@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::sim::CatalogueFile;
 
-/// The ArduPilot firmware a set documents. A helicopter runs `ArduCopter`.
+/// The firmware a set documents. A helicopter runs `ArduCopter`. PX4
+/// describes its own parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Firmware {
     ArduCopter,
@@ -16,10 +17,11 @@ pub enum Firmware {
     ArduSub,
     AntennaTracker,
     Blimp,
+    Px4,
 }
 
-/// Where a set came from: ArduPilot's own, from the catalogue, or added by a
-/// person for their fork.
+/// Where a set came from: ArduPilot's own, from the catalogue, added by a
+/// person for their fork, or the vehicle's own, as PX4 serves it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum DefinitionSource {
@@ -28,6 +30,7 @@ pub enum DefinitionSource {
     Own {
         label: String,
     },
+    Vehicle,
 }
 
 /// ArduPilot's `@User`: what most people need to see, or not.

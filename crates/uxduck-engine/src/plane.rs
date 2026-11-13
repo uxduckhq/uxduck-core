@@ -77,6 +77,9 @@ pub fn route(effect: Effect) -> Routed {
         Effect::ArmingChecks { vehicle_id, checks } => {
             Routed::Engine(Box::new(move |e| e.arming_checks(&vehicle_id, checks)))
         }
+        Effect::ParameterMetadata { vehicle_id, result } => Routed::Engine(Box::new(move |e| {
+            e.parameter_metadata(&vehicle_id, result);
+        })),
         Effect::AccelCalPosition {
             vehicle_id,
             position,
@@ -364,6 +367,7 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         | Effect::TuningSamples { .. }
         | Effect::MagCal { .. }
         | Effect::ArmingChecks { .. }
+        | Effect::ParameterMetadata { .. }
         | Effect::AccelCalPosition { .. }
         | Effect::CommandDone { .. }
         | Effect::Send { .. } => {

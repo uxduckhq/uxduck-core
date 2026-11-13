@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// The ArduPilot firmware a vehicle runs, which decides its parameters (P3).
-/// A helicopter runs `ArduCopter`.
+/// The firmware a vehicle runs, which decides its parameters (P3). A
+/// helicopter runs `ArduCopter`. PX4 is one firmware whatever it flies,
+/// and describes its own parameters (P12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Firmware {
     ArduCopter,
@@ -18,9 +19,11 @@ pub enum Firmware {
     ArduSub,
     AntennaTracker,
     Blimp,
+    Px4,
 }
 
 impl Firmware {
+    /// ArduPilot's, which the catalogue publishes.
     pub const ALL: [Self; 6] = [
         Self::ArduCopter,
         Self::ArduPlane,
@@ -56,6 +59,7 @@ impl Firmware {
             Self::ArduSub => "ArduSub",
             Self::AntennaTracker => "AntennaTracker",
             Self::Blimp => "Blimp",
+            Self::Px4 => "PX4",
         }
     }
 
@@ -70,6 +74,7 @@ impl Firmware {
             Self::ArduSub => "Sub",
             Self::AntennaTracker => "Tracker",
             Self::Blimp => "Blimp",
+            Self::Px4 => "PX4",
         }
     }
 
@@ -91,6 +96,8 @@ pub enum DefinitionSource {
     /// Added by a person, usually for their fork (P5).
     #[serde(rename_all = "camelCase")]
     Own { label: String },
+    /// The vehicle's own, as PX4 serves its parameters' metadata (P12).
+    Vehicle,
 }
 
 /// Standard or Advanced: ArduPilot's `@User`.
@@ -208,13 +215,13 @@ impl DefinitionSet {
         self.parameters.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    /// Its name for people: "Copter 4.5.7", "Copter latest", or a person's
-    /// own label.
+    /// Its name for people: "Copter 4.5.7", "Copter latest", "PX4 1.17.0",
+    /// or a person's own label.
     #[must_use]
     pub fn title(&self) -> String {
         match &self.source {
             DefinitionSource::Own { label } => label.clone(),
-            DefinitionSource::Ardupilot => match &self.version {
+            DefinitionSource::Ardupilot | DefinitionSource::Vehicle => match &self.version {
                 Some(version) => format!("{} {version}", self.firmware.tag_prefix()),
                 None => self.firmware.tag_prefix().to_owned(),
             },

@@ -10,9 +10,10 @@ use mavio::dialects::ardupilotmega::enums::{
 };
 use mavio::dialects::ardupilotmega::messages::{
     Attitude, AutopilotVersion, AvailableModes, AvailableModesMonitor, BatteryStatus, CommandLong,
-    DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat, MissionCurrent,
-    NavControllerOutput, PositionTargetGlobalInt, RadioStatus, RcChannels, ServoOutputRaw,
-    SysStatus, TerrainReport, Timesync, VfrHud, Vibration, VideoStreamInformation, Wind,
+    ComponentMetadata, DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat,
+    MissionCurrent, NavControllerOutput, PositionTargetGlobalInt, RadioStatus, RcChannels,
+    ServoOutputRaw, SysStatus, TerrainReport, Timesync, VfrHud, Vibration, VideoStreamInformation,
+    Wind,
 };
 use mavio::protocol::{V2, Versionless};
 use mavio::{Frame, Message};
@@ -463,6 +464,29 @@ pub fn video_stream_information_frame(
         uri: uri_bytes,
         name,
         ..VideoStreamInformation::default()
+    };
+    frame(system_id, component_id, sequence, &message)
+}
+
+/// Where the fake PX4 keeps its general metadata, when it has any, as PX4
+/// 1.17 does.
+pub const PX4_GENERAL_METADATA: &str = "/etc/extras/component_general.json.xz";
+
+/// `COMPONENT_METADATA`: the general metadata at `uri` (ADR-0021 P12).
+#[must_use]
+pub fn component_metadata_frame(
+    system_id: u8,
+    component_id: u8,
+    sequence: u8,
+    uri: &str,
+) -> Vec<u8> {
+    let mut uri_bytes = [0u8; 100];
+    for (to, from) in uri_bytes.iter_mut().zip(uri.bytes()) {
+        *to = from;
+    }
+    let message = ComponentMetadata {
+        uri: uri_bytes,
+        ..ComponentMetadata::default()
     };
     frame(system_id, component_id, sequence, &message)
 }
@@ -3267,6 +3291,23 @@ impl FakeVehicle {
                     sequence,
                     1,
                     &uri,
+                ));
+            }
+            if let Some(Decoded::CommandLong {
+                command: 512,
+                param1,
+                ..
+            }) = decode(frame).map(|d| d.message)
+                && (param1 - 397.0).abs() < f32::EPSILON
+                && self.px4.is_some()
+                && self.files.files.contains_key(PX4_GENERAL_METADATA)
+            {
+                let sequence = self.next();
+                replies.push(component_metadata_frame(
+                    self.system_id,
+                    1,
+                    sequence,
+                    &format!("mftp:/{PX4_GENERAL_METADATA}"),
                 ));
             }
             if let Some(decoded) = decode(frame)

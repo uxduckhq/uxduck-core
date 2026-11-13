@@ -130,6 +130,11 @@ fn actor() -> Actor {
     }
 }
 
+/// Where a PX4 vehicle's own set is kept.
+fn vehicle_set_id(vehicle_id: &str) -> String {
+    format!("vehicle:{vehicle_id}")
+}
+
 /// The catalogue's sets as candidates, by id.
 fn catalogue_candidates(sets: &[CatalogueSet]) -> Vec<Candidate> {
     sets.iter()
@@ -192,6 +197,36 @@ impl Engine {
         self.choose_all_definitions();
     }
 
+    /// A PX4 vehicle's own metadata, its `parameters.json`, or why it gave
+    /// none (P12): kept in memory while the daemon runs.
+    pub fn parameter_metadata(&mut self, vehicle_id: &str, result: Result<String, String>) {
+        let Some(vehicle) = self.state.vehicles.get(vehicle_id) else {
+            return;
+        };
+        let id = vehicle_set_id(vehicle_id);
+        let set = result.and_then(|text| {
+            Ok(DefinitionSet {
+                source: DefinitionSource::Vehicle,
+                firmware: Firmware::Px4,
+                version: vehicle.firmware.clone(),
+                commit: vehicle.firmware_commit.clone(),
+                parameters: pdef::from_px4(&text)
+                    .map_err(|why| format!("they aren't PX4's parameter metadata, {why}"))?,
+            })
+        });
+        match set {
+            Ok(set) => {
+                self.definitions.failed.remove(&id);
+                self.definitions.loaded.insert(id, Arc::new(set));
+            }
+            Err(why) => {
+                self.definitions.loaded.remove(&id);
+                self.definitions.failed.insert(id, why);
+            }
+        }
+        self.choose_definitions(vehicle_id);
+    }
+
     pub(crate) fn choose_all_definitions(&mut self) {
         let ids: Vec<String> = self.state.vehicles.keys().cloned().collect();
         for id in ids {
@@ -238,6 +273,41 @@ impl Engine {
             choice: choice.clone(),
             detail,
         };
+        if vehicle.autopilot == "Px4" {
+            let id = vehicle_set_id(&vehicle.id);
+            let (status, detail) = if self.definitions.loaded.contains_key(&id) {
+                (DefinitionsStatus::Ready, None)
+            } else if let Some(why) = self.definitions.failed.get(&id) {
+                (
+                    DefinitionsStatus::Failed,
+                    Some(format!(
+                        "{} didn't give its parameter descriptions: {why}. Names and values only.",
+                        vehicle.name
+                    )),
+                )
+            } else {
+                (
+                    DefinitionsStatus::Loading,
+                    Some(format!(
+                        "Reading the parameter descriptions from {}.",
+                        vehicle.name
+                    )),
+                )
+            };
+            let ready = status == DefinitionsStatus::Ready;
+            return Some(VehicleDefinitions {
+                firmware: Some(Firmware::Px4),
+                set_id: ready.then_some(id),
+                title: Some(
+                    vehicle
+                        .firmware
+                        .as_deref()
+                        .map_or_else(|| "PX4".to_owned(), |v| format!("PX4 {v}")),
+                ),
+                matched: ready.then_some(Match::Exact),
+                ..blank(status, detail)
+            });
+        }
         if !vehicle.autopilot.to_ascii_lowercase().contains("ardupilot") {
             return Some(VehicleDefinitions {
                 firmware: None,

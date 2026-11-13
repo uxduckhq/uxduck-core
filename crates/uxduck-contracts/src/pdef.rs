@@ -296,6 +296,92 @@ fn split_list(text: &str) -> Vec<(String, String)> {
     pairs
 }
 
+/// PX4's `parameters.json`, as a vehicle serves it (P12): sorted by name.
+///
+/// # Errors
+/// When it is not JSON in that shape, or holds no parameters.
+pub fn from_px4(text: &str) -> Result<Vec<ParamDefinition>, String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    let entries = value
+        .get("parameters")
+        .and_then(Value::as_array)
+        .ok_or("not PX4's parameters.json: it has no parameters")?;
+    let mut parameters: Vec<ParamDefinition> = entries
+        .iter()
+        .filter_map(|fields| {
+            let text = |key: &str| fields.get(key).and_then(Value::as_str);
+            let flag = |key: &str| fields.get(key).and_then(Value::as_bool) == Some(true);
+            let name = text("name")?.to_owned();
+            let named = |key: &str, at: &str| -> Vec<(Value, String)> {
+                fields
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                Some((
+                                    item.get(at)?.clone(),
+                                    item.get("description")?.as_str()?.trim().to_owned(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut values: Vec<ValueName> = named("values", "value")
+                .into_iter()
+                .filter_map(|(value, name)| {
+                    Some(ValueName {
+                        value: value.as_f64()?,
+                        name,
+                    })
+                })
+                .collect();
+            values.sort_by(|a, b| a.value.total_cmp(&b.value));
+            let mut bitmask: Vec<BitName> = named("bitmask", "index")
+                .into_iter()
+                .filter_map(|(bit, name)| {
+                    Some(BitName {
+                        bit: u8::try_from(bit.as_u64()?).ok()?,
+                        name,
+                    })
+                })
+                .collect();
+            bitmask.sort_by_key(|b| b.bit);
+            let number = |key: &str| fields.get(key).and_then(Value::as_f64);
+            Some(ParamDefinition {
+                display_name: text("shortDesc").unwrap_or_default().trim().to_owned(),
+                description: text("longDesc").unwrap_or_default().trim().to_owned(),
+                group: text("group").unwrap_or_default().to_owned(),
+                units: text("units").filter(|u| !u.is_empty()).map(str::to_owned),
+                range: number("min")
+                    .zip(number("max"))
+                    .map(|(low, high)| ParamRange { low, high }),
+                increment: number("increment"),
+                values,
+                bitmask,
+                user: if text("category") == Some("Standard") {
+                    UserLevel::Standard
+                } else {
+                    UserLevel::Advanced
+                },
+                reboot_required: flag("rebootRequired"),
+                read_only: false,
+                volatile: flag("volatile"),
+                calibration: name.starts_with("CAL_"),
+                variant: None,
+                name,
+            })
+        })
+        .collect();
+    if parameters.is_empty() {
+        return Err("no parameters in it".to_owned());
+    }
+    parameters.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(parameters)
+}
+
 fn values(pairs: Vec<(String, String)>) -> Vec<ValueName> {
     let mut values: Vec<ValueName> = pairs
         .into_iter()
@@ -373,6 +459,78 @@ mod tests {
 
     fn find<'a>(all: &'a [ParamDefinition], name: &str) -> &'a ParamDefinition {
         all.iter().find(|p| p.name == name).unwrap()
+    }
+
+    /// Entries as PX4 1.17's `parameters.json` has them.
+    const PX4: &str = r#"{"version": 1, "parameters": [
+        {"category": "Standard", "decimalPlaces": 0, "default": 5.0, "group": "Multicopter Position Control", "increment": 1.0, "longDesc": "e.g. in Missions, RTL, Goto if the waypoint does not specify differently", "max": 20.0, "min": 3.0, "name": "MPC_XY_CRUISE", "shortDesc": "Default horizontal velocity in autonomous modes", "type": "Float", "units": "m/s"},
+        {"category": "Standard", "default": 0, "group": "System", "longDesc": "CHANGING THIS VALUE REQUIRES A RESTART. Defines the auto-start script used to bootstrap the system.", "max": 9999999, "min": 0, "name": "SYS_AUTOSTART", "rebootRequired": true, "shortDesc": "Auto-start script index", "type": "Int32"},
+        {"category": "Standard", "default": 1, "group": "Commander", "longDesc": "Measures taken when a check defined by EKF2_GPS_CHECK is failing.", "name": "COM_ARM_WO_GPS", "shortDesc": "GPS preflight check", "type": "Int32", "values": [{"description": "Warning only", "value": 1}, {"description": "Deny arming", "value": 0}, {"description": "Disabled", "value": 2}]},
+        {"bitmask": [{"description": "SIM Channel 2", "index": 1}, {"description": "SIM Channel 1", "index": 0}], "category": "Standard", "default": 0, "group": "Actuator Outputs", "max": 65535, "min": 0, "name": "PWM_MAIN_REV", "shortDesc": "Reverse Output Range for SIM", "type": "Int32"},
+        {"category": "System", "default": 0, "group": "Sensor Calibration", "longDesc": "Device ID of the accelerometer this calibration applies to.", "name": "CAL_ACC0_ID", "shortDesc": "Accelerometer 0 calibration device ID", "type": "Int32", "volatile": true}
+    ]}"#;
+
+    #[test]
+    fn px4s_own_metadata_reads_every_field() {
+        let all = from_px4(PX4).unwrap();
+        let names: Vec<&str> = all.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "CAL_ACC0_ID",
+                "COM_ARM_WO_GPS",
+                "MPC_XY_CRUISE",
+                "PWM_MAIN_REV",
+                "SYS_AUTOSTART"
+            ]
+        );
+        let cruise = find(&all, "MPC_XY_CRUISE");
+        assert_eq!(
+            cruise.display_name,
+            "Default horizontal velocity in autonomous modes"
+        );
+        assert!(cruise.description.starts_with("e.g. in Missions"));
+        assert_eq!(cruise.group, "Multicopter Position Control");
+        assert_eq!(cruise.units.as_deref(), Some("m/s"));
+        assert_eq!(
+            cruise.range,
+            Some(ParamRange {
+                low: 3.0,
+                high: 20.0
+            })
+        );
+        assert_eq!(cruise.increment, Some(1.0));
+        assert_eq!(cruise.user, UserLevel::Standard);
+        assert!(!cruise.reboot_required);
+        assert!(find(&all, "SYS_AUTOSTART").reboot_required);
+        let gps = find(&all, "COM_ARM_WO_GPS");
+        assert_eq!(gps.range, None, "PX4 gave no range");
+        let values: Vec<(f64, &str)> = gps
+            .values
+            .iter()
+            .map(|v| (v.value, v.name.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (0.0, "Deny arming"),
+                (1.0, "Warning only"),
+                (2.0, "Disabled")
+            ]
+        );
+        let rev = find(&all, "PWM_MAIN_REV");
+        assert_eq!(rev.description, "");
+        let bits: Vec<(u8, &str)> = rev
+            .bitmask
+            .iter()
+            .map(|b| (b.bit, b.name.as_str()))
+            .collect();
+        assert_eq!(bits, [(0, "SIM Channel 1"), (1, "SIM Channel 2")]);
+        let calibration = find(&all, "CAL_ACC0_ID");
+        assert!(calibration.calibration && calibration.volatile);
+        assert_eq!(calibration.user, UserLevel::Advanced);
+        assert!(from_px4(r#"{"parameters": []}"#).is_err());
+        assert!(from_px4(JSON).is_err(), "ArduPilot's is not PX4's");
     }
 
     #[test]

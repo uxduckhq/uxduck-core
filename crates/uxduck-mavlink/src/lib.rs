@@ -37,6 +37,7 @@ pub use uxduck_core::domain::modes;
 pub mod producers;
 pub mod px4_cal;
 pub mod px4_events;
+pub mod px4_metadata;
 mod rc_input;
 pub mod router;
 pub mod session;

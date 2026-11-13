@@ -23,6 +23,8 @@ serde_json.workspace = true
 serde.workspace = true
 flate2.workspace = true
 base64.workspace = true
+# PX4's own metadata, which it serves xz-compressed (ADR-0021 P12).
+lzma-rs.workspace = true
 # Dialect files: plugins' (S60) and people's own (S252, custom.rs).
 quick-xml.workspace = true
 

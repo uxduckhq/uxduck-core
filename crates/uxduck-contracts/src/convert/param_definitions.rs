@@ -11,6 +11,7 @@ impl From<core::Firmware> for dto::Firmware {
             core::Firmware::ArduSub => Self::ArduSub,
             core::Firmware::AntennaTracker => Self::AntennaTracker,
             core::Firmware::Blimp => Self::Blimp,
+            core::Firmware::Px4 => Self::Px4,
         }
     }
 }
@@ -24,6 +25,7 @@ impl From<dto::Firmware> for core::Firmware {
             dto::Firmware::ArduSub => Self::ArduSub,
             dto::Firmware::AntennaTracker => Self::AntennaTracker,
             dto::Firmware::Blimp => Self::Blimp,
+            dto::Firmware::Px4 => Self::Px4,
         }
     }
 }
@@ -35,6 +37,7 @@ impl From<&core::DefinitionSource> for dto::DefinitionSource {
             core::DefinitionSource::Own { label } => Self::Own {
                 label: label.clone(),
             },
+            core::DefinitionSource::Vehicle => Self::Vehicle,
         }
     }
 }
@@ -44,6 +47,7 @@ impl From<dto::DefinitionSource> for core::DefinitionSource {
         match v {
             dto::DefinitionSource::Ardupilot => Self::Ardupilot,
             dto::DefinitionSource::Own { label } => Self::Own { label },
+            dto::DefinitionSource::Vehicle => Self::Vehicle,
         }
     }
 }

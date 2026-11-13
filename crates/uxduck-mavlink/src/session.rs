@@ -344,6 +344,12 @@ pub enum Effect {
         severity: u8,
         text: String,
     },
+    /// A PX4 vehicle's own parameter metadata, the text of its
+    /// `parameters.json`, or why it gave none (ADR-0021 P12).
+    ParameterMetadata {
+        vehicle_id: String,
+        result: Result<String, String>,
+    },
     /// What PX4's latest health and arming report says about the mode it
     /// is in, each time that changes.
     ArmingChecks {
@@ -482,6 +488,8 @@ struct Vehicle {
     px4_events: crate::px4_events::Events,
     arming: Option<crate::px4_events::Report>,
     arming_said: Option<crate::px4_events::ArmingChecks>,
+    /// Where PX4 keeps its parameters' metadata, and reading it.
+    px4_metadata: crate::px4_metadata::Metadata,
     version_requests: u8,
     last_request_us: u64,
     /// Produced since the last tick; sent and cleared on the next.
@@ -585,6 +593,7 @@ impl Vehicle {
             px4_events: crate::px4_events::Events::default(),
             arming: None,
             arming_said: None,
+            px4_metadata: crate::px4_metadata::Metadata::default(),
             version_requests: 0,
             last_request_us: 0,
             pending: Produced::default(),
@@ -1051,6 +1060,7 @@ impl Session {
                     | Message::CommandAck { .. }
                     | Message::ParamValue { .. }
                     | Message::Ftp { .. }
+                    | Message::ComponentMetadata { .. }
                     | Message::MissionCount { .. }
                     | Message::MissionItem(_)
                     | Message::MissionRequest { .. }
@@ -1109,6 +1119,14 @@ impl Session {
                 | Message::MissionRequest { .. }
                 | Message::MissionAck { .. }) => {
                     effects.extend(self.transfer(&key, message, received_us, processed_us));
+                }
+                Message::ComponentMetadata { uri } => {
+                    effects.extend(self.component_metadata(
+                        &key,
+                        decoded.component_id,
+                        &uri,
+                        processed_us,
+                    ));
                 }
                 Message::VideoStream {
                     stream_id,
@@ -2713,6 +2731,9 @@ impl Session {
         event: files::Event,
         now_us: u64,
     ) -> Vec<Effect> {
+        if crate::px4_metadata::ours(&event) {
+            return self.metadata_read(key, event, now_us);
+        }
         let ardupilot = !self.is_px4(key);
         let Some(vehicle) = self.vehicles.get_mut(key) else {
             return Vec::new();
@@ -2738,6 +2759,90 @@ impl Session {
                 self.params_written(key, writes, read_back, now_us)
             }
             event => vec![Effect::File { vehicle_id, event }],
+        }
+    }
+
+    /// Where PX4's autopilot keeps its general metadata (ADR-0021 P12).
+    fn component_metadata(
+        &mut self,
+        key: &(String, String, u8),
+        component_id: u8,
+        uri: &str,
+        now_us: u64,
+    ) -> Vec<Effect> {
+        let px4 = self.is_px4(key);
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
+        if !px4 || component_id != vehicle.autopilot_component {
+            return Vec::new();
+        }
+        let next = vehicle.px4_metadata.located(uri);
+        self.metadata_next(key, next, now_us)
+    }
+
+    /// The session's own read of PX4's metadata, going on.
+    fn metadata_read(
+        &mut self,
+        key: &(String, String, u8),
+        event: files::Event,
+        now_us: u64,
+    ) -> Vec<Effect> {
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
+        let next = match event {
+            files::Event::Data { bytes, .. } if !vehicle.px4_metadata.data(&bytes) => {
+                let output = vehicle.ftp.cancel(crate::px4_metadata::READ_ID, now_us);
+                let next = vehicle.px4_metadata.done(Err("they are too large".into()));
+                let mut effects = self.ftp_output(key, output, now_us);
+                effects.extend(self.metadata_next(key, next, now_us));
+                return effects;
+            }
+            files::Event::Done { result, .. } => vehicle
+                .px4_metadata
+                .done(result.map_err(|failure| failure.to_string())),
+            _ => crate::px4_metadata::Next::Nothing,
+        };
+        self.metadata_next(key, next, now_us)
+    }
+
+    fn metadata_next(
+        &mut self,
+        key: &(String, String, u8),
+        next: crate::px4_metadata::Next,
+        now_us: u64,
+    ) -> Vec<Effect> {
+        use crate::px4_metadata::{COMPONENT_METADATA, Next, READ_ID};
+        let gcs = self.config.gcs_system_id;
+        let sequence = self.next_sequence();
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return Vec::new();
+        };
+        match next {
+            Next::Ask => vec![Effect::Send {
+                link_id: vehicle.observation.link_id.clone(),
+                peer: vehicle.observation.peer.clone(),
+                bytes: crate::sim::request_message_frame(
+                    gcs,
+                    vehicle.observation.system_id,
+                    vehicle.autopilot_component,
+                    sequence,
+                    COMPONENT_METADATA,
+                    0.0,
+                ),
+            }],
+            Next::Read(path) => {
+                let output = vehicle
+                    .ftp
+                    .file(READ_ID, files::Op::Read { path, from: 0 }, now_us);
+                self.ftp_output(key, output, now_us)
+            }
+            Next::Said(result) => vec![Effect::ParameterMetadata {
+                vehicle_id: vehicle.observation.id.clone(),
+                result,
+            }],
+            Next::Nothing => Vec::new(),
         }
     }
 
@@ -3275,8 +3380,10 @@ impl Session {
                 // a new baseline.
                 vehicle.plan_ids = None;
                 vehicle.after_upload = AfterUpload::Watching;
-                // Its events count again from the start.
+                // Its events count again from the start, and its metadata
+                // may be another firmware's.
                 vehicle.px4_events = crate::px4_events::Events::default();
+                vehicle.px4_metadata = crate::px4_metadata::Metadata::default();
                 for stream in vehicle.streams.values_mut() {
                     *stream = Stream::default();
                 }
@@ -3293,6 +3400,7 @@ impl Session {
                     match event {
                         // Sent again by PARAM_SET once the tick comes.
                         files::Event::ParamsWritten { writes, .. } => vehicle.batch.extend(writes),
+                        event if crate::px4_metadata::ours(&event) => {}
                         event => effects.push(Effect::File {
                             vehicle_id: vehicle_id.clone(),
                             event,
@@ -3354,6 +3462,8 @@ impl Session {
                     restarted: false,
                 });
             }
+            let metadata = (identified && vehicle.observation.autopilot == "Px4")
+                .then(|| vehicle.px4_metadata.tick(now_us));
             let mut outs = Vec::new();
             let ftp = vehicle.ftp.tick(now_us, &timing);
             let batched = !vehicle.batch.is_empty();
@@ -3413,6 +3523,9 @@ impl Session {
                 .uploading(&key)
                 .map(|u| u.protocol.tick(now_us, &timing));
             effects.extend(self.upload_step(&key, step));
+            if let Some(next) = metadata {
+                effects.extend(self.metadata_next(&key, next, now_us));
+            }
         }
         effects
     }
@@ -6181,6 +6294,63 @@ mod tests {
             .unwrap()
             .to_owned();
         (session, vid)
+    }
+
+    /// PX4 says where its general metadata is, which says where its
+    /// parameters' is, each read by FTP and unpacked (ADR-0021 P12). One
+    /// that never says is asked three times.
+    #[test]
+    fn a_px4_vehicle_gives_its_parameter_metadata_by_ftp() {
+        let xz = |text: &str| {
+            let mut out = Vec::new();
+            lzma_rs::xz_compress(&mut text.as_bytes(), &mut out).unwrap();
+            out
+        };
+        let parameters = r#"{"version": 1, "parameters": [{"name": "MPC_XY_CRUISE", "shortDesc": "Default horizontal velocity in autonomous modes", "group": "Multicopter Position Control", "category": "Standard", "type": "Float", "default": 5.0}]}"#;
+        let said = |fake: &mut FakeVehicle| {
+            let (mut session, vid) = identified(fake);
+            let mut said = Vec::new();
+            let mut asks = 0;
+            for second in 1..40 {
+                let now_us = second * 1_000_000;
+                let effects = session.tick(now_us);
+                asks += sends(&effects)
+                    .iter()
+                    .filter(|bytes| {
+                        matches!(
+                            decode(bytes).map(|d| d.message),
+                            Some(Message::CommandLong { command: 512, param1, .. })
+                                if (param1 - 397.0).abs() < f32::EPSILON
+                        )
+                    })
+                    .count();
+                for effect in converse(&mut session, fake, effects, now_us) {
+                    if let Effect::ParameterMetadata { vehicle_id, result } = effect {
+                        assert_eq!(vehicle_id, vid);
+                        said.push(result);
+                    }
+                }
+            }
+            (said, asks)
+        };
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.make_px4(false, true);
+        fake.ftp = true;
+        fake.files.files.insert(
+            crate::sim::PX4_GENERAL_METADATA.into(),
+            xz(r#"{"version": 1, "metadataTypes": [{"type": 1, "fileCrc": 1, "uri": "mftp://etc/extras/parameters.json.xz"}]}"#),
+        );
+        fake.files
+            .files
+            .insert("/etc/extras/parameters.json.xz".into(), xz(parameters));
+        assert_eq!(said(&mut fake), (vec![Ok(parameters.to_owned())], 1));
+
+        let mut silent = FakeVehicle::new(1, 0xABCD);
+        silent.make_px4(false, true);
+        assert_eq!(
+            said(&mut silent),
+            (vec![Err("it didn't say where they are".to_owned())], 3)
+        );
     }
 
     #[test]

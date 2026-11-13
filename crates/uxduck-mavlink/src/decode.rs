@@ -278,6 +278,11 @@ pub enum Message {
         breached: bool,
         count: u16,
     },
+    /// `COMPONENT_METADATA`: where a component's general metadata is, which
+    /// says where the rest is (ADR-0021 P12).
+    ComponentMetadata {
+        uri: String,
+    },
     /// `EXTENDED_SYS_STATE` (S103): `MAV_LANDED_STATE`, 0 when the
     /// autopilot does not know, then on the ground, in the air, taking off,
     /// landing. And a VTOL's `MAV_VTOL_STATE`, 0 for anything else.
@@ -681,6 +686,7 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             pitch_cdeg: m.pointing_a,
             yaw_cdeg: m.pointing_c,
         },
+        Ok(Ardupilotmega::ComponentMetadata(m)) => Message::ComponentMetadata { uri: text(&m.uri) },
         Ok(Ardupilotmega::VideoStreamInformation(m)) => Message::VideoStream {
             stream_id: m.stream_id,
             kind: m.type_ as u8,

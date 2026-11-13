@@ -44,7 +44,7 @@ uxduck params definitions generate path/to/ardupilot --vehicle Plane
 
 Use `Copter`, `Plane`, `Rover`, `Sub`, `Tracker` or `Blimp` for `--vehicle`. Python 3 with `lxml` is required; `PYTHON` can point to an existing virtual environment's interpreter. The generated set records the checkout's commit and is used only for firmware with that commit. Keep a clean checkout so the descriptions match its recorded source. Remove one with `uxduck params definitions remove <set-id>`.
 
-PX4 parameter descriptions are not supported yet.
+A PX4 vehicle describes its own parameters. UXDuck reads PX4's parameter metadata from the vehicle when it connects, so the descriptions match the firmware it runs. If the vehicle doesn't carry them, its parameters show names and values only, and its setup's **Definitions** says why.
 
 ## Your fork's messages, and each vehicle's definitions
 
@@ -67,4 +67,4 @@ Parameter values can download even when descriptions are unavailable. Check `uxd
 
 A message about **no trusted public verification key** means this build cannot verify the publisher's parameter catalogue. You do not need to provide a secret or a release signing key. The publisher includes the public verification key in the build. Until a build with that key is available, add descriptions from the matching ArduPilot checkout using the command above.
 
-For a development firmware, use the exact commit that built it, rather than a nearby release. PX4 descriptions remain unavailable; values alone do not establish their meaning. For an incomplete parameter download, check the link and message freshness in [Troubleshooting](/docs/troubleshooting).
+For a development firmware, use the exact commit that built it, rather than a nearby release. A PX4 vehicle's descriptions come from the vehicle itself. For an incomplete parameter download, check the link and message freshness in [Troubleshooting](/docs/troubleshooting).
