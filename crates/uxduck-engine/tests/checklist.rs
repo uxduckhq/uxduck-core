@@ -260,6 +260,7 @@ const BATTERY: &str = "Battery at least 22.2 V";
 impl Bench {
     fn observe(&mut self, id: &str, system_id: u8, armed: bool) {
         self.engine.vehicle_observed(Observation {
+            connections: None,
             id: id.into(),
             aliases: Vec::new(),
             link_id: self.link_id.clone(),
@@ -652,6 +653,44 @@ fn one_rule_per_cell_reads_the_same_on_4s_and_6s() {
     let check = b.step_check("Cells charged");
     assert_eq!(check["status"], "fail", "the lowest cell is 3.7 V");
     assert_eq!(check["detail"], "Battery per cell is below 3.8 V.");
+}
+
+#[test]
+fn the_cells_average_sits_beside_the_lowest() {
+    let mut b = bench();
+    let item = |b: &Bench, key: &str| {
+        b.engine
+            .telemetry("v")
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.key == key)
+            .cloned()
+    };
+    // Neither cells nor a cell count: no average.
+    b.volts(14.8);
+    assert!(item(&b, "battery.cell_avg_v").is_none());
+    // A 4S pack at 14.8 V, its count set on the vehicle: 3.7 V a cell,
+    // the lowest and the average alike.
+    b.params(&[("OSD_CELL_COUNT", 4.0)]);
+    b.volts(14.8);
+    let average = item(&b, "battery.cell_avg_v").unwrap();
+    assert!((average.value.unwrap() - 3.7).abs() < 1e-9, "{average:?}");
+    assert_eq!(average.label, "Battery cell average");
+    assert_eq!(average.unit, Unit::Volt);
+    let lowest = item(&b, "battery.cell_v").unwrap();
+    assert!((lowest.value.unwrap() - 3.7).abs() < 1e-9, "{lowest:?}");
+    // Its own cells: the average of all of them, the lowest apart.
+    let cells = vec![
+        b.item("battery.cell_1_v", Unit::Volt, 4.0),
+        b.item("battery.cell_2_v", Unit::Volt, 3.5),
+        b.item("battery.cell_3_v", Unit::Volt, 3.9),
+    ];
+    b.telemetry(cells);
+    let average = item(&b, "battery.cell_avg_v").unwrap();
+    assert!((average.value.unwrap() - 3.8).abs() < 1e-9, "{average:?}");
+    let lowest = item(&b, "battery.cell_v").unwrap();
+    assert!((lowest.value.unwrap() - 3.5).abs() < 1e-9, "{lowest:?}");
 }
 
 #[test]

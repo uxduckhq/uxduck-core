@@ -79,6 +79,7 @@ pub fn without_ground_stations(records: Vec<(u64, &[u8])>) -> Vec<(u64, &[u8])> 
                         | Message::NavControllerOutput { .. }
                         | Message::RadioStatus { .. }
                         | Message::EkfStatus { .. }
+                        | Message::EstimatorStatus { .. }
                         | Message::Vibration { .. }
                         | Message::BatteryStatus { .. }
                         | Message::DistanceSensor { .. }

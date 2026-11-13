@@ -169,6 +169,33 @@ impl Engine {
             }
         }
         self.remove_observed_duplicates(&seen, &vehicle.id);
+        if let Some(mut connections) = seen.connections {
+            if let Some(previous) = &vehicle.connections {
+                for route in &previous.routes {
+                    // A new address on the same connection supersedes its old
+                    // endpoint, rather than inventing another redundant link.
+                    if !connections
+                        .routes
+                        .iter()
+                        .any(|r| r.link_id == route.link_id)
+                    {
+                        let mut old = route.clone();
+                        old.reachable = false;
+                        old.selected = false;
+                        old.telemetry = false;
+                        old.reason = "Not heard in this session".into();
+                        old.round_trip_us = None;
+                        old.loss_per_mille = None;
+                        old.last_receive_age_ms = None;
+                        connections.routes.push(old);
+                    }
+                }
+            }
+            connections
+                .routes
+                .sort_by_key(|r| (r.priority, r.link_id.clone(), r.peer.clone()));
+            vehicle.connections = Some(connections);
+        }
         vehicle.link_id = seen.link_id;
         // Heard live: no longer known from a log alone (S248).
         vehicle.seen_in_log = false;
@@ -224,6 +251,7 @@ impl Engine {
     /// as nobody chose.
     fn first_heard(&self, seen: &Observation) -> Vehicle {
         Vehicle {
+            connections: None,
             id: seen.id.clone(),
             name: self.unchosen_name(&seen.link_id, None),
             aliases: Vec::new(),
@@ -252,6 +280,7 @@ impl Engine {
             companions: Vec::new(),
             traffic: false,
             look: None,
+            own_model: None,
             colour: Some(self.given_colour(&seen.id)),
             preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
             definitions: uxduck_core::domain::param_definitions::DefinitionsChoice::default(),
@@ -507,12 +536,27 @@ impl Engine {
             .collect();
         for mut vehicle in stale {
             vehicle.presence = Presence::Offline;
+            if let Some(connections) = &mut vehicle.connections {
+                connections.command_available = false;
+                connections.reason = "Waiting for vehicle after daemon restart".into();
+                for route in &mut connections.routes {
+                    route.reachable = false;
+                    route.selected = false;
+                    route.telemetry = false;
+                    route.reason = "Not heard in this session".into();
+                    route.round_trip_us = None;
+                    route.loss_per_mille = None;
+                    route.last_receive_age_ms = None;
+                }
+            }
             vehicle.dismissed = false;
             vehicle.version += 1;
             self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
         }
         // Who UXDuck is on MAVLink, before anything is sent.
         self.links.gcs_system_id(self.state.settings.gcs_system_id);
+        self.links
+            .connection_order(&self.state.settings.connection_order);
         let links: Vec<Link> = self.state.links.values().cloned().collect();
         let recreate = self.state.settings.recreate_simulations;
         // Remove old sessions before opening anything: their dependent

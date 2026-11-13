@@ -1,0 +1,14 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 2,
+    "closePolicy": "quit",
+    "autoDelete": [
+      {
+        "category": "tlogs",
+        "days": 30
+      }
+    ],
+    "connectionOrder": ["ethernet", "radio", "4g"]
+  }
+}

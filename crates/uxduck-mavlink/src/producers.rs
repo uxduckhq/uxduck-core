@@ -896,7 +896,11 @@ impl Producer for Health {
                 fixed,
                 ..
             } => radio([rssi, remrssi, noise, remnoise], rxerrors, fixed, from, out),
-            &Message::EkfStatus { flags, variances } => ekf(flags, variances, from, out),
+            &Message::EkfStatus { flags, variances } => ekf(flags, variances, true, from, out),
+            // PX4's height above ground stays out of the worst: it reads 2
+            // while its rangefinder is out of range, as a vehicle above the
+            // rangefinder's reach is.
+            &Message::EstimatorStatus { flags, ratios } => ekf(flags, ratios, false, from, out),
             // The fence (S132): outside it now, and breaches since boot.
             &Message::FenceStatus { breached, count } => {
                 out.item(
@@ -1059,7 +1063,13 @@ fn radio(levels: [u8; 4], rxerrors: u16, fixed: u16, from: (&str, u8, u64), out:
     );
 }
 
-fn ekf(flags: u16, variances: [f32; 5], from: (&str, u8, u64), out: &mut Produced) {
+fn ekf(
+    flags: u16,
+    variances: [f32; 5],
+    with_terrain: bool,
+    from: (&str, u8, u64),
+    out: &mut Produced,
+) {
     let names = [
         ("ekf.velocity_variance", "EKF velocity variance"),
         ("ekf.position_variance", "EKF position variance"),
@@ -1068,10 +1078,17 @@ fn ekf(flags: u16, variances: [f32; 5], from: (&str, u8, u64), out: &mut Produce
         ("ekf.terrain_variance", "EKF terrain variance"),
     ];
     for ((key, label), value) in names.iter().zip(variances) {
-        out.item(key, label, Unit::None, f64::from(value), from);
+        if value.is_finite() {
+            out.item(key, label, Unit::None, f64::from(value), from);
+        }
     }
     // The worst, as Mission Planner's EKF indicator shows it.
-    let worst = variances.iter().copied().fold(0.0_f32, f32::max);
+    let counted = if with_terrain { 5 } else { 4 };
+    let worst = variances[..counted]
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0.0_f32, f32::max);
     out.item("ekf.variance", "EKF", Unit::None, f64::from(worst), from);
     out.text("ekf.status", "EKF state", ekf_text(flags), from);
 }
@@ -1976,6 +1993,26 @@ mod tests {
         assert_eq!(ekf_text(1024), "Not started");
         assert_eq!(ekf_text(1 | 32768 | 2 | 16), "GPS glitching");
 
+        let px4 = produced(&Message::EstimatorStatus {
+            flags: 0b11_0111_1111,
+            ratios: [0.17, 0.05, 0.04, 0.16, 2.0],
+        });
+        assert!(
+            px4.contains(&("ekf.variance".to_owned(), f64::from(0.17_f32))),
+            "PX4's height above ground is not its worst: {px4:?}"
+        );
+        assert!(px4.contains(&("ekf.terrain_variance".to_owned(), 2.0)));
+        let starting = produced(&Message::EstimatorStatus {
+            flags: 0b1010_0100,
+            ratios: [0.0, 0.0, 0.0, 0.0, f32::NAN],
+        });
+        assert!(
+            !starting
+                .iter()
+                .any(|(key, _)| key == "ekf.terrain_variance"),
+            "no ratio yet: {starting:?}"
+        );
+
         let vibration = produced(&Message::Vibration {
             axes: [12.0, 64.5, 30.0],
             clipping: [0, 2, 5],
@@ -2076,6 +2113,10 @@ mod tests {
             Message::EkfStatus {
                 flags: 0,
                 variances: [0.0; 5],
+            },
+            Message::EstimatorStatus {
+                flags: 0,
+                ratios: [0.0; 5],
             },
             Message::Vibration {
                 axes: [0.0; 3],

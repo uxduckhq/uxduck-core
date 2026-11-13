@@ -23,7 +23,7 @@ use uxduck_contracts::dto::sim::{
     SimCatalogueResult,
 };
 
-use super::{BUILD_FILE, Simulators};
+use super::{BUILD_FILE, PX4, Simulators};
 
 /// Where the catalogue is published (R2, `docs/plan/review.md` S18).
 pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/catalogue.json";
@@ -381,6 +381,9 @@ impl Catalogue {
                 executable(&target)?;
             }
         }
+        if build.program == PX4 {
+            px4_links(&folder.join(PX4).join("bin"))?;
+        }
         std::fs::write(
             folder.join(BUILD_FILE),
             serde_json::to_vec_pretty(build).map_err(|e| e.to_string())?,
@@ -638,6 +641,43 @@ fn executable(_: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// PX4's start-up scripts run each command as `px4-<command>`, a link to
+/// `px4` beside it, which a catalogue's files cannot carry. The links are
+/// made as PX4's build makes them, one for each alias its `px4-alias.sh`
+/// defines (`alias commander='px4-commander --instance $px4_instance'`).
+#[cfg(unix)]
+fn px4_links(bin: &Path) -> Result<(), String> {
+    let aliases = std::fs::read_to_string(bin.join("px4-alias.sh"))
+        .map_err(|e| format!("the PX4 build has no px4-alias.sh: {e}"))?;
+    let mut made = 0;
+    for line in aliases.lines() {
+        let Some((name, command)) = line
+            .strip_prefix("alias ")
+            .and_then(|alias| alias.split_once("='"))
+        else {
+            continue;
+        };
+        let link = format!("px4-{name}");
+        let named = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !named || command.split_whitespace().next() != Some(link.as_str()) {
+            continue;
+        }
+        let path = bin.join(&link);
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink(PX4, &path).map_err(|e| format!("cannot link {link}: {e}"))?;
+        made += 1;
+    }
+    if made == 0 {
+        return Err("the PX4 build's px4-alias.sh names no commands".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn px4_links(_: &Path) -> Result<(), String> {
+    Err("PX4 runs on macOS and Linux only".into())
+}
+
 /// Verifies and reads a manifest.
 ///
 /// # Errors
@@ -688,9 +728,12 @@ fn valid(build: &CatalogueBuild) -> bool {
             local && fetched(&f.url) && f.sha256.len() == 64 && readable
         });
     let program_first = build.files.first().is_some_and(|f| {
-        f.name
-            .to_ascii_lowercase()
-            .starts_with(&build.program.to_ascii_lowercase())
+        let program = build.program.to_ascii_lowercase();
+        let name = Path::new(&f.name)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        name == program || name.starts_with(&format!("{program}."))
     });
     safe_id && safe_files && program_first
 }
@@ -756,5 +799,42 @@ mod tests {
         let mut sneaky = build("arducopter", "https://x/a");
         sneaky.id = "../../evil".into();
         assert!(!valid(&sneaky));
+        let mut px4 = build("px4/bin/px4", "https://x/a");
+        px4.program = PX4.into();
+        assert!(valid(&px4), "a PX4 build's program is in its px4 folder");
+        px4.files[0].name = "px4/bin/px4-alias.sh".into();
+        assert!(!valid(&px4), "the daemon runs the first file");
+        assert!(valid(&build("arducopter.exe", "https://x/a")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_px4_build_gets_a_link_for_each_command_its_aliases_name() {
+        let bin = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bin.path().join("px4-alias.sh"),
+            "alias set=_set\nalias commander='px4-commander --instance $px4_instance'\nalias other='rm -rf /'\nalias ../x='px4-../x'\nalias param='px4-param --instance $px4_instance'\n",
+        )
+        .unwrap();
+        px4_links(bin.path()).unwrap();
+        let mut links: Vec<String> = std::fs::read_dir(bin.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        links.sort();
+        assert_eq!(links, ["px4-commander", "px4-param"]);
+        assert_eq!(
+            std::fs::read_link(bin.path().join("px4-param")).unwrap(),
+            Path::new(PX4)
+        );
+        // Installing again replaces them.
+        px4_links(bin.path()).unwrap();
+        std::fs::write(bin.path().join("px4-alias.sh"), "alias set=_set\n").unwrap();
+        assert!(
+            px4_links(bin.path()).is_err(),
+            "a build with no commands is refused"
+        );
     }
 }

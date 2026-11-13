@@ -550,8 +550,8 @@ impl Engine {
     /// knows where it is takes off in nothing but a stabilised mode: GUIDED,
     /// AUTO and Take off are refused until it does. It waits until then, a
     /// few seconds after its own checks pass, and while its EKF status is
-    /// missing or more than 5 s old. PX4 sends no `EKF_STATUS_REPORT`, so
-    /// it is not held.
+    /// missing or more than 5 s old. PX4 is not held: the rule is for
+    /// ArduPilot's SITL, which says it may arm before its EKF has a position.
     fn simulation_position_check(&self, vehicle: &Vehicle) -> Option<Check> {
         if !self.is_simulated(vehicle) || vehicle.autopilot != "Ardupilotmega" {
             return None;

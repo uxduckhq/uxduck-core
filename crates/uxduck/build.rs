@@ -10,6 +10,16 @@ use std::path::Path;
 
 fn main() {
     windows_resource::embed("uxduck");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rerun-if-changed=src/diagnostics/local_network.m");
+        cc::Build::new()
+            .file("src/diagnostics/local_network.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("uxduck_local_network");
+        println!("cargo:rustc-link-lib=framework=Network");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
     // Windows gives the main thread 1 MiB, where Linux and macOS give 8 MiB;
     // parsing the command line in a debug build needs about 1 MiB, so match
     // the others rather than overflow before main does anything.

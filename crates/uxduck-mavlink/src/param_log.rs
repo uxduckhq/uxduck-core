@@ -7,10 +7,10 @@
 //! without the requests (recorded before UXDuck kept what it sent, or by
 //! another app) gives a file by its magic at offset 0, marked guessed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::decode::{Message, decode};
-use crate::transfers::{ftp, parse_param_pck_partial};
+use crate::transfers::{from_bytewise, ftp, parse_param_pck_partial};
 
 /// How long after a `PARAM_SET` the vehicle's report of that parameter is its
 /// echo.
@@ -278,12 +278,17 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
     let mut files: BTreeMap<(u8, u8, u8), Assembly> = BTreeMap::new();
     let mut booted: BTreeMap<(u8, u8), u32> = BTreeMap::new();
     let mut boots: BTreeMap<(u8, u8), Vec<u64>> = BTreeMap::new();
+    // PX4 sends an integer parameter's bits, not its number, as it does live.
+    let mut px4: BTreeSet<(u8, u8)> = BTreeSet::new();
     for &(at_us, frame) in records {
         let Some(decoded) = decode(frame) else {
             continue;
         };
         let (system, component) = (decoded.system_id, decoded.component_id);
         match decoded.message {
+            Message::Heartbeat { autopilot, .. } if autopilot.eq_ignore_ascii_case("px4") => {
+                px4.insert((system, component));
+            }
             Message::GlobalPositionInt { time_boot_ms, .. }
             | Message::Attitude { time_boot_ms, .. } => {
                 let last = booted.insert((system, component), time_boot_ms);
@@ -312,6 +317,11 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
                     (Some((by, _)), _) => Source::Set { by },
                     (None, u16::MAX) => Source::Reported,
                     (None, index) => Source::Listed { index, count },
+                };
+                let value = if px4.contains(&(system, component)) {
+                    from_bytewise(value, param_type)
+                } else {
+                    value
                 };
                 let timeline = out.entry((system, component)).or_default();
                 if count > 0 && count != u16::MAX {
@@ -471,6 +481,24 @@ mod tests {
         assert!(timeline.completeness(T0).whole());
         assert!(!timeline.completeness(T0 + S).whole());
         assert!(timeline.completeness(T0 + 2 * S).whole());
+    }
+
+    #[test]
+    fn a_px4_integer_is_read_as_its_number_and_an_ardupilot_one_as_sent() {
+        let frames = vec![
+            (T0, sim::px4_heartbeat_frame(1, 0, 0)),
+            (
+                T0 + S,
+                sim::param_value_frame(1, 1, 1, "SYS_AUTOSTART", f32::from_bits(10040), 6, 1, 0),
+            ),
+            (
+                T0 + S,
+                sim::param_value_frame(2, 1, 0, "FRAME_CLASS", 1.0, 6, 1, 0),
+            ),
+        ];
+        let found = timelines(&log(&frames));
+        assert_eq!(found[&(1, 1)].at(T0 + S)[0].reading.value, 10040.0);
+        assert_eq!(found[&(2, 1)].at(T0 + S)[0].reading.value, 1.0);
     }
 
     #[test]

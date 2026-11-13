@@ -1,0 +1,7 @@
+{
+  "method": "telemetry/calculate",
+  "params": {
+    "formula": "battery.voltage_v * battery.current_a",
+    "vehicleId": "veh_1"
+  }
+}

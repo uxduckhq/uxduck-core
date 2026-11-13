@@ -123,6 +123,7 @@ pub(crate) fn setup() -> (Engine, Client, Orders, String) {
         json!({ "kind": { "type": "udp-listen", "host": "0.0.0.0", "port": 14550 } }),
     );
     engine.vehicle_observed(Observation {
+        connections: None,
         id: "v".into(),
         aliases: vec![],
         link_id: link["result"]["id"].as_str().unwrap().into(),

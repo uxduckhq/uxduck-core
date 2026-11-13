@@ -447,17 +447,26 @@ impl FtpClient {
     /// it again by `PARAM_SET`), and the parameter file is dropped, since
     /// the engine downloads the parameters again after a restart.
     pub fn restarted(&mut self) -> Vec<Event> {
+        self.interrupted("the vehicle restarted", false)
+    }
+
+    /// A route session ended. Do not turn this into an implicit retry on a new path.
+    pub fn interrupted(&mut self, reason: &str, report_parameters: bool) -> Vec<Event> {
         self.reset_done = false;
-        let restarted = || Failure::Rejected("the vehicle restarted".into());
+        let restarted = || Failure::Rejected(reason.into());
         let mut events = Vec::new();
         let mut jobs: Vec<Job> = self.active.take().map(|a| a.job).into_iter().collect();
         jobs.extend(self.queue.drain(..));
         for job in jobs {
             match job {
-                Job::Params => {}
+                Job::Params => {
+                    if report_parameters {
+                        events.push(Event::Parameters(Err(reason.into())));
+                    }
+                }
                 Job::WriteParams { writes } => events.push(Event::ParamsWritten {
                     writes,
-                    read_back: Err("the vehicle restarted".into()),
+                    read_back: Err(reason.into()),
                 }),
                 Job::File { id, .. } => events.push(Event::Done {
                     id,

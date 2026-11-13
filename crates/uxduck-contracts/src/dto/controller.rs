@@ -299,6 +299,17 @@ pub struct ControllerSetTargetParams {
     pub vehicle_id: Option<String>,
 }
 
+/// Keeps on this client's operator the mapping to use with a controller on
+/// a vehicle, or, without `vehicleId`, for a vehicle with none of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerChooseMappingParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    pub mapping_id: String,
+}
+
 /// The vehicle this client has selected, for controllers that follow it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

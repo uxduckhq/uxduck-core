@@ -20,6 +20,25 @@ pub enum VehicleLook {
     Jet,
 }
 
+/// A 3D model of the person's own that a vehicle is drawn with (ADR-0035
+/// M5, 2026-11-12), in place of UXDuck's: a glTF file UXDuck keeps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnModel {
+    /// Where UXDuck keeps the file: its SHA-256, in hex.
+    pub file: String,
+    /// The file's name as the person chose it, such as `skywalker.glb`.
+    pub name: String,
+    pub bytes: u64,
+    /// How far it is turned clockwise, seen from above, from the front
+    /// glTF gives it (+Z): 0, 90, 180 or 270 degrees.
+    pub turn_deg: u16,
+    /// Why it may slow the maps down, in words, when it is more detailed
+    /// than a vehicle needs: written when the file was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// A vehicle's colour on the maps, in the sidebar and on its mission
 /// (ADR-0029 P19). None is green, red, amber, orange or grey, which mean
 /// inside and outside a fence, connected, lost and offline, so a colour
@@ -93,6 +112,8 @@ pub struct Vehicle {
     /// Earlier ids of this vehicle, such as its provisional id.
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<VehicleConnections>,
     pub link_id: String,
     pub peer: String,
     pub system_id: u8,
@@ -165,6 +186,10 @@ pub struct Vehicle {
     /// The model it is drawn as, as the person chose; absent, its type's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// Its own 3D model, as the person gave it, drawn in place of `look`
+    /// and its type's. Never set with `look`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_model: Option<OwnModel>,
     /// Its colour: given when it is first heard and kept with its id, so it
     /// is the same whichever order vehicles connect in, or chosen in its
     /// menu. Absent only on a record from before colours were kept.
@@ -231,6 +256,7 @@ pub struct Bookmark {
 pub struct Observation {
     pub id: String,
     pub aliases: Vec<String>,
+    pub connections: Option<VehicleConnections>,
     pub link_id: String,
     pub peer: String,
     pub system_id: u8,
@@ -340,4 +366,35 @@ mod tests {
         assert_eq!(simulation_name(Some(0), ["Sim 1", "Sim 2"]), "Sim 3");
         assert_eq!(simulation_name(None, ["Sim 1"]), "Sim 2");
     }
+}
+
+/// Discovered connections only. Configuring a link is never vehicle evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnections {
+    pub routes: Vec<VehicleRoute>,
+    pub command_available: bool,
+    pub reason: String,
+    pub epoch: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent transport capability and selection evidence"
+)]
+pub struct VehicleRoute {
+    pub link_id: String,
+    pub peer: String,
+    pub system_id: u8,
+    pub priority: u32,
+    pub reachable: bool,
+    pub writable: bool,
+    pub selected: bool,
+    pub telemetry: bool,
+    pub last_heartbeat_us: u64,
+    pub round_trip_us: Option<u64>,
+    pub loss_per_mille: Option<u32>,
+    pub last_receive_age_ms: Option<u64>,
+    pub reason: String,
 }

@@ -339,6 +339,7 @@ fn bench() -> Bench {
 impl Bench {
     fn seen(&mut self, id: &str, system_id: u8) {
         self.engine.vehicle_observed(Observation {
+            connections: None,
             id: id.into(),
             aliases: Vec::new(),
             link_id: self.link_id.clone(),

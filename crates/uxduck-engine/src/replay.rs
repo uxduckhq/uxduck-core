@@ -152,6 +152,7 @@ fn follow(vehicle: &mut Vehicle, original: &Vehicle, copy_index: usize) {
     vehicle.replay_of = Some(original.id.clone());
     vehicle.name.clone_from(&original.name);
     vehicle.look = original.look;
+    vehicle.own_model.clone_from(&original.own_model);
     vehicle.colour = original.colour.map(|colour| {
         let all = uxduck_core::domain::vehicle::VehicleColour::ALL;
         let at = all.iter().position(|c| *c == colour).unwrap_or(0);
@@ -777,7 +778,7 @@ fn pass(bytes: &[u8], records: &[Record]) -> Pass {
         last: u64,
     }
     let mut out = Pass::default();
-    let mut session = Session::new(Config::default());
+    let mut session = Session::for_replay(Config::default());
     let mut ids: HashMap<String, Key> = HashMap::new();
     let mut tracks: BTreeMap<Key, Track> = BTreeMap::new();
     let mut last_tick = 0u64;
@@ -1133,7 +1134,7 @@ fn series_of(
     keys: &[String],
     max: usize,
 ) -> Vec<FlightSeries> {
-    let mut session = Session::new(Config::default());
+    let mut session = Session::for_replay(Config::default());
     let mut ids: HashMap<String, Key> = HashMap::new();
     let mut out: BTreeMap<&str, Vec<FlightSample>> = BTreeMap::new();
     let mut last_tick = 0u64;
@@ -1672,7 +1673,7 @@ impl Engine {
             anchor: (self.clock.now_us(), first_moment),
             generation: keep.as_ref().map_or(1, |k| k.generation + 1),
             next: 0,
-            session: Session::new(Config::default()),
+            session: Session::for_replay(Config::default()),
             last_tick: 0,
             vehicles: BTreeMap::new(),
             session_ids: HashMap::new(),
@@ -2347,6 +2348,7 @@ impl Engine {
     /// "Seen in a log" until it is heard live (S248).
     fn remember_log_vehicle(&mut self, seen: &Observation, name: &str) {
         let vehicle = Vehicle {
+            connections: None,
             id: seen.id.clone(),
             name: name.to_owned(),
             aliases: Vec::new(),
@@ -2376,6 +2378,7 @@ impl Engine {
             companions: Vec::new(),
             traffic: false,
             look: None,
+            own_model: None,
             preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
             definitions: uxduck_core::domain::param_definitions::DefinitionsChoice::default(),
             dialects: uxduck_core::domain::dialect::DialectChoice::default(),
@@ -2597,6 +2600,7 @@ impl Engine {
     fn replay_vehicle_seen(&mut self, identity: &Identity, seen: &Observation) {
         let previous = self.state.vehicles.get(&identity.replay_id).cloned();
         let mut vehicle = previous.clone().unwrap_or_else(|| Vehicle {
+            connections: None,
             id: identity.replay_id.clone(),
             name: identity.name.clone(),
             aliases: Vec::new(),
@@ -2625,6 +2629,7 @@ impl Engine {
             companions: Vec::new(),
             traffic: false,
             look: None,
+            own_model: None,
             colour: None,
             preflight: uxduck_core::domain::preflight::PreflightSettings::default(),
             definitions: uxduck_core::domain::param_definitions::DefinitionsChoice::default(),
@@ -2812,7 +2817,7 @@ impl Engine {
         let Some(replay) = self.replays.open.as_mut() else {
             return;
         };
-        replay.session = Session::new(Config::default());
+        replay.session = Session::for_replay(Config::default());
         replay.session_ids.clear();
         replay.next = 0;
         replay.last_tick = 0;

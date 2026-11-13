@@ -27,6 +27,8 @@ pub struct Vehicle {
     pub name: String,
     /// Earlier ids of the same vehicle, such as the provisional one.
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<VehicleConnections>,
     pub link_id: String,
     /// The source address it is heard from on its link.
     pub peer: String,
@@ -102,6 +104,11 @@ pub struct Vehicle {
     /// its type gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// Its own 3D model, set with `vehicle/look`'s `file`: drawn in place
+    /// of `look` and the one its type gives, read with
+    /// `vehicle/modelRead`. Absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_model: Option<OwnModel>,
     /// Its colour, given when it was first heard or chosen with
     /// `vehicle/colour`, kept with its id. Absent only on a vehicle kept
     /// from before colours were given and not heard since.
@@ -168,16 +175,81 @@ pub enum VehicleLook {
     Jet,
 }
 
+/// A 3D model of the person's own that a vehicle is drawn with (ADR-0035
+/// M5): a binary glTF (`.glb`), or a `.gltf` with its buffers and images
+/// inside it, kept by UXDuck.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnModel {
+    /// Where UXDuck keeps the file: its SHA-256, in hex. The same file for
+    /// two vehicles is kept once.
+    pub file: String,
+    /// The file's name as the person chose it, such as `skywalker.glb`.
+    pub name: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// How far it is turned clockwise, seen from above, from the front
+    /// glTF gives it (+Z): 0, 90, 180 or 270 degrees.
+    pub turn_deg: u16,
+    /// Why it may slow the maps down and what to change, in words, when
+    /// it has more triangles, wider textures or more separately drawn
+    /// parts than a vehicle on a map needs. It is still drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// The largest file `vehicle/look` takes as a vehicle's own model.
+pub const OWN_MODEL_MAX: u64 = 32 * 1024 * 1024;
+
+/// The most of an own model `vehicle/modelRead` gives at once, before base64.
+pub const OWN_MODEL_CHUNK: u64 = 4 * 1024 * 1024;
+
 /// `vehicle/look`: the model a vehicle is drawn as on both maps, such as a
-/// copter drawn as a boat it rides on.
+/// copter drawn as a boat it rides on, or a model of the person's own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VehicleLookParams {
     /// The vehicle, by id or an earlier alias.
     pub id: String,
-    /// Absent gives it back the model its type gives.
+    /// One of UXDuck's models. Absent, with no `file` or `turnDeg`, gives
+    /// it back the model its type gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<VehicleLook>,
+    /// A model of the person's own instead: the id of a file uploaded with
+    /// `attachment/begin` or attached to a message, a `.glb` or a
+    /// self-contained `.gltf` of up to 32 MB. Not with `look`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Turns its own model clockwise, seen from above, from the front glTF
+    /// gives it: 0, 90, 180 or 270. With `file`, or alone to turn the one
+    /// it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_deg: Option<u16>,
+}
+
+/// `vehicle/modelRead`: the bytes of a vehicle's own model, to draw it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleModelReadParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// Where to start, in bytes; from the start when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleModelReadResult {
+    /// The file, as `ownModel.file` names it.
+    pub file: String,
+    /// The whole file's size.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// Up to 4 MiB of it from `offset`, base64; read on from `offset` plus
+    /// what came until `bytes`.
+    pub content_base64: String,
 }
 
 /// A vehicle's colour on the maps, in the sidebar and on its mission
@@ -277,4 +349,39 @@ pub struct VehicleBookmarksParams {
     pub id: String,
     /// Any number; an empty list removes them all.
     pub bookmarks: Vec<VehicleBookmark>,
+}
+
+/// Discovered connections only. Configuring a link is never vehicle evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnections {
+    pub routes: Vec<VehicleRoute>,
+    pub command_available: bool,
+    pub reason: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub epoch: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent transport capability and selection evidence"
+)]
+pub struct VehicleRoute {
+    pub link_id: String,
+    pub peer: String,
+    pub system_id: u8,
+    pub priority: u32,
+    pub reachable: bool,
+    pub writable: bool,
+    pub selected: bool,
+    pub telemetry: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub last_heartbeat_us: u64,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub round_trip_us: Option<u64>,
+    pub loss_per_mille: Option<u32>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_receive_age_ms: Option<u64>,
+    pub reason: String,
 }

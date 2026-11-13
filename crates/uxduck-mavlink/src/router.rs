@@ -192,6 +192,17 @@ impl Router {
         header: Header,
         now_us: u64,
     ) -> Routed {
+        self.check_loop_with_sources((link_id, peer), frame, header, now_us, &[])
+    }
+
+    pub fn check_loop_with_sources(
+        &mut self,
+        (link_id, peer): (&str, &str),
+        frame: &[u8],
+        header: Header,
+        now_us: u64,
+        redundant_sources: &[(String, String)],
+    ) -> Routed {
         self.expire(now_us);
         let mut routed = Routed::default();
         let fingerprint = Fingerprint {
@@ -203,6 +214,10 @@ impl Router {
         // Its repeated heartbeat on each pipe is still original source traffic.
         let matches = |sent: &&SentFrame| {
             sent.fingerprint == fingerprint
+                && !sent
+                    .from
+                    .as_ref()
+                    .is_some_and(|source| redundant_sources.contains(source))
                 && !sent.from.as_ref().is_some_and(|(source, source_peer)| {
                     source_peer == peer
                         && (source == link_id
@@ -715,5 +730,56 @@ mod tests {
         let frame = heartbeat_frame(1, 1, 9);
         route(&mut router, "radio", &frame, Some("a"), 0);
         assert!(!route(&mut router, "radio", &frame, Some("a"), 3_000_000).looped);
+    }
+}
+
+#[cfg(test)]
+mod redundancy_tests {
+    #![allow(clippy::unwrap_used, reason = "known-valid test frames")]
+    use super::*;
+    #[test]
+    fn an_identified_alternate_is_not_a_forwarding_loop_but_an_echo_is() {
+        let mut router = Router::default();
+        router.set_link("a", Role::Vehicles);
+        router.set_link("b", Role::Vehicles);
+        router.set_link(
+            "forward",
+            Role::Forward {
+                vehicles: Vec::new(),
+                from_link: None,
+                writable: true,
+            },
+        );
+        let frame = crate::sim::heartbeat_frame(1, 1, 1);
+        let header = crate::framing::header(&frame).unwrap();
+        let destinations = vec![VehicleRoute {
+            vehicle_id: "vehicle".into(),
+            link_id: "a".into(),
+            peer: "peer".into(),
+        }];
+        router.forward(
+            ("a", "peer"),
+            &frame,
+            header,
+            Some("vehicle"),
+            &destinations,
+            1,
+        );
+        assert!(
+            !router
+                .check_loop_with_sources(
+                    ("b", "peer"),
+                    &frame,
+                    header,
+                    2,
+                    &[("a".into(), "peer".into())]
+                )
+                .looped
+        );
+        assert!(
+            router
+                .check_loop(("forward", "other"), &frame, header, 3)
+                .looped
+        );
     }
 }

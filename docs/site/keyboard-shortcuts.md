@@ -63,7 +63,7 @@ While a map has the focus, the arrows pan it instead.
 | Quit UXDuck  | ⌘Q    | Ctrl+Q            |
 | Full screen  | ⌃⌘F   | F11               |
 
-Settings is also in the **UXDuck** menu on macOS and **File** on Windows and Linux. Opening Settings keeps your workspace behind it; pressing its shortcut again leaves Settings open. Its native menu follows changes you make to the shortcut. **File › New Window** opens another view of the same UXDuck. Closing a window leaves UXDuck running; the quit shortcut asks before stopping it.
+Settings is also in the **UXDuck** menu on macOS and **File** on Windows and Linux. Opening Settings keeps your workspace behind it; pressing its shortcut again leaves Settings open. Its native menu follows changes you make to the shortcut. **File › New Window** opens another view of the same UXDuck. Closing a window leaves UXDuck running. The quit shortcut asks first only when a vehicle, simulation, forward link or recording would stop.
 
 The desktop app's Edit, View and Window menus provide the standard editing, zoom and window controls for your platform.
 

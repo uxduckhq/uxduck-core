@@ -207,6 +207,23 @@ impl Engine {
         Ok(())
     }
 
+    /// An upload used for something other than a message, such as a
+    /// vehicle's own model, once that kept its own copy: it goes, as one
+    /// taken out of the input does. A file sent with a message stays.
+    pub(crate) fn used_upload(&mut self, connection: ConnectionId, id: &str) {
+        if self
+            .uploads
+            .open
+            .get(id)
+            .is_none_or(|u| u.connection != connection)
+        {
+            return;
+        }
+        if let Some(upload) = self.uploads.open.remove(id) {
+            let _ = self.system.attachment_finish(id, &upload.name, false);
+        }
+    }
+
     /// A connection went: what it was still uploading goes too.
     pub(crate) fn attachments_disconnected(&mut self, connection: ConnectionId) {
         let unsent: Vec<(String, String)> = self

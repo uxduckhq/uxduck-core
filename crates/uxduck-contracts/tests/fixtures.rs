@@ -219,11 +219,17 @@ fn check(name: &str) {
             round_trip::<Link>(name, &json);
         }
         ("result", "serial_list") => round_trip::<SerialListResult>(name, &json),
+        ("result", "vehicle_modelRead") => {
+            round_trip::<uxduck_contracts::dto::vehicle::VehicleModelReadResult>(name, &json);
+        }
         ("result", "gripper_status") => {
             round_trip::<uxduck_contracts::dto::gripper::GripperStatus>(name, &json);
         }
         ("result", "link_list") => {
             round_trip::<uxduck_contracts::dto::link::LinkListResult>(name, &json);
+        }
+        ("result", "telemetry_calculate") => {
+            round_trip::<uxduck_contracts::dto::telemetry::TelemetryCalculateResult>(name, &json);
         }
         ("result", "telemetry_window") => {
             round_trip::<uxduck_contracts::dto::telemetry_window::TelemetryWindowResult>(
@@ -836,6 +842,7 @@ fn check(name: &str) {
             | "controller_keyboardStop"
             | "gripper_hold"
             | "controller_forget"
+            | "controller_chooseMapping"
             | "daemon_restart"
             | "daemon_stop"
             | "client_visibility"

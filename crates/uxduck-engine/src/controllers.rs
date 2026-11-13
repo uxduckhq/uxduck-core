@@ -23,9 +23,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 use uxduck_contracts::dto::command::CommandSendParams;
 use uxduck_contracts::dto::controller::{
-    ClientSelectParams, Controller as ControllerDto, ControllerClaimParams,
-    ControllerSetTargetParams, InputMapping as MappingDto, KeyboardStopReason, MappingCreateParams,
-    MappingUpdateParams,
+    ClientSelectParams, Controller as ControllerDto, ControllerChooseMappingParams,
+    ControllerClaimParams, ControllerSetTargetParams, InputMapping as MappingDto,
+    KeyboardStopReason, MappingCreateParams, MappingUpdateParams,
 };
 use uxduck_contracts::dto::link::IdParams;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
@@ -237,6 +237,12 @@ pub(crate) fn handle(
         ClientRequest::ControllerTakeOver(IdParams { id }) if id.starts_with("keyboard:") => {
             denied("Keyboard control stays with the page that started it")
         }
+        ClientRequest::ControllerChooseMapping(params) if params.id.starts_with("keyboard:") => {
+            denied("The keyboard's mapping is fixed")
+        }
+        ClientRequest::ControllerChooseMapping(params) => {
+            choose_mapping(engine, connection, params)
+        }
         ClientRequest::ControllerClaim(params) => claim(engine, connection, params),
         ClientRequest::ControllerTakeOver(IdParams { id }) => take_over(engine, connection, &id),
         ClientRequest::ControllerRelease(IdParams { id }) => {
@@ -420,22 +426,6 @@ fn claim(
             format!("{} is held by {name}", controller.name),
         ));
     }
-    // The person's mapping (maintainer, 2026-10-23): the one named, else
-    // theirs for this controller if it is here, else the one it last used.
-    let operator_id = engine.actor(connection).operator_id;
-    let theirs = operator_id
-        .as_ref()
-        .and_then(|id| engine.state.operators.get(id))
-        .and_then(|o| o.mapping_for(&controller.id, &controller.name))
-        .filter(|id| mapping(engine, id).is_some())
-        .map(str::to_owned);
-    let chosen = params.mapping_id.is_some();
-    if let Some(mapping_id) = params.mapping_id.or(theirs) {
-        if mapping(engine, &mapping_id).is_none() {
-            return Err(not_found(&format!("mapping {mapping_id}")));
-        }
-        controller.mapping_id = mapping_id;
-    }
     let mode: TargetMode = params.mode.into();
     let target = match mode {
         TargetMode::Pinned => params.vehicle_id,
@@ -449,6 +439,25 @@ fn claim(
         (TargetMode::FollowsSelection, None) => None,
         (_, target) => Some(engine.drivable(&controller.id, target)?),
     };
+    // The person's mapping (maintainer, 2026-10-23, per vehicle 2026-11-12):
+    // the one named, else theirs for this controller on this vehicle, else
+    // the one they chose last for it, if it is here, else the one it last
+    // used.
+    let operator_id = engine.actor(connection).operator_id;
+    let ids = engine.vehicle_ids(target.as_deref());
+    let theirs = operator_id
+        .as_ref()
+        .and_then(|id| engine.state.operators.get(id))
+        .and_then(|o| o.mapping_for(&controller.id, &controller.name, &ids))
+        .filter(|id| mapping(engine, id).is_some())
+        .map(str::to_owned);
+    let chosen = params.mapping_id.is_some();
+    if let Some(mapping_id) = params.mapping_id.or(theirs) {
+        if mapping(engine, &mapping_id).is_none() {
+            return Err(not_found(&format!("mapping {mapping_id}")));
+        }
+        controller.mapping_id = mapping_id;
+    }
     engine.require_mapping_reads(&controller)?;
     if let Some(target) = &target {
         engine.require_rc_channels(&controller.mapping_id, target)?;
@@ -469,7 +478,12 @@ fn claim(
         .insert(controller.id.clone(), connection);
     engine.resolve(&reclaim(&controller.id));
     if chosen {
-        engine.remember_mapping(actor.clone(), operator_id.as_deref(), &controller);
+        engine.remember_mapping(
+            actor.clone(),
+            operator_id.as_deref(),
+            &controller,
+            controller.target.as_deref(),
+        );
     }
     engine.commit_as(
         actor,
@@ -478,7 +492,7 @@ fn claim(
         },
     );
     engine.route(&controller.id);
-    engine.announce_target(&controller);
+    engine.announce_target(&controller, false);
     to_value(&ControllerDto::from(
         &engine.state.controllers[&controller.id],
     ))
@@ -575,10 +589,20 @@ fn set_target(
             .or_else(|| controller.target.clone()),
     };
     let target = engine.drivable(&controller.id, wanted)?;
-    engine.require_rc_channels(&controller.mapping_id, &target)?;
     let moving = controller.target.as_deref() != Some(target.as_str());
-    if moving && controller.target.is_none() {
-        // Its first vehicle: judged as a claim is.
+    // A vehicle with a mapping of its own is flown with it (maintainer,
+    // 2026-11-12); one without keeps the mapping in use.
+    let own = moving
+        .then(|| engine.own_mapping(&controller, &target))
+        .flatten()
+        .filter(|id| *id != controller.mapping_id);
+    let swapped = own.is_some();
+    if let Some(id) = own {
+        controller.mapping_id = id;
+    }
+    engine.require_rc_channels(&controller.mapping_id, &target)?;
+    if moving && (controller.target.is_none() || swapped) {
+        // Its first vehicle, or another mapping: judged as a claim is.
         engine.require_mapping_reads(&controller)?;
     }
     controller.mode = mode;
@@ -593,11 +617,77 @@ fn set_target(
     );
     if moving {
         engine.route(&controller.id);
-        engine.announce_target(&controller);
+        engine.announce_target(&controller, swapped);
     }
     to_value(&ControllerDto::from(
         &engine.state.controllers[&controller.id],
     ))
+}
+
+/// Keeps on the operator the mapping a controller uses on a vehicle
+/// (maintainer, 2026-11-12): synced with them, taken by a claim there, and
+/// switched to when the controller, held, moves there. The mapping it flies
+/// a vehicle with now changes only once it is released.
+fn choose_mapping(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: ControllerChooseMappingParams,
+) -> Result<Value, ApiError> {
+    let mut controller = engine
+        .state
+        .controllers
+        .get(&params.id)
+        .cloned()
+        .ok_or_else(|| not_found(&format!("controller {}", params.id)))?;
+    if mapping(engine, &params.mapping_id).is_none() {
+        return Err(not_found(&format!("mapping {}", params.mapping_id)));
+    }
+    let vehicle_id = match params.vehicle_id {
+        Some(id) => Some(
+            engine
+                .vehicle(&id)
+                .map(|v| v.id.clone())
+                .ok_or_else(|| not_found(&format!("vehicle {id}")))?,
+        ),
+        None => None,
+    };
+    let drives_it = controller.claim.is_some()
+        && vehicle_id.is_some()
+        && controller
+            .target
+            .as_deref()
+            .and_then(|target| engine.vehicle(target))
+            .map(|v| v.id.as_str())
+            == vehicle_id.as_deref();
+    if drives_it && controller.mapping_id != params.mapping_id {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!(
+                "{} drives {} now. Release it to change the mapping it uses there.",
+                controller.name,
+                engine.target_name(vehicle_id.as_deref().unwrap_or_default()),
+            ),
+        ));
+    }
+    let actor = engine.actor(connection);
+    let Some(operator_id) = actor
+        .operator_id
+        .clone()
+        .filter(|id| engine.state.operators.contains_key(id))
+    else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Mappings are kept on an operator. Choose one first.",
+        ));
+    };
+    controller.mapping_id = params.mapping_id;
+    engine.remember_mapping(
+        actor,
+        Some(&operator_id),
+        &controller,
+        vehicle_id.as_deref(),
+    );
+    Ok(json!({}))
 }
 
 fn create_mapping(
@@ -832,12 +922,14 @@ fn update_mapping(
 }
 
 impl Engine {
-    /// Keeps on the operator the mapping they claimed a controller with.
+    /// Keeps on the operator the mapping chosen for a controller on a
+    /// vehicle, or with none yet.
     fn remember_mapping(
         &mut self,
         actor: Actor,
         operator_id: Option<&str>,
         controller: &Controller,
+        vehicle_id: Option<&str>,
     ) {
         let Some(mut operator) = operator_id
             .and_then(|id| self.state.operators.get(id))
@@ -845,7 +937,15 @@ impl Engine {
         else {
             return;
         };
-        if operator.choose_mapping(&controller.id, &controller.name, &controller.mapping_id) {
+        let vehicle_id = vehicle_id
+            .and_then(|id| self.vehicle(id))
+            .map(|v| v.id.clone());
+        if operator.choose_mapping(
+            &controller.id,
+            &controller.name,
+            vehicle_id.as_deref(),
+            &controller.mapping_id,
+        ) {
             operator.version += 1;
             self.commit_as(actor, Change::OperatorUpserted { operator });
         }
@@ -857,6 +957,38 @@ impl Engine {
             .map(|c| c.name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "a client".into())
+    }
+
+    /// A vehicle's id and the ids it was known by, its own first; none for
+    /// no vehicle or one not here.
+    fn vehicle_ids(&self, vehicle_id: Option<&str>) -> Vec<&str> {
+        vehicle_id
+            .and_then(|id| self.vehicle(id))
+            .map(|v| {
+                std::iter::once(v.id.as_str())
+                    .chain(v.aliases.iter().map(String::as_str))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The mapping the operator holding a controller chose for it on a
+    /// vehicle, if it is here.
+    fn own_mapping(&self, controller: &Controller, vehicle_id: &str) -> Option<String> {
+        let operator = controller
+            .claim
+            .as_ref()?
+            .operator_id
+            .as_ref()
+            .and_then(|id| self.state.operators.get(id))?;
+        operator
+            .vehicle_mapping(
+                &controller.id,
+                &controller.name,
+                &self.vehicle_ids(Some(vehicle_id)),
+            )
+            .filter(|id| mapping(self, id).is_some())
+            .map(str::to_owned)
     }
 
     fn target_name(&self, vehicle_id: &str) -> String {
@@ -1273,7 +1405,9 @@ impl Engine {
         self.links.route_controller(controller_id, route);
     }
 
-    fn announce_target(&mut self, controller: &Controller) {
+    /// Says what a controller drives now, and with which mapping when a
+    /// switch changed it.
+    fn announce_target(&mut self, controller: &Controller, swapped: bool) {
         // The keyboard panel already shows which vehicle it controls.
         if controller.id.starts_with("keyboard:") {
             return;
@@ -1282,13 +1416,18 @@ impl Engine {
             return;
         };
         let name = self.target_name(target);
+        let with = swapped
+            .then(|| mapping(self, &controller.mapping_id))
+            .flatten()
+            .map(|m| format!(" with {}", m.name))
+            .unwrap_or_default();
         self.raise(Raise {
             severity: Severity::Info,
             kind: NotificationKind::Transient,
             subject: Subject::Vehicle {
                 id: target.to_owned(),
             },
-            title: format!("{} now drives {name}", controller.name),
+            title: format!("{} now drives {name}{with}", controller.name),
             body: None,
             actions: Vec::new(),
             condition: None,

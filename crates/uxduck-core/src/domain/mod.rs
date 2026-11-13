@@ -1,6 +1,7 @@
 //! One module per entity.
 
 pub mod approval;
+pub mod calculated;
 pub mod checklist;
 pub mod client;
 pub mod command;
@@ -12,6 +13,7 @@ pub mod files;
 pub mod find;
 pub mod firmware_profile;
 pub mod flight;
+pub mod formula;
 pub mod frames;
 pub mod gripper;
 pub mod history;
@@ -43,3 +45,5 @@ pub mod tuning_response;
 pub mod tuning_steps;
 pub mod vehicle;
 pub mod video;
+
+pub mod transport;

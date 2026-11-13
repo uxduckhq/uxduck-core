@@ -8,8 +8,9 @@ use uxduck_contracts::dto::link::{
     SerialPort,
 };
 use uxduck_contracts::dto::vehicle::{
-    Vehicle as VehicleDto, VehicleBookmarksParams, VehicleColourParams, VehicleLabelParams,
-    VehicleListResult, VehicleLookParams, VehicleSaveParams, VehicleSizeParams,
+    OWN_MODEL_CHUNK, Vehicle as VehicleDto, VehicleBookmarksParams, VehicleColourParams,
+    VehicleLabelParams, VehicleListResult, VehicleLookParams, VehicleModelReadParams,
+    VehicleModelReadResult, VehicleSaveParams, VehicleSizeParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -81,6 +82,10 @@ pub fn handle(
             require(Capability::Read)?;
             to_value(&engine.telemetry_window(&params)?)
         }
+        ClientRequest::TelemetryCalculate(params) => {
+            require(Capability::Read)?;
+            to_value(&engine.calculate(&params)?)
+        }
         ClientRequest::VehicleGet(IdParams { id }) => {
             require(Capability::Read)?;
             to_value(&live_vehicle(engine, found(engine, &id)?))
@@ -100,6 +105,10 @@ pub fn handle(
         ClientRequest::VehicleLook(params) => {
             require(Capability::Config)?;
             look_vehicle(engine, connection, params)
+        }
+        ClientRequest::VehicleModelRead(params) => {
+            require(Capability::Read)?;
+            read_own_model(engine, &params)
         }
         ClientRequest::VehicleColour(params) => {
             require(Capability::Config)?;
@@ -414,14 +423,14 @@ pub(crate) fn check_kind(
     };
     match kind {
         LinkKind::UdpListen { host, port } => {
-            check_udp_listen(engine, &links, host, *port, listener_on(*port).is_some())?;
+            check_udp_listen(engine, &links, host, *port, listener_on(*port))?;
             Ok(default_name(kind).unwrap_or_default())
         }
         LinkKind::Serial { device, baud, usb } => {
             if device.trim().is_empty() || *baud == 0 {
                 return Err(invalid("a serial link needs a device and a baud rate"));
             }
-            let taken = links.iter().any(|l| match &l.kind {
+            let taken = links.iter().find(|l| match &l.kind {
                 LinkKind::Serial {
                     device: other,
                     usb: other_usb,
@@ -429,8 +438,11 @@ pub(crate) fn check_kind(
                 } => other == device || (usb.is_some() && other_usb == usb),
                 _ => false,
             });
-            if taken {
-                return Err(invalid(format!("another link already uses {device}")));
+            if let Some(other) = taken {
+                return Err(link_conflict(
+                    other,
+                    format!("\"{}\" already uses {device}", other.name),
+                ));
             }
             Ok(default_name(kind).unwrap_or_default())
         }
@@ -496,17 +508,18 @@ fn check_udp_listen(
     links: &[&Link],
     host: &str,
     port: u16,
-    listened_on: bool,
+    listener: Option<&Link>,
 ) -> Result<(), ApiError> {
     if port == 0 || !is_ip(host) {
         return Err(invalid(
             "a UDP link needs an IP address and a port from 1 to 65535",
         ));
     }
-    if listened_on {
-        return Err(invalid(format!(
-            "another link already listens on port {port}"
-        )));
+    if let Some(listener) = listener {
+        return Err(link_conflict(
+            listener,
+            format!("\"{}\" already listens on port {port}", listener.name),
+        ));
     }
     let sent_here = links.iter().find(|l| {
         !l.status.is_off() && matches!(&l.kind, LinkKind::UdpForward { host: to, port: p } | LinkKind::UdpClient { host: to, port: p }
@@ -558,11 +571,12 @@ fn check_tcp_server(
     }
     let taken = links
         .iter()
-        .any(|l| matches!(&l.kind, LinkKind::TcpServer { port: p, .. } if *p == port));
-    if taken {
-        return Err(invalid(format!(
-            "another link already listens on TCP port {port}"
-        )));
+        .find(|l| matches!(&l.kind, LinkKind::TcpServer { port: p, .. } if *p == port));
+    if let Some(other) = taken {
+        return Err(link_conflict(
+            other,
+            format!("\"{}\" already listens on TCP port {port}", other.name),
+        ));
     }
     Ok(default_name(kind).unwrap_or_default())
 }
@@ -587,13 +601,14 @@ fn check_udp_client(
             "{host}:{port} is one of this daemon's own listeners. Connecting there would loop"
         )));
     }
-    let duplicate = links.iter().any(
+    let duplicate = links.iter().find(
         |l| matches!(&l.kind, LinkKind::UdpClient { host: h, port: p } if h == host && *p == port),
     );
-    if duplicate {
-        return Err(invalid(format!(
-            "another link already connects to {host}:{port}"
-        )));
+    if let Some(other) = duplicate {
+        return Err(link_conflict(
+            other,
+            format!("\"{}\" already connects to {host}:{port}", other.name),
+        ));
     }
     Ok(default_name(kind).unwrap_or_default())
 }
@@ -779,6 +794,28 @@ pub(crate) fn vehicles_offline(engine: &mut Engine, connection: ConnectionId, li
         .cloned()
         .collect();
     for mut vehicle in on_link {
+        if let Some(connections) = &mut vehicle.connections {
+            for route in &mut connections.routes {
+                if route.link_id == link_id {
+                    route.reachable = false;
+                    route.selected = false;
+                    route.telemetry = false;
+                    route.reason = "Connection unavailable".into();
+                }
+            }
+            if let Some(route) = connections
+                .routes
+                .iter()
+                .find(|r| r.reachable && r.writable)
+                .or_else(|| connections.routes.iter().find(|r| r.reachable))
+            {
+                vehicle.link_id.clone_from(&route.link_id);
+                vehicle.peer.clone_from(&route.peer);
+                connections.command_available = route.writable;
+                continue; // The data plane publishes the authoritative selection.
+            }
+            connections.command_available = false;
+        }
         vehicle.presence = uxduck_core::domain::vehicle::Presence::Offline;
         vehicle.version += 1;
         engine.commit(connection, Change::VehicleUpserted { vehicle });
@@ -873,10 +910,12 @@ fn delete_vehicle(
         ));
     }
     let id = vehicle.id.clone();
+    let own_model = vehicle.own_model.clone();
     // Deleted, it is not flying: an open flight of it ends.
     let now = engine.clock.now_us();
     engine.end_flights_of(&id, now);
     engine.commit(connection, Change::VehicleRemoved { id });
+    engine.forget_own_model(own_model.as_ref());
     Ok(json!({}))
 }
 
@@ -1106,15 +1145,53 @@ fn simulate_vehicle(
     to_value(&VehicleDto::from(&vehicle))
 }
 
+/// `vehicle/look`: one of UXDuck's models, a model of the person's own
+/// (ADR-0035 M5, 2026-11-12) or a turn of the one it has, or its type's.
+/// A model of its own replaces its look and the other way round.
 fn look_vehicle(
     engine: &mut Engine,
     connection: ConnectionId,
-    VehicleLookParams { id, look }: VehicleLookParams,
+    VehicleLookParams {
+        id,
+        look,
+        file,
+        turn_deg,
+    }: VehicleLookParams,
 ) -> Result<Value, ApiError> {
-    let look = look.map(Into::into);
-    let mut vehicle = found(engine, &id)?.clone();
-    if vehicle.look != look {
-        vehicle.look = look;
+    let turn_deg = turn_deg.map(crate::own_models::turn).transpose()?;
+    let before = found(engine, &id)?.clone();
+    let mut vehicle = before.clone();
+    match (look, file, turn_deg) {
+        (Some(_), Some(_), _) | (Some(_), None, Some(_)) => {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Give one of UXDuck's models or a file of your own, not both.",
+            ));
+        }
+        (Some(look), None, None) => {
+            vehicle.look = Some(look.into());
+            vehicle.own_model = None;
+        }
+        (None, Some(file), turn) => {
+            vehicle.own_model =
+                Some(engine.keep_own_model(connection, &file, turn.unwrap_or(0))?);
+            vehicle.look = None;
+        }
+        (None, None, Some(turn)) => {
+            let own = vehicle.own_model.as_mut().ok_or_else(|| {
+                ApiError::new(
+                    ErrorKind::InvalidValue,
+                    format!("{} has no model of its own to turn.", before.name),
+                )
+            })?;
+            own.turn_deg = turn;
+        }
+        (None, None, None) => {
+            vehicle.look = None;
+            vehicle.own_model = None;
+        }
+    }
+    if vehicle != before {
         vehicle.version += 1;
         engine.commit(
             connection,
@@ -1122,8 +1199,35 @@ fn look_vehicle(
                 vehicle: vehicle.clone(),
             },
         );
+        if vehicle.own_model.as_ref().map(|o| &o.file) != before.own_model.as_ref().map(|o| &o.file)
+        {
+            engine.forget_own_model(before.own_model.as_ref());
+        }
     }
     to_value(&VehicleDto::from(&vehicle))
+}
+
+/// `vehicle/modelRead`: a piece of its own model, for a page to draw it.
+fn read_own_model(engine: &mut Engine, params: &VehicleModelReadParams) -> Result<Value, ApiError> {
+    use base64::Engine as _;
+    let vehicle = found(engine, &params.id)?;
+    let own = vehicle.own_model.clone().ok_or_else(|| {
+        ApiError::new(
+            ErrorKind::NotFound,
+            format!("{} has no model of its own.", vehicle.name),
+        )
+    })?;
+    let offset = params.offset.unwrap_or(0).min(own.bytes);
+    let len = usize::try_from((own.bytes - offset).min(OWN_MODEL_CHUNK)).unwrap_or(usize::MAX);
+    let bytes = engine
+        .system
+        .own_model_read(&own.file, offset, len)
+        .map_err(|why| ApiError::new(ErrorKind::NotFound, why))?;
+    to_value(&VehicleModelReadResult {
+        file: own.file,
+        bytes: own.bytes,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
 }
 
 /// `vehicle/colour`: the colour it is drawn in. As its look, neither saves
@@ -1259,6 +1363,18 @@ pub(crate) fn remove_link(
     // goes with its simulation.
     let simulated = engine.state.links[id].kind.is_simulator();
     for mut vehicle in on_link {
+        if !simulated
+            && vehicle.connections.as_ref().is_some_and(|connections| {
+                connections
+                    .routes
+                    .iter()
+                    .any(|route| route.link_id != id && route.reachable)
+            })
+        {
+            // Closing the transport publishes the authoritative replacement.
+            // Do not insert an offline state between two reachable routes.
+            continue;
+        }
         if !simulated || vehicle.saved {
             // A stopped simulator cannot remain armed. Its saved profile
             // outlives the simulation link, so preserve no armed evidence

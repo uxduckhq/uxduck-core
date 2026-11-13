@@ -293,6 +293,7 @@ impl Bench {
 
     fn seen_as(&mut self, vehicle_type: &str, mode: &str, armed: bool, autopilot: &str) {
         self.engine.vehicle_observed(Observation {
+            connections: None,
             id: "v".into(),
             aliases: Vec::new(),
             link_id: self.link_id.clone(),
@@ -1177,6 +1178,7 @@ fn the_link_the_controller_and_the_cameras() {
     assert_eq!(reset["settings"][2]["threshold"]["value"], 30.0);
     // Not heard.
     b.engine.vehicle_observed(Observation {
+        connections: None,
         id: "v".into(),
         aliases: Vec::new(),
         link_id: b.link_id.clone(),

@@ -211,6 +211,13 @@ pub enum Message {
         flags: u16,
         variances: [f32; 5],
     },
+    /// PX4's `ESTIMATOR_STATUS`: its flags as `EKF_STATUS_FLAGS`, and its
+    /// innovation test ratios for velocity, horizontal and vertical position,
+    /// compass and height above ground.
+    EstimatorStatus {
+        flags: u16,
+        ratios: [f32; 5],
+    },
     /// `VIBRATION` (S72): m/s² per axis and each accelerometer's clipping count.
     Vibration {
         axes: [f32; 3],
@@ -265,7 +272,8 @@ pub enum Message {
     ExtendedSysState {
         landed_state: u8,
     },
-    /// ArduPilot's `WIND` (S72): where it comes from in degrees, m/s.
+    /// ArduPilot's `WIND` (S72): where it comes from in degrees, m/s. PX4's
+    /// `WIND_COV` reads into it too.
     Wind {
         direction: f32,
         speed: f32,
@@ -799,6 +807,45 @@ fn command(message: &Ardupilotmega) -> Option<Message> {
 
 /// The parameter and mission protocol messages.
 /// The health and environment messages (S72).
+/// PX4's estimator and wind, read into ArduPilot's EKF and wind rows.
+fn px4_health(message: &Ardupilotmega) -> Option<Message> {
+    Some(match message {
+        // Its flags mean what ArduPilot's do up to the predicted positions,
+        // and its GPS glitch is ArduPilot's, at another bit.
+        Ardupilotmega::EstimatorStatus(m) => {
+            const GPS_GLITCH: u16 = 1024;
+            const EKF_GPS_GLITCHING: u16 = 32768;
+            let flags = m.flags.bits();
+            let glitching = if flags & GPS_GLITCH == 0 {
+                0
+            } else {
+                EKF_GPS_GLITCHING
+            };
+            Message::EstimatorStatus {
+                flags: (flags & 0x03ff) | glitching,
+                ratios: [
+                    m.vel_ratio,
+                    m.pos_horiz_ratio,
+                    m.pos_vert_ratio,
+                    m.mag_ratio,
+                    m.hagl_ratio,
+                ],
+            }
+        }
+        // Its wind, north, east and down, as ArduPilot's WIND says it: where
+        // it comes from, as ArduPilot works it out, its speed and its down
+        // speed.
+        Ardupilotmega::WindCov(m) if m.wind_x.is_finite() && m.wind_y.is_finite() => {
+            Message::Wind {
+                direction: (-m.wind_y).atan2(-m.wind_x).to_degrees(),
+                speed: m.wind_x.hypot(m.wind_y),
+                speed_z: m.wind_z,
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn health(message: &Ardupilotmega) -> Option<Message> {
     Some(match message {
         // The receiver's channels, for the radio calibration (S187).
@@ -1102,7 +1149,7 @@ fn transfer(message: Ardupilotmega) -> Option<Message> {
             ],
             time_us: m.time_usec,
         }),
-        other => health(&other),
+        other => health(&other).or_else(|| px4_health(&other)),
     }
 }
 
@@ -1327,6 +1374,73 @@ mod tests {
         let written = frame.serialize(&mut buf).unwrap_or(0);
         buf.truncate(written);
         buf
+    }
+
+    #[test]
+    fn px4_estimator_status_reads_with_ardupilot_ekf_flags() {
+        use mavio::dialects::ardupilotmega::enums::EstimatorStatusFlags;
+        use mavio::dialects::ardupilotmega::messages::EstimatorStatus;
+        let packet = EstimatorStatus {
+            flags: EstimatorStatusFlags::from_bits_truncate(0b100_0011_1111),
+            vel_ratio: 0.1,
+            pos_horiz_ratio: 0.2,
+            pos_vert_ratio: 0.3,
+            mag_ratio: 0.4,
+            hagl_ratio: 0.5,
+            tas_ratio: 0.9,
+            ..Default::default()
+        };
+        let decoded = decode(&frame_of(1, 0, &packet)).expect("estimator status frame");
+        assert_eq!(
+            decoded.message,
+            Message::EstimatorStatus {
+                flags: 0b11_1111 | 32768,
+                ratios: [0.1, 0.2, 0.3, 0.4, 0.5],
+            },
+            "the GPS glitch moves to ArduPilot's bit, not its uninitialised one"
+        );
+        assert_eq!(
+            crate::producers::ekf_text(0b11_1111 | 32768),
+            "GPS glitching"
+        );
+        assert_eq!(crate::producers::ekf_text(0b11_1111), "Good");
+    }
+
+    #[test]
+    fn px4_wind_reads_as_ardupilot_wind() {
+        use mavio::dialects::ardupilotmega::messages::WindCov;
+        let packet = WindCov {
+            wind_x: -3.0,
+            wind_y: -4.0,
+            wind_z: 0.5,
+            ..Default::default()
+        };
+        let decoded = decode(&frame_of(1, 0, &packet)).expect("wind frame");
+        let Message::Wind {
+            direction,
+            speed,
+            speed_z,
+        } = decoded.message
+        else {
+            panic!("not wind: {:?}", decoded.message);
+        };
+        assert!(
+            (direction - 53.130_1).abs() < 0.01,
+            "from the north-east: {direction}"
+        );
+        assert!((speed - 5.0).abs() < 1e-6);
+        assert!((speed_z - 0.5).abs() < 1e-6);
+
+        let unknown = WindCov {
+            wind_x: f32::NAN,
+            wind_y: f32::NAN,
+            ..Default::default()
+        };
+        let decoded = decode(&frame_of(1, 1, &unknown)).expect("wind frame");
+        assert!(
+            !matches!(decoded.message, Message::Wind { .. }),
+            "no estimate yet"
+        );
     }
 
     #[test]

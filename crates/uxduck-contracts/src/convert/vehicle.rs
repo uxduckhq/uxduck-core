@@ -80,6 +80,30 @@ impl From<&core::Vehicle> for dto::Vehicle {
             id: v.id.clone(),
             name: v.name.clone(),
             aliases: v.aliases.clone(),
+            connections: v.connections.as_ref().map(|c| dto::VehicleConnections {
+                routes: c
+                    .routes
+                    .iter()
+                    .map(|r| dto::VehicleRoute {
+                        link_id: r.link_id.clone(),
+                        peer: r.peer.clone(),
+                        system_id: r.system_id,
+                        priority: r.priority,
+                        reachable: r.reachable,
+                        writable: r.writable,
+                        selected: r.selected,
+                        telemetry: r.telemetry,
+                        last_heartbeat_us: r.last_heartbeat_us,
+                        round_trip_us: r.round_trip_us,
+                        loss_per_mille: r.loss_per_mille,
+                        last_receive_age_ms: r.last_receive_age_ms,
+                        reason: r.reason.clone(),
+                    })
+                    .collect(),
+                command_available: c.command_available,
+                reason: c.reason.clone(),
+                epoch: c.epoch,
+            }),
             link_id: v.link_id.clone(),
             peer: v.peer.clone(),
             system_id: v.system_id,
@@ -118,6 +142,13 @@ impl From<&core::Vehicle> for dto::Vehicle {
             companions: v.companions.iter().map(Into::into).collect(),
             traffic: v.traffic,
             look: v.look.map(Into::into),
+            own_model: v.own_model.as_ref().map(|own| dto::OwnModel {
+                file: own.file.clone(),
+                name: own.name.clone(),
+                bytes: own.bytes,
+                turn_deg: own.turn_deg,
+                warning: own.warning.clone(),
+            }),
             colour: v.colour.map(Into::into),
             version: v.version,
         }

@@ -374,6 +374,7 @@ pub fn observation(seen: session::Observation) -> Observation {
     Observation {
         id: seen.id,
         aliases: seen.aliases,
+        connections: seen.connections,
         link_id: seen.link_id,
         peer: seen.peer,
         system_id: seen.system_id,

@@ -136,6 +136,8 @@ pub struct Settings {
     /// vehicle's `SYSID_MYGCS` counts only this id's heartbeats.
     #[serde(default = "gcs_system_id")]
     pub gcs_system_id: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_order: Vec<String>,
     /// "Store flights and recordings in my account" (S82): off until the
     /// person turns it on.
     #[serde(default)]
@@ -276,6 +278,9 @@ pub struct SettingsUpdateParams {
     /// 1 to 255.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcs_system_id: Option<u8>,
+    /// Shared preference for all vehicles. Connections not listed follow in creation order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_order: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_flights: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -336,6 +336,22 @@ fn flights_and_supervision(
         }
         settings.supervision_grace_s = grace;
     }
+    if let Some(order) = &params.connection_order {
+        if order.len() > 1024
+            || order.iter().any(|id| id.is_empty() || id.len() > 128)
+            || order
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != order.len()
+        {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Connection preference must contain unique connection IDs",
+            ));
+        }
+        settings.connection_order.clone_from(order);
+    }
     if let Some(id) = params.gcs_system_id {
         if id == 0 {
             return Err(ApiError::new(
@@ -628,6 +644,9 @@ fn update_settings(
     engine.traffic_sources_changed();
     engine.listen_video_ports(&before.video_ports, &settings.video_ports);
     gcs_system_id_changed(engine, before.gcs_system_id, settings.gcs_system_id);
+    if before.connection_order != settings.connection_order {
+        engine.links.connection_order(&settings.connection_order);
+    }
     if before.video_recording != settings.video_recording {
         engine.review_recordings();
     }

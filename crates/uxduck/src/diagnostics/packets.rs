@@ -17,6 +17,7 @@ fn message(
     let h = header(bytes)?;
     let decoded = uxduck_mavlink::dialect::decode(h.message_id, payload(bytes)?);
     Some(PastMessage {
+        socket_send: None,
         at_us,
         system_id: h.system_id,
         component_id: h.component_id,
@@ -187,13 +188,11 @@ fn sent(
     Ok(MavlinkHistoryResult {
         messages: found
             .into_iter()
-            .filter_map(|f| message(
-                &f.bytes,
-                f.packet.at_us,
-                link,
-                f.packet.endpoint.peer.clone(),
-                params.include_raw,
-            ))
+            .filter_map(|f| {
+                let mut message = message(&f.bytes, f.packet.at_us, link, f.packet.endpoint.peer.clone(), params.include_raw)?;
+                message.socket_send.clone_from(&f.socket_send);
+                Some(message)
+            })
             .collect(),
         older,
         from_log: false,
@@ -204,7 +203,7 @@ fn sent(
             available_to_us: all.last().map(|f| f.packet.at_us),
             truncated: data.frame_loss || range.0 < data.run,
             source: "memory".into(),
-            notes: vec!["Outbound packets record queued sends, not delivery acknowledgements, and are retained only in this daemon run's bounded capture ring.".into()],
+            notes: vec!["Outbound packets retain their queued evidence. socketSend adds a correlated UDP attempt and its local OS outcome, including registration. Neither proves vehicle delivery. History is bounded to this daemon run.".into()],
         }),
     })
 }

@@ -7,6 +7,7 @@ mod command;
 mod companion;
 mod controller;
 mod dialect;
+mod feedback;
 mod files;
 mod find;
 mod firmware_profile;

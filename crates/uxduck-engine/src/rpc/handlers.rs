@@ -177,6 +177,7 @@ pub(crate) fn handle(
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)
         | ClientRequest::VehicleLook(_)
+        | ClientRequest::VehicleModelRead(_)
         | ClientRequest::VehicleColour(_)
         | ClientRequest::VehicleGripper(_)
         | ClientRequest::GripperStatus(_)
@@ -191,6 +192,7 @@ pub(crate) fn handle(
         | ClientRequest::TelemetrySubscribe(_)
         | ClientRequest::TelemetryGet(_)
         | ClientRequest::TelemetryWindow(_)
+        | ClientRequest::TelemetryCalculate(_)
         | ClientRequest::LinkEnable(_)
         | ClientRequest::LinkDisable(_)
         | ClientRequest::LinkUpdate(_)
@@ -705,6 +707,7 @@ pub(crate) fn handle(
         | ClientRequest::ControllerRelease(_)
         | ClientRequest::ControllerForget(_)
         | ClientRequest::ControllerSetTarget(_)
+        | ClientRequest::ControllerChooseMapping(_)
         | ClientRequest::ControllerInputs(_)
         | ClientRequest::ClientSelect(_)
         | ClientRequest::MappingUpdate(_)
@@ -1026,6 +1029,7 @@ fn operator_create(
         skipped_confirmations: Vec::new(),
         telemetry_layouts: Vec::new(),
         vehicle_telemetry: std::collections::BTreeMap::new(),
+        calculated_items: Vec::new(),
         parameter_groups: Vec::new(),
         inspector_pinned: Vec::new(),
         control_actions: Vec::new(),
@@ -1062,6 +1066,45 @@ fn control_actions(
             ),
         )
     })
+}
+
+/// An operator's calculated values (ADR-0056 K1, K2), each as ADR-0056
+/// says, and none another operator here works out differently under the
+/// same key: every operator's are worked out for every vehicle.
+fn calculated_items(
+    engine: &Engine,
+    operator_id: &str,
+    items: &[uxduck_contracts::dto::operator::CalculatedItem],
+) -> Result<Vec<uxduck_core::domain::calculated::CalculatedItem>, ApiError> {
+    let items: Vec<uxduck_core::domain::calculated::CalculatedItem> =
+        items.iter().map(Into::into).collect();
+    let items = uxduck_core::domain::calculated::clean_calculated(&items)
+        .map_err(|message| ApiError::new(ErrorKind::InvalidValue, message))?;
+    for item in &items {
+        let other = engine
+            .state
+            .operators
+            .values()
+            .filter(|o| o.id != operator_id)
+            .find_map(|o| {
+                o.calculated_items
+                    .iter()
+                    .find(|c| {
+                        c.key == item.key && (c.formula != item.formula || c.unit != item.unit)
+                    })
+                    .map(|_| o)
+            });
+        if let Some(other) = other {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!(
+                    "{} already works out {} another way on this computer. Name {} something else.",
+                    other.name, item.key, item.label
+                ),
+            ));
+        }
+    }
+    Ok(items)
 }
 
 /// An operator's display document (C1), kept as sent: the app owns its
@@ -1123,6 +1166,9 @@ fn operator_update(
         );
         (operator.telemetry_layouts, operator.vehicle_telemetry) =
             uxduck_core::domain::telemetry_layout::cleaned(layouts, chosen);
+    }
+    if let Some(items) = &params.calculated_items {
+        operator.calculated_items = calculated_items(engine, &operator.id, items)?;
     }
     if let Some(on) = params.place_search {
         operator.place_search = on;

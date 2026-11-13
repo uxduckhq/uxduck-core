@@ -3,6 +3,7 @@
 //! caller supplies both and carries out the effects.
 
 use std::collections::BTreeMap;
+mod routes;
 
 use uxduck_core::domain::modes::AvailableMode;
 use uxduck_core::domain::parameter::same_value;
@@ -29,9 +30,16 @@ const REBOOT_TOLERANCE_US: u64 = 5_000_000;
 /// How far a vehicle's time since boot may move on across a silence for it
 /// to count as paused rather than restarted.
 const PAUSE_SLACK_MS: u32 = 5_000;
+/// How far back `time_boot_ms` may go by reordering alone. Further back,
+/// the autopilot restarted.
+const REORDERING_MS: u32 = 1_000;
 
 const MAV_CMD_NAV_TAKEOFF: u16 = 22;
 const MAV_CMD_CONDITION_YAW: u16 = 115;
+const MAV_CMD_DO_REPOSITION: u16 = 192;
+const MAV_FRAME_GLOBAL_INT: u8 = 5;
+const MAV_FRAME_GLOBAL_RELATIVE_ALT_INT: u8 = 6;
+const MAV_FRAME_GLOBAL_TERRAIN_ALT_INT: u8 = 11;
 /// `AVAILABLE_MODES`: a vehicle's own list of modes, asked for by
 /// `MAV_CMD_REQUEST_MESSAGE`.
 const AVAILABLE_MODES: u32 = 435;
@@ -73,6 +81,23 @@ pub const STREAM_RATES: [(u32, u32); 23] = [
     // spare a telemetry radio, maintainer).
     (285, 1_000_000),
 ];
+
+/// PX4's estimator and wind, what ArduPilot sends as `EKF_STATUS_REPORT` and
+/// `WIND`: asked of PX4 alone, as ArduPilot sends neither.
+const PX4_STREAM_RATES: [(u32, u32); 2] = [
+    (230, 1_000_000), // ESTIMATOR_STATUS, 1 Hz
+    (231, 1_000_000), // WIND_COV, 1 Hz
+];
+
+/// The rates asked of an autopilot: `STREAM_RATES`, and for PX4 its own rows.
+fn stream_rates(autopilot: &str) -> impl Iterator<Item = (u32, u32)> + use<> {
+    let own: &[(u32, u32)] = if autopilot == "Px4" {
+        &PX4_STREAM_RATES
+    } else {
+        &[]
+    };
+    STREAM_RATES.into_iter().chain(own.iter().copied())
+}
 
 /// A terrain report older than this no longer gives the fused position an
 /// above-ground altitude: the stream stopped, or the data went.
@@ -134,6 +159,7 @@ pub struct Observation {
     pub id: String,
     /// Earlier ids of the same vehicle (a provisional id replaced by the derived one).
     pub aliases: Vec<String>,
+    pub connections: Option<uxduck_core::domain::vehicle::VehicleConnections>,
     pub link_id: String,
     /// The link-level source, such as `192.168.1.20:14550`.
     pub peer: String,
@@ -524,6 +550,7 @@ impl Vehicle {
             observation: Observation {
                 id: provisional_vid(link_id, peer, *system_id),
                 aliases: Vec::new(),
+                connections: None,
                 link_id: link_id.clone(),
                 peer: peer.clone(),
                 system_id: *system_id,
@@ -543,9 +570,8 @@ impl Vehicle {
             last_request_us: 0,
             pending: Produced::default(),
             online_since_us: now_us,
-            streams: STREAM_RATES
-                .iter()
-                .map(|(id, _)| (*id, Stream::default()))
+            streams: stream_rates(autopilot)
+                .map(|(id, _)| (id, Stream::default()))
                 .collect(),
             boot_instant_us: None,
             boot_announced: false,
@@ -716,7 +742,7 @@ const STREAM_BACKOFF_US: [u64; 3] = [5_000_000, 15_000_000, 60_000_000];
 /// request comes only while terrain is missing (S118), the fence's status
 /// only while there is a fence (S132), a gimbal's attitude only while it has
 /// one.
-const SENT_WHILE_SET: [u32; 10] = [87, 242, 49, 168, 132, 133, 162, 285, 137, 245];
+const SENT_WHILE_SET: [u32; 11] = [87, 242, 49, 168, 231, 132, 133, 162, 285, 137, 245];
 
 #[derive(Clone, Debug)]
 struct PendingCommand {
@@ -756,6 +782,42 @@ fn replace_motor_test(
     effects
 }
 
+/// PX4 reads a take-off's and a Go to's height above mean sea level,
+/// whatever the frame says (PX4-Autopilot#10246), so a height above home is
+/// sent above the sea, from the vehicle's home. A take-off's yaw and place
+/// given as 0 would be used, so they are NaN. A Go to above the terrain,
+/// which PX4 cannot follow, is not sent.
+fn px4_heights(
+    command: u16,
+    wire: &mut crate::commands::Wire,
+    home_amsl_m: Option<f32>,
+) -> Result<(), &'static str> {
+    use crate::commands::Wire;
+    const HOME_UNKNOWN: &str = "its home altitude is not known yet";
+    match wire {
+        Wire::Long(params) if command == MAV_CMD_NAV_TAKEOFF => {
+            params[6] += home_amsl_m.ok_or(HOME_UNKNOWN)?;
+            params[3] = f32::NAN;
+            params[4] = f32::NAN;
+            params[5] = f32::NAN;
+        }
+        Wire::Int { frame, z, .. } if command == MAV_CMD_DO_REPOSITION => match *frame {
+            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT => {
+                *z += home_amsl_m.ok_or(HOME_UNKNOWN)?;
+                *frame = MAV_FRAME_GLOBAL_INT;
+            }
+            MAV_FRAME_GLOBAL_TERRAIN_ALT_INT => {
+                return Err(
+                    "PX4 cannot go to a height above the terrain. Give it above home or above sea level",
+                );
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Initial great-circle bearing. A destination within one metre keeps the
 /// existing heading, avoiding an arbitrary rotation for a depth-only Go to.
 fn heading_to(lat: f64, lon: f64, target_lat: f64, target_lon: f64) -> Option<f32> {
@@ -775,8 +837,10 @@ fn heading_to(lat: f64, lon: f64, target_lat: f64, target_lon: f64) -> Option<f3
 #[derive(Debug, Default)]
 pub struct Session {
     config: Config,
+    routing: routes::Routing,
     producers: Vec<Box<dyn Producer>>,
     commands: Vec<PendingCommand>,
+    deferred_effects: Vec<Effect>,
     /// By `(link, peer, system id)`: one autopilot per address.
     vehicles: BTreeMap<(String, String, u8), Vehicle>,
     /// Last time each peer was heard, by `(link, peer)`.
@@ -960,6 +1024,21 @@ impl Session {
             }
             if let Message::RadioStatus { txbuf, .. } = decoded.message {
                 self.terrain.radio_status(link_id, txbuf, received_us);
+            }
+            let protocol = matches!(
+                decoded.message,
+                Message::Heartbeat { .. }
+                    | Message::AutopilotVersion { .. }
+                    | Message::CommandAck { .. }
+                    | Message::ParamValue { .. }
+                    | Message::Ftp { .. }
+                    | Message::MissionCount { .. }
+                    | Message::MissionItem(_)
+                    | Message::MissionRequest { .. }
+                    | Message::MissionAck { .. }
+            );
+            if !protocol && !self.accept_telemetry(&key, &decoded.message, received_us) {
+                continue;
             }
             match decoded.message {
                 Message::CommandAck {
@@ -1221,14 +1300,22 @@ impl Session {
             }
         }
         effects.extend(self.rc_calibrations());
-        effects
+        self.reconcile(effects, processed_us)
     }
 
     /// Says what each vehicle's RC calibration now is, where that or its
     /// id changed (`Effect::RcCalibration`).
     fn rc_calibrations(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        for vehicle in self.vehicles.values_mut() {
+        for (address, vehicle) in &mut self.vehicles {
+            if self
+                .routing
+                .command
+                .get(&vehicle.observation.id)
+                .is_some_and(|selected| selected != address)
+            {
+                continue;
+            }
             let changed = vehicle.rc_input.take_changed();
             let id = &vehicle.observation.id;
             if !changed
@@ -1291,6 +1378,8 @@ impl Session {
     /// The autopilot heard at `key` is the one at `address`, which is let
     /// go: its other ids and its commands go with it.
     fn let_go(&mut self, address: &(String, String, u8), key: &(String, String, u8)) {
+        let interrupted = self.interrupt_route(address);
+        self.deferred_effects.extend(interrupted);
         let Some(gone) = self.vehicles.remove(address) else {
             return;
         };
@@ -1302,11 +1391,8 @@ impl Session {
                 }
             }
         }
-        for command in &mut self.commands {
-            if command.key == *address {
-                command.key = key.clone();
-            }
-        }
+        // Pending operations stay bound to their original address. A new
+        // route never grants another retry budget.
     }
 
     /// An autopilot heard again at another address on the same link under
@@ -1822,7 +1908,7 @@ impl Session {
         // The whole table once, when the vehicle first appears; after that
         // only rows that go missing (see `reconcile_streams`).
         if new {
-            for (message_id, interval_us) in STREAM_RATES {
+            for (message_id, interval_us) in stream_rates(&vehicle.observation.autopilot) {
                 effects.push(Effect::Send {
                     link_id: vehicle.observation.link_id.clone(),
                     peer: vehicle.observation.peer.clone(),
@@ -1872,6 +1958,10 @@ impl Session {
     }
 
     /// Advances time: presence transitions, peer expiry and version retries.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordered session timer phases with a single routing reconciliation"
+    )]
     pub fn tick(&mut self, now_us: u64) -> Vec<Effect> {
         let config = self.config;
         self.peers
@@ -1881,7 +1971,7 @@ impl Session {
         effects.extend(self.ask_cameras(now_us));
         let mut sends = Vec::new();
         let mut stream_requests = Vec::new();
-        for vehicle in self.vehicles.values_mut() {
+        for (address, vehicle) in &mut self.vehicles {
             // A paused simulator's vehicle stays as it was until it resumes.
             let paused = self.paused.contains(&vehicle.observation.link_id);
             let presence = if paused {
@@ -1894,7 +1984,13 @@ impl Session {
                 effects.push(Effect::Vehicle(Box::new(vehicle.observation.clone())));
             }
             let produced = std::mem::take(&mut vehicle.pending);
-            if !produced.positions.is_empty() || !produced.items.is_empty() {
+            if self
+                .routing
+                .telemetry
+                .get(&vehicle.observation.id)
+                .is_none_or(|selected| selected == address)
+                && (!produced.positions.is_empty() || !produced.items.is_empty())
+            {
                 let mut telemetry = VehicleTelemetry {
                     vehicle_id: vehicle.observation.id.clone(),
                     ..VehicleTelemetry::default()
@@ -1964,6 +2060,7 @@ impl Session {
                 ),
             });
         }
+        effects = self.reconcile(effects, now_us);
         effects.extend(self.retry_commands(now_us));
         effects.extend(self.tick_transfers(now_us));
         effects.extend(self.send_terrain(now_us));
@@ -2119,10 +2216,10 @@ impl Session {
                 attempts: 0,
             }]
         };
-        let Some((key, vehicle)) = self.vehicles.iter().find(|(_, v)| {
-            v.observation.id == order.vehicle_id
-                || v.observation.aliases.contains(&order.vehicle_id)
-        }) else {
+        let Some((key, vehicle)) = self
+            .command_address(&order.vehicle_id)
+            .and_then(|key| self.vehicles.get_key_value(&key))
+        else {
             return not_sent(order, "this vehicle has no address in this session");
         };
         let family = crate::modes::Family::for_vehicle(
@@ -2138,19 +2235,10 @@ impl Session {
             Ok(encoded) => encoded,
             Err(reason) => return not_sent(order, &reason),
         };
-        // PX4's take-off: its altitude is above mean sea level, not home,
-        // and a yaw or place given as 0 would be used, so they are NaN.
         if family == Some(crate::modes::Family::Px4)
-            && command == MAV_CMD_NAV_TAKEOFF
-            && let crate::commands::Wire::Long(params) = &mut wire
+            && let Err(why) = px4_heights(command, &mut wire, vehicle.home_amsl_m)
         {
-            let Some(home_m) = vehicle.home_amsl_m else {
-                return not_sent(order, "its home altitude is not known yet");
-            };
-            params[3] = f32::NAN;
-            params[4] = f32::NAN;
-            params[5] = f32::NAN;
-            params[6] += home_m;
+            return not_sent(order, why);
         }
         let follow_up = if family == Some(crate::modes::Family::Sub)
             && (self.simulated.contains(&key.0)
@@ -2459,13 +2547,27 @@ impl Session {
     }
 
     fn find(&self, vehicle_id: &str) -> Option<(String, String, u8)> {
-        self.vehicles
-            .iter()
-            .find(|(_, v)| {
+        if self.routing.replay {
+            return self
+                .vehicles
+                .iter()
+                .find(|(_, v)| {
+                    v.observation.id == vehicle_id
+                        || v.observation.aliases.iter().any(|a| a == vehicle_id)
+                })
+                .map(|(key, _)| key.clone());
+        }
+        let id = self
+            .vehicles
+            .values()
+            .find(|v| {
                 v.observation.id == vehicle_id
                     || v.observation.aliases.iter().any(|a| a == vehicle_id)
-            })
-            .map(|(key, _)| key.clone())
+            })?
+            .observation
+            .id
+            .as_str();
+        self.routing.command.get(id).cloned()
     }
 
     /// Starts downloading every parameter. A download already running
@@ -3080,7 +3182,7 @@ impl Session {
         let estimate = now_us.saturating_sub(u64::from(time_boot_ms) * 1000);
         // Back by more than reordering explains: it restarted, however soon
         // after its last boot.
-        let went_back = time_boot_ms.saturating_add(1000) < vehicle.last_time_boot_ms;
+        let went_back = time_boot_ms.saturating_add(REORDERING_MS) < vehicle.last_time_boot_ms;
         // Its time since boot carrying on from where it was, however long
         // since it was last heard: it was paused, not restarted. A simulator
         // stops while the computer sleeps, or while its browser tab is in
@@ -3153,7 +3255,7 @@ impl Session {
                 }
                 let (link_id, peer, system_id) = key.clone();
                 let component = vehicle.autopilot_component;
-                for (message_id, interval_us) in STREAM_RATES {
+                for (message_id, interval_us) in stream_rates(&vehicle.observation.autopilot) {
                     let sequence = self.next_sequence();
                     effects.push(Effect::Send {
                         link_id: link_id.clone(),
@@ -3469,6 +3571,20 @@ impl Session {
         }]
     }
 
+    /// A health probe has an explicit route and must never look up the VID again.
+    pub fn send_address(
+        &mut self,
+        address: &(String, String, u8),
+        make: impl FnOnce(u8, u8) -> Vec<u8>,
+    ) -> Vec<Effect> {
+        let sequence = self.next_sequence();
+        vec![Effect::Send {
+            link_id: address.0.clone(),
+            peer: address.1.clone(),
+            bytes: make(address.2, sequence),
+        }]
+    }
+
     /// The VID of the vehicle at this address, if one is known.
     #[must_use]
     pub fn vehicle_at(&self, link_id: &str, peer: &str, system_id: u8) -> Option<&str> {
@@ -3498,13 +3614,27 @@ impl Session {
 
     /// Where each vehicle is reached now, for traffic to it.
     #[must_use]
-    pub fn routes(&self) -> Vec<crate::router::VehicleRoute> {
+    pub fn all_routes(&self) -> Vec<crate::router::VehicleRoute> {
         self.vehicles
             .values()
             .map(|v| crate::router::VehicleRoute {
                 vehicle_id: v.observation.id.clone(),
                 link_id: v.observation.link_id.clone(),
                 peer: v.observation.peer.clone(),
+            })
+            .collect()
+    }
+
+    /// The router forwards a vehicle-directed frame to only one selected path.
+    #[must_use]
+    pub fn routes(&self) -> Vec<crate::router::VehicleRoute> {
+        self.routing
+            .command
+            .iter()
+            .map(|(id, key)| crate::router::VehicleRoute {
+                vehicle_id: id.clone(),
+                link_id: key.0.clone(),
+                peer: key.1.clone(),
             })
             .collect()
     }
@@ -3557,6 +3687,9 @@ impl Session {
         self.stations.retain(|(link, _, _), _| link != link_id);
         self.simulated.remove(link_id);
         self.paused.remove(link_id);
+        self.routing.command.retain(|_, key| key.0 != link_id);
+        self.routing.telemetry.retain(|_, key| key.0 != link_id);
+        self.transport_peer_send_health(link_id, std::collections::BTreeSet::new());
         ids
     }
 }
@@ -3589,7 +3722,7 @@ fn missing_streams(vehicle: &mut Vehicle, config: &Config, now_us: u64) -> Vec<(
         return Vec::new();
     }
     let mut missing = Vec::new();
-    for (message_id, interval_us) in STREAM_RATES {
+    for (message_id, interval_us) in stream_rates(&vehicle.observation.autopilot) {
         if SENT_WHILE_SET.contains(&message_id) {
             continue;
         }
@@ -4574,6 +4707,8 @@ mod tests {
         assert!(session.needs_tick());
         assert_eq!(sent(session.tick(600_100)), 2);
         assert_eq!(sent(session.tick(1_100_100)), 2);
+        // The vehicle keeps its heartbeat while the paced transfer runs.
+        session.ingest("l1", PEER, &heartbeat_frame(1, 1, 99), 5_000_000);
         // Each batch says which of the block's groups went.
         let effects = session.tick(5_000_000);
         assert!(
@@ -4791,6 +4926,19 @@ mod tests {
                 "{name} is not asked for: {asked:?}"
             );
         }
+    }
+
+    #[test]
+    fn px4_is_asked_for_its_estimator_and_wind_as_well() {
+        let mut session = Session::new(Config::default());
+        let first = session.ingest("l1", PEER, &crate::sim::px4_heartbeat_frame(1, 0, 0), 0);
+        let asked: Vec<f32> = commands(&first)
+            .into_iter()
+            .filter(|(command, _)| *command == 511)
+            .map(|(_, message_id)| message_id)
+            .collect();
+        assert_eq!(asked.len(), STREAM_RATES.len() + 2, "{asked:?}");
+        assert!(asked.ends_with(&[230.0, 231.0]), "{asked:?}");
     }
 
     #[test]
@@ -5226,6 +5374,73 @@ mod tests {
         };
         assert_eq!(command, 22);
         assert!((param7 - 604.0).abs() < 0.01, "{param7}");
+    }
+
+    #[test]
+    fn px4_goes_to_a_height_above_home_as_one_above_the_sea() {
+        use crate::sim::{global_position_frame, px4_heartbeat_frame};
+        use uxduck_core::domain::telemetry::AltitudeFrame;
+        let send = |home_known: bool, altitude_m: f64, altitude_frame: AltitudeFrame| {
+            let mut session = Session::new(Config::default());
+            session.ingest("l1", PEER, &px4_heartbeat_frame(1, 0, 0x0304_0000), 0);
+            if home_known {
+                // Home 584 m above the sea, the vehicle 20 m over it.
+                session.ingest(
+                    "l1",
+                    PEER,
+                    &global_position_frame(1, 1, 604_000, 20_000),
+                    10,
+                );
+            }
+            let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+            let command = Command::GoTo {
+                latitude_deg: -35.36,
+                longitude_deg: 149.17,
+                altitude_m,
+                altitude_frame,
+                loiter_radius_m: None,
+                heading: None,
+            };
+            session.command(
+                CommandOrder {
+                    receipt_id: "r1".into(),
+                    vehicle_id,
+                    command,
+                    force: false,
+                },
+                20,
+            )
+        };
+        let not_sent = |effects: &[Effect], words: &str| {
+            matches!(
+                effects,
+                [Effect::CommandDone { outcome: CommandOutcome::NotSent(why), .. }] if why.contains(words)
+            )
+        };
+        let sent_as = |effects: &[Effect]| {
+            let [Effect::Send { bytes, .. }] = effects else {
+                panic!("{effects:?}");
+            };
+            let decoded = decode(crate::framing::split(bytes).frames[0]).expect("a frame");
+            let Message::CommandInt {
+                command, frame, z, ..
+            } = decoded.message
+            else {
+                panic!("{:?}", decoded.message);
+            };
+            assert_eq!(command, 192);
+            (frame, z)
+        };
+        let unknown = send(false, 30.0, AltitudeFrame::AboveHome);
+        assert!(not_sent(&unknown, "home"), "{unknown:?}");
+        let (frame, z) = sent_as(&send(true, 30.0, AltitudeFrame::AboveHome));
+        assert_eq!(frame, 5);
+        assert!((z - 614.0).abs() < 0.01, "{z}");
+        let (frame, z) = sent_as(&send(true, 650.0, AltitudeFrame::Amsl));
+        assert_eq!(frame, 5);
+        assert!((z - 650.0).abs() < 0.01, "{z}");
+        let terrain = send(true, 30.0, AltitudeFrame::AboveGround);
+        assert!(not_sent(&terrain, "terrain"), "{terrain:?}");
     }
 
     #[test]
@@ -5861,6 +6076,7 @@ mod tests {
             "{done:?}"
         );
         fake.reboot();
+        session.ingest("l1", PEER, &fake.heartbeat(), 5_000_000);
         let started = session.download_parameters(&vid, 5_000_000);
         let done = converse(&mut session, &mut fake, started, 5_000_000);
         assert!(
@@ -5921,6 +6137,7 @@ mod tests {
         let mut now = 10;
         for _ in 0..3 {
             now += 1_600_000;
+            session.ingest("l1", PEER, &fake.heartbeat(), now);
             let tick = session.tick(now);
             let out = converse(&mut session, &mut fake, tick, now);
             assert!(!out.iter().any(|e| matches!(e, Effect::Parameters { .. })));

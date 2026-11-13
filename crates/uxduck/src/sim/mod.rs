@@ -151,7 +151,8 @@ const PROGRAMS: [(&str, &[SimVehicleDto]); 6] = [
 ];
 /// PX4's program: one build flies every vehicle, its airframe chosen when
 /// it starts. A build is a folder with `bin/px4` and `etc/`, as PX4's own
-/// build leaves it (`scripts/px4-sitl.sh`).
+/// build leaves it (`scripts/px4-sitl.sh`); a catalogue build has that
+/// folder as `px4/`, beside its `build.json`.
 pub const PX4: &str = "px4";
 
 /// How long a build has to describe itself.
@@ -696,7 +697,7 @@ fn port_frees_up(port: u16) -> bool {
 
 fn missing(autopilot: SimAutopilot, vehicle: SimVehicle) -> String {
     if autopilot == SimAutopilot::Px4 {
-        return "No PX4 simulator is installed on this computer. Build one into the simulators folder with scripts/px4-sitl.sh, or choose your own build.".into();
+        return "No PX4 simulator is installed on this computer. Download it from the simulator catalogue first with sim/catalogue and sim/download, or start it from New simulation, which downloads it for you. You can also choose your own build.".into();
     }
     let program = match vehicle {
         SimVehicle::Multicopter => "arducopter",
@@ -1123,9 +1124,13 @@ fn probe_px4(path: &Path) -> Result<SimBinary, String> {
         .or_else(|| frames.first())
         .cloned()
         .ok_or_else(|| format!("{} has no SIH airframes", rootfs.display()))?;
-    let build: Option<CatalogueBuild> = std::fs::read(rootfs.join(BUILD_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    // A catalogue build describes itself beside its `px4/` folder.
+    let build: Option<CatalogueBuild> = [Some(rootfs), rootfs.parent()]
+        .into_iter()
+        .flatten()
+        .find_map(|folder| std::fs::read(folder.join(BUILD_FILE)).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .filter(|build: &CatalogueBuild| build.program == PX4);
     // A local build's version, from `scripts/px4-sitl.sh`.
     let version = build.as_ref().map(|b| b.version.clone()).or_else(|| {
         std::fs::read_to_string(rootfs.join("version.txt"))

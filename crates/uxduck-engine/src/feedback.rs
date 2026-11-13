@@ -14,12 +14,12 @@ use uxduck_contracts::dto::analytics::Surface;
 use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
     BundleVehicle, FeedbackAddParams, FeedbackAttachment, FeedbackBundle, FeedbackFileParams,
-    FeedbackFiled, FeedbackKind, FeedbackSendParams, FeedbackSendResult, FeedbackSuggestParams,
-    FeedbackVoiceNote, SuggestionCard,
+    FeedbackFiled, FeedbackKind, FeedbackProgress, FeedbackSendParams, FeedbackSendResult,
+    FeedbackSuggestParams, FeedbackVoiceNote, SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
-use uxduck_contracts::rpc::ClientRequest;
+use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::ClientKind;
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
@@ -33,6 +33,14 @@ pub(crate) const RECENT_US: u64 = 120_000_000;
 pub(crate) const RECENT_FRAMES: usize = 200;
 /// Longer strings in a kept frame are cut, such as a screenshot being sent.
 const KEPT_STRING: usize = 512;
+/// A kept frame still larger than this keeps only its outline: a window's
+/// first state snapshot can be tens of megabytes of parameters.
+const KEPT_FRAME: usize = 16 * 1024;
+/// In an outline, an object with more entries than this is counted.
+const OUTLINE_ENTRIES: usize = 50;
+/// The most a bundle may be. The API takes 5 MB, and a smaller one goes out
+/// sooner over a field connection.
+pub const MAX_BUNDLE: usize = 2 * 1024 * 1024;
 const MAX_TEXT: usize = 5000;
 /// A 3 MB image in base64.
 const MAX_SCREENSHOT_B64: usize = 4 * 1024 * 1024 + 4;
@@ -125,11 +133,14 @@ impl FeedbackPort for NoFeedback {
 pub(crate) fn keep(recent: &mut VecDeque<TraceFrame>, mut frame: TraceFrame, now_us: u64) {
     if matches!(
         frame.method.as_deref(),
-        Some("telemetry/update" | "agent/itemDelta" | "trace/frame")
+        Some("telemetry/update" | "agent/itemDelta" | "trace/frame" | "feedback/progress")
     ) {
         return;
     }
     cut_strings(&mut frame.payload);
+    if frame.bytes > KEPT_FRAME as u64 && json_len(&frame.payload) > KEPT_FRAME {
+        outline(&mut frame.payload);
+    }
     recent.push_back(frame);
     while recent.len() > RECENT_FRAMES
         || recent
@@ -153,6 +164,42 @@ fn cut_strings(value: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(cut_strings),
         Value::Object(map) => map.values_mut().for_each(cut_strings),
         _ => {}
+    }
+}
+
+/// What is left of a frame too large to keep: its fields, with each list,
+/// and each object of many entries, replaced by how many it held, such as
+/// `"[166447 items]"`.
+fn outline(value: &mut Value) {
+    match value {
+        Value::Array(items) => *value = Value::String(format!("[{} items]", items.len())),
+        Value::Object(map) if map.len() > OUTLINE_ENTRIES => {
+            *value = Value::String(format!("{{{} entries}}", map.len()));
+        }
+        Value::Object(map) => map.values_mut().for_each(outline),
+        _ => {}
+    }
+}
+
+fn json_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+/// Fits a whole bundle within [`MAX_BUNDLE`]: the oldest trace frames go
+/// first, then the oldest log lines, then the chat's oldest items, so the
+/// report is never refused for its details.
+pub fn fit(bundle: &mut Value) {
+    let mut size = json_len(bundle);
+    for part in ["trace", "log", "chat"] {
+        let Some(items) = bundle.get_mut(part).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut gone = 0;
+        while size > MAX_BUNDLE && gone < items.len() {
+            size = size.saturating_sub(json_len(&items[gone]) + 1);
+            gone += 1;
+        }
+        items.drain(..gone);
     }
 }
 
@@ -737,6 +784,25 @@ impl Engine {
         self.send(connection, &frame);
     }
 
+    /// How much of a report the root has sent so far: told to the page
+    /// waiting on its `feedback/send`. Not for the agent's own reports.
+    pub fn feedback_progress(&mut self, report_id: &str, sent: u64, total: u64) {
+        if self.agent_filing.contains_key(report_id) {
+            return;
+        }
+        let Some(&(connection, _)) = self.awaiting_feedback.get(report_id) else {
+            return;
+        };
+        let frame = crate::rpc::router::notification(&ServerNotification::FeedbackProgress(
+            FeedbackProgress {
+                report_id: report_id.to_owned(),
+                sent,
+                total,
+            },
+        ));
+        self.send(connection, &frame);
+    }
+
     /// A suggestion this install sent shipped in this version (S73): said
     /// once, to everyone here.
     pub fn suggestion_shipped(&mut self, issue: &str, title: &str, version: &str) {
@@ -803,6 +869,10 @@ impl Engine {
     }
 
     /// UXDuck's part of the bundle, before scrubbing.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bundle's parts, read top to bottom"
+    )]
     fn bundle(&self, connection: ConnectionId, params: &FeedbackSendParams) -> FeedbackBundle {
         let now = self.clock.now_us();
         let vehicles = self
@@ -823,6 +893,7 @@ impl Engine {
                     .get(&v.link_id)
                     .map_or("gone", |l| link_kind(&l.kind))
                     .to_owned(),
+                connections: v.connections.as_ref().map(Into::into),
             })
             .collect();
         let links = self
@@ -830,9 +901,15 @@ impl Engine {
             .links
             .values()
             .map(|l| BundleLink {
+                id: l.id.clone(),
                 kind: link_kind(&l.kind).to_owned(),
                 status: format!("{:?}", l.status).to_lowercase(),
                 detail: l.status_detail.clone(),
+                transport: self
+                    .system
+                    .transport_diagnostics(&l.id)
+                    .as_ref()
+                    .map(Into::into),
             })
             .collect();
         let mut notifications: Vec<BundleNotification> = self
@@ -1059,9 +1136,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn kept_frames_are_recent_short_and_not_telemetry() {
-        let frame = |ts_us: u64, method: &str, payload: Value| TraceFrame {
+    /// A frame as it came, its size on the wire its payload's.
+    fn frame(ts_us: u64, method: &str, payload: Value) -> TraceFrame {
+        TraceFrame {
             ts_us,
             direction: uxduck_contracts::dto::trace::TraceDirection::In,
             kind: uxduck_contracts::dto::trace::FrameKind::Request,
@@ -1069,12 +1146,17 @@ mod tests {
             transport: uxduck_contracts::dto::trace::Transport::WebSocket,
             method: Some(method.into()),
             id: None,
-            bytes: 1,
+            bytes: payload.to_string().len() as u64,
             latency_us: None,
             payload,
-        };
+        }
+    }
+
+    #[test]
+    fn kept_frames_are_recent_short_and_not_telemetry() {
         let mut recent = VecDeque::new();
         keep(&mut recent, frame(1, "telemetry/update", json!({})), 1);
+        keep(&mut recent, frame(1, "feedback/progress", json!({})), 1);
         assert!(recent.is_empty());
         keep(
             &mut recent,
@@ -1093,5 +1175,93 @@ mod tests {
             RECENT_US + 10,
         );
         assert_eq!(recent.len(), 1, "older than two minutes goes");
+    }
+
+    /// A report sent just after the window connected carried its state
+    /// snapshot, 32 MB of parameters, and the API refused the whole report.
+    #[test]
+    fn a_frame_too_large_to_keep_keeps_its_outline_and_size() {
+        let parameters: Vec<Value> = (0..5000)
+            .map(|n| json!({ "vehicleId": "v1", "name": format!("PARAM_{n}"), "value": n }))
+            .collect();
+        let snapshot = frame(
+            1,
+            "state/subscribe",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": { "seq": 42, "snapshot": { "parameters": parameters, "threads": [] } },
+            }),
+        );
+        let bytes = snapshot.bytes;
+        let mut recent = VecDeque::new();
+        keep(&mut recent, snapshot, 1);
+        let kept = &recent[0];
+        assert_eq!(kept.bytes, bytes, "the bundle still says how large it was");
+        assert_eq!(
+            kept.payload,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": {
+                    "seq": 42,
+                    "snapshot": { "parameters": "[5000 items]", "threads": "[0 items]" },
+                },
+            })
+        );
+
+        // Large only for a long string: cut, and kept whole.
+        keep(
+            &mut recent,
+            frame(
+                1,
+                "feedback/send",
+                json!({ "screenshot": "A".repeat(100_000), "attachments": [{ "name": "a.pdf" }] }),
+            ),
+            1,
+        );
+        assert_eq!(recent[1].payload["attachments"][0]["name"], "a.pdf");
+    }
+
+    #[test]
+    fn a_bundle_is_fitted_within_its_budget_oldest_first() {
+        let frames: Vec<Value> = (0..400)
+            .map(|n| json!({ "tsUs": n, "payload": "y".repeat(10_000) }))
+            .collect();
+        let line = |n: usize| format!("{n:05} {}", "x".repeat(400));
+        let mut bundle = json!({
+            "schema": BUNDLE_SCHEMA,
+            "trace": frames,
+            "log": (0..500).map(line).collect::<Vec<_>>(),
+            "chat": [{ "kind": "user-message", "text": "Why did it climb?" }],
+        });
+        fit(&mut bundle);
+        assert!(json_len(&bundle) <= MAX_BUNDLE);
+        let trace = bundle["trace"].as_array().unwrap();
+        assert!(!trace.is_empty() && trace.len() < 400, "{}", trace.len());
+        assert_eq!(trace.last().unwrap()["tsUs"], 399, "the newest frames stay");
+        assert_eq!(
+            bundle["log"].as_array().unwrap().len(),
+            500,
+            "the log is whole while dropping frames makes room"
+        );
+        assert_eq!(bundle["chat"].as_array().unwrap().len(), 1);
+
+        let mut logged = json!({
+            "schema": BUNDLE_SCHEMA,
+            "trace": [],
+            "log": (0..10_000).map(line).collect::<Vec<_>>(),
+        });
+        fit(&mut logged);
+        assert!(json_len(&logged) <= MAX_BUNDLE);
+        let log = logged["log"].as_array().unwrap();
+        assert!(log.len() < 10_000);
+        assert_eq!(log.last().unwrap().as_str(), Some(line(9999).as_str()));
+
+        let mut small =
+            json!({ "schema": BUNDLE_SCHEMA, "trace": [{ "tsUs": 1 }], "log": ["one"] });
+        let before = small.clone();
+        fit(&mut small);
+        assert_eq!(small, before, "a bundle that fits is left as it is");
     }
 }

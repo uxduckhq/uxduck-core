@@ -229,6 +229,8 @@ pub const AGENT_METHODS: &[&str] = &[
     "settings/update",
     "operator/list",
     "operator/update",
+    // Calculated values (ADR-0056 K5): trying a formula changes nothing.
+    "telemetry/calculate",
 ];
 
 /// Methods agents are not offered, each on purpose. With [`AGENT_METHODS`]
@@ -280,6 +282,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "attachment/begin",
     "attachment/append",
     "attachment/finish",
+    // A vehicle's own 3D model's bytes, for the pages that draw it: its
+    // name, size and warning are in the vehicle (ADR-0035 M5).
+    "vehicle/modelRead",
     // Protocol, sessions, streams and window plumbing: not tools.
     "initialize",
     "trace/subscribe",
@@ -461,6 +466,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "controller/takeOver",
     "controller/forget",
     "controller/setTarget",
+    "controller/chooseMapping",
     "controller/inputs",
     "mapping/update",
     "mapping/create",
@@ -621,6 +627,8 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "feedback/suggest",
     // Rare, and kept the tools sent each turn under budget for set home (S308).
     "checklist/copy",
+    // Found with operator/update's calculated values (ADR-0056 K5).
+    "telemetry/calculate",
 ];
 
 /// The tool that runs a deferred one by name.
@@ -978,6 +986,42 @@ mod tests {
         }
     }
 
+    /// FB-217: a parameter's value is the vehicle's and its default the
+    /// firmware's as the vehicle reported it. The definition set only
+    /// describes, so the agent never credits it with a value or a default.
+    #[test]
+    fn parameter_tools_say_whose_value_and_default_they_give() {
+        let tools = tools();
+        let says = |name: &str, words: &[&str]| {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            let description = tool
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for words in words {
+                assert!(
+                    description.contains(words),
+                    "{name}: {words}: {description}"
+                );
+            }
+        };
+        says(
+            "param_get",
+            &[
+                "`value` is what the vehicle holds now",
+                "`default` its firmware's default as the vehicle reported it",
+                "never sets or overrides either",
+            ],
+        );
+        for name in ["param_search", "param_list"] {
+            says(
+                name,
+                &["Values and defaults are the vehicle's, never the definition set's"],
+            );
+        }
+    }
+
     #[test]
     fn names_are_lowercase_with_underscores() {
         assert_eq!(tool_name("vehicle/list"), "vehicle_list");
@@ -1080,6 +1124,16 @@ mod deferred_tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
 
     use super::*;
+
+    /// ADR-0035 M5: asked to change a vehicle's model, the tool that does is found.
+    #[test]
+    fn a_vehicles_own_model_is_found_by_words() {
+        let found: Vec<String> = find_deferred("change my plane's 3D model to a glb file", 3)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(found.contains(&"vehicle_look".to_owned()), "{found:?}");
+    }
 
     #[test]
     fn deferred_tools_are_agent_tools_found_by_words_and_never_named_in_the_instructions() {

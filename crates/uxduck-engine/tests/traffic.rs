@@ -133,6 +133,7 @@ fn two_vehicles(engine: &mut Engine, ui: &mut Client) {
     let link_id = link["result"]["id"].as_str().unwrap().to_owned();
     for (id, system_id) in [("alpha", 1), ("bravo", 2)] {
         engine.vehicle_observed(Observation {
+            connections: None,
             id: id.into(),
             aliases: Vec::new(),
             link_id: link_id.clone(),
@@ -644,6 +645,7 @@ fn traffic_alerts_ignore_arming_and_clear_once_past() {
 
 fn observation_of(v: &uxduck_core::domain::vehicle::Vehicle) -> Observation {
     Observation {
+        connections: None,
         id: v.id.clone(),
         aliases: v.aliases.clone(),
         link_id: v.link_id.clone(),

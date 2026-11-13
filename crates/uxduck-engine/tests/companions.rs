@@ -177,6 +177,7 @@ fn refused(engine: &mut Engine, client: &mut Client, method: &str, params: Value
 
 fn heard(engine: &mut Engine) {
     engine.vehicle_observed(Observation {
+        connections: None,
         id: "v".into(),
         aliases: vec![],
         link_id: "l".into(),

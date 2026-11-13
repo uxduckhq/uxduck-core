@@ -43,6 +43,7 @@ enum Command {
     GroundHeartbeat(String, bool),
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
+    ConnectionOrder(Vec<String>),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
     /// A link's host looked up off this task; `lookup` says it is the
@@ -60,6 +61,7 @@ struct Incoming {
     generation: Arc<()>,
     event: LinkEvent,
     at_us: u64,
+    socket_generation: Option<u64>,
 }
 
 /// A second bounded queue shared by links; control orders have their own
@@ -94,6 +96,9 @@ impl LinkPort for LinkChannel {
     }
     fn route_controller(&mut self, controller_id: &str, route: Option<ControlRoute>) {
         let _ = self.0.send(Command::Route(controller_id.to_owned(), route));
+    }
+    fn connection_order(&mut self, order: &[String]) {
+        let _ = self.0.send(Command::ConnectionOrder(order.to_vec()));
     }
     fn ground_heartbeat(&mut self, vehicle_id: &str, on: bool) {
         let _ = self
@@ -188,6 +193,8 @@ struct Open {
     /// a UDP client's hello, without which its server sends nothing.
     writable: bool,
     forward: bool,
+    registration: links::RegistrationGate,
+    socket_generation: u64,
     /// A stream's partial frames, by peer: a TCP server has a stream per
     /// connection.
     reassemblers: HashMap<String, Reassembler>,
@@ -253,6 +260,10 @@ impl Drop for Open {
 }
 
 /// Starts the data plane. `tlog_dir` receives one tlog per link per run.
+#[allow(
+    clippy::too_many_lines,
+    reason = "data plane event loop preserves ordered command handling"
+)]
 pub fn start(
     inbox: LinkInbox,
     engine: EngineHandle,
@@ -287,7 +298,7 @@ pub fn start(
             // sleeps until a command or a frame arrives (S24).
             let steering = plane.controls.routed();
             let ticking = plane.session.needs_tick();
-            let vehicles = !plane.session.routes().is_empty() || !plane.health.is_empty();
+            let vehicles = !plane.open.is_empty() || !plane.health.is_empty();
             // Simulators' builds and receiver sticks' decoders are watched.
             let simulating = plane
                 .open
@@ -297,7 +308,10 @@ pub fn start(
                 command = commands.recv() => match command {
                     None => break,
                     Some(Command::Open(link)) => plane.open(link, &events).await,
-                    Some(Command::Close(link_id)) => plane.close(&link_id),
+                    Some(Command::Close(link_id)) => {
+                        plane.close(&link_id).await;
+                        plane.session.remove_link(&link_id);
+                    }
                     Some(Command::Update(link)) => plane.update(link, &events).await,
                     Some(Command::Order(order)) => {
                         let effects = glue::start_command(&mut plane.session, order, SystemClock.now_us());
@@ -336,6 +350,12 @@ pub fn start(
                             tracing::warn!(%vehicle_id, "nobody supervises it: withholding the ground station heartbeat");
                             plane.withheld.insert(vehicle_id);
                         }
+                        plane.refresh_registration();
+                    }
+                    Some(Command::ConnectionOrder(order)) => {
+                        plane.session.set_connection_order(order);
+                        let effects = plane.session.tick(SystemClock.now_us());
+                        plane.apply(effects).await;
                     }
                     Some(Command::GcsSystemId(id)) => {
                         plane.gcs.store(id, Ordering::Relaxed);
@@ -358,6 +378,8 @@ pub fn start(
                     let effects = plane.time_syncs();
                     plane.apply(effects).await;
                     plane.report_link_health().await;
+                    plane.refresh_registration();
+                    plane.report_transports().await;
                     plane.send_onboard().await;
                 }
                 _ = watch.tick(), if simulating => plane.simulators_stopped().await,
@@ -393,6 +415,7 @@ struct Plane {
     /// Vehicles nobody supervises: no ground heartbeat to them (S81).
     withheld: std::collections::HashSet<String>,
     /// How each vehicle's link is doing (S261), on the clock of `started`.
+    registration_vehicles: HashMap<String, std::collections::BTreeSet<String>>,
     health: uxduck_mavlink::link_health::Tracker,
     /// The vehicle at each address last reported, for the last report of
     /// an address that is gone.
@@ -450,6 +473,7 @@ impl Plane {
             simulators,
             withheld: std::collections::HashSet::new(),
             health: uxduck_mavlink::link_health::Tracker::default(),
+            registration_vehicles: HashMap::new(),
             reported: std::collections::BTreeMap::new(),
             started: std::time::Instant::now(),
             onboard: None,
@@ -459,6 +483,35 @@ impl Plane {
     }
 
     async fn incoming(&mut self, incoming: Incoming) {
+        if let Some(generation) = incoming.socket_generation
+            && self
+                .open
+                .get(&incoming.link_id)
+                .and_then(|o| o.handle.diagnostics.as_ref())
+                .is_none_or(|d| {
+                    let d = d.borrow();
+                    d.generation != generation || !d.socket_open
+                })
+        {
+            return;
+        }
+
+        if let Some(generation) = incoming.socket_generation {
+            let changed = self.open.get_mut(&incoming.link_id).is_some_and(|open| {
+                if open.socket_generation == generation {
+                    return false;
+                }
+                open.socket_generation = generation;
+                true
+            });
+            if changed {
+                let effects = self
+                    .session
+                    .transport_lost(&incoming.link_id, SystemClock.now_us());
+                self.apply(effects).await;
+                self.session.transport_restored(&incoming.link_id);
+            }
+        }
         // Close/reopen orders can overtake telemetry. Bytes from an earlier
         // transport must never enter its replacement.
         if self
@@ -476,9 +529,89 @@ impl Plane {
     /// sends one: what lets a vehicle's lost ground station failsafe act
     /// when it stops. An address is skipped only when every vehicle there is
     /// withheld, so a supervised vehicle never loses it.
+    fn registration_withheld(&self, link_id: &str) -> bool {
+        self.registration_vehicles
+            .get(link_id)
+            .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| self.withheld.contains(id)))
+    }
+
+    fn refresh_registration(&mut self) {
+        let mut known: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+        for (address, id) in self.session.addresses() {
+            known
+                .entry(address.0.clone())
+                .or_default()
+                .insert(id.to_owned());
+        }
+        self.registration_vehicles.extend(known);
+        for (id, open) in &self.open {
+            open.registration
+                .renew(open.writable && !open.forward && !self.registration_withheld(id));
+        }
+    }
+
+    async fn report_transports(&mut self) {
+        let reports: Vec<_> = self
+            .open
+            .iter_mut()
+            .filter_map(|(id, open)| {
+                let receiver = open.handle.diagnostics.as_mut()?;
+                if !receiver.has_changed().unwrap_or(false) {
+                    return None;
+                }
+                Some((id.clone(), receiver.borrow_and_update().clone()))
+            })
+            .collect();
+        for (id, report) in reports {
+            let detail = report
+                .send_error
+                .as_ref()
+                .filter(|e| e.active)
+                .or_else(|| report.receive_error.as_ref().filter(|e| e.active))
+                .or_else(|| report.recovery_error.as_ref().filter(|e| e.active))
+                .map(|e| {
+                    format!(
+                        "{}: {} ({}, OS {:?})",
+                        e.operation, e.message, e.kind, e.os_code
+                    )
+                });
+            let status = if report.socket_open {
+                LinkStatus::Up
+            } else {
+                LinkStatus::Down
+            };
+            if report.configured_destination.is_some() {
+                self.session.transport_send_health(
+                    &id,
+                    report.send_error.as_ref().is_some_and(|e| e.active),
+                );
+            } else {
+                let mut latest = std::collections::BTreeMap::new();
+                for send in report.sends.iter().filter(|s| s.outcome != "attempted") {
+                    latest.insert(send.endpoint.clone(), send.outcome == "failed");
+                }
+                self.session.transport_peer_send_health(
+                    &id,
+                    latest
+                        .into_iter()
+                        .filter_map(|(peer, failed)| failed.then_some(peer))
+                        .collect(),
+                );
+            }
+            if report.socket_open {
+                self.session.transport_restored(&id);
+            } else {
+                let effects = self.session.transport_lost(&id, SystemClock.now_us());
+                self.apply(effects).await;
+            }
+            crate::diagnostics::transport(&id, report);
+            self.report(&id, status, detail).await;
+        }
+    }
+
     fn ground_heartbeats(&mut self) -> Vec<Effect> {
         let mut addresses: HashMap<(String, String), (String, bool)> = HashMap::new();
-        for route in self.session.routes() {
+        for route in self.session.all_routes() {
             let withheld = self.withheld.contains(&route.vehicle_id);
             let entry = addresses
                 .entry((route.link_id.clone(), route.peer.clone()))
@@ -489,7 +622,7 @@ impl Plane {
         }
         let mut effects = Vec::new();
         let gcs = self.gcs.load(Ordering::Relaxed);
-        for ((link_id, _), (vehicle_id, withheld)) in addresses {
+        for ((link_id, peer), (_, withheld)) in addresses {
             if withheld
                 || self
                     .open
@@ -498,13 +631,16 @@ impl Plane {
             {
                 continue;
             }
-            effects.extend(self.session.send_to(&vehicle_id, |_, sequence| {
-                uxduck_mavlink::sim::gcs_heartbeat_frame(
-                    gcs,
-                    uxduck_mavlink::GCS_COMPONENT_ID,
-                    sequence,
-                )
-            }));
+            effects.extend(
+                self.session
+                    .send_address(&(link_id, peer, 0), |_, sequence| {
+                        uxduck_mavlink::sim::gcs_heartbeat_frame(
+                            gcs,
+                            uxduck_mavlink::GCS_COMPONENT_ID,
+                            sequence,
+                        )
+                    }),
+            );
         }
         effects
     }
@@ -538,7 +674,7 @@ impl Plane {
                 continue;
             }
             let ts1 = self.health.asked(&address, now_us);
-            effects.extend(self.session.send_to(&vehicle_id, |system_id, sequence| {
+            effects.extend(self.session.send_address(&address, |system_id, sequence| {
                 uxduck_mavlink::sim::timesync_frame(
                     (gcs, uxduck_mavlink::GCS_COMPONENT_ID, sequence),
                     (0, ts1),
@@ -570,11 +706,13 @@ impl Plane {
                 (!addresses.values().any(|known| known == id)).then(|| (id.clone(), last))
             })
             .collect();
-        reports.extend(
-            addresses
-                .iter()
-                .map(|(address, id)| (id.clone(), self.health.report(address, now_us))),
-        );
+        for (address, id) in &addresses {
+            let health = self.health.report(address, now_us);
+            self.session.route_health(address.clone(), health.clone());
+            if self.session.telemetry_address(id) == Some(address) {
+                reports.push((id.clone(), health));
+            }
+        }
         self.reported = addresses;
         if reports.is_empty() {
             return;
@@ -590,6 +728,9 @@ impl Plane {
     /// other links; the link opens when it is found.
     async fn open(&mut self, link: Link, incoming: &mpsc::Sender<Incoming>) {
         self.resolving.remove(&link.id);
+        if matches!(link.kind, LinkKind::UdpClient { .. }) {
+            return self.open_at(link, None, incoming).await;
+        }
         let Some((host, port)) = host(&link.kind) else {
             return self.open_at(link, None, incoming).await;
         };
@@ -598,7 +739,7 @@ impl Plane {
                 .open_at(link, Some(SocketAddr::new(ip, port)), incoming)
                 .await;
         }
-        self.close(&link.id);
+        self.close(&link.id).await;
         let lookup = Arc::new(());
         self.resolving.insert(link.id.clone(), lookup.clone());
         let host = host.to_owned();
@@ -639,6 +780,10 @@ impl Plane {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "transport-specific setup and one complete open state"
+    )]
     async fn open_at(
         &mut self,
         link: Link,
@@ -652,7 +797,7 @@ impl Plane {
             .open
             .get_mut(&link.id)
             .and_then(|open| open.simulator.take());
-        self.close(&link.id);
+        self.close(&link.id).await;
         if let Some(previous) = previous {
             let _ = tokio::task::spawn_blocking(move || previous.stop()).await;
         }
@@ -662,18 +807,25 @@ impl Plane {
         if link.kind.is_simulator() {
             self.session.simulated(&link.id);
         }
+        self.session.configure_link(&link);
         let (events, mut received) = links::event_channel();
         let destination = incoming.clone();
         let link_id = link.id.clone();
         let generation = Arc::new(());
         let receiving_generation = generation.clone();
         let relay = tokio::spawn(async move {
-            while let Some(links::TimedEvent { event, at_us }) = received.recv().await {
+            while let Some(links::TimedEvent {
+                event,
+                at_us,
+                socket_generation,
+            }) = received.recv().await
+            {
                 let command = Incoming {
                     link_id: link_id.clone(),
                     generation: receiving_generation.clone(),
                     event,
                     at_us,
+                    socket_generation,
                 };
                 if destination.send(command).await.is_err() {
                     break;
@@ -683,6 +835,9 @@ impl Plane {
         // A simulated vehicle: its build starts first, then the link
         // connects to its SERIAL0, retrying while it starts (S17); PX4's
         // is UDP, and is greeted until it answers.
+        let registration = links::RegistrationGate::default();
+        registration
+            .renew(link.policy == LinkPolicy::ReadWrite && !self.registration_withheld(&link.id));
         let mut simulator = None;
         let mut decoder = None;
         let spawned = if matches!(link.kind, LinkKind::UsbReceiver {}) {
@@ -708,6 +863,14 @@ impl Plane {
                 }
                 Err(detail) => Err((LinkStatus::Down, detail)),
             }
+        } else if let LinkKind::UdpClient { host, port } = &link.kind {
+            Ok(links::udp_client_host(
+                host.clone(),
+                *port,
+                self.gcs.clone(),
+                registration.clone(),
+                events,
+            ))
         } else {
             spawn(&link.kind, address, self.gcs.clone(), events).await
         };
@@ -734,6 +897,8 @@ impl Plane {
                         started: false,
                         writable,
                         forward,
+                        registration,
+                        socket_generation: 0,
                         reassemblers: HashMap::new(),
                         traffic: TrafficReaders::new(link.carries),
                         tlog_path: tlog_path.clone(),
@@ -764,6 +929,7 @@ impl Plane {
     /// for, only its role changes, so the vehicles on it are not dropped;
     /// opened for something else, or not open, it opens anew.
     async fn update(&mut self, link: Link, incoming: &mpsc::Sender<Incoming>) {
+        self.session.configure_link(&link);
         match self.open.get_mut(&link.id) {
             Some(open) if open.kind == link.kind => {
                 open.writable = link.policy == LinkPolicy::ReadWrite;
@@ -826,12 +992,12 @@ impl Plane {
         }
         for (link_id, detail) in decoders {
             tracing::warn!(link = %link_id, %detail, "a receiver stick's decoder stopped");
-            self.close(&link_id);
+            self.close(&link_id).await;
             self.report(&link_id, LinkStatus::Down, Some(detail)).await;
         }
         for (link_id, detail) in stopped {
             tracing::warn!(link = %link_id, %detail, "a simulated vehicle's build stopped by itself");
-            self.close(&link_id);
+            self.close(&link_id).await;
             self.report(&link_id, LinkStatus::Down, Some(detail)).await;
         }
     }
@@ -859,13 +1025,14 @@ impl Plane {
         self.session.pause(link_id, paused, SystemClock.now_us());
     }
 
-    fn close(&mut self, link_id: &str) {
+    async fn close(&mut self, link_id: &str) {
         self.resolving.remove(link_id);
         if self.open.remove(link_id).is_some() {
             crate::tlog_index::close(link_id);
         }
         self.router.remove_link(link_id);
-        self.session.remove_link(link_id);
+        let effects = self.session.transport_lost(link_id, SystemClock.now_us());
+        self.apply(effects).await;
     }
 
     async fn report(&self, link_id: &str, status: LinkStatus, detail: Option<String>) {
@@ -885,8 +1052,15 @@ impl Plane {
             }
         }
         match event {
-            LinkEvent::Up => self.report(link_id, LinkStatus::Up, None).await,
-            LinkEvent::Down(reason) => self.report(link_id, LinkStatus::Down, Some(reason)).await,
+            LinkEvent::Up => {
+                self.session.transport_restored(link_id);
+                self.report(link_id, LinkStatus::Up, None).await;
+            }
+            LinkEvent::Down(reason) => {
+                let effects = self.session.transport_lost(link_id, SystemClock.now_us());
+                self.apply(effects).await;
+                self.report(link_id, LinkStatus::Down, Some(reason)).await;
+            }
             LinkEvent::Left { peer } => {
                 if let Some(open) = self.open.get_mut(link_id) {
                     open.reassemblers.remove(&peer);
@@ -946,9 +1120,15 @@ impl Plane {
             frame,
             at_us,
         );
-        let checked = self
-            .router
-            .check_loop((link_id, peer), frame, header, at_us);
+        let sources = if forward {
+            Vec::new()
+        } else {
+            self.session
+                .redundant_sources(link_id, peer, header.system_id)
+        };
+        let checked =
+            self.router
+                .check_loop_with_sources((link_id, peer), frame, header, at_us, &sources);
         if checked.looped {
             crate::diagnostics::record_routing(link_id, peer, frame, header, &checked, at_us);
             self.send(checked).await;
@@ -973,6 +1153,7 @@ impl Plane {
                 self.session
                     .ingest_received(link_id, peer, frame, at_us, SystemClock.now_us());
             self.apply(effects).await;
+            self.refresh_registration();
             let vehicle = self
                 .session
                 .vehicle_at(link_id, peer, header.system_id)
@@ -1057,11 +1238,20 @@ impl Plane {
             if let Some(open) = self.open.get(&send.link_id)
                 && (open.forward || open.writable)
                 && !self.session.is_paused(&send.link_id)
+                && open.handle.diagnostics.as_ref().is_none_or(|d| {
+                    let d = d.borrow();
+                    d.socket_open && d.generation == open.socket_generation
+                })
             {
                 let at_us = SystemClock.now_us();
+                let remote = open
+                    .handle
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|d| d.borrow().remote_endpoint.clone());
                 crate::diagnostics::record(
                     &send.link_id,
-                    send.peer.as_deref(),
+                    send.peer.as_deref().or(remote.as_deref()),
                     InspectDirection::Sent,
                     &send.bytes,
                     at_us,
@@ -1082,7 +1272,7 @@ impl Plane {
         for detected in routed.disable {
             let link_id = detected.forward_link_id;
             tracing::warn!(link = %link_id, returned_on = %detected.received_link_id, peer = %detected.received_peer, "forward disabled by loop detection");
-            self.close(&link_id);
+            self.close(&link_id).await;
             let _ = self
                 .engine
                 .run(move |e| {
@@ -1214,11 +1404,14 @@ impl Plane {
                     bytes,
                 } => {
                     // A paused simulator would read it all at once on resuming.
-                    if let Some(open) = self
-                        .open
-                        .get(&link_id)
-                        .filter(|o| o.writable && !self.session.is_paused(&link_id))
-                    {
+                    if let Some(open) = self.open.get(&link_id).filter(|o| {
+                        o.writable
+                            && !self.session.is_paused(&link_id)
+                            && o.handle.diagnostics.as_ref().is_none_or(|d| {
+                                let d = d.borrow();
+                                d.socket_open && d.generation == o.socket_generation
+                            })
+                    }) {
                         let at_us = SystemClock.now_us();
                         inspect_sent(&self.session, &link_id, &peer, &bytes);
                         crate::diagnostics::record(
@@ -1513,7 +1706,7 @@ mod tests {
         let (events, _received) = mpsc::channel(8);
 
         plane.open(listening_at("localhost"), &events).await;
-        plane.close("li1");
+        plane.close("li1").await;
         let Some(Command::Resolved {
             link,
             address,
@@ -1534,6 +1727,36 @@ mod tests {
 
         plane.open(listening_at("127.0.0.1"), &events).await;
         assert!(plane.open.contains_key("li1"));
+    }
+
+    #[tokio::test]
+    async fn registration_keeps_withholding_known_vehicles_across_silence_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, _commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+        plane
+            .registration_vehicles
+            .insert("li1".into(), ["buggy".into()].into());
+        plane.withheld.insert("buggy".into());
+        plane.refresh_registration();
+        assert!(plane.registration_withheld("li1"));
+        plane.open(listening_at("127.0.0.1"), &events).await;
+        plane.close("li1").await;
+        assert!(plane.registration_withheld("li1"));
+        plane.open(listening_at("127.0.0.1"), &events).await;
+        plane.refresh_registration();
+        assert!(plane.registration_withheld("li1"));
+        plane
+            .registration_vehicles
+            .get_mut("li1")
+            .unwrap()
+            .insert("scout".into());
+        assert!(
+            !plane.registration_withheld("li1"),
+            "another supervised vehicle shares the peer"
+        );
+        plane.withheld.insert("scout".into());
+        assert!(plane.registration_withheld("li1"));
     }
 
     #[test]

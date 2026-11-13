@@ -1569,6 +1569,10 @@ pub struct Operator {
     /// The layout chosen for a vehicle, by vehicle id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vehicle_telemetry: BTreeMap<String, String>,
+    /// Values they work out from telemetry with a formula (ADR-0056),
+    /// which the daemon adds to every vehicle's telemetry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_items: Vec<crate::domain::calculated::CalculatedItem>,
     /// Groups of parameters the operator tunes together, such as Hover
     /// tuning (S74), by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1757,56 +1761,99 @@ pub struct ControlActions {
     pub actions: Vec<String>,
 }
 
-/// The mapping an operator uses with one controller: by the controller's
-/// id on the computer where it was chosen, and its name, which finds the
-/// same kind of controller on another computer.
+/// The mapping an operator uses with one controller on one vehicle: by the
+/// controller's id on the computer where it was chosen, and its name, which
+/// finds the same kind of controller on another computer. The vehicle's id
+/// is the same on every computer that knows its autopilot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerMapping {
     pub controller_id: String,
     pub controller_name: String,
+    /// None for one chosen before any vehicle was, or kept from before
+    /// mappings were kept per vehicle (maintainer, 2026-11-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
     pub mapping_id: String,
 }
 
-/// The most controllers an operator keeps a mapping for; the oldest goes.
-pub const MAX_CONTROLLER_MAPPINGS: usize = 32;
+/// The most controller and vehicle pairs an operator keeps a mapping for;
+/// the oldest goes.
+pub const MAX_CONTROLLER_MAPPINGS: usize = 128;
 
 impl Operator {
-    /// The mapping this operator chose for a controller: for that one, else
-    /// for one of the same name.
+    /// The mapping this operator chose for a controller on a vehicle, known
+    /// by any of its ids: for that controller, else one of the same name.
     #[must_use]
-    pub fn mapping_for(&self, controller_id: &str, controller_name: &str) -> Option<&str> {
-        self.controller_mappings
-            .iter()
+    pub fn vehicle_mapping(
+        &self,
+        controller_id: &str,
+        controller_name: &str,
+        vehicle_ids: &[&str],
+    ) -> Option<&str> {
+        let on = |m: &&ControllerMapping| {
+            m.vehicle_id
+                .as_deref()
+                .is_some_and(|id| vehicle_ids.contains(&id))
+        };
+        let newest = self.controller_mappings.iter().rev();
+        newest
+            .clone()
+            .filter(on)
             .find(|m| m.controller_id == controller_id)
             .or_else(|| {
-                self.controller_mappings
-                    .iter()
+                newest
+                    .filter(on)
                     .find(|m| m.controller_name == controller_name)
             })
             .map(|m| m.mapping_id.as_str())
     }
 
-    /// Notes the mapping chosen for a controller, newest last; `false` if
-    /// it was already the one.
+    /// The mapping this operator uses with a controller on a vehicle: the
+    /// one chosen for it, else the one chosen last for that controller, else
+    /// for one of the same name.
+    #[must_use]
+    pub fn mapping_for(
+        &self,
+        controller_id: &str,
+        controller_name: &str,
+        vehicle_ids: &[&str],
+    ) -> Option<&str> {
+        self.vehicle_mapping(controller_id, controller_name, vehicle_ids)
+            .or_else(|| {
+                let mut newest = self.controller_mappings.iter().rev();
+                newest
+                    .clone()
+                    .find(|m| m.controller_id == controller_id)
+                    .or_else(|| newest.find(|m| m.controller_name == controller_name))
+                    .map(|m| m.mapping_id.as_str())
+            })
+    }
+
+    /// Notes the mapping chosen for a controller on a vehicle, or with none
+    /// yet, newest last; `false` if it was already the one.
     pub fn choose_mapping(
         &mut self,
         controller_id: &str,
         controller_name: &str,
+        vehicle_id: Option<&str>,
         mapping_id: &str,
     ) -> bool {
+        let same = |m: &ControllerMapping| {
+            m.controller_id == controller_id && m.vehicle_id.as_deref() == vehicle_id
+        };
         if self
             .controller_mappings
             .iter()
-            .any(|m| m.controller_id == controller_id && m.mapping_id == mapping_id)
+            .any(|m| same(m) && m.mapping_id == mapping_id)
         {
             return false;
         }
-        self.controller_mappings
-            .retain(|m| m.controller_id != controller_id);
+        self.controller_mappings.retain(|m| !same(m));
         self.controller_mappings.push(ControllerMapping {
             controller_id: controller_id.to_owned(),
             controller_name: controller_name.to_owned(),
+            vehicle_id: vehicle_id.map(str::to_owned),
             mapping_id: mapping_id.to_owned(),
         });
         let over = self
@@ -3072,6 +3119,7 @@ mod tests {
             skipped_confirmations: Vec::new(),
             telemetry_layouts: Vec::new(),
             vehicle_telemetry: BTreeMap::new(),
+            calculated_items: Vec::new(),
             parameter_groups: vec![ParameterGroup {
                 name: "Hover tuning".into(),
                 parameters: vec!["ATC_RAT_RLL_P".into()],

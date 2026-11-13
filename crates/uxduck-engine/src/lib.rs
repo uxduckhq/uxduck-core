@@ -20,6 +20,7 @@ mod app;
 mod app_update;
 pub mod approvals;
 mod attachments;
+mod calculated;
 mod checklist;
 pub mod commands;
 pub mod companions;
@@ -53,6 +54,7 @@ pub mod mission_history;
 mod mission_reads;
 pub mod nmea;
 mod operations;
+mod own_models;
 pub mod pairing;
 pub mod param_definitions;
 mod photos;
@@ -884,6 +886,7 @@ impl Engine {
         self.dialects_after(&event.change);
         self.gripper_after(&event.change);
         self.plan_run_after(&event.change);
+        self.calculated_after(&event.change);
         self.since_checkpoint += 1;
         if self.since_checkpoint >= self.config.checkpoint_every {
             self.checkpoint();

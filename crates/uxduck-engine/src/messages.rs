@@ -99,9 +99,9 @@ impl Messages {
 }
 
 /// A pre-arm failure's reason, from ArduPilot's `PreArm: …` or PX4's
-/// `Preflight Fail: …`.
+/// `Preflight Fail: …` and its refused arm, `Arming denied: …`.
 fn prearm_reason(text: &str) -> Option<&str> {
-    ["PreArm: ", "Preflight Fail: ", "Arm: "]
+    ["PreArm: ", "Preflight Fail: ", "Arm: ", "Arming denied: "]
         .iter()
         .find_map(|prefix| text.strip_prefix(prefix))
         .map(str::trim)

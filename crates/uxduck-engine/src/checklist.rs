@@ -52,6 +52,8 @@ const CELL_COUNT_PARAMS: [&str; 4] = [
 const CAPACITY_PARAMS: [&str; 2] = ["BATT_CAPACITY", "BAT1_CAPACITY"];
 /// The item for the battery's voltage per cell (K8).
 pub(crate) const CELL_ITEM: &str = "battery.cell_v";
+/// The item for the average of the battery's cells.
+const AVERAGE_ITEM: &str = "battery.cell_avg_v";
 /// The item for what is left in the battery.
 pub(crate) const LEFT_ITEM: &str = "battery.remaining_mah";
 
@@ -713,8 +715,8 @@ impl Engine {
     }
 
     /// Items the checklist's rules read that the vehicle does not report
-    /// as such (K8): the battery per cell, and what is left in it. Added
-    /// to telemetry carrying battery readings.
+    /// as such (K8): the battery per cell, its cells' average, and what is
+    /// left in it. Added to telemetry carrying battery readings.
     pub(crate) fn battery_items(&self, update: &VehicleTelemetry) -> Vec<TelemetryItem> {
         let now = self.clock.now_us();
         let latest = self.telemetry(&update.vehicle_id);
@@ -747,8 +749,8 @@ impl Engine {
                 component_id: from.component_id,
                 time_us: from.time_us,
             };
-        // The vehicle's own cells, the lowest of them; else the pack over
-        // its cell count.
+        // The vehicle's own cells, the lowest of them and their average;
+        // else the pack over its cell count, which is both.
         let mut cells: Vec<&TelemetryItem> = (1..=14)
             .filter_map(|n| find(&format!("battery.cell_{n}_v")))
             .collect();
@@ -759,11 +761,22 @@ impl Engine {
         });
         if cells.len() > 1 {
             let lowest = cells[0];
+            let (sum, count) = cells
+                .iter()
+                .filter_map(|cell| cell.value)
+                .fold((0.0, 0.0), |(sum, count), v| (sum + v, count + 1.0));
             out.push(made(
                 CELL_ITEM,
                 "Battery per cell",
                 Unit::Volt,
                 lowest.value.unwrap_or_default(),
+                lowest,
+            ));
+            out.push(made(
+                AVERAGE_ITEM,
+                "Battery cell average",
+                Unit::Volt,
+                sum / count,
                 lowest,
             ));
         } else if let Some(pack) = find("battery.voltage_v")
@@ -772,11 +785,19 @@ impl Engine {
                 .filter_map(|name| param(name))
                 .find(|n| *n >= 1.0 && *n <= 24.0)
         {
+            let per_cell = pack.value.unwrap_or_default() / count.round();
             out.push(made(
                 CELL_ITEM,
                 "Battery per cell",
                 Unit::Volt,
-                pack.value.unwrap_or_default() / count.round(),
+                per_cell,
+                pack,
+            ));
+            out.push(made(
+                AVERAGE_ITEM,
+                "Battery cell average",
+                Unit::Volt,
+                per_cell,
                 pack,
             ));
         }

@@ -181,6 +181,7 @@ fn scenario() -> (Vec<Event>, State) {
         json!({ "kind": { "type": "udp-listen", "host": "0.0.0.0", "port": 14550 } }),
     );
     engine.vehicle_observed(Observation {
+        connections: None,
         id: "vehicle-1".into(),
         aliases: Vec::new(),
         link_id: link["id"].as_str().unwrap().into(),

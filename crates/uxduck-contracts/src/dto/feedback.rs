@@ -306,6 +306,20 @@ pub struct FeedbackSendResult {
     pub limited: bool,
 }
 
+/// How much of a report UXDuck has sent to its servers so far
+/// (`feedback/progress`), for the page waiting on its `feedback/send`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackProgress {
+    pub report_id: String,
+    /// Bytes sent.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub sent: u64,
+    /// The whole upload's bytes: the report, the bundle and every file.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub total: u64,
+}
+
 /// The account's feedback, newest first (`GET /v1/feedback/mine`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -438,16 +452,140 @@ pub struct BundleVehicle {
     pub mode: Option<String>,
     /// The kind of link it is heard on, such as `udp-listen`.
     pub link: String,
+    /// Every route it is heard on, and which one carries its commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<BundleConnections>,
+}
+
+/// A vehicle's routes and why one is selected. Never a route's peer address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleConnections {
+    pub command_available: bool,
+    pub reason: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub epoch: u64,
+    pub routes: Vec<BundleRoute>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent transport capability and selection evidence"
+)]
+pub struct BundleRoute {
+    /// The link's `id` in `links`.
+    pub link_id: String,
+    pub system_id: u8,
+    pub priority: u32,
+    pub reachable: bool,
+    pub writable: bool,
+    pub selected: bool,
+    pub telemetry: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub last_heartbeat_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub round_trip_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_per_mille: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_receive_age_ms: Option<u64>,
+    pub reason: String,
 }
 
 /// A link's kind and state; never its address, port or device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleLink {
+    /// So the trace and the vehicles' routes can be matched.
+    #[serde(default)]
+    pub id: String,
     pub kind: String,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// A UDP link's socket, as `link/diagnose` shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<BundleTransport>,
+}
+
+/// A socket's state, attempts and failures. Never its configured
+/// destination, its endpoints or the endpoint a failure names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleTransport {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub generation: u64,
+    pub socket_open: bool,
+    pub wildcard_bind: bool,
+    /// Confirmed by Network.framework in the daemon process, or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_network_permission: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_receive_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_valid_mavlink_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_heartbeat_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_send_attempt_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_socket_send_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_error: Option<BundleTransportError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_error: Option<BundleTransportError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_error: Option<BundleTransportError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub registration_attempts: u64,
+    pub registration_suppressed: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub recreation_attempts: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub backoff_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub next_retry_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub dropped_receive_events: u64,
+    /// The recent socket sends, oldest first.
+    pub sends: Vec<BundleSocketSend>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleTransportError {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    pub operation: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_code: Option<i32>,
+    pub message: String,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleSocketSend {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    pub registration: bool,
+    /// attempted, accepted-by-os, or failed. Never claims peer delivery.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_code: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -218,6 +218,9 @@ pub struct Settings {
     /// A vehicle's `SYSID_MYGCS` counts only this id's heartbeats.
     #[serde(default = "gcs_system_id")]
     pub gcs_system_id: u8,
+    /// Shared connection preference. Unknown and new links follow in creation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_order: Vec<String>,
     /// "Store flights and recordings in my account" (S82, ADR-0003 C17):
     /// while signed in, each flight's tlog goes to the account as it is
     /// recorded. Off until the person turns it on (maintainer, 2026-10-24:
@@ -451,6 +454,7 @@ impl Default for Settings {
             network_address: None,
             network_addresses: Vec::new(),
             supervision_grace_s: 10,
+            connection_order: Vec::new(),
             gcs_system_id: 255,
             store_flights: false,
             save_flights: false,

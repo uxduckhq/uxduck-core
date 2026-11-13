@@ -618,6 +618,7 @@ mod tests {
                     skipped_confirmations: Vec::new(),
                     telemetry_layouts: Vec::new(),
                     vehicle_telemetry: std::collections::BTreeMap::new(),
+                    calculated_items: Vec::new(),
                     parameter_groups: Vec::new(),
                     inspector_pinned: Vec::new(),
                     control_actions: Vec::new(),

@@ -694,22 +694,33 @@ fn changes(engine: &Engine, params: &ParamChangesParams) -> Result<ParamChangesR
 }
 
 /// A `.param` file's values, and the numbers of the lines it could not read.
+/// Mission Planner writes `NAME,VALUE`, and QGroundControl's `.params` lead
+/// with the vehicle and component and end with the type:
+/// `1\t1\tMPC_XY_CRUISE\t5.0\t9`.
 pub(crate) fn read_param_file(text: &str) -> (BTreeMap<String, f64>, Vec<u32>) {
     let mut values = BTreeMap::new();
     let mut unread = Vec::new();
+    let numbered = |field: &str| field.bytes().all(|b| b.is_ascii_digit());
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut parts = line.split(|c: char| c == ',' || c.is_whitespace());
-        let name = parts.next().unwrap_or_default().trim();
-        let value = parts
-            .find(|p| !p.is_empty())
-            .and_then(|v| v.trim().parse::<f64>().ok());
+        let fields: Vec<&str> = line
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect();
+        let (name, value) = match fields.as_slice() {
+            [system, component, name, value, ..] if numbered(system) && numbered(component) => {
+                (*name, Some(*value))
+            }
+            [name, value, ..] => (*name, Some(*value)),
+            _ => ("", None),
+        };
+        let value = value.and_then(|v| v.parse::<f64>().ok());
         match value {
             Some(value)
-                if !name.is_empty()
+                if name.starts_with(|c: char| c.is_ascii_alphabetic())
                     && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
             {
                 values.insert(name.to_uppercase(), value);
@@ -864,6 +875,19 @@ mod tests {
         assert_eq!(values["WPNAV_SPEED"], 1000.5);
         assert_eq!(values["FS_THR_ENABLE"], 1.0);
         assert_eq!(unread, [5]);
+    }
+
+    #[test]
+    fn a_params_file_is_read_as_qgroundcontrol_writes_it() {
+        let (values, unread) = read_param_file(
+            "# Onboard parameters for Vehicle 1\n#\n# Vehicle-Id Component-Id Name Value Type\n\
+             1\t1\tMPC_XY_CRUISE\t5.000000000000000000\t9\n\
+             1\t1\tSYS_AUTOSTART\t10040\t6\n1\t1\n",
+        );
+        assert_eq!(values.len(), 2, "{values:?}");
+        assert_eq!(values["MPC_XY_CRUISE"], 5.0);
+        assert_eq!(values["SYS_AUTOSTART"], 10040.0);
+        assert_eq!(unread, [6]);
     }
 
     #[test]

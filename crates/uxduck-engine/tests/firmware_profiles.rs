@@ -157,6 +157,7 @@ fn engine(port: Option<&Asked>) -> (Engine, Client) {
 /// A vehicle built from `commit`.
 fn heard(engine: &mut Engine, id: &str, commit: &str) {
     engine.vehicle_observed(Observation {
+        connections: None,
         id: id.into(),
         aliases: Vec::new(),
         link_id: "lk".into(),

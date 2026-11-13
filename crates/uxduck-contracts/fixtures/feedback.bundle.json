@@ -31,10 +31,86 @@
         "presence": "online",
         "armed": false,
         "mode": "GUIDED",
-        "link": "udp-listen"
+        "link": "udp-listen",
+        "connections": {
+          "commandAvailable": true,
+          "reason": "Radio is preferred and healthy",
+          "epoch": 2,
+          "routes": [
+            {
+              "linkId": "lk3c4d5e6f7a8b9c0d",
+              "systemId": 1,
+              "priority": 0,
+              "reachable": true,
+              "writable": true,
+              "selected": true,
+              "telemetry": true,
+              "lastHeartbeatUs": 1789999999000000,
+              "roundTripUs": 42000,
+              "lossPerMille": 3,
+              "lastReceiveAgeMs": 120,
+              "reason": "Preferred and healthy"
+            },
+            {
+              "linkId": "lk9f8e7d6c5b4a3921",
+              "systemId": 1,
+              "priority": 1,
+              "reachable": false,
+              "writable": true,
+              "selected": false,
+              "telemetry": false,
+              "lastHeartbeatUs": 1789999990000000,
+              "lastReceiveAgeMs": 9000,
+              "reason": "No heartbeat for 3 seconds"
+            }
+          ]
+        }
       }
     ],
-    "links": [{ "kind": "udp-listen", "status": "listening" }],
+    "links": [
+      {
+        "id": "lk3c4d5e6f7a8b9c0d",
+        "kind": "udp-listen",
+        "status": "listening"
+      },
+      {
+        "id": "lk9f8e7d6c5b4a3921",
+        "kind": "udp-client",
+        "status": "up",
+        "transport": {
+          "generation": 3,
+          "socketOpen": true,
+          "wildcardBind": false,
+          "localNetworkPermission": "granted",
+          "lastReceiveUs": 1789999990000000,
+          "lastSendAttemptUs": 1789999999500000,
+          "lastSocketSendUs": 1789999999000000,
+          "sendError": {
+            "atUs": 1789999999500000,
+            "operation": "send",
+            "kind": "HostUnreachable",
+            "osCode": 65,
+            "message": "No route to host (os error 65)",
+            "active": true
+          },
+          "recoveryReason": "No reply to UDP registration for 30 seconds",
+          "registrationAttempts": 30,
+          "registrationSuppressed": false,
+          "recreationAttempts": 2,
+          "backoffMs": 5000,
+          "nextRetryUs": 1790000004500000,
+          "droppedReceiveEvents": 0,
+          "sends": [
+            {
+              "atUs": 1789999999500000,
+              "registration": true,
+              "outcome": "failed",
+              "osCode": 65
+            }
+          ]
+        }
+      }
+    ],
     "notifications": [
       { "severity": "warning", "title": "Set mode was rejected", "createdAtUs": 1789999990000000 }
     ],

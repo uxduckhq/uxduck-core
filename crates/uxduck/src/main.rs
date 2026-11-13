@@ -30,6 +30,7 @@ mod mcp;
 mod metered;
 mod network;
 mod online;
+mod own_models;
 mod params;
 mod parent;
 mod paths;

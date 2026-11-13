@@ -175,6 +175,7 @@ fn diagnose(engine: &Engine, query: &str) -> Result<Value, ApiError> {
         routing,
         recent_events,
         last_incident: engine.system.last_router_incident(&link.id),
+        transport: engine.system.transport_diagnostics(&link.id),
     })
 }
 

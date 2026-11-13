@@ -22,8 +22,8 @@ use crate::dto::client::{
 };
 use crate::dto::command::{CommandSendParams, ModeListParams};
 use crate::dto::controller::{
-    ClientSelectParams, ControllerClaimParams, ControllerSetTargetParams, MappingCreateParams,
-    MappingUpdateParams,
+    ClientSelectParams, ControllerChooseMappingParams, ControllerClaimParams,
+    ControllerSetTargetParams, MappingCreateParams, MappingUpdateParams,
 };
 use crate::dto::diagnostics::{
     DaemonLogsParams, LinkDiagnoseParams, RouterEventsParams, SocketInspectParams,
@@ -72,7 +72,7 @@ use crate::dto::sim::{
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
-use crate::dto::telemetry::VehicleTelemetry;
+use crate::dto::telemetry::{TelemetryCalculateParams, VehicleTelemetry};
 use crate::dto::telemetry_window::TelemetryWindowParams;
 use crate::dto::thread::ThreadFeedbackParams;
 use crate::dto::thread::{
@@ -221,12 +221,24 @@ pub enum ClientRequest {
     /// Result: `Vehicle`.
     #[serde(rename = "vehicle/traffic")]
     VehicleTraffic(crate::dto::traffic::VehicleTrafficParams),
-    /// Draws a vehicle as another of UXDuck's models on both maps (plane,
-    /// vtol, multicopter, rover, boat, submarine, airship, jet), such as a
-    /// copter drawn as a boat; without `look`, as its type gives. Kept on
-    /// this computer. Needs `config`. Result: `Vehicle`.
+    /// The 3D model a vehicle is drawn as on the 3D map and in the vehicle
+    /// view: another of UXDuck's models (plane, vtol, multicopter, rover,
+    /// boat, submarine, airship, jet), such as a copter drawn as a boat, or
+    /// the person's own model from a glTF file (`.glb` or `.gltf`) they
+    /// attached, by its id, turned with `turnDeg` if its nose points the
+    /// wrong way. With neither, as its type gives. Its own model replaces
+    /// the one before. A file either renderer cannot draw is refused in
+    /// words, as is one whose textures take over 256 MB on the graphics
+    /// card. One more detailed than a vehicle needs is drawn, with
+    /// `ownModel.warning` saying so. Kept on this computer. Needs
+    /// `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/look")]
     VehicleLook(VehicleLookParams),
+    /// Up to 4 MiB of a vehicle's own 3D model from `offset`, base64, as
+    /// `vehicle/look` kept it, for drawing it. Needs `read`. Result:
+    /// `VehicleModelReadResult`.
+    #[serde(rename = "vehicle/modelRead")]
+    VehicleModelRead(crate::dto::vehicle::VehicleModelReadParams),
     /// The colour a vehicle is drawn in on the maps, in the sidebar and on
     /// its mission: blue, pink, teal, purple, lilac, orchid, violet, sky or
     /// magenta. Kept with its id on this computer. Needs `config`. Result:
@@ -400,7 +412,8 @@ pub enum ClientRequest {
     /// Finds a vehicle's parameters by what they mean ("battery failsafe",
     /// "return altitude") or by name (`RTL_`), ranked by name, then display
     /// name, then description; ArduPilot's abbreviations (RTL, FS, BATT)
-    /// match their words. Brief results with current values, paged.
+    /// match their words. Brief results with current values, paged. Values
+    /// and defaults are the vehicle's, never the definition set's.
     /// `describedBy` names the descriptions' set: say its version, and when
     /// it is approximate or missing; if its `held` is not `complete`, say
     /// so and do as its `note` says. Read one in full with `param/get`
@@ -409,14 +422,17 @@ pub enum ClientRequest {
     ParamSearch(ParamSearchParams),
     /// Parameters by name, each with its value and its whole definition:
     /// description, units, range, values, bits, whether it needs a reboot.
-    /// A parameter without a definition is not described by the vehicle's
-    /// set: say so and do not guess what it does. Needs `read`. Result:
-    /// `ParamGetResult`.
+    /// `value` is what the vehicle holds now and `default` its firmware's
+    /// default as the vehicle reported it. The definition set only
+    /// describes, and never sets or overrides either. A parameter without a
+    /// definition is not described by the vehicle's set: say so and do not
+    /// guess what it does. Needs `read`. Result: `ParamGetResult`.
     #[serde(rename = "param/get")]
     ParamGet(ParamGetParams),
     /// A vehicle's parameters in a group (`BATT_`), paged: ask again from
     /// `nextOffset` for the rest. Without a group, when there are many, how
     /// many each group has instead: ask again for the group you need.
+    /// Values and defaults are the vehicle's, never the definition set's.
     /// `describedBy` names the vehicle read; its `held` says how many
     /// parameters UXDuck holds and whether that is all of them, and its
     /// `note` what to do when not, such as downloading them or reading the
@@ -639,6 +655,13 @@ pub enum ClientRequest {
     /// the sticks centred. Result: `Controller`.
     #[serde(rename = "controller/setTarget")]
     ControllerSetTarget(ControllerSetTargetParams),
+    /// Keeps on this client's operator the mapping a controller uses on a
+    /// vehicle, synced with them: a claim there uses it, and a held
+    /// controller moving there switches to it. Refused for the vehicle it
+    /// drives now, until it is released, and without an operator.
+    /// Operators with control only. Result: `Empty`.
+    #[serde(rename = "controller/chooseMapping")]
+    ControllerChooseMapping(ControllerChooseMappingParams),
     /// Every plugged-in controller's raw axes and buttons right now, before
     /// any mapping, for testing a gamepad. Changes nothing; poll it while
     /// it is shown. Needs `read`. Result: `ControllerInputsResult`.
@@ -2008,11 +2031,19 @@ pub enum ClientRequest {
     /// (S294), as a comment on its issue. Result: `FeedbackSendResult`.
     #[serde(rename = "feedback/add")]
     FeedbackAdd(FeedbackAddParams),
+    /// Reads a formula for a calculated value (ADR-0056) and, given a
+    /// vehicle, works it out from its telemetry and parameters now, saying
+    /// which items it reads and which have no value yet. Changes nothing:
+    /// try a formula here before saving it with `operator/update`. A formula
+    /// that cannot be read is refused with why and where. Needs `read`.
+    /// Result: `TelemetryCalculateResult`.
+    #[serde(rename = "telemetry/calculate")]
+    TelemetryCalculate(TelemetryCalculateParams),
 }
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 374] = [
+    pub const METHODS: [&'static str; 377] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2047,6 +2078,7 @@ impl ClientRequest {
         "vehicle/size",
         "vehicle/traffic",
         "vehicle/look",
+        "vehicle/modelRead",
         "vehicle/colour",
         "vehicle/gripper",
         "gripper/status",
@@ -2124,6 +2156,7 @@ impl ClientRequest {
         "controller/takeOver",
         "controller/forget",
         "controller/setTarget",
+        "controller/chooseMapping",
         "controller/inputs",
         "client/select",
         "mapping/update",
@@ -2387,6 +2420,7 @@ impl ClientRequest {
         "firmware/rename",
         "feedback/file",
         "feedback/add",
+        "telemetry/calculate",
     ];
 }
 
@@ -2523,6 +2557,11 @@ pub enum ServerNotification {
     /// Not journaled.
     #[serde(rename = "vehicle/message")]
     VehicleMessage(VehicleMessage),
+    /// How much of a report UXDuck has sent to its servers, to the
+    /// connection waiting on its `feedback/send`: at most four times a
+    /// second while it uploads. Not journaled.
+    #[serde(rename = "feedback/progress")]
+    FeedbackProgress(crate::dto::feedback::FeedbackProgress),
     /// The replay as it changes (ADR-0039 R1), to a connection that called
     /// `replay/state`: about four times a second while it plays, on every
     /// change, and once with `open` false when it closes. Without the

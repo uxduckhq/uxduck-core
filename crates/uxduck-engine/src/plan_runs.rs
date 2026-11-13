@@ -1284,6 +1284,7 @@ mod tests {
         .expect("simulation link");
         engine.state.links.insert("sim".into(), link);
         engine.vehicle_observed(Observation {
+            connections: None,
             id: "vehicle".into(),
             aliases: Vec::new(),
             link_id: "sim".into(),

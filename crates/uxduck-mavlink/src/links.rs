@@ -18,6 +18,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
+
+mod udp;
+pub use udp::{RegistrationGate, udp_client_host};
 use uxduck_core::domain::link::UsbId;
 
 /// What a link reports.
@@ -52,6 +55,7 @@ pub struct LinkHandle {
     task: Option<tokio::task::JoinHandle<()>>,
     /// Whether it carries a byte stream (serial, TCP) rather than datagrams.
     pub stream: bool,
+    pub diagnostics: Option<watch::Receiver<uxduck_core::domain::transport::TransportDiagnostics>>,
 }
 
 impl LinkHandle {
@@ -93,6 +97,7 @@ impl Drop for LinkHandle {
 pub struct TimedEvent {
     pub event: LinkEvent,
     pub at_us: u64,
+    pub socket_generation: Option<u64>,
 }
 
 impl TimedEvent {
@@ -102,7 +107,11 @@ impl TimedEvent {
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
             });
-        Self { event, at_us }
+        Self {
+            event,
+            at_us,
+            socket_generation: None,
+        }
     }
 }
 
@@ -191,84 +200,14 @@ fn udp_task(
     hello: Option<Arc<AtomicU8>>,
     events: Events,
 ) -> LinkHandle {
-    let (send, mut outgoing) = mpsc::unbounded_channel::<Outgoing>();
-    let stop = Arc::new(AtomicBool::new(false));
-    let task = tokio::spawn(async move {
-        let (heard, last_heard) = watch::channel(None::<tokio::time::Instant>);
-        let (backpressured, pressure) = watch::channel(false);
-        let receiving = async {
-            if events.send(LinkEvent::Up).await.is_err() {
-                return;
-            }
-            let mut buffer = vec![0u8; 65_536];
-            loop {
-                match socket.recv_from(&mut buffer).await {
-                    Ok((len, from)) if destination.is_none_or(|d| d == from) => {
-                        heard.send_replace(Some(tokio::time::Instant::now()));
-                        backpressured.send_replace(true);
-                        let delivered = events
-                            .send(LinkEvent::Received {
-                                peer: from.to_string(),
-                                bytes: buffer[..len].to_vec(),
-                            })
-                            .await;
-                        backpressured.send_replace(false);
-                        if delivered.is_err() {
-                            return;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-                    Err(error) => {
-                        if events
-                            .send(LinkEvent::Down(error.to_string()))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                }
-            }
-        };
-        let sending = async {
-            let mut every = tokio::time::interval(Duration::from_secs(1));
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut sequence = 0u8;
-            loop {
-                tokio::select! {
-                    _ = every.tick(), if hello.is_some() => {
-                        // A full receive queue is not a silent UDP server.
-                        // Its hello must not mask a withheld GCS heartbeat.
-                        let quiet = !*pressure.borrow()
-                            && last_heard.borrow().is_none_or(|at| at.elapsed() >= UDP_CLIENT_QUIET);
-                        if quiet && let Some(to) = destination && let Some(gcs) = &hello {
-                            let bytes = crate::sim::gcs_heartbeat_frame(
-                                gcs.load(Ordering::Relaxed), crate::GCS_COMPONENT_ID, sequence,
-                            );
-                            sequence = sequence.wrapping_add(1);
-                            let _ = socket.send_to(&bytes, to).await;
-                        }
-                    }
-                    next = outgoing.recv() => {
-                        let Some(Outgoing { peer, bytes }) = next else { return };
-                        let to = peer.and_then(|p| p.parse::<SocketAddr>().ok()).or(destination);
-                        if let Some(to) = to { let _ = socket.send_to(&bytes, to).await; }
-                    }
-                }
-            }
-        };
-        // Both futures live in this task and are cancelled together on drop.
-        // Waiting for receive capacity never suspends the sending future.
-        tokio::select! { () = receiving => {}, () = sending => {} }
-    });
-    LinkHandle {
-        send,
-        stop,
-        task: Some(task),
-        stream: false,
-    }
+    udp::start(
+        socket,
+        destination,
+        None,
+        hello,
+        RegistrationGate::unrestricted(),
+        events,
+    )
 }
 
 /// How long to wait before each reconnect; the last repeats.
@@ -329,6 +268,7 @@ pub fn tcp_client(host: String, port: u16, events: Events) -> LinkHandle {
         stop,
         task: Some(task),
         stream: true,
+        diagnostics: None,
     }
 }
 
@@ -440,6 +380,7 @@ pub async fn tcp_server(address: SocketAddr, events: Events) -> std::io::Result<
         stop,
         task: Some(task),
         stream: true,
+        diagnostics: None,
     })
 }
 
@@ -623,6 +564,7 @@ pub fn serial(device: String, baud: u32, usb: Option<UsbId>, events: Events) -> 
         stop,
         task: None,
         stream: true,
+        diagnostics: None,
     }
 }
 

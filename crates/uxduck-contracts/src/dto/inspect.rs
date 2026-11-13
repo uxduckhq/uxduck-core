@@ -159,6 +159,9 @@ impl MavlinkHistoryParams {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PastMessage {
+    /// Matched to the original queued frame. OS acceptance is not vehicle delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_send: Option<super::diagnostics::SocketSend>,
     /// When UXDuck received or sent it, in microseconds since the Unix
     /// epoch.
     #[schemars(schema_with = "crate::safe::integer")]

@@ -1023,6 +1023,7 @@ impl Engine {
                 ..here.clone()
             },
             None => Vehicle {
+                connections: None,
                 id: entry.id.clone(),
                 name: entry.name.clone(),
                 aliases: Vec::new(),
@@ -1050,6 +1051,7 @@ impl Engine {
                 traffic: false,
                 // Not in the account's library: chosen on each computer.
                 look: None,
+                own_model: None,
                 colour: entry.colour,
                 gripper: None,
                 companions: Vec::new(),

@@ -242,6 +242,7 @@ enum Call {
     Transfer(TransferOrder),
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
+    ConnectionOrder(Vec<String>),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
     Journal(Write),
@@ -311,6 +312,9 @@ impl LinkPort for Links {
     }
     fn transfer(&mut self, order: TransferOrder) {
         push(&self.0, Call::Transfer(order));
+    }
+    fn connection_order(&mut self, order: &[String]) {
+        push(&self.0, Call::ConnectionOrder(order.to_vec()));
     }
     fn gcs_system_id(&mut self, id: u8) {
         push(&self.0, Call::GcsSystemId(id));
@@ -412,6 +416,9 @@ struct Host {
     /// Files attached to chat messages this visit (S246), in memory: the
     /// browser has no folder for them. Whole or not.
     attached: HashMap<String, (Vec<u8>, bool)>,
+    /// Vehicles' own 3D models (ADR-0035 M5) this visit, in memory, by
+    /// their SHA-256, as attached files are.
+    own_models: HashMap<String, Vec<u8>>,
 }
 
 /// The most attached files the page holds at once, together.
@@ -517,6 +524,25 @@ impl System for Host {
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         Ok(bytes[from..from.saturating_add(len).min(bytes.len())].to_vec())
+    }
+    fn own_model_keep(&mut self, file: &str, bytes: &[u8]) -> Result<(), String> {
+        self.own_models
+            .entry(file.to_owned())
+            .or_insert_with(|| bytes.to_vec());
+        Ok(())
+    }
+    fn own_model_read(&mut self, file: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let bytes = self.own_models.get(file).ok_or(
+            "UXDuck Web keeps a model of your own only while it is open. Choose its file again.",
+        )?;
+        let from = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        Ok(bytes[from..from.saturating_add(len).min(bytes.len())].to_vec())
+    }
+    fn own_model_remove(&mut self, file: &str) -> Result<(), String> {
+        self.own_models.remove(file);
+        Ok(())
     }
     fn link_last_heard_us(&self, link_id: &str) -> Option<u64> {
         self.logs
@@ -681,6 +707,7 @@ impl Browser {
                 clock: clock.clone(),
                 inputs: inputs.clone(),
                 attached: HashMap::new(),
+                own_models: HashMap::new(),
             }),
             plugins: Box::new(NoPlugins),
         };
@@ -1579,6 +1606,7 @@ impl Browser {
                 self.apply(effects, outputs);
             }
             Call::GcsSystemId(id) => self.session.set_gcs_system_id(id),
+            Call::ConnectionOrder(order) => self.session.set_connection_order(order),
             Call::Pause(link_id, paused) => {
                 if self.streams.contains_key(&link_id) {
                     self.session.pause(&link_id, paused, now);

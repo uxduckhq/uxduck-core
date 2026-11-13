@@ -256,6 +256,18 @@ impl System for Host {
         crate::attachments::path(&self.data_dir.join("attachments"), id)
     }
 
+    fn own_model_keep(&mut self, file: &str, bytes: &[u8]) -> Result<(), String> {
+        crate::own_models::keep(&self.data_dir.join("vehicle-models"), file, bytes)
+    }
+
+    fn own_model_read(&mut self, file: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        crate::own_models::read(&self.data_dir.join("vehicle-models"), file, offset, len)
+    }
+
+    fn own_model_remove(&mut self, file: &str) -> Result<(), String> {
+        crate::own_models::remove(&self.data_dir.join("vehicle-models"), file)
+    }
+
     fn keep_log(&mut self, recording: &str, bytes: &[u8]) -> Result<(), String> {
         let mut spool = crate::spool::Spool::open(&self.data_dir, self.data_dir.join("tlogs"))
             .map_err(|e| e.to_string())?;
@@ -306,6 +318,13 @@ impl System for Host {
             vehicle.system_id,
             params,
         )
+    }
+
+    fn transport_diagnostics(
+        &self,
+        link: &str,
+    ) -> Option<uxduck_contracts::dto::diagnostics::TransportDiagnostics> {
+        crate::diagnostics::transport_of(link)
     }
 
     fn last_router_incident(

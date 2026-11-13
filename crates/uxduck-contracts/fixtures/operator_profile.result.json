@@ -60,7 +60,19 @@
     "parameterGroups": [],
     "inspectorPinned": [],
     "controlActions": [],
-    "controllerMappings": []
+    "controllerMappings": [
+      {
+        "controllerId": "gp-030000005e0400000b0b000000000000",
+        "controllerName": "Xbox Wireless Controller",
+        "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+        "mappingId": "mode-1"
+      },
+      {
+        "controllerId": "gp-030000005e0400000b0b000000000000",
+        "controllerName": "Xbox Wireless Controller",
+        "mappingId": "mode-2"
+      }
+    ]
   },
   "commandsRequested": 3,
   "notesWritten": 1,

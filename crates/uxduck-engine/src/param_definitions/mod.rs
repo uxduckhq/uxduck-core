@@ -239,10 +239,13 @@ impl Engine {
             detail,
         };
         if !vehicle.autopilot.to_ascii_lowercase().contains("ardupilot") {
-            return Some(blank(
-                DefinitionsStatus::Missing,
-                Some("Descriptions are for ArduPilot only for now.".into()),
-            ));
+            return Some(VehicleDefinitions {
+                firmware: None,
+                ..blank(
+                    DefinitionsStatus::Missing,
+                    Some("Descriptions are for ArduPilot only for now.".into()),
+                )
+            });
         }
         let pinned = matches!(choice.ardupilot, SetChoice::Set { .. });
         if matches!(self.definitions.catalogue, Catalogue::Unknown)

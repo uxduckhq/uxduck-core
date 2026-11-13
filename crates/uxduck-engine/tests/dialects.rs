@@ -147,6 +147,7 @@ fn engine_from(persistence: Box<dyn Persistence>, state: State) -> (Engine, Clie
 /// A vehicle heard on no particular link, built from a commit.
 fn heard(engine: &mut Engine, id: &str, commit: Option<&str>) {
     engine.vehicle_observed(Observation {
+        connections: None,
         id: id.into(),
         aliases: Vec::new(),
         link_id: "lk".into(),

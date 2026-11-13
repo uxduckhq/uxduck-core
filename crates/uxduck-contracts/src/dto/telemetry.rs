@@ -178,3 +178,31 @@ pub struct TelemetrySubscribeResult {
     /// The latest of every vehicle; updates follow as `telemetry/update`.
     pub vehicles: Vec<VehicleTelemetry>,
 }
+
+/// A formula to try (ADR-0056), as a calculated value would have it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryCalculateParams {
+    /// Such as `battery.voltage_v * battery.current_a`.
+    pub formula: String,
+    /// The vehicle to work it out for now; without one it is only read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+}
+
+/// What a formula reads, and its value now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryCalculateResult {
+    /// For the vehicle now; absent without one, while an item or parameter
+    /// it reads has no value, or when the answer is not a number (a
+    /// division by zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// The telemetry items it reads, each once.
+    pub items: Vec<String>,
+    /// The parameters it reads, each once.
+    pub params: Vec<String>,
+    /// Those items and parameters the vehicle has no recent value for.
+    pub missing: Vec<String>,
+}

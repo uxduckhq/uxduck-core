@@ -233,6 +233,9 @@ pub trait LinkPort: Send {
     }
     /// The MAVLink system id UXDuck sends as and takes replies for, from
     /// its settings: told before any link opens, and again when it changes.
+    fn connection_order(&mut self, order: &[String]) {
+        let _ = order;
+    }
     fn gcs_system_id(&mut self, id: u8) {
         let _ = id;
     }
@@ -526,6 +529,31 @@ pub trait System: Send {
         let _ = id;
         Err("Adding a video needs UXDuck Desktop.".into())
     }
+    /// Keeps a vehicle's own 3D model (ADR-0035 M5), checked, under
+    /// `file`, its SHA-256. Keeping one already kept changes nothing.
+    ///
+    /// # Errors
+    /// What a person reads: it could not be kept, and why.
+    fn own_model_keep(&mut self, file: &str, bytes: &[u8]) -> Result<(), String> {
+        let _ = (file, bytes);
+        Err("Keeping a model of your own needs UXDuck Desktop.".into())
+    }
+    /// Up to `len` of a kept model's bytes from `offset`.
+    ///
+    /// # Errors
+    /// What a person reads: it is gone or could not be read.
+    fn own_model_read(&mut self, file: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let _ = (file, offset, len);
+        Err("Models of your own are kept by UXDuck Desktop.".into())
+    }
+    /// Forgets a kept model that no vehicle is drawn with any more.
+    ///
+    /// # Errors
+    /// What a person reads: it could not be removed.
+    fn own_model_remove(&mut self, file: &str) -> Result<(), String> {
+        let _ = file;
+        Ok(())
+    }
     /// Keeps a log opened from elsewhere for the account, under a flight's
     /// id (ADR-0039 R11): sent as that flight's log is. UXDuck Desktop only.
     ///
@@ -593,6 +621,14 @@ pub trait System: Send {
     }
     /// On-demand Core and owned simulation usage; unsupported browser hosts return none.
     fn process_usage(&self) -> Option<uxduck_contracts::dto::settings::CoreProcessUsage> {
+        None
+    }
+
+    fn transport_diagnostics(
+        &self,
+        link: &str,
+    ) -> Option<uxduck_contracts::dto::diagnostics::TransportDiagnostics> {
+        let _ = link;
         None
     }
 

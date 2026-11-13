@@ -128,6 +128,8 @@ pub struct LinkDiagnoseResult {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relationships_truncated: bool,
     pub routing: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportDiagnostics>,
     pub recent_events: RouterEventsResult,
     /// Last preserved loop shutdown, even when outside the recent time window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,4 +220,81 @@ pub struct DaemonLogsResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub older: Option<String>,
     pub coverage: DiagnosticCoverage,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportDiagnostics {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub generation: u64,
+    pub configured_destination: Option<String>,
+    pub remote_endpoint: Option<String>,
+    pub local_endpoint: Option<String>,
+    pub wildcard_bind: bool,
+    pub socket_open: bool,
+    /// Confirmed by Network.framework in the daemon process, or unknown.
+    pub local_network_permission: Option<String>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub local_network_checked_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_receive_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_valid_mavlink_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_heartbeat_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_send_attempt_us: Option<u64>,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_socket_send_us: Option<u64>,
+    pub send_error: Option<TransportError>,
+    pub receive_error: Option<TransportError>,
+    pub recovery_error: Option<TransportError>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub registration_attempts: u64,
+    pub registration_suppressed: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub recreation_attempts: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub backoff_ms: u64,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub next_retry_us: Option<u64>,
+    pub recovery_reason: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub dropped_receive_events: u64,
+    /// Bounded recent socket attempts. Each record is one attempt and its
+    /// outcome, never a second packet. OS acceptance is not delivery.
+    pub sends: Vec<SocketSend>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportError {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    pub operation: String,
+    pub kind: String,
+    pub os_code: Option<i32>,
+    pub endpoint: Option<String>,
+    pub message: String,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketSend {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub id: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub generation: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub completed_us: Option<u64>,
+    pub endpoint: String,
+    pub registration: bool,
+    pub fingerprint: String,
+    pub message_id: Option<u32>,
+    /// attempted, accepted-by-os, or failed. Never claims peer delivery.
+    pub outcome: String,
+    pub error: Option<TransportError>,
 }

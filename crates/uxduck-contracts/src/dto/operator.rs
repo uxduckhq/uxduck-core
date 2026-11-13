@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::dto::telemetry::AltitudeFrame;
+use crate::dto::telemetry::{AltitudeFrame, Unit};
 
 /// The name of the operator the page makes for someone who has none, so
 /// they never have to choose one (`DEFAULT_OPERATOR_NAME` in the web app).
@@ -490,6 +490,38 @@ pub struct TelemetryLayout {
     pub tiles: Vec<Tile>,
 }
 
+/// A value the operator works out from telemetry with a formula (ADR-0056),
+/// which UXDuck adds to every vehicle's telemetry as the item `key`. The
+/// formula reads items by key in their contract units (`battery.voltage_v`
+/// in volts, `speed.ground_mps` in m/s), with `+ - * / % ^`, comparisons
+/// that are 1 or 0, brackets, `abs`, `min`, `max`, `avg`, `round(x, d)`,
+/// `floor`, `ceil`, `sqrt`, `clamp(x, lo, hi)`, `if(test, a, b)` and
+/// `param("NAME")` for a parameter, such as `speed.ground_mps * 3.6` in
+/// km/h. It has no value while an item it reads has none. It cannot read
+/// another calculated value. Try one with `telemetry/calculate` first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedItem {
+    /// `custom.`, then up to 40 lowercase letters, digits and `_` ending in
+    /// the unit's suffix (`custom.sag_v` for volts), or with no suffix for
+    /// no unit or a count (`custom.power`). Kept when it is renamed.
+    pub key: String,
+    /// Its name, 1 to 48 characters, such as "Power".
+    pub label: String,
+    /// At most 400 characters, reading at least one item.
+    pub formula: String,
+    /// The unit the formula's answer is in. One UXDuck knows is shown in
+    /// the operator's units. `none` for anything else, with `unitText`.
+    pub unit: Unit,
+    /// A unit of the operator's own, up to 12 characters such as "km/h",
+    /// shown as written and never converted. Only with `none` or `count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_text: Option<String>,
+    /// How many decimals to show, 0 to 6; UXDuck's choice when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
+}
+
 /// The layout chosen for one vehicle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -541,6 +573,10 @@ pub struct Operator {
     /// The layout chosen for each vehicle that has one.
     #[serde(default)]
     pub vehicle_telemetry: Vec<VehicleTelemetryChoice>,
+    /// Values the operator works out from telemetry (ADR-0056), synced
+    /// with them. UXDuck adds them to every vehicle's telemetry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_items: Vec<CalculatedItem>,
     /// Groups of parameters the operator tunes together, such as Hover
     /// tuning (S74), by name.
     #[serde(default)]
@@ -568,9 +604,12 @@ pub struct Operator {
     /// signed in keeps the sign-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    /// The mapping this operator uses with each controller, recorded when
-    /// they claim one with it; read only. A claim without a mapping uses
-    /// theirs, else the one the controller last used.
+    /// The mapping this operator uses with each controller on each vehicle,
+    /// recorded when they claim one with it or choose one with
+    /// `controller/chooseMapping`; read only here. A claim without a
+    /// mapping uses theirs for the vehicle, else the one they chose last for
+    /// the controller, else the one the controller last used. A held
+    /// controller moving to a vehicle with one of its own switches to it.
     #[serde(default)]
     pub controller_mappings: Vec<ControllerMapping>,
     /// The Terms of Service this operator last agreed to on this computer
@@ -677,6 +716,11 @@ pub struct OperatorUpdateParams {
     /// Every vehicle's chosen layout; replaces the ones saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_telemetry: Option<Vec<VehicleTelemetryChoice>>,
+    /// Every calculated value (ADR-0056); replaces the ones saved. At most
+    /// 32. A key another operator on this computer works out differently
+    /// is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculated_items: Option<Vec<CalculatedItem>>,
     /// Every parameter group; replaces the ones saved (S74). At most 100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_groups: Option<Vec<ParameterGroup>>,
@@ -702,13 +746,19 @@ pub struct OperatorUpdateParams {
     pub me_marker_id: Option<Option<String>>,
 }
 
-/// The mapping an operator uses with one controller: by its id here, and
-/// its name, which finds the same kind of controller on another computer.
+/// The mapping an operator uses with one controller on one vehicle: by the
+/// controller's id here, and its name, which finds the same kind of
+/// controller on another computer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerMapping {
     pub controller_id: String,
     pub controller_name: String,
+    /// The vehicle it is for. None for one chosen before any vehicle was,
+    /// or before mappings were kept per vehicle: the one chosen last stands
+    /// for a vehicle without its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
     pub mapping_id: String,
 }
 

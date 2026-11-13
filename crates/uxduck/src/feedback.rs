@@ -8,6 +8,8 @@
 //! week. No timer runs while nothing waits (S24).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -33,6 +35,15 @@ const KEEP_FOR: Duration = Duration::from_hours(24 * 7);
 const RETRY: Duration = Duration::from_mins(1);
 /// The longest a 429's `Retry-After` holds kept reports back.
 const LONGEST_PAUSE: Duration = Duration::from_hours(24);
+/// A report goes out in pieces this large, and the page waiting on it is
+/// told how far it has got at most this often.
+const UPLOAD_CHUNK: usize = 64 * 1024;
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+/// An upload is given up, and the report kept, when none of the rest of it
+/// goes out for this long, or when it takes longer in all than a minute for
+/// the answer and its body at `SLOWEST_UPLOAD` bytes a second.
+const STALLED: Duration = Duration::from_mins(1);
+const SLOWEST_UPLOAD: usize = 32 * 1024;
 
 /// How many follow-up keys of reports the agent filed are kept (S294).
 const KEYS_KEPT: usize = 200;
@@ -80,11 +91,12 @@ pub fn start(
         sent: data_dir.join("suggestions.json"),
         keys: data_dir.join("agent-feedback-keys.json"),
         credentials,
+        engine,
     };
     // Suggestions sent from here that this version ships (S73).
     let shipped = crate::shipped::due(&sender.sent, env!("CARGO_PKG_VERSION"));
     if !shipped.is_empty() {
-        let engine = engine.clone();
+        let engine = sender.engine.clone();
         tokio::spawn(async move {
             let _ = engine
                 .run(move |e| {
@@ -95,7 +107,7 @@ pub fn start(
                 .await;
         });
     }
-    tokio::spawn(run(sender, rx, engine));
+    tokio::spawn(run(sender, rx));
     FeedbackChannel { tx }
 }
 
@@ -110,6 +122,7 @@ struct Sender {
     /// The follow-up keys of reports the agent filed, by report id (S294).
     keys: PathBuf,
     credentials: FileCredentials,
+    engine: EngineHandle,
 }
 
 /// How a send went.
@@ -124,7 +137,8 @@ enum Sent {
     Refused(String),
 }
 
-async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>, engine: EngineHandle) {
+async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
+    let engine = sender.engine.clone();
     // While the API is limiting this address, kept reports wait until then.
     let mut paused_until: Option<Instant> = None;
     loop {
@@ -333,13 +347,18 @@ impl Sender {
                 "couldn't reach UXDuck's servers. Nothing was added",
             )
         };
-        let response = client
+        let total = body.len();
+        let handed = Arc::new(AtomicUsize::new(0));
+        let request = client
             .post(format!("{api}/v1/feedback/{}/more", addition.report_id))
+            .timeout(upload_timeout(total))
             .header("Content-Type", content_type)
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| unreachable())?;
+            .header(reqwest::header::CONTENT_LENGTH, total)
+            .body(streamed(body, Arc::clone(&handed)));
+        let response = tokio::select! {
+            response = request.send() => response.map_err(|_| unreachable())?,
+            () = watch(&handed, total, STALLED, |_| {}) => return Err(unreachable()),
+        };
         let status = response.status();
         let answer: Value = response.json().await.unwrap_or(Value::Null);
         match status.as_u16() {
@@ -424,6 +443,7 @@ impl Sender {
                 report.insert("arch".into(), json!(crate::analytics::arch()));
             }
             bundle["log"] = json!(crate::logs::tail());
+            uxduck_engine::feedback::fit(&mut bundle);
             std::fs::write(dir.join("feedback-bundle.json"), bundle.to_string())?;
         }
         if let Some(image) = order.screenshot.as_deref().and_then(base64_decode) {
@@ -510,10 +530,20 @@ impl Sender {
             );
         }
         let (content_type, body) = form.finish();
+        // The outbox keeps each report under its id.
+        let report_id = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let total = body.len();
+        let handed = Arc::new(AtomicUsize::new(0));
         let mut request = client
             .post(format!("{api}/v1/feedback"))
+            .timeout(upload_timeout(total))
             .header("Content-Type", content_type)
-            .body(body);
+            .header(reqwest::header::CONTENT_LENGTH, total)
+            .body(streamed(body, Arc::clone(&handed)));
         // Signed in: the report is the account's, to see on any computer,
         // and credited when asked (S73). The API reads it from the token.
         // One the agent filed by itself goes without it (S294).
@@ -526,7 +556,19 @@ impl Sender {
         {
             request = request.bearer_auth(token);
         }
-        let response = match request.send().await {
+        let tell = |sent: usize| {
+            let report_id = report_id.clone();
+            self.engine
+                .post(move |e| e.feedback_progress(&report_id, sent as u64, total as u64));
+        };
+        let response = tokio::select! {
+            response = request.send() => response,
+            () = watch(&handed, total, STALLED, tell) => {
+                tracing::debug!("feedback: none of the report went out for a minute; kept");
+                return Sent::Later;
+            }
+        };
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 tracing::debug!(%error, "feedback: UXDuck's servers could not be reached; kept");
@@ -593,6 +635,47 @@ impl Sender {
             ),
         }
     }
+}
+
+/// A body sent in pieces, counting in `handed` how much of it has been
+/// handed to the network.
+fn streamed(body: Vec<u8>, handed: Arc<AtomicUsize>) -> reqwest::Body {
+    let total = body.len();
+    let pieces = (0..total).step_by(UPLOAD_CHUNK).map(move |start| {
+        let end = (start + UPLOAD_CHUNK).min(total);
+        handed.store(end, Ordering::Relaxed);
+        Ok::<_, std::io::Error>(body[start..end].to_vec())
+    });
+    reqwest::Body::wrap_stream(futures::stream::iter(pieces))
+}
+
+/// Watches an upload: `tell` hears the latest count every `PROGRESS_EVERY`,
+/// as the network takes the body in bursts. Returns once none of the rest
+/// has gone out for `stalled`. After the last piece it never returns: the
+/// network may still hold megabytes of the body, and the request's own
+/// timeout waits for the answer.
+async fn watch(handed: &AtomicUsize, total: usize, stalled: Duration, mut tell: impl FnMut(usize)) {
+    let (mut told, mut moved) = (0, Instant::now());
+    loop {
+        tokio::time::sleep(PROGRESS_EVERY).await;
+        crate::wakes::count("feedback: upload progress");
+        let sent = handed.load(Ordering::Relaxed);
+        if sent != told {
+            (told, moved) = (sent, Instant::now());
+            tell(sent);
+        }
+        if sent == total {
+            return std::future::pending().await;
+        }
+        if moved.elapsed() >= stalled {
+            return;
+        }
+    }
+}
+
+/// The longest a request may take in all, as `STALLED` says.
+fn upload_timeout(bytes: usize) -> Duration {
+    STALLED + Duration::from_secs((bytes / SLOWEST_UPLOAD) as u64)
 }
 
 /// A kept report as sent, and its voice notes as (file name, bytes).
@@ -844,6 +927,46 @@ mod tests {
         assert_eq!(sent["voiceNotes"], json!([{}]));
         assert_eq!(sent["id"], "r1");
         assert_eq!(voices, [("voice".to_owned(), b"old".to_vec())]);
+    }
+
+    #[tokio::test]
+    async fn an_upload_is_given_up_once_it_stops_and_not_while_it_waits_for_its_answer() {
+        let handed = AtomicUsize::new(0);
+        let stalled = Duration::from_millis(600);
+        let started = Instant::now();
+        let mut told = Vec::new();
+        let moving = async {
+            for sent in [100, 200, 300] {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                handed.store(sent, Ordering::Relaxed);
+            }
+        };
+        tokio::join!(
+            watch(&handed, 1000, stalled, |sent| told.push(sent)),
+            moving
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(900) + stalled,
+            "not given up while it moved"
+        );
+        assert_eq!(told.last(), Some(&300), "{told:?}");
+        assert!(told.is_sorted(), "{told:?}");
+
+        handed.store(1000, Ordering::Relaxed);
+        let waited = tokio::time::timeout(
+            Duration::from_secs(2),
+            watch(&handed, 1000, stalled, |_| {}),
+        )
+        .await;
+        assert!(
+            waited.is_err(),
+            "all of it handed over, the request waits for the answer"
+        );
+        assert_eq!(
+            upload_timeout(25 * 1024 * 1024),
+            Duration::from_secs(60 + 800),
+            "25 MB may take 14 minutes"
+        );
     }
 
     #[test]

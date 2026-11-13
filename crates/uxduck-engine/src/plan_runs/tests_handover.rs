@@ -139,6 +139,7 @@ impl Fixture {
             .to_owned();
         engine.state.links.get_mut(&link).unwrap().status = LinkStatus::Up;
         engine.vehicle_observed(Observation {
+            connections: None,
             id: "plane".into(),
             aliases: Vec::new(),
             link_id: link.clone(),
@@ -208,6 +209,7 @@ impl Fixture {
     fn mode(&mut self, mode: &str) {
         let vehicle = self.engine.state.vehicles["plane"].clone();
         self.engine.vehicle_observed(Observation {
+            connections: None,
             id: vehicle.id,
             aliases: vehicle.aliases,
             link_id: vehicle.link_id,

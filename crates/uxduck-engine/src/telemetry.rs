@@ -25,6 +25,11 @@ impl Engine {
             let derived = self.battery_items(&update);
             update.items.extend(derived);
         }
+        // The operators' calculated values (ADR-0056 K2), after those.
+        if self.calculates() {
+            let calculated = self.calculated_items(&update);
+            update.items.extend(calculated);
+        }
         // A replay vehicle's telemetry is shown and nothing more (ADR-0039 R3).
         let replay = self
             .state

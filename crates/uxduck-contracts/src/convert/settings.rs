@@ -179,6 +179,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         },
         supervision_grace_s: settings.supervision_grace_s,
         gcs_system_id: settings.gcs_system_id,
+        connection_order: settings.connection_order.clone(),
         store_flights: settings.store_flights,
         save_flights: settings.save_flights,
         upload_while_armed: settings.upload_while_armed,

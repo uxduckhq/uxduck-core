@@ -148,6 +148,7 @@ impl From<&core::Operator> for dto::Operator {
                     layout_id: layout.clone(),
                 })
                 .collect(),
+            calculated_items: value.calculated_items.iter().map(Into::into).collect(),
             parameter_groups: value
                 .parameter_groups
                 .iter()
@@ -167,6 +168,7 @@ impl From<&core::Operator> for dto::Operator {
                 .map(|m| dto::ControllerMapping {
                     controller_id: m.controller_id.clone(),
                     controller_name: m.controller_name.clone(),
+                    vehicle_id: m.vehicle_id.clone(),
                     mapping_id: m.mapping_id.clone(),
                 })
                 .collect(),
@@ -176,6 +178,32 @@ impl From<&core::Operator> for dto::Operator {
                 account_id: t.account_id.clone(),
             }),
             version: value.version,
+        }
+    }
+}
+
+impl From<&uxduck_core::domain::calculated::CalculatedItem> for dto::CalculatedItem {
+    fn from(value: &uxduck_core::domain::calculated::CalculatedItem) -> Self {
+        Self {
+            key: value.key.clone(),
+            label: value.label.clone(),
+            formula: value.formula.clone(),
+            unit: value.unit.into(),
+            unit_text: value.unit_text.clone(),
+            decimals: value.decimals,
+        }
+    }
+}
+
+impl From<&dto::CalculatedItem> for uxduck_core::domain::calculated::CalculatedItem {
+    fn from(value: &dto::CalculatedItem) -> Self {
+        Self {
+            key: value.key.clone(),
+            label: value.label.clone(),
+            formula: value.formula.clone(),
+            unit: value.unit.into(),
+            unit_text: value.unit_text.clone(),
+            decimals: value.decimals,
         }
     }
 }

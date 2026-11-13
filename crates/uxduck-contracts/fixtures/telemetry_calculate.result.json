@@ -1,0 +1,6 @@
+{
+  "value": 186.5,
+  "items": ["battery.voltage_v", "battery.current_a"],
+  "params": [],
+  "missing": []
+}

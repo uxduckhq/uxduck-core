@@ -1,0 +1,23 @@
+{
+  "method": "operator/update",
+  "params": {
+    "id": "op5f1c0a91b2d3e4f5",
+    "expectedVersion": 3,
+    "calculatedItems": [
+      {
+        "key": "custom.power",
+        "label": "Power",
+        "formula": "battery.voltage_v * battery.current_a",
+        "unit": "none",
+        "unitText": "W",
+        "decimals": 0
+      },
+      {
+        "key": "custom.sag_v",
+        "label": "Sag",
+        "formula": "param(\"BATT_ARM_VOLT\") - battery.voltage_v",
+        "unit": "volt"
+      }
+    ]
+  }
+}
