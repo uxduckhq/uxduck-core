@@ -1080,6 +1080,12 @@ fn prearm(set: bool) -> MavSysStatusSensor {
     MavSysStatusSensor::from_bits_truncate(if set { 0x1000_0000 } else { 0 })
 }
 
+/// `MAV_SYS_STATUS_SENSOR_RC_RECEIVER`: the fake always has RC input, as
+/// `ArduPilot`'s SITL does.
+fn rc_receiver() -> MavSysStatusSensor {
+    MavSysStatusSensor::from_bits_truncate(0x1_0000)
+}
+
 /// How long without `MANUAL_CONTROL` before the fake's failsafe: RTL.
 pub const FAILSAFE_S: f64 = 1.5;
 
@@ -2943,8 +2949,9 @@ impl FakeVehicle {
             voltage_battery: (12_600.0 - 12.0 * (100.0 - remaining)) as u16,
             current_battery: 1450,
             battery_remaining: remaining as i8,
-            onboard_control_sensors_enabled: prearm(reports),
-            onboard_control_sensors_health: prearm(reports && self.ready()),
+            onboard_control_sensors_present: rc_receiver(),
+            onboard_control_sensors_enabled: prearm(reports) | rc_receiver(),
+            onboard_control_sensors_health: prearm(reports && self.ready()) | rc_receiver(),
             ..SysStatus::default()
         }
     }
@@ -3774,6 +3781,26 @@ mod fork_tests {
     use super::*;
     use crate::custom::{Messages, read};
     use uxduck_core::domain::dialect::Dialect;
+
+    /// It has RC input, as SITL does, so a simulation passes the RC
+    /// receiver check.
+    #[test]
+    fn it_says_it_has_rc_input() {
+        let mut vehicle = FakeVehicle::new(1, 1);
+        vehicle.streams_on_request = false;
+        let frames = vehicle.telemetry(2.0);
+        let status = frames
+            .iter()
+            .find(|f| crate::framing::header(f).unwrap().message_id == 1)
+            .unwrap();
+        assert!(matches!(
+            decode(status).unwrap().message,
+            Decoded::SysStatus {
+                rc_receiver: Some(true),
+                ..
+            }
+        ));
+    }
 
     /// With `fork_messages`, it sends `ACME_STATUS` and a `SYS_STATUS` with the
     /// fork's extension (S252): UXDuck's own reader still reads that status,

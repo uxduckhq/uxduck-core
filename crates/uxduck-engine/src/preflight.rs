@@ -24,7 +24,7 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
-use uxduck_core::domain::controller::centred_throttle;
+use uxduck_core::domain::controller::{Controller, centred_throttle};
 use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::preflight::{
     Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, OwnCheck,
@@ -32,6 +32,7 @@ use uxduck_core::domain::preflight::{
 };
 use uxduck_core::domain::settings::PilotInputMethod;
 use uxduck_core::domain::setup::{SetupKind, SetupRow, fix_for};
+use uxduck_core::domain::telemetry::{RC_LOST, RC_RECEIVING};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::domain::video::{RecordPolicy, VideoState};
 use uxduck_core::events::{Actor, Change};
@@ -391,6 +392,7 @@ impl Engine {
                 OwnCheck::Setup => self.setup_check(vehicle),
                 OwnCheck::Restart => self.restart_check(vehicle),
                 OwnCheck::Link => self.link_check(vehicle),
+                OwnCheck::RcReceiver => self.rc_check(vehicle),
                 OwnCheck::Controller => self.controller_check(vehicle),
                 OwnCheck::Plan => self.plan_check(vehicle).0,
                 OwnCheck::Terrain => self.terrain_preflight(vehicle),
@@ -796,12 +798,58 @@ impl Engine {
         }
     }
 
-    fn controller_check(&self, vehicle: &Vehicle) -> Outcome {
+    /// The vehicle's RC input as it says in `SYS_STATUS` (`rc.status`). It
+    /// counts a ground station's stick input as RC, so while a controller
+    /// drives it from UXDuck it cannot say whether its own receiver works.
+    fn rc_check(&self, vehicle: &Vehicle) -> Outcome {
+        let name = &vehicle.name;
+        let now = self.clock.now_us();
+        let said = self
+            .telemetry(&vehicle.id)
+            .and_then(|t| t.items.iter().find(|i| i.key == "rc.status"))
+            .filter(|i| now.saturating_sub(i.time_us) < SIGNAL_FRESH_US)
+            .and_then(|i| i.text.as_deref());
+        let radio = Some(CheckFix::Setup {
+            row: SetupRow::Radio,
+        });
+        match said {
+            None => not(
+                CheckStatus::Unknown,
+                format!("{name} hasn't said whether it has RC input."),
+                None,
+            ),
+            Some(RC_RECEIVING) => match self.driving(vehicle).first() {
+                Some(controller) => not(
+                    CheckStatus::Unknown,
+                    format!(
+                        "{name} takes {}'s input from UXDuck as RC, so it can't say whether its own receiver works.",
+                        controller.name
+                    ),
+                    None,
+                ),
+                None => pass(format!("{name} is receiving RC input.")),
+            },
+            Some(RC_LOST) => not(
+                CheckStatus::Fail,
+                format!("{name} has lost its RC signal. Check its transmitter is on and in range."),
+                radio,
+            ),
+            Some(_) => not(
+                CheckStatus::Fail,
+                format!(
+                    "{name} has had no RC input since it started. Check its transmitter is on and bound."
+                ),
+                radio,
+            ),
+        }
+    }
+
+    /// The controllers driving a vehicle from UXDuck.
+    fn driving(&self, vehicle: &Vehicle) -> Vec<&Controller> {
         let ids: Vec<&String> = std::iter::once(&vehicle.id)
             .chain(vehicle.aliases.iter())
             .collect();
-        let driving: Vec<_> = self
-            .state
+        self.state
             .controllers
             .values()
             .filter(|c| {
@@ -809,7 +857,11 @@ impl Engine {
                     && c.claim.is_some()
                     && c.target.as_ref().is_some_and(|t| ids.contains(&t))
             })
-            .collect();
+            .collect()
+    }
+
+    fn controller_check(&self, vehicle: &Vehicle) -> Outcome {
+        let driving = self.driving(vehicle);
         if driving.is_empty() {
             return pass(format!("No controller drives {}.", vehicle.name));
         }

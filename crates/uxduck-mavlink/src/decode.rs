@@ -129,6 +129,10 @@ pub enum Message {
         /// Whether the autopilot reports its pre-arm checks
         /// (`MAV_SYS_STATUS_PREARM_CHECK` enabled), and whether they pass.
         prearm: Option<bool>,
+        /// Whether the autopilot has RC input
+        /// (`MAV_SYS_STATUS_SENSOR_RC_RECEIVER` present), and whether it is
+        /// healthy.
+        rc_receiver: Option<bool>,
     },
     VfrHud {
         /// Metres per second.
@@ -748,6 +752,10 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
                 m.onboard_control_sensors_enabled.bits(),
                 m.onboard_control_sensors_health.bits(),
             ),
+            rc_receiver: rc_receiver(
+                m.onboard_control_sensors_present.bits(),
+                m.onboard_control_sensors_health.bits(),
+            ),
         },
         Ok(Ardupilotmega::Timesync(m)) => Message::Timesync {
             tc1: m.tc1,
@@ -1234,6 +1242,15 @@ fn prearm(enabled: u32, health: u32) -> Option<bool> {
     (enabled & PREARM_CHECK != 0).then_some(health & PREARM_CHECK != 0)
 }
 
+/// `MAV_SYS_STATUS_SENSOR_RC_RECEIVER`: ArduPilot sets it present once it
+/// has had any RC input since it started, a ground station's stick
+/// overrides included, and healthy while it is not in its RC failsafe.
+const RC_RECEIVER: u32 = 0x1_0000;
+
+fn rc_receiver(present: u32, health: u32) -> Option<bool> {
+    (present & RC_RECEIVER != 0).then_some(health & RC_RECEIVER != 0)
+}
+
 /// `RC_CHANNELS` (S187).
 const fn rc_channels(m: &mavio::dialects::ardupilotmega::messages::RcChannels) -> Message {
     Message::RcChannels {
@@ -1370,6 +1387,41 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// `SYS_STATUS`'s RC receiver bit: present says the autopilot has RC
+    /// input, and health whether it still does.
+    #[test]
+    fn sys_status_says_whether_the_autopilot_has_rc_input() {
+        use mavio::dialects::ardupilotmega::enums::MavSysStatusSensor;
+        use mavio::dialects::ardupilotmega::messages::SysStatus;
+        let rc = MavSysStatusSensor::from_bits_truncate(0x1_0000);
+        let none = MavSysStatusSensor::empty();
+        for (present, health, expected) in [
+            (none, none, None),
+            // Healthy but not present is no receiver.
+            (none, rc, None),
+            (rc, rc, Some(true)),
+            (rc, none, Some(false)),
+        ] {
+            let frame = frame_of(
+                1,
+                0,
+                &SysStatus {
+                    onboard_control_sensors_present: present,
+                    onboard_control_sensors_enabled: present,
+                    onboard_control_sensors_health: health,
+                    ..SysStatus::default()
+                },
+            );
+            assert!(
+                matches!(
+                    decode(&frame).map(|d| d.message),
+                    Some(Message::SysStatus { rc_receiver, .. }) if rc_receiver == expected
+                ),
+                "{expected:?}"
+            );
+        }
     }
 
     /// A frame of any message, as `sim::frame` builds one.

@@ -143,6 +143,14 @@ pub fn off_the_ground(state: &str) -> Option<bool> {
     Some(at != 0)
 }
 
+/// `rc.status`: what the autopilot says of its RC input, from
+/// `MAV_SYS_STATUS_SENSOR_RC_RECEIVER` in `SYS_STATUS`. `ArduPilot` has a
+/// receiver once it has had any RC input since it started, a ground
+/// station's stick overrides included, and loses it in its RC failsafe.
+pub const RC_RECEIVING: &str = "Receiving";
+pub const RC_LOST: &str = "Signal lost";
+pub const RC_NOT_SEEN: &str = "Not seen";
+
 /// A named value for panels.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

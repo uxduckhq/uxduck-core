@@ -450,6 +450,24 @@ impl Bench {
 }
 
 impl Bench {
+    /// What the vehicle says of its RC input, as `rc.status`.
+    fn rc(&mut self, text: &str) {
+        self.engine.telemetry_observed(VehicleTelemetry {
+            vehicle_id: "v".into(),
+            positions: Vec::new(),
+            items: vec![TelemetryItem {
+                key: "rc.status".into(),
+                label: "RC receiver".into(),
+                unit: Unit::None,
+                value: None,
+                text: Some(text.into()),
+                source: "rc".into(),
+                component_id: 1,
+                time_us: self.time.now(),
+            }],
+        });
+    }
+
     fn ekf(&mut self, text: &str) {
         self.engine.telemetry_observed(VehicleTelemetry {
             vehicle_id: "v".into(),
@@ -692,6 +710,7 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
             "uxduck:setup",
             "uxduck:restart",
             "uxduck:link",
+            "uxduck:rc-receiver",
             "uxduck:controller",
             "uxduck:plan",
             "uxduck:terrain",
@@ -722,14 +741,22 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
             ("setup", "block"),
             ("restart", "block"),
             ("link", "warn"),
+            ("rc-receiver", "warn"),
             ("controller", "warn"),
             ("plan", "warn"),
             ("terrain", "warn"),
             ("recording", "warn")
         ]
     );
+    // Everything passes now, but the RC receiver: the vehicle has not said
+    // whether it has RC input, which is a warning.
     for check in &checks["checks"].as_array().unwrap()[1..] {
-        assert_eq!(check["status"], "pass", "{check}");
+        let expected = if check["id"] == "uxduck:rc-receiver" {
+            "unknown"
+        } else {
+            "pass"
+        };
+        assert_eq!(check["status"], expected, "{check}");
     }
     assert_eq!(checks["evaluating"], true);
     assert!(gating(&checks).is_empty());
@@ -1300,6 +1327,59 @@ fn the_link_the_controller_and_the_cameras() {
 }
 
 #[test]
+fn the_rc_receiver_check_is_what_the_vehicle_says_of_its_rc_input() {
+    let mut b = bench();
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["title"], "RC receiver");
+    assert_eq!(rc["status"], "unknown");
+    assert_eq!(rc["severity"], "warn");
+    assert_eq!(rc["gates"], false);
+    assert_eq!(rc["detail"], "Alpha hasn't said whether it has RC input.");
+    b.rc("Not seen");
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["status"], "fail");
+    assert_eq!(
+        rc["detail"],
+        "Alpha has had no RC input since it started. Check its transmitter is on and bound."
+    );
+    assert_eq!(rc["fix"], json!({ "type": "setup", "row": "radio" }));
+    assert_eq!(rc["gates"], false);
+    b.rc("Receiving");
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["status"], "pass");
+    assert_eq!(rc["detail"], "Alpha is receiving RC input.");
+    b.rc("Signal lost");
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["status"], "fail");
+    assert_eq!(
+        rc["detail"],
+        "Alpha has lost its RC signal. Check its transmitter is on and in range."
+    );
+    assert_eq!(rc["fix"], json!({ "type": "setup", "row": "radio" }));
+    // A person may have it hold arming.
+    b.configure(json!({ "check": "rc-receiver", "severity": "block" }));
+    assert_eq!(b.check("uxduck:rc-receiver")["gates"], true);
+    assert_eq!(
+        b.arm(None)["result"]["preflight"][0]["id"],
+        "uxduck:rc-receiver"
+    );
+    b.configure(json!({ "check": "rc-receiver", "severity": "warn" }));
+    // Its word counts for 10 s.
+    b.rc("Receiving");
+    b.time.advance(11 * S);
+    assert_eq!(b.check("uxduck:rc-receiver")["status"], "unknown");
+    // Turned off, as for a vehicle with no receiver, it is not listed.
+    b.configure(json!({ "check": "rc-receiver", "on": false }));
+    assert!(
+        !b.checks()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "uxduck:rc-receiver")
+    );
+}
+
+#[test]
 fn the_plan_on_the_vehicle_is_the_one_chosen_verified_and_unchanged() {
     let mut b = bench();
     let ridge = b.plan("Ridge survey");
@@ -1376,6 +1456,7 @@ fn the_plan_on_the_vehicle_is_the_one_chosen_verified_and_unchanged() {
 #[test]
 fn the_list_is_journaled_when_it_changes_and_kept_while_armed() {
     let mut b = bench();
+    b.rc("Receiving");
     b.checks();
     let before = b.journal.preflight_updates();
     assert!(before >= 1);

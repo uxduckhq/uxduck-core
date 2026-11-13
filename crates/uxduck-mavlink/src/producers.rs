@@ -7,7 +7,8 @@
 use std::f64::consts::PI;
 
 use uxduck_core::domain::telemetry::{
-    Altitude, AltitudeFrame, PositionEstimate, TelemetryItem, Unit,
+    Altitude, AltitudeFrame, PositionEstimate, RC_LOST, RC_NOT_SEEN, RC_RECEIVING, TelemetryItem,
+    Unit,
 };
 
 use crate::decode::Message;
@@ -393,6 +394,7 @@ impl Producer for Power {
             current_battery,
             battery_remaining,
             prearm,
+            ..
         } = message
         else {
             return;
@@ -769,6 +771,9 @@ impl Producer for Servos {
 /// calibration's bars (S187). Channels it does not give, or gives as unused
 /// (0 or `UINT16_MAX`), are left out. Receiver strength is `rc.rssi` on its
 /// device-dependent scale; 255 clears it to unknown, while zero is valid.
+/// `rc.channels` is how many channels the receiver gives. `rc.status` is
+/// what the autopilot says of its RC input in `SYS_STATUS`: receiving, lost
+/// or not seen since it started.
 #[derive(Debug)]
 pub struct RcInputs;
 
@@ -778,6 +783,16 @@ impl Producer for RcInputs {
     }
 
     fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let from = (self.id(), component_id, now_us);
+        if let &Message::SysStatus { rc_receiver, .. } = message {
+            let text = match rc_receiver {
+                Some(true) => RC_RECEIVING,
+                Some(false) => RC_LOST,
+                None => RC_NOT_SEEN,
+            };
+            out.text("rc.status", "RC receiver", text, from);
+            return;
+        }
         let Message::RcChannels {
             count,
             channels,
@@ -786,7 +801,6 @@ impl Producer for RcInputs {
         else {
             return;
         };
-        let from = (self.id(), component_id, now_us);
         // Preserve the device-dependent scale. Unknown clears a previous sample.
         out.items.push(TelemetryItem {
             key: "rc.rssi".into(),
@@ -798,6 +812,13 @@ impl Producer for RcInputs {
             component_id,
             time_us: now_us,
         });
+        out.item(
+            "rc.channels",
+            "RC channels",
+            Unit::Count,
+            f64::from(*count),
+            from,
+        );
         for (index, pulse) in channels
             .iter()
             .enumerate()
@@ -1712,6 +1733,7 @@ mod tests {
                 current_battery: -1,
                 battery_remaining,
                 prearm: None,
+                rc_receiver: None,
             })
         };
         let volts = |items: Vec<(String, f64)>| {
@@ -1929,6 +1951,59 @@ mod tests {
                 ("fence.breaches".to_owned(), 2.0)
             ]
         );
+    }
+
+    #[test]
+    fn rc_status_is_the_autopilots_word_on_its_rc_input() {
+        let status = |rc_receiver| {
+            let mut out = Produced::default();
+            RcInputs.consume(
+                1,
+                &Message::SysStatus {
+                    voltage_battery: 0,
+                    current_battery: -1,
+                    battery_remaining: -1,
+                    prearm: None,
+                    rc_receiver,
+                },
+                42,
+                &mut out,
+            );
+            assert_eq!(out.items.len(), 1);
+            let item = out.items.remove(0);
+            assert_eq!(item.key, "rc.status");
+            assert_eq!(item.label, "RC receiver");
+            assert_eq!(item.source, "rc");
+            assert_eq!(item.time_us, 42);
+            item.text.unwrap()
+        };
+        assert_eq!(status(None), "Not seen");
+        assert_eq!(status(Some(true)), "Receiving");
+        assert_eq!(status(Some(false)), "Signal lost");
+    }
+
+    #[test]
+    fn rc_channels_is_how_many_the_receiver_gives() {
+        for count in [0, 8] {
+            let mut out = Produced::default();
+            RcInputs.consume(
+                1,
+                &Message::RcChannels {
+                    count,
+                    channels: [1500; 18],
+                    rssi: 255,
+                },
+                42,
+                &mut out,
+            );
+            let channels = out
+                .items
+                .iter()
+                .find(|item| item.key == "rc.channels")
+                .unwrap();
+            assert_eq!(channels.value, Some(f64::from(count)));
+            assert_eq!(channels.unit, Unit::Count);
+        }
     }
 
     #[test]

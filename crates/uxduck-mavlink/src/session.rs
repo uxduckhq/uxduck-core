@@ -7149,9 +7149,11 @@ mod tests {
             .filter(|item| item.key.starts_with("rc."))
             .map(|item| (item.key.clone(), item.value.unwrap_or_default()))
             .collect();
-        assert_eq!(items.len(), 9, "{items:?}");
+        assert_eq!(items.len(), 11, "{items:?}");
         assert!(items.contains(&("rc.rssi".into(), 200.0)));
+        assert!(items.contains(&("rc.channels".into(), 8.0)));
         assert!(items.contains(&("rc.3".into(), 1000.0)));
+        assert!(items.iter().any(|(key, _)| key == "rc.status"));
     }
 
     #[test]

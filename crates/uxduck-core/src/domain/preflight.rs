@@ -94,6 +94,8 @@ pub enum OwnCheck {
     /// The link is good: heard just now, and the radio's signal is strong
     /// enough when it reports one.
     Link,
+    /// The vehicle says it is receiving RC input.
+    RcReceiver,
     /// A controller driving the vehicle is at neutral.
     Controller,
     /// The plan on the vehicle is the one chosen, verified and unchanged
@@ -118,10 +120,11 @@ pub struct Threshold {
 
 impl OwnCheck {
     /// In the list's order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Setup,
         Self::Restart,
         Self::Link,
+        Self::RcReceiver,
         Self::Controller,
         Self::Plan,
         Self::Terrain,
@@ -135,6 +138,7 @@ impl OwnCheck {
             Self::Setup => "setup",
             Self::Restart => "restart",
             Self::Link => "link",
+            Self::RcReceiver => "rc-receiver",
             Self::Controller => "controller",
             Self::Plan => "plan",
             Self::Terrain => "terrain",
@@ -161,6 +165,7 @@ impl OwnCheck {
             Self::Setup => "No setup procedure running",
             Self::Restart => "No restart due",
             Self::Link => "Link",
+            Self::RcReceiver => "RC receiver",
             Self::Controller => "Controller at neutral",
             Self::Plan => "Plan on the vehicle",
             Self::Terrain => "Terrain loaded",

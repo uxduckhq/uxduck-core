@@ -88,6 +88,11 @@ pub enum OwnCheck {
     /// The vehicle was heard just now, and its radio's signal, when it
     /// reports one, is at least the threshold.
     Link,
+    /// The vehicle says it is receiving RC input (`rc.status`). Fails when
+    /// it has lost it or has had none since it started. Not known while a
+    /// controller drives the vehicle from UXDuck, because the vehicle
+    /// counts that input as RC.
+    RcReceiver,
     /// A controller driving the vehicle has roll, pitch and yaw within the
     /// threshold of centre and its throttle no higher than that above its
     /// middle.
