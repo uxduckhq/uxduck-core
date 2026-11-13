@@ -215,7 +215,7 @@ fn replay_note(
         }
         None => note.push_str(
             " Its vehicle is not here: connect it to read all of them, or replay the flight's \
-             ArduPilot autopilot log (.bin), which records every parameter.",
+             autopilot log (ArduPilot's .bin or PX4's .ulg), which records every parameter.",
         ),
     }
     note

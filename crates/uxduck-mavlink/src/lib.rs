@@ -47,6 +47,7 @@ pub mod tlog;
 pub mod traffic;
 pub mod transfers;
 mod tuning;
+pub mod ulog;
 pub mod usb_ids;
 
 #[cfg(feature = "native")]

@@ -19,7 +19,7 @@ pub struct ReplayOpenParams {
     /// An operation's flights, played together (R16, R17).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
-    /// A tlog or `.bin` file on this computer.
+    /// A tlog, `.bin` or `.ulg` file on this computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// A log's bytes in base64.
@@ -31,7 +31,7 @@ pub struct ReplayOpenParams {
     /// A flight log in the account, from `account/flights`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<ReplayAccountLog>,
-    /// A tlog or `.bin` the operator attached to a chat message (S246): its
+    /// A tlog, `.bin` or `.ulg` the operator attached to a chat message (S246): its
     /// attachment id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<String>,
@@ -68,8 +68,8 @@ pub struct ReplayVehicleFile {
     pub path: String,
 }
 
-/// A vehicle's SD card plugged into this computer, with logs in its
-/// `APM/LOGS` folder (R15).
+/// A vehicle's SD card plugged into this computer, with ArduPilot's logs in
+/// its `APM/LOGS` folder or PX4's in `log` (R15).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LogCard {
@@ -131,11 +131,11 @@ pub struct FlightSeriesParams {
     pub vehicle_id: Option<String>,
     /// Telemetry keys, such as `battery.voltage_v` or `vibration.z`, and
     /// `position.fused.<frame>` for a height (`above-home`, `amsl`,
-    /// `above-ground`). A replay vehicle from a DataFlash log also takes the
+    /// `above-ground`). A replay vehicle from an autopilot log also takes the
     /// log's own fields as `replay/logFields` lists them, at the rate they
-    /// were logged: `df.<MESSAGE>.<Column>`, such as `df.XKF4.SV`, or
-    /// `df.<MESSAGE>[<instance>].<Column>`, such as `df.VIBE[1].VibeZ`. At
-    /// most 16.
+    /// were logged: `df.<MESSAGE>.<Column>`, such as `df.XKF4.SV` or PX4's
+    /// `df.battery_status.voltage_v`, or `df.<MESSAGE>[<instance>].<Column>`,
+    /// such as `df.VIBE[1].VibeZ`. At most 16.
     pub keys: Vec<String>,
     /// At most this many points a series, the highs and lows kept: 1 to
     /// 3000, 1000 when absent.
@@ -178,7 +178,7 @@ pub struct FlightSeriesResult {
     pub missing_keys: Vec<String>,
 }
 
-/// `replay/logFields`: what a replay vehicle's DataFlash log holds.
+/// `replay/logFields`: what a replay vehicle's autopilot log holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplayLogFieldsParams {
@@ -197,11 +197,12 @@ pub struct LogColumn {
     pub unit: Option<String>,
 }
 
-/// One message type a DataFlash log holds, as logged.
+/// One message type an autopilot log holds, as logged: a DataFlash message
+/// or a PX4 topic.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LogMessage {
-    /// Such as `VIBE` or `XKF4`.
+    /// Such as `VIBE`, `XKF4` or `vehicle_attitude`.
     pub name: String,
     pub columns: Vec<LogColumn>,
     /// Its instances (two IMUs: `[0, 1]`), each a key of its own as
@@ -424,7 +425,8 @@ pub enum ReplaySourceKind {
     Flight,
     /// A tlog file.
     Tlog,
-    /// The autopilot's own DataFlash log (`.bin`), R15.
+    /// The autopilot's own log, ArduPilot's DataFlash (`.bin`) or PX4's
+    /// ULog (`.ulg`), R15.
     Log,
 }
 
@@ -476,8 +478,9 @@ pub struct ReplaySource {
     pub vehicle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// What a DataFlash log said of its vehicle: its system id and its
-    /// firmware, such as "`System 1 · ArduCopter V4.5.1 (abcdef12)`".
+    /// What an autopilot log said of its vehicle: its system id and its
+    /// firmware, such as "`System 1 · ArduCopter V4.5.1 (abcdef12)`" or
+    /// "`System 1 · PX4 v1.15.0 (abcdef12)`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]

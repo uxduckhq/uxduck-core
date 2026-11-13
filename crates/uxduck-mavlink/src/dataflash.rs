@@ -315,7 +315,7 @@ fn mission_item(format: &Format, payload: &[u8]) -> Option<MissionItemInt> {
     clippy::cast_possible_wrap,
     reason = "a log's values into MAVLink's fields"
 )]
-fn int<T: TryFrom<i64> + Default>(v: f64) -> T {
+pub(crate) fn int<T: TryFrom<i64> + Default>(v: f64) -> T {
     T::try_from(v.round() as i64).unwrap_or_default()
 }
 

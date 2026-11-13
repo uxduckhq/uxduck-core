@@ -221,8 +221,8 @@ struct Hint {
     /// is gone, as a deleted simulation's is) and name.
     vehicle: Option<(String, Option<u8>, String)>,
     link_id: Option<String>,
-    /// A DataFlash log as it was read, for its own fields (R15), and the
-    /// mission its `CMD` records give.
+    /// An autopilot log (DataFlash or ULog) as it was read, for its own
+    /// fields (R15), and the mission a DataFlash log's `CMD` records give.
     log: Option<std::sync::Arc<Vec<u8>>>,
     mission: Vec<uxduck_mavlink::decode::MissionItemInt>,
     /// The parameter frames of its link's log before it (ADR-0050 L7), as
@@ -600,19 +600,23 @@ fn log_start_us(file: &str) -> Option<u64> {
     secs.parse::<u64>().ok()?.checked_mul(1_000_000)
 }
 
-/// A DataFlash log (`.bin`) as tlog records on its own clock, through
-/// its producer (R15), kept as read for its own fields; a tlog as it is.
+/// An autopilot log, ArduPilot's DataFlash (`.bin`) or PX4's ULog
+/// (`.ulg`), as tlog records on its own clock, through its producer (R15),
+/// kept as read for its own fields; a tlog as it is.
 fn as_tlog(
     bytes: Vec<u8>,
     source: &mut ReplaySource,
     hint: &mut Hint,
 ) -> Result<Vec<u8>, ApiError> {
-    if !uxduck_mavlink::dataflash::is_dataflash(&bytes) {
+    let converted = if uxduck_mavlink::dataflash::is_dataflash(&bytes) {
+        uxduck_mavlink::dataflash::to_tlog(&bytes)
+    } else if uxduck_mavlink::ulog::is_ulog(&bytes) {
+        uxduck_mavlink::ulog::to_tlog(&bytes)
+    } else {
         return Ok(bytes);
-    }
+    };
     source.kind = ReplaySourceKind::Log;
-    let (tlog, about) = uxduck_mavlink::dataflash::to_tlog(&bytes)
-        .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+    let (tlog, about) = converted.map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
     // The log names no vehicle: its file does, with what it said of itself.
     if let Some(firmware) = about.firmware {
         source.detail = Some(format!("System {} · {firmware}", about.system_id));
@@ -2998,7 +3002,7 @@ impl Engine {
         }
     }
 
-    /// A replay vehicle's DataFlash fields as logged (R15): `df.` keys,
+    /// A replay vehicle's autopilot log fields as logged (R15): `df.` keys,
     /// on the replay's clock and within its source's range.
     fn log_series(
         replay: &Replay,
@@ -3013,7 +3017,11 @@ impl Engine {
         ) else {
             return Vec::new();
         };
-        let mut logged = uxduck_mavlink::dataflash::series(log, keys);
+        let mut logged = if uxduck_mavlink::ulog::is_ulog(log) {
+            uxduck_mavlink::ulog::series(log, keys)
+        } else {
+            uxduck_mavlink::dataflash::series(log, keys)
+        };
         keys.iter()
             .filter_map(|key| {
                 let samples: Vec<FlightSample> = logged
@@ -3049,7 +3057,7 @@ impl Engine {
             .collect()
     }
 
-    /// `replay/logFields` (R15): what a replay vehicle's DataFlash log
+    /// `replay/logFields` (R15): what a replay vehicle's autopilot log
     /// holds, so the agent says "not logged" rather than guessing.
     fn replay_log_fields(
         &self,
@@ -3066,32 +3074,36 @@ impl Engine {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
                 "This is a telemetry log (.tlog): it has what the vehicle sent, not the \
-                 autopilot's own fields. Open the flight's autopilot log (.bin) for those.",
+                 autopilot's own fields. Open the flight's autopilot log (.bin or .ulg) for those.",
             ));
         };
         Ok(ReplayLogFieldsResult {
             name: input.source.name.clone(),
-            messages: uxduck_mavlink::dataflash::messages(log)
-                .into_iter()
-                .map(|m| LogMessage {
-                    name: m.name,
-                    columns: m
-                        .columns
-                        .into_iter()
-                        .map(|c| LogColumn {
-                            name: c.name,
-                            unit: c.unit,
-                        })
-                        .collect(),
-                    instances: m
-                        .instances
-                        .into_iter()
-                        .filter_map(|i| u32::try_from(i).ok())
-                        .collect(),
-                    records: u64::try_from(m.records).unwrap_or(u64::MAX),
-                    rate_hz: m.rate_hz,
-                })
-                .collect(),
+            messages: if uxduck_mavlink::ulog::is_ulog(log) {
+                uxduck_mavlink::ulog::messages(log)
+            } else {
+                uxduck_mavlink::dataflash::messages(log)
+            }
+            .into_iter()
+            .map(|m| LogMessage {
+                name: m.name,
+                columns: m
+                    .columns
+                    .into_iter()
+                    .map(|c| LogColumn {
+                        name: c.name,
+                        unit: c.unit,
+                    })
+                    .collect(),
+                instances: m
+                    .instances
+                    .into_iter()
+                    .filter_map(|i| u32::try_from(i).ok())
+                    .collect(),
+                records: u64::try_from(m.records).unwrap_or(u64::MAX),
+                rate_hz: m.rate_hz,
+            })
+            .collect(),
         })
     }
 

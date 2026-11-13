@@ -15,6 +15,7 @@ doc-valid-idents = [
   "QGroundControl",
   "WebCodecs",
   "DataFlash",
+  "ULog",
   "AutoTune",
   "QuikTune",
 ]

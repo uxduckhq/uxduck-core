@@ -1781,8 +1781,8 @@ pub enum ClientRequest {
     LinkList(Empty),
     /// Plays a flight back, paused at its start or `timeUs`: its vehicles
     /// appear under their own names with `replay: true`, as they were then;
-    /// call one "<name> (replay)". A tlog or `.bin` the operator attached to
-    /// a message opens by its `attachment` id. Nothing is sent to a vehicle.
+    /// call one "<name> (replay)". A tlog, `.bin` or `.ulg` the operator
+    /// attached to a message opens by its `attachment` id. Nothing is sent to a vehicle.
     /// Needs `read`. Result: `ReplayState`.
     #[serde(rename = "replay/open")]
     ReplayOpen(crate::dto::replay::ReplayOpenParams),
@@ -1860,13 +1860,13 @@ pub enum ClientRequest {
     /// `config`. Result: `OperationListResult`.
     #[serde(rename = "operation/removeFlights")]
     OperationRemoveFlights(crate::dto::operation::OperationFlightsParams),
-    /// Vehicles' SD cards plugged into this computer, known by their
-    /// `APM/LOGS` folder, and the DataFlash logs copied off cards before,
-    /// to replay with `replay/open` by path. Changes nothing. UXDuck Desktop
+    /// Vehicles' SD cards plugged into this computer, known by their logs
+    /// (ArduPilot's in `APM/LOGS`, PX4's in `log`), and the autopilot logs
+    /// copied off cards before, to replay with `replay/open` by path. Changes nothing. UXDuck Desktop
     /// only. Needs `read`. Result: `LogCardsResult`.
     #[serde(rename = "logs/cards")]
     LogsCards(Empty),
-    /// Copies a card's `.BIN` logs into this computer's logs; `logs/cards`
+    /// Copies a card's `.BIN` or `.ulg` logs into this computer's logs; `logs/cards`
     /// says how it goes. Needs `config`. Result: `LogCardsResult`.
     #[serde(rename = "logs/copyCard")]
     LogsCopyCard(crate::dto::replay::LogCopyCardParams),
@@ -1879,8 +1879,9 @@ pub enum ClientRequest {
     /// Needs `read`. Result: `FlightSeriesResult`.
     #[serde(rename = "flight/series")]
     FlightSeries(crate::dto::replay::FlightSeriesParams),
-    /// What a replay vehicle's DataFlash log (`.bin`) holds, as the
-    /// autopilot logged it (ADR-0039 R15): every message with numbers, its
+    /// What a replay vehicle's autopilot log (ArduPilot's `.bin` or PX4's
+    /// `.ulg`) holds, as the autopilot logged it (ADR-0039 R15): every
+    /// message (a topic, for PX4) with numbers, its
     /// columns and units, its instances and how often it was written. Each
     /// column is a `flight/series` key, `df.<MESSAGE>.<Column>` or
     /// `df.<MESSAGE>[<instance>].<Column>`; a field not listed was not
@@ -1895,8 +1896,8 @@ pub enum ClientRequest {
     /// nothing. Needs `read`. Result: `ReplayMotionResult`.
     #[serde(rename = "replay/motion")]
     ReplayMotion(crate::dto::replay::ReplayMotionParams),
-    /// Saves the flights of the log the replay plays (a tlog or a `.bin`
-    /// opened from a file) to the account: each kept as a flight, and the
+    /// Saves the flights of the log the replay plays (a tlog, `.bin` or
+    /// `.ulg` opened from a file) to the account: each kept as a flight, and the
     /// log sent with it, so it is in the logbook and replays on the
     /// person's other computers. UXDuck Desktop only. Needs `config`.
     /// Result: `ReplayState`.

@@ -1,7 +1,8 @@
 //! The vehicle's SD card plugged into this computer (ADR-0039 R15, S212):
-//! noticed by its `APM/LOGS` folder, and its `.BIN` logs copied into this
-//! computer's logs (`<data>/logs-from-cards/<card>-<date>/`), where Flights
-//! lists them to replay. Nothing is fetched from a vehicle: people pull the
+//! noticed by its logs, ArduPilot's `.BIN` in `APM/LOGS` or PX4's `.ulg` in
+//! `log/<date>/`, and those copied into this computer's logs
+//! (`<data>/logs-from-cards/<card>-<date>/`), where Flights lists them to
+//! replay. Nothing is fetched from a vehicle: people pull the
 //! card, since nothing reads a log over MAVLink quickly (maintainer,
 //! 2026-10-28).
 
@@ -43,28 +44,73 @@ fn mount_roots() -> Vec<PathBuf> {
     volumes
 }
 
-/// A card's logs folder, whatever its letters' case.
-fn logs_folder(volume: &Path) -> Option<PathBuf> {
-    let find = |dir: &Path, name: &str| {
-        std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.is_dir() && p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name)))
-    };
-    find(&find(volume, "APM")?, "LOGS")
+/// A folder in `dir`, whatever its letters' case.
+fn folder(dir: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir() && p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name)))
 }
 
-fn bin_files(folder: &Path) -> Vec<PathBuf> {
+/// The files in a folder with one of these extensions, whatever their case,
+/// leaving out hidden ones such as the `._` files macOS writes beside each
+/// file it copies to a card.
+fn files_in(folder: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(folder)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("bin")))
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+                && p.extension()
+                    .is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        })
         .collect();
     files.sort();
     files
+}
+
+/// A card's logs, each with the name its copy takes: ArduPilot's in
+/// `APM/LOGS`, and PX4's in `log` and the folders in it, by day
+/// (`2026-11-13/18_31_07.ulg` as `2026-11-13_18_31_07.ulg`) or by session
+/// (`sess001/log001.ulg`) when it had no GPS time.
+fn card_logs(volume: &Path) -> Vec<(PathBuf, String)> {
+    let named = |files: Vec<PathBuf>, prefix: &str| {
+        files
+            .into_iter()
+            .filter_map(|file| {
+                let name = file.file_name()?.to_string_lossy().into_owned();
+                Some((file, format!("{prefix}{name}")))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut logs = Vec::new();
+    if let Some(apm) = folder(volume, "APM").and_then(|apm| folder(&apm, "LOGS")) {
+        logs.extend(named(files_in(&apm, &["bin"]), ""));
+    }
+    if let Some(px4) = folder(volume, "log") {
+        logs.extend(named(files_in(&px4, &["ulg"]), ""));
+        let mut days: Vec<PathBuf> = std::fs::read_dir(&px4)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        days.sort();
+        for day in days {
+            let prefix = day
+                .file_name()
+                .map(|n| format!("{}_", n.to_string_lossy()))
+                .unwrap_or_default();
+            logs.extend(named(files_in(&day, &["ulg"]), &prefix));
+        }
+    }
+    logs
 }
 
 /// Cards plugged in with logs on them, from `volumes` (the mount points).
@@ -73,8 +119,7 @@ pub fn cards_in(volumes: &[PathBuf]) -> Vec<LogCard> {
     volumes
         .iter()
         .filter_map(|volume| {
-            let folder = logs_folder(volume)?;
-            let files = bin_files(&folder);
+            let files: Vec<PathBuf> = card_logs(volume).into_iter().map(|(f, _)| f).collect();
             (!files.is_empty()).then(|| LogCard {
                 path: volume.display().to_string(),
                 name: volume.file_name().map_or_else(
@@ -101,7 +146,7 @@ pub fn copied(data_dir: &Path) -> Vec<CopiedLog> {
         .flatten()
         .flat_map(|copy| {
             let card = copy.file_name().to_string_lossy().into_owned();
-            bin_files(&copy.path())
+            files_in(&copy.path(), &["bin", "ulg"])
                 .into_iter()
                 .map(move |file| (card.clone(), file))
         })
@@ -145,8 +190,10 @@ impl Copying {
     /// When it is not a card with logs, or one is being copied.
     pub fn start(&self, data_dir: &Path, card: &str, today: &str) -> Result<(), String> {
         let volume = PathBuf::from(card);
-        let folder = logs_folder(&volume).ok_or("This card has no APM/LOGS folder.")?;
-        let files = bin_files(&folder);
+        let files = card_logs(&volume);
+        if files.is_empty() {
+            return Err("This card has no ArduPilot or PX4 logs.".into());
+        }
         {
             let mut now = self.0.lock().unwrap_or_else(PoisonError::into_inner);
             if now
@@ -170,11 +217,8 @@ impl Copying {
         std::thread::spawn(move || {
             let copy = || -> Result<(), String> {
                 std::fs::create_dir_all(&into).map_err(|e| e.to_string())?;
-                for (done, file) in files.iter().enumerate() {
-                    let Some(file_name) = file.file_name() else {
-                        continue;
-                    };
-                    let target = into.join(file_name);
+                for (done, (file, name)) in files.iter().enumerate() {
+                    let target = into.join(name);
                     let same = std::fs::metadata(&target)
                         .ok()
                         .zip(std::fs::metadata(file).ok())
@@ -257,5 +301,62 @@ mod tests {
         let logs = copied(data.path());
         assert_eq!(logs.len(), 2);
         assert!(logs.iter().all(|l| l.card == "NO NAME-2026-10-28"));
+    }
+
+    #[test]
+    fn a_px4_card_is_known_by_its_ulogs_and_each_day_is_kept_in_the_name() {
+        let volumes = tempfile::tempdir().unwrap();
+        let card = volumes.path().join("PX4");
+        for (path, bytes) in [
+            ("log/2026-11-13/18_31_07.ulg", &b"one"[..]),
+            ("log/2026-11-14/18_31_07.ulg", b"two!"),
+            ("log/sess001/log001.ulg", b"three"),
+            ("log/2026-11-13/notes.txt", b"not a log"),
+            ("log/2026-11-13/._18_31_07.ulg", b"macOS's own"),
+            ("etc/extras.txt", b"not a log"),
+        ] {
+            let file = card.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        // A stick whose log folder holds no ULog is no card.
+        let stick = volumes.path().join("STICK");
+        std::fs::create_dir_all(stick.join("log")).unwrap();
+        std::fs::write(stick.join("log/data.bin"), b"x").unwrap();
+        let cards = cards_in(&[card.clone(), stick]);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            (cards[0].name.as_str(), cards[0].logs, cards[0].bytes),
+            ("PX4", 3, 12)
+        );
+
+        let data = tempfile::tempdir().unwrap();
+        let copying = Copying::default();
+        copying
+            .start(data.path(), &card.display().to_string(), "2026-11-14")
+            .unwrap();
+        for _ in 0..200 {
+            if copying.now().is_some_and(|n| n.1 == 3) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut names: Vec<String> = copied(data.path()).into_iter().map(|l| l.name).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "2026-11-13_18_31_07.ulg",
+                "2026-11-14_18_31_07.ulg",
+                "sess001_log001.ulg"
+            ]
+        );
+        let empty = volumes.path().join("EMPTY");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            Copying::default()
+                .start(data.path(), &empty.display().to_string(), "2026-11-14")
+                .is_err()
+        );
     }
 }
