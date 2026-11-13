@@ -39,6 +39,8 @@ mod plugin_bundle;
 mod ports;
 mod receiver_stick;
 mod replay;
+#[cfg(target_os = "macos")]
+mod responsibility;
 mod service;
 mod shipped;
 mod sim;
@@ -81,6 +83,9 @@ fn main() -> ExitCode {
             }
         };
     }
+    // Before anything else exists: on success this process is replaced.
+    #[cfg(target_os = "macos")]
+    let responsibility = responsibility::disclaim();
     let (console, _console_guard) = match logs::console_writer().and_then(logs::Tee::new) {
         Ok(console) => console,
         Err(error) => {
@@ -98,6 +103,13 @@ fn main() -> ExitCode {
         .with(errors::ErrorLayer)
         .init();
     errors::install_panic_hook();
+    #[cfg(target_os = "macos")]
+    if let Some(error) = responsibility {
+        tracing::warn!(
+            %error,
+            "could not start as UXDuck's own process, so macOS may refuse the local network once its launcher exits"
+        );
+    }
     let cli = match cli::Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {

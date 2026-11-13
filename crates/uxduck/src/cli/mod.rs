@@ -2382,6 +2382,10 @@ pub(crate) async fn start_daemon(
     let mut diagnostic = tempfile::NamedTempFile::new()?;
     command.env(crate::startup::ERROR_FILE, diagnostic.path());
     command.env("UXDUCK_BACKGROUND_LOG", data_dir.join("logs/daemon.log"));
+    // This command exits once the daemon answers, and macOS refuses the
+    // local network to a daemon whose responsible process is gone.
+    #[cfg(target_os = "macos")]
+    command.env(crate::responsibility::DISCLAIM, "1");
     if dev {
         command.arg("--dev");
     }
