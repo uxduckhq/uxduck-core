@@ -388,6 +388,10 @@ impl Provider for AnthropicProvider {
         Wire::Anthropic
     }
 
+    fn max_request_bytes(&self) -> Option<usize> {
+        self.hosted.then_some(super::HOSTED_MAX_REQUEST_BYTES)
+    }
+
     fn respond(
         &self,
         request: ProviderRequest,

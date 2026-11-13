@@ -12,7 +12,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde_json::Value;
 
-use super::{ProviderError, ProviderEvent};
+use super::{ProviderError, ProviderEvent, TOO_LARGE};
 
 /// Said when the answer is a redirect or a page that is not the API.
 pub const NOT_THE_API: &str = "the answer was not the model's: the network may want you to sign in to it first, or something else is in the way";
@@ -103,6 +103,9 @@ pub fn explain(status: u16, retry_after: Option<Duration>, text: &str) -> Provid
         };
     }
     match (kind, message) {
+        (Some("uxduck"), _) if code == Some("too-large") => {
+            ProviderError::Account(TOO_LARGE.into())
+        }
         (Some("uxduck"), Some(message)) => ProviderError::Account(message),
         (_, Some(message)) => ProviderError::Refused(message),
         // An HTML page, or nothing: not the API answering.
@@ -212,6 +215,17 @@ mod tests {
             assert_eq!(error.to_string(), message);
             assert!(!error.retryable(), "{code} cannot be fixed by retrying");
         }
+    }
+
+    #[test]
+    fn a_hosted_size_refusal_says_what_to_do() {
+        let body = serde_json::json!({
+            "error": { "type": "uxduck", "code": "too-large", "message": "The request is too large." }
+        });
+        let error = explain(400, None, &body.to_string());
+        assert_eq!(error, ProviderError::Account(TOO_LARGE.into()));
+        assert!(!error.retryable());
+        assert!(!TOO_LARGE.contains(';'));
     }
 
     #[test]

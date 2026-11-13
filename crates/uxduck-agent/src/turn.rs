@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 
 use crate::conversation::{self, ToolResult};
 use crate::models;
-use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderRequest, Usage};
+use crate::provider::{
+    Provider, ProviderError, ProviderEvent, ProviderRequest, TOO_LARGE, Usage, anthropic, openai,
+};
 use crate::tools::{TOOL_CALL, Tool, chat_tools, find_deferred};
 
 /// The most of one tool result the model gets; a parameter list can run to
@@ -429,6 +431,68 @@ async fn apply_inputs(
     applied
 }
 
+/// The bytes of the body `provider` would send for `request`.
+fn request_bytes(provider: &dyn Provider, request: &ProviderRequest) -> usize {
+    match provider.wire() {
+        conversation::Wire::Anthropic => anthropic::body(request),
+        conversation::Wire::OpenAi => openai::body(request),
+    }
+    .to_string()
+    .len()
+}
+
+/// Keeps a request within the provider's limit, less a sixteenth for the
+/// hosted socket's wrapper. Past it, earlier tool results are left out,
+/// oldest first, down to three quarters of the limit so the next rounds fit
+/// too, or failing that only as far as the limit. The latest round's
+/// results, which the model just asked for in this turn (from
+/// `turn_start`), are never left out. A request that cannot be made to fit
+/// is not sent.
+fn fit(
+    provider: &dyn Provider,
+    conversation: &mut Vec<Value>,
+    turn_start: usize,
+    request: impl Fn(&[Value]) -> ProviderRequest,
+) -> Result<(), ProviderError> {
+    let Some(limit) = provider.max_request_bytes() else {
+        return Ok(());
+    };
+    let ceiling = limit - limit / 16;
+    let size = |conversation: &[Value]| request_bytes(provider, &request(conversation));
+    if size(conversation) <= ceiling {
+        return Ok(());
+    }
+    let earlier = conversation::latest_round(conversation).max(turn_start);
+    let mut roomy = conversation.clone();
+    if conversation::leave_out_tool_results(&mut roomy, earlier, |c| size(c) <= limit / 4 * 3) {
+        *conversation = roomy;
+        return Ok(());
+    }
+    if conversation::leave_out_tool_results(conversation, earlier, |c| size(c) <= ceiling) {
+        Ok(())
+    } else {
+        Err(ProviderError::Account(TOO_LARGE.into()))
+    }
+}
+
+/// Whether a chat should be summarised before it nears the provider's
+/// limit: when, with every tool result left out, its request passes half
+/// the limit. Then the summary request itself still fits, and so does the
+/// next turn's.
+fn nears_limit(
+    provider: &dyn Provider,
+    conversation: &[Value],
+    request: impl Fn(&[Value]) -> ProviderRequest,
+) -> bool {
+    let Some(limit) = provider.max_request_bytes() else {
+        return false;
+    };
+    let mut bare = conversation.to_vec();
+    let all = bare.len();
+    conversation::leave_out_tool_results(&mut bare, all, |_| false);
+    request_bytes(provider, &request(&bare)) > limit / 2
+}
+
 /// Runs one turn.
 pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> TurnOutcome {
     let wire = provider.wire();
@@ -438,10 +502,10 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
     let mut stats = TurnStats::default();
     let mut conversation = turn.conversation;
     let mut context_sent = turn.context_sent;
-    let request = |conversation: &Vec<Value>, continues: Option<String>| ProviderRequest {
+    let request = |conversation: &[Value], continues: Option<String>| ProviderRequest {
         model: turn.model.clone(),
         instructions: INSTRUCTIONS.into(),
-        conversation: conversation.clone(),
+        conversation: conversation.to_vec(),
         tools: sent.clone(),
         max_output_tokens: settings.max_output_tokens,
         effort: turn
@@ -454,18 +518,19 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
 
     // A chat too long to send whole is summarised, and starts again from
     // the summary: no earlier turn or reasoning is replayed after it.
-    if conversation::estimate_tokens(&conversation) > settings.compact_at_tokens {
+    if conversation::estimate_tokens(&conversation) > settings.compact_at_tokens
+        || nears_limit(provider, &conversation, |c| request(c, None))
+    {
         let mut asking = conversation.clone();
         asking.extend(conversation::user(wire, SUMMARY_REQUEST));
-        let summary = round(
-            provider,
-            host,
-            request(&asking, turn.previous.clone()),
-            &mut stats,
-            started,
-            false,
-        )
-        .await;
+        let question = asking.len() - 1;
+        let summary = match fit(provider, &mut asking, question, |c| request(c, None)) {
+            Ok(()) => {
+                let asking = request(&asking, turn.previous.clone());
+                round(provider, host, asking, &mut stats, started, false).await
+            }
+            Err(error) => Err(error),
+        };
         match summary {
             Ok(summary) if !summary.text.trim().is_empty() => {
                 conversation = conversation::user(
@@ -481,6 +546,7 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
         }
     }
 
+    let turn_start = conversation.len();
     conversation.extend(conversation::user(wire, &turn.text));
     if !context_sent {
         let context = turn.context.as_deref().unwrap_or(
@@ -494,6 +560,11 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
     let mut last: Option<String> = None;
     let result = loop {
         apply_inputs(wire, host, &mut conversation, &inputs).await;
+        if let Err(error) = fit(provider, &mut conversation, turn_start, |c| {
+            request(c, None)
+        }) {
+            break Err(error.into());
+        }
         let continues = last.clone();
         let answered = round(
             provider,
@@ -540,6 +611,7 @@ mod tests {
     use futures::FutureExt;
 
     use super::*;
+    use crate::conversation::Entry;
     use crate::provider::fake::FakeProvider;
     use crate::tools::{model_tools, tools};
 
@@ -1200,6 +1272,268 @@ mod tests {
                 .iter()
                 .any(|v| v["type"] == "function_call_output"
                     && v["output"].as_str().unwrap().contains("Superseded"))
+        );
+    }
+
+    /// A host whose every tool answers with a long telemetry series.
+    struct Heavy;
+
+    impl Host for Heavy {
+        fn message_start(&self) -> BoxFuture<'_, String> {
+            async { "m1".to_owned() }.boxed()
+        }
+        fn text_delta(&self, _: String, _: String) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn message_finish(&self, _: String, _: Option<String>) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn tool_start(&self, _: String, _: Value) -> BoxFuture<'_, String> {
+            async { "t1".to_owned() }.boxed()
+        }
+        fn call(&self, _: String, _: Value) -> BoxFuture<'_, Result<Value, Value>> {
+            let samples: Vec<Value> = (0..2_000)
+                .map(|t| json!({ "t": t, "key": "rc.ch3", "value": "1500" }))
+                .collect();
+            async move { Ok(json!({ "samples": samples })) }.boxed()
+        }
+        fn tool_finish(&self, _: String, _: Result<Value, Value>) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+    }
+
+    /// The hosted model: refuses a request over its size limit, as the API
+    /// does, and calls a tool each round until `rounds`, saying `text`
+    /// characters as it does. Notes when the latest result was left out.
+    struct Hosted {
+        rounds: usize,
+        text: usize,
+        requests: std::sync::atomic::AtomicUsize,
+        largest: std::sync::atomic::AtomicUsize,
+        latest_left_out: std::sync::atomic::AtomicBool,
+    }
+
+    impl Provider for Hosted {
+        fn wire(&self) -> conversation::Wire {
+            conversation::Wire::Anthropic
+        }
+        fn max_request_bytes(&self) -> Option<usize> {
+            Some(crate::provider::HOSTED_MAX_REQUEST_BYTES)
+        }
+        fn respond(
+            &self,
+            request: ProviderRequest,
+        ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+            use std::sync::atomic::Ordering;
+            let bytes = anthropic::body(&request).to_string().len();
+            self.largest.fetch_max(bytes, Ordering::Relaxed);
+            if bytes > crate::provider::HOSTED_MAX_REQUEST_BYTES {
+                return futures::stream::iter([Err(ProviderError::Account(
+                    "The request is too large.".into(),
+                ))])
+                .boxed();
+            }
+            if tool_outputs(&request.conversation)
+                .last()
+                .map(String::as_str)
+                == Some(conversation::LEFT_OUT)
+                && request
+                    .conversation
+                    .last()
+                    .is_some_and(|item| item["role"] == "user")
+            {
+                self.latest_left_out.store(true, Ordering::Relaxed);
+            }
+            let index = self.requests.fetch_add(1, Ordering::Relaxed);
+            let (content, calls) = if index >= self.rounds {
+                (
+                    vec![json!({ "type": "text", "text": "It disarmed itself." })],
+                    vec![Ok(ProviderEvent::TextDelta("It disarmed itself.".into()))],
+                )
+            } else {
+                let id = format!("series-{index}");
+                (
+                    vec![
+                        json!({ "type": "text", "text": "w".repeat(self.text) }),
+                        json!({ "type": "tool_use", "id": id, "name": "vehicle_list", "input": {} }),
+                    ],
+                    vec![Ok(ProviderEvent::ToolCall {
+                        call_id: id,
+                        name: "vehicle_list".into(),
+                        arguments: "{}".into(),
+                    })],
+                )
+            };
+            let completed = Ok(ProviderEvent::Completed {
+                response_id: format!("r{index}"),
+                output: vec![json!({ "role": "assistant", "content": content })],
+                usage: Usage::default(),
+                usage_known: true,
+            });
+            futures::stream::iter(calls.into_iter().chain([completed])).boxed()
+        }
+    }
+
+    fn hosted(rounds: usize, text: usize) -> Hosted {
+        Hosted {
+            rounds,
+            text,
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            largest: std::sync::atomic::AtomicUsize::new(0),
+            latest_left_out: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn tool_outputs(conversation: &[Value]) -> Vec<String> {
+        conversation
+            .iter()
+            .filter_map(|item| item["content"].as_array())
+            .flatten()
+            .filter(|block| block["type"] == "tool_result")
+            .map(|block| block["content"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_long_turn_of_heavy_tool_results_stays_within_the_hosted_limit() {
+        use std::sync::atomic::Ordering;
+        let provider = hosted(14, 0);
+        let outcome = run_turn(
+            &provider,
+            &Heavy,
+            turn("Why did the vehicle disarm itself?"),
+        )
+        .now_or_never()
+        .unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        assert!(!outcome.stats.compacted);
+        assert!(!provider.latest_left_out.load(Ordering::Relaxed));
+        assert_eq!(outcome.stats.tool_calls, 14);
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+        let outputs = tool_outputs(&outcome.conversation);
+        assert_eq!(outputs.len(), 14);
+        assert_eq!(outputs[0], conversation::LEFT_OUT);
+        assert_ne!(outputs[13], conversation::LEFT_OUT);
+        assert!(outputs[13].starts_with("{\"samples\""));
+    }
+
+    #[test]
+    fn a_rebuilt_chat_with_an_oversized_result_is_sent_within_the_limit() {
+        use std::sync::atomic::Ordering;
+        let history = [
+            Entry::User("Show me the RC inputs.".into()),
+            Entry::Tool {
+                id: "old".into(),
+                name: "telemetry_get".into(),
+                arguments: json!({}),
+                output: "x".repeat(300_000),
+                failed: false,
+            },
+            Entry::Agent("Throttle sat at 1500.".into()),
+        ];
+        let provider = hosted(0, 0);
+        let mut chat = turn("And now?");
+        chat.conversation = conversation::rebuild(conversation::Wire::Anthropic, &history);
+        let outcome = run_turn(&provider, &Heavy, chat).now_or_never().unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        assert!(!outcome.stats.compacted);
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            tool_outputs(&outcome.conversation),
+            [conversation::LEFT_OUT]
+        );
+    }
+
+    #[test]
+    fn a_stopped_turns_results_are_left_out_on_the_next_turn() {
+        use std::sync::atomic::Ordering;
+        let history = [
+            Entry::User("Show me the RC inputs.".into()),
+            Entry::Tool {
+                id: "stopped".into(),
+                name: "telemetry_get".into(),
+                arguments: json!({}),
+                output: "x".repeat(300_000),
+                failed: false,
+            },
+        ];
+        let provider = hosted(0, 0);
+        let mut chat = turn("And now?");
+        chat.conversation = conversation::rebuild(conversation::Wire::Anthropic, &history);
+        let outcome = run_turn(&provider, &Heavy, chat).now_or_never().unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            tool_outputs(&outcome.conversation),
+            [conversation::LEFT_OUT]
+        );
+    }
+
+    #[test]
+    fn with_long_prose_in_the_turn_the_latest_results_still_go_whole() {
+        use std::sync::atomic::Ordering;
+        let provider = hosted(4, 35_000);
+        let outcome = run_turn(&provider, &Heavy, turn("Why did it disarm?"))
+            .now_or_never()
+            .unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+        assert!(!provider.latest_left_out.load(Ordering::Relaxed));
+        let outputs = tool_outputs(&outcome.conversation);
+        assert_eq!(outputs.len(), 4);
+        assert_eq!(outputs[0], conversation::LEFT_OUT);
+        assert!(outputs[3].starts_with("{\"samples\""));
+    }
+
+    #[test]
+    fn a_chat_nearing_the_hosted_limit_is_summarised_before_the_turn() {
+        use std::sync::atomic::Ordering;
+        let history = [
+            Entry::User("q".repeat(60_000)),
+            Entry::Agent("a".repeat(60_000)),
+            Entry::User("And the logs?".into()),
+            Entry::Agent("l".repeat(30_000)),
+        ];
+        let provider = hosted(0, 0);
+        let mut chat = turn("Why did it disarm?");
+        chat.conversation = conversation::rebuild(conversation::Wire::Anthropic, &history);
+        assert!(
+            conversation::estimate_tokens(&chat.conversation)
+                < models::settings("fake").compact_at_tokens
+        );
+        let outcome = run_turn(&provider, &Heavy, chat).now_or_never().unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        assert!(outcome.stats.compacted);
+        assert_eq!(provider.requests.load(Ordering::Relaxed), 2);
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+    }
+
+    #[test]
+    fn a_round_too_large_to_send_fails_without_sending_it() {
+        use std::sync::atomic::Ordering;
+        let provider = hosted(1, 300_000);
+        let outcome = run_turn(&provider, &Heavy, turn("Why did it disarm?"))
+            .now_or_never()
+            .unwrap();
+        assert_eq!(
+            outcome.result,
+            Err(TurnError::Provider(ProviderError::Account(
+                TOO_LARGE.into()
+            )))
+        );
+        assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
+        assert!(
+            provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
         );
     }
 }

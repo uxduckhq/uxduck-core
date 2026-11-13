@@ -244,6 +244,9 @@ impl Provider for BrowserProvider {
     fn wire(&self) -> Wire {
         self.wire
     }
+    fn max_request_bytes(&self) -> Option<usize> {
+        Some(uxduck_agent::provider::HOSTED_MAX_REQUEST_BYTES)
+    }
     fn respond(
         &self,
         request: ProviderRequest,

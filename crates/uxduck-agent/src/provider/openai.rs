@@ -181,6 +181,8 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
                 .unwrap_or_default();
             return Err(if code == "uxduck-upstream" {
                 ProviderError::Transport(message(value))
+            } else if code == "uxduck-socket" && message(value) == "The AI request is too large." {
+                ProviderError::Account(super::TOO_LARGE.into())
             } else if matches!(
                 code,
                 "rate_limit_exceeded" | "server_error" | "server_is_overloaded"
@@ -235,6 +237,10 @@ impl Provider for OpenAiProvider {
     }
     fn wire(&self) -> Wire {
         Wire::OpenAi
+    }
+
+    fn max_request_bytes(&self) -> Option<usize> {
+        self.hosted.then_some(super::HOSTED_MAX_REQUEST_BYTES)
     }
 
     fn respond(
@@ -357,5 +363,27 @@ mod tests {
         assert!(event(&failed).unwrap_err().retryable());
         let refused = json!({ "type": "response.failed", "response": { "error": { "code": "invalid_prompt", "message": "no" } } });
         assert_eq!(event(&refused), Err(ProviderError::Refused("no".into())));
+    }
+
+    #[test]
+    fn the_hosted_sockets_size_refusal_says_what_to_do() {
+        let refused = json!({
+            "type": "error",
+            "error": { "message": "The AI request is too large.", "code": "uxduck-socket" }
+        });
+        assert_eq!(
+            event(&refused),
+            Err(ProviderError::Account(super::super::TOO_LARGE.into()))
+        );
+        let other = json!({
+            "type": "error",
+            "error": { "message": "Too many pending AI messages.", "code": "uxduck-socket" }
+        });
+        assert_eq!(
+            event(&other),
+            Err(ProviderError::Refused(
+                "Too many pending AI messages.".into()
+            ))
+        );
     }
 }

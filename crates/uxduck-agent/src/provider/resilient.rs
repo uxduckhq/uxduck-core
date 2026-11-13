@@ -243,6 +243,10 @@ impl Provider for Resilient {
         self.inner.wire()
     }
 
+    fn max_request_bytes(&self) -> Option<usize> {
+        self.inner.max_request_bytes()
+    }
+
     fn respond(
         &self,
         request: ProviderRequest,

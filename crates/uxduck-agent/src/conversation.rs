@@ -215,6 +215,66 @@ pub fn tool_results(wire: Wire, results: &[ToolResult]) -> Vec<Value> {
     }
 }
 
+/// Stands in for a tool result left out so the chat still fits a request.
+pub const LEFT_OUT: &str = "[Left out to keep this chat within the request size limit. Call the tool again if you need this result.]";
+
+/// Leaves out tool results in the items before `before`, oldest first,
+/// until `fits` says the conversation does. Whether it fits in the end.
+pub fn leave_out_tool_results(
+    items: &mut [Value],
+    before: usize,
+    fits: impl Fn(&[Value]) -> bool,
+) -> bool {
+    let mut outputs = Vec::new();
+    for (index, item) in items.iter().enumerate().take(before) {
+        if item["type"] == "function_call_output" {
+            outputs.push((index, None));
+        } else if item["role"] == "user"
+            && let Some(blocks) = item["content"].as_array()
+        {
+            outputs.extend(
+                blocks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| block["type"] == "tool_result")
+                    .map(|(block, _)| (index, Some(block))),
+            );
+        }
+    }
+    if fits(items) {
+        return true;
+    }
+    for (index, block) in outputs {
+        let output = match block {
+            None => &mut items[index]["output"],
+            Some(block) => &mut items[index]["content"][block]["content"],
+        };
+        if output
+            .as_str()
+            .is_some_and(|text| text.len() > LEFT_OUT.len())
+        {
+            *output = json!(LEFT_OUT);
+            if fits(items) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Where the latest round starts: just after the model's last output, so
+/// the results it is waiting for.
+#[must_use]
+pub fn latest_round(items: &[Value]) -> usize {
+    items
+        .iter()
+        .rposition(|item| {
+            item["role"] == "assistant"
+                || matches!(item["type"].as_str(), Some("function_call" | "reasoning"))
+        })
+        .map_or(0, |index| index + 1)
+}
+
 /// A rough count of a conversation's tokens: four characters each.
 #[must_use]
 pub fn estimate_tokens(items: &[Value]) -> usize {
@@ -307,5 +367,39 @@ mod tests {
         assert_eq!(anthropic.len(), 1, "one user message");
         assert_eq!(anthropic[0]["content"][1]["is_error"], true);
         assert_eq!(tool_results(Wire::OpenAi, &results).len(), 2);
+    }
+
+    #[test]
+    fn tool_results_are_left_out_oldest_first_until_the_chat_fits() {
+        let long = "r".repeat(10_000);
+        let entries: Vec<Entry> = (0..3)
+            .map(|i| Entry::Tool {
+                id: format!("t{i}"),
+                name: "flight_series".into(),
+                arguments: json!({}),
+                output: long.clone(),
+                failed: false,
+            })
+            .collect();
+        for wire in [Wire::OpenAi, Wire::Anthropic] {
+            let mut items = rebuild(wire, &entries);
+            let size = |items: &[Value]| Value::Array(items.to_vec()).to_string().len();
+            let whole = size(&items);
+            let all = items.len();
+            assert!(leave_out_tool_results(&mut items, all, |items| size(items) < whole - 15_000));
+            let text = Value::Array(items.clone()).to_string();
+            assert_eq!(text.matches(LEFT_OUT).count(), 2, "{wire:?}");
+            assert!(text.contains(&long), "the newest result stays");
+            assert!(!leave_out_tool_results(&mut items, all, |_| false));
+            assert_eq!(Value::Array(items).to_string().matches(LEFT_OUT).count(), 3);
+
+            let mut items = rebuild(wire, &entries);
+            let latest = latest_round(&items);
+            assert!(latest > 0 && latest < items.len(), "{wire:?}");
+            assert!(!leave_out_tool_results(&mut items, latest, |_| false));
+            let text = Value::Array(items).to_string();
+            assert_eq!(text.matches(LEFT_OUT).count(), 2, "{wire:?}");
+            assert!(text.contains(&long), "the latest round is never left out");
+        }
     }
 }
