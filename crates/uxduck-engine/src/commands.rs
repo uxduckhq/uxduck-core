@@ -142,6 +142,20 @@ pub(crate) fn send_checked(
     {
         return Err(ApiError::new(ErrorKind::InvalidValue, why));
     }
+    // PX4 takes a VTOL onto its wings on the ground too, so it would take
+    // off flying forward. Back to its rotors is always allowed.
+    if let Some(vehicle) = engine.vehicle(&params.vehicle_id)
+        && Command::from(params.command.clone()).flies_forward()
+        && !(vehicle.armed && engine.off_the_ground(&vehicle.id, true))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{} is on the ground. Take off on its rotors, then transition to forward flight.",
+                vehicle.name
+            ),
+        ));
+    }
     send(engine, connection, params, operator)
 }
 
@@ -802,6 +816,11 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
     if lifts_off(engine, vehicle) {
         commands.push(Command::take_off(TAKE_OFF_HEIGHT_M));
     }
+    // PX4 has no mode for it, as ArduPlane has its Q modes: a VTOL goes onto
+    // its wings, or back to hovering, when told to.
+    if family == Some(Family::Px4) && is_vtol(&vehicle.vehicle_type) {
+        commands.extend([Command::transition(true), Command::transition(false)]);
+    }
     // Go to: offered with no place, for its risk and
     // class; the sender fills the place in. Copter, Plane, Rover and Sub
     // apply DO_REPOSITION in GUIDED; PX4 holds there. Blimp acknowledges
@@ -891,6 +910,7 @@ fn restart_scripts(engine: &Engine, vehicle: &Vehicle, family: Option<Family>) -
 
 /// Descriptions shared by the command menu and the agent, for a vehicle of
 /// this `MAV_TYPE`.
+#[allow(clippy::too_many_lines)]
 fn command_description(
     command: &Command,
     family: Option<Family>,
@@ -908,6 +928,12 @@ fn command_description(
         (Command::Long { command: 186, .. }, Some(Family::Plane)) => Some(
             "Changes the height while keeping the current horizontal destination".to_owned(),
         ),
+        (Command::Long { command: 3000, .. }, Some(Family::Px4)) if command.flies_forward() => {
+            Some("Speeds up on its rotors until its wings carry it, then flies on them".to_owned())
+        }
+        (Command::Long { command: 3000, .. }, Some(Family::Px4)) => {
+            Some("Slows down until its rotors carry it, then hovers on them".to_owned())
+        }
         (Command::Long { command: 178, .. }, Some(Family::Plane)) => Some(
             "Changes the airspeed it flies at, to its destination or along its mission".to_owned(),
         ),

@@ -135,6 +135,15 @@ pub fn key_says_unit(key: &str, unit: Unit) -> bool {
 /// `MAV_LANDED_STATE` 1 to 4, in words.
 pub const LANDED_STATES: [&str; 4] = ["On the ground", "In the air", "Taking off", "Landing"];
 
+/// `vtol.state`: how a VTOL is flying, from `MAV_VTOL_STATE` 1 to 4, in
+/// words.
+pub const VTOL_STATES: [&str; 4] = [
+    "Transition to forward flight",
+    "Transition to hover",
+    "Hover",
+    "Forward flight",
+];
+
 /// Whether a `flight.state` says the vehicle is off the ground: taking off
 /// and landing count as in the air. None for words that are not a state.
 #[must_use]

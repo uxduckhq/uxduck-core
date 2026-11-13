@@ -280,9 +280,10 @@ pub enum Message {
     },
     /// `EXTENDED_SYS_STATE` (S103): `MAV_LANDED_STATE`, 0 when the
     /// autopilot does not know, then on the ground, in the air, taking off,
-    /// landing.
+    /// landing. And a VTOL's `MAV_VTOL_STATE`, 0 for anything else.
     ExtendedSysState {
         landed_state: u8,
+        vtol_state: u8,
     },
     /// ArduPilot's `WIND` (S72): where it comes from in degrees, m/s. PX4's
     /// `WIND_COV` reads into it too.
@@ -869,6 +870,8 @@ fn px4_health(message: &Ardupilotmega) -> Option<Message> {
     })
 }
 
+// A flat match: one arm per message reads better than splitting it.
+#[allow(clippy::too_many_lines)]
 fn health(message: &Ardupilotmega) -> Option<Message> {
     Some(match message {
         // The receiver's channels, for the radio calibration (S187).
@@ -942,6 +945,7 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
         },
         Ardupilotmega::ExtendedSysState(m) => Message::ExtendedSysState {
             landed_state: m.landed_state as u8,
+            vtol_state: m.vtol_state as u8,
         },
         Ardupilotmega::Wind(m) => Message::Wind {
             direction: m.direction,

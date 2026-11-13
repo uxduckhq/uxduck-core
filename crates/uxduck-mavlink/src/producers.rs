@@ -976,12 +976,21 @@ impl Producer for Health {
                     from,
                 );
             }
-            &Message::ExtendedSysState { landed_state } => {
+            &Message::ExtendedSysState {
+                landed_state,
+                vtol_state,
+            } => {
                 // 0 is "undefined": the autopilot does not know, so say nothing.
                 if let Some(state) = uxduck_core::domain::telemetry::LANDED_STATES
                     .get(usize::from(landed_state).wrapping_sub(1))
                 {
                     out.text("flight.state", "Flight state", state, from);
+                }
+                // 0 for anything but a VTOL.
+                if let Some(state) = uxduck_core::domain::telemetry::VTOL_STATES
+                    .get(usize::from(vtol_state).wrapping_sub(1))
+                {
+                    out.text("vtol.state", "VTOL state", state, from);
                 }
             }
             &Message::ScaledPressure2 { temperature_cdeg } => {
@@ -1806,7 +1815,15 @@ mod tests {
     fn the_landed_state_is_said_in_words_and_not_when_unknown() {
         let state = |landed_state| {
             let mut out = Produced::default();
-            Health.consume(1, &Message::ExtendedSysState { landed_state }, 5, &mut out);
+            Health.consume(
+                1,
+                &Message::ExtendedSysState {
+                    landed_state,
+                    vtol_state: 0,
+                },
+                5,
+                &mut out,
+            );
             out.items.into_iter().find_map(|i| i.text)
         };
         assert_eq!(state(0), None);
@@ -1814,6 +1831,32 @@ mod tests {
         assert_eq!(state(2).as_deref(), Some("In the air"));
         assert_eq!(state(4).as_deref(), Some("Landing"));
         assert_eq!(state(9), None);
+    }
+
+    #[test]
+    fn a_vtols_state_is_said_in_words_and_nothing_for_anything_else() {
+        let state = |vtol_state| {
+            let mut out = Produced::default();
+            Health.consume(
+                1,
+                &Message::ExtendedSysState {
+                    landed_state: 0,
+                    vtol_state,
+                },
+                5,
+                &mut out,
+            );
+            out.items
+                .into_iter()
+                .find(|i| i.key == "vtol.state")
+                .and_then(|i| i.text)
+        };
+        assert_eq!(state(0), None, "not a VTOL");
+        assert_eq!(state(1).as_deref(), Some("Transition to forward flight"));
+        assert_eq!(state(2).as_deref(), Some("Transition to hover"));
+        assert_eq!(state(3).as_deref(), Some("Hover"));
+        assert_eq!(state(4).as_deref(), Some("Forward flight"));
+        assert_eq!(state(5), None);
     }
 
     #[test]

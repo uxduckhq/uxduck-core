@@ -227,6 +227,11 @@ const TARGET_COMMANDS: [u16; 3] = [16, 186, 192];
 pub const MAV_CMD_MISSION_START: u16 = 300;
 /// `DO_CHANGE_SPEED`: param 1 the kind (0 airspeed, 1 ground speed), param 2 m/s.
 pub const MAV_CMD_DO_CHANGE_SPEED: u16 = 178;
+/// `DO_VTOL_TRANSITION`: param 1 the `MAV_VTOL_STATE` to go to, 3 hovering
+/// on its rotors (multicopter) or 4 flying on its wings (fixed wing).
+pub const MAV_CMD_DO_VTOL_TRANSITION: u16 = 3000;
+const MAV_VTOL_STATE_FW: f32 = 4.0;
+const MAV_VTOL_STATE_MC: f32 = 3.0;
 
 /// Why a command was refused before it was sent, for clients and agents to
 /// act on without parsing `detail`.
@@ -353,7 +358,8 @@ impl Command {
                 | MAV_CMD_DO_SET_MODE
                 | MAV_CMD_DO_CHANGE_SPEED
                 | MAV_CMD_DO_SET_MISSION_CURRENT
-                | MAV_CMD_DO_PAUSE_CONTINUE => CommandClass::Mission,
+                | MAV_CMD_DO_PAUSE_CONTINUE
+                | MAV_CMD_DO_VTOL_TRANSITION => CommandClass::Mission,
                 _ => CommandClass::Critical,
             },
         }
@@ -391,6 +397,30 @@ impl Command {
             command: MAV_CMD_NAV_TAKEOFF,
             params: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, height_m],
         }
+    }
+
+    /// A VTOL's transition: `forward` onto its wings, else back to hovering
+    /// on its rotors.
+    #[must_use]
+    pub fn transition(forward: bool) -> Self {
+        Self::Long {
+            command: MAV_CMD_DO_VTOL_TRANSITION,
+            params: vec![if forward {
+                MAV_VTOL_STATE_FW
+            } else {
+                MAV_VTOL_STATE_MC
+            }],
+        }
+    }
+
+    /// Whether it is a VTOL's transition onto its wings.
+    #[must_use]
+    pub fn flies_forward(&self) -> bool {
+        matches!(
+            self,
+            Self::Long { command: MAV_CMD_DO_VTOL_TRANSITION, params }
+                if params.first().is_some_and(|state| (*state - MAV_VTOL_STATE_FW).abs() < 0.5)
+        )
     }
 
     /// Restarts ArduPilot's Lua scripts, reading them again from its
@@ -586,6 +616,14 @@ impl Command {
                 ..
             } => "Terminate the flight".into(),
             Self::Long { command: 186, .. } => "Change height".into(),
+            Self::Long {
+                command: MAV_CMD_DO_VTOL_TRANSITION,
+                ..
+            } if self.flies_forward() => "Transition to forward flight".into(),
+            Self::Long {
+                command: MAV_CMD_DO_VTOL_TRANSITION,
+                ..
+            } => "Transition to hover".into(),
             Self::Long { .. } if self.pauses() => "Pause the mission".into(),
             Self::Long { .. } if self.lands_via_the_mission() => "Land via the mission".into(),
             Self::Long { .. } if self.starts_mission() => match self.mission_start_item() {
@@ -841,6 +879,20 @@ mod tests {
         assert_eq!(Command::ArmToggle.resolved(true), Command::Disarm);
         assert_eq!(Command::Land.resolved(true), Command::Land);
         assert_eq!(Command::ArmToggle.risk(true, false).level, Risk::Dangerous);
+    }
+
+    #[test]
+    fn a_vtol_transition_is_confirmed_in_flight_either_way() {
+        for (forward, label) in [
+            (true, "Transition to forward flight"),
+            (false, "Transition to hover"),
+        ] {
+            let transition = Command::transition(forward);
+            assert_eq!(transition.label(), label);
+            assert_eq!(transition.flies_forward(), forward);
+            assert_eq!(transition.risk(true, false).level, Risk::Confirm);
+            assert_eq!(transition.class(), CommandClass::Mission);
+        }
     }
 
     #[test]
