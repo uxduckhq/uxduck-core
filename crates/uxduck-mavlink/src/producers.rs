@@ -771,6 +771,7 @@ impl Producer for Servos {
 /// calibration's bars (S187). Channels it does not give, or gives as unused
 /// (0 or `UINT16_MAX`), are left out. Receiver strength is `rc.rssi` on its
 /// device-dependent scale; 255 clears it to unknown, while zero is valid.
+/// The session adds it as a percentage, `rc.rssi_pct` (`rc_rssi_pct`).
 /// `rc.channels` is how many channels the receiver gives. `rc.status` is
 /// what the autopilot says of its RC input in `SYS_STATUS`: receiving, lost
 /// or not seen since it started.
@@ -804,7 +805,7 @@ impl Producer for RcInputs {
         // Preserve the device-dependent scale. Unknown clears a previous sample.
         out.items.push(TelemetryItem {
             key: "rc.rssi".into(),
-            label: "RC RSSI".into(),
+            label: "RC RSSI (raw)".into(),
             unit: Unit::None,
             value: (*rssi != u8::MAX).then(|| f64::from(*rssi)),
             text: None,
@@ -1034,6 +1035,30 @@ fn wind(direction: f32, speed: f32, speed_z: f32, from: (&str, u8, u64), out: &m
         f64::from(speed_z),
         from,
     );
+}
+
+/// `rc.rssi` as a rounded percentage, `rc.rssi_pct` (FB-212), on the scale
+/// the autopilot sends: ArduPilot its receiver's 0 to 1 reading × 254, PX4
+/// its 0 to 100 percentage. A value past that scale, such as 255 for
+/// unknown, and another autopilot's reading have no value.
+#[must_use]
+pub fn rc_rssi_pct(autopilot: &str, rssi: &TelemetryItem) -> TelemetryItem {
+    let full = match autopilot {
+        "Ardupilotmega" => Some(254.0),
+        "Px4" => Some(100.0),
+        _ => None,
+    };
+    TelemetryItem {
+        key: "rc.rssi_pct".into(),
+        label: "RC RSSI".into(),
+        unit: Unit::Percent,
+        value: rssi
+            .value
+            .zip(full)
+            .filter(|&(raw, full)| raw <= full)
+            .map(|(raw, full)| (raw * 100.0 / full).round()),
+        ..rssi.clone()
+    }
 }
 
 /// Signal and noise here and at the far end, as 0 to 254 (255 unknown).
@@ -2076,6 +2101,55 @@ mod tests {
                 assert_eq!(signal.time_us, 42);
             }
             assert!(!out.items.iter().any(|item| item.key.starts_with("link.")));
+        }
+    }
+
+    #[test]
+    fn rc_rssi_pct_is_on_the_autopilots_own_scale() {
+        let pct = |autopilot: &str, rssi: u8| {
+            let mut out = Produced::default();
+            RcInputs.consume(
+                1,
+                &Message::RcChannels {
+                    count: 1,
+                    channels: [1500; 18],
+                    rssi,
+                },
+                42,
+                &mut out,
+            );
+            let raw = out.items.iter().find(|i| i.key == "rc.rssi").unwrap();
+            let pct = rc_rssi_pct(autopilot, raw);
+            assert_eq!(pct.unit, Unit::Percent);
+            assert_eq!(
+                (pct.source.as_str(), pct.component_id, pct.time_us),
+                ("rc", 1, 42)
+            );
+            assert!(uxduck_core::domain::telemetry::key_says_unit(
+                &pct.key, pct.unit
+            ));
+            assert_eq!(raw.unit, Unit::None, "the raw reading keeps its scale");
+            pct.value
+        };
+        for (rssi, expected) in [
+            (0, Some(0.0)),
+            (127, Some(50.0)),
+            (254, Some(100.0)),
+            (255, None),
+        ] {
+            assert_eq!(pct("Ardupilotmega", rssi), expected, "ArduPilot {rssi}");
+        }
+        for (rssi, expected) in [
+            (0, Some(0.0)),
+            (100, Some(100.0)),
+            (101, None),
+            (254, None),
+            (255, None),
+        ] {
+            assert_eq!(pct("Px4", rssi), expected, "PX4 {rssi}");
+        }
+        for rssi in [0, 127, 254, 255] {
+            assert_eq!(pct("Generic", rssi), None, "another autopilot {rssi}");
         }
     }
 

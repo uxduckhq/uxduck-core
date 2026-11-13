@@ -13,7 +13,7 @@ use crate::decode::{Message, decode, firmware_commit, firmware_version};
 use crate::files::{self, FtpClient};
 use crate::framing::split;
 use crate::identity::{provisional_vid, simulated_vid, uid_text, vid_from_uid};
-use crate::producers::{Produced, Producer, core_producers};
+use crate::producers::{Produced, Producer, core_producers, rc_rssi_pct};
 use crate::sim::{Route, request_autopilot_version_frame, set_message_interval_frame};
 use crate::transfers::{
     Failure, MissionDownload, MissionUpload, Out, Param, ParamDownload, ParamWrite, Step, Timing,
@@ -1329,6 +1329,7 @@ impl Session {
                     if let Some(vehicle) = self.vehicles.get_mut(&key) {
                         vehicle.note_terrain(&message, received_us);
                         vehicle.tuning.take(&message, received_us);
+                        let produced = vehicle.pending.items.len();
                         for producer in &self.producers {
                             producer.consume(
                                 decoded.component_id,
@@ -1337,6 +1338,11 @@ impl Session {
                                 &mut vehicle.pending,
                             );
                         }
+                        let rssi = vehicle.pending.items[produced..]
+                            .iter()
+                            .find(|item| item.key == "rc.rssi")
+                            .map(|raw| rc_rssi_pct(&vehicle.observation.autopilot, raw));
+                        vehicle.pending.items.extend(rssi);
                         vehicle.add_above_ground(received_us);
                     }
                 }
@@ -6080,12 +6086,12 @@ mod tests {
 
         let mut session = Session::new(Config::default());
         session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
-        for (at, rssi, expected) in [
-            (100, 127, Some(127.0)),
-            (200, 0, Some(0.0)),
-            (300, 100, Some(100.0)),
-            (400, 254, Some(254.0)),
-            (500, 255, None),
+        for (at, rssi, expected, pct) in [
+            (100, 127, Some(127.0), Some(50.0)),
+            (200, 0, Some(0.0), Some(0.0)),
+            (300, 100, Some(100.0), Some(39.0)),
+            (400, 254, Some(254.0), Some(100.0)),
+            (500, 255, None, None),
         ] {
             let frame = crate::sim::frame(
                 1,
@@ -6114,6 +6120,13 @@ mod tests {
                 .expect("RC_CHANNELS.rssi must reach the header's receiver signal item");
             assert_eq!(signal.value, expected);
             assert_eq!(signal.unit, uxduck_core::domain::telemetry::Unit::None);
+            let percent = telemetry
+                .items
+                .iter()
+                .find(|item| item.key == "rc.rssi_pct")
+                .expect("an ArduPilot receiver's RSSI must also come as a percentage (FB-212)");
+            assert_eq!(percent.value, pct, "{rssi} of 254");
+            assert_eq!(percent.unit, uxduck_core::domain::telemetry::Unit::Percent);
             assert!(
                 telemetry
                     .items
@@ -7319,9 +7332,10 @@ mod tests {
             .filter(|item| item.key.starts_with("rc."))
             .map(|item| (item.key.clone(), item.value.unwrap_or_default()))
             .collect();
-        assert_eq!(items.len(), 11, "{items:?}");
+        assert_eq!(items.len(), 12, "{items:?}");
         assert!(items.contains(&("rc.rssi".into(), 200.0)));
         assert!(items.contains(&("rc.channels".into(), 8.0)));
+        assert!(items.contains(&("rc.rssi_pct".into(), 79.0)));
         assert!(items.contains(&("rc.3".into(), 1000.0)));
         assert!(items.iter().any(|(key, _)| key == "rc.status"));
     }

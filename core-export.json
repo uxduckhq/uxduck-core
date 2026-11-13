@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "c3692336ee87c71958c0d8195e96215a39ab0554",
+  "sourceCommit": "6acab8fd3e4a93b8546d57f80ac34f16e5519b45",
   "licenseReady": true,
   "files": [
     {
@@ -131,7 +131,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/turn.rs",
-      "sha256": "f6c2509680fed50db92232829141525fe819ec237d1607c6e859e69838acd8fe",
+      "sha256": "42ecf9eb19747c6bb337c837c3b47ef08aedd73959837f6e5c609394c360ccbf",
       "executable": false
     },
     {
@@ -6631,7 +6631,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/producers.rs",
-      "sha256": "9f1b3f145e0ca491bdd103ee32cecf6d6b16d7451b691dc4ae838cfc9e73652a",
+      "sha256": "ba56b155e0dc6fefebf73c56857acd51457149afe49d12be07e003724a008dee",
       "executable": false
     },
     {
@@ -6661,7 +6661,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/session.rs",
-      "sha256": "44e1bb5bb8e62f771e1420fd45cee711e8e6b8f28912f84732add8b8efeab1e3",
+      "sha256": "489a8c918bba682f34eeac130ba7d28868cced0189ed47c43d2030bf483730b2",
       "executable": false
     },
     {
@@ -7886,7 +7886,7 @@
     },
     {
       "path": "docs/site/telemetry-and-control.md",
-      "sha256": "356554d2535f8cd1c583447e9e49bda8a44e1a27b98718df46ce2e844ea75855",
+      "sha256": "6cff24c8fae75730aea75048b85e9b04028aadd03a562a552a00fbe1c5001a09",
       "executable": false
     },
     {
