@@ -11,7 +11,7 @@ use uxduck_contracts::dto::command::Command;
 use uxduck_contracts::dto::tuning::{TuningAutotuneRun, TuningValue};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::history::{HistoryEvent, TunedGain};
-use uxduck_core::domain::tuning::{self, Controller, Resolved};
+use uxduck_core::domain::tuning::{self, Autopilot, Controller, Resolved};
 use uxduck_core::domain::tuning_autotune::{self as autotune, Family, Phase, Run, Said};
 use uxduck_core::domain::vehicle::Vehicle;
 
@@ -44,7 +44,9 @@ impl Engine {
         let Some((family, said)) = autotune::said(text) else {
             return;
         };
-        let Ok(controllers) = tuning::controllers(&vehicle.autopilot, &vehicle.vehicle_type) else {
+        let Ok((Autopilot::ArduPilot, controllers)) =
+            tuning::controllers(&vehicle.autopilot, &vehicle.vehicle_type)
+        else {
             return;
         };
         let controller = match family {
@@ -215,12 +217,12 @@ pub(crate) fn agent_refusal(engine: &Engine, request: &ClientRequest) -> Option<
         return None;
     };
     let vehicle = engine.vehicle(&params.vehicle_id)?;
-    let drivers: Vec<autotune::Driver> =
+    let Ok((Autopilot::ArduPilot, controllers)) =
         tuning::controllers(&vehicle.autopilot, &vehicle.vehicle_type)
-            .ok()?
-            .into_iter()
-            .map(autotune::driver)
-            .collect();
+    else {
+        return None;
+    };
+    let drivers: Vec<autotune::Driver> = controllers.into_iter().map(autotune::driver).collect();
     let is = |value: Option<&f32>, want: u32| {
         value.is_some_and(|v| (f64::from(*v) - f64::from(want)).abs() < 0.5)
     };

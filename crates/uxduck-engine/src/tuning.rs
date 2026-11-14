@@ -37,7 +37,7 @@ pub(crate) fn resolved(
     engine: &Engine,
     vehicle: &Vehicle,
 ) -> Result<(Vec<Resolved>, BTreeMap<String, f64>), TuningUnsupported> {
-    let controllers = tuning::controllers(&vehicle.autopilot, &vehicle.vehicle_type)
+    let (autopilot, controllers) = tuning::controllers(&vehicle.autopilot, &vehicle.vehicle_type)
         .map_err(TuningUnsupported::from)?;
     let values = vehicle_values(engine, vehicle.clone());
     if values.is_empty() {
@@ -45,7 +45,7 @@ pub(crate) fn resolved(
     }
     let resolved = controllers
         .into_iter()
-        .filter_map(|c| tuning::resolve(c, |name| values.contains_key(name)))
+        .filter_map(|c| tuning::resolve(c, autopilot, |name| values.contains_key(name)))
         .collect();
     Ok((resolved, values))
 }

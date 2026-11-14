@@ -237,7 +237,7 @@ pub struct TuningStepState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TuningUnsupported {
-    /// Not ArduPilot.
+    /// Neither ArduPilot nor PX4.
     Autopilot,
     /// A traditional helicopter.
     Helicopter,

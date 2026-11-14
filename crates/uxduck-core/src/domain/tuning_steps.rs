@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::tuning::{Controller, Resolved, Term};
+use super::tuning::{Autopilot, Controller, Resolved, Term};
 
 /// A battery's chemistry: a cell's full and empty voltages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,13 +233,17 @@ fn differs(value: Option<f64>, default: Option<f64>) -> bool {
 /// The steps for a controller and their states (T3): a copter's or a
 /// hover's Prepare, First flight, Filters, Tune and Feel; a plane's
 /// Prepare, Tune and Feel. `value` and `default` give a parameter's value
-/// now and its default, when the vehicle has it.
+/// now and its default, when the vehicle has it. They are ArduPilot's
+/// process, so PX4 has none.
 #[must_use]
 pub fn steps(
     resolved: &Resolved,
     value: impl Fn(&str) -> Option<f64>,
     default: impl Fn(&str) -> Option<f64>,
 ) -> Vec<Reading> {
+    if resolved.autopilot == Autopilot::Px4 {
+        return Vec::new();
+    }
     let changed = |name: &str| differs(value(name), default(name));
     let gains: Vec<String> = resolved
         .rates
@@ -440,8 +444,10 @@ mod tests {
         .collect();
         let defaults = values.clone();
         let resolved =
-            super::super::tuning::resolve(Controller::Copter, |n| values.contains_key(n))
-                .expect("a copter");
+            super::super::tuning::resolve(Controller::Copter, Autopilot::ArduPilot, |n| {
+                values.contains_key(n)
+            })
+            .expect("a copter");
         let read = |values: &BTreeMap<&str, f64>| {
             steps(
                 &resolved,

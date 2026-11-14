@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "3df555585009f9efbb0245cea16c152abe058a02",
+  "sourceCommit": "fe84bbe50aaaa2c86cea60356cf54f170f5b9ec8",
   "licenseReady": true,
   "files": [
     {
@@ -5331,7 +5331,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/tuning.rs",
-      "sha256": "47e5bd9708cd77f300b4102a11e3b32dbe7ab446dc017539184602886bf2a4f2",
+      "sha256": "476ad080bf57206f8d94bd3b93676468501076e2e045459eaa44447036adb5cb",
       "executable": false
     },
     {
@@ -5631,7 +5631,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/tuning.rs",
-      "sha256": "3b7df52820d32cf717281ddb3af77fad5f59ad58e859ef95ab3b4c43bfc8e7c9",
+      "sha256": "6856c2c3182b4641489d0cd62afe62f66f926a0a9fff04289397d0dff821a607",
       "executable": false
     },
     {
@@ -5646,7 +5646,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/tuning_steps.rs",
-      "sha256": "c4ec91e8c3b60291765f5d49f52bd8fb8faaed6934f34518fa9d884a32dfaaed",
+      "sha256": "1b3cccd3724ac6bb42d918d82d5aa9ab8e4937f36f87d929247fa2fa31da4ea1",
       "executable": false
     },
     {
@@ -5736,7 +5736,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/autotune.rs",
-      "sha256": "ebe48df1a3bebb2d5627782c6907e73b82d4788d8e767e533a234086c31af4c1",
+      "sha256": "16236996c28c24949e6bf7aaea55ccf1e1ad7de6ceda13fc01200ce8a315763f",
       "executable": false
     },
     {
@@ -6381,7 +6381,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/tuning.rs",
-      "sha256": "34837de66bad1b5b50ffea2ce7223717de649df21e9cb2bce3f254f76a2062b6",
+      "sha256": "d16f4e913065ee64a7295693ab1b07d83c6a24d607ab4cca61829ecf4352f028",
       "executable": false
     },
     {
