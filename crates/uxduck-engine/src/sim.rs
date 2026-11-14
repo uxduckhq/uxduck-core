@@ -339,6 +339,7 @@ pub(crate) fn start_link(
         from_link: None,
         keep_alive: false,
         carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
+        for_vehicle: None,
     });
     if let Some(forward) = &forward {
         if engine.config.capabilities.runs_in == RunsIn::Browser {
@@ -709,5 +710,6 @@ pub(crate) fn add_params(params: SimStartParams) -> LinkAddParams {
         from_link: None,
         keep_alive: false,
         carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
+        for_vehicle: None,
     }
 }

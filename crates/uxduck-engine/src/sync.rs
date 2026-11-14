@@ -134,10 +134,11 @@ fn shared_plan(plan: &Plan) -> Change {
 }
 
 /// What a vehicle is in the account: its profile, not where it was last
-/// heard.
+/// heard or the connections added for it here.
 fn profile(vehicle: &Vehicle) -> Vehicle {
     Vehicle {
         aliases: Vec::new(),
+        added_links: Vec::new(),
         link_id: String::new(),
         peer: String::new(),
         system_id: 0,
@@ -988,6 +989,7 @@ impl Engine {
             from_link: None,
             keep_alive: false,
             carries: entry.carries.into(),
+            for_vehicle: None,
         };
         crate::rpc::vehicles::create_link_as(self, actor, params, entry.id.clone()).map(|_| ())
     }
@@ -1024,6 +1026,7 @@ impl Engine {
             },
             None => Vehicle {
                 connections: None,
+                added_links: Vec::new(),
                 id: entry.id.clone(),
                 name: entry.name.clone(),
                 aliases: Vec::new(),

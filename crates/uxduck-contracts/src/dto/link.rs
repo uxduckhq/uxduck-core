@@ -299,6 +299,11 @@ pub struct LinkAddParams {
     /// `gdl90` on a UDP listener. A traffic link is read-only.
     #[serde(default, skip_serializing_if = "LinkCarries::is_mavlink")]
     pub carries: LinkCarries,
+    /// Added for this vehicle, by id or an earlier alias (S261): the
+    /// vehicle's page shows it as waiting until it hears the vehicle. Only
+    /// a connection that carries MAVLink from vehicles, never a forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_vehicle: Option<String>,
 }
 
 /// `link/update`: what changes on a link; everything else stays. A new

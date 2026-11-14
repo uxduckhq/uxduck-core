@@ -278,6 +278,7 @@ fn start(
         from_link: None,
         keep_alive: false,
         carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
+        for_vehicle: None,
     };
     let link = crate::sim::start_link(engine, connection, add, params.forward)?;
     to_value(&link)

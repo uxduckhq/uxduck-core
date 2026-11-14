@@ -299,7 +299,15 @@ pub enum ClientRequest {
     /// Result: `Vehicle`.
     #[serde(rename = "vehicle/hide")]
     VehicleHide(crate::dto::vehicle::VehicleHideParams),
-    /// Adds a link and opens it. Needs `config`. Result: `Link`.
+    /// Takes a connection off a vehicle (S261): its route kept from before
+    /// and its having been added for the vehicle. Discovery still decides,
+    /// so the connection comes back if it hears the vehicle again. Refused
+    /// with `busy` while the connection is heard on it in this run of
+    /// UXDuck. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "vehicle/forgetConnection")]
+    VehicleForgetConnection(crate::dto::vehicle::VehicleForgetConnectionParams),
+    /// Adds a link and opens it, for a vehicle with `forVehicle`. Needs
+    /// `config`. Result: `Link`.
     #[serde(rename = "link/add")]
     LinkAdd(LinkAddParams),
     /// Closes and removes a link; its vehicles' live records go. For a
@@ -2104,7 +2112,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 386] = [
+    pub const METHODS: [&'static str; 387] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2152,6 +2160,7 @@ impl ClientRequest {
         "vehicle/bookmarks",
         "vehicle/dismiss",
         "vehicle/hide",
+        "vehicle/forgetConnection",
         "link/add",
         "link/remove",
         "telemetry/subscribe",

@@ -138,6 +138,7 @@ pub fn forward_links(
             from_link: None,
             keep_alive: false,
             carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
+            for_vehicle: None,
         });
     }
     for spec in outputs {
@@ -150,6 +151,7 @@ pub fn forward_links(
             from_link: None,
             keep_alive: false,
             carries: uxduck_contracts::dto::link::LinkCarries::Mavlink,
+            for_vehicle: None,
         });
     }
     Ok(links)

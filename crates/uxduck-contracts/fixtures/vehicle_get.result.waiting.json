@@ -1,0 +1,40 @@
+{
+  "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "name": "Buggy",
+  "aliases": [],
+  "linkId": "radio",
+  "peer": "192.168.1.2:14550",
+  "systemId": 1,
+  "componentIds": [1],
+  "autopilot": "Ardupilotmega",
+  "vehicleType": "GroundRover",
+  "presence": "online",
+  "lastHeartbeatUs": 1790668800123456,
+  "armed": false,
+  "saved": true,
+  "dismissed": false,
+  "version": 4,
+  "waitingLinks": ["lk9f8e7d6c5b4a3f2e"],
+  "connections": {
+    "routes": [
+      {
+        "linkId": "radio",
+        "peer": "192.168.1.2:14550",
+        "systemId": 1,
+        "priority": 1,
+        "reachable": true,
+        "writable": true,
+        "selected": true,
+        "telemetry": true,
+        "lastHeartbeatUs": 1790668800123456,
+        "roundTripUs": 20000,
+        "lossPerMille": 0,
+        "lastReceiveAgeMs": 20,
+        "reason": "In use"
+      }
+    ],
+    "commandAvailable": true,
+    "reason": "Using the highest-preference available connection radio",
+    "epoch": 1
+  }
+}

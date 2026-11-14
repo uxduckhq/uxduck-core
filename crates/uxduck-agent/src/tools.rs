@@ -434,6 +434,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "vehicle/bookmarks",
     "vehicle/dismiss",
     "vehicle/hide",
+    "vehicle/forgetConnection",
     "link/add",
     "link/remove",
     "link/enable",

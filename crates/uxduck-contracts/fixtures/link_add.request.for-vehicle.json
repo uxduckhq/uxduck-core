@@ -1,0 +1,14 @@
+{
+  "method": "link/add",
+  "params": {
+    "name": "Buggy · Internet",
+    "kind": {
+      "type": "udp-client",
+      "host": "100.76.177.45",
+      "port": 15010
+    },
+    "policy": "read-write",
+    "topology": "auto",
+    "forVehicle": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41"
+  }
+}

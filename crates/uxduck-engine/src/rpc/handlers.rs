@@ -197,6 +197,7 @@ pub(crate) fn handle(
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleHide(_)
+        | ClientRequest::VehicleForgetConnection(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::LinkAdd(_)
         | ClientRequest::LinkList(_)

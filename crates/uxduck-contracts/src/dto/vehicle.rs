@@ -29,6 +29,12 @@ pub struct Vehicle {
     pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connections: Option<VehicleConnections>,
+    /// Connections added for it with `link/add`'s `forVehicle` that have
+    /// not heard it yet (S261), by link id: shown on its page as waiting.
+    /// None is a route, so none is ever chosen for commands. Once one hears
+    /// the vehicle it is in `connections` instead. Absent when none waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_links: Vec<String>,
     pub link_id: String,
     /// The source address it is heard from on its link.
     pub peer: String,
@@ -351,6 +357,16 @@ pub struct VehicleBookmarksParams {
     pub bookmarks: Vec<VehicleBookmark>,
 }
 
+/// `vehicle/forgetConnection`: one connection off one vehicle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleForgetConnectionParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// The connection, by its link id.
+    pub link_id: String,
+}
+
 /// Discovered connections only. Configuring a link is never vehicle evidence.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -384,4 +400,9 @@ pub struct VehicleRoute {
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub last_receive_age_ms: Option<u64>,
     pub reason: String,
+    /// Kept from before and not heard since UXDuck started (S261): never
+    /// selected, and `vehicle/forgetConnection` can take it off the
+    /// vehicle. Absent for a route heard in this run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remembered: bool,
 }

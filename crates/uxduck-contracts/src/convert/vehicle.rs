@@ -98,12 +98,23 @@ impl From<&core::Vehicle> for dto::Vehicle {
                         loss_per_mille: r.loss_per_mille,
                         last_receive_age_ms: r.last_receive_age_ms,
                         reason: r.reason.clone(),
+                        remembered: r.remembered,
                     })
                     .collect(),
                 command_available: c.command_available,
                 reason: c.reason.clone(),
                 epoch: c.epoch,
             }),
+            waiting_links: v
+                .added_links
+                .iter()
+                .filter(|link| {
+                    v.connections
+                        .as_ref()
+                        .is_none_or(|c| c.routes.iter().all(|r| &r.link_id != *link))
+                })
+                .cloned()
+                .collect(),
             link_id: v.link_id.clone(),
             peer: v.peer.clone(),
             system_id: v.system_id,

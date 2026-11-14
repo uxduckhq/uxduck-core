@@ -465,6 +465,7 @@ impl Session {
                                 "Available"
                             }
                             .into(),
+                            remembered: false,
                         }
                     })
                     .collect(),

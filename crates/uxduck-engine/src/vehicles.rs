@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
 use uxduck_core::domain::notification::NotificationState;
 use uxduck_core::domain::vehicle::{
-    Observation, Presence, Vehicle, VehicleColour, callsign, simulation_name,
+    Observation, Presence, Vehicle, VehicleColour, VehicleRoute, callsign, simulation_name,
 };
 use uxduck_core::events::{Actor, Change};
 
@@ -23,6 +23,33 @@ pub(crate) fn data_plane() -> Actor {
         operator_id: None,
         identity: None,
     }
+}
+
+/// A route the data plane does not have in this run: kept, so the
+/// vehicle's page still lists the connection, and never selected.
+fn not_heard(route: &mut VehicleRoute) {
+    route.reachable = false;
+    route.selected = false;
+    route.telemetry = false;
+    route.reason = "Not heard in this session".into();
+    route.round_trip_us = None;
+    route.loss_per_mille = None;
+    route.last_receive_age_ms = None;
+    route.remembered = true;
+}
+
+/// Takes a connection off a vehicle: its routes and its having been added
+/// for it. Whether anything changed.
+pub(crate) fn drop_link(vehicle: &mut Vehicle, link_id: &str) -> bool {
+    let added = vehicle.added_links.len();
+    vehicle.added_links.retain(|link| link != link_id);
+    let mut changed = vehicle.added_links.len() != added;
+    if let Some(connections) = &mut vehicle.connections {
+        let routes = connections.routes.len();
+        connections.routes.retain(|route| route.link_id != link_id);
+        changed |= connections.routes.len() != routes;
+    }
+    changed
 }
 
 impl Engine {
@@ -174,19 +201,15 @@ impl Engine {
                 for route in &previous.routes {
                     // A new address on the same connection supersedes its old
                     // endpoint, rather than inventing another redundant link.
-                    if !connections
-                        .routes
-                        .iter()
-                        .any(|r| r.link_id == route.link_id)
+                    // A removed connection is gone from every vehicle.
+                    if self.state.links.contains_key(&route.link_id)
+                        && !connections
+                            .routes
+                            .iter()
+                            .any(|r| r.link_id == route.link_id)
                     {
                         let mut old = route.clone();
-                        old.reachable = false;
-                        old.selected = false;
-                        old.telemetry = false;
-                        old.reason = "Not heard in this session".into();
-                        old.round_trip_us = None;
-                        old.loss_per_mille = None;
-                        old.last_receive_age_ms = None;
+                        not_heard(&mut old);
                         connections.routes.push(old);
                     }
                 }
@@ -273,6 +296,7 @@ impl Engine {
     fn first_heard(&self, seen: &Observation) -> Vehicle {
         Vehicle {
             connections: None,
+            added_links: Vec::new(),
             id: seen.id.clone(),
             name: self.unchosen_name(&seen.link_id, None),
             aliases: Vec::new(),
@@ -461,6 +485,11 @@ impl Engine {
                     vehicle.aliases.push(alias.clone());
                 }
             }
+            for link in &duplicate.added_links {
+                if !vehicle.added_links.contains(link) {
+                    vehicle.added_links.push(link.clone());
+                }
+            }
         }
         duplicates.into_iter().map(|d| d.id.clone()).collect()
     }
@@ -550,30 +579,27 @@ impl Engine {
             }
             self.commit_as(data_plane(), Change::VehicleRemoved { id: duplicate });
         }
-        // Nothing is heard yet, and a dismissal lasts one daemon run.
-        let stale: Vec<Vehicle> = self
-            .state
-            .vehicles
-            .values()
-            .filter(|v| v.presence != Presence::Offline || v.dismissed)
-            .cloned()
-            .collect();
-        for mut vehicle in stale {
+        // Nothing is heard yet, and a dismissal lasts one daemon run. Every
+        // route is kept from before, and one on a connection that is gone,
+        // such as one removed by an older UXDuck, goes with it.
+        let vehicles: Vec<Vehicle> = self.state.vehicles.values().cloned().collect();
+        for before in vehicles {
+            let mut vehicle = before.clone();
             vehicle.presence = Presence::Offline;
+            vehicle.dismissed = false;
+            let links = &self.state.links;
+            vehicle.added_links.retain(|link| links.contains_key(link));
             if let Some(connections) = &mut vehicle.connections {
                 connections.command_available = false;
                 connections.reason = "Waiting for vehicle after daemon restart".into();
-                for route in &mut connections.routes {
-                    route.reachable = false;
-                    route.selected = false;
-                    route.telemetry = false;
-                    route.reason = "Not heard in this session".into();
-                    route.round_trip_us = None;
-                    route.loss_per_mille = None;
-                    route.last_receive_age_ms = None;
-                }
+                connections
+                    .routes
+                    .retain(|route| links.contains_key(&route.link_id));
+                connections.routes.iter_mut().for_each(not_heard);
             }
-            vehicle.dismissed = false;
+            if vehicle == before {
+                continue;
+            }
             vehicle.version += 1;
             self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
         }

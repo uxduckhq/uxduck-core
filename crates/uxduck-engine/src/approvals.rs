@@ -129,6 +129,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VehicleBookmarks(_)
         | ClientRequest::VehicleDismiss(_)
         | ClientRequest::VehicleHide(_)
+        | ClientRequest::VehicleForgetConnection(_)
         | ClientRequest::VehicleDelete(_)
         | ClientRequest::OperatorCreate(_)
         | ClientRequest::OperatorUpdate(_)

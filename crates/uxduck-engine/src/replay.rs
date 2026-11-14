@@ -2911,6 +2911,7 @@ impl Engine {
     fn remember_log_vehicle(&mut self, seen: &Observation, name: &str) {
         let vehicle = Vehicle {
             connections: None,
+            added_links: Vec::new(),
             id: seen.id.clone(),
             name: name.to_owned(),
             aliases: Vec::new(),
@@ -3188,6 +3189,7 @@ impl Engine {
         let previous = self.state.vehicles.get(&identity.replay_id).cloned();
         let mut vehicle = previous.clone().unwrap_or_else(|| Vehicle {
             connections: None,
+            added_links: Vec::new(),
             id: identity.replay_id.clone(),
             name: identity.name.clone(),
             aliases: Vec::new(),

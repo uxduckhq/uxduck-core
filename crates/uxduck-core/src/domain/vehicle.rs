@@ -114,6 +114,11 @@ pub struct Vehicle {
     pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connections: Option<VehicleConnections>,
+    /// Connections added for it on its page (S261), by link id. One that
+    /// has not heard it is shown as waiting, never as a route, so it is
+    /// never chosen for commands. Kept on this computer, as links are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_links: Vec<String>,
     pub link_id: String,
     pub peer: String,
     pub system_id: u8,
@@ -397,4 +402,9 @@ pub struct VehicleRoute {
     pub loss_per_mille: Option<u32>,
     pub last_receive_age_ms: Option<u64>,
     pub reason: String,
+    /// Kept from before, not heard in this run of UXDuck (S261): the data
+    /// plane has no such route, so it is never selected, and
+    /// `vehicle/forgetConnection` can take it off the vehicle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remembered: bool,
 }

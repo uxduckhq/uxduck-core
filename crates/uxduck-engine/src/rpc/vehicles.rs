@@ -142,6 +142,10 @@ pub fn handle(
             require(Capability::Config)?;
             delete_vehicle(engine, connection, &id)
         }
+        ClientRequest::VehicleForgetConnection(params) => {
+            require(Capability::Config)?;
+            forget_connection(engine, connection, &params)
+        }
         ClientRequest::LinkAdd(params) => {
             require(Capability::Config)?;
             add_link(engine, connection, params)
@@ -222,10 +226,97 @@ fn found<'e>(
 fn add_link(
     engine: &mut Engine,
     connection: ConnectionId,
-    params: LinkAddParams,
+    mut params: LinkAddParams,
 ) -> Result<Value, ApiError> {
     let actor = engine.actor(connection);
-    to_value(&create_link(engine, actor, params)?)
+    let Some(for_vehicle) = params.for_vehicle.take() else {
+        return to_value(&create_link(engine, actor, params)?);
+    };
+    // Added on a vehicle's page (S261): a connection that hears vehicles,
+    // which the page lists as waiting until it hears this one.
+    let mut vehicle = found(engine, &for_vehicle)?.clone();
+    if vehicle.replay {
+        return Err(invalid("A replay's vehicle can't have connections added."));
+    }
+    let kind: LinkKind = params.kind.clone().into();
+    if kind.is_forward()
+        || kind.is_simulator()
+        || matches!(kind, LinkKind::UsbReceiver {})
+        || !params.carries.is_mavlink()
+    {
+        return Err(invalid(format!(
+            "A connection added for {} must hear vehicles over MAVLink. Add a forward or a receiver from the Vehicles page.",
+            vehicle.name
+        )));
+    }
+    let link = create_link(engine, actor, params)?;
+    vehicle.added_links.push(link.id.clone());
+    vehicle.version += 1;
+    engine.commit(connection, Change::VehicleUpserted { vehicle });
+    to_value(&link)
+}
+
+/// `vehicle/forgetConnection`: takes a connection off a vehicle's page
+/// (S261), the route kept from before and its having been added for the
+/// vehicle. Discovery still decides: heard again, it comes back. One heard
+/// in this run stays, because the data plane would bring it back at once.
+fn forget_connection(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: &uxduck_contracts::dto::vehicle::VehicleForgetConnectionParams,
+) -> Result<Value, ApiError> {
+    let mut vehicle = found(engine, &params.id)?.clone();
+    let link_id = params.link_id.as_str();
+    let name = engine
+        .state
+        .links
+        .get(link_id)
+        .map_or_else(|| link_id.to_owned(), |link| link.name.clone());
+    if engine
+        .state
+        .links
+        .get(link_id)
+        .is_some_and(|link| link.kind.is_simulator())
+    {
+        return Err(invalid(format!(
+            "{name} is {}'s simulation. It goes when the simulation is deleted.",
+            vehicle.name
+        )));
+    }
+    if vehicle.connections.as_ref().is_some_and(|c| {
+        c.routes
+            .iter()
+            .any(|route| route.link_id == link_id && !route.remembered)
+    }) {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!(
+                "{name} has heard {} since UXDuck started, so it stays. Forget is for a connection not heard since then.",
+                vehicle.name
+            ),
+        ));
+    }
+    if !crate::vehicles::drop_link(&mut vehicle, link_id) {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("{} has no connection {name}.", vehicle.name),
+        ));
+    }
+    // Last heard on it: on another connection it has, else on none.
+    if vehicle.link_id == link_id {
+        let (link, peer) = vehicle
+            .connections
+            .as_ref()
+            .and_then(|c| c.routes.first())
+            .map(|route| (route.link_id.clone(), route.peer.clone()))
+            .unwrap_or_default();
+        vehicle.link_id = link;
+        vehicle.peer = peer;
+    }
+    vehicle.version += 1;
+    let dto = VehicleDto::from(&vehicle);
+    engine.commit(connection, Change::VehicleUpserted { vehicle });
+    to_value(&dto)
 }
 
 /// Checks and creates a link, and opens it.
@@ -1352,27 +1443,38 @@ pub(crate) fn remove_link(
         engine.end_flights_on_simulation(id);
     }
     engine.forget_flights_on(id);
+    // Every vehicle that knows the link: heard on it last, or with a route
+    // on it or added for it, which goes from its list (S261).
     let on_link: Vec<_> = engine
         .state
         .vehicles
         .values()
-        .filter(|v| v.link_id == id)
+        .filter(|v| {
+            v.link_id == id
+                || v.added_links.iter().any(|link| link == id)
+                || v.connections
+                    .as_ref()
+                    .is_some_and(|c| c.routes.iter().any(|route| route.link_id == id))
+        })
         .cloned()
         .collect();
     // A vehicle is remembered, name and all, saved or not; a simulated one
     // goes with its simulation.
     let simulated = engine.state.links[id].kind.is_simulator();
     for mut vehicle in on_link {
-        if !simulated
-            && vehicle.connections.as_ref().is_some_and(|connections| {
-                connections
-                    .routes
-                    .iter()
-                    .any(|route| route.link_id != id && route.reachable)
-            })
+        let dropped = crate::vehicles::drop_link(&mut vehicle, id);
+        if vehicle.link_id != id
+            || (!simulated
+                && vehicle.connections.as_ref().is_some_and(|connections| {
+                    connections.routes.iter().any(|route| route.reachable)
+                }))
         {
             // Closing the transport publishes the authoritative replacement.
             // Do not insert an offline state between two reachable routes.
+            if dropped {
+                vehicle.version += 1;
+                engine.commit(connection, Change::VehicleUpserted { vehicle });
+            }
             continue;
         }
         if !simulated || vehicle.saved {
