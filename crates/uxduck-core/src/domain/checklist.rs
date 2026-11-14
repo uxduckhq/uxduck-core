@@ -371,6 +371,27 @@ fn invalid(message: impl Into<String>) -> Invalid {
     Invalid(message.into())
 }
 
+/// A group's name as it is kept: single spaces, and none at its ends.
+/// None when nothing is left of it.
+///
+/// # Errors
+/// A name longer than `MAX_GROUP` characters.
+pub fn group_name(name: &str) -> Result<Option<String>, Invalid> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.chars().count() > MAX_GROUP {
+        return Err(invalid(format!(
+            "a group's name is at most {MAX_GROUP} characters"
+        )));
+    }
+    Ok((!name.is_empty()).then_some(name))
+}
+
+/// Whether two names are one group in the list: capitals do not count.
+#[must_use]
+pub fn same_group(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 /// A telemetry key as ADR-0006 names them: `group.name`, lower case words.
 fn is_item_key(key: &str) -> bool {
     let word = |w: &str| {
@@ -435,18 +456,11 @@ impl StepDef {
             }
             (StepKind::Rule, Some(rule)) => Some(checked_rule(&title, rule)?),
         };
-        let group = self
-            .group
-            .map(|g| g.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|g| !g.is_empty());
-        if group
-            .as_ref()
-            .is_some_and(|g| g.chars().count() > MAX_GROUP)
-        {
-            return Err(invalid(format!(
-                "“{title}”: a group's name is at most {MAX_GROUP} characters"
-            )));
-        }
+        let group = match self.group.as_deref().map(group_name) {
+            Some(Ok(group)) => group,
+            Some(Err(long)) => return Err(invalid(format!("“{title}”: {long}"))),
+            None => None,
+        };
         Ok(Self {
             kind: self.kind,
             title,

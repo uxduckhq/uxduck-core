@@ -480,6 +480,27 @@ impl Engine {
         }
     }
 
+    /// Journals a vehicle's steps when they changed.
+    pub(crate) fn store_steps(
+        &mut self,
+        connection: ConnectionId,
+        before: &Checklist,
+        steps: Vec<Step>,
+        copied_from: Option<String>,
+    ) {
+        if steps != before.steps || copied_from != before.copied_from {
+            let checklist = Checklist {
+                vehicle_id: before.vehicle_id.clone(),
+                steps,
+                copied_from,
+                updated_at_us: self.clock.now_us(),
+                version: before.version + 1,
+            };
+            self.commit(connection, Change::ChecklistUpdated { checklist });
+            self.track_rules(&before.vehicle_id);
+        }
+    }
+
     /// Journals the checklist when it changed and answers with the checks.
     fn keep_checklist(
         &mut self,
@@ -489,17 +510,7 @@ impl Engine {
         steps: Vec<Step>,
         copied_from: Option<String>,
     ) -> Result<Value, ApiError> {
-        if steps != before.steps || copied_from != before.copied_from {
-            let checklist = Checklist {
-                vehicle_id: vehicle.id.clone(),
-                steps,
-                copied_from,
-                updated_at_us: self.clock.now_us(),
-                version: before.version + 1,
-            };
-            self.commit(connection, Change::ChecklistUpdated { checklist });
-            self.track_rules(&vehicle.id);
-        }
+        self.store_steps(connection, before, steps, copied_from);
         self.review_preflight(&vehicle.id);
         let preflight = self
             .state

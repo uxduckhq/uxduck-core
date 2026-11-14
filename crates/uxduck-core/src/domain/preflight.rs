@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::checklist::{Step, same_group};
 use crate::domain::setup::SetupRow;
 
 /// Where a check comes from (K1).
@@ -211,7 +212,8 @@ impl OwnCheck {
     }
 
     /// The concept it sits under in the list (K16), where a checklist's
-    /// steps of the same group join it.
+    /// steps of the same group join it, until a person puts it under
+    /// another (K31, `PreflightSettings::group`).
     #[must_use]
     pub const fn group(self) -> &'static str {
         match self {
@@ -343,12 +345,101 @@ pub struct PreflightSettings {
     pub checks: BTreeMap<OwnCheck, CheckSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<ChosenPlan>,
+    /// The group a person put one of UXDuck's own checks under, when it is
+    /// not the check's own (K31).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<OwnCheck, String>,
+    /// The list's groups in the order a person put them (K31). The rest
+    /// follow as they first appear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_order: Vec<String>,
 }
 
 impl PreflightSettings {
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.checks.is_empty() && self.plan.is_none()
+        self.checks.is_empty()
+            && self.plan.is_none()
+            && self.groups.is_empty()
+            && self.group_order.is_empty()
+    }
+
+    /// The group a check sits under in the list: its own, unless a person
+    /// put it under another (K31).
+    #[must_use]
+    pub fn group(&self, check: OwnCheck) -> &str {
+        self.groups
+            .get(&check)
+            .map_or(check.group(), String::as_str)
+    }
+
+    /// Puts a check under a group, or back under its own with none,
+    /// keeping nothing for its own.
+    pub fn set_group(&mut self, check: OwnCheck, group: Option<String>) {
+        match group {
+            Some(group) if group != check.group() => {
+                self.groups.insert(check, group);
+            }
+            _ => {
+                self.groups.remove(&check);
+            }
+        }
+    }
+
+    /// Keeps the order a person put the groups in: each once, whatever
+    /// its capitals. No names puts back the order they first appear in.
+    pub fn set_group_order(&mut self, names: Vec<String>) {
+        self.group_order.clear();
+        for name in names {
+            if !self.group_order.iter().any(|n| same_group(n, &name)) {
+                self.group_order.push(name);
+            }
+        }
+    }
+
+    /// Gives a group another name (K31), for UXDuck's own checks under it
+    /// and in the order. Another group's name joins the two, where that
+    /// group stands.
+    pub fn rename_group(&mut self, from: &str, to: &str) {
+        for check in OwnCheck::ALL {
+            if same_group(self.group(check), from) {
+                self.set_group(check, Some(to.to_owned()));
+            }
+        }
+        let joins = !same_group(from, to) && self.group_order.iter().any(|n| same_group(n, to));
+        if joins {
+            self.group_order.retain(|n| !same_group(n, from));
+        }
+        for name in &mut self.group_order {
+            if same_group(name, from) || same_group(name, to) {
+                to.clone_into(name);
+            }
+        }
+    }
+
+    /// The list's groups in the order they show (K16, K31): as a person
+    /// put them, then the rest as they first appear, UXDuck's own before
+    /// the checklist's. Each once, whatever its capitals, and only those
+    /// with a check or a step under them.
+    #[must_use]
+    pub fn groups_shown(&self, steps: &[Step]) -> Vec<String> {
+        let used: Vec<&str> = OwnCheck::ALL
+            .iter()
+            .map(|&check| self.group(check))
+            .chain(steps.iter().filter_map(|s| s.group.as_deref()))
+            .collect();
+        // As its first check or step spells it.
+        let listed = self
+            .group_order
+            .iter()
+            .filter_map(|name| used.iter().find(|u| same_group(u, name)));
+        let mut shown: Vec<String> = Vec::new();
+        for name in listed.chain(&used) {
+            if !shown.iter().any(|n| same_group(n, name)) {
+                shown.push((*name).to_owned());
+            }
+        }
+        shown
     }
 
     /// How a check is set for the vehicle.
@@ -682,5 +773,107 @@ mod tests {
         assert_eq!(OwnCheck::Plan.when(), None);
         assert_eq!(settings.threshold(OwnCheck::Home), Some(50.0));
         assert_eq!(OwnCheck::from_id("vehicle:terrain"), None);
+    }
+
+    fn step(id: &str, group: Option<&str>) -> Step {
+        use crate::domain::checklist::StepKind;
+        Step {
+            id: id.into(),
+            kind: StepKind::Manual,
+            title: id.into(),
+            group: group.map(Into::into),
+            severity: CheckSeverity::Warn,
+            when: CheckWhen::Preflight,
+            rule: None,
+            confirm: false,
+            tick: None,
+        }
+    }
+
+    #[test]
+    fn a_person_arranges_the_groups_and_only_what_they_changed_is_kept() {
+        let mut settings = PreflightSettings::default();
+        let steps = [
+            step("a", Some("Battery")),
+            step("b", Some("controller")),
+            step("c", None),
+        ];
+        assert_eq!(settings.group(OwnCheck::RcReceiver), "Controller");
+        assert_eq!(
+            settings.groups_shown(&steps),
+            [
+                "Setup",
+                "Link",
+                "Controller",
+                "Plan",
+                "Cameras",
+                "Home",
+                "Battery"
+            ],
+            "as they first appear, UXDuck's own first, capitals aside"
+        );
+
+        // A check under another group: the same concept split.
+        settings.set_group(OwnCheck::RcReceiver, Some("Radio".into()));
+        assert_eq!(settings.group(OwnCheck::RcReceiver), "Radio");
+        assert_eq!(settings.group(OwnCheck::Controller), "Controller");
+        assert!(!settings.is_default());
+        assert_eq!(
+            settings.groups_shown(&steps),
+            [
+                "Setup",
+                "Link",
+                "Radio",
+                "Controller",
+                "Plan",
+                "Cameras",
+                "Home",
+                "Battery"
+            ]
+        );
+
+        // An order, each name once. A group not in it follows, and a name
+        // with nothing under it does not show.
+        settings.set_group_order(vec![
+            "Battery".into(),
+            "Radio".into(),
+            "battery".into(),
+            "Gone".into(),
+        ]);
+        assert_eq!(settings.group_order, ["Battery", "Radio", "Gone"]);
+        assert_eq!(
+            settings.groups_shown(&steps),
+            [
+                "Battery",
+                "Radio",
+                "Setup",
+                "Link",
+                "Controller",
+                "Plan",
+                "Cameras",
+                "Home"
+            ]
+        );
+
+        // A new name keeps the group's place.
+        settings.rename_group("radio", "RC");
+        assert_eq!(settings.group(OwnCheck::RcReceiver), "RC");
+        assert_eq!(settings.group_order, ["Battery", "RC", "Gone"]);
+
+        // Another group's name joins the two, where that group stands.
+        settings.rename_group("Link", "RC");
+        assert_eq!(settings.group(OwnCheck::Link), "RC");
+        settings.rename_group("RC", "Battery");
+        assert_eq!(settings.group(OwnCheck::Link), "Battery");
+        assert_eq!(settings.group(OwnCheck::RcReceiver), "Battery");
+        assert_eq!(settings.group_order, ["Battery", "Gone"]);
+
+        // Its own group again keeps nothing.
+        settings.set_group(OwnCheck::RcReceiver, Some("Controller".into()));
+        settings.set_group(OwnCheck::Link, None);
+        settings.set_group_order(Vec::new());
+        assert!(settings.is_default());
+        let kept = serde_json::to_string(&settings).unwrap();
+        assert_eq!(kept, "{}", "a vehicle nobody arranged keeps nothing");
     }
 }

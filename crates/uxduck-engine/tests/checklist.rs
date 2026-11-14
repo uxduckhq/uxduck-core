@@ -1673,6 +1673,207 @@ fn checks_sit_under_their_concepts() {
     assert!(step["tick"].is_null());
 }
 
+#[test]
+fn a_person_arranges_the_groups() {
+    let mut b = bench();
+    let configure = |b: &mut Bench, mut params: Value| {
+        params["vehicleId"] = json!("v");
+        b.call("preflight/configure", params)
+    };
+    let group_of = |list: &Value, id: &str| {
+        list["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {list}"))["group"]
+            .clone()
+    };
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [
+                { "kind": "manual", "title": "Sticks move the right surfaces", "group": "Controller" },
+                { "kind": "manual", "title": "Strapped", "group": "Battery" },
+                { "kind": "manual", "title": PROPS }
+            ]
+        }),
+    );
+    // As they first appear, UXDuck's own before the checklist's.
+    assert_eq!(
+        b.checks()["groups"],
+        json!([
+            "Setup",
+            "Link",
+            "Controller",
+            "Plan",
+            "Cameras",
+            "Home",
+            "Battery"
+        ])
+    );
+
+    // One of UXDuck's own checks under another group: a concept split.
+    let split = configure(
+        &mut b,
+        json!({ "check": "rc-receiver", "group": "  Radio   link " }),
+    );
+    let split = &split["result"];
+    assert_eq!(group_of(split, "uxduck:rc-receiver"), "Radio link");
+    assert_eq!(group_of(split, "uxduck:controller"), "Controller");
+    let setting = split["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["check"] == "rc-receiver")
+        .unwrap();
+    assert_eq!(setting["group"], "Radio link");
+    assert_eq!(
+        split["groups"],
+        json!([
+            "Setup",
+            "Link",
+            "Radio link",
+            "Controller",
+            "Plan",
+            "Cameras",
+            "Home",
+            "Battery"
+        ])
+    );
+    let nameless = configure(&mut b, json!({ "group": "Radio" }));
+    assert_eq!(nameless["error"]["data"]["kind"], "invalid-value");
+    let long = configure(&mut b, json!({ "check": "link", "group": "g".repeat(61) }));
+    assert!(
+        long["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most 60 characters"),
+        "{long}"
+    );
+
+    // The order a person puts them in, capitals aside. A group left out
+    // follows as it first appears.
+    let ordered = configure(&mut b, json!({ "groups": ["battery", "Radio link"] }));
+    assert_eq!(
+        ordered["result"]["groups"],
+        json!([
+            "Battery",
+            "Radio link",
+            "Setup",
+            "Link",
+            "Controller",
+            "Plan",
+            "Cameras",
+            "Home"
+        ])
+    );
+    let unknown = configure(&mut b, json!({ "groups": ["Battery", "Airframe"] }));
+    assert_eq!(unknown["error"]["data"]["kind"], "not-found", "{unknown}");
+    assert_eq!(
+        unknown["error"]["message"],
+        "no group “Airframe” in the list"
+    );
+
+    // A group renamed: UXDuck's own checks and the steps under it, where
+    // it stood. A tick was for the step's words, so it stays.
+    b.tick("Sticks move the right surfaces", true);
+    configure(&mut b, json!({ "groups": ["Controller", "Battery"] }));
+    let renamed = configure(
+        &mut b,
+        json!({ "renameGroup": { "from": "controller", "to": " Sticks " } }),
+    );
+    let renamed = &renamed["result"];
+    assert_eq!(group_of(renamed, "uxduck:controller"), "Sticks");
+    let step = b.step("v", "Sticks move the right surfaces");
+    assert_eq!(step["group"], "Sticks");
+    assert_eq!(step["tick"]["by"]["clientName"], "operator-ui", "{step}");
+    assert_eq!(
+        renamed["groups"],
+        json!([
+            "Sticks",
+            "Battery",
+            "Setup",
+            "Link",
+            "Radio link",
+            "Plan",
+            "Cameras",
+            "Home"
+        ])
+    );
+
+    // Another group's name joins the two, as that group spells it.
+    let joined = configure(
+        &mut b,
+        json!({ "renameGroup": { "from": "Radio link", "to": "battery" } }),
+    );
+    let joined = &joined["result"];
+    assert_eq!(group_of(joined, "uxduck:rc-receiver"), "Battery");
+    assert_eq!(
+        joined["groups"],
+        json!([
+            "Sticks", "Battery", "Setup", "Link", "Plan", "Cameras", "Home"
+        ])
+    );
+    let empty = configure(
+        &mut b,
+        json!({ "renameGroup": { "from": "Battery", "to": "  " } }),
+    );
+    assert_eq!(empty["error"]["message"], "a group needs a name");
+    let missing = configure(
+        &mut b,
+        json!({ "renameGroup": { "from": "Radio link", "to": "Radio" } }),
+    );
+    assert_eq!(missing["error"]["data"]["kind"], "not-found", "{missing}");
+
+    // Kept with the vehicle, through a restart of the daemon.
+    b.restart_daemon();
+    let kept = b.checks();
+    assert_eq!(group_of(&kept, "uxduck:rc-receiver"), "Battery");
+    assert_eq!(kept["groups"], joined["groups"]);
+    assert_eq!(
+        b.step("v", "Sticks move the right surfaces")["group"],
+        "Sticks"
+    );
+
+    // Its own group back, and the order they first appear in.
+    let back = configure(
+        &mut b,
+        json!({ "check": "rc-receiver", "group": null, "groups": [] }),
+    );
+    assert_eq!(
+        group_of(&back["result"], "uxduck:rc-receiver"),
+        "Controller"
+    );
+    assert_eq!(
+        back["result"]["groups"],
+        json!([
+            "Setup",
+            "Link",
+            "Controller",
+            "Sticks",
+            "Plan",
+            "Cameras",
+            "Home",
+            "Battery"
+        ])
+    );
+
+    // Arranging the list is a person's, as its settings are.
+    let mut agent = connect(&mut b.engine, "agent");
+    let refused = call(
+        &mut b.engine,
+        &mut agent,
+        "preflight/configure",
+        json!({ "vehicleId": "v", "groups": ["Battery"] }),
+    );
+    assert_eq!(
+        refused["error"]["data"]["kind"], "capability-denied",
+        "{refused}"
+    );
+}
+
 fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State {
     let operator = serde_json::from_value(json!({
         "id": "op-agreed",

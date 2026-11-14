@@ -212,6 +212,10 @@ pub struct OwnCheckSetting {
     /// Its id in `checks` while on.
     pub id: String,
     pub title: String,
+    /// The group it sits under in the list: its own, or the one a person
+    /// put it under.
+    #[serde(default)]
+    pub group: String,
     pub on: bool,
     pub severity: CheckSeverity,
     pub default_severity: CheckSeverity,
@@ -257,6 +261,10 @@ pub struct Preflight {
     pub checks: Vec<Check>,
     /// Each of UXDuck's own checks as set for the vehicle, on or off.
     pub settings: Vec<OwnCheckSetting>,
+    /// The list's groups in the order they show: as a person put them,
+    /// then the rest as they first appear.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// The plan chosen for its next flight: picked, or uploaded since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
@@ -281,14 +289,24 @@ pub struct PreflightParams {
     pub vehicle_id: String,
 }
 
-/// `preflight/configure`: one of UXDuck's own checks, or the plan for the
-/// next flight. What is left out stays as it is.
+/// A group of the list given another name. Another group's name joins the
+/// two.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRename {
+    pub from: String,
+    pub to: String,
+}
+
+/// `preflight/configure`: one of UXDuck's own checks, the plan for the
+/// next flight, or how the list is grouped. What is left out stays as it
+/// is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PreflightConfigureParams {
     pub vehicle_id: String,
-    /// The check to change; `on`, `severity`, `threshold` and `input` need
-    /// it.
+    /// The check to change; `on`, `severity`, `threshold`, `input` and
+    /// `group` need it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<OwnCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,6 +324,23 @@ pub struct PreflightConfigureParams {
     /// Where "Controller input" may come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<InputPath>,
+    /// The group the check sits under in the list; null puts its own back.
+    #[serde(
+        default,
+        deserialize_with = "crate::nullable::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[allow(clippy::option_option, reason = "absent, null or a value")]
+    pub group: Option<Option<String>>,
+    /// The list's groups in the order to show them. A group left out
+    /// follows as it first appears, and an empty list puts that order back
+    /// for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    /// Renames a group, for UXDuck's own checks and the checklist's steps
+    /// under it. Ticks stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_group: Option<GroupRename>,
     /// The plan for the next flight; null for none, flown by hand.
     #[serde(
         default,

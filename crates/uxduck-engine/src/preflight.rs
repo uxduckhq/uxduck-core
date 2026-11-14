@@ -19,11 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use uxduck_contracts::dto::preflight::{
-    Preflight as PreflightDto, PreflightConfigureParams, PreflightParams,
+    GroupRename, Preflight as PreflightDto, PreflightConfigureParams, PreflightParams,
 };
 use uxduck_contracts::dto::setup::{RowState, SetupRow as RowDto};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
+use uxduck_core::domain::checklist::{Step, group_name, same_group};
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{Controller, centred_throttle};
@@ -31,7 +32,7 @@ use uxduck_core::domain::modes::Family;
 use uxduck_core::domain::plan::{LatLon, distance_m};
 use uxduck_core::domain::preflight::{
     Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, InputPath,
-    OwnCheck, Preflight,
+    OwnCheck, Preflight, PreflightSettings,
 };
 use uxduck_core::domain::settings::PilotInputMethod;
 use uxduck_core::domain::setup::{SetupKind, SetupRow, fix_for};
@@ -89,6 +90,17 @@ fn no_vehicle(id: &str) -> ApiError {
     ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}"))
 }
 
+fn no_group(name: &str) -> ApiError {
+    ApiError::new(
+        ErrorKind::NotFound,
+        format!("no group “{name}” in the list"),
+    )
+}
+
+fn invalid(reason: impl std::fmt::Display) -> ApiError {
+    ApiError::new(ErrorKind::InvalidValue, reason.to_string())
+}
+
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -140,52 +152,12 @@ fn configure(
         .ok_or_else(|| no_vehicle(&params.vehicle_id))?;
     let mut settings = vehicle.preflight.clone();
     match params.check.map(OwnCheck::from) {
-        Some(check) => {
-            let mut setting = settings.setting(check);
-            if let Some(on) = params.on {
-                setting.on = on;
-            }
-            if let Some(severity) = params.severity {
-                setting.severity = severity.into();
-            }
-            if let Some(threshold) = params.threshold {
-                let meta = check.threshold().ok_or_else(|| {
-                    ApiError::new(
-                        ErrorKind::InvalidValue,
-                        format!("“{}” has no threshold", check.title()),
-                    )
-                })?;
-                if let Some(value) = threshold
-                    && !(value.is_finite() && (meta.min..=meta.max).contains(&value))
-                {
-                    return Err(ApiError::new(
-                        ErrorKind::InvalidValue,
-                        format!(
-                            "threshold: {} takes {} to {} {}",
-                            check.title(),
-                            meta.min,
-                            meta.max,
-                            meta.unit
-                        ),
-                    ));
-                }
-                setting.threshold = threshold;
-            }
-            if let Some(input) = params.input {
-                if !check.has_input() {
-                    return Err(ApiError::new(
-                        ErrorKind::InvalidValue,
-                        format!("“{}” has no input to choose", check.title()),
-                    ));
-                }
-                setting.input = Some(input.into());
-            }
-            settings.set(check, setting);
-        }
+        Some(check) => set_check(&mut settings, check, &params)?,
         None if params.on.is_some()
             || params.severity.is_some()
             || params.threshold.is_some()
-            || params.input.is_some() =>
+            || params.input.is_some()
+            || params.group.is_some() =>
         {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -209,6 +181,14 @@ fn configure(
             at_us: engine.clock.now_us(),
         });
     }
+    let checklist = engine.checklist_of(&vehicle.id);
+    let mut steps = checklist.steps.clone();
+    arrange(
+        &mut settings,
+        &mut steps,
+        params.rename_group,
+        params.groups,
+    )?;
     if settings != vehicle.preflight {
         vehicle.preflight = settings;
         vehicle.version += 1;
@@ -216,6 +196,8 @@ fn configure(
         engine.commit(connection, Change::VehicleUpserted { vehicle });
         engine.review_preflight(&id);
     }
+    let copied_from = checklist.copied_from.clone();
+    engine.store_steps(connection, &checklist, steps, copied_from);
     let id = engine
         .vehicle(&params.vehicle_id)
         .map(|v| v.id.clone())
@@ -227,6 +209,109 @@ fn configure(
         .get(&id)
         .ok_or_else(|| no_vehicle(&id))?;
     to_value(&PreflightDto::from(preflight))
+}
+
+/// One of UXDuck's own checks set as asked: what is left out stays.
+fn set_check(
+    settings: &mut PreflightSettings,
+    check: OwnCheck,
+    params: &PreflightConfigureParams,
+) -> Result<(), ApiError> {
+    let mut setting = settings.setting(check);
+    if let Some(on) = params.on {
+        setting.on = on;
+    }
+    if let Some(severity) = params.severity {
+        setting.severity = severity.into();
+    }
+    if let Some(threshold) = params.threshold {
+        let meta = check.threshold().ok_or_else(|| {
+            ApiError::new(
+                ErrorKind::InvalidValue,
+                format!("“{}” has no threshold", check.title()),
+            )
+        })?;
+        if let Some(value) = threshold
+            && !(value.is_finite() && (meta.min..=meta.max).contains(&value))
+        {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!(
+                    "threshold: {} takes {} to {} {}",
+                    check.title(),
+                    meta.min,
+                    meta.max,
+                    meta.unit
+                ),
+            ));
+        }
+        setting.threshold = threshold;
+    }
+    if let Some(input) = params.input {
+        if !check.has_input() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!("“{}” has no input to choose", check.title()),
+            ));
+        }
+        setting.input = Some(input.into());
+    }
+    settings.set(check, setting);
+    if let Some(group) = &params.group {
+        let group = group
+            .as_deref()
+            .map(group_name)
+            .transpose()
+            .map_err(invalid)?;
+        settings.set_group(check, group.flatten());
+    }
+    Ok(())
+}
+
+/// The list's grouping (K31), after a check's own group: a rename and
+/// an order then name the groups as they are now.
+fn arrange(
+    settings: &mut PreflightSettings,
+    steps: &mut [Step],
+    rename: Option<GroupRename>,
+    order: Option<Vec<String>>,
+) -> Result<(), ApiError> {
+    if let Some(GroupRename { from, to }) = rename {
+        let from = group_name(&from).map_err(invalid)?.unwrap_or_default();
+        let to = group_name(&to)
+            .map_err(invalid)?
+            .ok_or_else(|| invalid("a group needs a name"))?;
+        let shown = settings.groups_shown(steps);
+        if !shown.iter().any(|name| same_group(name, &from)) {
+            return Err(no_group(&from));
+        }
+        // Another group's name joins the two, as that group spells it.
+        let to = shown
+            .into_iter()
+            .find(|name| same_group(name, &to) && !same_group(name, &from))
+            .unwrap_or(to);
+        settings.rename_group(&from, &to);
+        // A step's tick was for its words, not its group: it stays.
+        for step in steps.iter_mut() {
+            if step.group.as_deref().is_some_and(|g| same_group(g, &from)) {
+                step.group = Some(to.clone());
+            }
+        }
+    }
+    if let Some(names) = order {
+        let shown = settings.groups_shown(steps);
+        let mut placed = Vec::with_capacity(names.len());
+        for name in &names {
+            let name = group_name(name).map_err(invalid)?.unwrap_or_default();
+            let group = shown
+                .iter()
+                .find(|group| same_group(group, &name))
+                .ok_or_else(|| no_group(&name))?;
+            placed.push(group.clone());
+        }
+        settings.set_group_order(placed);
+    }
+    Ok(())
 }
 
 /// "the compass calibration", for a running procedure.
@@ -427,7 +512,7 @@ impl Engine {
                 id: check.id(),
                 source: CheckSource::Uxduck,
                 title: check.title().to_owned(),
-                group: Some(check.group().to_owned()),
+                group: Some(vehicle.preflight.group(check).to_owned()),
                 severity: setting.severity,
                 when: check.when(),
                 status: outcome.status,

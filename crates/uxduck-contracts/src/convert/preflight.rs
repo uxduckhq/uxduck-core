@@ -190,6 +190,7 @@ pub fn own_settings(settings: &p::PreflightSettings) -> Vec<dto::OwnCheckSetting
                 check: check.into(),
                 id: check.id(),
                 title: check.title().to_owned(),
+                group: settings.group(check).to_owned(),
                 on: setting.on,
                 severity: setting.severity.into(),
                 default_severity: check.default_severity().into(),
@@ -214,6 +215,9 @@ impl From<&p::Preflight> for dto::Preflight {
             vehicle_id: v.vehicle_id.clone(),
             checks: v.checks.iter().map(Into::into).collect(),
             settings: own_settings(&v.settings),
+            groups: v
+                .settings
+                .groups_shown(v.checklist.as_ref().map_or(&[], |c| &c.steps)),
             plan_id: v.plan_id.clone(),
             evaluating: v.evaluating,
             checklist: crate::dto::checklist::Checklist {

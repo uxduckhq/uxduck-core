@@ -141,6 +141,7 @@
       "check": "setup",
       "id": "uxduck:setup",
       "title": "No setup procedure running",
+      "group": "Setup",
       "on": true,
       "severity": "block",
       "defaultSeverity": "warn"
@@ -149,6 +150,7 @@
       "check": "restart",
       "id": "uxduck:restart",
       "title": "No restart due",
+      "group": "Setup",
       "on": true,
       "severity": "block",
       "defaultSeverity": "warn"
@@ -157,6 +159,7 @@
       "check": "link",
       "id": "uxduck:link",
       "title": "Link",
+      "group": "Link",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn",
@@ -173,6 +176,7 @@
       "check": "controller",
       "id": "uxduck:controller",
       "title": "Controller at neutral",
+      "group": "Controller",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn",
@@ -189,6 +193,7 @@
       "check": "plan",
       "id": "uxduck:plan",
       "title": "Plan on the vehicle",
+      "group": "Plan",
       "on": true,
       "severity": "block",
       "defaultSeverity": "warn"
@@ -197,6 +202,7 @@
       "check": "terrain",
       "id": "uxduck:terrain",
       "title": "Terrain loaded",
+      "group": "Plan",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn"
@@ -205,6 +211,7 @@
       "check": "recording",
       "id": "uxduck:recording",
       "title": "Cameras ready to record",
+      "group": "Cameras",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn"
@@ -213,6 +220,7 @@
       "check": "home",
       "id": "uxduck:home",
       "title": "Home is where the vehicle is",
+      "group": "Home",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn",
@@ -227,6 +235,7 @@
       "when": "launch"
     }
   ],
+  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home"],
   "planId": "pl4a1b2c3d4e5f6a7",
   "evaluating": true,
   "checklist": {

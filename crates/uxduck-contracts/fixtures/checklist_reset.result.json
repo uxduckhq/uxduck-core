@@ -150,7 +150,8 @@
       "id": "uxduck:setup",
       "on": true,
       "severity": "block",
-      "title": "No setup procedure running"
+      "title": "No setup procedure running",
+      "group": "Setup"
     },
     {
       "check": "restart",
@@ -158,7 +159,8 @@
       "id": "uxduck:restart",
       "on": true,
       "severity": "block",
-      "title": "No restart due"
+      "title": "No restart due",
+      "group": "Setup"
     },
     {
       "check": "link",
@@ -174,7 +176,8 @@
         "unit": "%",
         "value": 30.0
       },
-      "title": "Link"
+      "title": "Link",
+      "group": "Link"
     },
     {
       "check": "controller",
@@ -190,7 +193,8 @@
         "unit": "%",
         "value": 10.0
       },
-      "title": "Controller at neutral"
+      "title": "Controller at neutral",
+      "group": "Controller"
     },
     {
       "check": "plan",
@@ -198,7 +202,8 @@
       "id": "uxduck:plan",
       "on": true,
       "severity": "warn",
-      "title": "Plan on the vehicle"
+      "title": "Plan on the vehicle",
+      "group": "Plan"
     },
     {
       "check": "terrain",
@@ -206,7 +211,8 @@
       "id": "uxduck:terrain",
       "on": true,
       "severity": "warn",
-      "title": "Terrain loaded"
+      "title": "Terrain loaded",
+      "group": "Plan"
     },
     {
       "check": "recording",
@@ -214,12 +220,14 @@
       "id": "uxduck:recording",
       "on": true,
       "severity": "warn",
-      "title": "Cameras ready to record"
+      "title": "Cameras ready to record",
+      "group": "Cameras"
     },
     {
       "check": "home",
       "id": "uxduck:home",
       "title": "Home is where the vehicle is",
+      "group": "Home",
       "on": true,
       "severity": "warn",
       "defaultSeverity": "warn",
@@ -234,6 +242,7 @@
       "when": "launch"
     }
   ],
+  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home"],
   "updatedAtUs": 1790669310000000,
   "vehicleId": "v9b1c2d3e4f5a6b7c",
   "version": 12

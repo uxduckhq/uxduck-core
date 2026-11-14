@@ -38,6 +38,19 @@ pub struct PreflightArgs {
     /// `either`.
     #[arg(long, requires = "check", value_name = "either|rc|link")]
     pub input: Option<String>,
+    /// The group the check sits under in the list, such as Radio;
+    /// `default` puts its own back.
+    #[arg(long, requires = "check", value_name = "NAME|default")]
+    pub group: Option<String>,
+    /// The list's groups in the order to show them, with commas between.
+    /// A group left out follows as it first appears, and `default` puts
+    /// that order back for all.
+    #[arg(long, value_name = "A,B|default")]
+    pub group_order: Option<String>,
+    /// Renames a group, for UXDuck's own checks and the steps under it.
+    /// Another group's name joins the two.
+    #[arg(long, num_args = 2, value_names = ["FROM", "TO"])]
+    pub rename_group: Option<Vec<String>>,
     /// The plan for the next flight, by id; `none` for none.
     #[arg(long, value_name = "ID|none")]
     pub plan: Option<String>,
@@ -47,7 +60,10 @@ pub async fn run(data_dir: &Path, args: PreflightArgs) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
     let id = super::vehicle::resolve(&mut client, &args.vehicle).await?;
-    let changing = args.check.is_some() || args.plan.is_some();
+    let changing = args.check.is_some()
+        || args.plan.is_some()
+        || args.group_order.is_some()
+        || args.rename_group.is_some();
     let state = if changing {
         let mut params = Map::new();
         params.insert("vehicleId".into(), json!(id));
@@ -74,6 +90,25 @@ pub async fn run(data_dir: &Path, args: PreflightArgs) -> Result<(), CliError> {
         }
         if let Some(input) = &args.input {
             params.insert("input".into(), json!(input));
+        }
+        if let Some(group) = &args.group {
+            let value = if group == "default" {
+                Value::Null
+            } else {
+                json!(group)
+            };
+            params.insert("group".into(), value);
+        }
+        if let Some(order) = &args.group_order {
+            let names: Vec<&str> = if order == "default" {
+                Vec::new()
+            } else {
+                order.split(',').collect()
+            };
+            params.insert("groups".into(), json!(names));
+        }
+        if let Some([from, to]) = args.rename_group.as_deref() {
+            params.insert("renameGroup".into(), json!({ "from": from, "to": to }));
         }
         if let Some(plan) = &args.plan {
             let value = if plan == "none" {
