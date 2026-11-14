@@ -26,7 +26,8 @@ use crate::conversation::Wire;
 use crate::tools::Tool;
 
 /// The largest request the hosted model takes, in bytes: the API's
-/// `MAX_BODY` for HTTP and `MAX_INPUT` for its socket.
+/// `MAX_BODY` for HTTP and `MAX_INPUT` for its socket, which
+/// `apps/api/src/features/model/requestLimit.test.ts` checks.
 pub const HOSTED_MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 /// Said when a request would pass that limit even with every earlier tool
@@ -173,19 +174,4 @@ pub trait Provider: Send + Sync {
         &self,
         request: ProviderRequest,
     ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::HOSTED_MAX_REQUEST_BYTES;
-
-    #[test]
-    fn the_hosted_limit_is_the_apis_own() {
-        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/api/src/features/model");
-        let read = |file: &str| std::fs::read_to_string(model.join(file)).unwrap();
-        assert_eq!(HOSTED_MAX_REQUEST_BYTES, 256 * 1024);
-        assert!(read("modelApp.ts").contains("const MAX_BODY = 256 * 1024;"));
-        assert!(read("modelSocket.ts").contains("MAX_INPUT = 256 * 1024,"));
-    }
 }
