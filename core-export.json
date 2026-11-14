@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "fe84bbe50aaaa2c86cea60356cf54f170f5b9ec8",
+  "sourceCommit": "d78045c15b8b8b92a0a34fd2edebb447440e00ee",
   "licenseReady": true,
   "files": [
     {
@@ -5016,7 +5016,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/setup.rs",
-      "sha256": "672b0452cfbdf487b5af0e23ac2947a7aca9f1d02c7c24e364b13fba77ab76e8",
+      "sha256": "e230327f207e793a9ccaacf65577440c5a0a87134a224a09ba1d368e4156c179",
       "executable": false
     },
     {
@@ -5271,7 +5271,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/setup.rs",
-      "sha256": "96031c63bdfa3d5f9123c71a5349ffc40970a378482a89097b90b4fbf4b3edbb",
+      "sha256": "634e370f042070cb24b6091dcbd0219c4e73c2aae5a47011cebb24f1bad598cc",
       "executable": false
     },
     {
@@ -5591,7 +5591,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/setup.rs",
-      "sha256": "1d80d3011b510ebe8abac8e104cec05a222ccd9631781e7a56fd859e02a6e129",
+      "sha256": "4fcc194f3f960fb35ff00086bb069df1bde0de778bdd8f6dc146e58ca9ec9be4",
       "executable": false
     },
     {
@@ -6256,7 +6256,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/setup.rs",
-      "sha256": "7f96ecb101305ee74af43e571a7e9265db58442cf781d8d641d378adc9557463",
+      "sha256": "ce8dfa3431a20b3332d55829016b1e1d1f0b03be6bab0dcb17e9ad09b7b9831e",
       "executable": false
     },
     {
@@ -6266,7 +6266,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/setup/escs.rs",
-      "sha256": "fd7be6425d2b4266e4b13de3cd426655752f4f08263f1bfb1e7de27b4def5472",
+      "sha256": "232a3f9b665f76e03f4e23d423584350aa9ef027ac07d90dadf62a0381370f83",
       "executable": false
     },
     {
@@ -6281,7 +6281,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/setup/px4.rs",
-      "sha256": "587da63ba347bc4b6ca98581e2379be1e41511b1d6d36b5cb36e2bbeb727d405",
+      "sha256": "efd1e28fc9f59c199ffeb390d3ea4d1bf09591980262041c32489a1604cba8a5",
       "executable": false
     },
     {
@@ -6711,7 +6711,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/px4_cal.rs",
-      "sha256": "6b9cf49089f52b7a4dacdf84538c882ed7d468e3ccbd6e148e1e0e4d4c084828",
+      "sha256": "0c6b3fa09d78a7b62b97d8c53dd68cfbb7692804ec2800217e0bcc9711630d4d",
       "executable": false
     },
     {

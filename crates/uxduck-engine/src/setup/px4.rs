@@ -15,6 +15,16 @@
 //! says "calibration cancelled". PX4 uses a calibration at once: none needs
 //! a restart.
 //!
+//! The ESCs calibrate with 7 at 1, the other way round from `ArduPilot`:
+//! PX4 refuses it on its battery ("calibration failed: Disconnect battery
+//! and try again"), so it starts on USB power. It sets every motor to full,
+//! says "Connect battery now" and waits up to six seconds for the battery,
+//! then "Battery connected", holds full for 3 s and low for 5 s, and says
+//! done. Its only failure, "Timeout waiting for battery", is the current
+//! rising at once, a battery left in. It can't be stopped once started, so
+//! cancelling only ends it here. With a safety switch not pressed, PX4
+//! accepts it but says "ESC calibration denied! Press safety button first".
+//!
 //! From a known heading, PX4's "mag quick calibration" is the same
 //! `MAV_CMD_FIXED_MAG_CAL_YAW` as `ArduPilot`'s, answered at once and then
 //! "Assuming vehicle is facing heading 90.0 degrees" and "Mag quick
@@ -87,6 +97,7 @@ pub(super) fn start_command(kind: SetupKind) -> Option<Command> {
         SetupKind::Compass => Some(calibrate(1, 1.0)),
         SetupKind::Radio => Some(calibrate(3, 1.0)),
         SetupKind::AirspeedZero => Some(calibrate(5, 2.0)),
+        SetupKind::Escs => Some(calibrate(6, 1.0)),
         _ => None,
     }
 }
@@ -152,6 +163,7 @@ fn kind_of(word: &str) -> Option<SetupKind> {
         "accel" => Some(SetupKind::Accelerometer),
         "level" => Some(SetupKind::Level),
         "airspeed" => Some(SetupKind::AirspeedZero),
+        "esc" => Some(SetupKind::Escs),
         _ => None,
     }
 }
@@ -160,7 +172,11 @@ fn kind_of(word: &str) -> Option<SetupKind> {
 const fn by_text(kind: SetupKind) -> bool {
     matches!(
         kind,
-        SetupKind::Compass | SetupKind::Accelerometer | SetupKind::Level | SetupKind::AirspeedZero
+        SetupKind::Compass
+            | SetupKind::Accelerometer
+            | SetupKind::Level
+            | SetupKind::AirspeedZero
+            | SetupKind::Escs
     )
 }
 
@@ -176,6 +192,13 @@ fn failure_words(name: &str, kind: SetupKind, reason: &str) -> String {
         "to set parameters" | "to apply calibration" => {
             format!("{name} could not save the calibration.")
         }
+        "disconnect battery and try again" => format!(
+            "{name} is on its battery. Unplug the battery, power {name} from USB, and try again."
+        ),
+        "timeout waiting for battery" => format!(
+            "{name} stopped it because its current rose at once, as if the battery was still in. \
+             Unplug the battery, power {name} from USB, and try again."
+        ),
         "mag" | "accel" | "level" | "airspeed" => match kind {
             SetupKind::AirspeedZero => format!(
                 "{name}'s airspeed calibration failed: it read no usable pressure from its \
@@ -214,6 +237,7 @@ impl Engine {
                     Instruction::HoldOnASide
                 }
                 SetupKind::AirspeedZero => Instruction::CoverPitot,
+                SetupKind::Escs => Instruction::PlugInBattery,
                 _ => Instruction::HoldStill,
             });
             setup.updated_at_us = now;
@@ -226,12 +250,18 @@ impl Engine {
             SetupKind::Accelerometer => "calibrate its accelerometers",
             SetupKind::Level => "take this as level",
             SetupKind::AirspeedZero => "calibrate its airspeed sensor",
+            SetupKind::Escs => "calibrate its ESCs",
             _ => "start it",
         };
         let why = match (receipt.status, receipt.detail.as_deref()) {
             (ReceiptStatus::Rejected, Some("Unsupported")) => {
                 format!("{name} can't {what}: its firmware does not support it.")
             }
+            // PX4 refuses its ESC calibration while it is on its battery.
+            (ReceiptStatus::Rejected, _) if setup.kind == SetupKind::Escs => format!(
+                "{name} refused to {what}. Unplug the battery, power {name} from USB, disarm it, \
+                 and try again."
+            ),
             (ReceiptStatus::Rejected, _) => {
                 format!("{name} refused to {what} now. Disarm it, keep it still, and try again.")
             }
@@ -293,8 +323,18 @@ impl Engine {
             return Some(true);
         }
         let Some(said) = parse(text) else {
-            // The radio's own words while it runs.
             let lower = text.trim().to_lowercase();
+            // Accepted, but not started while its safety switch is on.
+            if lower.starts_with("esc calibration denied") {
+                let setup = current.filter(|s| s.kind == SetupKind::Escs && s.step.running())?;
+                let name = self.vehicle_name(vehicle_id);
+                let why = format!(
+                    "{name} refused it until its safety switch is pressed. Press it and try again."
+                );
+                self.px4_finished(setup, false, Some(why));
+                return Some(true);
+            }
+            // The radio's own words while it runs.
             let radio = lower.starts_with("calibration: disabling rc input")
                 || lower.starts_with("calibration: restoring rc input");
             return (radio && current.is_some_and(|s| s.kind == SetupKind::Radio && lately(&s)))
@@ -352,6 +392,7 @@ impl Engine {
                 Instruction::HoldOnASide
             }
             SetupKind::AirspeedZero => Instruction::CoverPitot,
+            SetupKind::Escs => Instruction::PlugInBattery,
             _ => Instruction::HoldStill,
         });
         setup.updated_at_us = now;
@@ -505,6 +546,15 @@ impl Engine {
             CalText::SwapTubes => {
                 setup.instruction = Some(Instruction::CheckPitot);
             }
+            CalText::ConnectBattery => {
+                setup.instruction = Some(Instruction::PlugInBattery);
+                at_once = true;
+            }
+            CalText::BatteryConnected => {
+                setup.instruction = Some(Instruction::KeepPowered);
+                setup.progress = setup.progress.max(40);
+                at_once = true;
+            }
             CalText::Started { .. } | CalText::AtRest | CalText::Other(_) => {}
         }
         self.save_setup(setup, at_once, actor());
@@ -530,6 +580,7 @@ impl Engine {
                 SetupKind::Compass => format!("Compasses calibrated on {sides} sides"),
                 SetupKind::Accelerometer => format!("Accelerometers calibrated on {sides} sides"),
                 SetupKind::Level => "Level set".to_owned(),
+                SetupKind::Escs => "ESCs calibrated".to_owned(),
                 _ => match blown {
                     Some((Some(offset), Some(blowing))) => format!(
                         "Airspeed sensor zeroed and its pitot checked (offset {offset} Pa, \

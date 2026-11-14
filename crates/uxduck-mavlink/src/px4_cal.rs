@@ -137,6 +137,11 @@ pub enum CalText {
     SwapTubes,
     /// The airspeed: blow harder; the pressure it got, in pascals.
     MorePressure(i32),
+    /// The ESCs: the motors are at full, plug in the battery now.
+    ConnectBattery,
+    /// The ESCs: the battery is in (or six seconds passed), and they learn
+    /// the range.
+    BatteryConnected,
     /// Any other `[cal]` line: a side's result, a compass's rotation.
     Other(String),
 }
@@ -278,6 +283,12 @@ pub fn parse(text: &str) -> Option<CalText> {
             .and_then(|(_, r)| number(r))
             .unwrap_or(0);
         return Some(CalText::MorePressure(got));
+    }
+    if lower.starts_with("connect battery now") {
+        return Some(CalText::ConnectBattery);
+    }
+    if lower.starts_with("battery connected") {
+        return Some(CalText::BatteryConnected);
     }
     Some(CalText::Other(line.to_owned()))
 }

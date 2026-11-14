@@ -787,6 +787,12 @@ pub enum Instruction {
     /// Unplug the battery, wait five seconds and plug it in: the ESCs beep
     /// as they learn the range (S216).
     ReplugBattery,
+    /// PX4's ESC calibration: the motors are at full, so plug in the
+    /// battery now, within six seconds.
+    PlugInBattery,
+    /// PX4's ESC calibration: the battery is in, so leave it powered while
+    /// the ESCs learn the range, about ten seconds.
+    KeepPowered,
 }
 
 /// Where one sensor of a procedure is.

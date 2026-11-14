@@ -8,7 +8,10 @@
 //!
 //! For copters with PWM or `OneShot` ESCs (`MOT_PWM_TYPE` 0 to 3): `DShot`
 //! needs no calibration, and planes, rovers and boats calibrate their ESCs
-//! by hand. The vehicle keeps no record of a calibration, so the row's
+//! by hand. PX4 calibrates its ESCs with its own command instead
+//! (`super::px4`), for any vehicle with rotors (`CA_ROTOR_COUNT`) unless
+//! every output timer is `DShot` (`PWM_MAIN_TIMn` or `PWM_AUX_TIMn` -5 to
+//! -3); this file then only says whether it is offered. The vehicle keeps no record of a calibration, so the row's
 //! state is UXDuck's own history. A calibration not heard back within two
 //! minutes says so; cancelling it sets `ESC_CALIBRATION` back to 0, at once
 //! or once the vehicle is heard again, so a half-done calibration does not
@@ -26,7 +29,7 @@ use uxduck_core::domain::setup::{Instruction, Setup, SetupKind, SetupRow, SetupS
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::Actor;
 
-use super::actor;
+use super::{actor, px4};
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
@@ -49,9 +52,22 @@ pub(super) struct Escs {
     reset: BTreeSet<String>,
 }
 
-/// Whether the vehicle's ESCs are calibrated this way: an `ArduPilot`
-/// multicopter whose `MOT_PWM_TYPE` is 0 to 3.
+/// Whether UXDuck calibrates the vehicle's ESCs: an `ArduPilot`
+/// multicopter whose `MOT_PWM_TYPE` is 0 to 3, or a PX4 vehicle with rotors
+/// and an output timer that isn't `DShot`.
 pub(super) fn offered(engine: &Engine, vehicle: &Vehicle) -> bool {
+    if px4::px4(vehicle) {
+        let timers: Vec<f64> = ["PWM_MAIN_TIM", "PWM_AUX_TIM"]
+            .iter()
+            .flat_map(|group| (0..8).map(move |n| format!("{group}{n}")))
+            .filter_map(|name| engine.escs_param(&vehicle.id, &name))
+            .collect();
+        let all_dshot = !timers.is_empty() && timers.iter().all(|t| (-5.0..=-3.0).contains(t));
+        return engine
+            .escs_param(&vehicle.id, "CA_ROTOR_COUNT")
+            .is_some_and(|n| n >= 1.0)
+            && !all_dshot;
+    }
     vehicle.autopilot == "Ardupilotmega"
         && vehicle.vehicle_type != "Helicopter"
         && Family::of(&vehicle.vehicle_type) == Some(Family::Copter)
@@ -61,22 +77,28 @@ pub(super) fn offered(engine: &Engine, vehicle: &Vehicle) -> bool {
         && engine.escs_param(&vehicle.id, PARAM).is_some()
 }
 
-/// `setup/start` for `escs`: the propellers said off, then 3 written.
-pub(super) fn start(
-    engine: &mut Engine,
-    connection: ConnectionId,
+/// Whether an ESC calibration can start: offered, and the propellers said
+/// off.
+pub(super) fn ready(
+    engine: &Engine,
     vehicle: &Vehicle,
     propellers_off: bool,
-) -> Result<Value, ApiError> {
+) -> Result<(), ApiError> {
     if !offered(engine, vehicle) {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
+        let why = if px4::px4(vehicle) {
+            format!(
+                "{}'s ESCs aren't calibrated this way: it has no rotors (CA_ROTOR_COUNT), or \
+                 only DShot outputs, which need no calibration.",
+                vehicle.name
+            )
+        } else {
             format!(
                 "{}'s ESCs aren't calibrated this way: UXDuck calibrates the ESCs of copters \
                  with PWM or OneShot ESCs (MOT_PWM_TYPE 0 to 3).",
                 vehicle.name
-            ),
-        ));
+            )
+        };
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
     }
     if !propellers_off {
         return Err(ApiError::new(
@@ -85,6 +107,18 @@ pub(super) fn start(
              while the ESCs are calibrated.",
         ));
     }
+    Ok(())
+}
+
+/// `setup/start` for `escs` on `ArduPilot`: the propellers said off, then 3
+/// written.
+pub(super) fn start(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    vehicle: &Vehicle,
+    propellers_off: bool,
+) -> Result<Value, ApiError> {
+    ready(engine, vehicle, propellers_off)?;
     let now = engine.clock.now_us();
     let setup = Setup {
         vehicle_id: vehicle.id.clone(),
@@ -182,12 +216,14 @@ impl Engine {
         self.save_setup(setup, true, actor());
     }
 
-    /// The vehicle restarted: a calibration waiting for it goes on, and is
-    /// ended by the parameters read after it. True when one was waiting.
+    /// The vehicle restarted: an `ArduPilot` calibration waiting for it goes
+    /// on, and is ended by the parameters read after it. True when one was
+    /// waiting.
     pub(super) fn escs_restarted(&mut self, vehicle_id: &str) -> bool {
         let waiting = self
             .row_setup(vehicle_id, SetupRow::Escs)
-            .is_some_and(|s| s.step == SetupStep::Running);
+            .is_some_and(|s| s.step == SetupStep::Running)
+            && !self.vehicle(vehicle_id).is_some_and(px4::px4);
         if waiting {
             self.setup.escs.restarted.insert(vehicle_id.to_owned());
         }
@@ -283,6 +319,7 @@ impl Engine {
             .setups
             .values()
             .filter(|s| s.kind == SetupKind::Escs && s.step == SetupStep::Running)
+            .filter(|s| !self.vehicle(&s.vehicle_id).is_some_and(px4::px4))
             .filter(|s| !self.setup.escs.restarted.contains(&s.vehicle_id))
             .filter(|s| s.detail.is_none())
             .filter(|s| now.saturating_sub(s.started_at_us) >= HEARD_WITHIN_US)

@@ -106,6 +106,8 @@ impl From<s::Instruction> for dto::Instruction {
             s::Instruction::HoldOnASide => Self::HoldOnASide,
             s::Instruction::TurnOnThisSide => Self::TurnOnThisSide,
             s::Instruction::ReplugBattery => Self::ReplugBattery,
+            s::Instruction::PlugInBattery => Self::PlugInBattery,
+            s::Instruction::KeepPowered => Self::KeepPowered,
         }
     }
 }

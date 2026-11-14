@@ -309,6 +309,11 @@ fn start(
             None
         }
         SetupKind::Compass | SetupKind::Accelerometer | SetupKind::Level => None,
+        // PX4's is its own command, sent below.
+        SetupKind::Escs if px4::px4(&vehicle) => {
+            escs::ready(engine, &vehicle, params.propellers_off)?;
+            None
+        }
         // ArduPilot's ESC calibration is a parameter and a replug (S216).
         SetupKind::Escs => {
             return escs::start(engine, connection, &vehicle, params.propellers_off);
@@ -357,7 +362,7 @@ fn start(
     };
     let actor = engine.actor(connection);
     let saved = engine.save_setup(setup, true, actor.clone());
-    // PX4's own commands for the compasses and the radio (S191); the
+    // PX4's own commands for the compasses, the radio and the ESCs (S191); the
     // radio's channels are asked for as well.
     if px4::px4(&vehicle)
         && let Some(command) = px4::start_command(kind)
@@ -990,6 +995,7 @@ impl Engine {
                     | SetupKind::Accelerometer
                     | SetupKind::Level
                     | SetupKind::AirspeedZero
+                    | SetupKind::Escs
             )
         {
             self.px4_answered(setup, receipt);
