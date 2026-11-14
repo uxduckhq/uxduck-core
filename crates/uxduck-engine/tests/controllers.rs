@@ -427,6 +427,104 @@ fn restarts_retire_old_session_records_but_preserve_synced_mapping_refs_and_cali
     }
 }
 
+/// B1: a second unit of a model connected under the same id raises one
+/// warning while it is plugged in, and it changes nothing about the first
+/// unit's controller. A restart, which starts with no units, clears it.
+#[test]
+fn a_second_unit_of_a_model_raises_one_notice_while_it_is_plugged_in() {
+    use uxduck_core::domain::notification::NotificationState;
+    const GX12: &str = "gp-0300000009120000544f000011010000";
+    let (mut engine, _, _) = setup();
+    engine.controller_connected(GX12, "GX12", false);
+    let controller = engine.state().controllers[GX12].clone();
+    let warnings = |engine: &Engine| {
+        engine
+            .state()
+            .notifications
+            .values()
+            .filter(|n| n.title == "A second GX12 is connected")
+            .map(|n| n.state)
+            .collect::<Vec<_>>()
+    };
+    engine.controller_second_unit(GX12, "GX12", true);
+    engine.controller_second_unit(GX12, "GX12", true);
+    assert_eq!(warnings(&engine), [NotificationState::Active]);
+    let notice = engine
+        .state()
+        .notifications
+        .values()
+        .find(|n| n.title == "A second GX12 is connected")
+        .unwrap();
+    assert!(!notice.body.as_deref().unwrap_or_default().contains(';'));
+    assert_eq!(engine.state().controllers[GX12], controller);
+    let (restarted, _, _) = load_state(NoSystem::default(), engine.state().clone());
+    let after_restart = warnings(&restarted);
+    assert!(
+        !after_restart.contains(&NotificationState::Active),
+        "a restart clears it"
+    );
+    engine.controller_second_unit(GX12, "GX12", false);
+    assert!(!warnings(&engine).contains(&NotificationState::Active));
+    assert_eq!(engine.state().controllers[GX12], controller);
+}
+
+/// FB-154: Linux names a radio by its model's SDL GUID (bus, vendor,
+/// product and version), so the same GX12 comes back under the same id
+/// after a restart or a replug, and with it the mapping and calibration set
+/// up for it. A reconnect never puts it back on the default radio mapping.
+#[test]
+fn a_linux_radio_keeps_its_calibrated_mapping_through_restarts_and_replugs() {
+    use uxduck_core::domain::controller::{AxisCalibration, InputMapping};
+    const GX12: &str = "gp-0300000009120000544f000011010000";
+    const NAME: &str = "OpenTX Radiomaster GX12 Joystick";
+    let (engine, _, _) = setup();
+    let mut state = engine.state().clone();
+    let mut mapping = InputMapping::radio();
+    mapping.id = "opentx-radiomaster-gx12-joystick".into();
+    mapping.name = NAME.into();
+    mapping.version = 52;
+    for (n, binding) in [
+        &mut mapping.roll,
+        &mut mapping.pitch,
+        &mut mapping.throttle,
+        &mut mapping.yaw,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        binding.calibration = Some(AxisCalibration {
+            min: -0.9,
+            centre: 0.01 * f64::from(u8::try_from(n).unwrap()),
+            max: 0.95,
+        });
+    }
+    state
+        .input_mappings
+        .insert(mapping.id.clone(), mapping.clone());
+    state.controllers.insert(
+        GX12.into(),
+        serde_json::from_value(json!({
+            "id": GX12, "name": NAME, "connected": true,
+            "mode": "follows-selection", "mappingId": mapping.id, "version": 52
+        }))
+        .unwrap(),
+    );
+    for _ in 0..3 {
+        let (mut restarted, _, orders) = load_state(NoSystem::default(), state);
+        assert!(!restarted.state().controllers[GX12].connected);
+        restarted.controller_connected(GX12, NAME, false);
+        restarted.controller_disconnected(GX12);
+        restarted.controller_connected(GX12, NAME, false);
+        let controller = &restarted.state().controllers[GX12];
+        assert!(controller.connected);
+        assert_eq!(controller.mapping_id, mapping.id);
+        assert!(controller.claim.is_none() && controller.target.is_none());
+        assert_eq!(restarted.state().input_mappings[&mapping.id], mapping);
+        assert!(orders.take().is_empty());
+        state = serde_json::from_str(&serde_json::to_string(restarted.state()).unwrap()).unwrap();
+    }
+}
+
 #[test]
 fn a_promoted_alias_cannot_admit_a_second_controller_for_the_same_aircraft() {
     let (mut engine, mut ui, orders) = setup();

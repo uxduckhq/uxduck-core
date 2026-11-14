@@ -13,7 +13,7 @@ third-party licenses or notices.
   its health and arming check messages. PX4 is BSD-3-Clause licensed. Its
   licence is beside the file, in `crates/uxduck-mavlink/px4/LICENSE`.
 - Native controller input includes `gilrs` 0.11.2 and `gilrs-core` 0.6.8 under
-  `vendor/`, with bounded macOS attachment/removal patches documented in
+  `vendor/`, with bounded macOS attachment/removal and Linux initial-state patches documented in
   `vendor/gilrs/UXDUCK-PATCH.md`. Their upstream MIT and Apache-2.0 licenses are
   retained in each directory. The bundled SDL controller database retains its
   own license at `vendor/gilrs/SDL_GameControllerDB/LICENSE`.

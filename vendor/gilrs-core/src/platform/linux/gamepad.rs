@@ -130,13 +130,12 @@ impl Gilrs {
                     }
                 })
                 .expect("failed to spawn thread");
-            return Ok(Gilrs {
+            return Ok(Gilrs::found(
                 gamepads,
                 epoll,
                 hotplug_rx,
-                to_check: VecDeque::new(),
-                discovery_backend: DiscoveryBackend::Inotify,
-            });
+                DiscoveryBackend::Inotify,
+            ));
         }
         let udev = match Udev::new() {
             Some(udev) => udev,
@@ -200,13 +199,30 @@ impl Gilrs {
             })
             .expect("failed to spawn thread");
 
-        Ok(Gilrs {
+        Ok(Gilrs::found(
             gamepads,
             epoll,
             hotplug_rx,
-            to_check: VecDeque::new(),
-            discovery_backend: DiscoveryBackend::Udev,
-        })
+            DiscoveryBackend::Udev,
+        ))
+    }
+
+    /// UXDuck: the pads found at start, each checked once, so the axes it
+    /// queued on opening are delivered without waiting for its next report.
+    fn found(
+        gamepads: Vec<Gamepad>,
+        epoll: Epoll,
+        hotplug_rx: Receiver<HotplugEvent>,
+        discovery_backend: DiscoveryBackend,
+    ) -> Self {
+        Gilrs {
+            // UXDuck: check each pad found at start once.
+            to_check: (0..gamepads.len()).collect(),
+            gamepads,
+            epoll,
+            hotplug_rx,
+            discovery_backend,
+        }
     }
 
     pub(crate) fn next_event(&mut self) -> Option<Event> {
@@ -313,25 +329,7 @@ impl Gilrs {
                     }
                     if let Some(gamepad) = Gamepad::open(&devpath, &syspath, self.discovery_backend)
                     {
-                        return if let Some(id) = self
-                            .gamepads
-                            .iter()
-                            .position(|gp| gp.uuid() == gamepad.uuid && !gp.is_connected)
-                        {
-                            if let Err(e) = gamepad.register_fd(&self.epoll, id as u64) {
-                                error!("Failed to add gamepad to epoll: {}", e);
-                            }
-                            self.gamepads[id] = gamepad;
-                            Some(Event::new(id, EventType::Connected))
-                        } else {
-                            if let Err(e) =
-                                gamepad.register_fd(&self.epoll, self.gamepads.len() as u64)
-                            {
-                                error!("Failed to add gamepad to epoll: {}", e);
-                            }
-                            self.gamepads.push(gamepad);
-                            Some(Event::new(self.gamepads.len() - 1, EventType::Connected))
-                        };
+                        return Some(self.plug(gamepad));
                     }
                 }
                 HotplugEvent::Removed(devpath) => {
@@ -355,6 +353,32 @@ impl Gilrs {
         }
 
         None
+    }
+
+    /// A pad plugged in, in the slot of a disconnected pad with its UUID or
+    /// a new one.
+    fn plug(&mut self, gamepad: Gamepad) -> Event {
+        if let Some(id) = self
+            .gamepads
+            .iter()
+            .position(|gp| gp.uuid() == gamepad.uuid && !gp.is_connected)
+        {
+            if let Err(e) = gamepad.register_fd(&self.epoll, id as u64) {
+                error!("Failed to add gamepad to epoll: {}", e);
+            }
+            self.gamepads[id] = gamepad;
+            // UXDuck: check it once, so the axes it queued on opening are delivered.
+            self.to_check.push_back(id);
+            Event::new(id, EventType::Connected)
+        } else {
+            if let Err(e) = gamepad.register_fd(&self.epoll, self.gamepads.len() as u64) {
+                error!("Failed to add gamepad to epoll: {}", e);
+            }
+            self.gamepads.push(gamepad);
+            // UXDuck: check it once, so the axes it queued on opening are delivered.
+            self.to_check.push_back(self.gamepads.len() - 1);
+            Event::new(self.gamepads.len() - 1, EventType::Connected)
+        }
     }
 }
 
@@ -554,6 +578,8 @@ pub struct Gamepad {
     axes_values: VecMap<i32>,
     buttons_values: VecMap<bool>,
     events: Vec<input_event>,
+    /// UXDuck: axes' values read on opening, delivered before any event.
+    on_connection: Vec<(u16, i32)>,
     axes: Vec<EvCode>,
     buttons: Vec<EvCode>,
     is_connected: bool,
@@ -613,6 +639,7 @@ impl Gamepad {
             axes_values: VecMap::new(),
             buttons_values: VecMap::new(),
             events: Vec::new(),
+            on_connection: Vec::new(),
             axes: Vec::new(),
             buttons: Vec::new(),
             is_connected: true,
@@ -620,30 +647,46 @@ impl Gamepad {
 
         gamepad.collect_axes_and_buttons();
 
-        if !gamepad.is_gamepad() {
+        gamepad.ready(discovery_backend, |code| {
+            let mut absinfo = input_absinfo::default();
+            let read = unsafe { ioctl::eviocgabs(fd, u32::from(code), &mut absinfo) };
+            (read >= 0).then_some(absinfo.value)
+        })
+    }
+
+    /// The opened device if it is a gamepad. UXDuck: with each axis's value
+    /// now, read by `abs`, queued for delivery.
+    fn ready(
+        mut self,
+        discovery_backend: DiscoveryBackend,
+        abs: impl Fn(u16) -> Option<i32>,
+    ) -> Option<Self> {
+        if !self.is_gamepad() {
             log!(
                 match discovery_backend {
                     DiscoveryBackend::Inotify => log::Level::Debug,
                     _ => log::Level::Warn,
                 },
                 "{:?} doesn't have at least 1 button and 2 axes, ignoring.",
-                path
+                self.devpath
             );
             return None;
         }
 
-        info!("Gamepad {} ({}) connected.", gamepad.devpath, gamepad.name);
+        self.queue_axes(abs);
+
+        info!("Gamepad {} ({}) connected.", self.devpath, self.name);
         debug!(
             "Gamepad {}: uuid: {}, ff_supported: {}, axes: {:?}, buttons: {:?}, axes_info: {:?}",
-            gamepad.devpath,
-            gamepad.uuid,
-            gamepad.ff_supported,
-            gamepad.axes,
-            gamepad.buttons,
-            gamepad.axes_info
+            self.devpath,
+            self.uuid,
+            self.ff_supported,
+            self.axes,
+            self.buttons,
+            self.axes_info
         );
 
-        Some(gamepad)
+        Some(self)
     }
 
     fn register_fd(&self, epoll: &Epoll, data: u64) -> Result<(), Errno> {
@@ -720,6 +763,29 @@ impl Gamepad {
         }
     }
 
+    /// UXDuck: queues each axis's value now, so axes resting where they are
+    /// (a centred stick, a throttle at idle) are reported on connection
+    /// instead of only once they first move. Left out: an axis whose value
+    /// cannot be read (never reported as 0), one whose range is empty (it
+    /// would scale to NaN), and the hats, which gilrs reads as D-pad presses.
+    /// gilrs leaves out any other axis it maps to a button, and buttons are
+    /// not read, so nothing held on connection reads as a fresh press.
+    fn queue_axes(&mut self, abs: impl Fn(u16) -> Option<i32>) {
+        let now: Vec<_> = self
+            .axes
+            .iter()
+            .filter(|axis| !(ABS_HAT0X..=ABS_HAT3Y).contains(&axis.code))
+            .filter(|axis| {
+                self.axes_info
+                    .info
+                    .get(axis.code as usize)
+                    .is_some_and(|info| info.max > info.min)
+            })
+            .filter_map(|axis| Some((axis.code, abs(axis.code)?)))
+            .collect();
+        self.on_connection.extend(now.into_iter().rev());
+    }
+
     fn is_gamepad(&self) -> bool {
         // TODO: improve it (for example check for buttons in range)
         !self.buttons.is_empty() && self.axes.len() >= 2
@@ -787,6 +853,14 @@ impl Gamepad {
     }
 
     fn event(&mut self) -> Option<(EventType, SystemTime)> {
+        if let Some((code, value)) = self.on_connection.pop() {
+            self.axes_values.insert(code as usize, value);
+            let code = crate::EvCode(EvCode::new(EV_ABS, code));
+            return Some((
+                EventType::AxisValueOnConnection(value, code),
+                utils::time_now(),
+            ));
+        }
         let mut skip = false;
         // Skip all unknown events and return Option on first know event or when there is no more
         // events to read. Returning None on unknown event breaks iterators.
@@ -1204,6 +1278,7 @@ const ABS_HAT1X: u16 = 0x12;
 const ABS_HAT1Y: u16 = 0x13;
 const ABS_HAT2X: u16 = 0x14;
 const ABS_HAT2Y: u16 = 0x15;
+const ABS_HAT3Y: u16 = 0x17;
 
 const FF_MAX: u16 = FF_GAIN;
 const FF_SQUARE: u16 = 0x58;
@@ -1346,6 +1421,156 @@ mod tests {
     use super::super::ioctl;
     use super::create_uuid;
     use uuid::Uuid;
+
+    /// A pad with `axes` and `buttons` that reads nothing from a device.
+    fn unread(axes: &[u16], buttons: &[u16]) -> super::Gamepad {
+        super::Gamepad {
+            fd: -1,
+            axes_info: super::AxesInfo {
+                info: axes
+                    .iter()
+                    .map(|&code| {
+                        let info = crate::AxisInfo {
+                            min: -1024,
+                            max: 1024,
+                            deadzone: None,
+                        };
+                        (code as usize, info)
+                    })
+                    .collect(),
+            },
+            ff_supported: false,
+            devpath: String::new(),
+            name: String::new(),
+            uuid: Uuid::nil(),
+            vendor_id: 0,
+            product_id: 0,
+            bt_capacity_fd: -1,
+            bt_status_fd: -1,
+            axes_values: Default::default(),
+            buttons_values: Default::default(),
+            events: Vec::new(),
+            on_connection: Vec::new(),
+            axes: axes
+                .iter()
+                .map(|&code| super::EvCode::new(super::EV_ABS, code))
+                .collect(),
+            buttons: buttons
+                .iter()
+                .map(|&code| super::EvCode::new(super::EV_KEY, code))
+                .collect(),
+            is_connected: true,
+        }
+    }
+
+    fn code(kind: u16, code: u16) -> crate::EvCode {
+        crate::EvCode(super::EvCode::new(kind, code))
+    }
+
+    fn reported(pad: &mut super::Gamepad) -> Vec<crate::EventType> {
+        std::iter::from_fn(|| pad.event().map(|(event, _)| event)).collect()
+    }
+
+    fn resting(value: i32, code: u16) -> crate::EventType {
+        crate::EventType::AxisValueOnConnection(value, self::code(super::EV_ABS, code))
+    }
+
+    fn gilrs(gamepads: Vec<super::Gamepad>) -> super::Gilrs {
+        let epoll = super::Epoll::new(super::EpollCreateFlags::empty()).unwrap();
+        let (_, hotplug_rx) = std::sync::mpsc::channel();
+        super::Gilrs::found(gamepads, epoll, hotplug_rx, super::DiscoveryBackend::Udev)
+    }
+
+    fn delivered(gilrs: &mut super::Gilrs) -> Vec<(usize, crate::EventType)> {
+        std::iter::from_fn(|| gilrs.next_event().map(|event| (event.id, event.event))).collect()
+    }
+
+    #[test]
+    fn resting_axes_are_reported_on_connection() {
+        let (x, y, z) = (super::ABS_X, super::ABS_Y, super::ABS_Z);
+        let mut pad = unread(&[x, y, z], &[super::BTN_SOUTH]);
+        pad.queue_axes(|code| Some(if code == z { -1024 } else { 0 }));
+        assert_eq!(
+            reported(&mut pad),
+            [resting(0, x), resting(0, y), resting(-1024, z)]
+        );
+        assert_eq!(pad.axes_values.get(x as usize), Some(&0));
+        assert_eq!(pad.axes_values.get(z as usize), Some(&-1024));
+    }
+
+    #[test]
+    fn an_axis_that_cannot_be_read_is_not_reported_as_centred() {
+        let (x, y) = (super::ABS_X, super::ABS_Y);
+        let mut pad = unread(&[x, y], &[super::BTN_SOUTH]);
+        pad.queue_axes(|code| (code == y).then_some(512));
+        assert_eq!(reported(&mut pad), [resting(512, y)]);
+    }
+
+    #[test]
+    fn an_axis_with_an_empty_range_is_not_reported() {
+        let (x, y) = (super::ABS_X, super::ABS_Y);
+        let mut pad = unread(&[x, y], &[super::BTN_SOUTH]);
+        let flat = crate::AxisInfo {
+            min: 0,
+            max: 0,
+            deadzone: None,
+        };
+        pad.axes_info.info.insert(y as usize, flat);
+        pad.queue_axes(|_| Some(0));
+        assert_eq!(reported(&mut pad), [resting(0, x)]);
+    }
+
+    #[test]
+    fn a_held_hat_is_not_reported_on_connection() {
+        let (x, y) = (super::ABS_X, super::ABS_Y);
+        let hats = [super::ABS_HAT0X, super::ABS_HAT0Y, super::ABS_HAT3Y];
+        let mut pad = unread(&[x, y, hats[0], hats[1], hats[2]], &[super::BTN_SOUTH]);
+        pad.queue_axes(|code| Some(if hats.contains(&code) { -1 } else { 0 }));
+        assert_eq!(reported(&mut pad), [resting(0, x), resting(0, y)]);
+    }
+
+    #[test]
+    fn pads_found_at_start_deliver_their_resting_axes_before_any_report() {
+        let (x, y) = (super::ABS_X, super::ABS_Y);
+        let pad = unread(&[x, y], &[super::BTN_SOUTH])
+            .ready(super::DiscoveryBackend::Udev, |code| Some(if code == y { 300 } else { 0 }))
+            .unwrap();
+        let mut gilrs = gilrs(vec![pad]);
+        assert_eq!(
+            delivered(&mut gilrs),
+            [(0, resting(0, x)), (0, resting(300, y))]
+        );
+    }
+
+    #[test]
+    fn a_pad_plugged_in_delivers_its_resting_axes_in_a_new_or_reused_slot() {
+        let (x, y) = (super::ABS_X, super::ABS_Y);
+        let open = |value| {
+            use std::os::fd::IntoRawFd;
+            let mut pad = unread(&[x, y], &[super::BTN_SOUTH]);
+            pad.fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+            pad.ready(super::DiscoveryBackend::Udev, move |_| Some(value))
+                .unwrap()
+        };
+        let mut gilrs = gilrs(Vec::new());
+        assert_eq!(gilrs.plug(open(10)).event, crate::EventType::Connected);
+        assert_eq!(
+            delivered(&mut gilrs),
+            [(0, resting(10, x)), (0, resting(10, y))]
+        );
+        gilrs.gamepads[0].disconnect();
+        assert_eq!(gilrs.plug(open(20)).id, 0);
+        assert_eq!(
+            delivered(&mut gilrs),
+            [(0, resting(20, x)), (0, resting(20, y))]
+        );
+    }
+
+    #[test]
+    fn a_device_that_is_not_a_gamepad_is_not_opened() {
+        let pad = unread(&[super::ABS_X], &[]);
+        assert!(pad.ready(super::DiscoveryBackend::Udev, |_| Some(0)).is_none());
+    }
 
     #[test]
     fn sdl_uuid() {

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "84a167d50b236b3bf2870df238b7ce499c61fcbb",
+  "sourceCommit": "cdb451f7b618d20e839957e65ff03f7da757a876",
   "licenseReady": true,
   "files": [
     {
@@ -81,7 +81,7 @@
     },
     {
       "path": "THIRD_PARTY.md",
-      "sha256": "e8f8b2b7a1506e80676e46715e245cfbfd537334441d719dc9e2c6b0a3e8a523",
+      "sha256": "4e0fc1dd08a82b9b18e07168fc9ec354e63c24b0ac44c1352c36a84b1a8325b2",
       "executable": false
     },
     {
@@ -6006,12 +6006,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/controller_input.rs",
-      "sha256": "3cc5e13058a1ff692e05fc21fd47c7f9a2eaf89284a852e595bb4891c3ed0155",
+      "sha256": "62055d9c31eb4c539d2c4a2e11d5816eb1a40b972427b8bac5426075556ef61c",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/controllers.rs",
-      "sha256": "ad866092cf6547bc2d8a5e98de6d2f773a2a3f4e9fd439c54c4bb80d501fba98",
+      "sha256": "ae86e254cd39c40031688e437227fe93a3cba7d6951d8d8f2d287353abc199fd",
       "executable": false
     },
     {
@@ -6666,7 +6666,7 @@
     },
     {
       "path": "crates/uxduck-engine/tests/controllers.rs",
-      "sha256": "9b5caed74ed231d1f191e2fad11f80dd59f21f690158898c53bf52d2ac7852af",
+      "sha256": "a6e68259072468f046eba1f40c4e3399a40729b71f5133ef77419ddc8ba06129",
       "executable": false
     },
     {
@@ -7261,7 +7261,7 @@
     },
     {
       "path": "crates/uxduck-web/src/root.rs",
-      "sha256": "d5f36c44189d84d7b81c1aa1d67ceb9f832e8b72bbe5ff7c05a8ae7e8b3fc907",
+      "sha256": "b29334ff560e17e1aa4c95b11b442351165a24e47434583e12d38b7e8fcc3a4f",
       "executable": false
     },
     {
@@ -7636,12 +7636,12 @@
     },
     {
       "path": "crates/uxduck/src/daemon/controllers.rs",
-      "sha256": "736d93e73e9e394140008f4f6b9d7300b2bd65ba0fa464d6799969443301a568",
+      "sha256": "2ca1313646ed1c28d21ad6f5734c0cfaeb8e62dcb46c2d5e223e1899408dc7bc",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/daemon/data_plane.rs",
-      "sha256": "95e6e37b50e7a74f7b420df1b1fbc94464bd21f55ee9499808eebf6b26c53b6e",
+      "sha256": "281a2fa8c2232c12882db91d35bd8c3c3ca4804fd34477bd653ccbceb8dcd420",
       "executable": false
     },
     {
@@ -8606,7 +8606,7 @@
     },
     {
       "path": "vendor/gilrs-core/src/lib.rs",
-      "sha256": "4dbb55f6bde85dfbf5e1ec0a72ada56e00920fc5b268ca187f58ac64e5688bab",
+      "sha256": "bb653e4ade19e4ebbcc55d4c22e8d49caddb752d5722fa1c851b0a08fb4202d2",
       "executable": false
     },
     {
@@ -8631,7 +8631,7 @@
     },
     {
       "path": "vendor/gilrs-core/src/platform/linux/gamepad.rs",
-      "sha256": "49c6a720f91d98d78955a8ac863ea99a980049e071086809c420953b1c97ae3c",
+      "sha256": "b4f6b2f5357d26a5b2b4348690671176c02dd806c08219cdebc7d72dc05fdd1c",
       "executable": false
     },
     {
@@ -8781,7 +8781,7 @@
     },
     {
       "path": "vendor/gilrs/UXDUCK-PATCH.md",
-      "sha256": "7be97a66e9a6a8c72e01a8136c83709506e467f2d11f7d8b87b6f0a575bf0e38",
+      "sha256": "42953ac837e87b0320a4ace9f7f2678085f221ed3c2e8458222449040cd57331",
       "executable": false
     },
     {
@@ -8881,7 +8881,7 @@
     },
     {
       "path": "vendor/gilrs/src/gamepad.rs",
-      "sha256": "92bd63e3d1384d530ff4f64d4bf90b0aeae5a141c514512fe810c84855a9b11d",
+      "sha256": "625a8cfbc8667073b3d8eeefe99ce98d14ad1e530ca4a865575a9927635d7932",
       "executable": false
     },
     {

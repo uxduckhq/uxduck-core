@@ -1384,6 +1384,11 @@ impl Browser {
                 layout_known,
             } => self.engine.controller_connected(&id, &name, layout_known),
             Report::Disconnected { id } => self.engine.controller_disconnected(&id),
+            Report::SecondUnit {
+                id,
+                name,
+                connected,
+            } => self.engine.controller_second_unit(&id, &name, connected),
             Report::Neutral { id, neutral } => self.engine.controller_neutral(&id, neutral),
             Report::Pressed { id, button, code } => {
                 self.engine.controller_pressed(&id, button, code);

@@ -28,3 +28,31 @@ persistent unit identity from its serial number. A model GUID or singleton
 VID/PID match cannot establish that join when disconnect events are queued.
 Remove these two patches once the pinned upstream versions expose an
 equivalent exact-attachment accessor.
+
+# Resting inputs on Linux (FB-154)
+
+The Linux evdev backend reported an axis only once it changed, so a stick
+resting at centre had no value until moved. A radio set up and calibrated
+earlier came back after a restart or a replug with its centred sticks
+unread, and UXDuck asked for its setup again.
+
+`Gamepad::open` now hands the opened device to `Gamepad::ready`, which
+reads every axis's current `EVIOCGABS` value and queues it. `Gamepad::event`
+delivers these first, as a new `gilrs_core::EventType::AxisValueOnConnection`.
+`Gilrs::found` (start) and `Gilrs::plug` (hotplug) check each newly opened
+pad once, so the values arrive before the device's next report.
+
+Left out of the queue: an axis whose value cannot be read (never reported
+as centred), an axis whose range is empty (gilrs would scale it to NaN),
+and the hats `ABS_HAT0X` to `ABS_HAT3Y`, which gilrs reads as D-pad
+presses. Buttons are never read on connection. In `gilrs`, an
+`AxisValueOnConnection` for an axis the mapping makes a button (a trigger,
+for example) becomes `EventType::Dropped` and leaves the state untouched.
+So nothing held while plugging in reads as a fresh press. Any other axis
+is scaled and named as an ordinary axis change, so it agrees with later
+ones.
+
+Tests in `gilrs-core/src/platform/linux/gamepad.rs` cover the queue, the
+left-out axes, `Gamepad::ready`, and delivery through `Gilrs::found` and
+`Gilrs::plug` into a new and a reused slot. Remove this patch once
+upstream reports the initial state of a Linux device.

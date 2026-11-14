@@ -55,6 +55,9 @@ pub enum EventType {
     ButtonPressed(EvCode),
     ButtonReleased(EvCode),
     AxisValueChanged(i32, EvCode),
+    /// UXDuck: an axis's value read when its gamepad connected, before it
+    /// moved (Linux).
+    AxisValueOnConnection(i32, EvCode),
     Connected,
     Disconnected,
 }

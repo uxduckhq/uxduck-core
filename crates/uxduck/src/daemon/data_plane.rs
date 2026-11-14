@@ -1504,6 +1504,15 @@ impl Plane {
                         .run(move |e| e.controller_disconnected(&id))
                         .await
                 }
+                Report::SecondUnit {
+                    id,
+                    name,
+                    connected,
+                } => {
+                    self.engine
+                        .run(move |e| e.controller_second_unit(&id, &name, connected))
+                        .await
+                }
                 Report::Neutral { id, neutral } => {
                     self.engine
                         .run(move |e| e.controller_neutral(&id, neutral))

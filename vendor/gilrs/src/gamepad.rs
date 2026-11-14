@@ -328,6 +328,25 @@ impl Gilrs {
                                 ),
                             }
                         }
+                        RawEventType::AxisValueOnConnection(val, nec) => {
+                            // UXDuck: a resting axis read on connection. One
+                            // mapped to a button is dropped, so a trigger held
+                            // while plugging in does not read as a fresh press.
+                            let axis_info = *self.gamepad(id).inner.axis_info(nec).unwrap();
+                            let nec = Code(nec);
+
+                            match self.gamepad(id).axis_or_btn_name(nec) {
+                                Some(AxisOrBtn::Btn(_)) => EventType::Dropped,
+                                Some(AxisOrBtn::Axis(a)) => {
+                                    EventType::AxisChanged(a, axis_value(&axis_info, val, a), nec)
+                                }
+                                None => EventType::AxisChanged(
+                                    Axis::Unknown,
+                                    axis_value(&axis_info, val, Axis::Unknown),
+                                    nec,
+                                ),
+                            }
+                        }
                         RawEventType::Connected => {
                             match id.0.cmp(&self.gamepads_data.len()) {
                                 Ordering::Equal => {

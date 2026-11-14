@@ -138,15 +138,92 @@ fn fake_events(message: &serde_json::Value, known: &mut BTreeSet<String>) -> Vec
 
 #[cfg(all(feature = "gamepad", not(target_os = "macos")))]
 fn gamepad_id(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
-    let uuid = gilrs.gamepad(id).uuid();
+    model_id(gilrs.gamepad(id).uuid(), usize::from(id))
+}
+
+/// A native pad's id on Linux and Windows: its model's GUID, which names
+/// the bus, vendor, product and version but no serial. It stays the same
+/// across replugs and restarts, so the pad's setup does too, and two units
+/// of one model share it. Without a GUID, the slot it was given.
+#[cfg(any(all(feature = "gamepad", not(target_os = "macos")), test))]
+fn model_id(uuid: [u8; 16], slot: usize) -> String {
     if uuid == [0; 16] {
-        format!("gp-{}", usize::from(id))
+        format!("gp-{slot}")
     } else {
         uuid.iter().fold(String::from("gp-"), |mut out, byte| {
             use std::fmt::Write;
             let _ = write!(out, "{byte:02x}");
             out
         })
+    }
+}
+
+/// Which gilrs slot drives each id, on Linux and Windows. Units of one
+/// model share an id, so a second unit would drive the controller the first
+/// one set up and maybe claimed: its slot is ignored until it is plugged in
+/// again with no other unit of its model connected (B1, FB-154). Only the
+/// owning slot's input passes, so input a slot sends before its connection
+/// or after its disconnection (the Windows poller can) reaches nothing.
+#[cfg(any(all(feature = "gamepad", not(target_os = "macos")), test))]
+#[derive(Debug, Default)]
+struct Owners {
+    owner: std::collections::HashMap<String, usize>,
+    ignored: std::collections::HashMap<usize, String>,
+}
+
+/// What a gilrs event from a slot is.
+#[cfg(any(all(feature = "gamepad", not(target_os = "macos")), test))]
+#[derive(Clone, Copy, Debug)]
+enum Arrival {
+    Connected,
+    Disconnected,
+    Input,
+}
+
+/// What the gamepad loop does with a gilrs event.
+#[cfg(any(all(feature = "gamepad", not(target_os = "macos")), test))]
+#[derive(Debug, PartialEq, Eq)]
+enum Admit {
+    Pass,
+    Drop,
+    /// A second unit of the model connected under the id came, or the last
+    /// one went: the person is told, and nothing else is sent.
+    SecondUnit {
+        connected: bool,
+    },
+}
+
+#[cfg(any(all(feature = "gamepad", not(target_os = "macos")), test))]
+impl Owners {
+    fn admit(&mut self, slot: usize, id: &str, arrival: Arrival) -> Admit {
+        match arrival {
+            Arrival::Connected => {
+                self.ignored.remove(&slot);
+                self.owner.retain(|_, owner| *owner != slot);
+                if self.owner.contains_key(id) {
+                    self.ignored.insert(slot, id.to_owned());
+                    return Admit::SecondUnit { connected: true };
+                }
+                self.owner.insert(id.to_owned(), slot);
+                Admit::Pass
+            }
+            Arrival::Disconnected => {
+                if let Some(id) = self.ignored.remove(&slot) {
+                    return if self.ignored.values().any(|other| *other == id) {
+                        Admit::Drop
+                    } else {
+                        Admit::SecondUnit { connected: false }
+                    };
+                }
+                if self.owner.get(id) != Some(&slot) {
+                    return Admit::Drop;
+                }
+                self.owner.remove(id);
+                Admit::Pass
+            }
+            Arrival::Input if self.owner.get(id) == Some(&slot) => Admit::Pass,
+            Arrival::Input => Admit::Drop,
+        }
     }
 }
 
@@ -162,6 +239,20 @@ fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId, id: String) ->
     #[cfg(target_os = "linux")]
     super::bluetooth::track(&connected, gilrs::LinuxGamepadExt::devpath(&gamepad));
     connected
+}
+
+#[cfg(all(feature = "gamepad", not(target_os = "macos")))]
+fn second_unit(
+    gilrs: &gilrs::Gilrs,
+    pad: gilrs::GamepadId,
+    id: String,
+    connected: bool,
+) -> InputEvent {
+    InputEvent::SecondUnit {
+        id,
+        name: gilrs.gamepad(pad).name().to_owned(),
+        connected,
+    }
 }
 
 /// Gamepads through gilrs, on a thread of their own. Without a gamepad
@@ -193,6 +284,8 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
             let events = super::bluetooth::watch(events);
             #[cfg(target_os = "macos")]
             let mut duplicates = std::collections::HashMap::new();
+            #[cfg(not(target_os = "macos"))]
+            let mut owners = Owners::default();
             #[cfg(target_os = "macos")]
             let mut identities = match super::controller_identity::Attachments::new() {
                 Ok(identities) => identities,
@@ -209,6 +302,13 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                 };
                 #[cfg(not(target_os = "macos"))]
                 let id = gamepad_id(&gilrs, pad);
+                #[cfg(not(target_os = "macos"))]
+                if let Admit::SecondUnit { connected } =
+                    owners.admit(usize::from(pad), &id, Arrival::Connected)
+                {
+                    events(second_unit(&gilrs, pad, id, connected));
+                    continue;
+                }
                 events(gamepad_connected(&gilrs, pad, id.clone()));
                 #[cfg(target_os = "macos")]
                 if let Some(observer) = announce_native(&gilrs, pad, id, events.clone()) {
@@ -223,6 +323,22 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                 );
                 #[cfg(not(target_os = "macos"))]
                 let id = gamepad_id(&gilrs, event.id);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let arrival = match event.event {
+                        gilrs::EventType::Connected => Arrival::Connected,
+                        gilrs::EventType::Disconnected => Arrival::Disconnected,
+                        _ => Arrival::Input,
+                    };
+                    match owners.admit(usize::from(event.id), &id, arrival) {
+                        Admit::Pass => {}
+                        Admit::Drop => continue,
+                        Admit::SecondUnit { connected } => {
+                            events(second_unit(&gilrs, event.id, id, connected));
+                            continue;
+                        }
+                    }
+                }
                 #[cfg(target_os = "macos")]
                 let id = {
                     use gilrs::MacOSGamepadExt;
@@ -665,6 +781,7 @@ fn button_of(button: gilrs::Button) -> Option<GamepadButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uxduck_core::domain::controller::{GamepadAxis, GamepadButton};
 
     #[cfg(all(feature = "gamepad", target_os = "macos"))]
     #[test]
@@ -696,6 +813,236 @@ mod tests {
         assert!(
             !ids.is_empty(),
             "No admitted native controller; attach a joystick or gamepad first"
+        );
+    }
+
+    /// FB-154: the GX12's GUID on Linux, as gilrs builds it from the input
+    /// device's bus (USB), vendor (0x1209), product (0x4f54) and version.
+    const GX12: [u8; 16] = [
+        0x03, 0, 0, 0, 0x09, 0x12, 0, 0, 0x54, 0x4f, 0, 0, 0x11, 0x01, 0, 0,
+    ];
+
+    #[test]
+    fn a_native_pad_is_known_by_its_model_across_replugs_and_restarts() {
+        let id = model_id(GX12, 0);
+        assert_eq!(id, "gp-0300000009120000544f000011010000");
+        assert_eq!(model_id(GX12, 3), id);
+        let mut other_version = GX12;
+        other_version[12] = 0x12;
+        assert_ne!(model_id(other_version, 0), id);
+        assert!(!id.starts_with("gp-session-"));
+    }
+
+    #[test]
+    fn two_units_of_one_model_share_an_id_and_a_pad_without_a_guid_is_its_slot() {
+        assert_eq!(model_id(GX12, 0), model_id(GX12, 1));
+        assert_eq!(model_id([0; 16], 2), "gp-2");
+    }
+
+    /// What the gamepad loop sends on for an event gilrs reports from `slot`.
+    fn deliver(
+        owners: &mut Owners,
+        controls: &mut Controls,
+        slot: usize,
+        arrival: Arrival,
+        event: InputEvent,
+    ) -> Vec<Report> {
+        let id = model_id(GX12, slot);
+        match owners.admit(slot, &id, arrival) {
+            Admit::Pass => controls.input(event),
+            Admit::Drop => Vec::new(),
+            Admit::SecondUnit { connected } => controls.input(InputEvent::SecondUnit {
+                id,
+                name: "GX12".into(),
+                connected,
+            }),
+        }
+    }
+
+    fn sticks(controls: &Controls) -> Vec<(String, [i16; 4])> {
+        controls
+            .pilot_outputs()
+            .into_iter()
+            .map(|(vehicle, sticks, ..)| (vehicle, sticks))
+            .collect()
+    }
+
+    /// B1 on Windows: gilrs's WGI poller can send a slot's input before its
+    /// connection is handled and after its disconnection. None of it reaches
+    /// a controller, so it can neither move the unit that owns the id nor
+    /// bring back a controller that was removed.
+    #[test]
+    fn input_outside_a_slots_connection_never_reaches_a_controller() {
+        let id = model_id(GX12, 0);
+        let (a, b) = (0, 1);
+        let axis = |value| InputEvent::Axis {
+            id: id.clone(),
+            axis: Some(GamepadAxis::LeftStickY),
+            code: Some(1),
+            value,
+        };
+        let connected = InputEvent::Connected {
+            id: id.clone(),
+            name: "GX12".into(),
+            layout_known: true,
+        };
+        let disconnected = InputEvent::Disconnected { id: id.clone() };
+        let (mut owners, mut controls) = (Owners::default(), Controls::default());
+        let mut send =
+            |slot, arrival, event| deliver(&mut owners, &mut controls, slot, arrival, event);
+
+        assert!(
+            send(a, Arrival::Input, axis(1.0)).is_empty(),
+            "before A connects"
+        );
+        send(a, Arrival::Connected, connected.clone());
+        assert!(
+            send(b, Arrival::Input, axis(1.0)).is_empty(),
+            "B, never connected"
+        );
+        send(b, Arrival::Connected, connected.clone());
+        send(b, Arrival::Disconnected, disconnected.clone());
+        assert!(
+            send(b, Arrival::Input, axis(1.0)).is_empty(),
+            "B after it left"
+        );
+        send(a, Arrival::Disconnected, disconnected);
+        assert!(
+            send(a, Arrival::Input, axis(1.0)).is_empty(),
+            "A after it left"
+        );
+        assert!(
+            controls.snapshot().controllers.is_empty(),
+            "no controller came back"
+        );
+    }
+
+    /// B1: a second GX12 plugged in while the first drives a vehicle. Its
+    /// resting and moving sticks and its buttons never reach the first's
+    /// controller, and it drives only once plugged in again alone, as a
+    /// freshly connected controller.
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one scenario, step by step")]
+    fn a_second_unit_of_a_model_never_drives_the_first_units_controller() {
+        use uxduck_core::domain::controller::InputMapping;
+        use uxduck_core::domain::settings::PilotInputMethod;
+        use uxduck_engine::runtime::ControlRoute;
+        let id = model_id(GX12, 0);
+        let (a, b) = (0, 1);
+        let axis = |axis, code, value| InputEvent::Axis {
+            id: id.clone(),
+            axis: Some(axis),
+            code: Some(code),
+            value,
+        };
+        let button = |pressed| InputEvent::Button {
+            id: id.clone(),
+            button: Some(GamepadButton::South),
+            code: Some(304),
+            pressed,
+        };
+        let connected = InputEvent::Connected {
+            id: id.clone(),
+            name: "GX12".into(),
+            layout_known: true,
+        };
+        let disconnected = InputEvent::Disconnected { id: id.clone() };
+        let second = |connected| {
+            vec![Report::SecondUnit {
+                id: id.clone(),
+                name: "GX12".into(),
+                connected,
+            }]
+        };
+        let (mut owners, mut controls) = (Owners::default(), Controls::default());
+        let mut send = |controls: &mut Controls, slot, arrival, event| {
+            deliver(&mut owners, controls, slot, arrival, event)
+        };
+
+        let first = send(&mut controls, a, Arrival::Connected, connected.clone());
+        assert!(matches!(first[..], [Report::Connected { .. }, ..]));
+        send(
+            &mut controls,
+            a,
+            Arrival::Input,
+            axis(GamepadAxis::LeftStickY, 1, -1.0),
+        );
+        controls.route(
+            &id,
+            Some(ControlRoute {
+                pilot_input_method: PilotInputMethod::Automatic,
+                vehicle_id: "v".into(),
+                mapping: InputMapping::mode_2(),
+                gripper: None,
+            }),
+        );
+        let claimed = sticks(&controls);
+        assert_eq!(claimed.len(), 1, "unit A drives v");
+
+        let announced = send(&mut controls, b, Arrival::Connected, connected.clone());
+        assert_eq!(
+            announced,
+            second(true),
+            "B is a second unit, not the controller"
+        );
+        for event in [
+            axis(GamepadAxis::LeftStickY, 1, 1.0),
+            axis(GamepadAxis::LeftStickX, 0, 1.0),
+            axis(GamepadAxis::RightStickX, 3, -1.0),
+            axis(GamepadAxis::RightStickY, 4, 1.0),
+            button(true),
+            button(false),
+        ] {
+            let reports = send(&mut controls, b, Arrival::Input, event);
+            assert!(reports.is_empty(), "B's input reaches nothing");
+        }
+        assert_eq!(sticks(&controls), claimed, "A's sticks still drive v");
+
+        send(
+            &mut controls,
+            a,
+            Arrival::Input,
+            axis(GamepadAxis::LeftStickX, 0, 0.5),
+        );
+        assert_ne!(sticks(&controls), claimed, "A moving still drives v");
+
+        let gone = send(
+            &mut controls,
+            a,
+            Arrival::Disconnected,
+            disconnected.clone(),
+        );
+        assert_eq!(gone, [Report::Disconnected { id: id.clone() }]);
+        let late = send(
+            &mut controls,
+            b,
+            Arrival::Input,
+            axis(GamepadAxis::LeftStickY, 1, 1.0),
+        );
+        assert!(
+            late.is_empty(),
+            "B does not take over without a fresh connection"
+        );
+        let left = send(&mut controls, b, Arrival::Disconnected, disconnected);
+        assert_eq!(left, second(false), "B leaving clears the notice only");
+
+        let again = send(&mut controls, b, Arrival::Connected, connected.clone());
+        assert!(
+            matches!(again[..], [Report::Connected { .. }, ..]),
+            "B alone is fresh"
+        );
+        send(
+            &mut controls,
+            b,
+            Arrival::Input,
+            axis(GamepadAxis::LeftStickY, 1, 1.0),
+        );
+        let snapshot = controls.snapshot();
+        let device = snapshot.controllers.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            device.axes.iter().map(|a| a.code).collect::<Vec<_>>(),
+            [Some(1)],
+            "B's input reaches a fresh controller now, with none of A's values"
         );
     }
 

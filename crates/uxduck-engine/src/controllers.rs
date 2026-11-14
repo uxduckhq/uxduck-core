@@ -48,6 +48,10 @@ use crate::rpc::handlers::to_value;
 use crate::runtime::ControlRoute;
 use crate::{ConnectionId, Engine, upsert};
 
+/// The condition of the notice a second unit of a model raises. A daemon
+/// restart starts with no units, so none outlives it.
+const SECOND_UNIT: &str = "controller-second-unit:";
+
 /// How long a window's controllers keep flying after it goes, for the
 /// next window like it to take back: long enough for a reload.
 pub const CLAIM_GRACE_US: u64 = 15_000_000;
@@ -1878,6 +1882,16 @@ impl Engine {
         for id in sessions {
             self.prune_disconnected_session(&id);
         }
+        let second_units: Vec<String> = self
+            .state
+            .notifications
+            .values()
+            .filter_map(|n| n.condition.clone())
+            .filter(|condition| condition.starts_with(SECOND_UNIT))
+            .collect();
+        for condition in second_units {
+            self.resolve(&condition);
+        }
     }
 
     fn prune_disconnected_session(&mut self, id: &str) {
@@ -1955,6 +1969,30 @@ impl Engine {
         if plugged_in && !waiting_for_input && !id.starts_with("keyboard:") {
             self.controller_presence(id, name, true);
         }
+    }
+
+    /// A second unit of the model connected under `id` was plugged in, or
+    /// the last such unit unplugged. The daemon ignores its input, so one
+    /// notice says so while it is in.
+    pub fn controller_second_unit(&mut self, id: &str, name: &str, connected: bool) {
+        let condition = format!("{SECOND_UNIT}{id}");
+        if !connected {
+            self.resolve(&condition);
+            return;
+        }
+        self.raise(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Persistent,
+            subject: Subject::System,
+            title: format!("A second {name} is connected"),
+            body: Some(
+                "UXDuck uses only one of them and ignores the other. To use the other one, unplug both and plug it back in alone."
+                    .into(),
+            ),
+            actions: Vec::new(),
+            condition: Some(condition),
+            report: None,
+        });
     }
 
     /// Reconnects update one notice per device, including old notices without a condition.

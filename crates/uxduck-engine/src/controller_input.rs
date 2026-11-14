@@ -38,6 +38,14 @@ pub enum InputEvent {
     Disconnected {
         id: String,
     },
+    /// A second unit of the model connected under `id` was plugged in, or
+    /// the last such unit unplugged. On Linux and Windows units of one model
+    /// share an id, so the daemon ignores the second unit's input.
+    SecondUnit {
+        id: String,
+        name: String,
+        connected: bool,
+    },
     Axis {
         id: String,
         axis: Option<GamepadAxis>,
@@ -83,6 +91,12 @@ pub enum Report {
     },
     Disconnected {
         id: String,
+    },
+    /// See [`InputEvent::SecondUnit`].
+    SecondUnit {
+        id: String,
+        name: String,
+        connected: bool,
     },
     Neutral {
         id: String,
@@ -396,6 +410,7 @@ impl Controls {
     }
 
     /// Applies one input event; returns what the engine must hear.
+    #[allow(clippy::too_many_lines, reason = "one arm per input event")]
     pub fn input(&mut self, event: InputEvent) -> Vec<Report> {
         match event {
             InputEvent::Keyboard { id, axes, at_us } => {
@@ -433,6 +448,15 @@ impl Controls {
                 self.devices.remove(&id);
                 vec![Report::Disconnected { id }]
             }
+            InputEvent::SecondUnit {
+                id,
+                name,
+                connected,
+            } => vec![Report::SecondUnit {
+                id,
+                name,
+                connected,
+            }],
             InputEvent::Axis {
                 id,
                 axis,
