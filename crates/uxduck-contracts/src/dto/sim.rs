@@ -322,9 +322,9 @@ pub struct SimPauseParams {
     pub paused: bool,
 }
 
-/// Contact with loaded 3D scenery: pauses an ArduPilot simulation where it
-/// touched, and stops a PX4 one. The link version prevents a late report
-/// from ending a newly restarted flight.
+/// Contact with loaded 3D scenery: pauses a simulation where it touched.
+/// The link version prevents a late report from ending a newly restarted
+/// flight.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SimCrashParams {

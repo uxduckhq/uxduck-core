@@ -1201,13 +1201,12 @@ pub enum ClientRequest {
     /// vehicles cannot be paused. Control capability. Result: `Link`.
     #[serde(rename = "sim/pause")]
     SimPause(SimPauseParams),
-    /// Reports contact with the loaded 3D scenery. An ArduPilot simulation
-    /// pauses where it touched (`sceneryHit`), with a notice offering
-    /// Continue anyway and Start again; resuming ignores contact near that
-    /// spot until the vehicle is clear of it. A PX4 simulation, which cannot
-    /// pause, stops, keeping its vehicle and a notice with Start again.
-    /// Requires the current link version and control capability. Never a
-    /// real link. Result: `Link`.
+    /// Reports contact with the loaded 3D scenery. The simulation pauses
+    /// where it touched (`sceneryHit`), with a notice offering Continue
+    /// anyway and Start again; resuming ignores contact near that spot until
+    /// the vehicle is clear of it. Without a position it stops, keeping its
+    /// vehicle and a notice with Start again. Requires the current link
+    /// version and control capability. Never a real link. Result: `Link`.
     #[serde(rename = "sim/crash")]
     SimCrash(SimCrashParams),
     /// Saves a snapshot of a simulated vehicle: where it is, its height,

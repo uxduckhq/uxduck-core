@@ -499,9 +499,9 @@ pub(crate) fn restart(
 /// simulator runs no time while paused: it does not move, its failsafes do
 /// not count down, and UXDuck neither expects to hear from it nor sends it
 /// anything; commands and changes to it are refused until it resumes. Only
-/// a running ArduPilot simulation pauses: PX4's clock does not stop with
-/// its process, a start in the air finishes its take-off first, and a
-/// practice exercise is flown through without one.
+/// a running simulation pauses: a start in the air finishes its take-off
+/// first, and a practice exercise is flown through without one. PX4's SIH
+/// steps its own clock, so it stops with the process as ArduPilot's does.
 pub(crate) fn pause(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -514,19 +514,16 @@ pub(crate) fn pause(
             format!("no simulated vehicle on link {id}"),
         ));
     };
-    let LinkKind::Simulator { autopilot, .. } = &link.kind else {
+    if !link.kind.is_simulator() {
         return Err(ApiError::new(
             ErrorKind::NotFound,
             format!("no simulated vehicle on link {id}"),
         ));
-    };
+    }
     if link.paused == paused {
         return to_value(&LinkDto::from(&link));
     }
     if paused {
-        if *autopilot == SimAutopilot::Px4 {
-            return Err(invalid("a PX4 simulation can't be paused"));
-        }
         // A practice exercise is judged on UXDuck's clock, so a pause would
         // bend its timings and its result (maintainer, 2026-10-23). The Get
         // started guide teaches; it may pause.
@@ -568,13 +565,13 @@ pub(crate) fn pause(
 }
 
 /// Contact with the 3D scenery. The scenery can be wrong (a building or
-/// hill where the simulator has none), so an ArduPilot simulation pauses
-/// where it touched instead of ending (maintainer, 2026-10-31): Continue
-/// anyway resumes it, and contact within [`SCENERY_CLEAR_M`] of the spot is
-/// not reported until it is clear, so it can fly out of the obstacle;
-/// Start again puts it back where it started. A PX4 simulation cannot
-/// pause, so it still ends, keeping its vehicle, telemetry, tabs and Start
-/// again. Either way a practice attempt on it is given up.
+/// hill where the simulator has none), so a simulation pauses where it
+/// touched instead of ending (maintainer, 2026-10-31): Continue anyway
+/// resumes it, and contact within [`SCENERY_CLEAR_M`] of the spot is not
+/// reported until it is clear, so it can fly out of the obstacle; Start
+/// again puts it back where it started. Without a position to pause at, it
+/// ends, keeping its vehicle, telemetry, tabs and Start again. Either way a
+/// practice attempt on it is given up.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "handlers take their params by value"
@@ -621,14 +618,7 @@ fn crash(
     }
     engine.give_up_practice_on(&link.id, connection);
     let at = engine.ground_position(&vehicle.id);
-    if let (
-        LinkKind::Simulator {
-            autopilot: SimAutopilot::Ardupilot,
-            ..
-        },
-        Some(at),
-    ) = (&link.kind, at)
-    {
+    if let Some(at) = at {
         engine.links.pause_simulation(&link.id, true);
         link.paused = true;
         link.scenery_hit = Some(at);
