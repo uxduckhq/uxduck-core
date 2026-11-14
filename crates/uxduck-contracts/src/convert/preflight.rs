@@ -31,6 +31,44 @@ impl From<dto::CheckSeverity> for p::CheckSeverity {
     }
 }
 
+impl From<p::CheckWhen> for dto::CheckWhen {
+    fn from(v: p::CheckWhen) -> Self {
+        match v {
+            p::CheckWhen::Preflight => Self::Preflight,
+            p::CheckWhen::Launch => Self::Launch,
+        }
+    }
+}
+
+impl From<dto::CheckWhen> for p::CheckWhen {
+    fn from(v: dto::CheckWhen) -> Self {
+        match v {
+            dto::CheckWhen::Preflight => Self::Preflight,
+            dto::CheckWhen::Launch => Self::Launch,
+        }
+    }
+}
+
+impl From<p::InputPath> for dto::InputPath {
+    fn from(v: p::InputPath) -> Self {
+        match v {
+            p::InputPath::Either => Self::Either,
+            p::InputPath::Rc => Self::Rc,
+            p::InputPath::Link => Self::Link,
+        }
+    }
+}
+
+impl From<dto::InputPath> for p::InputPath {
+    fn from(v: dto::InputPath) -> Self {
+        match v {
+            dto::InputPath::Either => Self::Either,
+            dto::InputPath::Rc => Self::Rc,
+            dto::InputPath::Link => Self::Link,
+        }
+    }
+}
+
 impl From<p::CheckStatus> for dto::CheckStatus {
     fn from(v: p::CheckStatus) -> Self {
         match v {
@@ -60,6 +98,7 @@ impl From<&p::CheckFix> for dto::CheckFix {
             p::CheckFix::Plugin { plugin_id } => Self::Plugin {
                 plugin_id: plugin_id.clone(),
             },
+            p::CheckFix::Home => Self::Home,
         }
     }
 }
@@ -75,6 +114,7 @@ impl From<p::OwnCheck> for dto::OwnCheck {
             p::OwnCheck::Plan => Self::Plan,
             p::OwnCheck::Terrain => Self::Terrain,
             p::OwnCheck::Recording => Self::Recording,
+            p::OwnCheck::Home => Self::Home,
         }
     }
 }
@@ -90,6 +130,7 @@ impl From<dto::OwnCheck> for p::OwnCheck {
             dto::OwnCheck::Plan => Self::Plan,
             dto::OwnCheck::Terrain => Self::Terrain,
             dto::OwnCheck::Recording => Self::Recording,
+            dto::OwnCheck::Home => Self::Home,
         }
     }
 }
@@ -102,6 +143,7 @@ impl From<&p::Check> for dto::Check {
             title: v.title.clone(),
             group: v.group.clone(),
             severity: v.severity.into(),
+            when: v.when.map(Into::into),
             status: v.status.into(),
             detail: v.detail.clone(),
             fix: v.fix.as_ref().map(Into::into),
@@ -159,6 +201,8 @@ pub fn own_settings(settings: &p::PreflightSettings) -> Vec<dto::OwnCheckSetting
                     unit: meta.unit.to_owned(),
                     label: meta.label.to_owned(),
                 }),
+                input: settings.input(check).map(Into::into),
+                when: check.when().map(Into::into),
             }
         })
         .collect()

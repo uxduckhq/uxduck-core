@@ -1111,7 +1111,7 @@ pub enum ClientRequest {
     /// left. Operators only. Result: `Plugin`.
     #[serde(rename = "plugin/setEnabled")]
     PluginSetEnabled(crate::dto::plugin::PluginSetEnabledParams),
-    /// Whether a plugin's blocking checks may stop arming (`block: true`)
+    /// Whether a plugin's blocking checks may hold the launch (`block: true`)
     /// or only warn (S194, ADR-0038 K13): a person's answer, kept on this
     /// computer and journaled. Operators only. Result: `Plugin`.
     #[serde(rename = "plugin/setChecksBlock")]
@@ -1426,11 +1426,11 @@ pub enum ClientRequest {
     /// A vehicle's preflight checks (S192, ADR-0038): its own pre-arm
     /// reasons first, then UXDuck's checks, each with its source, severity
     /// (block or warn), status and detail in words, and how UXDuck's are
-    /// set. While a blocking check does not pass, arming, a take-off and a
-    /// mission started from the ground are refused `not-sent` with reason
-    /// `preflight`, for every client; an agent's arming is put to an
-    /// operator listing them. The vehicle's own reasons never stop it in
-    /// UXDuck (the vehicle refuses by itself). Changes nothing. Needs
+    /// set. Arming is never refused for a check. While a `block` check
+    /// does not pass, a launch (a take-off, or a mission's start from the
+    /// ground) is refused `not-sent` with reason `preflight`, for every
+    /// client, and an agent's is put to an operator listing them. A
+    /// step's `when` is `preflight` or `launch`. Changes nothing. Needs
     /// `read`. Result: `Preflight`.
     #[serde(rename = "preflight/state")]
     PreflightState(crate::dto::preflight::PreflightParams),
@@ -1441,38 +1441,33 @@ pub enum ClientRequest {
     #[serde(rename = "preflight/configure")]
     PreflightConfigure(crate::dto::preflight::PreflightConfigureParams),
     /// Adds, changes, removes or reorders steps of one vehicle's checklist
-    /// (S193, S353, ADR-0038 K8, K11, K16, K17), all or none. A manual step
-    /// is ticked by a person ("Propellers tight"); a rule compares one
-    /// telemetry item or parameter with a value and passes once it has held
-    /// for `holdS` seconds: `{ "kind": "rule", "title": "Battery at least
-    /// 22.2 V", "item": "battery.voltage_v", "op": ">=", "value": 22.2,
-    /// "holdS": 3 }`. A rule with `"confirm": true` is ticked by a person
-    /// too, and only once it passes, for what UXDuck can measure and a
-    /// person must also see ("Battery charged and strapped"). Give each
-    /// step a `group` for the concept it belongs to ("Battery", "Airframe",
-    /// "Controller"): the list is shown by group, never as automatic and
-    /// manual sections, and a step in "Setup", "Link", "Controller", "Plan"
-    /// or "Cameras" sits with UXDuck's own checks there.
-    /// Use `battery.cell_v` (the lowest cell, or the pack over its cell
-    /// count) so one rule reads the same on 4S and 6S. A step blocks arming
-    /// until it passes unless its severity is `warn`. The checklist is this
-    /// vehicle's alone: nothing changes on any other vehicle. Needs
-    /// `config`; an agent without it is asked for by the operator first.
-    /// Ticking and overriding are a person's, never an agent's. Result:
-    /// `Preflight`, with the checklist and each step's check.
+    /// (S193, S353, ADR-0038 K8, K11, K16, K17), all or none. A manual
+    /// step is ticked by a person ("Propellers tight"). A
+    /// rule compares one telemetry item or parameter with a value and
+    /// passes once it has held for `holdS` seconds: `{ "kind": "rule",
+    /// "title": "Battery at least 22.2 V", "item": "battery.voltage_v",
+    /// "op": ">=", "value": 22.2, "holdS": 3 }`. Use `battery.cell_v` so
+    /// one rule reads the same on 4S and 6S. A rule with `"confirm": true`
+    /// is ticked by a person too, once it passes ("Battery charged and
+    /// strapped"). Give each step a `group` ("Battery", "Airframe"): the
+    /// list is shown by group, and "Setup", "Link", "Controller", "Plan" or
+    /// "Cameras" sits with UXDuck's own checks. A step only warns unless
+    /// its severity is `block`, which holds the launch until it passes,
+    /// never arming. `"when": "launch"` is for what must be true at
+    /// take-off ("Area clear of people"). Needs `config`; an agent without
+    /// it is asked for by the operator first. Ticking and overriding are a
+    /// person's. Result: `Preflight`.
     #[serde(rename = "checklist/update")]
     ChecklistUpdate(crate::dto::checklist::ChecklistUpdateParams),
     /// Copies steps into one vehicle's checklist (S193, ADR-0038 K7, K11)
-    /// from one source: another vehicle's checklist (`fromVehicleId`), a
-    /// checklist file (`file`, `uxduck.checklist/1`) or a pasted Markdown or
-    /// Notion checklist (`markdown`: each line, `- [ ]` item or numbered
-    /// item a manual step; each heading the group of the steps under it).
-    /// A copy, independent from
-    /// then on; ticks are never copied. After pasting a list, tell the
-    /// person which steps could be rules over telemetry or a parameter
-    /// (such as "Battery charged" as `battery.cell_v >= 4.1`) and change
-    /// them only if they agree. Needs `config`; an agent without it is
-    /// asked for by the operator first. Result: `Preflight`.
+    /// from one source: another vehicle's (`fromVehicleId`), a checklist
+    /// file (`file`, `uxduck.checklist/1`) or a pasted Markdown or Notion
+    /// list (`markdown`: each line or item a manual step, each heading
+    /// the group of the steps under it). Ticks are never copied. After
+    /// pasting, tell the person which steps could be rules (such as
+    /// "Battery charged" as `battery.cell_v >= 4.1`) and change them only
+    /// if they agree. Needs `config`; an agent without it is asked for by
+    /// the operator first. Result: `Preflight`.
     #[serde(rename = "checklist/copy")]
     ChecklistCopy(crate::dto::checklist::ChecklistCopyParams),
     /// A person ticks a manual step of a vehicle's checklist, or a rule

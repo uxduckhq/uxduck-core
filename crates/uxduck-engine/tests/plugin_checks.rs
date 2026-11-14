@@ -2,8 +2,9 @@
 //! manifest, reported per vehicle with `Effects.checks`, listed after the
 //! vehicle's checklist under the plugin's name; a report gone stale or a
 //! plugin that is off, stopped or starting leaves the check unknown or
-//! waiting, which holds arming when it blocks; a `block` check stops arming
-//! only once a person allowed the plugin's checks to, and warns until then;
+//! waiting, which holds the launch when it blocks (S352: never arming); a
+//! `block` check holds the launch only once a person allowed the plugin's
+//! checks to, and warns until then;
 //! the answer is a person's, journaled, kept across reinstalls and
 //! restarts; a plugin reports only the checks it declares and cannot tick a
 //! checklist's step.
@@ -431,21 +432,27 @@ impl Bench {
         );
     }
 
-    fn arm(&mut self) -> Value {
-        let params = json!({ "vehicleId": "v", "command": { "type": "arm" } });
+    /// Take off, the vehicle accepting each step: refused at once, or the
+    /// take-off's receipt.
+    fn launch(&mut self) -> Value {
+        let params = json!({ "vehicleId": "v", "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }) });
         if let Some(reply) = send(&mut self.engine, &mut self.ui, "command/send", params) {
             return reply;
         }
-        let sent = self.wire.take();
-        assert_eq!(sent.len(), 1, "one command went: {sent:?}");
-        self.engine
-            .command_result(&sent[0].receipt_id, Outcome::Accepted, 1);
-        later(&mut self.ui).expect("its receipt")
+        loop {
+            let sent = self.wire.take();
+            assert_eq!(sent.len(), 1, "one command at a time: {sent:?}");
+            self.engine
+                .command_result(&sent[0].receipt_id, Outcome::Accepted, 1);
+            if let Some(reply) = later(&mut self.ui) {
+                return reply;
+            }
+        }
     }
 
-    /// Arms, and disarms again if it went.
-    fn try_arm(&mut self) -> Value {
-        let receipt = self.arm();
+    /// Takes off, and is on the ground and disarmed again if it went.
+    fn try_launch(&mut self) -> Value {
+        let receipt = self.launch();
         if receipt["result"]["status"] == "accepted" {
             self.seen("v", 1);
         }
@@ -525,9 +532,9 @@ fn a_plugins_check_follows_the_checklist_and_only_warns_until_a_person_allows_it
         failing.get("fix").is_none(),
         "the plugin said what it found"
     );
-    assert_eq!(b.try_arm()["status"], "accepted");
+    assert_eq!(b.try_launch()["status"], "accepted");
 
-    // A person allows its checks to stop arming: now it holds arming.
+    // A person allows its checks to hold the launch: now it does.
     let allowed = b.ok(
         "plugin/setChecksBlock",
         json!({ "id": "wind-check", "block": true }),
@@ -543,20 +550,20 @@ fn a_plugins_check_follows_the_checklist_and_only_warns_until_a_person_allows_it
     assert_eq!(blocking["severity"], "block");
     assert_eq!(blocking["gates"], true);
     assert_eq!(blocking["plugin"]["heldBack"], json!(null));
-    let refused = b.try_arm();
+    let refused = b.try_launch();
     assert_eq!(refused["status"], "not-sent", "{refused}");
     assert_eq!(refused["reason"], "preflight");
     assert_eq!(refused["preflight"][0]["id"], WIND);
     assert_eq!(
         refused["detail"],
-        "Arm wasn't sent to Alpha: 1 preflight check doesn't pass: Wind under 8 m/s (Wind check) \
-         (Over 8 m/s). Fix them, or hold Arm anyway to arm past them."
+        "Take off wasn't sent to Alpha: 1 check that holds the launch doesn't pass: Wind under \
+         8 m/s (Wind check) (Over 8 m/s). Fix it, or hold Take off anyway to launch past it."
     );
 
     // The wind drops: it passes and arming goes.
     b.wind(ReportedStatus::Pass, "Under 8 m/s.");
     assert_eq!(b.check(WIND)["status"], "pass");
-    assert_eq!(b.try_arm()["status"], "accepted");
+    assert_eq!(b.try_launch()["status"], "accepted");
 
     // Changed back on the plugin's page: it warns again.
     b.wind(ReportedStatus::Fail, "Over 8 m/s.");
@@ -570,7 +577,7 @@ fn a_plugins_check_follows_the_checklist_and_only_warns_until_a_person_allows_it
         (Some("warn"), Some(false))
     );
     assert_eq!(warns["plugin"]["heldBack"], true);
-    assert_eq!(b.try_arm()["status"], "accepted");
+    assert_eq!(b.try_launch()["status"], "accepted");
 }
 
 #[test]
@@ -582,7 +589,7 @@ fn a_stale_report_and_a_plugin_that_is_off_or_stopped_leave_the_check_unknown_an
     assert!(gating(&b.checks_of("v")).is_empty());
 
     // No report for longer than its staleMs (10 min): unknown, and it
-    // holds arming. The 1 Hz beat notices with nothing else happening.
+    // holds the launch. The 1 Hz beat notices with nothing else happening.
     b.time.advance(600 * S + 1);
     b.engine.review_preflights();
     let stale = b.check(WIND);
@@ -592,7 +599,7 @@ fn a_stale_report_and_a_plugin_that_is_off_or_stopped_leave_the_check_unknown_an
         "The Wind check plugin hasn't reported for 10 min."
     );
     assert_eq!(stale["gates"], true);
-    assert_eq!(b.try_arm()["reason"], "preflight");
+    assert_eq!(b.try_launch()["reason"], "preflight");
     b.wind(ReportedStatus::Pass, "Under 8 m/s.");
     assert_eq!(b.check(WIND)["status"], "pass");
 
@@ -612,7 +619,7 @@ fn a_stale_report_and_a_plugin_that_is_off_or_stopped_leave_the_check_unknown_an
         off["fix"],
         json!({ "type": "plugin", "pluginId": "wind-check" })
     );
-    let refused = b.try_arm();
+    let refused = b.try_launch();
     assert_eq!(refused["reason"], "preflight", "{refused}");
     assert!(
         refused["detail"]
@@ -633,7 +640,7 @@ fn a_stale_report_and_a_plugin_that_is_off_or_stopped_leave_the_check_unknown_an
         b.check(WIND)["detail"],
         "The Wind check plugin hasn't reported on Alpha yet."
     );
-    assert_eq!(b.try_arm()["reason"], "preflight");
+    assert_eq!(b.try_launch()["reason"], "preflight");
     b.wind(ReportedStatus::Pass, "Under 8 m/s.");
 
     // It stops by itself (a trap, too slow): unknown again.
@@ -738,7 +745,7 @@ fn a_plugin_reports_only_its_own_declared_checks_for_known_vehicles() {
 }
 
 #[test]
-fn only_a_person_answers_and_an_agents_arming_lists_the_plugins_check() {
+fn only_a_person_answers_and_an_agents_launch_lists_the_plugins_check() {
     let mut b = bench();
     b.install("/plugins/wind", None);
     let mut agent = connect(&mut b.engine, "agent");
@@ -780,7 +787,7 @@ fn only_a_person_answers_and_an_agents_arming_lists_the_plugins_check() {
         &mut b.engine,
         &mut agent,
         "command/send",
-        json!({ "vehicleId": "v", "command": { "type": "arm" } }),
+        json!({ "vehicleId": "v", "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }) }),
     );
     assert!(held.is_none(), "held: {held:?}");
     assert!(b.wire.take().is_empty());
@@ -789,16 +796,19 @@ fn only_a_person_answers_and_an_agents_arming_lists_the_plugins_check() {
     assert_eq!(approval.preflight[0].id, WIND);
     assert_eq!(
         approval.summary,
-        "arm Alpha past 1 failing preflight check: Wind under 8 m/s (Wind check)"
+        "take off Alpha past 1 failing preflight check: Wind under 8 m/s (Wind check)"
     );
 
-    // The plugin's own arming is held the same way.
+    // The plugin's own launch is held the same way.
     b.engine.plugin_effects(
         "wind-check",
         Effects {
             commands: vec![SendCommand {
                 vehicle_id: "v".into(),
-                command: uxduck_contracts::dto::command::Command::Arm,
+                command: serde_json::from_value(
+                    json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }),
+                )
+                .unwrap(),
             }],
             ..Effects::default()
         },

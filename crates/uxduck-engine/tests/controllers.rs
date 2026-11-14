@@ -335,40 +335,61 @@ fn claimed_check(
     )
 }
 
-/// A vehicle counts UXDuck's stick input as RC, so while a controller
-/// drives it, its word that it is receiving does not say its own receiver
-/// works.
+/// A vehicle counts UXDuck's stick input as RC, and its failsafe does too,
+/// so a controller driving it from UXDuck passes "Controller input"
+/// (maintainer, 2026-11-13). Asked for its own receiver alone, its word
+/// that it is receiving does not say that receiver works. Asked for the
+/// link alone, the controller is what passes it.
 #[test]
-fn the_rc_receiver_check_is_not_known_while_a_controller_drives_the_vehicle() {
-    let check = claimed_check(
-        "uxduck:rc-receiver",
-        "Ardupilotmega",
-        "GroundRover",
-        false,
-        0.0,
-        |engine, _| {
-            engine.telemetry_observed(uxduck_core::domain::telemetry::VehicleTelemetry {
-                vehicle_id: "v3".into(),
-                positions: Vec::new(),
-                items: vec![uxduck_core::domain::telemetry::TelemetryItem {
-                    key: "rc.status".into(),
-                    label: "RC receiver".into(),
-                    unit: uxduck_core::domain::telemetry::Unit::None,
-                    value: None,
-                    text: Some("Receiving".into()),
-                    source: "rc".into(),
-                    component_id: 1,
-                    time_us: 1_000,
-                }],
-            });
-        },
-    );
+fn controller_input_passes_with_a_controller_from_uxduck_unless_rc_alone_is_asked_for() {
+    let receiving = |input: Option<&'static str>| {
+        claimed_check(
+            "uxduck:rc-receiver",
+            "Ardupilotmega",
+            "GroundRover",
+            false,
+            0.0,
+            move |engine, ui| {
+                if let Some(input) = input {
+                    let set = call(
+                        engine,
+                        ui,
+                        "preflight/configure",
+                        json!({ "vehicleId": "v3", "check": "rc-receiver", "input": input }),
+                    );
+                    assert!(set.get("error").is_none(), "{set}");
+                }
+                engine.telemetry_observed(uxduck_core::domain::telemetry::VehicleTelemetry {
+                    vehicle_id: "v3".into(),
+                    positions: Vec::new(),
+                    items: vec![uxduck_core::domain::telemetry::TelemetryItem {
+                        key: "rc.status".into(),
+                        label: "RC receiver".into(),
+                        unit: uxduck_core::domain::telemetry::Unit::None,
+                        value: None,
+                        text: Some("Receiving".into()),
+                        source: "rc".into(),
+                        component_id: 1,
+                        time_us: 1_000,
+                    }],
+                });
+            },
+        )
+    };
     let name = "Charlie";
     assert_eq!(
-        check,
+        receiving(None),
+        format!("pass: {name} takes Xbox's input from UXDuck as RC.")
+    );
+    assert_eq!(
+        receiving(Some("rc")),
         format!(
             "unknown: {name} takes Xbox's input from UXDuck as RC, so it can't say whether its own receiver works."
         )
+    );
+    assert_eq!(
+        receiving(Some("link")),
+        format!("pass: {name} takes Xbox's input from UXDuck.")
     );
 }
 

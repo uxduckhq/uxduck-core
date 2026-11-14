@@ -13,7 +13,7 @@ use crate::dto::setup::SetupRow;
 #[serde(rename_all = "kebab-case")]
 pub enum CheckSource {
     /// The vehicle's own pre-arm reasons: listed first, never turned off.
-    /// UXDuck never holds arming for them; the vehicle refuses by itself.
+    /// UXDuck never holds anything for them. The vehicle refuses to arm by itself.
     Vehicle,
     /// UXDuck's own checks: each on or off per vehicle.
     Uxduck,
@@ -23,7 +23,8 @@ pub enum CheckSource {
     Plugin,
 }
 
-/// Whether a check that does not pass stops arming.
+/// `block` holds the launch until the check passes. `warn` only warns.
+/// Arming is never held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckSeverity {
@@ -31,8 +32,26 @@ pub enum CheckSeverity {
     Warn,
 }
 
-/// Where a check stands. A blocking check holds arming in every status
-/// but `pass`.
+/// Where a checklist step counts: in the `preflight`, or at the `launch`,
+/// where and when the vehicle takes off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckWhen {
+    #[default]
+    Preflight,
+    Launch,
+}
+
+impl CheckWhen {
+    /// For serde: the default is left off the wire.
+    #[must_use]
+    pub fn is_preflight(&self) -> bool {
+        *self == Self::Preflight
+    }
+}
+
+/// Where a check stands. A check that holds the launch holds it in every
+/// status but `pass`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckStatus {
@@ -74,24 +93,26 @@ pub enum CheckFix {
     Connections,
     /// The plugin a check comes from, on the Plugins page (S194).
     Plugin { plugin_id: String },
+    /// Setting home to where the vehicle is now.
+    Home,
 }
 
 /// UXDuck's own checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OwnCheck {
-    /// No setup procedure is running. Blocks unless changed.
+    /// No setup procedure is running.
     Setup,
     /// No restart is due after a calibration or a parameter change that
-    /// takes effect on restarting. Blocks unless changed.
+    /// takes effect on restarting.
     Restart,
     /// The vehicle was heard just now, and its radio's signal, when it
     /// reports one, is at least the threshold.
     Link,
-    /// The vehicle says it is receiving RC input (`rc.status`). Fails when
-    /// it has lost it or has had none since it started. Not known while a
-    /// controller drives the vehicle from UXDuck, because the vehicle
-    /// counts that input as RC.
+    /// "Controller input": the vehicle says it has RC input (`rc.status`),
+    /// from its receiver or from a controller through UXDuck, which it
+    /// counts as RC. Fails when it has lost it or has had none since it
+    /// started. `input` asks for one of the two.
     RcReceiver,
     /// A controller driving the vehicle has roll, pitch and yaw within the
     /// threshold of centre and its throttle no higher than that above its
@@ -104,6 +125,11 @@ pub enum OwnCheck {
     Terrain,
     /// Every camera that records while the vehicle is armed is sending.
     Recording,
+    /// Home is within the threshold of the vehicle, in metres. A return
+    /// goes to home. Counts at the launch only. A home farther away fails
+    /// once the vehicle is armed. Disarmed it passes, saying that most
+    /// autopilots move home when they arm.
+    Home,
 }
 
 /// One check in a vehicle's list.
@@ -121,13 +147,19 @@ pub struct Check {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub severity: CheckSeverity,
+    /// Where a checklist step counts. Left out for the vehicle's own
+    /// reasons, UXDuck's own checks and plugins' checks, which are read
+    /// live and count in the preflight and at the launch alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<CheckWhen>,
     pub status: CheckStatus,
     /// What UXDuck found, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<CheckFix>,
-    /// Holds arming now: blocking, not the vehicle's, and not passing.
+    /// Holds a launch now: set to hold, not the vehicle's, and not
+    /// passing.
     pub gates: bool,
     /// The plugin a `plugin` check is from (S194), its id `plugin:<plugin
     /// id>:<check id>`.
@@ -141,10 +173,22 @@ pub struct Check {
 pub struct CheckPlugin {
     pub id: String,
     pub name: String,
-    /// Its blocking checks ask to stop arming but only warn, because no
-    /// person has allowed them to yet (K13).
+    /// Its blocking checks ask to hold the launch but only warn, because
+    /// no person has allowed them to yet (K13).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held_back: bool,
+}
+
+/// Where a vehicle's controller input may come from for "Controller input"
+/// to pass: `either`, as its own failsafe takes it, `rc` for its own RC
+/// receiver, or `link` for a controller through UXDuck.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputPath {
+    #[default]
+    Either,
+    Rc,
+    Link,
 }
 
 /// A check's threshold and its range.
@@ -173,6 +217,13 @@ pub struct OwnCheckSetting {
     pub default_severity: CheckSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<CheckThreshold>,
+    /// Where its input may come from, for the check that asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputPath>,
+    /// `launch` for a check of the place of the launch. Left out for the
+    /// rest, which count in the preflight and at the launch alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<CheckWhen>,
 }
 
 /// A check as it stood when a command was refused for it or sent past it.
@@ -186,11 +237,11 @@ pub struct CheckRef {
     pub detail: Option<String>,
 }
 
-/// How arming went past failing blocking checks.
+/// How a launch went past failing checks set to hold it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "by", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum PreflightOverride {
-    /// The operator held Arm anyway, naming the checks.
+    /// The operator held Take off anyway, naming the checks.
     Operator,
     /// An operator allowed a client's request that listed them.
     Approval { approval_id: String },
@@ -209,7 +260,8 @@ pub struct Preflight {
     /// The plan chosen for its next flight: picked, or uploaded since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
-    /// False while the vehicle is armed: the list is the one it armed with.
+    /// False once the vehicle has launched (in the air, or armed for one
+    /// that does not fly): the list is the one it launched with.
     pub evaluating: bool,
     /// The vehicle's own checklist (S193): manual steps and rules, with
     /// who ticked each and when. Its steps are in `checks` as
@@ -235,7 +287,8 @@ pub struct PreflightParams {
 #[serde(rename_all = "camelCase")]
 pub struct PreflightConfigureParams {
     pub vehicle_id: String,
-    /// The check to change; `on`, `severity` and `threshold` need it.
+    /// The check to change; `on`, `severity`, `threshold` and `input` need
+    /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<OwnCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,6 +303,9 @@ pub struct PreflightConfigureParams {
     )]
     #[allow(clippy::option_option, reason = "absent, null or a value")]
     pub threshold: Option<Option<f64>>,
+    /// Where "Controller input" may come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputPath>,
     /// The plan for the next flight; null for none, flown by hand.
     #[serde(
         default,

@@ -6,7 +6,8 @@
       {
         "kind": "manual",
         "title": "Propellers tight",
-        "group": "Airframe"
+        "group": "Airframe",
+        "severity": "block"
       },
       {
         "kind": "rule",
@@ -25,6 +26,12 @@
         "item": "battery.cell_v",
         "op": ">=",
         "value": 4.1
+      },
+      {
+        "kind": "manual",
+        "title": "Area clear of people",
+        "severity": "block",
+        "when": "launch"
       }
     ]
   }

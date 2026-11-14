@@ -555,10 +555,11 @@ impl Command {
         )
     }
 
-    /// Whether it arms a vehicle that is on the ground and disarmed
-    /// (ADR-0038 K3): arming, forced or not; a take-off and a mission's
-    /// start, which some autopilots arm for; and `DO_SET_MODE` with the
-    /// armed flag in its base mode.
+    /// Whether it arms a vehicle that is on the ground and disarmed:
+    /// arming, forced or not; a take-off and a mission's start, which some
+    /// autopilots arm for; and `DO_SET_MODE` with the armed flag in its
+    /// base mode. What the terms are asked before (ADR-0047). The preflight
+    /// checks hold only what `launches` (ADR-0038 K22, K23).
     #[must_use]
     pub fn arms_on_the_ground(&self) -> bool {
         const ARMED_FLAG: u32 = 128;
@@ -592,6 +593,13 @@ impl Command {
                 ..
             }
         )
+    }
+
+    /// Whether it launches a vehicle by itself (ADR-0038 K23): a take-off,
+    /// or a mission's start. What the preflight checks hold, never arming.
+    #[must_use]
+    pub fn launches(&self) -> bool {
+        self.is_take_off() || self.starts_mission()
     }
 
     /// For people: "Arm", "Set mode LOITER".

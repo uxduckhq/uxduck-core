@@ -74,7 +74,7 @@ pub struct PluginManifest {
     pub starts_off: bool,
     /// Its preflight checks (S194, ADR-0038 K12): reported per vehicle with
     /// `Effects.checks`, listed in each vehicle's checks under its name. A
-    /// `block` check stops arming only if a person allowed it (K13);
+    /// `block` check holds the launch only if a person allowed it (K13);
     /// otherwise it warns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<DeclaredCheck>,
@@ -88,7 +88,7 @@ pub struct DeclaredCheck {
     pub id: String,
     /// What passing means, for people: "Wind under 8 m/s".
     pub title: String,
-    /// `block` asks to stop arming while it does not pass; it does only
+    /// `block` asks to hold the launch while it does not pass; it does only
     /// once a person allows the plugin's checks to (K13), and warns until
     /// then.
     pub severity: crate::dto::preflight::CheckSeverity,
@@ -817,7 +817,7 @@ pub struct Plugin {
     /// Its preflight checks (S194).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<DeclaredCheck>,
-    /// Whether its `block` checks may stop arming (K13): a person's answer
+    /// Whether its `block` checks may hold the launch (K13): a person's answer
     /// on this computer, asked at install or on the Plugins page. Absent
     /// until someone answers; until `true` they only warn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -837,7 +837,7 @@ pub struct PluginSetEnabledParams {
 }
 
 /// `plugin/setChecksBlock` (S194, ADR-0038 K13): whether a plugin's
-/// blocking checks may stop arming, or only warn.
+/// blocking checks may hold the launch, or only warn.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginSetChecksBlockParams {
@@ -1036,7 +1036,7 @@ pub struct PluginTestResult {
 pub struct PluginInstallParams {
     /// A directory holding `plugin.json` and the module it names.
     pub path: String,
-    /// A person's answer: may its blocking checks stop arming (S194)?
+    /// A person's answer: may its blocking checks hold the launch (S194)?
     /// Only an operator's counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks_block: Option<bool>,

@@ -128,12 +128,12 @@ pub(crate) fn send_checked(
             "only an operator may force a command",
         ));
     }
-    // Arming past failing preflight checks is a person's (ADR-0038
-    // K4): an agent's or a plugin's arming is put to an operator.
+    // Launching past failing preflight checks is a person's (ADR-0038
+    // K24): an agent's or a plugin's launch is put to an operator.
     if !params.override_preflight.is_empty() && !operator {
         return Err(ApiError::new(
             ErrorKind::CapabilityDenied,
-            "only an operator may arm past failing preflight checks",
+            "only an operator may launch past failing preflight checks",
         ));
     }
     let params = home_under_an_armed_vehicle(engine, params)?;
@@ -425,8 +425,11 @@ fn send(
     // first of them now (`TakeOff`).
     let mut steps = take_off_steps(engine, &vehicle, &command).unwrap_or_default();
     let arms = command.arms_on_the_ground() || !steps.is_empty();
-    let asked = command.label();
-    let command = if steps.is_empty() {
+    // A launch (ADR-0038 K23): a take-off or a mission's start asked of a
+    // vehicle that has not launched yet, armed or not.
+    let launches = command.launches() && !engine.launched(&vehicle);
+    let asked = command.clone();
+    let mut command = if steps.is_empty() {
         command
     } else {
         steps.remove(0)
@@ -479,14 +482,21 @@ fn send(
     // A real vehicle arms only for an operator who agreed to the terms
     // (ADR-0047), asked before the preflight checks.
     engine.terms_gate(&vehicle, arms, &mut receipt);
-    // The preflight gate, for every client (S192), whichever step arms.
+    // The preflight gate, for every client (S192): on a launch, before
+    // its first step, and never on arming alone (S352, ADR-0038 K22).
     preflight_gate(
         engine,
         &vehicle,
         (&params.override_preflight, operator),
-        (arms, &asked),
+        (launches, &asked.label()),
         &mut receipt,
     );
+    // Held before its first step, such as the mode or arming: receipted as
+    // the launch asked for, which is what a person then sends anyway.
+    if receipt.reason == Some(RefusalReason::Preflight) {
+        command = asked;
+        receipt.command = command.clone();
+    }
     let result = ReceiptDto::from(&receipt);
     let id = receipt.id.clone();
     let sent = receipt.status == ReceiptStatus::Sent;
@@ -556,18 +566,19 @@ fn offline_check(
     Ok(())
 }
 
-/// Holds a command that arms on the ground while a blocking preflight check
-/// does not pass: `not-sent` with reason `preflight`, listing them; or sent
-/// past them by an operator naming every one, or by an approval that listed
-/// them (ADR-0038 K3, K4).
+/// Holds a launch while a check set to hold it does not pass: `not-sent`
+/// with reason `preflight`, listing them; or sent past them by an operator
+/// naming every one, or by an approval that listed them (ADR-0038 K23,
+/// K24). Arming alone is never held (K22), and nor is anything asked of a
+/// vehicle that has launched.
 fn preflight_gate(
     engine: &Engine,
     vehicle: &Vehicle,
     (named_ids, operator): (&[String], bool),
-    (arms, asked): (bool, &str),
+    (launches, asked): (bool, &str),
     receipt: &mut Receipt,
 ) {
-    if receipt.status != ReceiptStatus::Sent || vehicle.armed || !arms {
+    if receipt.status != ReceiptStatus::Sent || !launches {
         return;
     }
     let gating = engine.preflight_gating(&vehicle.id);

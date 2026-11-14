@@ -248,8 +248,8 @@ impl Engine {
         // So does a plugin's command it declares dangerous: "always allow" for the
         // `control` it needs must not let every later one through unasked.
         let install = matches!(request, ClientRequest::PluginInstall(_));
-        // Arming past failing preflight checks always asks (ADR-0038 K4),
-        // listing them: a client never overrides them on its own.
+        // Launching past failing checks set to hold always asks (ADR-0038
+        // K24), listing them: a client never overrides them on its own.
         let preflight = self.preflight_asks(request);
         let always = install
             || self.dangerous_plugin_command(request)
@@ -376,7 +376,7 @@ impl Engine {
     }
 
     /// An approval's summary and its notice's words: with failing preflight
-    /// checks, which, and that allowing it arms past them (ADR-0038 K4).
+    /// checks, which, and that allowing it launches past them (ADR-0038 K24).
     fn approval_words(
         &self,
         request: &ClientRequest,
@@ -413,7 +413,7 @@ impl Engine {
             })
             .collect();
         let body = format!(
-            "{}\nAllowing it arms past them. Denied in {deadline} s if nobody answers.",
+            "{}\nAllowing it launches past them. Denied in {deadline} s if nobody answers.",
             list.join("\n")
         );
         (summary, body)
@@ -910,8 +910,8 @@ impl Engine {
         // operator's own `approval/resolve` keeps its reply slot.
         let outer = self.replying_to.replace((held.connection, held.request_id));
         self.running_approved = true;
-        // An approval that listed failing preflight checks arms past them
-        // (ADR-0038 K4), recorded on the receipt as the operator's.
+        // An approval that listed failing preflight checks launches past
+        // them (ADR-0038 K24), recorded on the receipt as the operator's.
         self.approving_preflight = (!listed.is_empty()).then(|| (id.to_owned(), listed));
         let result = rpc::handlers::handle(self, held.connection, held.request);
         self.approving_preflight = None;

@@ -1,11 +1,13 @@
-//! Preflight checks and the arming gate (S192, ADR-0038 K1 to K6): one list
-//! per vehicle, the vehicle's own reasons first; UXDuck's own checks, each
-//! on or off with its severity; the gate in the daemon for every client
-//! (window, CLI, agent and MCP, plugins), warnings never stopping it and a
-//! blocking check that is unknown or waiting counting as failing; the
-//! operator's override naming the checks, refused for anyone else; an
-//! agent's or a plugin's arming put to an operator as an approval that
-//! lists them.
+//! Preflight checks and the gate on the launch (S192, S352, ADR-0038 K1 to
+//! K6 and K22 to K25): one list per vehicle, the vehicle's own reasons
+//! first; UXDuck's own checks, each on or off with its severity; arming
+//! never held by checks; the gate in the daemon on a take-off and a
+//! mission's start, for every client (window, CLI, agent and MCP,
+//! plugins), until the vehicle has launched, warnings never stopping it
+//! and a check set to hold that is unknown or waiting counting as
+//! failing; the operator's override naming the checks, refused for anyone
+//! else; an agent's or a plugin's launch put to an operator as an
+//! approval that lists them.
 
 #![allow(
     clippy::expect_used,
@@ -32,7 +34,7 @@ use uxduck_core::domain::mission::MissionItem;
 use uxduck_core::domain::parameter::ParamKind;
 use uxduck_core::domain::plan::PlanUpload;
 use uxduck_core::domain::preflight::{CheckStatus, PreflightOverride};
-use uxduck_core::domain::telemetry::{TelemetryItem, Unit, VehicleTelemetry};
+use uxduck_core::domain::telemetry::{PositionEstimate, TelemetryItem, Unit, VehicleTelemetry};
 use uxduck_core::domain::vehicle::{Observation, Presence};
 use uxduck_core::events::{Change, Event};
 use uxduck_core::policy::admission::Trust;
@@ -420,6 +422,30 @@ impl Bench {
         self.command(client, json!({ "command": { "type": "arm" } }))
     }
 
+    /// Take off as `client`: refused at once, or the take-off's receipt
+    /// once the vehicle has accepted each step.
+    fn launch(&mut self, client: Option<&mut Client>) -> Value {
+        self.take_off(client, json!({})).1
+    }
+
+    /// What the autopilot says of being on the ground or in the air.
+    fn flight_state(&mut self, state: &str) {
+        self.engine.telemetry_observed(VehicleTelemetry {
+            vehicle_id: "v".into(),
+            positions: Vec::new(),
+            items: vec![TelemetryItem {
+                key: "flight.state".into(),
+                label: "Flight".into(),
+                unit: Unit::Count,
+                value: None,
+                text: Some(state.into()),
+                source: "EXTENDED_SYS_STATE".into(),
+                component_id: 1,
+                time_us: self.time.now(),
+            }],
+        });
+    }
+
     /// The engine's state rebuilt from what it holds, with a change: as a
     /// restart of the daemon would find it.
     fn restart_with(&mut self, change: impl FnOnce(&mut State)) {
@@ -450,6 +476,33 @@ impl Bench {
 }
 
 impl Bench {
+    /// Where the autopilot says the vehicle is.
+    fn at(&mut self, latitude_deg: f64, longitude_deg: f64) {
+        self.engine.telemetry_observed(VehicleTelemetry {
+            vehicle_id: "v".into(),
+            positions: vec![PositionEstimate {
+                source: "fused".into(),
+                component_id: 1,
+                latitude_deg,
+                longitude_deg,
+                altitudes: Vec::new(),
+                heading_deg: None,
+                course_deg: None,
+                ground_speed_mps: None,
+                climb_mps: None,
+                horizontal_accuracy_m: None,
+                vertical_accuracy_m: None,
+                time_us: self.time.now(),
+            }],
+            items: Vec::new(),
+        });
+    }
+
+    fn home(&mut self, latitude_deg: f64, longitude_deg: f64) {
+        self.telemetry("home.latitude_deg", latitude_deg);
+        self.telemetry("home.longitude_deg", longitude_deg);
+    }
+
     /// What the vehicle says of its RC input, as `rc.status`.
     fn rc(&mut self, text: &str) {
         self.engine.telemetry_observed(VehicleTelemetry {
@@ -487,16 +540,16 @@ impl Bench {
 }
 
 #[test]
-fn a_simulation_arms_once_it_knows_where_it_is() {
+fn a_simulations_take_off_waits_until_it_knows_where_it_is() {
     let mut b = bench();
     b.telemetry("arming.ready", 1.0);
     b.ekf("No position");
-    // A vehicle of the person's own decides for itself: arming in a
+    // A vehicle of the person's own decides for itself: taking off in a
     // stabilised mode without a position is theirs to choose.
     assert!(gating(&b.checks()).is_empty());
 
     // A simulation says it is ready some 30 s before it knows where it is,
-    // when GUIDED, AUTO and Take off are still refused: it waits.
+    // when GUIDED, AUTO and Take off are still refused: its launch waits.
     b.restart_with(|state| state.vehicles.get_mut("v").unwrap().simulated = Some(true));
     b.telemetry("arming.ready", 1.0);
     b.ekf("No position");
@@ -505,21 +558,24 @@ fn a_simulation_arms_once_it_knows_where_it_is() {
     assert_eq!(check["severity"], "block");
     assert_eq!(
         check["detail"],
-        "Alpha is still starting: it can arm once it knows where it is, in a few seconds."
+        "Alpha is still starting: it can take off once it knows where it is, in a few seconds."
     );
     assert_eq!(gating(&b.checks()), ["uxduck:simulation-position"]);
-    let receipt = b.arm(None);
+    let receipt = b.launch(None);
     assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
     assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
+    // Arming is never held (K22).
+    let receipt = b.arm(None);
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
 
     b.ekf("Good");
     assert_eq!(b.check("uxduck:simulation-position")["status"], "pass");
-    let receipt = b.arm(None);
+    let receipt = b.launch(None);
     assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
 }
 
 #[test]
-fn a_simulation_that_has_not_said_where_it_is_waits_to_arm() {
+fn a_simulation_that_has_not_said_where_it_is_waits_to_take_off() {
     let mut b = bench();
     b.restart_with(|state| state.vehicles.get_mut("v").unwrap().simulated = Some(true));
     b.telemetry("arming.ready", 1.0);
@@ -532,7 +588,7 @@ fn a_simulation_that_has_not_said_where_it_is_waits_to_arm() {
         "Alpha hasn't said yet whether it knows where it is."
     );
     assert_eq!(gating(&b.checks()), ["uxduck:simulation-position"]);
-    let receipt = b.arm(None);
+    let receipt = b.launch(None);
     assert_eq!(receipt["result"]["status"], "not-sent", "{receipt}");
     assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
     assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
@@ -555,7 +611,7 @@ fn a_simulations_ekf_status_counts_for_5_s() {
         "Alpha hasn't said for over 5 s whether it knows where it is."
     );
     assert_eq!(gating(&b.checks()), ["uxduck:simulation-position"]);
-    let receipt = b.arm(None);
+    let receipt = b.launch(None);
     assert_eq!(receipt["result"]["status"], "not-sent", "{receipt}");
     assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
     assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
@@ -569,7 +625,7 @@ fn a_simulations_ekf_status_counts_for_5_s() {
     assert_eq!(check["status"], "pass");
     assert_eq!(check["detail"], "Alpha knows where it is.");
     assert!(gating(&b.checks()).is_empty());
-    let receipt = b.arm(None);
+    let receipt = b.launch(None);
     assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
 }
 
@@ -714,16 +770,17 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
             "uxduck:controller",
             "uxduck:plan",
             "uxduck:terrain",
-            "uxduck:recording"
+            "uxduck:recording",
+            "uxduck:home"
         ]
     );
     // The vehicle has not said whether it is ready: its row says so, and
-    // never holds arming in UXDuck (K5).
+    // never holds anything in UXDuck (K5).
     assert_eq!(checks["checks"][0]["source"], "vehicle");
     assert_eq!(checks["checks"][0]["status"], "unknown");
     assert_eq!(checks["checks"][0]["gates"], false);
-    // Defaults (ADR-0038's open question, as assumed): a running procedure
-    // and a restart due block, the rest warn; everything passes now.
+    // Defaults (K25): every one only warns until a person sets it to hold
+    // the launch. Everything passes now.
     let severities: Vec<(&str, &str)> = checks["settings"]
         .as_array()
         .unwrap()
@@ -738,20 +795,21 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
     assert_eq!(
         severities,
         [
-            ("setup", "block"),
-            ("restart", "block"),
+            ("setup", "warn"),
+            ("restart", "warn"),
             ("link", "warn"),
             ("rc-receiver", "warn"),
             ("controller", "warn"),
             ("plan", "warn"),
             ("terrain", "warn"),
-            ("recording", "warn")
+            ("recording", "warn"),
+            ("home", "warn")
         ]
     );
-    // Everything passes now, but the RC receiver: the vehicle has not said
-    // whether it has RC input, which is a warning.
+    // Everything passes now, but the RC receiver and Home: the vehicle has
+    // not said whether it has RC input, nor where it and its home are.
     for check in &checks["checks"].as_array().unwrap()[1..] {
-        let expected = if check["id"] == "uxduck:rc-receiver" {
+        let expected = if check["id"] == "uxduck:rc-receiver" || check["id"] == "uxduck:home" {
             "unknown"
         } else {
             "pass"
@@ -770,7 +828,85 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
 }
 
 #[test]
-fn warnings_never_stop_arming() {
+fn home_is_where_the_vehicle_is_counts_at_the_launch_and_offers_to_set_it() {
+    let mut b = bench();
+    // No home yet: not known, at the launch only, and a warning (K25, K27).
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "unknown", "{check}");
+    assert_eq!(check["when"], "launch");
+    assert_eq!(check["severity"], "warn");
+    assert_eq!(check["group"], "Home");
+    assert_eq!(
+        check["detail"],
+        "Alpha has no home yet. It sets one once it knows where it is."
+    );
+    assert!(check.get("fix").is_none(), "{check}");
+    let setting = &b.checks()["settings"][8];
+    assert_eq!(setting["when"], "launch", "{setting}");
+    assert_eq!(setting["threshold"]["value"], 50.0);
+    assert_eq!(setting["threshold"]["unit"], "m");
+    // A home and no position: still not known.
+    b.home(-35.0, 149.0);
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "unknown", "{check}");
+    assert_eq!(check["detail"], "Alpha hasn't said where it is.");
+    // About 9 m away: where it is.
+    b.at(-35.0, 149.0001);
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "pass", "{check}");
+    assert_eq!(check["detail"], "Home is within 50 m of Alpha.");
+    // Carried about 110 m while disarmed: most autopilots move home when
+    // they arm, so it is no warning yet, and says why (maintainer,
+    // 2026-11-13).
+    b.at(-35.001, 149.0);
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "pass", "{check}");
+    assert_eq!(
+        check["detail"],
+        "Home is more than 50 m from Alpha. Most autopilots move it here when they arm, so UXDuck reads it again once Alpha is armed."
+    );
+    assert!(check.get("fix").is_none(), "{check}");
+    // Set to hold, a far home holds neither arming nor a launch from
+    // disarmed.
+    b.configure(json!({ "check": "home", "severity": "block" }));
+    assert_eq!(b.check("uxduck:home")["gates"], false);
+    let receipt = b.arm(None);
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    let disarm = b.command(None, json!({ "command": { "type": "disarm" } }));
+    assert_eq!(disarm["result"]["status"], "accepted", "{disarm}");
+    let receipt = b.launch(None);
+    assert!(receipt["result"].get("preflight").is_none(), "{receipt}");
+    // Armed on the ground and home has not moved: it stays there, a
+    // return would go back to it, and that holds the launch.
+    b.seen(true);
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "fail", "{check}");
+    assert_eq!(
+        check["detail"],
+        "Home is more than 50 m from Alpha. A return goes to home."
+    );
+    assert_eq!(check["fix"]["type"], "home");
+    assert_eq!(check["gates"], true);
+    let receipt = b.launch(None);
+    assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
+    assert_eq!(receipt["result"]["preflight"][0]["id"], "uxduck:home");
+    // Only warning, it holds nothing.
+    b.configure(json!({ "check": "home", "severity": "warn" }));
+    assert_eq!(b.check("uxduck:home")["gates"], false);
+    // The distance is the person's to set.
+    b.configure(json!({ "check": "home", "threshold": 200.0 }));
+    let check = b.check("uxduck:home");
+    assert_eq!(check["status"], "pass", "{check}");
+    assert_eq!(check["detail"], "Home is within 200 m of Alpha.");
+    // Home moved to the vehicle, as Set home here does.
+    b.configure(json!({ "check": "home", "threshold": null }));
+    assert_eq!(b.check("uxduck:home")["status"], "fail");
+    b.home(-35.001, 149.0);
+    assert_eq!(b.check("uxduck:home")["status"], "pass");
+}
+
+#[test]
+fn warnings_never_stop_arming_or_a_launch() {
     let mut b = bench();
     let plan = b.plan("Ridge survey");
     b.configure(json!({ "planId": plan }));
@@ -785,51 +921,65 @@ fn warnings_never_stop_arming() {
     assert_eq!(check["fix"], json!({ "type": "plan", "planId": plan }));
     let receipt = b.arm(None);
     assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    let receipt = b.launch(None);
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    assert!(receipt["result"].get("preflight").is_none(), "{receipt}");
 }
 
 #[test]
-fn a_blocking_check_refuses_arming_from_the_window_and_the_cli_and_what_arms_on_the_ground() {
+fn a_check_set_to_hold_refuses_a_launch_from_the_window_and_the_cli_and_never_arming() {
     let mut b = bench();
     b.wrong_plan();
     let checks = b.checks();
     assert_eq!(gating(&checks), ["uxduck:plan"]);
 
+    // Arming is never held by checks (K22), however it is asked: from the
+    // window, from the CLI, by number, forced past the vehicle's own
+    // checks, or by a mode with the armed flag.
     let receipt = b.arm(None);
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    assert!(receipt["result"].get("preflight").is_none(), "{receipt}");
+    let mut cli = connect(&mut b.engine, "operator-cli");
+    let receipt = b.arm(Some(&mut cli));
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    for command in [
+        json!({ "type": "long", "command": 400, "params": [1, 0] }),
+        json!({ "type": "long", "command": 176, "params": [217, 4] }),
+    ] {
+        let receipt = b.command(None, json!({ "command": command }));
+        assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    }
+    let forced = b.command(None, json!({ "command": { "type": "arm" }, "force": true }));
+    assert_eq!(forced["result"]["status"], "accepted", "{forced}");
+
+    // A launch is held (K23): a take-off.
+    let receipt = b.launch(None);
     let result = &receipt["result"];
     assert_eq!(result["status"], "not-sent", "{receipt}");
     assert_eq!(result["reason"], "preflight");
     assert_eq!(result["preflight"][0]["id"], "uxduck:plan");
     assert_eq!(
         result["detail"],
-        "Arm wasn't sent to Alpha: 1 preflight check doesn't pass: Plan on the vehicle \
-         (Ridge survey is chosen, but it isn't on Alpha yet). Fix them, or hold Arm anyway to \
-         arm past them."
+        "Take off wasn't sent to Alpha: 1 check that holds the launch doesn't pass: Plan on \
+         the vehicle (Ridge survey is chosen, but it isn't on Alpha yet). Fix it, or hold Take \
+         off anyway to launch past it."
     );
     assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
-
     // The CLI, an operator too, the same.
-    let mut cli = connect(&mut b.engine, "operator-cli");
-    let receipt = b.arm(Some(&mut cli));
+    let receipt = b.launch(Some(&mut cli));
     assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
-
-    // Whatever arms on the ground: a take-off, a mission's start (from a
-    // step too, whose first command only makes the step current), arming
-    // by number, forced past the vehicle's own checks, or by a mode.
+    // A mission's start, from a step too, whose first command only makes
+    // the step current. Forcing passes the vehicle's checks, not UXDuck's.
     for command in [
-        json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }),
         json!({ "type": "long", "command": 300, "params": [0, 0] }),
         json!({ "type": "long", "command": 300, "params": [3, 0] }),
-        json!({ "type": "long", "command": 400, "params": [1, 0] }),
-        json!({ "type": "long", "command": 176, "params": [217, 4] }),
     ] {
         let receipt = b.command(None, json!({ "command": command }));
         assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
     }
-    let forced = b.command(None, json!({ "command": { "type": "arm" }, "force": true }));
-    assert_eq!(
-        forced["result"]["reason"], "preflight",
-        "forcing passes the vehicle's checks, not UXDuck's: {forced}"
-    );
+    let forced = b.command(None, json!({ "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }), "force": true }));
+    assert_eq!(forced["result"]["reason"], "preflight", "{forced}");
+    assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
     // The rest goes: a mode, disarming.
     let mode = b.command(
         None,
@@ -838,37 +988,57 @@ fn a_blocking_check_refuses_arming_from_the_window_and_the_cli_and_what_arms_on_
     assert_eq!(mode["result"]["status"], "accepted", "{mode}");
     let disarm = b.command(None, json!({ "command": { "type": "disarm" } }));
     assert_eq!(disarm["result"]["status"], "accepted", "{disarm}");
-    // Armed already (by the radio), a take-off is no arming: it goes.
+
+    // Armed and still on the ground, a take-off is a launch all the same.
     b.seen(true);
-    let take_off = b.command(
-        None,
-        json!({ "command": { "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] } }),
-    );
-    assert_eq!(take_off["result"]["status"], "accepted", "{take_off}");
+    b.flight_state("On the ground");
+    assert_eq!(b.checks()["evaluating"], true, "read live on the ground");
+    let take_off = b.command(None, json!({ "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }) }));
+    assert_eq!(take_off["result"]["reason"], "preflight", "{take_off}");
+    // In the air nothing is held: a take-off, a mission's start.
+    b.flight_state("In the air");
+    assert_eq!(b.checks()["evaluating"], false);
+    for command in [
+        json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }),
+        json!({ "type": "long", "command": 300, "params": [0, 0] }),
+    ] {
+        let receipt = b.command(None, json!({ "command": command }));
+        assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+        assert!(receipt["result"].get("preflight").is_none(), "{receipt}");
+    }
 }
 
 #[test]
-fn an_operator_arms_anyway_naming_every_failing_check_and_the_journal_keeps_it() {
+fn an_operator_takes_off_anyway_naming_every_failing_check_and_the_journal_keeps_it() {
     let mut b = bench();
     b.wrong_plan();
     // Naming another check, or none, is no override.
-    let wrong = b.command(
-        None,
-        json!({ "command": { "type": "arm" }, "overridePreflight": ["uxduck:terrain"] }),
-    );
+    let (steps, wrong) = b.take_off(None, json!({ "overridePreflight": ["uxduck:terrain"] }));
     assert_eq!(wrong["result"]["reason"], "preflight", "{wrong}");
-
-    let receipt = b.command(
+    assert!(steps.is_empty() && b.wire.take().is_empty());
+    // Held before its first step, which is arming here: receipted as the
+    // take-off asked for, the command a person then holds to send anyway.
+    assert_eq!(wrong["result"]["command"]["command"], 22, "{wrong}");
+    // Arming needs no override, and records none though one is named.
+    let armed = b.command(
         None,
         json!({ "command": { "type": "arm" }, "overridePreflight": ["uxduck:plan"] }),
     );
+    assert_eq!(armed["result"]["status"], "accepted", "{armed}");
+    assert!(
+        armed["result"].get("preflightOverride").is_none(),
+        "{armed}"
+    );
+
+    let (steps, receipt) = b.take_off(None, json!({ "overridePreflight": ["uxduck:plan"] }));
+    assert_eq!(steps, [Command::Arm, Command::take_off(10.0)]);
     let result = &receipt["result"];
     assert_eq!(result["status"], "accepted", "{receipt}");
     assert_eq!(result["preflightOverride"], json!({ "by": "operator" }));
     assert_eq!(result["preflight"][0]["id"], "uxduck:plan");
     assert_eq!(result["preflight"][0]["status"], "fail");
-    // The journal has the receipt with the override and the checks.
-    let journaled = b
+    // The journal has each step's receipt with the override and the checks.
+    let journaled: Vec<_> = b
         .journal
         .0
         .lock()
@@ -878,17 +1048,21 @@ fn an_operator_arms_anyway_naming_every_failing_check_and_the_journal_keeps_it()
             Change::ReceiptUpserted { receipt } => Some(receipt.clone()),
             _ => None,
         })
-        .find(|r| r.preflight_override.is_some())
-        .expect("journaled");
-    assert_eq!(
-        journaled.preflight_override,
-        Some(PreflightOverride::Operator)
-    );
-    assert_eq!(journaled.preflight[0].id, "uxduck:plan");
+        .filter(|r| r.preflight_override.is_some())
+        .collect();
+    assert!(journaled.iter().any(|r| r.command == Command::Arm));
+    assert!(journaled.iter().any(|r| r.command.is_take_off()));
+    for receipt in &journaled {
+        assert_eq!(
+            receipt.preflight_override,
+            Some(PreflightOverride::Operator)
+        );
+        assert_eq!(receipt.preflight[0].id, "uxduck:plan");
+    }
 }
 
 #[test]
-fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
+fn an_agents_launch_waits_for_an_operator_who_sees_the_checks() {
     let mut b = bench();
     b.wrong_plan();
     // MCP clients are agents (`uxduck mcp`): they read the same list.
@@ -911,8 +1085,9 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
         change["error"]["data"]["kind"], "capability-denied",
         "{change}"
     );
+    let take_off = || json!({ "vehicleId": "v", "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }) });
 
-    // Its arming is held, asking an operator, listing the check.
+    // Its arming asks for `control` as ever, and lists no check (K22).
     let held = send(
         &mut b.engine,
         &mut agent,
@@ -920,13 +1095,34 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
         json!({ "vehicleId": "v", "command": { "type": "arm" } }),
     );
     assert!(held.is_none(), "held: {held:?}");
-    assert!(b.wire.take().is_empty());
     let approval = b.engine.state().approvals.values().next().cloned().unwrap();
+    assert!(approval.preflight.is_empty(), "{approval:?}");
+    assert_eq!(approval.summary, "arm Alpha");
+    b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": false }),
+    );
+    assert!(later(&mut agent).is_some());
+
+    // Its launch is held, asking an operator, listing the check.
+    let held = send(&mut b.engine, &mut agent, "command/send", take_off());
+    assert!(held.is_none(), "held: {held:?}");
+    assert!(b.wire.take().is_empty());
+    let pending = |b: &Bench| {
+        b.engine
+            .state()
+            .approvals
+            .values()
+            .find(|a| a.state == uxduck_core::domain::approval::ApprovalState::Pending)
+            .cloned()
+            .unwrap()
+    };
+    let approval = pending(&b);
     assert_eq!(approval.preflight.len(), 1);
     assert_eq!(approval.preflight[0].id, "uxduck:plan");
     assert_eq!(
         approval.summary,
-        "arm Alpha past 1 failing preflight check: Plan on the vehicle"
+        "take off Alpha past 1 failing preflight check: Plan on the vehicle"
     );
     let notice = b
         .engine
@@ -936,14 +1132,12 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
         .find(|n| n.condition.as_deref() == Some(&format!("approval:{}", approval.id)))
         .cloned()
         .unwrap();
+    let body = notice.body.as_deref().unwrap();
     assert!(
-        notice
-            .body
-            .as_deref()
-            .unwrap()
-            .starts_with("Plan on the vehicle: Ridge survey is chosen"),
+        body.starts_with("Plan on the vehicle: Ridge survey is chosen"),
         "{notice:?}"
     );
+    assert!(body.contains("Allowing it launches past them."), "{body}");
     assert_eq!(notice.actions.len(), 2, "allow once or deny: {notice:?}");
     // Denied: nothing goes.
     b.call(
@@ -954,7 +1148,36 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
     assert_eq!(denied["error"]["data"]["kind"], "capability-denied");
     assert!(b.wire.take().is_empty());
 
-    // Asked again and allowed: it arms past them, as the operator's.
+    // Asked again and allowed: it launches past them, as the operator's.
+    assert!(send(&mut b.engine, &mut agent, "command/send", take_off()).is_none());
+    let approval = pending(&b);
+    b.call(
+        "approval/resolve",
+        json!({ "id": approval.id, "allow": true, "remember": "always" }),
+    );
+    let sent = b.wire.take();
+    assert_eq!(sent.len(), 1, "sent once allowed");
+    assert_eq!(sent[0].command, Command::Arm, "the take-off's first step");
+    let receipt = b.engine.state().receipts[&sent[0].receipt_id].clone();
+    assert_eq!(
+        receipt.preflight_override,
+        Some(PreflightOverride::Approval {
+            approval_id: approval.id.clone()
+        })
+    );
+    // "Always" remembers `control`, never the override: the next launch
+    // asks again, and the next arming goes straight out.
+    assert!(
+        send(&mut b.engine, &mut agent, "command/send", take_off()).is_none(),
+        "asks again"
+    );
+    assert!(b.wire.take().is_empty());
+    let again = pending(&b);
+    b.call(
+        "approval/resolve",
+        json!({ "id": again.id, "allow": false }),
+    );
+    assert!(later(&mut agent).is_some());
     assert!(
         send(
             &mut b.engine,
@@ -964,63 +1187,15 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
         )
         .is_none()
     );
-    let approval = b
-        .engine
-        .state()
-        .approvals
-        .values()
-        .find(|a| a.state == uxduck_core::domain::approval::ApprovalState::Pending)
-        .cloned()
-        .unwrap();
-    b.call(
-        "approval/resolve",
-        json!({ "id": approval.id, "allow": true, "remember": "always" }),
-    );
     let sent = b.wire.take();
-    assert_eq!(sent.len(), 1, "sent once allowed");
+    assert_eq!(sent.len(), 1, "arming needs no approval now: {sent:?}");
     assert_eq!(sent[0].command, Command::Arm);
-    let receipt = b.engine.state().receipts[&sent[0].receipt_id].clone();
-    assert_eq!(
-        receipt.preflight_override,
-        Some(PreflightOverride::Approval {
-            approval_id: approval.id.clone()
-        })
-    );
-    // "Always" remembers `control`, never the override: the next arming
-    // asks again.
-    assert!(
-        send(
-            &mut b.engine,
-            &mut agent,
-            "command/send",
-            json!({ "vehicleId": "v", "command": { "type": "arm" } }),
-        )
-        .is_none(),
-        "asks again"
-    );
-    assert!(b.wire.take().is_empty());
-    let again = b
-        .engine
-        .state()
-        .approvals
-        .values()
-        .find(|a| a.state == uxduck_core::domain::approval::ApprovalState::Pending)
-        .cloned()
-        .unwrap();
-    b.call(
-        "approval/resolve",
-        json!({ "id": again.id, "allow": false }),
-    );
-    assert!(later(&mut agent).is_some());
 
     // It cannot override on its own, even allowed.
     let mut own = connect(&mut b.engine, "agent");
-    let tried = send(
-        &mut b.engine,
-        &mut own,
-        "command/send",
-        json!({ "vehicleId": "v", "command": { "type": "arm" }, "overridePreflight": ["uxduck:plan"] }),
-    );
+    let mut params = take_off();
+    params["overridePreflight"] = json!(["uxduck:plan"]);
+    let tried = send(&mut b.engine, &mut own, "command/send", params);
     let tried = tried.or_else(|| {
         let approval = b
             .engine
@@ -1042,7 +1217,6 @@ fn an_agents_arming_waits_for_an_operator_who_sees_the_checks() {
         tried["error"]["data"]["kind"], "capability-denied",
         "{tried}"
     );
-    assert!(b.wire.take().is_empty());
 }
 
 #[test]
@@ -1086,32 +1260,35 @@ fn with_nothing_failing_an_agent_with_control_arms_as_before() {
 }
 
 #[test]
-fn a_plugins_arming_asks_an_operator_and_its_raw_arming_is_not_sent() {
+fn a_plugins_launch_asks_an_operator_and_its_raw_launch_is_not_sent() {
     let mut b = bench();
     let installed = b.call("plugin/install", json!({ "path": "/plugins/launcher" }));
     assert!(installed.get("error").is_none(), "{installed}");
     b.engine
         .plugin_described("launcher", Description { panels: Vec::new() });
-    let arm = || SendCommand {
+    let take_off = || SendCommand {
         vehicle_id: "v".into(),
-        command: uxduck_contracts::dto::command::Command::Arm,
+        command: serde_json::from_value(
+            json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }),
+        )
+        .unwrap(),
     };
-    let raw = || SendMessage {
+    let raw = |command: u16| SendMessage {
         vehicle_id: "v".into(),
         name: "COMMAND_LONG".into(),
         fields: serde_json::from_value(json!({
-            "target_system": 1, "target_component": 1, "command": 400,
+            "target_system": 1, "target_component": 1, "command": command,
             "confirmation": 0, "param1": 1.0, "param2": 0.0, "param3": 0.0,
-            "param4": 0.0, "param5": 0.0, "param6": 0.0, "param7": 0.0
+            "param4": 0.0, "param5": 0.0, "param6": 0.0, "param7": 10.0
         }))
         .unwrap(),
     };
-    // Nothing failing: its arming goes, under its control capability.
+    // Nothing failing: its launch goes, under its control capability.
     b.engine.plugin_effects(
         "launcher",
         Effects {
-            commands: vec![arm()],
-            messages: vec![raw()],
+            commands: vec![take_off()],
+            messages: vec![raw(22)],
             ..Effects::default()
         },
     );
@@ -1122,15 +1299,15 @@ fn a_plugins_arming_asks_an_operator_and_its_raw_arming_is_not_sent() {
     b.engine.plugin_effects(
         "launcher",
         Effects {
-            commands: vec![arm()],
-            messages: vec![raw()],
+            commands: vec![take_off()],
+            messages: vec![raw(22), raw(300)],
             ..Effects::default()
         },
     );
     assert!(b.wire.take().is_empty(), "held for an operator");
     assert!(
         b.wire.messages().is_empty(),
-        "its own COMMAND_LONG is not sent"
+        "its own take-off and mission start are not sent"
     );
     let approval = b
         .engine
@@ -1141,10 +1318,24 @@ fn a_plugins_arming_asks_an_operator_and_its_raw_arming_is_not_sent() {
         .cloned()
         .unwrap();
     assert_eq!(approval.preflight[0].id, "uxduck:plan");
+    // Its arming is never held by checks (K22), raw or not.
+    b.engine.plugin_effects(
+        "launcher",
+        Effects {
+            commands: vec![SendCommand {
+                vehicle_id: "v".into(),
+                command: uxduck_contracts::dto::command::Command::Arm,
+            }],
+            messages: vec![raw(400)],
+            ..Effects::default()
+        },
+    );
+    assert_eq!(b.wire.take().len(), 1, "its arming went");
+    assert_eq!(b.wire.messages().len(), 1, "its raw arming went");
 }
 
 #[test]
-fn a_blocking_check_that_is_unknown_or_waiting_holds_arming_too() {
+fn a_check_set_to_hold_that_is_unknown_or_waiting_holds_a_launch_too() {
     let mut b = bench();
     // A mission above terrain, and the vehicle has not said whether its
     // terrain is loaded.
@@ -1166,22 +1357,23 @@ fn a_blocking_check_that_is_unknown_or_waiting_holds_arming_too() {
     let terrain = b.check("uxduck:terrain");
     assert_eq!(terrain["status"], "unknown", "{terrain}");
     assert_eq!(terrain["gates"], true);
-    assert_eq!(b.arm(None)["result"]["reason"], "preflight");
+    assert_eq!(b.launch(None)["result"]["reason"], "preflight");
     // Loading.
     b.telemetry("terrain.pending", 12.0);
     b.telemetry("terrain.loaded", 40.0);
     let terrain = b.check("uxduck:terrain");
     assert_eq!(terrain["status"], "waiting");
     assert_eq!(terrain["detail"], "Alpha is loading terrain.");
-    assert_eq!(b.arm(None)["result"]["reason"], "preflight");
-    // Loaded: it arms.
+    assert_eq!(b.launch(None)["result"]["reason"], "preflight");
+    assert_eq!(b.arm(None)["result"]["status"], "accepted");
+    // Loaded: it takes off.
     b.telemetry("terrain.pending", 0.0);
     assert_eq!(b.check("uxduck:terrain")["status"], "pass");
-    assert_eq!(b.arm(None)["result"]["status"], "accepted");
+    assert_eq!(b.launch(None)["result"]["status"], "accepted");
 }
 
 #[test]
-fn a_running_procedure_and_a_restart_due_block_by_default() {
+fn a_running_procedure_and_a_restart_due_warn_and_hold_the_launch_once_set_to() {
     let mut b = bench();
     // The vehicle's compasses, so the compass calibration can start.
     let mut reported = Vec::new();
@@ -1213,8 +1405,16 @@ fn a_running_procedure_and_a_restart_due_block_by_default() {
     assert_eq!(setup["status"], "fail");
     assert_eq!(setup["detail"], "The compass calibration is running.");
     assert_eq!(setup["fix"], json!({ "type": "setup", "row": "compass" }));
-    let refused = b.arm(None);
+    // It only warns (K25): nothing is held, a launch either.
+    assert_eq!(setup["severity"], "warn");
+    assert_eq!(setup["gates"], false);
+    assert_eq!(b.arm(None)["result"]["status"], "accepted");
+    assert_eq!(b.launch(None)["result"]["status"], "accepted");
+    // Set to hold, it holds the launch and never arming.
+    b.configure(json!({ "check": "setup", "severity": "block" }));
+    let refused = b.launch(None);
     assert_eq!(refused["result"]["preflight"][0]["id"], "uxduck:setup");
+    assert_eq!(b.arm(None)["result"]["status"], "accepted");
 
     // Done, and waiting for a restart.
     b.time.advance(S);
@@ -1236,11 +1436,13 @@ fn a_running_procedure_and_a_restart_due_block_by_default() {
         restart["detail"],
         "The compass calibration takes effect once Alpha restarts."
     );
+    assert_eq!(restart["gates"], false, "it only warns until set to hold");
+    b.configure(json!({ "check": "restart", "severity": "block" }));
     assert_eq!(
-        b.arm(None)["result"]["preflight"][0]["id"],
+        b.launch(None)["result"]["preflight"][0]["id"],
         "uxduck:restart"
     );
-    // A person may make it a warning, or turn it off.
+    // A person may make it a warning again, or turn it off.
     b.configure(json!({ "check": "restart", "severity": "warn" }));
     assert_eq!(b.check("uxduck:restart")["gates"], false);
     b.configure(json!({ "check": "restart", "on": false }));
@@ -1258,7 +1460,7 @@ fn a_running_procedure_and_a_restart_due_block_by_default() {
     // Restarted: nothing waits.
     b.engine.vehicle_booted("v", 99 * S, true);
     assert_eq!(b.check("uxduck:restart")["status"], "pass");
-    assert_eq!(b.arm(None)["result"]["status"], "accepted");
+    assert_eq!(b.launch(None)["result"]["status"], "accepted");
 }
 
 #[test]
@@ -1330,7 +1532,7 @@ fn the_link_the_controller_and_the_cameras() {
 fn the_rc_receiver_check_is_what_the_vehicle_says_of_its_rc_input() {
     let mut b = bench();
     let rc = b.check("uxduck:rc-receiver");
-    assert_eq!(rc["title"], "RC receiver");
+    assert_eq!(rc["title"], "Controller input");
     assert_eq!(rc["status"], "unknown");
     assert_eq!(rc["severity"], "warn");
     assert_eq!(rc["gates"], false);
@@ -1356,13 +1558,14 @@ fn the_rc_receiver_check_is_what_the_vehicle_says_of_its_rc_input() {
         "Alpha has lost its RC signal. Check its transmitter is on and in range."
     );
     assert_eq!(rc["fix"], json!({ "type": "setup", "row": "radio" }));
-    // A person may have it hold arming.
+    // A person may have it hold the launch. Arm is never held.
     b.configure(json!({ "check": "rc-receiver", "severity": "block" }));
     assert_eq!(b.check("uxduck:rc-receiver")["gates"], true);
     assert_eq!(
-        b.arm(None)["result"]["preflight"][0]["id"],
+        b.launch(None)["result"]["preflight"][0]["id"],
         "uxduck:rc-receiver"
     );
+    assert_eq!(b.arm(None)["result"]["status"], "accepted");
     b.configure(json!({ "check": "rc-receiver", "severity": "warn" }));
     // Its word counts for 10 s.
     b.rc("Receiving");
@@ -1376,6 +1579,58 @@ fn the_rc_receiver_check_is_what_the_vehicle_says_of_its_rc_input() {
             .unwrap()
             .iter()
             .any(|c| c["id"] == "uxduck:rc-receiver")
+    );
+}
+
+/// A vehicle's failsafe takes a controller over RC or over the link alike,
+/// so either passes until a person asks for one of the two (maintainer,
+/// 2026-11-13).
+#[test]
+fn controller_input_takes_rc_the_link_or_either_as_a_person_sets_it() {
+    let mut b = bench();
+    let input = |b: &mut Bench| {
+        b.checks()["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["check"] == "rc-receiver")
+            .unwrap()["input"]
+            .clone()
+    };
+    assert_eq!(input(&mut b), "either");
+    assert!(
+        b.checks()["settings"][2].get("input").is_none(),
+        "only the check that asks has one"
+    );
+    b.rc("Receiving");
+    assert_eq!(b.check("uxduck:rc-receiver")["status"], "pass");
+    // The link alone: no controller drives it from UXDuck, so it fails and
+    // leads to the controllers, whatever its receiver says.
+    b.configure(json!({ "check": "rc-receiver", "input": "link" }));
+    assert_eq!(input(&mut b), "link");
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["status"], "fail");
+    assert_eq!(
+        rc["detail"],
+        "No controller drives Alpha from UXDuck. Choose one in Controls."
+    );
+    assert_eq!(rc["fix"], json!({ "type": "controllers" }));
+    // Its own receiver alone: what the vehicle says.
+    b.configure(json!({ "check": "rc-receiver", "input": "rc" }));
+    let rc = b.check("uxduck:rc-receiver");
+    assert_eq!(rc["status"], "pass");
+    assert_eq!(rc["detail"], "Alpha is receiving RC input.");
+    // Either again is the default, and nothing is kept for it.
+    b.configure(json!({ "check": "rc-receiver", "input": "either" }));
+    assert_eq!(input(&mut b), "either");
+    // A check that takes no input refuses one.
+    let refused = b.call(
+        "preflight/configure",
+        json!({ "vehicleId": "v", "check": "link", "input": "rc" }),
+    );
+    assert_eq!(
+        refused["error"]["message"], "“Link” has no input to choose",
+        "{refused}"
     );
 }
 
@@ -1420,7 +1675,7 @@ fn the_plan_on_the_vehicle_is_the_one_chosen_verified_and_unchanged() {
         check["detail"],
         "Field loop is chosen, but Alpha has Ridge survey."
     );
-    assert_eq!(b.arm(None)["result"]["reason"], "preflight");
+    assert_eq!(b.launch(None)["result"]["reason"], "preflight");
     // Flown by hand: no plan.
     b.configure(json!({ "planId": null }));
     assert_eq!(b.check("uxduck:plan")["status"], "pass");
@@ -1454,7 +1709,7 @@ fn the_plan_on_the_vehicle_is_the_one_chosen_verified_and_unchanged() {
 }
 
 #[test]
-fn the_list_is_journaled_when_it_changes_and_kept_while_armed() {
+fn the_list_is_journaled_when_it_changes_read_live_on_the_ground_and_kept_in_the_air() {
     let mut b = bench();
     b.rc("Receiving");
     b.checks();
@@ -1471,19 +1726,29 @@ fn the_list_is_journaled_when_it_changes_and_kept_while_armed() {
     assert!(after > before);
     b.engine.review_preflights();
     assert_eq!(b.journal.preflight_updates(), after);
-    // Armed (with the operator's override): the list stays as it armed,
-    // marked so, while the checks would change.
-    b.command(
-        None,
-        json!({ "command": { "type": "arm" }, "overridePreflight": ["uxduck:plan"] }),
-    );
+    // Armed on the ground: still read live, for the launch (K26).
+    b.arm(None);
     b.seen(true);
+    b.flight_state("On the ground");
     let armed = b.checks();
-    assert_eq!(armed["evaluating"], false);
+    assert_eq!(armed["evaluating"], true);
     assert_eq!(gating(&armed), ["uxduck:plan"]);
     b.configure(json!({ "planId": null }));
-    assert_eq!(gating(&b.checks()), ["uxduck:plan"], "kept while armed");
-    // Disarmed: evaluated again.
+    assert!(
+        gating(&b.checks()).is_empty(),
+        "read live while on the ground"
+    );
+    b.wrong_plan();
+    // In the air: the list stays as it launched, marked so, while the
+    // checks would change.
+    b.flight_state("In the air");
+    let flying = b.checks();
+    assert_eq!(flying["evaluating"], false);
+    assert_eq!(gating(&flying), ["uxduck:plan"]);
+    b.configure(json!({ "planId": null }));
+    assert_eq!(gating(&b.checks()), ["uxduck:plan"], "kept in the air");
+    // Landed and disarmed: evaluated again.
+    b.flight_state("On the ground");
     b.seen(false);
     let disarmed = b.checks();
     assert_eq!(disarmed["evaluating"], true);
@@ -1491,12 +1756,9 @@ fn the_list_is_journaled_when_it_changes_and_kept_while_armed() {
     // Pushed as the `preflight` entity.
     let entity = b.engine.state().preflights["v"].clone();
     assert!(entity.evaluating);
-    assert!(
-        entity
-            .checks
-            .iter()
-            .all(|c| c.status == CheckStatus::Pass || c.id.starts_with("vehicle:"))
-    );
+    assert!(entity.checks.iter().all(|c| c.status == CheckStatus::Pass
+        || c.id.starts_with("vehicle:")
+        || c.id == "uxduck:home"));
 }
 
 #[test]
@@ -1510,7 +1772,7 @@ fn a_refusal_is_a_receipt_with_its_reason_for_every_client() {
         .values()
         .find(|r| r.reason == Some(RefusalReason::Preflight));
     assert!(receipt.is_none());
-    b.arm(None);
+    b.launch(None);
     let receipt = b
         .engine
         .state()
@@ -1521,6 +1783,28 @@ fn a_refusal_is_a_receipt_with_its_reason_for_every_client() {
         .unwrap();
     assert_eq!(receipt.status, ReceiptStatus::NotSent);
     assert_eq!(receipt.preflight[0].title, "Plan on the vehicle");
+}
+
+#[test]
+fn a_vehicle_that_does_not_fly_is_held_until_it_is_armed() {
+    // A rover has no leaving the ground to tell a launch by: its mission's
+    // start is held while it is disarmed, and never once it is armed.
+    let mut b = bench();
+    b.seen_as("GroundRover", "MANUAL", false, "Ardupilotmega");
+    b.wrong_plan();
+    b.wire.take();
+    let start = json!({ "type": "long", "command": 300, "params": [0, 0] });
+    assert_eq!(b.checks()["evaluating"], true);
+    let receipt = b.command(None, json!({ "command": start }));
+    assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
+    assert!(b.wire.take().is_empty(), "nothing reached the vehicle");
+    // Arming it is never held.
+    assert_eq!(b.arm(None)["result"]["status"], "accepted");
+    b.seen_as("GroundRover", "MANUAL", true, "Ardupilotmega");
+    assert_eq!(b.checks()["evaluating"], false, "armed, it is under way");
+    let receipt = b.command(None, json!({ "command": start }));
+    assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+    assert!(receipt["result"].get("preflight").is_none(), "{receipt}");
 }
 
 /// The take-off's steps from a mode other than GUIDED (`take_off_steps`).
@@ -1535,8 +1819,8 @@ fn from_another_mode() -> Vec<Command> {
 }
 
 /// A disarmed copter or quadplane outside GUIDED is switched to GUIDED,
-/// then armed, then taken off: held at once like arming, before its first
-/// step, so nothing reaches the real vehicle (review of #736, H1).
+/// then armed, then taken off: the launch is held at once, before its
+/// first step, so nothing reaches the real vehicle (review of #736, H1).
 fn held_before_its_first_step(airframe: &str, heard: impl FnOnce(&mut Bench)) {
     let mut b = bench();
     heard(&mut b);
@@ -1549,7 +1833,7 @@ fn held_before_its_first_step(airframe: &str, heard: impl FnOnce(&mut Bench)) {
     assert_eq!(result["preflight"][0]["id"], "uxduck:plan", "{airframe}");
     assert!(
         result["detail"].as_str().unwrap().starts_with(
-            "Take off wasn't sent to Alpha: 1 preflight check doesn't pass: Plan on the vehicle"
+            "Take off wasn't sent to Alpha: 1 check that holds the launch doesn't pass: Plan on the vehicle"
         ),
         "{airframe}: {receipt}"
     );
@@ -1583,10 +1867,10 @@ fn a_quadplanes_take_off_from_another_mode_waits_for_blocking_checks() {
 fn a_take_off_with_its_checks_passing_or_named_goes_as_before() {
     let mut b = bench();
     b.wrong_plan();
-    // Arming alone: held while the check blocks, sent once it only warns.
+    // Arming alone is never held (K22).
     let arm = b.arm(None);
-    assert_eq!(arm["result"]["reason"], "preflight", "{arm}");
-    // From GUIDED, held the same, and nothing goes.
+    assert_eq!(arm["result"]["status"], "accepted", "{arm}");
+    // From GUIDED the take-off is held, and nothing goes.
     let (steps, guided) = b.take_off(None, json!({}));
     assert_eq!(guided["result"]["reason"], "preflight", "{guided}");
     assert!(steps.is_empty() && b.wire.take().is_empty());

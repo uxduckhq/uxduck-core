@@ -1,13 +1,17 @@
 //! Preflight checks (ADR-0038 K1 to K6, S192): one list per vehicle, the
-//! engine's to evaluate while it is disarmed, and the gate that holds
-//! arming while a blocking check does not pass.
+//! engine's to evaluate until the vehicle has launched, and the gate that
+//! holds a launch, never arming, while a check set to hold it does not
+//! pass (K22 to K25, S352).
 //!
 //! A check has a source (the vehicle, UXDuck, the vehicle's checklist, a
-//! plugin), a severity (block or warn) and a status, with a detail in words
-//! and where its fix is. The vehicle's own pre-arm reasons come first and
-//! never gate: the vehicle refuses by itself. UXDuck's own checks are each
-//! on or off per vehicle, with a severity and, for some, a threshold.
-//! Checklist steps (S193) and plugins' checks (S194) join the same list.
+//! plugin), a severity (`block` holds the launch, `warn` only warns) and a
+//! status, with a detail in words and where its fix is. The vehicle's own
+//! pre-arm reasons come first and never gate: the vehicle refuses by
+//! itself. UXDuck's own checks are each on or off per vehicle, with a
+//! severity and, for some, a threshold. Checklist steps (S193) and
+//! plugins' checks (S194) join the same list. A step of the checklist
+//! counts in the preflight or at the launch (K26). The rest are read live
+//! and count in both.
 
 use std::collections::BTreeMap;
 
@@ -30,16 +34,38 @@ pub enum CheckSource {
     Plugin,
 }
 
-/// Whether a check that does not pass stops arming.
+/// Whether a check that does not pass holds the launch (K25): a take-off,
+/// or a mission's start from the ground. Never arming (K22).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckSeverity {
+    /// Holds the launch until it passes.
     Block,
+    /// Only warns.
     Warn,
 }
 
-/// Where a check stands. Only `pass` lets a blocking check through: one
-/// that fails, waits, is unknown or is still to do holds arming.
+/// Where a checklist step counts (K26): in the preflight, done ahead of
+/// time and wherever a person likes, or at the launch, where and when the
+/// vehicle takes off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckWhen {
+    #[default]
+    Preflight,
+    Launch,
+}
+
+impl CheckWhen {
+    /// For serde: the default is left off the wire.
+    #[must_use]
+    pub fn is_preflight(&self) -> bool {
+        *self == Self::Preflight
+    }
+}
+
+/// Where a check stands. Only `pass` lets a holding check through: one
+/// that fails, waits, is unknown or is still to do holds the launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckStatus {
@@ -81,6 +107,8 @@ pub enum CheckFix {
     Connections,
     /// The plugin the check is from, on the Plugins page (S194).
     Plugin { plugin_id: String },
+    /// Home, set to where the vehicle is now (K27).
+    Home,
 }
 
 /// UXDuck's own checks (K6): what the firmware cannot know.
@@ -94,7 +122,8 @@ pub enum OwnCheck {
     /// The link is good: heard just now, and the radio's signal is strong
     /// enough when it reports one.
     Link,
-    /// The vehicle says it is receiving RC input.
+    /// The vehicle has controller input: over RC, from a controller
+    /// through UXDuck, or either, as a person sets it (`InputPath`).
     RcReceiver,
     /// A controller driving the vehicle is at neutral.
     Controller,
@@ -105,6 +134,11 @@ pub enum OwnCheck {
     Terrain,
     /// The cameras that record while it is armed are sending video.
     Recording,
+    /// Home is where the vehicle is (K27): a return goes to home, and one
+    /// left indoors or at an earlier place is not where it takes off.
+    /// Read at the launch only. A home far away fails once the vehicle is
+    /// armed: before that most autopilots are still to move it.
+    Home,
 }
 
 /// A check's threshold: what it means and its range.
@@ -120,7 +154,7 @@ pub struct Threshold {
 
 impl OwnCheck {
     /// In the list's order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Setup,
         Self::Restart,
         Self::Link,
@@ -129,6 +163,7 @@ impl OwnCheck {
         Self::Plan,
         Self::Terrain,
         Self::Recording,
+        Self::Home,
     ];
 
     /// Its key on the wire: "plan".
@@ -143,6 +178,7 @@ impl OwnCheck {
             Self::Plan => "plan",
             Self::Terrain => "terrain",
             Self::Recording => "recording",
+            Self::Home => "home",
         }
     }
 
@@ -165,11 +201,12 @@ impl OwnCheck {
             Self::Setup => "No setup procedure running",
             Self::Restart => "No restart due",
             Self::Link => "Link",
-            Self::RcReceiver => "RC receiver",
+            Self::RcReceiver => "Controller input",
             Self::Controller => "Controller at neutral",
             Self::Plan => "Plan on the vehicle",
             Self::Terrain => "Terrain loaded",
             Self::Recording => "Cameras ready to record",
+            Self::Home => "Home is where the vehicle is",
         }
     }
 
@@ -183,18 +220,26 @@ impl OwnCheck {
             Self::RcReceiver | Self::Controller => "Controller",
             Self::Plan | Self::Terrain => "Plan",
             Self::Recording => "Cameras",
+            Self::Home => "Home",
         }
     }
 
-    /// A fresh vehicle's (ADR-0038's open question, as assumed): every one
-    /// on, as a warning, but a running procedure and a restart due, which
-    /// block. A simulation is never held up by the rest.
+    /// Where it counts (K26, K27): at the launch only for the checks about
+    /// the place of the launch. None for the rest, which are read live and
+    /// count in the preflight and at the launch alike.
+    #[must_use]
+    pub const fn when(self) -> Option<CheckWhen> {
+        match self {
+            Self::Home => Some(CheckWhen::Launch),
+            _ => None,
+        }
+    }
+
+    /// A fresh vehicle's: every one on, and only warning until a person
+    /// sets it to hold the launch (K25).
     #[must_use]
     pub const fn default_severity(self) -> CheckSeverity {
-        match self {
-            Self::Setup | Self::Restart => CheckSeverity::Block,
-            _ => CheckSeverity::Warn,
-        }
+        CheckSeverity::Warn
     }
 
     /// Its threshold, for the checks that have one.
@@ -215,8 +260,21 @@ impl OwnCheck {
                 min: 1.0,
                 max: 50.0,
             }),
+            Self::Home => Some(Threshold {
+                label: "Home within",
+                unit: "m",
+                default: 50.0,
+                min: 5.0,
+                max: 5000.0,
+            }),
             _ => None,
         }
+    }
+
+    /// Whether a person chooses where its input may come from.
+    #[must_use]
+    pub const fn has_input(self) -> bool {
+        matches!(self, Self::RcReceiver)
     }
 
     /// How it is set when nobody has set it.
@@ -226,8 +284,23 @@ impl OwnCheck {
             on: true,
             severity: self.default_severity(),
             threshold: None,
+            input: None,
         }
     }
+}
+
+/// Where a vehicle's controller input may come from for "Controller input"
+/// to pass (K6). Its own failsafe takes either (maintainer, 2026-11-13).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputPath {
+    /// Its RC receiver, or a controller through UXDuck.
+    #[default]
+    Either,
+    /// Its own RC receiver.
+    Rc,
+    /// A controller through UXDuck, over the link.
+    Link,
 }
 
 /// One of UXDuck's own checks as set for a vehicle.
@@ -239,6 +312,10 @@ pub struct CheckSetting {
     /// Its threshold when changed from the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f64>,
+    /// Where its input may come from when changed from either, for the
+    /// check that asks (`OwnCheck::has_input`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputPath>,
 }
 
 /// The plan a person chose for a vehicle's next flight, and when. An
@@ -295,10 +372,22 @@ impl PreflightSettings {
         )
     }
 
+    /// Where a check's input may come from, for the check that asks:
+    /// either unless changed.
+    #[must_use]
+    pub fn input(&self, check: OwnCheck) -> Option<InputPath> {
+        check
+            .has_input()
+            .then(|| self.setting(check).input.unwrap_or_default())
+    }
+
     /// Changes a check's setting, keeping nothing for one set back to its
     /// default.
     pub fn set(&mut self, check: OwnCheck, setting: CheckSetting) {
         let mut setting = setting;
+        if !check.has_input() || setting.input == Some(InputPath::Either) {
+            setting.input = None;
+        }
         if let (Some(meta), Some(value)) = (check.threshold(), setting.threshold)
             && (value - meta.default).abs() < f64::EPSILON
         {
@@ -329,6 +418,12 @@ pub struct Check {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub severity: CheckSeverity,
+    /// Where a checklist step counts (K26), and `launch` for UXDuck's
+    /// checks of the place of the launch (K27). None for the vehicle's
+    /// reasons, UXDuck's other checks and plugins' checks, which are read
+    /// live and count in the preflight and at the launch alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<CheckWhen>,
     pub status: CheckStatus,
     /// What UXDuck found, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,15 +442,15 @@ pub struct CheckPlugin {
     pub id: String,
     pub name: String,
     /// It declares the check blocking, but no person has allowed its
-    /// checks to stop arming (K13): it only warns.
+    /// checks to hold the launch (K13): it only warns.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held_back: bool,
 }
 
 impl Check {
-    /// Whether UXDuck holds arming for it (K3): a blocking check of any
-    /// source but the vehicle, which refuses by itself (K5), that does not
-    /// pass.
+    /// Whether UXDuck holds the launch for it (K23): a check set to hold,
+    /// of any source but the vehicle, which refuses by itself (K5), that
+    /// does not pass.
     #[must_use]
     pub fn gates(&self) -> bool {
         self.source != CheckSource::Vehicle
@@ -391,11 +486,11 @@ pub struct CheckRef {
     pub detail: Option<String>,
 }
 
-/// How arming went past failing blocking checks (K4).
+/// How a launch went past failing checks set to hold it (K24).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum PreflightOverride {
-    /// The operator held Arm anyway, naming the checks.
+    /// The operator held Take off anyway, naming the checks.
     Operator,
     /// An operator allowed a client's request that listed them.
     Approval { approval_id: String },
@@ -414,7 +509,8 @@ pub struct Preflight {
     /// The plan it counts as chosen: picked, or uploaded since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
-    /// False while the vehicle is armed: the list is the one it armed with.
+    /// False once the vehicle has launched (in the air, or armed for one
+    /// that does not fly): the list is the one it launched with.
     pub evaluating: bool,
     /// The vehicle's checklist (S193): its steps with their ticks, kept
     /// with the vehicle; its checks are in `checks` as `checklist:<id>`.
@@ -453,7 +549,7 @@ pub struct ParamOffer {
 }
 
 impl Preflight {
-    /// The checks that hold arming now (K3).
+    /// The checks that hold a launch now (K23).
     pub fn gating(&self) -> impl Iterator<Item = &Check> {
         self.checks.iter().filter(|c| c.gates())
     }
@@ -483,6 +579,7 @@ mod tests {
             title: "X".into(),
             group: None,
             severity,
+            when: None,
             status,
             detail: None,
             fix: None,
@@ -511,10 +608,13 @@ mod tests {
             settings.setting(OwnCheck::Plan).severity,
             CheckSeverity::Warn
         );
-        assert_eq!(
-            settings.setting(OwnCheck::Restart).severity,
-            CheckSeverity::Block
-        );
+        for check in OwnCheck::ALL {
+            assert_eq!(
+                settings.setting(check).severity,
+                CheckSeverity::Warn,
+                "{check:?} only warns until a person sets it to hold"
+            );
+        }
         assert_eq!(settings.threshold(OwnCheck::Link), Some(30.0));
         assert_eq!(settings.threshold(OwnCheck::Plan), None);
         settings.set(
@@ -523,6 +623,7 @@ mod tests {
                 on: true,
                 severity: CheckSeverity::Block,
                 threshold: Some(3.0),
+                input: Some(InputPath::Link),
             },
         );
         assert_eq!(
@@ -533,12 +634,43 @@ mod tests {
             None,
             "a check without a threshold keeps none"
         );
+        assert_eq!(
+            settings.checks.get(&OwnCheck::Plan).and_then(|s| s.input),
+            None,
+            "a check that takes no input keeps none"
+        );
+        assert_eq!(settings.input(OwnCheck::Plan), None);
+        // Controller input takes either path until a person asks for one.
+        assert_eq!(
+            settings.input(OwnCheck::RcReceiver),
+            Some(InputPath::Either)
+        );
+        settings.set(
+            OwnCheck::RcReceiver,
+            CheckSetting {
+                input: Some(InputPath::Link),
+                ..OwnCheck::RcReceiver.default_setting()
+            },
+        );
+        assert_eq!(settings.input(OwnCheck::RcReceiver), Some(InputPath::Link));
+        settings.set(
+            OwnCheck::RcReceiver,
+            CheckSetting {
+                input: Some(InputPath::Either),
+                ..OwnCheck::RcReceiver.default_setting()
+            },
+        );
+        assert!(
+            !settings.checks.contains_key(&OwnCheck::RcReceiver),
+            "either is the default, so nothing is kept"
+        );
         settings.set(
             OwnCheck::Link,
             CheckSetting {
                 on: true,
                 severity: CheckSeverity::Warn,
                 threshold: Some(150.0),
+                input: None,
             },
         );
         assert_eq!(settings.threshold(OwnCheck::Link), Some(100.0));
@@ -546,6 +678,9 @@ mod tests {
         settings.set(OwnCheck::Plan, OwnCheck::Plan.default_setting());
         assert!(settings.is_default());
         assert_eq!(OwnCheck::from_id("uxduck:terrain"), Some(OwnCheck::Terrain));
+        assert_eq!(OwnCheck::Home.when(), Some(CheckWhen::Launch));
+        assert_eq!(OwnCheck::Plan.when(), None);
+        assert_eq!(settings.threshold(OwnCheck::Home), Some(50.0));
         assert_eq!(OwnCheck::from_id("vehicle:terrain"), None);
     }
 }

@@ -1,16 +1,18 @@
-//! Preflight checks and the arming gate (S192, ADR-0038 K1 to K6).
+//! Preflight checks and the gate on the launch (S192, S352, ADR-0038 K1 to K6, K22 to K25).
 //!
-//! The engine evaluates each vehicle's checks while it is disarmed and
-//! journals the list as the `preflight` entity whenever a check's status,
-//! detail or setting changes, never for the same list evaluated again.
-//! While it is armed the list stays as it armed with (`evaluating` false).
+//! The engine evaluates each vehicle's checks while it is on the ground,
+//! armed or not, and journals the list as the `preflight` entity whenever
+//! a check's status, detail or setting changes, never for the same list
+//! evaluated again. Once it has launched the list stays as it launched
+//! with (`evaluating` false).
 //!
-//! The gate (`commands::send`) evaluates afresh: a command that arms on the
-//! ground is refused `not-sent` with reason `preflight` while a blocking
-//! check of UXDuck's, a checklist's or a plugin's does not pass.
-//! The vehicle's own pre-arm reasons are listed first and never gate (K5):
-//! the vehicle refuses by itself. An operator arms anyway by naming the
-//! checks (K4); an agent's or a plugin's arming is put to an operator as an
+//! The gate (`commands::send`) evaluates afresh: a launch, a take-off or
+//! a mission started from the ground, is refused `not-sent` with reason
+//! `preflight` while a check of UXDuck's, a checklist's or a plugin's set
+//! to hold does not pass. Arming is never held (K22). The vehicle's own
+//! pre-arm reasons are listed first and never gate (K5): the vehicle
+//! refuses by itself. An operator launches anyway by naming the checks
+//! (K24). An agent's or a plugin's launch is put to an operator as an
 //! approval listing them, and allowing it is the override.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,9 +28,10 @@ use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{Controller, centred_throttle};
 use uxduck_core::domain::modes::Family;
+use uxduck_core::domain::plan::{LatLon, distance_m};
 use uxduck_core::domain::preflight::{
-    Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, OwnCheck,
-    Preflight,
+    Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, InputPath,
+    OwnCheck, Preflight,
 };
 use uxduck_core::domain::settings::PilotInputMethod;
 use uxduck_core::domain::setup::{SetupKind, SetupRow, fix_for};
@@ -168,9 +171,22 @@ fn configure(
                 }
                 setting.threshold = threshold;
             }
+            if let Some(input) = params.input {
+                if !check.has_input() {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        format!("“{}” has no input to choose", check.title()),
+                    ));
+                }
+                setting.input = Some(input.into());
+            }
             settings.set(check, setting);
         }
-        None if params.on.is_some() || params.severity.is_some() || params.threshold.is_some() => {
+        None if params.on.is_some()
+            || params.severity.is_some()
+            || params.threshold.is_some()
+            || params.input.is_some() =>
+        {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
                 "check: name the check to change",
@@ -309,6 +325,7 @@ fn px4_checks(vehicle: &Vehicle, report: &ArmingChecks) -> Vec<Check> {
             fix: Some(fix),
             plugin: None,
             group: None,
+            when: None,
         });
     }
     if checks.iter().any(|c| c.severity == CheckSeverity::Block) {
@@ -337,6 +354,7 @@ fn px4_checks(vehicle: &Vehicle, report: &ArmingChecks) -> Vec<Check> {
             fix: None,
             plugin: None,
             group: None,
+            when: None,
         },
     );
     checks
@@ -368,14 +386,18 @@ pub(crate) fn refusal(label: &str, vehicle: &str, gating: &[CheckRef], operator:
             None => c.title.clone(),
         })
         .collect();
-    let hint = if operator {
-        " Fix them, or hold Arm anyway to arm past them."
-    } else {
-        ""
+    let hint = match (operator, n) {
+        (false, _) => String::new(),
+        (true, 1) => format!(" Fix it, or hold {label} anyway to launch past it."),
+        (true, _) => format!(" Fix them, or hold {label} anyway to launch past them."),
     };
     format!(
-        "{label} wasn't sent to {vehicle}: {n} preflight {} {}: {}.{hint}",
-        if n == 1 { "check" } else { "checks" },
+        "{label} wasn't sent to {vehicle}: {n} {} {}: {}.{hint}",
+        if n == 1 {
+            "check that holds the launch"
+        } else {
+            "checks that hold the launch"
+        },
         if n == 1 { "doesn't pass" } else { "don't pass" },
         list.join(", ")
     )
@@ -399,6 +421,7 @@ impl Engine {
                 OwnCheck::Plan => self.plan_check(vehicle).0,
                 OwnCheck::Terrain => self.terrain_preflight(vehicle),
                 OwnCheck::Recording => self.recording_check(vehicle),
+                OwnCheck::Home => self.home_check(vehicle),
             };
             checks.push(Check {
                 id: check.id(),
@@ -406,6 +429,7 @@ impl Engine {
                 title: check.title().to_owned(),
                 group: Some(check.group().to_owned()),
                 severity: setting.severity,
+                when: check.when(),
                 status: outcome.status,
                 detail: Some(outcome.detail),
                 fix: outcome.fix,
@@ -421,7 +445,7 @@ impl Engine {
             checks,
             settings: vehicle.preflight.clone(),
             plan_id: self.plan_check(vehicle).1,
-            evaluating: !vehicle.armed,
+            evaluating: !self.launched(vehicle),
             checklist: self.state.checklists.get(&vehicle.id).cloned(),
             flown_since: self.flown_since(vehicle),
             offers: self.param_offers(vehicle),
@@ -430,8 +454,8 @@ impl Engine {
         }
     }
 
-    /// The checks holding arming now, evaluated afresh (K3): what the gate
-    /// refuses for.
+    /// The checks holding a launch now, evaluated afresh (K23): what the
+    /// gate refuses for.
     pub(crate) fn preflight_gating(&self, vehicle_id: &str) -> Vec<CheckRef> {
         let Some(vehicle) = self.vehicle(vehicle_id) else {
             return Vec::new();
@@ -442,25 +466,25 @@ impl Engine {
             .collect()
     }
 
-    /// A request that would arm a disarmed vehicle past failing blocking
-    /// checks: the checks, for its approval to list (K4). Empty for
-    /// anything else.
+    /// A request that would launch a vehicle past failing checks set to
+    /// hold: the checks, for its approval to list (K24). Empty for
+    /// anything else, arming included (K22).
     pub(crate) fn preflight_asks(&self, request: &ClientRequest) -> Vec<CheckRef> {
         let ClientRequest::CommandSend(params) = request else {
             return Vec::new();
         };
         let command = Command::from(params.command.clone());
         match self.vehicle(&params.vehicle_id) {
-            Some(vehicle) if !vehicle.armed && command.arms_on_the_ground() => {
+            Some(vehicle) if command.launches() && !self.launched(vehicle) => {
                 self.preflight_gating(&vehicle.id)
             }
             _ => Vec::new(),
         }
     }
 
-    /// A plugin's raw `COMMAND_LONG` or `COMMAND_INT` that would arm the
-    /// disarmed vehicle while a blocking check does not pass.
-    pub(crate) fn raw_message_arms(
+    /// A plugin's raw `COMMAND_LONG` or `COMMAND_INT` that would launch
+    /// the vehicle while a check set to hold does not pass.
+    pub(crate) fn raw_message_launches(
         &self,
         vehicle_id: &str,
         name: &str,
@@ -485,8 +509,8 @@ impl Engine {
             command: number,
             params,
         };
-        command.arms_on_the_ground()
-            && self.vehicle(vehicle_id).is_some_and(|v| !v.armed)
+        command.launches()
+            && self.vehicle(vehicle_id).is_some_and(|v| !self.launched(v))
             && !self.preflight_gating(vehicle_id).is_empty()
     }
 
@@ -499,9 +523,10 @@ impl Engine {
         self.preflight.reviewed_at.insert(vehicle.id.clone(), now);
         self.track_rules(&vehicle.id);
         let stored = self.state.preflights.get(&vehicle.id).cloned();
-        let mut next = match (&stored, vehicle.armed) {
-            // Armed: the list it armed with stays, marked so; the
-            // checklist's steps and ticks are as they are now (S193).
+        let mut next = match (&stored, self.launched(&vehicle)) {
+            // Launched: the list it launched with stays, marked so; the
+            // checklist's steps and ticks are as they are now (S193). On
+            // the ground it is read live, armed or not (K26).
             (Some(stored), true) => Preflight {
                 evaluating: false,
                 settings: vehicle.preflight.clone(),
@@ -622,6 +647,7 @@ impl Engine {
                 title: format!("{}'s own checks", vehicle.name),
                 group: None,
                 severity: CheckSeverity::Block,
+                when: None,
                 status,
                 detail: Some(detail.into()),
                 fix: None,
@@ -645,6 +671,7 @@ impl Engine {
                     title: reason,
                     group: None,
                     severity: CheckSeverity::Block,
+                    when: None,
                     status: CheckStatus::Fail,
                     detail: Some(format!(
                         "{} says it can't arm until this clears.",
@@ -659,9 +686,11 @@ impl Engine {
 
     /// A simulated `ArduPilot` vehicle that says it may arm before its EKF
     /// knows where it is takes off in nothing but a stabilised mode: GUIDED,
-    /// AUTO and Take off are refused until it does. It waits until then, a
-    /// few seconds after its own checks pass, and while its EKF status is
-    /// missing or more than 5 s old. PX4 is not held: the rule is for
+    /// AUTO and Take off are refused until it does. Its launch waits until
+    /// then, a few seconds after its own checks pass, and while its EKF
+    /// status is missing or more than 5 s old. It is the one check that
+    /// holds a launch without a person setting it to (K25): a simulation's
+    /// alone, and gone in seconds. PX4 is not held: the rule is for
     /// ArduPilot's SITL, which says it may arm before its EKF has a position.
     fn simulation_position_check(&self, vehicle: &Vehicle) -> Option<Check> {
         if !self.is_simulated(vehicle) || vehicle.autopilot != "Ardupilotmega" {
@@ -687,7 +716,7 @@ impl Engine {
             Some(_) => (
                 CheckStatus::Waiting,
                 format!(
-                    "{name} is still starting: it can arm once it knows where it is, in a few seconds."
+                    "{name} is still starting: it can take off once it knows where it is, in a few seconds."
                 ),
             ),
         };
@@ -697,6 +726,7 @@ impl Engine {
             title: "Position".into(),
             group: None,
             severity: CheckSeverity::Block,
+            when: None,
             status,
             detail: Some(detail),
             fix: None,
@@ -804,9 +834,12 @@ impl Engine {
         }
     }
 
-    /// The vehicle's RC input as it says in `SYS_STATUS` (`rc.status`). It
-    /// counts a ground station's stick input as RC, so while a controller
-    /// drives it from UXDuck it cannot say whether its own receiver works.
+    /// The vehicle's controller input as it says in `SYS_STATUS`
+    /// (`rc.status`). It counts a ground station's stick input as RC, and
+    /// so does its failsafe, so a controller through UXDuck passes as its
+    /// own receiver does (maintainer, 2026-11-13). A person may ask for one
+    /// of the two (`InputPath`): for its own receiver alone, while a
+    /// controller drives it from UXDuck it cannot say whether that works.
     fn rc_check(&self, vehicle: &Vehicle) -> Outcome {
         let name = &vehicle.name;
         let now = self.clock.now_us();
@@ -818,21 +851,53 @@ impl Engine {
         let radio = Some(CheckFix::Setup {
             row: SetupRow::Radio,
         });
+        let path = vehicle
+            .preflight
+            .input(OwnCheck::RcReceiver)
+            .unwrap_or_default();
+        let driving = self.driving(vehicle);
+        let controller = driving.first().map(|c| c.name.as_str());
+        if path == InputPath::Link {
+            let Some(controller) = controller else {
+                return not(
+                    CheckStatus::Fail,
+                    format!("No controller drives {name} from UXDuck. Choose one in Controls."),
+                    Some(CheckFix::Controllers),
+                );
+            };
+            return match said {
+                None => not(
+                    CheckStatus::Unknown,
+                    format!("{name} hasn't said whether it takes {controller}'s input."),
+                    None,
+                ),
+                Some(RC_RECEIVING) => {
+                    pass(format!("{name} takes {controller}'s input from UXDuck."))
+                }
+                Some(_) => not(
+                    CheckStatus::Fail,
+                    format!("{name} isn't taking {controller}'s input from UXDuck."),
+                    Some(CheckFix::Controllers),
+                ),
+            };
+        }
         match said {
             None => not(
                 CheckStatus::Unknown,
                 format!("{name} hasn't said whether it has RC input."),
                 None,
             ),
-            Some(RC_RECEIVING) => match self.driving(vehicle).first() {
-                Some(controller) => not(
+            Some(RC_RECEIVING) => match controller {
+                Some(controller) if path == InputPath::Rc => not(
                     CheckStatus::Unknown,
                     format!(
-                        "{name} takes {}'s input from UXDuck as RC, so it can't say whether its own receiver works.",
-                        controller.name
+                        "{name} takes {controller}'s input from UXDuck as RC, so it can't say whether its own receiver works."
                     ),
                     None,
                 ),
+                Some(controller) => pass(format!(
+                    "{name} takes {controller}'s input from UXDuck as RC."
+                )),
                 None => pass(format!("{name} is receiving RC input.")),
             },
             Some(RC_LOST) => not(
@@ -1060,6 +1125,68 @@ impl Engine {
                 CheckStatus::Unknown,
                 format!("{name} hasn't reported its terrain."),
                 Some(CheckFix::Mission),
+            ),
+        }
+    }
+
+    /// Home is where the vehicle is (K27): a return goes to home, and one
+    /// left indoors or at an earlier place is not where it takes off. No
+    /// live distance in its words, as for the radio's signal. `ArduPilot`
+    /// and PX4 move home to the vehicle when it arms unless home was set
+    /// by hand, so while it is disarmed a home far away is not a warning
+    /// and the words say why (maintainer, 2026-11-13). Once it is armed a
+    /// home still far away is one that stays, and that is the warning.
+    fn home_check(&self, vehicle: &Vehicle) -> Outcome {
+        let name = &vehicle.name;
+        let within = vehicle
+            .preflight
+            .threshold(OwnCheck::Home)
+            .unwrap_or_default();
+        let telemetry = self.telemetry(&vehicle.id);
+        let item = |key: &str| {
+            telemetry.and_then(|t| t.items.iter().find(|i| i.key == key).and_then(|i| i.value))
+        };
+        let at = telemetry.and_then(|t| t.positions.iter().find(|p| p.source == "fused"));
+        // Every family UXDuck knows is offered Set home (`home_and_origin`).
+        let fix =
+            Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type).map(|_| CheckFix::Home);
+        match (item("home.latitude_deg"), item("home.longitude_deg"), at) {
+            (Some(latitude_deg), Some(longitude_deg), Some(at)) => {
+                let away = distance_m(
+                    LatLon {
+                        latitude_deg,
+                        longitude_deg,
+                    },
+                    LatLon {
+                        latitude_deg: at.latitude_deg,
+                        longitude_deg: at.longitude_deg,
+                    },
+                );
+                if away <= within {
+                    pass(format!("Home is within {within:.0} m of {name}."))
+                } else if vehicle.armed {
+                    not(
+                        CheckStatus::Fail,
+                        format!(
+                            "Home is more than {within:.0} m from {name}. A return goes to home."
+                        ),
+                        fix,
+                    )
+                } else {
+                    pass(format!(
+                        "Home is more than {within:.0} m from {name}. Most autopilots move it here when they arm, so UXDuck reads it again once {name} is armed."
+                    ))
+                }
+            }
+            (Some(_), Some(_), None) => not(
+                CheckStatus::Unknown,
+                format!("{name} hasn't said where it is."),
+                None,
+            ),
+            _ => not(
+                CheckStatus::Unknown,
+                format!("{name} has no home yet. It sets one once it knows where it is."),
+                None,
             ),
         }
     }

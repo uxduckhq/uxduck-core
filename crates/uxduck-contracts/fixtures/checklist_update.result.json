@@ -34,11 +34,18 @@
         "title": "Battery charged and strapped",
         "group": "Battery",
         "confirm": true,
-        "severity": "block",
+        "severity": "warn",
         "item": "battery.cell_v",
         "op": ">=",
         "value": 4.1,
         "unit": "V"
+      },
+      {
+        "id": "st7a1b93c4d2",
+        "kind": "manual",
+        "severity": "block",
+        "title": "Area clear of people",
+        "when": "launch"
       }
     ],
     "version": 1
@@ -124,11 +131,23 @@
       "group": "Cameras"
     },
     {
+      "id": "uxduck:home",
+      "source": "uxduck",
+      "title": "Home is where the vehicle is",
+      "group": "Home",
+      "severity": "warn",
+      "when": "launch",
+      "status": "pass",
+      "detail": "Home is within 50 m of Alpha.",
+      "gates": false
+    },
+    {
       "detail": "For a person to tick.",
       "gates": true,
       "id": "checklist:st3f9a2c71be",
       "severity": "block",
       "source": "checklist",
+      "when": "preflight",
       "status": "to-do",
       "title": "Propellers tight",
       "group": "Airframe"
@@ -139,17 +158,29 @@
       "id": "checklist:st81d04e6a2c",
       "severity": "block",
       "source": "checklist",
+      "when": "preflight",
       "status": "unknown",
       "title": "Battery at least 22.2 V"
     },
     {
       "id": "checklist:st5c2e77a10f",
       "source": "checklist",
+      "when": "preflight",
       "title": "Battery charged and strapped",
       "group": "Battery",
-      "severity": "block",
+      "severity": "warn",
       "status": "to-do",
       "detail": "Battery per cell is at least 4.1 V. For a person to tick.",
+      "gates": false
+    },
+    {
+      "id": "checklist:st7a1b93c4d2",
+      "source": "checklist",
+      "when": "launch",
+      "title": "Area clear of people",
+      "severity": "block",
+      "status": "to-do",
+      "detail": "For a person to tick.",
       "gates": true
     }
   ],
@@ -157,7 +188,7 @@
   "settings": [
     {
       "check": "setup",
-      "defaultSeverity": "block",
+      "defaultSeverity": "warn",
       "id": "uxduck:setup",
       "on": true,
       "severity": "block",
@@ -165,7 +196,7 @@
     },
     {
       "check": "restart",
-      "defaultSeverity": "block",
+      "defaultSeverity": "warn",
       "id": "uxduck:restart",
       "on": true,
       "severity": "block",
@@ -226,6 +257,23 @@
       "on": true,
       "severity": "warn",
       "title": "Cameras ready to record"
+    },
+    {
+      "check": "home",
+      "id": "uxduck:home",
+      "title": "Home is where the vehicle is",
+      "on": true,
+      "severity": "warn",
+      "defaultSeverity": "warn",
+      "threshold": {
+        "value": 50.0,
+        "default": 50.0,
+        "min": 5.0,
+        "max": 5000.0,
+        "unit": "m",
+        "label": "Home within"
+      },
+      "when": "launch"
     }
   ],
   "updatedAtUs": 1790669310000000,

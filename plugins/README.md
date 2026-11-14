@@ -11,7 +11,7 @@ daemon includes the script host. Browser-only UXDuck does not run plugins.
 | [session-timer-ts](session-timer-ts) | A tool independent of a vehicle                  | Startup, wake-up, Reset       | Large readout; state kept across restarts   |
 | [home-distance-ts](home-distance-ts) | A calculation, messages and parameters           | Positions, battery, Mark      | Distance, circle, warning                   |
 | [clock-ts](clock-ts)                 | Several panels and persistent timers             | Startup, commands, wake-up    | Clock, stopwatch, timer, alarm              |
-| [wind-check-ts](wind-check-ts)       | A preflight check that can stop arming           | Wind estimate, set by hand    | "Wind under 8 m/s" in each vehicle's checks |
+| [wind-check-ts](wind-check-ts)       | A preflight check that can hold the launch       | Wind estimate, set by hand    | "Wind under 8 m/s" in each vehicle's checks |
 | [camera-manager](camera-manager)     | Rust/WebAssembly and commanding hardware         | Camera acknowledgement, Photo | Camera command and count                    |
 | [home-distance](home-distance)       | The Rust SDK and richer widgets                  | Positions, battery, commands  | Distance, chart, table, map                 |
 

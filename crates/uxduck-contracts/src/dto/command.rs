@@ -116,11 +116,9 @@ pub struct CommandSendParams {
     /// autopilot's checks. Operators only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
-    /// Arms past UXDuck's failing blocking preflight checks (ADR-0038 K4):
-    /// the ids of the checks the operator held Arm anyway for, from
-    /// `preflight/state`. Refused unless every check holding arming is
-    /// named. Operators only; it does not force past the vehicle's own
-    /// checks.
+    /// Launches past UXDuck's failing checks that hold the launch
+    /// (ADR-0038 K24): their ids, from `preflight/state`, every one
+    /// named. Operators only. It forces nothing on the vehicle.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub override_preflight: Vec<String>,
 }
@@ -163,9 +161,10 @@ pub enum RefusalReason {
     GroundTestingOnly,
     /// From away, and older than its `maxAgeMs` when it reached the computer.
     Expired,
-    /// It would arm the vehicle while a blocking preflight check does not
-    /// pass; `preflight` lists them. An operator may arm anyway with
-    /// `overridePreflight`.
+    /// It would launch the vehicle (a take-off, or a mission's start from
+    /// the ground) while a check set to hold the launch does not pass.
+    /// `preflight` lists them. An operator may launch anyway with
+    /// `overridePreflight`. Arming is never refused for this.
     Preflight,
     /// The vehicle is a replay of a flight, not live: nothing is sent to it.
     Replay,
@@ -205,11 +204,11 @@ pub struct Receipt {
     /// Set when the daemon refused it for a reason a client can act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RefusalReason>,
-    /// The blocking preflight checks that did not pass: why it was refused,
-    /// or what it was sent past.
+    /// The checks set to hold the launch that did not pass: why it was
+    /// refused, or what it was sent past.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preflight: Vec<crate::dto::preflight::CheckRef>,
-    /// Sent although blocking checks did not pass: by whom.
+    /// Sent although checks set to hold the launch did not pass: by whom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight_override: Option<crate::dto::preflight::PreflightOverride>,
     /// Sent while the vehicle was stale or offline.

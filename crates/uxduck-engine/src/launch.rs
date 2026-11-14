@@ -1065,14 +1065,14 @@ impl Engine {
 
     /// Sends a command as the simulation start: journaled with a receipt
     /// like any other, attributed to `simulation-start`.
-    /// UXDuck's own take-off arms too: never past a blocking preflight
-    /// check (S192, ADR-0038 K3).
+    /// UXDuck's own take-off is a launch too: it does not begin past a
+    /// check set to hold it (S192, ADR-0038 K23).
     fn launch_arm(&mut self, link_id: &str, vehicle: &Vehicle) {
         let gating = self.preflight_gating(&vehicle.id);
         if gating.is_empty() {
             self.launch_command(link_id, vehicle, Command::Arm);
         } else {
-            let why = crate::preflight::refusal("Arm", &vehicle.name, &gating, false);
+            let why = crate::preflight::refusal("Take off", &vehicle.name, &gating, false);
             self.fail_launch(link_id, why);
         }
     }

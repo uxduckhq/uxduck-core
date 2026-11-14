@@ -16,7 +16,8 @@ pub struct PreflightArgs {
     #[arg(long)]
     pub json: bool,
     /// One of UXDuck's own checks to change: setup, restart, link,
-    /// controller, plan, terrain or recording.
+    /// rc-receiver (Controller input), controller, plan, terrain, recording
+    /// or home.
     #[arg(long, value_name = "CHECK")]
     pub check: Option<String>,
     /// Turns the check on.
@@ -25,13 +26,18 @@ pub struct PreflightArgs {
     /// Turns the check off.
     #[arg(long, requires = "check")]
     pub off: bool,
-    /// `block` holds arming while it does not pass; `warn` only says so.
+    /// `block` holds the launch while it does not pass. `warn` only says so.
     #[arg(long, requires = "check", value_name = "block|warn")]
     pub severity: Option<String>,
     /// The check's threshold, such as the least radio signal in percent;
     /// `default` puts it back.
     #[arg(long, requires = "check", value_name = "N|default")]
     pub threshold: Option<String>,
+    /// Where Controller input (`rc-receiver`) may come from: `rc` for the
+    /// vehicle's own receiver, `link` for a controller through UXDuck, or
+    /// `either`.
+    #[arg(long, requires = "check", value_name = "either|rc|link")]
+    pub input: Option<String>,
     /// The plan for the next flight, by id; `none` for none.
     #[arg(long, value_name = "ID|none")]
     pub plan: Option<String>,
@@ -65,6 +71,9 @@ pub async fn run(data_dir: &Path, args: PreflightArgs) -> Result<(), CliError> {
                 })?)
             };
             params.insert("threshold".into(), value);
+        }
+        if let Some(input) = &args.input {
+            params.insert("input".into(), json!(input));
         }
         if let Some(plan) = &args.plan {
             let value = if plan == "none" {
@@ -112,19 +121,19 @@ fn title_of(check: &Value) -> String {
 }
 
 /// The list as the terminal shows it: one line per check, the vehicle's
-/// own first, then a line saying whether UXDuck holds arming.
+/// own first, then a line saying whether UXDuck holds the launch.
 #[must_use]
 pub fn lines(state: &Value) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let checks = state["checks"].as_array().cloned().unwrap_or_default();
     if state["evaluating"] == false {
-        let _ = writeln!(out, "Armed: the checks as they stood when it armed.");
+        let _ = writeln!(out, "Launched: the checks as they stood when it did.");
     }
     for check in &checks {
         let status = check["status"].as_str().unwrap_or_default();
         let blocks = if check["severity"] == "block" {
-            "blocks"
+            "holds"
         } else {
             "warns"
         };
@@ -173,14 +182,14 @@ pub fn lines(state: &Value) -> String {
     } else {
         let _ = writeln!(
             out,
-            "UXDuck holds arming: {}. `uxduck command arm --arm-anyway` arms past them.",
+            "UXDuck holds the launch: {}. `uxduck command takeoff --anyway` launches past them. Arming is never held.",
             gating.join(", ")
         );
     }
     out
 }
 
-/// The ids of the checks holding arming now, for `--arm-anyway`.
+/// The ids of the checks holding the launch now, for `--anyway`.
 pub async fn gating(client: &mut LocalClient, vehicle_id: &str) -> Result<Vec<Value>, CliError> {
     let state = client
         .call("preflight/state", json!({ "vehicleId": vehicle_id }))
@@ -215,12 +224,12 @@ mod tests {
         assert_eq!(
             text,
             "ok       vehicle Alpha's own checks: It says it is ready to arm.\n\
-             FAIL     blocks  No restart due: The compass calibration takes effect once Alpha restarts.\n\
+             FAIL     holds   No restart due: The compass calibration takes effect once Alpha restarts.\n\
              FAIL     warns   Plan on the vehicle: Ridge survey is chosen, but it isn't on Alpha yet.\n\
-             unknown  blocks  Wind under 8 m/s (Wind check): The Wind check plugin isn't running: it's turned off.\n\
+             unknown  holds   Wind under 8 m/s (Wind check): The Wind check plugin isn't running: it's turned off.\n\
              FAIL     warns   No gusts (Gusts): Gusting. (warns until you allow it: uxduck plugin checks gusts block)\n\
              Off: Terrain loaded\n\
-             UXDuck holds arming: No restart due, Wind under 8 m/s (Wind check). `uxduck command arm --arm-anyway` arms past them.\n"
+             UXDuck holds the launch: No restart due, Wind under 8 m/s (Wind check). `uxduck command takeoff --anyway` launches past them. Arming is never held.\n"
         );
     }
 }

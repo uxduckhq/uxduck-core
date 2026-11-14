@@ -1,8 +1,9 @@
 //! A vehicle's checklist (ADR-0038 K7 to K11, K14; S193): steps a person
 //! ticks ("Propellers tight") and rules over a telemetry item or a
-//! parameter ("Battery at least 22.2 V, held 3 s"), each blocking or only
-//! warning. They join the vehicle's preflight checks with source
-//! `checklist`.
+//! parameter ("Battery at least 22.2 V, held 3 s"), each only warning
+//! until a person sets it to hold the launch (K25). They join the
+//! vehicle's preflight checks with source `checklist`. A step counts in
+//! the preflight or at the launch (K26, `when`).
 //!
 //! A step can sit under a concept ("Battery", "Controller") beside
 //! UXDuck's own checks of that group (K16), and a rule can ask for a
@@ -19,7 +20,9 @@ use std::fmt::Write;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::history::Author;
-use crate::domain::preflight::{CheckRef, CheckSeverity, CheckStatus, PreflightOverride};
+use crate::domain::preflight::{
+    CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride,
+};
 
 /// The checklist file's format and version (K7).
 pub const FILE_FORMAT: &str = "uxduck.checklist/1";
@@ -231,8 +234,11 @@ pub struct Step {
     /// own checks of that group (K16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// Blocking by default, a manual step too.
+    /// Only warning unless a person set it to hold the launch (K25).
     pub severity: CheckSeverity,
+    /// Whether it counts in the preflight or at the launch (K26).
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     /// A rule's comparison; none for a manual step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<Rule>,
@@ -267,6 +273,7 @@ impl Step {
             title: self.title.clone(),
             group: self.group.clone(),
             severity: self.severity,
+            when: self.when,
             rule: self.rule.clone(),
             confirm: self.confirm,
         }
@@ -288,6 +295,8 @@ pub struct StepDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub severity: CheckSeverity,
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<Rule>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -382,14 +391,15 @@ fn is_param_name(name: &str) -> bool {
 }
 
 impl StepDef {
-    /// A manual step, blocking.
+    /// A manual step of the preflight, which only warns (K25).
     #[must_use]
     pub fn manual(title: impl Into<String>) -> Self {
         Self {
             kind: StepKind::Manual,
             title: title.into(),
             group: None,
-            severity: CheckSeverity::Block,
+            severity: CheckSeverity::Warn,
+            when: CheckWhen::Preflight,
             rule: None,
             confirm: false,
         }
@@ -442,6 +452,7 @@ impl StepDef {
             title,
             group,
             severity: self.severity,
+            when: self.when,
             confirm: self.confirm && rule.is_some(),
             rule,
         })
@@ -624,6 +635,9 @@ pub struct RecordStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub severity: CheckSeverity,
+    /// Whether it counted in the preflight or at the launch (K26).
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     pub status: CheckStatus,
     /// A rule that asked for a person's tick too (K17).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -638,19 +652,20 @@ pub struct RecordStep {
     pub value: Option<f64>,
 }
 
-/// The checklist as it stood when the vehicle armed, with every override
-/// (K14): written to its history and its flight.
+/// The checklist as it stood when the vehicle armed (K14), with what its
+/// launch went past (K24): written to its history and its flight.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistRecord {
     pub steps: Vec<RecordStep>,
-    /// Blocking checks of any source it armed past, and how.
+    /// Checks set to hold, of any source, that UXDuck's launch was sent
+    /// past, and how.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overridden: Vec<CheckRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_by: Option<PreflightOverride>,
-    /// It armed without UXDuck sending it (from its radio, say) while
-    /// these blocking checks did not pass (K10).
+    /// It left the ground without UXDuck launching it (on the sticks,
+    /// say) while these checks set to hold did not pass (K23).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<CheckRef>,
 }
@@ -660,12 +675,12 @@ impl ChecklistRecord {
     /// with its checklist: 2 of 2 steps passed".
     #[must_use]
     pub fn describe(&self) -> String {
-        let passed = self
-            .steps
-            .iter()
+        // The preflight's steps: the launch's are for later, at arming.
+        let preflight = || self.steps.iter().filter(|s| s.when.is_preflight());
+        let passed = preflight()
             .filter(|s| s.status == CheckStatus::Pass)
             .count();
-        let total = self.steps.len();
+        let total = preflight().count();
         let mut text = if total == 0 {
             "Armed".to_owned()
         } else {
@@ -680,13 +695,13 @@ impl ChecklistRecord {
                 Some(PreflightOverride::Approval { .. }) => "by an approval",
                 _ => "by the operator",
             };
-            let _ = write!(text, ". Armed past {} {how}", titles.join(", "));
+            let _ = write!(text, ". Launched past {} {how}", titles.join(", "));
         }
         if !self.failing.is_empty() {
             let titles: Vec<&str> = self.failing.iter().map(|c| c.title.as_str()).collect();
             let _ = write!(
                 text,
-                ". Armed from outside UXDuck while {} did not pass",
+                ". Left the ground without UXDuck launching it while {} did not pass",
                 titles.join(", ")
             );
         }
@@ -704,6 +719,7 @@ mod tests {
             title: "Battery".into(),
             group: None,
             severity: CheckSeverity::Block,
+            when: CheckWhen::Preflight,
             rule: Some(Rule {
                 item: Some(item.into()),
                 param: None,
@@ -807,7 +823,7 @@ mod tests {
         assert!(
             steps
                 .iter()
-                .all(|s| s.kind == StepKind::Manual && s.severity == CheckSeverity::Block)
+                .all(|s| s.kind == StepKind::Manual && s.severity == CheckSeverity::Warn)
         );
         assert!(
             steps
@@ -851,6 +867,7 @@ mod tests {
                 title: "Propellers tight".into(),
                 group: Some("Airframe".into()),
                 severity: CheckSeverity::Block,
+                when: CheckWhen::Launch,
                 rule: None,
                 confirm: false,
                 tick: Some(Tick {
@@ -872,10 +889,26 @@ mod tests {
             file.steps,
             [StepDef {
                 group: Some("Airframe".into()),
+                severity: CheckSeverity::Block,
+                when: CheckWhen::Launch,
                 ..StepDef::manual("Propellers tight")
             }],
-            "no ticks, and its group"
+            "no ticks, and its group, whether it holds and where it counts"
         );
+        // A step as written holds nothing and counts in the preflight.
+        let written = StepDef::manual("Area clear");
+        assert_eq!(written.severity, CheckSeverity::Warn);
+        assert_eq!(written.when, CheckWhen::Preflight);
+        let json = serde_json::to_value(&written).unwrap();
+        assert!(
+            json.get("when").is_none(),
+            "the default is left out: {json}"
+        );
+        let launch: StepDef = serde_json::from_value(serde_json::json!({
+            "kind": "manual", "title": "Area clear", "severity": "warn", "when": "launch"
+        }))
+        .unwrap();
+        assert_eq!(launch.when, CheckWhen::Launch);
         assert_eq!(file.clone().checked().unwrap(), file);
         let newer = ChecklistFile {
             format: "uxduck.checklist/2".into(),

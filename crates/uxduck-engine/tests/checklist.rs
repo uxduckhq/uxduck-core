@@ -1,14 +1,15 @@
 //! A vehicle's checklist (S193 and S353, ADR-0038 K7 to K11, K14, K16,
 //! K17): steps under their groups beside UXDuck's own checks, and a rule a
 //! person ticks too, only once it passes; manual steps and
-//! rules join the vehicle's preflight checks and hold arming while a
-//! blocking one does not pass; ticks come only from operators, say who and
+//! rules join the vehicle's preflight checks and hold the launch while
+//! one set to hold does not pass; ticks come only from operators, say who and
 //! when, and are never cleared by themselves (not by arming, landing, a
 //! battery change, a restart of the vehicle or of the daemon); rules held
 //! for seconds; the battery per cell; copies from another vehicle or a
 //! file that stay independent; a pasted Markdown list; the agent writing
 //! steps after asking; the record on arming in history and the flight;
-//! the warning when it arms (from its radio) with a blocking check failing;
+//! the warning when it leaves the ground, flown from its radio, with a
+//! check set to hold failing;
 //! and the offer to set `BATT_ARM_VOLT`.
 
 #![allow(
@@ -327,14 +328,14 @@ impl Bench {
     }
 
     /// "Propellers tight" and "Battery at least 22.2 V, held 3 s", both
-    /// blocking.
+    /// set to hold the launch.
     fn demo_steps(&mut self) -> Value {
         self.ok(
             "checklist/update",
             json!({
                 "vehicleId": "v",
                 "add": [
-                    { "kind": "manual", "title": PROPS },
+                    { "kind": "manual", "title": PROPS, "severity": "block" },
                     {
                         "kind": "rule", "title": BATTERY, "item": "battery.voltage_v",
                         "op": ">=", "value": 22.2, "holdS": 3, "severity": "block"
@@ -367,6 +368,37 @@ impl Bench {
 
     fn arm(&mut self) -> Value {
         self.command(json!({ "command": { "type": "arm" } }))
+    }
+
+    /// Take off, the vehicle accepting each step: refused at once, or the
+    /// take-off's receipt.
+    fn launch(&mut self, params: Value) -> Value {
+        let mut params = params;
+        params["vehicleId"] = json!("v");
+        params["command"] =
+            json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] });
+        if let Some(reply) = send(&mut self.engine, &mut self.ui, "command/send", params) {
+            return reply;
+        }
+        loop {
+            let sent = self.wire.take();
+            assert_eq!(sent.len(), 1, "one command at a time: {sent:?}");
+            self.engine
+                .command_result(&sent[0].receipt_id, Outcome::Accepted, 1);
+            if let Some(reply) = later(&mut self.ui) {
+                return reply;
+            }
+        }
+    }
+
+    /// What the autopilot says of being on the ground or in the air.
+    fn flight_state(&mut self, state: &str) {
+        let item = TelemetryItem {
+            value: None,
+            text: Some(state.into()),
+            ..self.item("flight.state", Unit::Count, 0.0)
+        };
+        self.telemetry(vec![item]);
     }
 
     fn item(&self, key: &str, unit: Unit, value: f64) -> TelemetryItem {
@@ -450,7 +482,7 @@ fn gating(checks: &Value) -> Vec<String> {
 }
 
 #[test]
-fn the_demo_arm_waits_for_both_steps() {
+fn the_demo_take_off_waits_for_both_steps_and_arm_never_does() {
     let mut b = bench();
     let after = b.demo_steps();
     // Its steps follow UXDuck's checks, in their order.
@@ -472,8 +504,9 @@ fn the_demo_arm_waits_for_both_steps() {
     assert_eq!(b.step_check(BATTERY)["status"], "unknown");
     assert_eq!(gating(&b.checks()), [PROPS, BATTERY]);
 
-    // Arm waits for both.
-    let refused = b.arm();
+    // Arm goes (K22). Take off waits for both (K23).
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    let refused = b.launch(json!({}));
     assert_eq!(refused["result"]["status"], "not-sent", "{refused}");
     assert_eq!(refused["result"]["reason"], "preflight");
     let named: Vec<&str> = refused["result"]["preflight"]
@@ -506,7 +539,7 @@ fn the_demo_arm_waits_for_both_steps() {
     assert_eq!(held["detail"], "Battery is at least 22.2 V, held 3 s.");
     assert_eq!(gating(&b.checks()), [PROPS]);
 
-    // Ticked: who and when, and Arm goes.
+    // Ticked: who and when, and Take off goes.
     let ticked_at = b.time.now();
     let after = b.tick(PROPS, true);
     let step = &after["checklist"]["steps"][0];
@@ -514,7 +547,7 @@ fn the_demo_arm_waits_for_both_steps() {
     assert_eq!(step["tick"]["by"]["clientName"], "operator-ui");
     assert_eq!(b.step_check(PROPS)["status"], "pass");
     assert!(gating(&b.checks()).is_empty());
-    assert_eq!(b.arm()["result"]["status"], "accepted");
+    assert_eq!(b.launch(json!({}))["result"]["status"], "accepted");
 }
 
 #[test]
@@ -539,7 +572,7 @@ fn a_held_rule_starts_again_when_its_value_drops_and_a_warning_never_stops_armin
     b.engine.review_preflights();
     assert_eq!(b.step_check(BATTERY)["status"], "unknown");
 
-    // Made a warning, it never holds arming.
+    // Made a warning, it never holds the launch.
     let id = b.step_id(BATTERY);
     b.ok(
         "checklist/update",
@@ -938,7 +971,7 @@ fn a_checklist_file_round_trips_and_a_pasted_list_becomes_manual_steps() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|s| s["kind"] == "manual" && s["tick"].is_null() && s["severity"] == "block")
+            .all(|s| s["kind"] == "manual" && s["tick"].is_null() && s["severity"] == "warn")
     );
     assert!(
         pasted["checklist"]["steps"]
@@ -974,7 +1007,7 @@ fn the_agent_writes_steps_after_asking_and_never_ticks() {
         &mut b.engine,
         &mut agent,
         "checklist/update",
-        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": "Payload latched" }] }),
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": "Payload latched", "severity": "block" }] }),
     );
     assert!(held.is_none(), "held: {held:?}");
     let approval = b
@@ -1004,7 +1037,7 @@ fn the_agent_writes_steps_after_asking_and_never_ticks() {
         &mut b.engine,
         &mut agent,
         "checklist/update",
-        json!({ "vehicleId": "v", "add": [{ "kind": "rule", "title": BATTERY, "item": "battery.voltage_v", "op": ">=", "value": 22.2 }] }),
+        json!({ "vehicleId": "v", "add": [{ "kind": "rule", "title": BATTERY, "item": "battery.voltage_v", "op": ">=", "value": 22.2, "severity": "block" }] }),
     );
     assert!(rule.get("result").is_some(), "{rule}");
     // A pasted list too; it still cannot tick.
@@ -1034,12 +1067,12 @@ fn the_agent_writes_steps_after_asking_and_never_ticks() {
         3,
         "{exported}"
     );
-    // Its arming past the steps is the operator's to allow, as in S192.
+    // Its launch past the steps is the operator's to allow, as in S192.
     let arming = send(
         &mut b.engine,
         &mut agent,
         "command/send",
-        json!({ "vehicleId": "v", "command": { "type": "arm" } }),
+        json!({ "vehicleId": "v", "command": json!({ "type": "long", "command": 22, "params": [0, 0, 0, 0, 0, 0, 10] }) }),
     );
     assert!(arming.is_none());
     let asked = b
@@ -1051,7 +1084,8 @@ fn the_agent_writes_steps_after_asking_and_never_ticks() {
         .cloned()
         .unwrap();
     let listed: Vec<&str> = asked.preflight.iter().map(|c| c.title.as_str()).collect();
-    assert_eq!(listed, ["Payload latched", BATTERY, PROPS]);
+    // The two set to hold. The pasted step only warns (K25).
+    assert_eq!(listed, ["Payload latched", BATTERY]);
 }
 
 #[test]
@@ -1097,13 +1131,22 @@ fn arming_records_the_checklist_in_history_and_the_flight() {
     );
     b.seen(false);
 
-    // Armed past a step by the operator: the override is recorded.
+    // Launched past a step by the operator: the override is recorded.
     b.time.advance(S);
     b.ok("checklist/reset", json!({ "vehicleId": "v" }));
     let check_id = format!("checklist:{}", b.step_id(PROPS));
-    let armed = b.command(json!({ "command": { "type": "arm" }, "overridePreflight": [check_id] }));
-    assert_eq!(armed["result"]["status"], "accepted", "{armed}");
+    let launched = b.launch(json!({ "overridePreflight": [check_id] }));
+    assert_eq!(launched["result"]["status"], "accepted", "{launched}");
     b.seen(true);
+    // In the air by UXDuck's own launch: nothing more to warn about.
+    b.flight_state("In the air");
+    assert!(
+        !b.engine
+            .state()
+            .notifications
+            .values()
+            .any(|n| n.condition.as_deref() == Some("preflight-armed:v"))
+    );
     let records = b.armed_records();
     let HistoryEvent::Armed { text, record, .. } = records.last().unwrap() else {
         unreachable!()
@@ -1113,42 +1156,72 @@ fn arming_records_the_checklist_in_history_and_the_flight() {
     assert_eq!(record.steps[0].status, CheckStatus::ToDo);
     assert_eq!(
         text,
-        "Armed with its checklist: 1 of 2 steps passed. Armed past Propellers tight by the operator"
+        "Armed with its checklist: 1 of 2 steps passed. Launched past Propellers tight by the operator"
     );
 }
 
 #[test]
-fn arming_from_the_radio_with_a_blocking_step_failing_warns() {
+fn leaving_the_ground_by_hand_while_a_step_holds_the_launch_warns() {
     let mut b = bench();
     b.demo_steps();
     b.params(&[("BATT_ARM_VOLT", 0.0)]);
     b.volts(21.0);
     b.engine.review_preflights();
-    // Nobody sent it: the vehicle reports itself armed.
+    let warning = |b: &Bench| {
+        b.engine
+            .state()
+            .notifications
+            .values()
+            .find(|n| n.condition.as_deref() == Some("preflight-armed:v"))
+            .cloned()
+    };
+    // Nobody sent it: the vehicle reports itself armed. Arming is never
+    // held and never warned about (K22): a bench test arms too.
     b.seen(true);
-    let warning = b
-        .engine
-        .state()
-        .notifications
-        .values()
-        .find(|n| n.condition.as_deref() == Some("preflight-armed:v"))
-        .cloned()
-        .expect("a warning");
-    assert_eq!(warning.severity, Severity::Warning);
-    assert_eq!(warning.title, "Alpha armed with 2 blocking checks failing");
-    assert_eq!(
-        warning.body.as_deref(),
-        Some(
-            "UXDuck didn't arm it (its radio may have): Propellers tight, Battery at least 22.2 V. Set BATT_ARM_VOLT so Alpha holds arming for it itself."
-        )
-    );
+    b.flight_state("On the ground");
+    assert!(warning(&b).is_none(), "armed on the ground is no launch");
     let records = b.armed_records();
     let HistoryEvent::Armed { record, text, .. } = records.last().unwrap() else {
         unreachable!()
     };
+    assert!(record.failing.is_empty() && record.overridden.is_empty());
+    assert_eq!(text, "Armed with its checklist: 0 of 2 steps passed");
+
+    // Flown by hand: it leaves the ground while both steps hold (K23).
+    b.flight_state("In the air");
+    let warning = warning(&b).expect("a warning");
+    assert_eq!(warning.severity, Severity::Warning);
+    assert_eq!(
+        warning.title,
+        "Alpha took off while 2 checks hold the launch"
+    );
+    assert_eq!(
+        warning.body.as_deref(),
+        Some(
+            "UXDuck didn't launch it (it may have been flown by hand): Propellers tight, Battery at least 22.2 V. Set BATT_ARM_VOLT so Alpha holds arming for it itself."
+        )
+    );
+    // Its flight keeps what it left the ground past.
+    let flight = b
+        .engine
+        .state()
+        .flights
+        .values()
+        .max_by_key(|f| f.version)
+        .cloned()
+        .unwrap();
+    let record = flight.checklist.expect("the flight's record");
     assert_eq!(record.failing.len(), 2);
-    assert!(text.contains("Armed from outside UXDuck"), "{text}");
+    assert_eq!(record.steps.len(), 2, "the steps as it armed stay");
+    assert!(
+        record
+            .describe()
+            .contains("Left the ground without UXDuck launching it"),
+        "{}",
+        record.describe()
+    );
     // Disarmed, the warning goes.
+    b.flight_state("On the ground");
     b.seen(false);
     assert!(
         b.engine
@@ -1263,6 +1336,94 @@ fn reordering_and_removing_steps() {
     assert_eq!(step["unit"], "V");
 }
 
+#[test]
+fn a_step_counts_in_the_preflight_or_at_the_launch() {
+    const AREA: &str = "Area clear of people";
+    let mut b = bench();
+    let after = b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [
+                { "kind": "manual", "title": PROPS },
+                { "kind": "manual", "title": AREA, "when": "launch", "severity": "block" }
+            ]
+        }),
+    );
+    // A step as written counts in the preflight and only warns (K25, K26).
+    let steps = &after["checklist"]["steps"];
+    assert!(
+        steps[0]["when"].is_null(),
+        "the default is left out: {steps}"
+    );
+    assert_eq!(steps[0]["severity"], "warn");
+    assert_eq!(steps[1]["when"], "launch");
+    assert_eq!(b.step_check(PROPS)["when"], "preflight");
+    assert_eq!(b.step_check(AREA)["when"], "launch");
+    // The vehicle's reasons and UXDuck's own checks are read live and
+    // count in both: they name neither. Home is about the place of the
+    // launch, and counts there only (K27).
+    let checks = b.checks();
+    assert!(
+        checks["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["source"] != "checklist" && c["id"] != "uxduck:home")
+            .all(|c| c["when"].is_null()),
+        "{checks}"
+    );
+    // Only the step set to hold holds the launch, and never arming.
+    assert_eq!(gating(&checks), [AREA]);
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    assert_eq!(b.launch(json!({}))["result"]["reason"], "preflight");
+
+    // Its tick stays until a person clears it (K9), a flight or not, and
+    // through a move to the preflight and back.
+    b.tick(AREA, true);
+    assert_eq!(b.launch(json!({}))["result"]["status"], "accepted");
+    b.seen(true);
+    b.flight_state("In the air");
+    b.flight_state("On the ground");
+    b.seen(false);
+    assert_eq!(
+        b.step_check(AREA)["status"],
+        "pass",
+        "still ticked after a flight"
+    );
+    let id = b.step_id(AREA);
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "when": "preflight" }] }),
+    );
+    let moved = b.step("v", AREA);
+    assert!(
+        moved["when"].is_null() && !moved["tick"].is_null(),
+        "{moved}"
+    );
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "when": "launch" }] }),
+    );
+    // A file and a copy carry where each step counts.
+    let file = b.ok("checklist/export", json!({ "vehicleId": "v" }));
+    assert_eq!(
+        file["steps"][1],
+        json!({ "kind": "manual", "title": AREA, "severity": "block", "when": "launch" })
+    );
+    // The whole list is reset by a person, both kinds of step at once.
+    b.tick(PROPS, true);
+    let reset = b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    assert!(
+        reset["checklist"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["tick"].is_null()),
+        "{reset}"
+    );
+}
+
 /// Someone at this computer agreed to the Terms of Service (ADR-0047), so a
 /// real vehicle arms for a window that acts as no one in particular.
 #[test]
@@ -1275,7 +1436,7 @@ fn a_rule_a_person_ticks_too_passes_once_both_have() {
             "vehicleId": "v",
             "add": [{
                 "kind": "rule", "title": CHARGED, "group": "Battery", "confirm": true,
-                "item": "battery.voltage_v", "op": ">=", "value": 22.2
+                "item": "battery.voltage_v", "op": ">=", "value": 22.2, "severity": "block"
             }]
         }),
     );
@@ -1313,7 +1474,7 @@ fn a_rule_a_person_ticks_too_passes_once_both_have() {
     );
     assert!(b.step("v", CHARGED)["tick"].is_null());
 
-    // The rule passes: it waits for a person, and still holds arming.
+    // The rule passes: it waits for a person, and still holds the launch.
     b.volts(22.6);
     let waiting = b.step_check(CHARGED);
     assert_eq!(waiting["status"], "to-do");
@@ -1322,14 +1483,14 @@ fn a_rule_a_person_ticks_too_passes_once_both_have() {
         "Battery is at least 22.2 V. For a person to tick."
     );
     assert_eq!(gating(&b.checks()), [CHARGED]);
-    assert_eq!(b.arm()["result"]["status"], "not-sent");
+    assert_eq!(b.launch(json!({}))["result"]["status"], "not-sent");
     b.tick(CHARGED, true);
     let passed = b.step_check(CHARGED);
     assert_eq!(passed["status"], "pass");
     assert_eq!(passed["detail"], "Battery is at least 22.2 V.");
     assert!(gating(&b.checks()).is_empty());
 
-    // The rule failing again holds arming. The tick stays for when it
+    // The rule failing again holds the launch. The tick stays for when it
     // passes again: only a person clears it (K9).
     b.volts(21.0);
     let dropped = b.step_check(CHARGED);
@@ -1497,7 +1658,7 @@ fn checks_sit_under_their_concepts() {
     assert_eq!(file["format"], "uxduck.checklist/1");
     assert_eq!(
         file["steps"][0],
-        json!({ "kind": "manual", "title": "Strapped", "group": "Battery", "severity": "block" })
+        json!({ "kind": "manual", "title": "Strapped", "group": "Battery", "severity": "warn" })
     );
     assert_eq!(file["steps"][2]["confirm"], true);
     let copied = b.ok(

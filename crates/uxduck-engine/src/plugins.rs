@@ -67,9 +67,9 @@ pub(crate) fn handle(
         }
         // A person's answer (S194, ADR-0038 K13): never an agent's or a
         // plugin's.
-        ClientRequest::PluginSetChecksBlock(_) if !operator => {
-            denied("only a person can let a plugin's checks stop arming, from UXDuck or its CLI")
-        }
+        ClientRequest::PluginSetChecksBlock(_) if !operator => denied(
+            "only a person can let a plugin's checks hold the launch, from UXDuck or its CLI",
+        ),
         ClientRequest::PluginSetChecksBlock(PluginSetChecksBlockParams { id, block }) => {
             let plugin = engine.set_checks_block(connection, &id, block)?;
             to_value(&PluginDto::from(&plugin))
@@ -87,7 +87,7 @@ pub(crate) fn handle(
         }),
         ClientRequest::PluginTest(params) => test(engine, connection, params),
         ClientRequest::PluginInstall(PluginInstallParams { path, checks_block }) => {
-            // Only a person answers whether its checks may stop arming
+            // Only a person answers whether its checks may hold the launch
             // (K13): an agent's install leaves it to be asked.
             install(engine, connection, &path, checks_block.filter(|_| operator))
         }
@@ -499,7 +499,7 @@ fn install(
 /// Installs the plugin in `path` and starts it. With `hold_back`, it gets
 /// only `read`, and the rest of what its manifest asks for waits for an
 /// operator here (X13). `checks_block` is a person's answer to whether its
-/// blocking checks may stop arming (S194, K13); without one, installing
+/// blocking checks may hold the launch (S194, K13); without one, installing
 /// again from a folder here keeps the last answer, and a plugin from
 /// another computer or a link is asked again.
 pub(crate) fn install_as(
@@ -913,13 +913,13 @@ impl Engine {
             let Some(vehicle_id) = self.vehicle(&message.vehicle_id).map(|v| v.id.clone()) else {
                 continue;
             };
-            // Arming by a raw command passes the preflight gate too
-            // (S192, ADR-0038 K3): refused while a blocking check fails.
-            if self.raw_message_arms(&vehicle_id, &message.name, &message.fields) {
+            // A launch by a raw command passes the preflight gate too
+            // (S192, ADR-0038 K23): refused while a check holds it.
+            if self.raw_message_launches(&vehicle_id, &message.name, &message.fields) {
                 tracing_line(
                     &plugin.id,
                     &format!(
-                        "{} would arm the vehicle while a blocking preflight check does not pass; not sent. Use command/send, which asks an operator",
+                        "{} would launch the vehicle while a check that holds the launch does not pass; not sent. Use command/send, which asks an operator",
                         message.name
                     ),
                 );

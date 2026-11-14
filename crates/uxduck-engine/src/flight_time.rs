@@ -1263,6 +1263,33 @@ impl Engine {
         }
     }
 
+    /// Whether the vehicle is past its launch (ADR-0038 K23): in the air
+    /// for one that flies, and armed for one that does not, which has no
+    /// leaving the ground to tell by. Until then its checks are read live
+    /// and hold a launch. Armed alone for a motor test is not launched.
+    pub(crate) fn launched(&self, vehicle: &uxduck_core::domain::vehicle::Vehicle) -> bool {
+        if !vehicle.armed {
+            return false;
+        }
+        if !flies(&vehicle.vehicle_type) {
+            return true;
+        }
+        let flying = self
+            .flight_times
+            .0
+            .get(&vehicle.id)
+            .is_some_and(|t| t.air_since_us.is_some());
+        self.off_the_ground(&vehicle.id, flying)
+    }
+
+    /// When the vehicle armed, while it is armed.
+    pub(crate) fn armed_since_us(&self, vehicle_id: &str) -> Option<u64> {
+        self.flight_times
+            .0
+            .get(vehicle_id)
+            .and_then(|t| t.armed_at_us)
+    }
+
     /// Telemetry arrived, or the vehicle armed or disarmed: start or stop
     /// its time in the air, and send its times when a second has passed.
     #[allow(
@@ -1355,14 +1382,26 @@ impl Engine {
         let Some(timer) = self.flight_times.0.get_mut(&id) else {
             return;
         };
-        match (up, timer.air_since_us) {
-            (true, None) => timer.air_since_us = Some(now),
+        let lifted = match (up, timer.air_since_us) {
+            (true, None) => {
+                timer.air_since_us = Some(now);
+                true
+            }
             (false, Some(at)) => {
                 timer.air_us += now.saturating_sub(at);
                 timer.air_since_us = None;
+                false
             }
-            _ => {}
+            _ => false,
+        };
+        // It left the ground: what its launch went past, and a warning
+        // when UXDuck did not launch it (ADR-0038 K23).
+        if lifted {
+            self.checklist_lifted_off(&id);
         }
+        let Some(timer) = self.flight_times.0.get_mut(&id) else {
+            return;
+        };
         let (armed_us, air_us) = (timer.armed_us(now), timer.air_us(now));
         let whole = (armed_us / 1_000_000, air_us / 1_000_000);
         if timer.sent == Some(whole) {

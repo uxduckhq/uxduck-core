@@ -321,7 +321,7 @@ pub struct Engine {
     /// must not ask again (an install always asks otherwise).
     running_approved: bool,
     /// While an approval that listed failing preflight checks runs its
-    /// request: its id and the checks' ids, which it may arm past (S192).
+    /// request: its id and the checks' ids, which it may launch past (S352).
     approving_preflight: Option<(String, Vec<String>)>,
     /// Parameter writes and mission uploads waiting for the vehicle.
     transfers: transfers::Pending,

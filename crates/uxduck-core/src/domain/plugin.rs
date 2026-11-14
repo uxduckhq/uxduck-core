@@ -269,7 +269,7 @@ pub struct Plugin {
     /// Its preflight checks, from its manifest (S194, ADR-0038 K12).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<DeclaredCheck>,
-    /// Whether its blocking checks may stop arming (K13): a person's
+    /// Whether its blocking checks may hold the launch (K13): a person's
     /// answer on this computer. None until someone answers; until `true`
     /// they only warn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,7 +296,7 @@ const fn abi_one() -> u32 {
 }
 
 impl Plugin {
-    /// Whether it declares a check that asks to stop arming (K13).
+    /// Whether it declares a check that asks to hold the launch (K13).
     #[must_use]
     pub fn asks_to_block(&self) -> bool {
         self.checks
@@ -304,7 +304,7 @@ impl Plugin {
             .any(|c| c.severity == crate::domain::preflight::CheckSeverity::Block)
     }
 
-    /// Whether its blocking checks stop arming: a person allowed it (K13).
+    /// Whether its blocking checks hold the launch: a person allowed it (K13).
     #[must_use]
     pub fn checks_may_block(&self) -> bool {
         self.checks_block == Some(true)

@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::history::Author;
-use crate::dto::preflight::{CheckRef, CheckSeverity, CheckStatus, PreflightOverride};
+use crate::dto::preflight::{CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride};
 
 /// How a rule compares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -58,9 +58,13 @@ pub struct StepInput {
     /// A rule a person ticks too, once it passes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm: bool,
-    /// Block (the default) stops arming until it passes; warn only warns.
+    /// `warn` (the default) only warns. `block` holds the launch until
+    /// the step passes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
+    /// Counts in the `preflight` (the default) or at the `launch`.
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +95,9 @@ pub struct ChecklistStep {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm: bool,
     pub severity: CheckSeverity,
+    /// Whether it counts in the preflight or at the launch.
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +190,9 @@ pub struct StepChange {
     pub confirm: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
+    /// To the preflight or the launch. Its tick stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<CheckWhen>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,10 +238,7 @@ pub struct ChecklistUpdateParams {
     pub order: Option<Vec<String>>,
 }
 
-/// `checklist/copy`: copies steps into one vehicle's checklist from one
-/// source: another vehicle's checklist, a checklist file, or a pasted
-/// Markdown or Notion list (each line or `- [ ]` item a manual step, each
-/// heading the group of the steps under it). Ticks are never copied.
+/// `checklist/copy`: one source. Ticks are never copied.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistCopyParams {
@@ -274,6 +281,9 @@ pub struct RecordStep {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm: bool,
     pub severity: CheckSeverity,
+    /// Whether it counted in the preflight or at the launch.
+    #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
+    pub when: CheckWhen,
     pub status: CheckStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick: Option<Tick>,
@@ -295,19 +305,19 @@ pub struct RecordStep {
     pub value: Option<f64>,
 }
 
-/// The checklist as it stood when a vehicle armed, with every override: in
-/// its history and its flight.
+/// The checklist as it stood when a vehicle armed, with what its launch
+/// went past: in its history and its flight.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistRecord {
     pub steps: Vec<RecordStep>,
-    /// Blocking checks it was armed past.
+    /// Checks set to hold that UXDuck's launch was sent past.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overridden: Vec<CheckRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_by: Option<PreflightOverride>,
-    /// It armed without UXDuck sending it while these blocking checks did
-    /// not pass.
+    /// It left the ground without UXDuck launching it while these checks
+    /// set to hold did not pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<CheckRef>,
 }

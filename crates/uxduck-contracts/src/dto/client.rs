@@ -95,7 +95,7 @@ pub struct Approval {
     pub method: String,
     /// For people: "arm Copter 1".
     pub summary: String,
-    /// Arming past these blocking preflight checks: allowing it is the
+    /// Launching past these checks set to hold: allowing it is the
     /// operator's override.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preflight: Vec<crate::dto::preflight::CheckRef>,

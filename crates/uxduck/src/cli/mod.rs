@@ -278,10 +278,12 @@ pub enum Command {
         /// but a dangerous command needs this.
         #[arg(long, short = 'y', global = true)]
         yes: bool,
-        /// Arm past UXDuck's failing blocking preflight checks
-        /// (`uxduck preflight`), naming them; asks first unless `--yes`.
-        #[arg(long, global = true)]
-        arm_anyway: bool,
+        /// Launch past UXDuck's failing checks that hold the launch
+        /// (`uxduck preflight`), naming them: `uxduck command takeoff
+        /// --anyway`. Asks first unless `--yes`. Arming is never held by
+        /// checks and needs none of this.
+        #[arg(long, global = true, alias = "arm-anyway")]
+        anyway: bool,
     },
     /// Call one API method and print the result as JSON.
     Rpc {
@@ -448,18 +450,18 @@ pub enum PluginCommand {
     },
     /// Install from a directory holding `plugin.json` and its module. The
     /// plugin gets the capabilities its manifest asks for. A plugin whose
-    /// checks ask to stop arming only warns until you allow it, here with
+    /// checks ask to hold the launch only warns until you allow it, here with
     /// `--checks-block` or later with `uxduck plugin checks`.
     Install {
         path: PathBuf,
-        /// Let its blocking checks stop arming while they don't pass.
+        /// Let its blocking checks hold the launch while they don't pass.
         #[arg(long, conflicts_with = "checks_warn")]
         checks_block: bool,
         /// Keep its checks as warnings only, and stop asking.
         #[arg(long)]
         checks_warn: bool,
     },
-    /// Whether a plugin's blocking checks may stop arming (`block`) or
+    /// Whether a plugin's blocking checks may hold the launch (`block`) or
     /// only warn (`warn`): your answer, kept on this computer.
     Checks {
         id: String,
@@ -488,7 +490,7 @@ pub enum PluginCommand {
 /// What a plugin's blocking checks may do.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum ChecksMay {
-    /// Stop arming while they don't pass.
+    /// Hold the launch while they don't pass.
     Block,
     /// Only warn.
     Warn,
@@ -1281,8 +1283,8 @@ async fn run_command(cli: Cli) -> ExitCode {
             vehicle,
             confirm,
             yes,
-            arm_anyway,
-        }) => vehicle_command(&data_dir, action, vehicle, confirm, (yes, arm_anyway)).await,
+            anyway,
+        }) => vehicle_command(&data_dir, action, vehicle, confirm, (yes, anyway)).await,
         Some(Command::Preflight(args)) => preflight::run(&data_dir, args).await,
         Some(Command::Replay(args)) => replay::run(&data_dir, args).await,
         Some(Command::Companion(args)) => companion::run(args).await,
@@ -2138,8 +2140,13 @@ async fn vehicle_command(
     action: VehicleAction,
     vehicle: Option<String>,
     confirm: bool,
-    (yes, arm_anyway): (bool, bool),
+    (yes, anyway): (bool, bool),
 ) -> Result<(), CliError> {
+    // A take-off or a mission's start: what the checks hold (K23).
+    let launches = matches!(
+        action,
+        VehicleAction::Takeoff { .. } | VehicleAction::MissionStart
+    );
     let mut command = action_json(&action);
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
@@ -2162,20 +2169,20 @@ async fn vehicle_command(
     if !yes {
         ask_first(&mut client, &vehicle_id, &command).await?;
     }
-    // Arming anyway names the checks it arms past (ADR-0038 K4).
+    // Launching anyway names the checks it launches past (ADR-0038 K24).
     let mut past: Vec<Value> = Vec::new();
-    if arm_anyway {
+    if anyway && launches {
         let gating = preflight::gating(&mut client, &vehicle_id).await?;
         if !gating.is_empty() {
             let titles: Vec<&str> = gating.iter().filter_map(|c| c["title"].as_str()).collect();
-            eprintln!("Past failing preflight checks: {}.", titles.join(", "));
+            eprintln!("Past checks that hold the launch: {}.", titles.join(", "));
             if !yes {
                 if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     return Err(CliError::Usage(
-                        "not sent: run it again with --yes to arm past them".into(),
+                        "not sent: run it again with --yes to launch past them".into(),
                     ));
                 }
-                let answer = prompt("Arm past them? [y/N] ")?;
+                let answer = prompt("Launch past them? [y/N] ")?;
                 if !(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")) {
                     return Err(CliError::Usage("not sent".into()));
                 }
@@ -2650,9 +2657,9 @@ fn checks_words(plugin: &serde_json::Value) -> Option<String> {
     let asks = checks.iter().any(|c| c["severity"] == "block");
     let doing = match (asks, plugin["checksBlock"].as_bool()) {
         (false, _) | (true, Some(false)) => "They only warn.".to_owned(),
-        (true, Some(true)) => "They stop arming while they don't pass.".to_owned(),
+        (true, Some(true)) => "They hold the launch while they don't pass.".to_owned(),
         (true, None) => format!(
-            "They ask to stop arming, and only warn until you allow it: uxduck plugin checks {} block",
+            "They ask to hold the launch, and only warn until you allow it: uxduck plugin checks {} block",
             plugin["id"].as_str().unwrap_or_default()
         ),
     };

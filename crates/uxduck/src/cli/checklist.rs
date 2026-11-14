@@ -40,8 +40,17 @@ pub enum ChecklistAction {
         /// Seconds the rule's value must hold before it passes.
         #[arg(long, requires = "rule", value_name = "SECONDS")]
         hold: Option<f64>,
-        /// Only warn: the step never stops arming.
+        /// Hold the launch (a take-off, or a mission's start) until the
+        /// step passes. Without it the step only warns. Arming is never
+        /// held.
+        #[arg(long = "hold-launch")]
+        hold_launch: bool,
+        /// The step counts at the launch, where and when the vehicle takes
+        /// off, and not in the preflight.
         #[arg(long)]
+        launch: bool,
+        /// Only warn, which every step does unless `--hold-launch`.
+        #[arg(long, hide = true, conflicts_with = "hold_launch")]
         warn: bool,
         /// The concept the step sits under, such as Battery or Controller.
         #[arg(long, value_name = "NAME")]
@@ -103,11 +112,16 @@ pub async fn run(data_dir: &Path, args: ChecklistArgs) -> Result<(), CliError> {
             title,
             rule,
             hold,
-            warn,
+            hold_launch,
+            launch,
+            warn: _,
             group,
             confirm,
         } => {
-            let mut step = new_step(&title, rule.as_deref(), hold, warn)?;
+            let mut step = new_step(&title, rule.as_deref(), hold, hold_launch)?;
+            if launch {
+                step["when"] = json!("launch");
+            }
             if let Some(group) = group {
                 step["group"] = json!(group);
             }
@@ -265,9 +279,9 @@ fn new_step(
     title: &str,
     rule: Option<&str>,
     hold: Option<f64>,
-    warn: bool,
+    hold_launch: bool,
 ) -> Result<Value, CliError> {
-    let severity = if warn { "warn" } else { "block" };
+    let severity = if hold_launch { "block" } else { "warn" };
     let Some(rule) = rule else {
         return Ok(json!({ "kind": "manual", "title": title, "severity": severity }));
     };
@@ -374,19 +388,24 @@ fn step_lines(n: usize, step: &Value, check: &Value) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let blocks = if step["severity"] == "block" {
-        "blocks"
+        "holds"
     } else {
         "warns"
     };
     let _ = write!(
         out,
-        "{n:>2}. {:<8} {blocks:<6} {}{}",
+        "{n:>2}. {:<8} {blocks:<6} {}{}{}",
         status_word(check["status"].as_str().unwrap_or_default()),
         step["group"]
             .as_str()
             .map(|group| format!("{group} · "))
             .unwrap_or_default(),
-        step["title"].as_str().unwrap_or_default()
+        step["title"].as_str().unwrap_or_default(),
+        if step["when"] == "launch" {
+            " [at launch]"
+        } else {
+            ""
+        }
     );
     if step["kind"] == "rule" {
         let _ = write!(
@@ -482,9 +501,9 @@ pub fn lines(state: &Value) -> String {
         .filter_map(|c| c["title"].as_str())
         .collect();
     if holding.is_empty() {
-        let _ = writeln!(out, "Nothing on the checklist holds arming.");
+        let _ = writeln!(out, "Nothing on the checklist holds the launch.");
     } else {
-        let _ = writeln!(out, "Holding arming: {}.", holding.join(", "));
+        let _ = writeln!(out, "Holding the launch: {}.", holding.join(", "));
     }
     out
 }
@@ -506,7 +525,7 @@ mod tests {
         assert_eq!(parse_rule("battery.cell_v>3.8V").unwrap().1, ">");
         assert!(parse_rule("battery.voltage_v 22").is_err());
         assert!(parse_rule(">= 22").is_err());
-        let step = new_step("Arming checks", Some("ARMING_CHECK == 1"), None, true).unwrap();
+        let step = new_step("Arming checks", Some("ARMING_CHECK == 1"), None, false).unwrap();
         assert!(step.get("group").is_none() && step.get("confirm").is_none());
         assert_eq!(step["param"], "ARMING_CHECK");
         assert_eq!(step["severity"], "warn");
@@ -514,9 +533,10 @@ mod tests {
             "Battery",
             Some("battery.voltage_v >= 22.2"),
             Some(3.0),
-            false,
+            true,
         )
         .unwrap();
+        assert_eq!(step["severity"], "block", "set to hold the launch");
         assert_eq!(step["item"], "battery.voltage_v");
         assert_eq!(step["holdS"], 3.0);
     }
@@ -536,7 +556,7 @@ mod tests {
                     { "id": "b", "kind": "rule", "title": "Battery at least 22.2 V", "severity": "block",
                       "item": "battery.voltage_v", "op": ">=", "value": 22.2, "unit": "V", "holdS": 3.0 },
                     { "id": "c", "kind": "rule", "title": "Charged and strapped", "group": "Battery", "confirm": true,
-                      "severity": "block", "item": "battery.cell_v", "op": ">=", "value": 4.1, "unit": "V" }
+                      "severity": "block", "when": "launch", "item": "battery.cell_v", "op": ">=", "value": 4.1, "unit": "V" }
                 ],
                 "offers": [{ "stepId": "b", "name": "BATT_ARM_VOLT", "value": 22.2, "current": 0.0, "held": false }],
                 "version": 3
@@ -544,18 +564,18 @@ mod tests {
         });
         let text = lines(&state);
         assert!(
-            text.contains(" 1. ok       blocks Propellers tight\n"),
+            text.contains(" 1. ok       holds  Propellers tight\n"),
             "{text}"
         );
         assert!(text.contains("ticked by Ben at "), "{text}");
         assert!(text.contains(", a flight since"), "{text}");
         assert!(
-            text.contains(" 2. FAIL     blocks Battery at least 22.2 V (battery.voltage_v >= 22.2 V, held 3 s): Battery is below 22.2 V.\n"),
+            text.contains(" 2. FAIL     holds  Battery at least 22.2 V (battery.voltage_v >= 22.2 V, held 3 s): Battery is below 22.2 V.\n"),
             "{text}"
         );
         assert!(
             text.contains(
-                " 3. ?        blocks Battery · Charged and strapped (battery.cell_v >= 4.1 V, then ticked)\n"
+                " 3. ?        holds  Battery · Charged and strapped [at launch] (battery.cell_v >= 4.1 V, then ticked)\n"
             ),
             "{text}"
         );
@@ -566,7 +586,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("Holding arming: Battery at least 22.2 V.\n"),
+            text.ends_with("Holding the launch: Battery at least 22.2 V.\n"),
             "{text}"
         );
         let found = find(&state, "propellers tight").unwrap();

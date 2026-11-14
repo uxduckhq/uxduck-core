@@ -6,7 +6,7 @@
 //! ask for a person's tick too, given only while it passes (K17), and a
 //! step can sit under a group beside UXDuck's own checks (K16). They are
 //! checks in the vehicle's preflight list (`checklist:<id>`), so the gate
-//! holds arming for a blocking one that does not pass. Copying from another
+//! holds the launch for one set to hold that does not pass. Copying from another
 //! vehicle, a checklist file or a pasted list makes an independent copy
 //! (K7). Only operator clients tick and clear ticks, and nothing clears a
 //! tick by itself (K9); writing steps is `config`, so an agent without it
@@ -156,6 +156,7 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
         group: change.group.unwrap_or_else(|| before.group.clone()),
         confirm: change.confirm.unwrap_or(before.confirm),
         severity: Some(change.severity.map_or(before.severity, Into::into).into()),
+        when: change.when.unwrap_or_else(|| before.when.into()),
         item: rule.as_ref().and_then(|r| r.item.clone()),
         param: rule.as_ref().and_then(|r| r.param.clone()),
         op: rule.as_ref().map(|r| r.op.into()),
@@ -201,7 +202,8 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
     let def = step_def(input)?;
     // A tick was for the step's words and the rule it waited for: new
     // words, another rule, or a tick no longer asked for, need a new tick
-    // from a person. A new group or severity leaves it.
+    // from a person. A new group or severity, or a move between the
+    // preflight and the launch, leaves it.
     let tick = if (def.rule.is_none() || def.confirm)
         && def.title == before.title
         && def.rule == before.rule
@@ -217,6 +219,7 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
         title: def.title,
         group: def.group,
         severity: def.severity,
+        when: def.when,
         rule: def.rule,
         confirm: def.confirm,
         tick,
@@ -281,6 +284,7 @@ fn new_step(id: String, def: StepDef) -> Step {
         title: def.title,
         group: def.group,
         severity: def.severity,
+        when: def.when,
         rule: def.rule,
         confirm: def.confirm,
         tick: None,
@@ -608,6 +612,7 @@ impl Engine {
                     title: step.title.clone(),
                     group: step.group.clone(),
                     severity: step.severity,
+                    when: Some(step.when),
                     status,
                     detail: Some(detail),
                     fix: None,
@@ -860,12 +865,14 @@ impl Engine {
         out
     }
 
-    /// The vehicle armed (K14, K10): its checklist as it stood goes to its
-    /// history and its flight, with every override; armed while a
-    /// blocking check failed, and not by UXDuck, raises a warning.
+    /// The vehicle armed (K14): its checklist as it stood goes to its
+    /// history and its flight. Armed as a step of a launch UXDuck sent
+    /// past checks, the record says which (K24). Arming is never held and
+    /// never warned about (K22): leaving the ground is
+    /// (`checklist_lifted_off`).
     pub(crate) fn checklist_armed(&mut self, vehicle: &Vehicle) {
         let now = self.clock.now_us();
-        // What it armed with: the list as last evaluated while disarmed.
+        // What it armed with: the list as last evaluated on the ground.
         let checks: Vec<Check> = self.state.preflights.get(&vehicle.id).map_or_else(
             || {
                 let mut disarmed = vehicle.clone();
@@ -874,15 +881,11 @@ impl Engine {
             },
             |p| p.checks.clone(),
         );
-        let gating: Vec<CheckRef> = checks
-            .iter()
-            .filter(|c| c.gates())
-            .map(Check::to_ref)
-            .collect();
         let ids: Vec<&String> = std::iter::once(&vehicle.id)
             .chain(vehicle.aliases.iter())
             .collect();
-        // The arming UXDuck sent, if it did.
+        // The arming UXDuck sent, if it did: a launch's step carries what
+        // the launch went past.
         let sent = self
             .state
             .receipts
@@ -905,6 +908,7 @@ impl Engine {
                 group: step.group.clone(),
                 confirm: step.confirm,
                 severity: step.severity,
+                when: step.when,
                 status: checks
                     .iter()
                     .find(|c| c.id == step.check_id())
@@ -917,13 +921,26 @@ impl Engine {
                     .and_then(|rule| self.reading(vehicle, rule).value),
             })
             .collect();
-        let (overridden, override_by) = match &sent {
+        let (mut overridden, mut override_by) = match &sent {
             Some(r) if r.preflight_override.is_some() => {
                 (r.preflight.clone(), r.preflight_override.clone())
             }
             _ => (Vec::new(), None),
         };
-        let failing = if sent.is_none() { gating } else { Vec::new() };
+        // First heard armed and in the air: what leaving the ground found
+        // is on its flight already, and stays.
+        let lifted = self
+            .open_flight(&vehicle.id)
+            .and_then(|f| f.checklist.clone());
+        let failing = lifted
+            .as_ref()
+            .map(|r| r.failing.clone())
+            .unwrap_or_default();
+        if let Some(lifted) = lifted
+            && overridden.is_empty()
+        {
+            (overridden, override_by) = (lifted.overridden, lifted.override_by);
+        }
         if steps.is_empty() && overridden.is_empty() && failing.is_empty() {
             return;
         }
@@ -933,9 +950,6 @@ impl Engine {
             override_by,
             failing,
         };
-        if !record.failing.is_empty() {
-            self.armed_while_failing(vehicle, &record.failing);
-        }
         let flight_id = self.open_flight(&vehicle.id).map(|f| f.id.clone());
         if let Some(id) = &flight_id
             && let Some(mut flight) = self.state.flights.get(id).cloned()
@@ -955,9 +969,76 @@ impl Engine {
         );
     }
 
-    /// A warning with its tone (K10): the vehicle armed, not by UXDuck,
-    /// while blocking checks did not pass.
-    fn armed_while_failing(&mut self, vehicle: &Vehicle, failing: &[CheckRef]) {
+    /// The vehicle left the ground (K23). A launch UXDuck sent past checks
+    /// joins its flight's record (K24). One UXDuck did not send, flown by
+    /// hand on the sticks or started from its radio, while a check set to
+    /// hold does not pass, joins it too and raises a warning with its
+    /// tone: UXDuck holds only what it sends.
+    pub(crate) fn checklist_lifted_off(&mut self, vehicle_id: &str) {
+        let Some(vehicle) = self.vehicle(vehicle_id).cloned() else {
+            return;
+        };
+        let now = self.clock.now_us();
+        let armed_at = self.armed_since_us(&vehicle.id).unwrap_or(now);
+        let ids: Vec<&String> = std::iter::once(&vehicle.id)
+            .chain(vehicle.aliases.iter())
+            .collect();
+        // The launch UXDuck sent since it armed, or just before: a
+        // take-off's first step goes before the arming.
+        let sent = self
+            .state
+            .receipts
+            .values()
+            .filter(|r| {
+                ids.contains(&&r.vehicle_id)
+                    && (r.command.launches() || r.preflight_override.is_some())
+                    && matches!(r.status, ReceiptStatus::Sent | ReceiptStatus::Accepted)
+                    && r.created_at_us.saturating_add(SENT_WITHIN_US) >= armed_at
+            })
+            .max_by_key(|r| r.created_at_us)
+            .cloned();
+        let (overridden, override_by, failing) = match sent {
+            Some(r) if r.preflight_override.is_some() => {
+                (r.preflight, r.preflight_override, Vec::new())
+            }
+            Some(_) => return,
+            // As last read on the ground: in the air the list stays.
+            None => {
+                let failing: Vec<CheckRef> = self.state.preflights.get(&vehicle.id).map_or_else(
+                    || self.preflight_gating(&vehicle.id),
+                    |p| p.gating().map(Check::to_ref).collect(),
+                );
+                (Vec::new(), None, failing)
+            }
+        };
+        if overridden.is_empty() && failing.is_empty() {
+            return;
+        }
+        if !failing.is_empty() {
+            self.launched_while_failing(&vehicle, &failing);
+        }
+        let Some(mut flight) = self.open_flight(&vehicle.id).cloned() else {
+            return;
+        };
+        let mut record = flight.checklist.take().unwrap_or(ChecklistRecord {
+            steps: Vec::new(),
+            overridden: Vec::new(),
+            override_by: None,
+            failing: Vec::new(),
+        });
+        if record.overridden == overridden && record.failing == failing {
+            return;
+        }
+        (record.overridden, record.override_by, record.failing) =
+            (overridden, override_by, failing);
+        flight.checklist = Some(record);
+        flight.version += 1;
+        self.commit_as(crate::history::actor(), Change::FlightUpserted { flight });
+    }
+
+    /// A warning with its tone (K23): the vehicle left the ground, not by
+    /// UXDuck's launch, while checks set to hold did not pass.
+    fn launched_while_failing(&mut self, vehicle: &Vehicle, failing: &[CheckRef]) {
         let titles: Vec<&str> = failing.iter().map(|c| c.title.as_str()).collect();
         let n = failing.len();
         let offers = self.param_offers(vehicle);
@@ -978,12 +1059,12 @@ impl Engine {
                 id: vehicle.id.clone(),
             },
             title: format!(
-                "{} armed with {n} blocking {} failing",
+                "{} took off while {n} {} the launch",
                 vehicle.name,
-                if n == 1 { "check" } else { "checks" }
+                if n == 1 { "check holds" } else { "checks hold" }
             ),
             body: Some(format!(
-                "UXDuck didn't arm it (its radio may have): {}.{hint}",
+                "UXDuck didn't launch it (it may have been flown by hand): {}.{hint}",
                 titles.join(", ")
             )),
             actions: Vec::new(),
@@ -992,7 +1073,7 @@ impl Engine {
         });
     }
 
-    /// The vehicle disarmed: its warning goes.
+    /// The vehicle disarmed: the warning from its launch goes.
     pub(crate) fn checklist_disarmed(&mut self, vehicle_id: &str) {
         self.resolve(&armed_condition(vehicle_id));
     }

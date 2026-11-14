@@ -6,9 +6,9 @@
 //! vehicle's preflight list after its checklist, by plugin. A report older
 //! than the check's `staleMs`, or a plugin that is off, stopped or gone,
 //! makes the check unknown; a running plugin that has not reported on the
-//! vehicle yet is waited for. Both hold arming when the check blocks.
+//! vehicle yet is waited for. Both hold the launch when the check blocks.
 //!
-//! A plugin's `block` check stops arming only once a person allowed the
+//! A plugin's `block` check holds the launch only once a person allowed the
 //! plugin's checks to (`plugin/setChecksBlock`, or at install); until then
 //! it is listed and evaluated as a warning. A plugin only reports its own
 //! checks: it cannot tick a checklist's step or change any other check,
@@ -255,6 +255,7 @@ impl Engine {
                     } else {
                         CheckSeverity::Warn
                     },
+                    when: None,
                     status,
                     detail,
                     fix,
@@ -287,7 +288,7 @@ impl Engine {
             return Err(ApiError::new(
                 ErrorKind::InvalidRequest,
                 format!(
-                    "the {} plugin has no checks that could stop arming",
+                    "the {} plugin has no checks that could hold the launch",
                     plugin.name
                 ),
             ));
