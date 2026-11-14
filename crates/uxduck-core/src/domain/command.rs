@@ -30,9 +30,10 @@ pub enum Command {
     /// Restarts the autopilot (refused by ArduPilot while armed).
     Reboot,
     /// Goes to a place and holds there, at a height in a frame: GUIDED on
-    /// ArduPilot, Hold on PX4. Sent as `DO_REPOSITION` in a `COMMAND_INT`,
-    /// whose integer position keeps the place to the centimetre, where a
-    /// `COMMAND_LONG`'s floats would move it by a metre.
+    /// ArduPilot, Hold on PX4 (Orbit given a radius). Sent as
+    /// `DO_REPOSITION` in a `COMMAND_INT`, whose integer position keeps the
+    /// place to the centimetre, where a `COMMAND_LONG`'s floats would move it
+    /// by a metre.
     GoTo {
         latitude_deg: f64,
         longitude_deg: f64,
@@ -42,8 +43,9 @@ pub enum Command {
         /// The ellipsoid is refused; `DO_REPOSITION` has no such frame.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
-        /// `ArduPlane` loiter radius in metres: positive clockwise, negative
-        /// counterclockwise. Omitted: keep the autopilot's default.
+        /// Circle radius in metres, negative counterclockwise: an `ArduPlane`
+        /// loiters there, a PX4 orbits it (`DO_ORBIT`). Omitted: the plane's
+        /// default, or a PX4 holds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loiter_radius_m: Option<f64>,
         /// Submarine heading. Omitted commands retain the existing default.

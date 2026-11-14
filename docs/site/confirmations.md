@@ -16,11 +16,15 @@ From a shortcut or the action list, a command you hold opens on its own with its
 
 When a vehicle refuses to arm or disarm, the Cockpit tab says why and shows **Force arm** or **Force disarm** to hold.
 
+A PX4 answers a mode change before it has tried it. So its receipt reads accepted only once the vehicle reports the new mode, and rejected with PX4's reason when PX4 refuses, such as "Switching to Offboard is currently not available".
+
 When a vehicle is offline, the Cockpit tab says so once. Commands still go to its last known address and may arrive late.
 
 ## Send it to a place
 
 On the Cockpit tab, press **Go to** (or **G**), set the height, then click the map: the vehicle goes there. Each click sends it again, until you press **G**, **Esc** or **Stop**, or show another part of the Cockpit, such as **Modes**. You can also type a latitude and longitude and press Enter.
+
+The options beside **Go to** say what the vehicle does once it gets there. An ArduPlane circles the place, at its own radius or one you set. A PX4 holds there unless you choose **Circle it**, with a radius and direction, which puts it in Orbit around the place. Orbit is not in a PX4's mode list, since it needs a place to circle. Follow Me isn't either, since it follows a target that sends its position and UXDuck sends none.
 
 ## Set home
 

@@ -37,6 +37,7 @@ const REORDERING_MS: u32 = 1_000;
 const MAV_CMD_NAV_TAKEOFF: u16 = 22;
 const MAV_CMD_CONDITION_YAW: u16 = 115;
 const MAV_CMD_DO_REPOSITION: u16 = 192;
+const MAV_CMD_DO_SET_MODE: u16 = 176;
 const MAV_FRAME_GLOBAL_INT: u8 = 5;
 const MAV_FRAME_GLOBAL_RELATIVE_ALT_INT: u8 = 6;
 const MAV_FRAME_GLOBAL_TERRAIN_ALT_INT: u8 = 11;
@@ -789,6 +790,58 @@ struct PendingCommand {
     completed_attempts: u8,
 }
 
+/// A PX4 mode change the vehicle accepted, waiting for a heartbeat in that
+/// mode. PX4 accepts `DO_SET_MODE` and then, when it cannot fly the mode,
+/// says so in a status text and stays where it was ("Switching to Offboard
+/// is currently not available").
+#[derive(Clone, Debug)]
+struct ModeCheck {
+    receipt_id: String,
+    key: (String, String, u8),
+    /// The mode asked for, and the one it was in when it accepted.
+    wanted: u32,
+    before: u32,
+    attempts: u8,
+    accepted_us: u64,
+    /// Whether a heartbeat came after it accepted.
+    heard: bool,
+}
+
+/// How long a PX4 mode change waits for a heartbeat in its mode before
+/// it is judged by the mode the vehicle is in.
+const MODE_CHECK_US: u64 = 3_000_000;
+
+/// PX4's words when it will not switch to a mode it accepted.
+fn px4_refusal(text: &str) -> bool {
+    text.starts_with("Switching to") && text.contains("is currently not available")
+}
+
+/// The checks of a vehicle's mode changes answered by a heartbeat in
+/// `custom_mode`.
+fn modes_heard(
+    checks: &mut Vec<ModeCheck>,
+    key: &(String, String, u8),
+    custom_mode: u32,
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    checks.retain_mut(|check| {
+        if check.key != *key {
+            return true;
+        }
+        check.heard = true;
+        if check.wanted != custom_mode {
+            return true;
+        }
+        effects.push(Effect::CommandDone {
+            receipt_id: check.receipt_id.clone(),
+            outcome: CommandOutcome::Accepted,
+            attempts: check.attempts,
+        });
+        false
+    });
+    effects
+}
+
 /// A newer motor test replaces one still waiting for its answer (S188):
 /// the older is done, not sent again.
 fn replace_motor_test(
@@ -829,18 +882,22 @@ fn px4_heights(
             params[4] = f32::NAN;
             params[5] = f32::NAN;
         }
-        Wire::Int { frame, z, .. } if command == MAV_CMD_DO_REPOSITION => match *frame {
-            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT => {
-                *z += home_amsl_m.ok_or(HOME_UNKNOWN)?;
-                *frame = MAV_FRAME_GLOBAL_INT;
+        Wire::Int { frame, z, .. }
+            if command == MAV_CMD_DO_REPOSITION || command == crate::commands::MAV_CMD_DO_ORBIT =>
+        {
+            match *frame {
+                MAV_FRAME_GLOBAL_RELATIVE_ALT_INT => {
+                    *z += home_amsl_m.ok_or(HOME_UNKNOWN)?;
+                    *frame = MAV_FRAME_GLOBAL_INT;
+                }
+                MAV_FRAME_GLOBAL_TERRAIN_ALT_INT => {
+                    return Err(
+                        "PX4 cannot go to a height above the terrain. Give it above home or above sea level",
+                    );
+                }
+                _ => {}
             }
-            MAV_FRAME_GLOBAL_TERRAIN_ALT_INT => {
-                return Err(
-                    "PX4 cannot go to a height above the terrain. Give it above home or above sea level",
-                );
-            }
-            _ => {}
-        },
+        }
         _ => {}
     }
     Ok(())
@@ -870,6 +927,10 @@ pub struct Session {
     /// nothing between messages.
     producers: Vec<std::sync::Arc<dyn Producer>>,
     commands: Vec<PendingCommand>,
+    /// PX4 mode changes accepted and not yet seen in a heartbeat.
+    mode_checks: Vec<ModeCheck>,
+    /// PX4's last refusal of a mode, by vehicle: its words and when.
+    refusals: BTreeMap<(String, String, u8), (String, u64)>,
     deferred_effects: Vec<Effect>,
     /// By `(link, peer, system id)`: one autopilot per address.
     vehicles: BTreeMap<(String, String, u8), Vehicle>,
@@ -1651,6 +1712,39 @@ impl Session {
         component_id: u8,
         message: Message,
         now_us: u64,
+    ) -> Vec<Effect> {
+        self.assemble_text(key, component_id, message, now_us)
+            .map_or_else(Vec::new, |said| {
+                let mut effects = Vec::new();
+                if let Effect::StatusText { text, .. } = &said
+                    && px4_refusal(text)
+                    && self.is_px4(key)
+                {
+                    self.refusals.insert(key.clone(), (text.clone(), now_us));
+                    self.mode_checks.retain(|check| {
+                        if check.key != *key {
+                            return true;
+                        }
+                        effects.push(Effect::CommandDone {
+                            receipt_id: check.receipt_id.clone(),
+                            outcome: CommandOutcome::Rejected(text.clone()),
+                            attempts: check.attempts,
+                        });
+                        false
+                    });
+                }
+                effects.insert(0, said);
+                effects
+            })
+    }
+
+    /// A status text, put together from its parts.
+    fn assemble_text(
+        &mut self,
+        key: &(String, String, u8),
+        component_id: u8,
+        message: Message,
+        now_us: u64,
     ) -> Option<Effect> {
         const PARTS_US: u64 = 2_000_000;
         let Message::StatusText {
@@ -2028,6 +2122,7 @@ impl Session {
         }
         vehicle.custom_mode = *custom_mode;
         effects.extend(arming_said(vehicle));
+        effects.extend(modes_heard(&mut self.mode_checks, key, *custom_mode));
         if new {
             effects.extend(first_asks(vehicle, gcs, sequence));
         }
@@ -2149,6 +2244,7 @@ impl Session {
         }
         effects = self.reconcile(effects, now_us);
         effects.extend(self.retry_commands(now_us));
+        effects.extend(self.expire_mode_checks(now_us));
         effects.extend(self.tick_transfers(now_us));
         effects.extend(self.send_terrain(now_us));
         effects.extend(self.unanswered_checks(now_us));
@@ -2519,6 +2615,11 @@ impl Session {
             return vec![self.transmit(index, now_us)];
         }
         let pending = self.commands.remove(index);
+        if result == 0
+            && let Some(effects) = self.check_px4_mode(key, &pending, now_us)
+        {
+            return effects;
+        }
         vec![Effect::CommandDone {
             receipt_id: pending.order.receipt_id,
             outcome: if result == 0 {
@@ -2533,6 +2634,105 @@ impl Session {
             },
             attempts: pending.completed_attempts.saturating_add(pending.attempts),
         }]
+    }
+
+    /// A PX4 mode change it accepted: done when it is in the mode already,
+    /// refused when it has just said it cannot fly it, else waiting for a
+    /// heartbeat in the mode ([`ModeCheck`]). None for anything else.
+    fn check_px4_mode(
+        &mut self,
+        key: &(String, String, u8),
+        pending: &PendingCommand,
+        now_us: u64,
+    ) -> Option<Vec<Effect>> {
+        let crate::commands::Wire::Long(params) = pending.wire else {
+            return None;
+        };
+        if pending.command != MAV_CMD_DO_SET_MODE || !self.is_px4(key) {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "PX4's main and sub modes are small"
+        )]
+        let wanted = (params[1] as u32) << 16 | (params[2] as u32) << 24;
+        let before = self.vehicles.get(key)?.custom_mode;
+        let attempts = pending.completed_attempts.saturating_add(pending.attempts);
+        let done = |outcome| {
+            vec![Effect::CommandDone {
+                receipt_id: pending.order.receipt_id.clone(),
+                outcome,
+                attempts,
+            }]
+        };
+        // A newer change answers for an older one still waiting.
+        let mut effects: Vec<Effect> = Vec::new();
+        self.mode_checks.retain(|check| {
+            if check.key != *key {
+                return true;
+            }
+            effects.push(Effect::CommandDone {
+                receipt_id: check.receipt_id.clone(),
+                outcome: CommandOutcome::Accepted,
+                attempts: check.attempts,
+            });
+            false
+        });
+        if before == wanted {
+            effects.extend(done(CommandOutcome::Accepted));
+            return Some(effects);
+        }
+        if self
+            .refusals
+            .get(key)
+            .is_some_and(|(_, at)| *at >= pending.issued_us)
+            && let Some((text, _)) = self.refusals.remove(key)
+        {
+            effects.extend(done(CommandOutcome::Rejected(text)));
+            return Some(effects);
+        }
+        self.mode_checks.push(ModeCheck {
+            receipt_id: pending.order.receipt_id.clone(),
+            key: key.clone(),
+            wanted,
+            before,
+            attempts,
+            accepted_us: now_us,
+            heard: false,
+        });
+        Some(effects)
+    }
+
+    /// Mode changes whose heartbeat never came: refused when the vehicle is
+    /// still in the mode it was in, else taken as done (it may have
+    /// switched and moved on, or nothing was heard).
+    fn expire_mode_checks(&mut self, now_us: u64) -> Vec<Effect> {
+        let vehicles = &self.vehicles;
+        let mut effects = Vec::new();
+        self.mode_checks.retain(|check| {
+            if now_us.saturating_sub(check.accepted_us) < MODE_CHECK_US {
+                return true;
+            }
+            let vehicle = vehicles.get(&check.key);
+            let stayed = check.heard && vehicle.is_some_and(|v| v.custom_mode == check.before);
+            effects.push(Effect::CommandDone {
+                receipt_id: check.receipt_id.clone(),
+                outcome: if stayed {
+                    CommandOutcome::Rejected(format!(
+                        "It stayed in {}",
+                        vehicle
+                            .and_then(|v| v.observation.mode.clone())
+                            .unwrap_or_else(|| "its mode".into())
+                    ))
+                } else {
+                    CommandOutcome::Accepted
+                },
+                attempts: check.attempts,
+            });
+            false
+        });
+        effects
     }
 
     fn retry_commands(&mut self, now_us: u64) -> Vec<Effect> {
@@ -5213,6 +5413,119 @@ mod tests {
     }
 
     const PX4_HOLD: u32 = 4 << 16 | 3 << 24;
+
+    #[test]
+    fn a_px4_mode_change_waits_for_its_heartbeat_and_says_why_px4_refused() {
+        const S: u64 = 1_000_000;
+        const MISSION: u32 = 4 << 16 | 4 << 24;
+        let mut session = Session::new(Config::default());
+        session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 0, PX4_HOLD),
+            0,
+        );
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let send = |session: &mut Session, receipt: &str, mode: &str, at: u64| {
+            session.command(
+                CommandOrder {
+                    receipt_id: receipt.into(),
+                    vehicle_id: vid.clone(),
+                    command: Command::SetMode { mode: mode.into() },
+                    force: false,
+                },
+                at,
+            );
+        };
+        let ack = |session: &mut Session, at: u64| {
+            session.ingest(
+                "l1",
+                PEER,
+                &crate::sim::command_ack_frame(1, 1, (0, 0), 0, MAV_CMD_DO_SET_MODE, 0),
+                at,
+            )
+        };
+        let said = |session: &mut Session, text: &str, at: u64| {
+            session.ingest(
+                "l1",
+                PEER,
+                &crate::sim::status_text_frame(1, 0, 2, text, (0, 0)),
+                at,
+            )
+        };
+        let beat = |session: &mut Session, mode: u32, at: u64| {
+            session.ingest("l1", PEER, &crate::sim::px4_heartbeat_frame(1, 0, mode), at)
+        };
+        let done = |effects: &[Effect]| -> Vec<(String, CommandOutcome)> {
+            effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::CommandDone {
+                        receipt_id,
+                        outcome,
+                        ..
+                    } => Some((receipt_id.clone(), outcome.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Accepted, and done once its heartbeat says Mission.
+        send(&mut session, "mission", "Mission", S);
+        assert!(done(&ack(&mut session, S + 100_000)).is_empty(), "not yet");
+        assert_eq!(
+            done(&beat(&mut session, MISSION, S + 600_000)),
+            [("mission".into(), CommandOutcome::Accepted)]
+        );
+
+        // Accepted, then refused in PX4's words.
+        send(&mut session, "offboard", "Offboard", 10 * S);
+        assert!(done(&ack(&mut session, 10 * S + 100_000)).is_empty());
+        let refusal = "Switching to Offboard is currently not available";
+        assert_eq!(
+            done(&said(&mut session, refusal, 10 * S + 150_000)),
+            [("offboard".into(), CommandOutcome::Rejected(refusal.into()))]
+        );
+
+        // Its words may come before the acknowledgement.
+        send(&mut session, "position", "Position", 20 * S);
+        let refusal = "Switching to Position is currently not available";
+        said(&mut session, refusal, 20 * S + 50_000);
+        assert_eq!(
+            done(&ack(&mut session, 20 * S + 100_000)),
+            [("position".into(), CommandOutcome::Rejected(refusal.into()))]
+        );
+
+        // The next change straight after is not refused in those words.
+        send(&mut session, "again", "Offboard", 20 * S + 200_000);
+        assert!(done(&ack(&mut session, 20 * S + 250_000)).is_empty());
+        let refusal = "Switching to Offboard is currently not available";
+        assert_eq!(
+            done(&said(&mut session, refusal, 20 * S + 300_000)),
+            [("again".into(), CommandOutcome::Rejected(refusal.into()))]
+        );
+
+        // Nothing said, and its heartbeats stay in Mission: refused.
+        send(&mut session, "altitude", "Altitude", 30 * S);
+        ack(&mut session, 30 * S + 100_000);
+        beat(&mut session, MISSION, 31 * S);
+        assert!(done(&session.tick(32 * S)).is_empty(), "still waiting");
+        assert_eq!(
+            done(&session.tick(33 * S + 200_000)),
+            [(
+                "altitude".into(),
+                CommandOutcome::Rejected("It stayed in Mission".into())
+            )]
+        );
+
+        // No heartbeat came at all: accepted, as it said.
+        send(&mut session, "hold", "Hold", 40 * S);
+        ack(&mut session, 40 * S + 100_000);
+        assert_eq!(
+            done(&session.tick(43 * S + 200_000)),
+            [("hold".into(), CommandOutcome::Accepted)]
+        );
+    }
 
     #[test]
     fn px4_reports_its_arming_checks_for_the_mode_it_is_in() {

@@ -13,6 +13,8 @@ const FORCE: f32 = 21196.0;
 
 /// `MAV_CMD_DO_REPOSITION`: go to a place now.
 const MAV_CMD_DO_REPOSITION: u16 = 192;
+/// `MAV_CMD_DO_ORBIT`: circle a place, PX4's Orbit.
+pub const MAV_CMD_DO_ORBIT: u16 = 34;
 /// `MAV_CMD_DO_SET_HOME`: param 1 is 1 for where the vehicle is now.
 const MAV_CMD_DO_SET_HOME: u16 = 179;
 /// `MAV_CMD_DO_SET_GLOBAL_ORIGIN`: the EKF origin.
@@ -88,12 +90,13 @@ pub fn encode_listed(
         loiter_radius_m: Some(radius),
         ..
     } = command
-        && (family != Some(Family::Plane)
+        && (!matches!(family, Some(Family::Plane | Family::Px4))
             || !radius.is_finite()
             || !(1.0..=65535.0).contains(&radius.abs()))
     {
         return Err(
-            "loiter radius needs an ArduPlane and a magnitude from 1 to 65535 metres".into(),
+            "loiter radius needs an ArduPlane or a PX4 and a magnitude from 1 to 65535 metres"
+                .into(),
         );
     }
     if let Command::GoTo {
@@ -126,6 +129,7 @@ pub fn encode_listed(
                 *altitude_m,
                 *altitude_frame,
                 *loiter_radius_m,
+                family == Some(Family::Px4),
             ),
             // Where the vehicle is now: param 1, and no place.
             Command::SetHome { place: None } => Ok((
@@ -147,12 +151,16 @@ pub fn encode_listed(
 /// `DO_REPOSITION` in a `COMMAND_INT`: the vehicle's own speed (-1),
 /// changing to GUIDED if it is not there, an optional plane loiter radius
 /// and direction (otherwise 0/NaN), and the place at the requested height.
+/// A PX4 given a radius circles the place instead: `DO_ORBIT` with the
+/// radius signed by its direction, its own speed and yaw (NaN), and no
+/// count of turns.
 fn go_to(
     latitude_deg: f64,
     longitude_deg: f64,
     altitude_m: f64,
     altitude_frame: AltitudeFrame,
     loiter_radius_m: Option<f64>,
+    px4: bool,
 ) -> Result<(u16, Wire), String> {
     if !(-90.0..=90.0).contains(&latitude_deg)
         || !(-180.0..=180.0).contains(&longitude_deg)
@@ -172,6 +180,21 @@ fn go_to(
     };
     #[allow(clippy::cast_possible_truncation, reason = "within ±1.8e9")]
     let e7 = |degrees: f64| (degrees * 1e7).round() as i32;
+    if px4 && let Some(radius) = loiter_radius_m {
+        #[allow(clippy::cast_possible_truncation, reason = "a validated radius")]
+        let radius = radius as f32;
+        return Ok((
+            MAV_CMD_DO_ORBIT,
+            Wire::Int {
+                frame,
+                params: [radius, f32::NAN, f32::NAN, f32::NAN],
+                x: e7(latitude_deg),
+                y: e7(longitude_deg),
+                #[allow(clippy::cast_possible_truncation, reason = "a height in metres")]
+                z: altitude_m as f32,
+            },
+        ));
+    }
     Ok((
         MAV_CMD_DO_REPOSITION,
         Wire::Int {
@@ -262,10 +285,71 @@ mod loiter_tests {
                 ]
             );
             assert_eq!((x, y), (377_639_321, -1_223_858_043));
-            for family in [Family::Copter, Family::Rover, Family::Sub, Family::Px4] {
+            for family in [Family::Copter, Family::Rover, Family::Sub] {
                 assert!(encode(&command, Some(family), false).is_err());
             }
         }
+    }
+
+    #[test]
+    fn a_px4_given_a_radius_orbits_the_place() {
+        for radius in [30.0, -45.0] {
+            let command = Command::GoTo {
+                latitude_deg: 47.397_970_1,
+                longitude_deg: 8.545_600_3,
+                altitude_m: 30.0,
+                altitude_frame: AltitudeFrame::AboveHome,
+                loiter_radius_m: Some(radius),
+                heading: None,
+            };
+            let (id, wire) = encode(&command, Some(Family::Px4), false).unwrap();
+            let Wire::Int {
+                frame,
+                params,
+                x,
+                y,
+                z,
+            } = wire
+            else {
+                panic!("an orbit keeps its integer position")
+            };
+            assert_eq!(id, MAV_CMD_DO_ORBIT);
+            assert_eq!(frame, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT);
+            #[allow(clippy::cast_possible_truncation, reason = "30 and 45 m are exact")]
+            let signed = radius as f32;
+            assert!(
+                (params[0] - signed).abs() < f32::EPSILON,
+                "signed by direction"
+            );
+            assert!(
+                params[1..].iter().all(|p| p.is_nan()),
+                "its own speed and yaw"
+            );
+            assert_eq!((x, y), (473_979_701, 85_456_003));
+            assert!((z - 30.0).abs() < f32::EPSILON);
+        }
+        // Without a radius it goes there and holds, as before.
+        let plain = Command::GoTo {
+            latitude_deg: 47.4,
+            longitude_deg: 8.5,
+            altitude_m: 30.0,
+            altitude_frame: AltitudeFrame::AboveHome,
+            loiter_radius_m: None,
+            heading: None,
+        };
+        assert_eq!(
+            encode(&plain, Some(Family::Px4), false).unwrap().0,
+            MAV_CMD_DO_REPOSITION
+        );
+        // Orbit as a mode would be Position to PX4: it needs a place.
+        let orbit = Command::SetMode {
+            mode: "Orbit".into(),
+        };
+        assert!(
+            encode(&orbit, Some(Family::Px4), false)
+                .unwrap_err()
+                .contains("Go to")
+        );
     }
 
     #[test]
@@ -312,6 +396,15 @@ fn encode_long(
         Command::Disarm => Ok((400, [0.0, force, 0.0, 0.0, 0.0, 0.0, 0.0])),
         // The engine sends it as Arm or Disarm (`Command::resolved`).
         Command::ArmToggle => Err("a toggle goes as Arm or Disarm".into()),
+        // PX4 takes Orbit as Position unless it is given a place and a
+        // radius, which Go to's circle sends (`DO_ORBIT`).
+        Command::SetMode { mode }
+            if family == Some(Family::Px4)
+                && Family::Px4.number(mode).is_some()
+                && Family::Px4.number(mode) == Family::Px4.number("Orbit") =>
+        {
+            Err("PX4 orbits a place it is given. Use Go to and choose to circle there".into())
+        }
         Command::SetMode { mode } => set_mode(mode),
         // MAV_CMD_NAV_RETURN_TO_LAUNCH: every ArduPilot vehicle, and PX4.
         Command::Rtl if family == Some(Family::Blimp) => set_mode("RTL"),

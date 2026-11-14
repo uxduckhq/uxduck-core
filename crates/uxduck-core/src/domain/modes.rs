@@ -194,14 +194,18 @@ impl Family {
         }
     }
 
-    /// Modes a vehicle puts itself in, never chosen: left out of the lists.
+    /// Modes a vehicle puts itself in, or that a mode change alone cannot
+    /// start: left out of the lists.
     fn is_hidden(self, name: &str) -> bool {
         let hidden: &[&str] = match self {
             Self::Copter => &["AVOID_ADSB", "AUTO_RTL"],
             Self::Plane => &["INITIALISING", "AVOID_ADSB"],
             Self::Rover => &["INITIALISING"],
             Self::Sub | Self::Blimp => &[],
-            Self::Px4 => &["Ready"],
+            // Orbit needs a place and a radius, which Go to's circle gives
+            // it, and Follow Me a target sending its position, which UXDuck
+            // does not send (QGroundControl offers neither).
+            Self::Px4 => &["Ready", "Orbit", "Follow Me"],
         };
         hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
@@ -904,14 +908,20 @@ const PX4_WORDS: &[(&str, &str)] = &[
     ("Mission", "Runs the mission"),
     ("Return", "Goes home"),
     ("Land", "Lands straight down where it is"),
-    ("Follow Me", "Follows the person with the controller"),
+    (
+        "Follow Me",
+        "Follows a target that sends its position, such as another ground station. UXDuck sends none.",
+    ),
     ("Precision Land", "Lands on a marker it can see"),
     ("VTOL Takeoff", "Takes off straight up, then flies forward"),
     (
         "Acro",
         "The sticks control rotation rates. Releasing the sticks does not level the vehicle.",
     ),
-    ("Offboard", "Follows a companion computer"),
+    (
+        "Offboard",
+        "Flies what a companion computer sends. PX4 refuses it unless one is sending.",
+    ),
     (
         "Stabilized",
         "The sticks control roll and pitch. Releasing the sticks levels the vehicle. You control throttle.",
@@ -1024,7 +1034,7 @@ mod tests {
             (Family::Rover, ROVER, 1),
             (Family::Sub, SUB, 0),
             (Family::Blimp, BLIMP, 0),
-            (Family::Px4, PX4, 1),
+            (Family::Px4, PX4, 3),
         ] {
             let all = names(family.offered(None));
             assert_eq!(all.len(), table.len() - hidden, "{family:?} {all:?}");
@@ -1033,6 +1043,14 @@ mod tests {
             sorted.dedup();
             assert_eq!(sorted.len(), all.len(), "{family:?} repeats a mode");
         }
+        // PX4's Orbit needs a place and Follow Me a target: neither is a
+        // mode to choose. Offboard is, for a companion computer.
+        let px4 = names(Family::Px4.offered(Some("Quadrotor")));
+        assert!(
+            !px4.contains(&"Orbit") && !px4.contains(&"Follow Me"),
+            "{px4:?}"
+        );
+        assert!(px4.contains(&"Offboard"));
         // The usual ones come first, for the top of the menu.
         let copter = Family::Copter.offered(Some("Quadrotor"));
         assert_eq!(copter[0], ("LOITER", false));

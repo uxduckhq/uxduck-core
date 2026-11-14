@@ -42,8 +42,9 @@ pub enum Command {
         /// `ellipsoid` is refused.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
-        /// `ArduPlane` loiter radius in metres: positive clockwise, negative
-        /// counterclockwise. Omitted: keep the autopilot's default.
+        /// Circle radius in metres, negative counterclockwise: an `ArduPlane`
+        /// loiters there, a PX4 orbits it (`DO_ORBIT`). Omitted: the plane's
+        /// default, or a PX4 holds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loiter_radius_m: Option<f64>,
         /// Submarine heading. Omitted commands retain the existing default.

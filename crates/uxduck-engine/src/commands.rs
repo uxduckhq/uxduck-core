@@ -823,8 +823,12 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
     }
     // Go to: offered with no place, for its risk and
     // class; the sender fills the place in. Copter, Plane, Rover and Sub
-    // apply DO_REPOSITION in GUIDED; PX4 holds there. Blimp acknowledges
-    // it without setting a destination, so it is not offered.
+    // apply DO_REPOSITION in GUIDED; PX4 holds there, or with a radius
+    // circles it in Orbit (DO_ORBIT), which a PX4 rover, boat or submarine
+    // cannot. Blimp acknowledges it without setting a destination, so it is
+    // not offered.
+    let circles = family == Some(Family::Plane)
+        || (family == Some(Family::Px4) && !VehicleClass::of(&vehicle.vehicle_type).never_flies());
     if matches!(
         family,
         Some(Family::Copter | Family::Plane | Family::Rover | Family::Sub | Family::Px4)
@@ -837,7 +841,7 @@ fn command_list(engine: &Engine, vehicle_id: &str) -> Result<CommandListResult, 
             heading: (family == Some(Family::Sub)).then_some(GoToHeading::FaceDestination),
             // Presence advertises support to interfaces paired with an older daemon.
             // This is an example radius, like the command's example position.
-            loiter_radius_m: (family == Some(Family::Plane)).then_some(60.0),
+            loiter_radius_m: circles.then_some(60.0),
         });
     }
     // Plane preserves next_WP_loc's horizontal destination itself. Copter
@@ -922,6 +926,13 @@ fn command_description(
         (Command::SetMode { mode }, Some(family)) => {
             family.describe_for(mode, vehicle_type).map(str::to_owned)
         }
+        (
+            Command::GoTo {
+                loiter_radius_m: Some(_),
+                ..
+            },
+            Some(Family::Px4),
+        ) => Some("Goes to a place chosen on the map and holds or circles there".to_owned()),
         (Command::GoTo { .. }, _) => {
             Some("Goes to a place chosen on the map and holds there".to_owned())
         }

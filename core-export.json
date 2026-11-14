@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "02c7cb5d6b204b9e17bc22f3d65499a026ec24d8",
+  "sourceCommit": "01fc692c75ec1e550575b41a13de157c05c22153",
   "licenseReady": true,
   "files": [
     {
@@ -5036,7 +5036,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/command.rs",
-      "sha256": "ff89b715a012ecaabdca62af2bb08e15adbc9ece8ab1bffe487824a185d57b7b",
+      "sha256": "1a26ad7d9a4a3dea005ffbd3e2ba85d549f3eff81aac89901a372b80a0f6a43f",
       "executable": false
     },
     {
@@ -5406,7 +5406,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/command.rs",
-      "sha256": "90211fe71dabac1454827c6bd3611d9700d9e628bca60fea049dc3f6d666e6a2",
+      "sha256": "02770300bde211591d8e26cb07f099f5442a3fb208ccfa4d764c83bcbd209293",
       "executable": false
     },
     {
@@ -5491,7 +5491,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/modes.rs",
-      "sha256": "5bd1b03c2b8d874fa990c7d5b6ee277a11da472b6858a8ee94717b72df38269b",
+      "sha256": "ecb47afc3e9fb0fcd512e19a6fad13585fd507739368edd75f4ab569eadbcc9b",
       "executable": false
     },
     {
@@ -5711,7 +5711,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/commands.rs",
-      "sha256": "04f2751ab4086c73d8fd34c652f4a979fde1976eee75ae2dd46ce54fa945b74a",
+      "sha256": "6faaddde8777b953d9c30319747079e2d1d58f8cc6fabfda1bd408d3dfaf000c",
       "executable": false
     },
     {
@@ -6516,7 +6516,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/commands.rs",
-      "sha256": "0d8ae7dac1a29a47af7be608d39d219dd1cc877f2437321b854f4bffa75a14b0",
+      "sha256": "65844f41ac96ac433823940ddcb0d1410bad4cc63f4d86b073508b4e729bc208",
       "executable": false
     },
     {
@@ -6691,7 +6691,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/session.rs",
-      "sha256": "d0a2b65b02a824756ad6a310f41460ea2be3f3f70f968e6ca2dbe0e87abdbd5b",
+      "sha256": "45e49a154880a891005a1d654ac7163445714f6db2b21ec548e3e7f9500548e4",
       "executable": false
     },
     {
@@ -7881,7 +7881,7 @@
     },
     {
       "path": "docs/site/confirmations.md",
-      "sha256": "ce811d9057f7b4731fb7ed796908f182bd49ccc1892672e5df88e736a6302946",
+      "sha256": "e7b70655ea41bf620325401f6d4d238b41fabef70218c643591c480d4097504c",
       "executable": false
     },
     {
