@@ -1202,7 +1202,13 @@ impl Session {
                     ..
                 } => {
                     if target_system == self.config.gcs_system_id || target_system == 0 {
-                        effects.extend(self.acknowledged(key, command, result, received_us));
+                        effects.extend(self.acknowledged(
+                            key,
+                            (decoded.system_id, decoded.component_id),
+                            command,
+                            result,
+                            received_us,
+                        ));
                     }
                 }
                 Message::Heartbeat {
@@ -2774,18 +2780,28 @@ impl Session {
         }
     }
 
+    /// An ack answers a pending command only when it comes from the system
+    /// and component the command was sent to. Commands go to the vehicle's
+    /// autopilot component, so a gimbal's or a camera's ack of the same
+    /// command id, or its `IN_PROGRESS`, is not the autopilot's answer: the
+    /// command keeps waiting and retrying as if nothing came. A command
+    /// sent to component 0 goes there only because the autopilot is heard
+    /// at 0, and only its ack from 0 answers it, never another component's.
     fn acknowledged(
         &mut self,
         key: &(String, String, u8),
+        (system, component): (u8, u8),
         command: u16,
         result: u8,
         now_us: u64,
     ) -> Vec<Effect> {
-        let Some(index) = self
-            .commands
-            .iter()
-            .position(|p| p.key == *key && p.command == command && now_us >= p.issued_us)
-        else {
+        let Some(index) = self.commands.iter().position(|p| {
+            p.key == *key
+                && p.key.2 == system
+                && p.component == component
+                && p.command == command
+                && now_us >= p.issued_us
+        }) else {
             return Vec::new();
         };
         // In progress: the vehicle is working on it; keep waiting.
@@ -6041,6 +6057,198 @@ mod tests {
         session.ingest("l1", PEER, &fake.answer(bytes)[0], 50);
         let seen = session.ingest("l1", PEER, &fake.heartbeat(), 60);
         assert_eq!(vehicles(&seen)[0].mode.as_deref(), Some("LOITER"));
+    }
+
+    /// UXD-248: the target component of each `command` that `effects` send.
+    fn command_targets(effects: &[Effect], command: u16) -> Vec<u8> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Send { bytes, .. } => Some(crate::framing::split(bytes).frames),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|frame| match decode(frame).map(|d| d.message) {
+                Some(Message::CommandLong { command: sent, .. }) if sent == command => {
+                    Some(if usize::from(frame[1]) > 31 {
+                        frame[10 + 31]
+                    } else {
+                        0
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn commands_done(effects: &[Effect]) -> Vec<(String, CommandOutcome, u8)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CommandDone {
+                    receipt_id,
+                    outcome,
+                    attempts,
+                } => Some((receipt_id.clone(), outcome.clone(), *attempts)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// UXD-248: a copter whose autopilot is heard at `component` of
+    /// system 1, told to arm, which is sent to that component.
+    fn arming_at(component: u8) -> Session {
+        let mut session = Session::new(Config::default());
+        session.ingest("l1", PEER, &crate::sim::heartbeat_frame(1, component, 0), 0);
+        let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let sent = session.command(
+            CommandOrder {
+                receipt_id: "arm".into(),
+                vehicle_id,
+                command: Command::Arm,
+                force: false,
+            },
+            10,
+        );
+        assert_eq!(command_targets(&sent, 400), [component]);
+        session
+    }
+
+    fn arm_ack(session: &mut Session, from: (u8, u8), result: u8, at: u64) -> Vec<Effect> {
+        session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::command_ack_frame(from.0, from.1, (255, 190), 0, 400, result),
+            at,
+        )
+    }
+
+    /// UXD-248: a gimbal's or a camera's ack of the same command id, accepted
+    /// or refused, is not the autopilot's answer. The autopilot's own is.
+    #[test]
+    fn another_components_ack_does_not_answer_the_autopilots_command() {
+        for component in [154, 100] {
+            for result in [0, 4] {
+                let mut session = arming_at(1);
+                let other = arm_ack(&mut session, (1, component), result, 20);
+                assert_eq!(commands_done(&other), [], "{component} said {result}");
+                assert_eq!(
+                    commands_done(&arm_ack(&mut session, (1, 1), 0, 30)),
+                    [("arm".to_owned(), CommandOutcome::Accepted, 1)]
+                );
+            }
+        }
+    }
+
+    /// UXD-248: an ack from another system on the same link, even from its
+    /// component 1, is not the commanded vehicle's.
+    #[test]
+    fn another_systems_ack_does_not_answer_the_command() {
+        let mut session = arming_at(1);
+        assert_eq!(commands_done(&arm_ack(&mut session, (2, 1), 0, 20)), []);
+        assert_eq!(
+            commands_done(&arm_ack(&mut session, (1, 1), 0, 30)),
+            [("arm".to_owned(), CommandOutcome::Accepted, 1)]
+        );
+    }
+
+    /// UXD-248: a vehicle whose autopilot is heard at component 0 is sent
+    /// its commands at 0, the broadcast component. Only the autopilot's ack
+    /// answers one, never a gimbal's that heard the broadcast.
+    #[test]
+    fn a_command_sent_to_component_0_is_answered_by_the_autopilot_alone() {
+        let mut session = arming_at(0);
+        assert_eq!(commands_done(&arm_ack(&mut session, (1, 154), 0, 20)), []);
+        assert_eq!(
+            commands_done(&arm_ack(&mut session, (1, 0), 0, 30)),
+            [("arm".to_owned(), CommandOutcome::Accepted, 1)]
+        );
+    }
+
+    /// UXD-248: `IN_PROGRESS` from another component is not the autopilot
+    /// working on the command. It is sent again and times out exactly as
+    /// when nothing answers.
+    #[test]
+    fn another_components_in_progress_does_not_hold_off_the_retries() {
+        let timeout = Config::default().command_timeout_us;
+        let run = |progress_from: Option<u8>| {
+            let mut session = arming_at(1);
+            let (mut resent, mut done) = (Vec::new(), Vec::new());
+            for step in 1..=4u64 {
+                let at = 10 + step * timeout;
+                if let Some(component) = progress_from {
+                    done.extend(commands_done(&arm_ack(
+                        &mut session,
+                        (1, component),
+                        5,
+                        at - 1,
+                    )));
+                }
+                let effects = session.tick(at);
+                if !command_targets(&effects, 400).is_empty() {
+                    resent.push(step);
+                }
+                done.extend(commands_done(&effects));
+            }
+            (resent, done)
+        };
+        let silent = run(None);
+        assert_eq!(
+            silent,
+            (
+                vec![1, 2],
+                vec![("arm".to_owned(), CommandOutcome::Timeout, 3)]
+            )
+        );
+        assert_eq!(run(Some(154)), silent);
+        assert_eq!(
+            run(Some(1)),
+            (vec![], vec![]),
+            "the autopilot's own holds them off"
+        );
+    }
+
+    /// UXD-248: a PX4 mode change is judged after the autopilot's own ack,
+    /// not a gimbal's of the same command id.
+    #[test]
+    fn a_px4_mode_change_waits_for_the_autopilots_own_ack() {
+        let mut session = Session::new(Config::default());
+        session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 0, PX4_HOLD),
+            0,
+        );
+        let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        session.command(
+            CommandOrder {
+                receipt_id: "mission".into(),
+                vehicle_id,
+                command: Command::SetMode {
+                    mode: "Mission".into(),
+                },
+                force: false,
+            },
+            10,
+        );
+        let ack = |session: &mut Session, component: u8, at: u64| {
+            session.ingest(
+                "l1",
+                PEER,
+                &crate::sim::command_ack_frame(1, component, (255, 190), 0, MAV_CMD_DO_SET_MODE, 0),
+                at,
+            )
+        };
+        assert_eq!(commands_done(&ack(&mut session, 154, 20)), []);
+        assert!(session.mode_checks.is_empty(), "not accepted by a gimbal");
+        assert_eq!(session.commands.len(), 1, "still waiting for the autopilot");
+        assert_eq!(commands_done(&ack(&mut session, 1, 30)), []);
+        assert_eq!(
+            session.mode_checks.len(),
+            1,
+            "accepted, waiting for its heartbeat"
+        );
+        assert!(session.commands.is_empty());
     }
 
     fn submarine_go_to_fixture(simulated: bool) -> (Session, CommandOrder) {
