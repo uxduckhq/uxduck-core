@@ -19,8 +19,8 @@ use uxduck_core::domain::notification::{
 
 const BOOTSTRAP_TTL_US: u64 = 60 * 1_000_000;
 const PAIRING_TTL_US: u64 = 10 * 60 * 1_000_000;
-/// A browser polls every second while it waits; one silent this long has
-/// gone (closed, reloaded), and its question with it.
+/// A browser polls four times a second while it waits; one silent this long
+/// has gone (closed, reloaded), and its question with it.
 const ABANDONED_US: u64 = 15 * 1_000_000;
 /// Phones and tablets on the network waiting at once (S97): anyone there
 /// can open the page, so they cannot pile questions on the operator.

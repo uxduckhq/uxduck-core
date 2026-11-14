@@ -261,11 +261,13 @@ impl State {
                 self.vehicles.insert(vehicle.id.clone(), vehicle.clone());
             }
             Change::VehicleRemoved { id } => {
-                if self.vehicles.remove(id).is_some_and(|v| v.replay) {
-                    self.parameters.retain(|_, p| p.vehicle_id != *id);
-                    self.parameter_sets.remove(id);
-                    self.missions.remove(id);
-                }
+                self.vehicles.remove(id);
+                // Its parameters and mission go with it. Kept, they went to
+                // every window that connected, about 1,500 for each
+                // simulation ever run (2026-11-14).
+                self.parameters.retain(|_, p| p.vehicle_id != *id);
+                self.parameter_sets.remove(id);
+                self.missions.remove(id);
                 // Its definitions go with it; heard again, they are chosen again.
                 self.param_definitions.remove(id);
                 self.preflights.remove(id);
@@ -589,6 +591,21 @@ pub fn restore(checkpoint: Option<State>, events: impl IntoIterator<Item = Event
         }
         restored.replayed += 1;
     }
+    // A vehicle removed before 2026-11-14 left its parameters and mission
+    // behind, which every window that connected was then sent.
+    let vehicles = &restored.state.vehicles;
+    restored
+        .state
+        .parameters
+        .retain(|_, p| vehicles.contains_key(&p.vehicle_id));
+    restored
+        .state
+        .parameter_sets
+        .retain(|id, _| vehicles.contains_key(id));
+    restored
+        .state
+        .missions
+        .retain(|id, _| vehicles.contains_key(id));
     restored
 }
 
