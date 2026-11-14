@@ -14,6 +14,10 @@ pub const COMPUTER_IDS: std::ops::RangeInclusive<u8> = 191..=194;
 /// `None` or left out.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ComputerStatus {
+    /// When it was sent, on the computer's own clock, in microseconds:
+    /// since 1970 from UXDuck (S356), which stamps it as it goes, or since
+    /// the computer started from software that counts that way.
+    pub time_usec: u64,
     pub uptime_ms: u32,
     /// Each core's use, in percent.
     pub cpu_cores_pct: Vec<u8>,
@@ -33,6 +37,7 @@ impl ComputerStatus {
             (!valid.is_empty()).then(|| valid.iter().fold(0_u32, |a, v| a.saturating_add(*v)))
         };
         Self {
+            time_usec: m.time_usec,
             uptime_ms: m.uptime,
             cpu_cores_pct: m.cpu_cores.into_iter().filter(|v| *v != u8::MAX).collect(),
             board_degc: (m.temperature_board != i8::MAX).then_some(m.temperature_board),
@@ -90,12 +95,53 @@ pub fn heartbeat_frame((system_id, component_id, sequence): (u8, u8, u8)) -> Vec
     crate::sim::frame(system_id, component_id, sequence, &heartbeat)
 }
 
+/// The reply an onboard computer gives a `TIMESYNC` request (`tc1` 0)
+/// addressed to it, target system 0 or its own and target component 0 or
+/// its own (S356): from `from`, its own clock in `tc1` in nanoseconds
+/// since 1970, and the request's `ts1`, addressed to whoever asked. A
+/// ground station tells the computer's clock from its own with it. None for
+/// anything else, and for any `from` that is not an onboard computer id, so
+/// a computer never answers as its autopilot.
+#[must_use]
+pub fn timesync_reply(
+    request: &[u8],
+    from: (u8, u8),
+    sequence: u8,
+    now_ns: i64,
+) -> Option<Vec<u8>> {
+    let (system_id, component_id) = from;
+    if !COMPUTER_IDS.contains(&component_id)
+        || crate::framing::header(request)?.message_id != crate::link_health::TIMESYNC
+    {
+        return None;
+    }
+    let decoded = crate::decode::decode(request)?;
+    let crate::decode::Message::Timesync {
+        tc1: 0,
+        ts1,
+        target_system,
+        target_component,
+    } = decoded.message
+    else {
+        return None;
+    };
+    let addressed = (target_system == 0 || target_system == system_id)
+        && (target_component == 0 || target_component == component_id);
+    if !addressed || (decoded.system_id, decoded.component_id) == from {
+        return None;
+    }
+    Some(crate::sim::timesync_frame(
+        (system_id, component_id, sequence),
+        (now_ns, ts1),
+        (decoded.system_id, decoded.component_id),
+    ))
+}
+
 /// `ONBOARD_COMPUTER_STATUS` from `component_id`; its `type` is the
 /// computer's place among the onboard ids (0 for the first).
 #[must_use]
 pub fn status_frame(
     (system_id, component_id, sequence): (u8, u8, u8),
-    time_usec: u64,
     status: &ComputerStatus,
 ) -> Vec<u8> {
     fn fill<T: Copy, const N: usize>(values: &[T], unused: T) -> [T; N] {
@@ -108,7 +154,7 @@ pub fn status_frame(
     let used: Vec<u32> = status.storage_used_mib.into_iter().collect();
     let total: Vec<u32> = status.storage_total_mib.into_iter().collect();
     let message = OnboardComputerStatus {
-        time_usec,
+        time_usec: status.time_usec,
         uptime: status.uptime_ms,
         type_: component_id.saturating_sub(*COMPUTER_IDS.start()),
         cpu_cores: fill(&status.cpu_cores_pct, u8::MAX),
@@ -140,6 +186,7 @@ mod tests {
     #[test]
     fn a_status_survives_the_wire_with_its_unused_fields_left_out() {
         let status = ComputerStatus {
+            time_usec: 5,
             uptime_ms: 61_000,
             cpu_cores_pct: vec![12, 40, 7, 1],
             board_degc: None,
@@ -149,7 +196,7 @@ mod tests {
             storage_used_mib: Some(9_000),
             storage_total_mib: Some(30_000),
         };
-        let decoded = decode(&status_frame((1, 192, 7), 5, &status)).unwrap();
+        let decoded = decode(&status_frame((1, 192, 7), &status)).unwrap();
         assert_eq!((decoded.system_id, decoded.component_id), (1, 192));
         assert_eq!(
             decoded.message,
@@ -172,6 +219,43 @@ mod tests {
             (mav_type.as_str(), autopilot.as_str()),
             ("OnboardController", "Invalid")
         );
+    }
+
+    #[test]
+    fn a_computer_answers_only_the_timesync_requests_addressed_to_it() {
+        let ask = |target| crate::sim::timesync_frame((255, 190, 0), (0, 42), target);
+        let reply = timesync_reply(&ask((1, 0)), (1, 192), 3, 1_700_000_000_000_000_000).unwrap();
+        let decoded = decode(&reply).unwrap();
+        assert_eq!((decoded.system_id, decoded.component_id), (1, 192));
+        assert_eq!(
+            decoded.message,
+            Message::Timesync {
+                tc1: 1_700_000_000_000_000_000,
+                ts1: 42,
+                target_system: 255,
+                target_component: 190,
+            }
+        );
+        assert!(timesync_reply(&ask((0, 192)), (1, 192), 0, 1).is_some());
+        assert!(
+            timesync_reply(&ask((2, 0)), (1, 192), 0, 1).is_none(),
+            "another vehicle"
+        );
+        assert!(
+            timesync_reply(&ask((1, 1)), (1, 192), 0, 1).is_none(),
+            "the autopilot"
+        );
+        assert!(
+            timesync_reply(&ask((1, 0)), (1, 1), 0, 1).is_none(),
+            "never as the autopilot"
+        );
+        let a_reply = crate::sim::timesync_frame((255, 190, 0), (7, 42), (1, 0));
+        assert!(
+            timesync_reply(&a_reply, (1, 192), 0, 1).is_none(),
+            "a reply is not a request"
+        );
+        let own = crate::sim::timesync_frame((1, 192, 0), (0, 42), (1, 0));
+        assert!(timesync_reply(&own, (1, 192), 0, 1).is_none(), "not itself");
     }
 
     #[test]

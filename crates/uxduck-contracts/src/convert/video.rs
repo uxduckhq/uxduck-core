@@ -46,6 +46,32 @@ impl From<&core::VideoCounters> for dto::VideoCounters {
                 core::CameraClock::Klv => dto::CameraClock::Klv,
             }),
             camera_delay_us: v.camera_delay_us,
+            camera_delay_signed_us: v.camera_delay_signed_us,
+            camera_clock_matches: v.camera_clock_matches.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&core::ClockMatch> for dto::ClockMatch {
+    fn from(v: &core::ClockMatch) -> Self {
+        Self {
+            way: match v.way {
+                core::ClockWay::Companion => dto::ClockWay::Companion,
+                core::ClockWay::Rtsp => dto::ClockWay::Rtsp,
+                core::ClockWay::Assumed => dto::ClockWay::Assumed,
+            },
+            computer_id: v.computer_id,
+            offset_us: v.offset_us,
+            within_us: v.within_us,
+            used: v.used,
+            gap: v.gap.map(|gap| match gap {
+                core::ClockGap::NotServed => dto::ClockGap::NotServed,
+                core::ClockGap::NoReports => dto::ClockGap::NoReports,
+                core::ClockGap::NoAnswers => dto::ClockGap::NoAnswers,
+                core::ClockGap::OneWay => dto::ClockGap::OneWay,
+                core::ClockGap::DatedByPictures => dto::ClockGap::DatedByPictures,
+                core::ClockGap::OtherClock => dto::ClockGap::OtherClock,
+            }),
         }
     }
 }

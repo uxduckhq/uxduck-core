@@ -8,6 +8,13 @@
 //! any KLV, its frames lined up with the pictures by PLAY's `RTP-Info` and
 //! the two tracks' RTCP sender reports. Sound UXDuck does not record is
 //! named and not set up.
+//!
+//! The keepalive's `GET_PARAMETER` is timed by its `CSeq`, and the video's
+//! sender reports by when they were read: together they measure the
+//! server's clock against this computer's (S355), so its reports date
+//! pictures even when the two clocks are days apart. Once a second it asks
+//! the engine for the companion computer serving the camera, whose TIMESYNC
+//! clock dates them first (S357).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -21,6 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uxduck_core::domain::video::{VideoTrack, redact};
 use uxduck_media::audio::AudioUnit;
+use uxduck_media::latency::Arrival;
 use uxduck_media::nal::Codec;
 use uxduck_media::rtcp::{AudioSync, sender_report};
 use uxduck_media::rtp_audio::{AudioDepacketizer, Format};
@@ -45,6 +53,12 @@ const REPORT_EVERY: Duration = Duration::from_secs(1);
 /// Sound with neither `RTP-Info` nor sender reports for this long is lined
 /// up by when it arrives (S149).
 const ALIGN_BY_ARRIVAL_AFTER: Duration = Duration::from_secs(3);
+/// `GET_PARAMETER` once a second for the first 10 s of playing, then every
+/// 5 s, or the keepalive if the server asks for one sooner: round trips
+/// enough for the fastest to time its clock (S355), never a load.
+const ASK_OFTEN: Duration = Duration::from_secs(1);
+const ASK_OFTEN_FOR: Duration = Duration::from_secs(10);
+const ASK_EVERY: Duration = Duration::from_secs(5);
 const USER_AGENT: &str = concat!("UXDuck/", env!("CARGO_PKG_VERSION"));
 
 /// An RTSP address, taken apart.
@@ -567,6 +581,9 @@ struct Session {
     challenge: Option<String>,
     /// The `Session` header SETUP gave.
     id: Option<String>,
+    /// When the latest read came: the last bytes of the frame just parsed
+    /// arrived then (S355).
+    read_at: Arrival,
 }
 
 impl Session {
@@ -587,6 +604,7 @@ impl Session {
             address,
             challenge: None,
             id: None,
+            read_at: Arrival::now(),
         })
     }
 
@@ -673,6 +691,7 @@ impl Session {
         if read == 0 {
             return Err("the camera closed the connection".into());
         }
+        self.read_at = Arrival::now();
         self.buffer.extend_from_slice(&self.scratch[..read]);
         Ok(())
     }
@@ -756,6 +775,9 @@ struct Playing {
     sound_description: Option<Sound>,
     note: Option<String>,
     keepalive: Duration,
+    /// The `Server` header, which says whether its sender reports are
+    /// dated when sent.
+    server: Option<String>,
 }
 
 /// An RTSP camera's sound track while it plays (S149).
@@ -880,6 +902,7 @@ async fn set_up(
         .or_else(|| headers.get("content-location"))
         .cloned()
         .unwrap_or_else(|| address.url.clone());
+    let server = headers.get("server").cloned();
     let sdp = String::from_utf8_lossy(&body);
     let offered = tracks(&sdp, &base)?;
     let chosen = address.track.unwrap_or(1);
@@ -957,6 +980,7 @@ async fn set_up(
         sound_description,
         note,
         keepalive: Duration::from_secs((timeout / 2).clamp(5, 25)),
+        server,
     })
 }
 
@@ -1028,6 +1052,7 @@ async fn play(
         sound_description,
         note,
         keepalive,
+        server,
     } = tokio::time::timeout(
         Duration::from_secs(15),
         set_up(source_id, &address, engine, epoch),
@@ -1041,12 +1066,16 @@ async fn play(
         Payload::Video(codec) => Source::rtp(codec, &video.parameter_sets),
         // As from the UDP listener: the demuxer finds the video and KLV.
         Payload::Ts => Source::new(),
-    };
+    }
+    .over_rtsp(server.as_deref());
     if let Some(description) = sound_description {
         source.sound_track(description);
     }
+    let playing = Instant::now();
     let mut last_picture = tokio::time::Instant::now();
-    let mut last_keepalive = Instant::now();
+    let mut last_keepalive = playing;
+    // The GET_PARAMETER awaiting its answer: its CSeq and when it was sent.
+    let mut asked: Option<(u32, Instant)> = None;
     let mut reported = (Instant::now(), 0u64, 0u64);
     let mut klv_posted = None;
     let mut video_us = 0u64;
@@ -1094,7 +1123,7 @@ async fn play(
             // the video's dates its pictures by the camera's clock (S262).
             Frame::Interleaved { channel: 1, data } => {
                 if let Some(report) = sender_report(&data) {
-                    source.sender_report(report);
+                    source.server_report(report, s.read_at);
                     if let Some(sound) = sound.as_mut() {
                         sound.sync.video_report(report);
                     }
@@ -1105,10 +1134,27 @@ async fn play(
                     sound.sync.audio_report(report);
                 }
             }
-            // KLV's RTCP and keepalive answers.
-            Frame::Interleaved { .. } | Frame::Response { .. } => {}
+            // Any answer to the keepalive is a round trip (S355).
+            Frame::Response { headers, .. } => {
+                if let Some((cseq, sent)) = asked
+                    && headers.get("cseq").and_then(|c| c.parse().ok()) == Some(cseq)
+                {
+                    source.round_trip(sent, s.read_at.at);
+                    asked = None;
+                }
+            }
+            // KLV's RTCP.
+            Frame::Interleaved { .. } => {}
         }
         if reported.0.elapsed() >= REPORT_EVERY {
+            let (id, host) = (source_id.to_owned(), address.host.clone());
+            source.companion(
+                engine
+                    .run(move |e| e.camera_companion(&id, &host))
+                    .await
+                    .ok()
+                    .flatten(),
+            );
             let status = source.status();
             let elapsed = reported.0.elapsed().as_secs_f64();
             let mut observed = report(
@@ -1130,9 +1176,15 @@ async fn play(
             let id = source_id.to_owned();
             engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_observed(observed)));
         }
-        if last_keepalive.elapsed() >= keepalive {
+        let every = if playing.elapsed() < ASK_OFTEN_FOR {
+            ASK_OFTEN
+        } else {
+            ASK_EVERY.min(keepalive)
+        };
+        if last_keepalive.elapsed() >= every {
             last_keepalive = Instant::now();
             s.send("GET_PARAMETER", &base, &[]).await?;
+            asked = Some((s.cseq, last_keepalive));
         }
     }
 }

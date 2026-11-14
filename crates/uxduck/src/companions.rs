@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use uxduck_core::domain::companion::CompanionComputer;
+use uxduck_core::domain::companion::{CompanionClock, CompanionComputer};
 use uxduck_engine::companions::{CheckAnswer, CompanionOrder, CompanionPort, Found};
 use uxduck_engine::runtime::Credentials as _;
 
@@ -107,8 +107,26 @@ fn own_key(credentials: &mut FileCredentials) -> Result<OwnKey, String> {
     })
 }
 
-/// What the computer is asked: its system, architecture and UXDuck.
-const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v""#;
+/// What the computer is asked: its system, architecture and UXDuck, then
+/// its clock (S356), whether the kernel says it is synchronised and network
+/// time is on (`timedatectl`, where there is one) and which time service
+/// runs (`systemctl`, where there is one).
+const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v"; echo "clock=$(date +%s%N 2>/dev/null)"; if command -v timedatectl >/dev/null 2>&1; then timedatectl show -p NTP -p NTPSynchronized 2>/dev/null; fi; if command -v systemctl >/dev/null 2>&1; then for s in systemd-timesyncd chrony chronyd ntpsec ntp ntpd openntpd; do if systemctl is-active --quiet "$s" 2>/dev/null; then echo "timeservice=$s"; fi; done; fi"#;
+
+/// One `ssh`'s output, and when it started and ended on this computer's
+/// wall clock, in nanoseconds since 1970, which bound when the computer read
+/// its clock.
+struct Ran {
+    output: std::process::Output,
+    started_ns: i64,
+    ended_ns: i64,
+}
+
+fn wall_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+}
 
 pub struct Host {
     dir: PathBuf,
@@ -253,7 +271,8 @@ pub(crate) async fn check(
     let mut output = None;
     for way in ways {
         let tried = run(dir, config, computer, &known_hosts, way, None).await?;
-        let again = !tried.status.success() && refused(&String::from_utf8_lossy(&tried.stderr));
+        let again = !tried.output.status.success()
+            && refused(&String::from_utf8_lossy(&tried.output.stderr));
         output = Some(tried);
         if !again {
             break;
@@ -343,7 +362,8 @@ async fn network(
         vec![Way::Person]
     };
     for way in ways {
-        let output = run(dir, None, computer, &trusted, way, Some(input)).await?;
+        let ran = run(dir, None, computer, &trusted, way, Some(input)).await?;
+        let output = &ran.output;
         if !output.status.success() && refused(&String::from_utf8_lossy(&output.stderr)) {
             continue;
         }
@@ -368,12 +388,12 @@ async fn network(
             // reapplying routes. Otherwise the companion restores its checkpoint.
             let confirmed = run(dir, None, computer, &trusted, way, Some(&confirm)).await
                 .map_err(|_| "The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".to_owned())?;
-            if !confirmed.status.success() {
+            if !confirmed.output.status.success() {
                 return Err("The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".into());
             }
             return answer(computer, sign_in, &confirmed);
         }
-        return answer(computer, sign_in, &output);
+        return answer(computer, sign_in, &ran);
     }
     Err("SSH could not sign in. Check the computer again before configuring networks.".into())
 }
@@ -390,7 +410,7 @@ async fn run(
     known_hosts: &Path,
     way: Way<'_>,
     network: Option<&str>,
-) -> Result<std::process::Output, String> {
+) -> Result<Ran, String> {
     let key_file = dir.join(format!("{}.key", computer.id));
     let askpass_file = dir.join(format!("{}.askpass", computer.id));
     let theirs = if network.is_none() {
@@ -507,6 +527,7 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let started_ns = wall_ns();
     let ran = tokio::time::timeout(CHECK_TIMEOUT, async {
         use tokio::io::AsyncWriteExt as _;
         let mut child = command.spawn()?;
@@ -521,6 +542,7 @@ async fn run(
         child.wait_with_output().await
     })
     .await;
+    let ended_ns = wall_ns();
     for file in [&key_file, &askpass_file] {
         let _ = std::fs::remove_file(file);
     }
@@ -535,16 +557,17 @@ async fn run(
                 .to_owned(),
         ),
         Ok(Err(error)) => Err(format!("Cannot run ssh: {error}")),
-        Ok(Ok(output)) => Ok(output),
+        Ok(Ok(output)) => Ok(Ran {
+            output,
+            started_ns,
+            ended_ns,
+        }),
     }
 }
 
 /// What a finished `ssh` says: the computer's system, or why not.
-fn answer(
-    computer: &CompanionComputer,
-    sign_in: SignIn<'_>,
-    output: &std::process::Output,
-) -> Result<Found, String> {
+fn answer(computer: &CompanionComputer, sign_in: SignIn<'_>, ran: &Ran) -> Result<Found, String> {
+    let output = &ran.output;
     let pinned = computer.check.as_ref().and_then(|c| c.host_key.as_deref());
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -573,6 +596,16 @@ fn answer(
             .filter(|v| !v.is_empty())
             .map(str::to_owned)
     };
+    let yes = |name: &str| field(name).map(|v| v == "yes");
+    let clock = field("clock")
+        .and_then(|read| clock_read(&read, (ran.started_ns, ran.ended_ns)))
+        .map(|(offset_ms, within_ms)| CompanionClock {
+            offset_ms,
+            within_ms,
+            synchronised: yes("NTPSynchronized"),
+            ntp: yes("NTP"),
+            service: field("timeservice"),
+        });
     Ok(Found {
         network: field("network")
             .map(|json| serde_json::from_str(&json))
@@ -582,7 +615,34 @@ fn answer(
         arch: field("arch"),
         uxduck: field("uxduck").map(|v| v.strip_prefix("uxduck ").unwrap_or(&v).to_owned()),
         host_key: Some(host_key),
+        clock,
     })
+}
+
+/// The computer's clock, `date +%s%N` as it printed it, against this
+/// computer's while the command ran (S356): its offset from the middle of
+/// that time and half of it, in milliseconds. A `date` without `%N`
+/// (macOS, busybox) prints whole seconds and a letter, read as the middle of
+/// its second with half a second more doubt. None for anything else.
+fn clock_read(read: &str, (started_ns, ended_ns): (i64, i64)) -> Option<(i64, u64)> {
+    let digits = read.trim_end_matches(|c: char| !c.is_ascii_digit());
+    let value: i64 = digits.parse().ok()?;
+    let (read_ns, doubt_ns) = if digits.len() == read.len() && digits.len() > 12 {
+        (value, 0)
+    } else {
+        (
+            value.checked_mul(1_000_000_000)?.checked_add(500_000_000)?,
+            500_000_000,
+        )
+    };
+    let middle_ns = started_ns.checked_add(ended_ns.checked_sub(started_ns)? / 2)?;
+    let half_ns = (ended_ns.checked_sub(started_ns)? / 2).checked_add(doubt_ns)?;
+    let offset_ns = read_ns.checked_sub(middle_ns)?;
+    let ms = 1_000_000;
+    Some((
+        (offset_ns + offset_ns.signum() * ms / 2) / ms,
+        u64::try_from((half_ns + ms - 1) / ms).ok()?,
+    ))
 }
 
 /// Adds `public` to the signed-in user's `authorized_keys` once, and says so.
@@ -855,6 +915,7 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            clock: None,
             network: None,
         });
         let port = first.port;
@@ -897,6 +958,13 @@ mod tests {
         );
         let pinned = found.host_key.clone().unwrap();
         assert!(pinned.starts_with("SHA256:"));
+        // The same computer's clock: in step, to within the command's time.
+        let clock = found.clock.clone().expect("its clock is read");
+        assert!(
+            clock.offset_ms.unsigned_abs() <= clock.within_ms + 1,
+            "{clock:?}"
+        );
+        assert!(clock.within_ms < 30_000, "{clock:?}");
         assert!(
             !keys.path().join("cctest.key").exists(),
             "the key is not left on disk"
@@ -909,6 +977,7 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            clock: None,
             network: None,
         });
         let again = check(
@@ -946,6 +1015,7 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            clock: None,
             network: None,
         });
         let port = first.port;
@@ -1032,6 +1102,7 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            clock: None,
             network: None,
         });
         let port = first.port;
@@ -1074,6 +1145,72 @@ mod tests {
             ) & 0o777,
             0o600
         );
+    }
+
+    fn ran(stdout: &str, (started_ns, ended_ns): (i64, i64)) -> Ran {
+        Ran {
+            output: std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: b"debug1: Server host key: ssh-ed25519 SHA256:abc\n".to_vec(),
+            },
+            started_ns,
+            ended_ns,
+        }
+    }
+
+    #[test]
+    fn a_check_reads_the_clock_and_whether_it_keeps_time() {
+        // 13 November 2026, the command taking 400 ms, and a computer that
+        // read its clock 8 days 6 h behind halfway through.
+        let started = 1_794_000_000_000_000_000;
+        let ended = started + 400_000_000;
+        let read = started + 200_000_000 - 712_800_000_000_000;
+        let computer = CompanionComputer {
+            id: "c".into(),
+            name: "pi".into(),
+            host: "pi".into(),
+            user: None,
+            port: None,
+            role: CompanionRole::Report,
+            component_id: 192,
+            key: false,
+            check: None,
+            connectivity: None,
+        };
+        let out = format!(
+            "os=Debian GNU/Linux 13 (trixie)\narch=aarch64\nuxduck=\nclock={read}\nNTP=yes\nNTPSynchronized=no\ntimeservice=systemd-timesyncd\n"
+        );
+        let found = answer(&computer, SignIn::default(), &ran(&out, (started, ended))).unwrap();
+        assert_eq!(
+            found.clock,
+            Some(CompanionClock {
+                offset_ms: -712_800_000,
+                within_ms: 200,
+                synchronised: Some(false),
+                ntp: Some(true),
+                service: Some("systemd-timesyncd".into()),
+            })
+        );
+        // Without timedatectl or systemd (Alpine, a container), and with a
+        // date that has no nanoseconds: the clock alone, with more doubt.
+        let seconds = (started + 200_000_000) / 1_000_000_000;
+        let out = format!("os=Alpine Linux v3.20\narch=x86_64\nclock={seconds}N\n");
+        let found = answer(&computer, SignIn::default(), &ran(&out, (started, ended))).unwrap();
+        let clock = found.clock.unwrap();
+        assert_eq!((clock.offset_ms, clock.within_ms), (300, 700));
+        assert_eq!(
+            (clock.synchronised, clock.ntp, clock.service),
+            (None, None, None)
+        );
+        // No date at all: no clock, and the rest as before.
+        let found = answer(
+            &computer,
+            SignIn::default(),
+            &ran("os=x\nclock=\n", (started, ended)),
+        )
+        .unwrap();
+        assert_eq!((found.os.as_deref(), found.clock), (Some("x"), None));
     }
 
     #[test]

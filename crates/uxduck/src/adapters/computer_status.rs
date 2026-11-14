@@ -92,6 +92,7 @@ fn status_of(
     let root = disks.iter().find(|(mount, ..)| *mount == Path::new("/"));
     let mib = |bytes: u64| u32::try_from(bytes / MIB).unwrap_or(u32::MAX - 1);
     ComputerStatus {
+        time_usec: 0,
         uptime_ms: u32::try_from(uptime_s.saturating_mul(1000)).unwrap_or(u32::MAX),
         cpu_cores_pct: cores.iter().take(8).map(|p| clamp_pct(*p)).collect(),
         board_degc: None,
@@ -138,6 +139,7 @@ mod tests {
         assert_eq!(
             status,
             ComputerStatus {
+                time_usec: 0,
                 uptime_ms: 90_000,
                 cpu_cores_pct: vec![12, 100, 0, 50],
                 board_degc: None,

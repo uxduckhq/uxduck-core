@@ -1474,6 +1474,7 @@ mod tests {
     #[test]
     fn each_onboard_computer_has_its_own_items_and_unused_fields_none() {
         let status = crate::computer::ComputerStatus {
+            time_usec: 0,
             uptime_ms: 90_500,
             cpu_cores_pct: vec![10, 30],
             board_degc: None,

@@ -152,20 +152,93 @@ pub struct VideoCounters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub camera_clock: Option<CameraClock>,
     /// From capture by that clock to arrival, the median over the last
-    /// second; none when the two clocks are not in step (S262).
+    /// second, the camera's clock matched as `camera_clock_matches` says;
+    /// none when that is not plausible (S262, S355).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub camera_delay_us: Option<u64>,
+    /// The same median before the check, so a camera whose clock dates
+    /// pictures after they arrive can say by how much (S355).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_delay_signed_us: Option<i64>,
+    /// The ways of matching the camera's clock to this computer's, in the
+    /// order they are tried, and the one used (S355). Empty for a camera
+    /// that sends no clock.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub camera_clock_matches: Vec<ClockMatch>,
 }
 
 impl VideoCounters {
     /// Nothing arriving: no bitrate, and nothing to say about how late.
-    pub const fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.bitrate_bps = 0;
         self.hold_us = None;
         self.jitter_us = None;
         self.camera_clock = None;
         self.camera_delay_us = None;
+        self.camera_delay_signed_us = None;
+        self.camera_clock_matches.clear();
     }
+}
+
+/// One way of matching a camera's clock to this computer's, and what it
+/// found (S355).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClockMatch {
+    pub way: ClockWay,
+    /// The companion computer's onboard id, for `Companion` (S357).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<u8>,
+    /// The camera's clock minus this computer's, once measured: 0 for
+    /// `Assumed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_us: Option<i64>,
+    /// Give or take, once measured; none for `Assumed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_us: Option<u64>,
+    /// Whether this way dates the pictures: the first with a measurement.
+    #[serde(default)]
+    pub used: bool,
+    /// Why it is not used, when that is not because a way before it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<ClockGap>,
+}
+
+/// A way of matching a camera's clock to this computer's (S355).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClockWay {
+    /// The clock of the companion computer serving the camera, measured by
+    /// MAVLink TIMESYNC (S357). Tried first.
+    Companion,
+    /// The RTSP server's clock, from its sender reports and `GET_PARAMETER`
+    /// round trips. Used only for sender reports' times.
+    Rtsp,
+    /// The two clocks assumed in step (S262).
+    Assumed,
+}
+
+/// Why a way of matching a camera's clock is not used (S355).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClockGap {
+    /// The camera is not reached this way: not over RTSP, or no companion
+    /// computer serves it.
+    NotServed,
+    /// No sender report in the last minute.
+    NoReports,
+    /// No answer to a request in the last minute.
+    NoAnswers,
+    /// Read only one way, from the companion computer's status messages:
+    /// too rough to date pictures (S357).
+    OneWay,
+    /// The RTSP server's sender reports say when each picture was taken but
+    /// not when they were sent, as gortsplib's (`MediaMTX`) do, so its clock
+    /// dates no picture.
+    DatedByPictures,
+    /// Not the clock the camera dates its pictures by, as for a KLV time
+    /// stamp, which may come from GPS on another machine.
+    OtherClock,
 }
 
 /// Where a camera says when it captured a picture (S262).

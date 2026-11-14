@@ -9,7 +9,9 @@ use std::time::Instant;
 use crate::aac::{adts_frames, other_audio_name};
 use crate::au::{AccessUnit, Filter};
 use crate::audio::{AudioConfig, AudioUnit};
-use crate::latency::{Arrival, CameraClock, CameraDelay, CaptureDelay, Jitter, rtp_capture_us};
+use crate::latency::{
+    Arrival, CameraClock, CameraDelay, CaptureDelay, Companion, Jitter, ServerClock, rtp_capture_us,
+};
 use crate::nal::{Codec, SpsInfo};
 use crate::rtcp::{SenderReport, sender_report};
 use crate::rtp::{Depacketizer, Header};
@@ -98,8 +100,8 @@ pub struct Status {
     pub counters: Counters,
     /// RFC 3550 interarrival jitter, in microseconds (S262).
     pub jitter_us: Option<u64>,
-    /// The camera's clock and, when plausible, how late its pictures
-    /// arrive by it (S262).
+    /// The camera's clock, how it was matched to this computer's (S355)
+    /// and, when plausible, how late its pictures arrive by it (S262).
     pub camera: Option<CameraDelay>,
 }
 
@@ -189,6 +191,10 @@ pub struct Source {
     /// The latest sender report for the RTP video, from RTCP.
     sender_report: Option<SenderReport>,
     capture: CaptureDelay,
+    /// The RTSP server's clock, for a camera reached over RTSP (S355).
+    server_clock: Option<ServerClock>,
+    /// The companion computer serving the camera, and its clock (S357).
+    companion: Option<Companion>,
 }
 
 impl Default for Source {
@@ -223,7 +229,19 @@ impl Source {
             jitter: Jitter::default(),
             sender_report: None,
             capture: CaptureDelay::default(),
+            server_clock: None,
+            companion: None,
         }
+    }
+
+    /// The same, for a camera reached over RTSP: its server's clock is
+    /// measured too, from `server_report` and `round_trip` (S355), and not
+    /// used when its `Server` header names a server whose reports do not
+    /// say when they were sent.
+    #[must_use]
+    pub fn over_rtsp(mut self, server: Option<&str>) -> Self {
+        self.server_clock = Some(ServerClock::new(server));
+        self
     }
 
     /// RTP video whose codec the SDP said, with the parameter sets it gave
@@ -537,6 +555,29 @@ impl Source {
         self.sender_report = Some(report);
     }
 
+    /// As `sender_report`, from an RTSP server, and when it arrived: it
+    /// times the server's clock too (S355).
+    pub fn server_report(&mut self, report: SenderReport, arrival: Arrival) {
+        self.sender_report = Some(report);
+        if let Some(clock) = &mut self.server_clock {
+            clock.report(report.ntp, arrival);
+        }
+    }
+
+    /// The companion computer serving the camera and its clock, as the
+    /// engine knows them now (S357): tried before the RTSP server's.
+    pub const fn companion(&mut self, companion: Option<Companion>) {
+        self.companion = companion;
+    }
+
+    /// A request the RTSP server answered, sent then and answered now,
+    /// whatever its answer: a round trip that times its clock (S355).
+    pub fn round_trip(&mut self, sent: Instant, answered: Instant) {
+        if let Some(clock) = &mut self.server_clock {
+            clock.round_trip(sent, answered);
+        }
+    }
+
     fn push_rtp(&mut self, header: &Header, payload: &[u8], arrival: Arrival) -> Vec<Output> {
         self.rtp_packets += 1;
         let mut out = Vec::new();
@@ -664,7 +705,11 @@ impl Source {
             audio: self.sound(),
             counters: self.counters(),
             jitter_us: self.jitter.us(),
-            camera: self.capture.summary(Instant::now()),
+            camera: self.capture.summary(
+                Instant::now(),
+                self.companion.as_ref(),
+                self.server_clock.as_ref(),
+            ),
         }
     }
 }

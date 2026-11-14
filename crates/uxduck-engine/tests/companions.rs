@@ -18,6 +18,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::DaemonCapabilities;
 use uxduck_contracts::dto::trace::Transport;
+use uxduck_core::domain::companion::CompanionClock;
 use uxduck_core::domain::link::Link;
 use uxduck_core::domain::vehicle::{Observation, Presence};
 use uxduck_core::policy::admission::Trust;
@@ -329,6 +330,13 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
             arch: Some("aarch64".into()),
             uxduck: None,
             host_key: Some("SHA256:first".into()),
+            clock: Some(CompanionClock {
+                offset_ms: -712_800_000,
+                within_ms: 240,
+                synchronised: Some(false),
+                ntp: Some(true),
+                service: Some("systemd-timesyncd".into()),
+            }),
         }),
     });
     let check = engine.state().vehicles["v"].companions[0]
@@ -338,6 +346,24 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     assert_eq!(check.os.as_deref(), Some("Debian GNU/Linux 12 (bookworm)"));
     assert_eq!(check.uxduck, None);
     assert_eq!(check.host_key.as_deref(), Some("SHA256:first"));
+    assert_eq!(
+        check.clock.as_ref().map(|c| c.offset_ms),
+        Some(-712_800_000)
+    );
+    let wire = serde_json::to_value(uxduck_contracts::dto::vehicle::Vehicle::from(
+        &engine.state().vehicles["v"],
+    ))
+    .unwrap();
+    assert_eq!(
+        wire["companions"][0]["check"]["clock"],
+        json!({
+            "offsetMs": -712_800_000,
+            "withinMs": 240,
+            "synchronised": false,
+            "ntp": true,
+            "service": "systemd-timesyncd",
+        })
+    );
 
     // A password goes to the host for this check alone, never onto the vehicle.
     let with_password = json!({ "vehicleId": "v", "computerId": id, "password": "raspberry" });

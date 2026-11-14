@@ -16,9 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use uxduck_core::domain::video::{
-    CameraClock, CameraMetadata, VideoAudio, VideoContainer, VideoCounters, VideoReport, source_id,
-    split_source_id,
+    CameraClock, CameraMetadata, ClockGap, ClockMatch, ClockWay, VideoAudio, VideoContainer,
+    VideoCounters, VideoReport, source_id, split_source_id,
 };
+use uxduck_media::latency;
 use uxduck_media::source::{Output, Source, Status};
 use uxduck_media::udp::Container;
 
@@ -329,7 +330,35 @@ pub(super) fn report(
                 uxduck_media::latency::CameraClock::Klv => CameraClock::Klv,
             }),
             camera_delay_us: status.camera.and_then(|camera| camera.delay_us),
+            camera_delay_signed_us: status.camera.and_then(|camera| camera.signed_us),
+            camera_clock_matches: status
+                .camera
+                .map(|camera| camera.matches.iter().map(clock_match).collect())
+                .unwrap_or_default(),
         },
+    }
+}
+
+/// A way of matching the camera's clock, as the daemon reports it (S355).
+fn clock_match(m: &latency::ClockMatch) -> ClockMatch {
+    ClockMatch {
+        way: match m.way {
+            latency::ClockWay::Companion => ClockWay::Companion,
+            latency::ClockWay::Rtsp => ClockWay::Rtsp,
+            latency::ClockWay::Assumed => ClockWay::Assumed,
+        },
+        computer_id: m.computer_id,
+        offset_us: m.offset_us,
+        within_us: m.within_us,
+        used: m.used,
+        gap: m.gap.map(|gap| match gap {
+            latency::ClockGap::NotServed => ClockGap::NotServed,
+            latency::ClockGap::NoReports => ClockGap::NoReports,
+            latency::ClockGap::NoAnswers => ClockGap::NoAnswers,
+            latency::ClockGap::OneWay => ClockGap::OneWay,
+            latency::ClockGap::DatedByPictures => ClockGap::DatedByPictures,
+            latency::ClockGap::OtherClock => ClockGap::OtherClock,
+        }),
     }
 }
 
@@ -427,6 +456,8 @@ mod tests {
         assert!(report.counters.jitter_us.is_some());
         assert_eq!(report.counters.camera_clock, None);
         assert_eq!(report.counters.camera_delay_us, None);
+        assert_eq!(report.counters.camera_delay_signed_us, None);
+        assert!(report.counters.camera_clock_matches.is_empty());
         assert_eq!(report.counters.hold_us, None);
     }
 }

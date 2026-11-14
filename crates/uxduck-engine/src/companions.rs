@@ -11,7 +11,7 @@ use uxduck_contracts::dto::companion::{
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::companion::{
-    self, CheckState, CompanionCheck, CompanionComputer, CompanionRole,
+    self, CheckState, CompanionCheck, CompanionClock, CompanionComputer, CompanionRole,
 };
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::{Actor, Change};
@@ -68,6 +68,8 @@ pub struct Found {
     pub arch: Option<String>,
     pub uxduck: Option<String>,
     pub host_key: Option<String>,
+    /// Its clock against this computer's (S356), when it could be read.
+    pub clock: Option<CompanionClock>,
     pub network: Option<companion::CompanionNetwork>,
 }
 
@@ -450,6 +452,7 @@ impl Engine {
             uxduck: None,
             host_key: pinned,
             problem: None,
+            clock: None,
             network: None,
         });
         let order = CompanionOrder::Check {
@@ -493,6 +496,7 @@ impl Engine {
                 uxduck: found.uxduck,
                 host_key: found.host_key.or(pinned),
                 problem: None,
+                clock: found.clock,
             },
             Err(problem) => CompanionCheck {
                 state: CheckState::Failed,
@@ -502,6 +506,7 @@ impl Engine {
                 uxduck: None,
                 host_key: pinned,
                 problem: Some(problem),
+                clock: None,
                 network: computer.check.as_ref().and_then(|c| c.network.clone()),
             },
         });

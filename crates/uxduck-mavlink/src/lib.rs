@@ -10,6 +10,7 @@ pub mod bootloader;
 pub mod camera;
 pub mod commands;
 pub mod computer;
+pub mod computer_clock;
 pub mod custom;
 pub mod dataflash;
 pub mod decode;

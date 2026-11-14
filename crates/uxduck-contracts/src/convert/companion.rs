@@ -46,6 +46,13 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                 uxduck: check.uxduck.clone(),
                 host_key: check.host_key.clone(),
                 problem: check.problem.clone(),
+                clock: check.clock.as_ref().map(|clock| dto::CompanionClock {
+                    offset_ms: clock.offset_ms,
+                    within_ms: clock.within_ms,
+                    synchronised: clock.synchronised,
+                    ntp: clock.ntp,
+                    service: clock.service.clone(),
+                }),
                 network: check.network.as_ref().map(|n| dto::CompanionNetwork {
                     wifi: n
                         .wifi

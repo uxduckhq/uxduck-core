@@ -3,8 +3,15 @@
 //! heartbeat as an onboard controller and `ONBOARD_COMPUTER_STATUS`, from
 //! the vehicle's system id and one of the four onboard computer component
 //! ids. The ground station shows them with the vehicle's telemetry.
+//!
+//! It also answers the ground station's `TIMESYNC` requests addressed to it
+//! with this computer's wall clock (S356), so the ground station can tell
+//! how far this computer's clock is from its own. It stamps each status
+//! with that clock as it is sent, for a ground station that only reads
+//! those.
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use uxduck_mavlink::computer::{self, COMPUTER_IDS};
 
@@ -12,6 +19,11 @@ use crate::adapters::computer_status::Sampler;
 
 /// An id heard this recently is someone else's.
 const HEARD_FOR_US: u64 = 10_000_000;
+
+/// A test seam, never set in use: milliseconds added to this computer's
+/// clock where it is told to the ground station, so a test can run a
+/// computer whose clock is wrong without setting the real one.
+pub const CLOCK_OFFSET_ENV: &str = "UXDUCK_ONBOARD_CLOCK_OFFSET_MS";
 
 /// What `--onboard` and `--computer-id` asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,6 +43,10 @@ pub struct Computer {
     sequence: u8,
     /// Every id was taken, already said once.
     full: BTreeSet<u8>,
+    /// The system and component ids it sent its status as last.
+    sending: Vec<(u8, u8)>,
+    /// Added to this computer's clock where it is told ([`CLOCK_OFFSET_ENV`]).
+    offset_ns: i64,
 }
 
 impl Computer {
@@ -42,7 +58,42 @@ impl Computer {
             heard: HashMap::new(),
             sequence: 0,
             full: BTreeSet::new(),
+            sending: Vec::new(),
+            offset_ns: std::env::var(CLOCK_OFFSET_ENV)
+                .ok()
+                .and_then(|ms| ms.trim().parse::<i64>().ok())
+                .map_or(0, |ms| ms.saturating_mul(1_000_000)),
         }
+    }
+
+    /// This computer's wall clock as it tells it, in nanoseconds since 1970.
+    pub fn now_ns(&self) -> i64 {
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
+        ns.saturating_add(self.offset_ns)
+    }
+
+    /// Its replies to a `TIMESYNC` request addressed to it, from each id it
+    /// sends as (S356): the asker gets this computer's clock. Anything
+    /// else, and a request before it has sent its first status, has none.
+    /// A router such as mavp2p passes a companion the vehicle's whole
+    /// stream, so any other message is let go on its header alone.
+    pub fn answer(&mut self, request: &[u8]) -> Vec<Vec<u8>> {
+        let timesync = uxduck_mavlink::framing::header(request)
+            .is_some_and(|h| h.message_id == uxduck_mavlink::link_health::TIMESYNC);
+        if !timesync {
+            return Vec::new();
+        }
+        let now_ns = self.now_ns();
+        let mut replies = Vec::new();
+        for from in self.sending.clone() {
+            if let Some(reply) = computer::timesync_reply(request, from, self.sequence, now_ns) {
+                self.next();
+                replies.push(reply);
+            }
+        }
+        replies
     }
 
     /// A frame from a vehicle's link. Another computer with this one's id
@@ -100,16 +151,19 @@ impl Computer {
             .into_iter()
             .filter_map(|system| Some((system, self.id_for(system, now_us)?)))
             .collect();
+        self.sending.clone_from(&ids);
         if ids.is_empty() {
             return Vec::new();
         }
-        let status = self.sampler.sample();
+        let mut status = self.sampler.sample();
+        // Stamped once sampled, as it goes, for a ground station that reads
+        // this computer's clock from it.
+        status.time_usec = u64::try_from(self.now_ns() / 1000).unwrap_or(0);
         let mut frames = Vec::new();
         for (system, component) in ids {
             frames.push(computer::heartbeat_frame((system, component, self.next())));
             frames.push(computer::status_frame(
                 (system, component, self.next()),
-                now_us,
                 &status,
             ));
         }
@@ -171,6 +225,66 @@ mod tests {
         assert_eq!(senders(&chosen.frames([1], 2))[0].1, 191);
         chosen.heard(1, 191, 3, true);
         assert_eq!(senders(&chosen.frames([1], 4))[0].1, 192);
+    }
+
+    #[test]
+    fn it_answers_the_ground_stations_timesync_with_its_clock_and_stamps_its_status() {
+        let mut computer = Computer::new(Onboard {
+            component_id: Some(192),
+        });
+        computer.offset_ns = -712_800_000_000_000;
+        let request = uxduck_mavlink::sim::timesync_frame((255, 190, 0), (0, 42), (1, 0));
+        assert!(computer.answer(&request).is_empty(), "nothing sent as yet");
+        let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let frames = computer.frames([1], 0);
+        let Some(Message::OnboardComputerStatus(status)) = decode(&frames[1]).map(|d| d.message)
+        else {
+            panic!("a status");
+        };
+        let stamped_ms = i64::try_from(status.time_usec / 1000).unwrap();
+        let before_ms = i64::try_from(before.as_millis()).unwrap();
+        assert!(
+            (stamped_ms - (before_ms - 712_800_000)).abs() < 1_000,
+            "its own clock, offset: {stamped_ms}"
+        );
+        let replies = computer.answer(&request);
+        assert_eq!(replies.len(), 1);
+        let reply = decode(&replies[0]).unwrap();
+        let Message::Timesync {
+            tc1,
+            ts1,
+            target_system,
+            target_component,
+        } = reply.message
+        else {
+            panic!("a reply");
+        };
+        assert_eq!((reply.system_id, reply.component_id), (1, 192));
+        assert_eq!((ts1, target_system, target_component), (42, 255, 190));
+        assert!(
+            (tc1 / 1_000_000 - (before_ms - 712_800_000)).abs() < 1_000,
+            "{tc1}"
+        );
+        let sequence = |frame: &[u8]| uxduck_mavlink::framing::header(frame).unwrap().sequence;
+        assert_eq!(sequence(&replies[0]), sequence(&frames[1]).wrapping_add(1));
+        let elsewhere = uxduck_mavlink::sim::timesync_frame((255, 190, 1), (0, 42), (2, 0));
+        assert!(computer.answer(&elsewhere).is_empty(), "another vehicle's");
+        let autopilot = uxduck_mavlink::sim::timesync_frame((255, 190, 2), (0, 42), (1, 1));
+        assert!(computer.answer(&autopilot).is_empty(), "the autopilot's");
+        // A router such as mavp2p passes a companion the vehicle's whole
+        // stream: none of it is answered, the autopilot's own reply to the
+        // same request included.
+        let answered = uxduck_mavlink::sim::timesync_frame((1, 1, 3), (7_000, 42), (255, 190));
+        assert!(
+            computer.answer(&answered).is_empty(),
+            "the autopilot's reply"
+        );
+        assert!(computer.answer(&frames[0]).is_empty(), "a heartbeat");
+        assert_eq!(
+            computer.answer(&request).len(),
+            1,
+            "a sequence number is spent only on a reply"
+        );
     }
 
     #[test]

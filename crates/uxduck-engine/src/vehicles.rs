@@ -347,6 +347,8 @@ impl Engine {
         for old in duplicates {
             self.telemetry.remove(&old);
             self.link_health.remove(&old);
+            self.computer_clocks
+                .retain(|(vehicle_id, _), _| *vehicle_id != old);
             self.commit_as(data_plane(), Change::VehicleRemoved { id: old });
         }
     }

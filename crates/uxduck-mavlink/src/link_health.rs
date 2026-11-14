@@ -8,7 +8,12 @@
 //!   ([`Tracker::not_asked`]). A reply counts only when its `ts1` is one of
 //!   UXDuck's own outstanding requests to that address, so replies to
 //!   another ground station on the same channel and a PX4's own requests
-//!   (`tc1` 0) are never counted. At most [`OUTSTANDING`] requests are kept,
+//!   (`tc1` 0) are never counted. Only the vehicle's own components count:
+//!   an onboard computer (191 to 194, [`crate::computer::COMPUTER_IDS`])
+//!   that answers the same request is measuring its clock, not the link
+//!   (S356, [`crate::computer_clock`]), so its reply neither stands in for
+//!   the autopilot's round trip nor uses up the request the autopilot's reply
+//!   answers. At most [`OUTSTANDING`] requests are kept,
 //!   each for [`OUTSTANDING_US`]. What is reported is the median of the
 //!   round trips of the last [`ROUND_TRIP_WINDOW_US`]: one late reply does
 //!   not move it, and a change in the link shows within a few seconds.
@@ -84,9 +89,11 @@ struct Bucket {
 }
 
 impl Tracker {
-    /// One whole frame from a vehicle's address: its sequence, when it was
-    /// heard, and, for a `TIMESYNC` reply to one of UXDuck's requests, its
-    /// round trip. `gcs` is the system id UXDuck sends as.
+    /// One whole frame from a vehicle's address: its sequence, when it
+    /// arrived, and, for a `TIMESYNC` reply to one of UXDuck's requests, its
+    /// round trip. `gcs` is the system id UXDuck sends as. `now_us` is when
+    /// the frame arrived, not when the caller got to it, or the round trip
+    /// counts the wait.
     pub fn heard(&mut self, address: &Address, frame: &[u8], gcs: u8, now_us: u64) {
         let Some(header) = header(frame) else {
             return;
@@ -95,6 +102,7 @@ impl Tracker {
         health.last_heard_us = Some(now_us);
         health.sequence(header.component_id, header.sequence, now_us);
         if header.message_id == TIMESYNC
+            && !crate::computer::COMPUTER_IDS.contains(&header.component_id)
             && let Some(decoded) = decode(frame)
             && let Message::Timesync {
                 tc1,
@@ -430,6 +438,26 @@ mod tests {
         assert!(fake.answer(&elsewhere).is_empty(), "not for it");
         let a_reply = timesync_frame((GCS, crate::GCS_COMPONENT_ID, 2), (7, 5), (1, 0));
         assert!(fake.answer(&a_reply).is_empty(), "a reply is not a request");
+    }
+
+    #[test]
+    fn an_onboard_computers_reply_leaves_the_round_trip_to_the_autopilot() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        let ts1 = tracker.asked(&a, 1_000_000);
+        let computer = timesync_frame((1, 192, 0), (1_700_000_000_000_000_000, ts1), (GCS, 0));
+        tracker.heard(&a, &computer, GCS, 1_002_000);
+        assert_eq!(
+            tracker.report(&a, 1_002_000).round_trip_missing,
+            Some(RoundTripMissing::Waiting),
+            "a companion's reply is not the link's"
+        );
+        tracker.heard(&a, &reply(ts1, 1, GCS), GCS, 1_030_000);
+        assert_eq!(
+            tracker.report(&a, 1_030_000).round_trip_ms,
+            Some(30.0),
+            "the autopilot's reply still answers the request"
+        );
     }
 
     #[test]

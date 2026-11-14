@@ -50,8 +50,36 @@ pub struct CompanionCheck {
     /// Why it failed, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// Its clock as the check read it (S356); absent when it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<CompanionClock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<CompanionNetwork>,
+}
+
+/// A computer's clock as a check read it (S356): its time against this
+/// computer's, timed around the SSH command, and whether it keeps time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionClock {
+    /// Its clock less this computer's, in milliseconds: positive when it
+    /// is ahead.
+    pub offset_ms: i64,
+    /// How far the true offset may be from `offset_ms`: half the time the
+    /// SSH command took, signing in included.
+    pub within_ms: u64,
+    /// Whether its kernel says the clock is synchronised (`timedatectl`'s
+    /// `NTPSynchronized`); absent where `timedatectl` is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synchronised: Option<bool>,
+    /// Whether network time is turned on (`timedatectl`'s `NTP`); absent
+    /// where `timedatectl` is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp: Option<bool>,
+    /// The time service that runs, such as `systemd-timesyncd` or
+    /// `chrony`; absent when none does or it cannot be told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

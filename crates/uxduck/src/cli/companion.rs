@@ -3,11 +3,17 @@
 //! says how it is doing. Once a second it sends its heartbeat and
 //! `ONBOARD_COMPUTER_STATUS` as the vehicle's system id and its own onboard
 //! computer id to the ground station, which shows it with that vehicle.
+//!
+//! It answers the `TIMESYNC` requests that reach it addressed to it, the
+//! ground station's through a router such as mavlink-router or straight
+//! from the ground station, with this computer's clock (S356), and stamps
+//! each status with that clock as it goes.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use uxduck_contracts::dto::link::LinkKind;
+use uxduck_mavlink::framing::split;
 
 use super::client::CliError;
 use super::link_spec;
@@ -56,8 +62,23 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
     );
     let mut unreachable = vec![false; targets.len()];
     let mut timer = tokio::time::interval(Duration::from_secs(1));
+    let mut buffer = [0_u8; 2048];
     loop {
-        timer.tick().await;
+        tokio::select! {
+            _ = timer.tick() => {}
+            received = socket.recv_from(&mut buffer) => {
+                // A router or the ground station asking for this computer's
+                // clock; an error is an earlier send that went nowhere.
+                if let Ok((length, from)) = received {
+                    for frame in split(&buffer[..length]).frames {
+                        for reply in computer.answer(frame) {
+                            let _ = socket.send_to(&reply, from).await;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
         let now_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));

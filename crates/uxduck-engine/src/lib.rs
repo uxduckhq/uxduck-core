@@ -487,6 +487,9 @@ pub struct Engine {
     /// How each vehicle's link is doing, by vehicle id, and when the data
     /// plane said so (S261); not journaled.
     link_health: BTreeMap<String, (uxduck_core::domain::telemetry::LinkHealth, u64)>,
+    /// Each onboard computer's clock, by vehicle id and component id, and
+    /// when the data plane last said it (S356, S357); not journaled.
+    computer_clocks: BTreeMap<(String, u8), (uxduck_core::domain::telemetry::ComputerClock, u64)>,
     telemetry_history: telemetry_window::Window,
     /// Each vehicle's rate controller samples, for the response graph (S330).
     responses: tuning::Responses,
@@ -637,6 +640,7 @@ impl Engine {
             tracers: BTreeSet::new(),
             telemetry: BTreeMap::new(),
             link_health: BTreeMap::new(),
+            computer_clocks: BTreeMap::new(),
             telemetry_history: telemetry_window::Window::default(),
             responses: tuning::Responses::default(),
             autotunes: autotune::AutoTunes::default(),

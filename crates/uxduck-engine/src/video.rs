@@ -21,10 +21,12 @@ use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
+use uxduck_core::domain::telemetry::ClockMeasured;
 use uxduck_core::domain::video::{
     CaptureInput, VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name,
 };
 use uxduck_core::events::{Actor, Change};
+use uxduck_media::latency::{Companion, CompanionClock, Offset};
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -638,6 +640,52 @@ impl Engine {
         if self.video.opened.contains(&report.source_id()) {
             self.video_observed(report);
         }
+    }
+
+    /// The companion computer serving an RTSP camera at `host`, and its
+    /// clock (S357): the computer in the profile of the camera's vehicle
+    /// whose host is the camera's, letter case and IPv6 brackets aside.
+    /// The RTSP task asks once a second, and the camera's ⓘ tries its clock
+    /// before the RTSP server's.
+    #[must_use]
+    pub fn camera_companion(&self, source_id: &str, host: &str) -> Option<Companion> {
+        let vehicle_id = self
+            .state
+            .video_sources
+            .get(source_id)?
+            .vehicle_id
+            .as_deref()?;
+        let vehicle = self.vehicle(vehicle_id)?;
+        let bare = |host: &str| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase()
+        };
+        let computer = vehicle
+            .companions
+            .iter()
+            .find(|c| bare(&c.host) == bare(host))?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "milliseconds to microseconds, well within range"
+        )]
+        let us = |ms: f64| (ms * 1000.0).round() as i64;
+        let clock =
+            self.computer_clock(&vehicle.id, computer.component_id)
+                .map(|clock| match clock.measured {
+                    ClockMeasured::Timesync { within_ms } => CompanionClock::Timesync(Offset {
+                        offset_us: us(clock.offset_ms),
+                        within_us: us(within_ms).unsigned_abs(),
+                    }),
+                    ClockMeasured::OneWay => CompanionClock::OneWay {
+                        offset_us: us(clock.offset_ms),
+                    },
+                });
+        Some(Companion {
+            computer_id: computer.component_id,
+            clock,
+        })
     }
 
     pub fn rtsp_stopped(&mut self, source_id: &str, why: String) {

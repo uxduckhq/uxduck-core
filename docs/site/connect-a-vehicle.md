@@ -70,6 +70,8 @@ uxduck companion --to udp:192.168.1.20:15010 --computer-id 192
 
 Each computer on a vehicle needs its own number from 191 to 194. The forwarding Pi takes 191 unless you give it `--computer-id`; give each companion the next one. Add `--system-id` when the vehicle's system id is not 1.
 
+Each computer's **Clock** shows how far its clock is from this computer's, such as "8 days 6 h behind this computer", and how UXDuck measured it. UXDuck asks each computer for its time over MAVLink, and the answer is good to within half the time the question took there and back, usually under a millisecond on a LAN. A computer that does not answer, such as one running an older UXDuck, is read from the time on its status messages. That is said to be one way, because the delay on the way is not known.
+
 ## Change or turn off a link
 
 On **Fleet**, each link has a switch and a pencil. The switch turns a link off or on without removing it. The pencil opens the link's settings in place: change its port, device, access or name and choose **Save**. **Remove** is in the settings.

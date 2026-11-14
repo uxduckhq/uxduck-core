@@ -219,6 +219,7 @@ ClientRecord.id
 ClientRecord.kind
 ClientRecord.name
 ClientRecord.version
+ClockMatch.way
 ColourRule.colour
 ColourRule.test
 ColourRule.value
@@ -232,6 +233,8 @@ Command::SetMode.mode
 CommandParam.index
 CompanionCheck.at_us
 CompanionCheck.state
+CompanionClock.offset_ms
+CompanionClock.within_ms
 CompanionComputer.component_id
 CompanionComputer.host
 CompanionComputer.id

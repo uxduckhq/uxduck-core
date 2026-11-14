@@ -367,6 +367,32 @@ pub enum RoundTripMissing {
     NotSent,
 }
 
+/// An onboard computer's clock against this computer's (S356, ADR-0049
+/// amended 2026-11-13): what the data plane measures for each computer on a
+/// vehicle, kept in memory beside its telemetry and never journaled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComputerClock {
+    /// Its component id, 191 to 194.
+    pub component_id: u8,
+    /// Its clock less this computer's, in milliseconds: positive when it
+    /// is ahead.
+    pub offset_ms: f64,
+    pub measured: ClockMeasured,
+}
+
+/// How a computer's clock was measured, and how far off it may be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClockMeasured {
+    /// MAVLink's `TIMESYNC`: the reply with the shortest round trip of the
+    /// last minute. The true offset is within `within_ms`, half that round
+    /// trip, of `offset_ms`, whatever the delays each way.
+    Timesync { within_ms: f64 },
+    /// One way, from the time its `ONBOARD_COMPUTER_STATUS` says it was
+    /// sent: the offset less the shortest delay on the way, so the true
+    /// offset is `offset_ms` or ahead of it by that unknown delay.
+    OneWay,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

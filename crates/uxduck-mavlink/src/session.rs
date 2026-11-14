@@ -3977,6 +3977,25 @@ impl Session {
             .map(|v| v.observation.id.as_str())
     }
 
+    /// The VID of the vehicle a frame from this sender belongs to: the one
+    /// at its address, or, for an onboard computer that sends from an
+    /// address of its own, the one vehicle on its link with its system id
+    /// (S295, S356).
+    #[must_use]
+    pub fn vehicle_of(
+        &self,
+        link_id: &str,
+        peer: &str,
+        system_id: u8,
+        component_id: u8,
+    ) -> Option<&str> {
+        let address = (link_id.to_owned(), peer.to_owned(), system_id);
+        let at_vehicle = self.companion_address(&address, component_id);
+        self.vehicles
+            .get(at_vehicle.as_ref().unwrap_or(&address))
+            .map(|v| v.observation.id.as_str())
+    }
+
     /// The system id and VID of each vehicle at this link and peer.
     pub fn vehicles_at_peer<'a>(
         &'a self,
@@ -8208,7 +8227,7 @@ mod tests {
         let mut joined = Vec::new();
         for frame in [
             crate::computer::heartbeat_frame((1, 192, 0)),
-            crate::computer::status_frame((1, 192, 1), 0, &status),
+            crate::computer::status_frame((1, 192, 1), &status),
         ] {
             joined.extend(session.ingest("l1", "10.0.0.9:5000", &frame, 10));
         }

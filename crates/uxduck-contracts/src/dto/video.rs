@@ -86,12 +86,95 @@ pub struct VideoCounters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_clock: Option<CameraClock>,
     /// Microseconds from capture by the camera's clock to arrival at
-    /// UXDuck, the median over the last second. Absent with a
-    /// `cameraClock` when the result is negative or over 5 s: the camera's
-    /// clock is not in step with this computer's (S262).
+    /// UXDuck, the median over the last second, the camera's clock matched
+    /// to this computer's by the way `cameraClockMatches` marks used.
+    /// Absent with a `cameraClock` when the result is not plausible: under
+    /// 0 by more than the match's uncertainty (a slightly negative one reads
+    /// 0), or over 5 s (S262, S355).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub camera_delay_us: Option<u64>,
+    /// The same median before that check, in microseconds: negative when
+    /// the camera's clock dates pictures after they arrive, so its times
+    /// are not capture times, or, measured over RTSP, its sender reports
+    /// are dated late (S355).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_signed_integer")]
+    pub camera_delay_signed_us: Option<i64>,
+    /// The ways of matching the camera's clock to this computer's, in the
+    /// order they are tried, and the one used: the first with a measurement
+    /// (S355). Absent for a camera that sends no clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera_clock_matches: Vec<ClockMatch>,
+}
+
+/// One way of matching a camera's clock to this computer's, and what it
+/// found (S355).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClockMatch {
+    pub way: ClockWay,
+    /// The onboard computer id, 191 to 194, of the companion computer
+    /// serving the camera, for `companion` (S357).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<u8>,
+    /// The camera's clock minus this computer's in microseconds, once this
+    /// way has measured it: negative when the camera's is behind. 0 for
+    /// `assumed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_signed_integer")]
+    pub offset_us: Option<i64>,
+    /// Give or take, in microseconds, once measured. Absent for `assumed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub within_us: Option<u64>,
+    /// This way's offset dates the pictures.
+    #[serde(default)]
+    pub used: bool,
+    /// Why this way is not used, when that is not because a way before it
+    /// is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<ClockGap>,
+}
+
+/// A way of matching a camera's clock to this computer's, in the order they
+/// are tried (S355).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClockWay {
+    /// The clock of the companion computer serving the camera, measured by
+    /// MAVLink TIMESYNC: the computer in the profile of the camera's vehicle
+    /// whose host is the camera's (S357).
+    Companion,
+    /// The RTSP server's clock, from its RTCP sender reports and
+    /// `GET_PARAMETER` round trips. Used only for sender reports' times.
+    Rtsp,
+    /// The two clocks assumed in step.
+    Assumed,
+}
+
+/// Why a way of matching a camera's clock is not used (S355).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClockGap {
+    /// The camera is not reached this way: not over RTSP, or no companion
+    /// computer serves it.
+    NotServed,
+    /// No sender report in the last minute.
+    NoReports,
+    /// No answer to a request in the last minute.
+    NoAnswers,
+    /// Read only one way, from the companion computer's status messages:
+    /// off by however long they took, so it dates no picture (S357).
+    OneWay,
+    /// The RTSP server's sender reports say when each picture was taken but
+    /// not when they were sent, as gortsplib's (`MediaMTX`'s RTSP library) do:
+    /// measured by them its clock reads behind by at least a picture's time
+    /// from the sensor to the server, so it dates no picture.
+    DatedByPictures,
+    /// Not the clock the camera dates its pictures by, as for a KLV time
+    /// stamp, which may come from GPS on another machine.
+    OtherClock,
 }
 
 /// Where a camera says when it captured a picture (S262).

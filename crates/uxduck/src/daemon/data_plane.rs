@@ -379,6 +379,7 @@ pub fn start(
                     let effects = plane.time_syncs();
                     plane.apply(effects).await;
                     plane.report_link_health().await;
+                    plane.report_clocks().await;
                     plane.refresh_registration();
                     plane.report_transports().await;
                     plane.send_onboard().await;
@@ -392,6 +393,17 @@ pub fn start(
             }
         }
     });
+}
+
+/// An onboard computer at an address of its own is asked for its clock
+/// while it was heard this recently.
+const COMPANION_HEARD_US: u64 = 10_000_000;
+
+/// This computer's wall clock, in nanoseconds since 1970.
+fn wall_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
 /// A timer that waits out a missed tick rather than catching up.
@@ -426,6 +438,13 @@ struct Plane {
     started: std::time::Instant,
     /// This computer's status, when it is on the vehicle (S295).
     onboard: Option<super::onboard::Computer>,
+    /// Each onboard computer's clock against this computer's (S356).
+    clocks: uxduck_mavlink::computer_clock::Clocks,
+    /// Onboard computers that send from an address of their own (`uxduck
+    /// companion` straight to this ground station), by address and
+    /// component id, last heard when on the monotonic clock: each is asked
+    /// for its clock there, since nothing else passes the request on.
+    companion_peers: std::collections::BTreeMap<(String, String, u8, u8), u64>,
     /// This task's own queue, for host lookups that finish off it.
     commands: mpsc::UnboundedSender<Command>,
     /// Links waiting for their host to be looked up, by the latest lookup.
@@ -481,6 +500,8 @@ impl Plane {
             reported: std::collections::BTreeMap::new(),
             started: std::time::Instant::now(),
             onboard: None,
+            clocks: uxduck_mavlink::computer_clock::Clocks::default(),
+            companion_peers: std::collections::BTreeMap::new(),
             commands,
             resolving: HashMap::new(),
             network: links::NetworkChanges::default(),
@@ -654,13 +675,28 @@ impl Plane {
         u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
+    /// When a frame read now arrived, on this plane's monotonic clock, from
+    /// its arrival `at_us` by the wall clock. A busy plane reads a frame
+    /// tens of milliseconds after it arrived, and a round trip timed from
+    /// the read would count that wait (S356, S261).
+    fn arrived_mono_us(&self, at_us: u64) -> u64 {
+        let waited_us = SystemClock.now_us().saturating_sub(at_us);
+        self.now_mono_us().saturating_sub(waited_us)
+    }
+
     /// MAVLink's ping, `TIMESYNC` (S261, ADR-0004 2026-11-01): a request
     /// from the ground station id to each vehicle the ground station
     /// heartbeat goes to, once a second with it, and only there
-    /// ([`not_pinged`]). Its `ts1` is this plane's monotonic clock.
+    /// ([`not_pinged`]). Its `ts1` is this plane's monotonic clock. The
+    /// vehicle's onboard computers answer the same request with their clocks
+    /// (S356), and one that sends from an address of its own is asked there.
     fn time_syncs(&mut self) -> Vec<Effect> {
         let gcs = self.gcs.load(Ordering::Relaxed);
         let now_us = self.now_mono_us();
+        let sent = uxduck_mavlink::computer_clock::Moment {
+            mono_us: now_us,
+            wall_ns: wall_ns(),
+        };
         let addresses: Vec<((String, String, u8), String)> = self
             .session
             .addresses()
@@ -679,6 +715,7 @@ impl Plane {
                 continue;
             }
             let ts1 = self.health.asked(&address, now_us);
+            self.clocks.asked(ts1, sent);
             effects.extend(self.session.send_address(&address, |system_id, sequence| {
                 uxduck_mavlink::sim::timesync_frame(
                     (gcs, uxduck_mavlink::GCS_COMPONENT_ID, sequence),
@@ -687,7 +724,56 @@ impl Plane {
                 )
             }));
         }
+        self.companion_peers
+            .retain(|_, heard| now_us.saturating_sub(*heard) < COMPANION_HEARD_US);
+        let peers: Vec<(String, String, u8, u8)> = self.companion_peers.keys().cloned().collect();
+        for (link_id, peer, system_id, component_id) in peers {
+            let Some(vehicle_id) = self
+                .session
+                .vehicle_of(&link_id, &peer, system_id, component_id)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let link = self.open.get(&link_id).map(|o| (o.writable, o.forward));
+            let why = not_pinged(
+                link,
+                self.withheld.contains(&vehicle_id),
+                self.session.is_paused(&link_id),
+            );
+            if why.is_some() {
+                continue;
+            }
+            let ts1 = self.clocks.ask(sent);
+            let address = (link_id, peer, system_id);
+            effects.extend(self.session.send_address(&address, |system_id, sequence| {
+                uxduck_mavlink::sim::timesync_frame(
+                    (gcs, uxduck_mavlink::GCS_COMPONENT_ID, sequence),
+                    (0, ts1),
+                    (system_id, component_id),
+                )
+            }));
+        }
         effects
+    }
+
+    /// Tells the engine each onboard computer's clock (S356), once a
+    /// second, after forgetting the computers of vehicles no longer known.
+    async fn report_clocks(&mut self) {
+        let known: std::collections::HashSet<String> = self
+            .session
+            .addresses()
+            .map(|(_, id)| id.to_owned())
+            .collect();
+        self.clocks.retain(|id| known.contains(id));
+        let reports = self.clocks.report(self.now_mono_us());
+        if reports.is_empty() {
+            return;
+        }
+        let _ = self
+            .engine
+            .run(move |e| e.computer_clocks_observed(reports))
+            .await;
     }
 
     /// Tells the engine how each vehicle's link is doing (S261), once a
@@ -1140,6 +1226,9 @@ impl Plane {
             self.send(checked).await;
             return;
         }
+        if forward && header.message_id == uxduck_mavlink::link_health::TIMESYNC {
+            self.answer_clock(link_id, peer, frame).await;
+        }
         if !forward && let Some(computer) = &mut self.onboard {
             let mut coin = [0_u8; 1];
             let _ = getrandom::fill(&mut coin);
@@ -1166,11 +1255,17 @@ impl Plane {
                 .map(str::to_owned);
             if vehicle.is_some() {
                 let address = (link_id.to_owned(), peer.to_owned(), header.system_id);
-                let (gcs, now_us) = (self.gcs.load(Ordering::Relaxed), self.now_mono_us());
-                self.health.heard(&address, frame, gcs, now_us);
+                let (gcs, arrived_us) = (
+                    self.gcs.load(Ordering::Relaxed),
+                    self.arrived_mono_us(at_us),
+                );
+                self.health.heard(&address, frame, gcs, arrived_us);
             }
             vehicle
         };
+        if !forward && uxduck_mavlink::computer::COMPUTER_IDS.contains(&header.component_id) {
+            self.computer_heard(link_id, peer, frame, header, vehicle.as_deref(), at_us);
+        }
         if let Some(vehicle_id) = &vehicle
             && let Some(payload) = uxduck_mavlink::framing::payload(frame)
         {
@@ -1205,6 +1300,76 @@ impl Plane {
         );
         crate::diagnostics::record_routing(link_id, peer, frame, header, &routed, at_us);
         self.send(routed).await;
+    }
+
+    /// The ground station asking this onboard computer's clock through the
+    /// forward it reached it by (S356): answered there at once. The request
+    /// still goes on to the vehicle, whose autopilot answers it.
+    async fn answer_clock(&mut self, link_id: &str, peer: &str, frame: &[u8]) {
+        let Some(computer) = &mut self.onboard else {
+            return;
+        };
+        let sends: Vec<uxduck_mavlink::router::Send> = computer
+            .answer(frame)
+            .into_iter()
+            .map(|bytes| uxduck_mavlink::router::Send {
+                link_id: link_id.to_owned(),
+                peer: Some(peer.to_owned()),
+                bytes,
+            })
+            .collect();
+        if sends.is_empty() {
+            return;
+        }
+        self.send(Routed {
+            sends,
+            ..Routed::default()
+        })
+        .await;
+    }
+
+    /// A frame from an onboard computer of a vehicle (S356): its clock's
+    /// `TIMESYNC` reply or status time stamp, as of when it arrived, and,
+    /// when it sends from an address of its own, that address, to ask it
+    /// there, timed from when it arrived.
+    fn computer_heard(
+        &mut self,
+        link_id: &str,
+        peer: &str,
+        frame: &[u8],
+        header: uxduck_mavlink::framing::Header,
+        vehicle: Option<&str>,
+        at_us: u64,
+    ) {
+        let now_us = self.now_mono_us();
+        let owner = if let Some(vehicle_id) = vehicle {
+            vehicle_id.to_owned()
+        } else {
+            let Some(owner) =
+                self.session
+                    .vehicle_of(link_id, peer, header.system_id, header.component_id)
+            else {
+                return;
+            };
+            self.companion_peers.insert(
+                (
+                    link_id.to_owned(),
+                    peer.to_owned(),
+                    header.system_id,
+                    header.component_id,
+                ),
+                now_us,
+            );
+            owner.to_owned()
+        };
+        let heard = uxduck_mavlink::computer_clock::Moment {
+            mono_us: self.arrived_mono_us(at_us),
+            wall_ns: i64::try_from(at_us)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1000),
+        };
+        let gcs = self.gcs.load(Ordering::Relaxed);
+        self.clocks.heard(&owner, frame, gcs, heard);
     }
 
     /// This computer's heartbeat and status (S295), out of every forward,
@@ -1763,6 +1928,48 @@ mod tests {
         );
         plane.withheld.insert("scout".into());
         assert!(plane.registration_withheld("li1"));
+    }
+
+    /// S261's round trip is timed from when the reply arrived, not from
+    /// when a busy plane got to it, as S356's computer clocks are: a
+    /// debug daemon with a window open read replies 13 to 54 ms late, so a
+    /// vehicle on this computer read 6 to 81 ms.
+    #[tokio::test]
+    async fn a_round_trip_is_timed_from_when_its_reply_arrived() {
+        use crate::adapters::system::SystemClock;
+        use std::sync::atomic::Ordering;
+        use uxduck_engine::runtime::Clock;
+        use uxduck_mavlink::sim::{heartbeat_frame, timesync_frame};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, _commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(8);
+        plane.open(listening_at("127.0.0.1"), &events).await;
+        let peer = "127.0.0.1:14550";
+        plane
+            .frame(
+                "li1",
+                peer,
+                &heartbeat_frame(1, 1, 0),
+                false,
+                SystemClock.now_us(),
+            )
+            .await;
+        let address = ("li1".to_owned(), peer.to_owned(), 1);
+        let ts1 = plane.health.asked(&address, plane.now_mono_us());
+        let gcs = plane.gcs.load(Ordering::Relaxed);
+        let reply = timesync_frame((1, 1, 1), (1_000_000, ts1), (gcs, 0));
+        let arrived = SystemClock.now_us();
+        // The plane busy elsewhere while the reply waits.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        plane.frame("li1", peer, &reply, false, arrived).await;
+
+        let health = plane.health.report(&address, plane.now_mono_us());
+        let round_trip = health.round_trip_ms.expect("a round trip");
+        assert!(
+            round_trip < 20.0,
+            "timed from its arrival, not 60 ms later: {round_trip} ms"
+        );
     }
 
     #[test]
