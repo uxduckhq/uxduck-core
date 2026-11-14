@@ -1,0 +1,17 @@
+{
+  "method": "thread/send",
+  "params": {
+    "threadId": "th9f2c",
+    "text": "Replay this and keep the video with today's flight",
+    "attachments": [
+      {
+        "title": "2026-10-30 14-02-17.tlog",
+        "file": { "id": "at5c0ffee1d2e3f405", "bytes": 18432771 }
+      },
+      {
+        "title": "IMG_4471.MOV",
+        "file": { "id": "at71e2d3c4b5a69788", "bytes": 734003200 }
+      }
+    ]
+  }
+}

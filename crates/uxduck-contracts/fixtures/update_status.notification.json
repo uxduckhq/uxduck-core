@@ -1,0 +1,13 @@
+{
+  "method": "update/status",
+  "params": {
+    "phase": "ready",
+    "current": "0.1.1",
+    "version": "0.2.0",
+    "pushUpdates": true,
+    "blockers": ["Simulations are running"],
+    "canInstallWithSimulations": true,
+    "installWhenIdle": false,
+    "dismissed": false
+  }
+}

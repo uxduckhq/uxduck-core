@@ -1,0 +1,45 @@
+{
+  "method": "terrain/vehicleChanged",
+  "params": {
+    "vehicleId": "veh-7f3a",
+    "used": true,
+    "dataset": "alos",
+    "chosen": false,
+    "spacingM": 100,
+    "enabled": true,
+    "pending": 16,
+    "loaded": 504,
+    "blocks": [
+      {
+        "corners": [
+          {
+            "latitudeDeg": -35.3632621,
+            "longitudeDeg": 149.1652374
+          },
+          {
+            "latitudeDeg": -35.3389867,
+            "longitudeDeg": 149.1652374
+          },
+          {
+            "latitudeDeg": -35.3389867,
+            "longitudeDeg": 149.1993018
+          },
+          {
+            "latitudeDeg": -35.3632621,
+            "longitudeDeg": 149.1993018
+          }
+        ],
+        "spacingM": 100,
+        "state": "sending",
+        "groups": 56,
+        "groupsDone": 40,
+        "askedAtUs": 1762300000000000
+      }
+    ],
+    "files": {
+      "path": "terrain",
+      "files": [],
+      "listing": true
+    }
+  }
+}

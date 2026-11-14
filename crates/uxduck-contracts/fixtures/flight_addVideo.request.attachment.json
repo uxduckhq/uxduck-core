@@ -1,0 +1,7 @@
+{
+  "method": "flight/addVideo",
+  "params": {
+    "flightId": "fl3c2a",
+    "attachment": "at71e2d3c4b5a69788"
+  }
+}

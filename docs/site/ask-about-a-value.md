@@ -15,7 +15,7 @@ In the Telemetry tab, a tile's **ⓘ** shows in the tile's corner when you point
 
 ## Ask the agent about it
 
-**Preview:** the in-app AI chat is currently hidden in production. These steps apply to development and staging builds. For external coding agents, use [MCP](/docs/mcp).
+**Preview:** the in-app AI chat is currently hidden in production. These steps apply to development and staging builds. For external coding agents, use [MCP](mcp.md).
 
 1. Open the **ⓘ** and choose **Ask the agent**. A chip such as **Battery · 15.8 V** appears in the input. Nothing is sent yet.
 2. Type your question and send. The chip goes with the message.

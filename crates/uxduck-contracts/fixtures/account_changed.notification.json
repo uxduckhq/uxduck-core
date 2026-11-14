@@ -1,0 +1,4 @@
+{
+  "method": "account/changed",
+  "params": {}
+}

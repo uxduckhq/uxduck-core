@@ -36,7 +36,7 @@ After an RTL, a battery change or a reboot, the subtab says which step the vehic
 
 The vehicle's History says how far through its mission each flight got, such as "reached mission step 4 of 6", and a replay's timeline details have a **Steps** lane with a tick at each step reached.
 
-For sticks, switches and gamepad buttons, follow [Controllers and radio transmitters](/docs/controllers).
+For sticks, switches and gamepad buttons, follow [Controllers and radio transmitters](controllers.md).
 
 ## Messages
 
@@ -64,4 +64,4 @@ Either instruments tab can show the vehicle's camera behind it, as an FPV goggle
 
 A colour threshold is a display rule, not a diagnosis. Check the value’s unit, source and timestamp, and compare it with the vehicle’s messages. A dash means no value is available; it does not mean zero. A recent heartbeat does not prove every sensor value is fresh.
 
-For stale values, connection problems or rejected commands, follow [Troubleshooting](/docs/troubleshooting). To compare a voltage dip or a GPS change over time, use the [MCP telemetry window](/docs/mcp#compare-telemetry-over-time).
+For stale values, connection problems or rejected commands, follow [Troubleshooting](troubleshooting.md). To compare a voltage dip or a GPS change over time, use the [MCP telemetry window](mcp.md#compare-telemetry-over-time).

@@ -1,0 +1,4 @@
+{
+  "method": "thread/cancel",
+  "params": { "threadId": "th1", "itemId": "it1" }
+}

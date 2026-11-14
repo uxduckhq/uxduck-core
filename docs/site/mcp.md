@@ -25,7 +25,7 @@ connect or reconnect the agent's MCP connection. MCP never starts UXDuck
 automatically. If UXDuck is offline, MCP asks you to start it and reconnect.
 Closing the MCP connection leaves UXDuck and its work running. Ask: **“List the vehicles UXDuck can hear, and show the running version and link status.”** It should use `vehicle_list`, `daemon_about` and `link_list`.
 
-An empty vehicle list means the connection reached UXDuck but has no vehicle to inspect. Follow [Connect a vehicle](/docs/connect-a-vehicle) or [Troubleshooting](/docs/troubleshooting). A simulation running only inside a browser is separate from the installed UXDuck that `uxduck mcp` connects to.
+An empty vehicle list means the connection reached UXDuck but has no vehicle to inspect. Follow [Connect a vehicle](connect-a-vehicle.md) or [Troubleshooting](troubleshooting.md). A simulation running only inside a browser is separate from the installed UXDuck that `uxduck mcp` connects to.
 
 ## Keep the agent's context small
 
@@ -107,7 +107,7 @@ Start with `vehicle_list`, `telemetry_get`, `vehicle_messages` and `vehicle_hist
 - “This altitude looks wrong. Compare the home, sea-level and terrain frames, their units and their timestamps.”
 - “Is the vehicle still sending telemetry? Compare heartbeat age, link status and the age of the raw messages.”
 
-Use `param_get` to read a parameter's actual value and `describedBy` before interpreting it. [Parameter descriptions](/docs/parameters#missing-descriptions) must match the firmware; a description from another version can mislead.
+Use `param_get` to read a parameter's actual value and `describedBy` before interpreting it. [Parameter descriptions](parameters.md#missing-descriptions) must match the firmware; a description from another version can mislead.
 
 ## Compare telemetry over time
 
@@ -141,7 +141,7 @@ These diagnostics read existing evidence without sending commands, probing remot
 
 ## If setup fails
 
-1. Run `uxduck --version` and `uxduck status` in a terminal. If `uxduck` is not found, finish [installation](/docs/install) and restart the coding agent so it sees the updated PATH.
+1. Run `uxduck --version` and `uxduck status` in a terminal. If `uxduck` is not found, finish [installation](install.md) and restart the coding agent so it sees the updated PATH.
 2. Check that the MCP command uses the same `--dev` or `--data-dir` option as the running UXDuck. For example, use `uxduck --dev mcp` for a development installation.
 3. After updating UXDuck, restart it when you are ready, then reconnect MCP. The running version from `daemon_about` is the one that supplies the tools; replacing the CLI alone does not update a running process.
 

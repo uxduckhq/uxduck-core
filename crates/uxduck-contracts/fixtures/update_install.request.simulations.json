@@ -1,0 +1,4 @@
+{
+  "method": "update/install",
+  "params": { "version": "0.2.0", "whenIdle": false, "stopSimulations": true }
+}

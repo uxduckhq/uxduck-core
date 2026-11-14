@@ -5,7 +5,7 @@ group: Debug and integrate
 summary: Use read-only checks, scripts and commands from a terminal.
 ---
 
-Use the command line to script UXDuck, run it without a window, or work over SSH. [Install UXDuck](/docs/install) first.
+Use the command line to script UXDuck, run it without a window, or work over SSH. [Install UXDuck](install.md) first.
 
 ## Check the connection
 
@@ -49,7 +49,7 @@ uxduck rpc call vehicle/messages --json '{"vehicleId":"VEHICLE_ID"}'
 uxduck vehicle history VEHICLE_ID
 ```
 
-For connection or stale-value problems, follow [Troubleshooting](/docs/troubleshooting). For an agent that compares readings over time, follow [Use with AI agents](/docs/mcp).
+For connection or stale-value problems, follow [Troubleshooting](troubleshooting.md). For an agent that compares readings over time, follow [Use with AI agents](mcp.md).
 
 ## Find a simulation's starting place
 
@@ -71,7 +71,7 @@ The result's `place` contains `latitudeDeg` and `longitudeDeg`. Read `terrain/at
 at those coordinates for the ground elevation, then use them and that height with
 `sim/start`. Searching and locating read data only; they never start a simulation
 or save a place. Both respect the selected operator's place-name search setting.
-See [Use with AI agents](/docs/mcp#choose-a-simulation-s-starting-place) for MCP.
+See [Use with AI agents](mcp.md#choose-a-simulation-s-starting-place) for MCP.
 
 ## Send a command
 
@@ -84,7 +84,7 @@ uxduck command --vehicle VEHICLE_ID disarm
 
 In a terminal, a command the app would confirm, such as arm, asks first. A script is not asked, but a dangerous command, such as disarming in flight, is sent only with `--yes`.
 
-See [Confirmations](/docs/confirmations) before issuing commands.
+See [Confirmations](confirmations.md) before issuing commands.
 
 ## Replay a flight
 

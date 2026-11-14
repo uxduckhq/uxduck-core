@@ -1,0 +1,8 @@
+{
+  "models": ["gpt-6-luna"],
+  "defaultModel": "gpt-6-luna",
+  "provider": "openai",
+  "ready": true,
+  "readyModels": ["gpt-6-luna"],
+  "spokenTurns": true
+}

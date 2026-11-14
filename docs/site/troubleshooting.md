@@ -12,7 +12,7 @@ Start with the connection, then the age of the evidence, then the vehicle's mess
 
 1. Check whether the app is connected to **Browser** or **Computer** in the top-left menu. A browser simulation is separate from the installed UXDuck used by CLI and MCP.
 2. Run `uxduck status`, `uxduck ports`, `uxduck rpc call link/list` and `uxduck rpc call vehicle/list`. For a development installation, add `--dev` to each command.
-3. Match the link to the sender: serial port and baud rate, UDP destination and listening port, or TCP host and port. Follow [Connect a vehicle](/docs/connect-a-vehicle). Check `ports` for another program holding the listener.
+3. Match the link to the sender: serial port and baud rate, UDP destination and listening port, or TCP host and port. Follow [Connect a vehicle](connect-a-vehicle.md). Check `ports` for another program holding the listener.
 4. If the link is open but there is no vehicle, check that the autopilot or simulator is sending MAVLink heartbeats to that endpoint. Opening a port alone does not establish a vehicle connection.
 
 ## A value has stopped updating
@@ -23,11 +23,11 @@ Use the Telemetry value's information button to check its source and unit. In MC
 - A fresh heartbeat with old sensor messages points to a particular stream or sensor. Check whether that message type is actually arriving before changing stream rates.
 - A missing value or a dash is missing evidence, not a reading of zero. Above-terrain altitude needs terrain data; above-home and sea-level altitude use different reference frames.
 
-Repeat the read while reproducing the symptom, or use [telemetry over time](/docs/mcp#compare-telemetry-over-time). Check the reported coverage and limits; recent history starts when UXDuck starts capturing it.
+Repeat the read while reproducing the symptom, or use [telemetry over time](mcp.md#compare-telemetry-over-time). Check the reported coverage and limits; recent history starts when UXDuck starts capturing it.
 
 ## Arming or a command is refused
 
-Read the command receipt first. UXDuck may have denied permission or reached an approval timeout. Check [Confirmations](/docs/confirmations).
+Read the command receipt first. UXDuck may have denied permission or reached an approval timeout. Check [Confirmations](confirmations.md).
 
 If the vehicle rejected it, read **Messages** or MCP's `vehicle_messages` for the latest `PreArm` or other explanation. Check that it is recent and belongs to the selected vehicle. Read the relevant parameter's current value and matching firmware description before proposing a change. An accepted receipt still needs telemetry to confirm the result.
 
@@ -35,15 +35,15 @@ For intermittent GPS, EKF, vibration or battery problems, correlate messages wit
 
 ## Parameter descriptions are missing
 
-Run `uxduck params definitions list` and follow [Missing descriptions](/docs/parameters#missing-descriptions). Values and descriptions are separate downloads. A public catalogue verification key belongs in the published build; it is not a secret the user must supply. Custom firmware needs descriptions from its matching commit.
+Run `uxduck params definitions list` and follow [Missing descriptions](parameters.md#missing-descriptions). Values and descriptions are separate downloads. A public catalogue verification key belongs in the published build; it is not a secret the user must supply. Custom firmware needs descriptions from its matching commit.
 
 ## Camera video is blank
 
-Run `uxduck video list`. Use `uxduck video probe --port 5600` to inspect the arriving stream, replacing `5600` with its port; `uxduck video probe --help` lists the options. Check its transport and codec against [Camera video](/docs/camera-video). QGroundControl and UXDuck cannot both listen on the same UDP port on this computer.
+Run `uxduck video list`. Use `uxduck video probe --port 5600` to inspect the arriving stream, replacing `5600` with its port; `uxduck video probe --help` lists the options. Check its transport and codec against [Camera video](camera-video.md). QGroundControl and UXDuck cannot both listen on the same UDP port on this computer.
 
 ## A controller input is missing or shared
 
-Check the active radio model's channel monitor and USB joystick mode, then compare individual inputs in UXDuck's controller setup. [Controllers and radio transmitters](/docs/controllers) covers Tango 2 CH7/CH8 on macOS, rear E/F button mixes, EdgeTX USB modes and Xbox layouts. Native support requires the app to be connected to **Computer**.
+Check the active radio model's channel monitor and USB joystick mode, then compare individual inputs in UXDuck's controller setup. [Controllers and radio transmitters](controllers.md) covers Tango 2 CH7/CH8 on macOS, rear E/F button mixes, EdgeTX USB modes and Xbox layouts. Native support requires the app to be connected to **Computer**.
 
 ## Show your location on Linux
 

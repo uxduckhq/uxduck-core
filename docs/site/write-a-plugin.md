@@ -124,10 +124,13 @@ Effects are commands, messages by name (only those in `sends`), items with a uni
 
 Handlers are synchronous. There is no DOM, Node runtime, filesystem, fetch or
 package loader. The SDK exposes `value`, `text`, `table`, `latest`, `notify`,
-`point`, `circle` and `commandLong`; its TypeScript types live in
-`packages/sdk/src/index.ts`. This package is currently private to the repository,
-so an external editor needs a checkout and a TypeScript path mapping to that file;
-`uxduck plugin test` resolves the import without package installation.
+`point`, `circle` and `commandLong`. Its TypeScript types are in
+`packages/sdk/src/index.ts` in [UXDuck Core](https://github.com/uxduckhq/uxduck-core).
+The package is not on npm. In a checkout, `plugins/tsconfig.json` maps
+`@uxduck/sdk` to those types, so an editor finds them for a plugin in `plugins/`,
+and `npx -p typescript tsc -p plugins` checks every example. For a plugin elsewhere,
+copy its `paths`, pointing them at the checkout. `uxduck plugin test` resolves the
+import without package installation.
 
 An item key is `group.name`, lower case with underscores. Units require their
 suffix: meter `_m`, meter-per-second `_mps`, percent `_pct`, volt `_v`, ampere
@@ -154,7 +157,7 @@ Each command in `plugin.json` has a `name`, a `title`, a `description`, its `par
 
 A plugin can add checks to each vehicle's preflight list, such as the wind from a forecast or a payload's SD card. Declare them in `plugin.json`: `"checks": [{ "id": "wind", "title": "Wind under 8 m/s", "severity": "block", "staleMs": 30000 }]`. Report where each stands for a vehicle in `checks`, with the SDK's `check(vehicleId, "wind", "pass" | "fail" | "waiting", "Under 8 m/s.")`. Keep the words short and without live numbers, and show a value as an item instead.
 
-The latest report counts until `staleMs` runs out (a minute if left out). After that the check is unknown. It is also unknown while the plugin is off or stopped. A `block` check stops arming only after the person allows it, when installing the plugin or on the **Plugins** page. Until then it only warns. Reports of checks you did not declare are ignored. [wind-check-ts](../../plugins/wind-check-ts) is an example.
+The latest report counts until `staleMs` runs out (a minute if left out). After that the check is unknown. It is also unknown while the plugin is off or stopped. A `block` check stops arming only after the person allows it, when installing the plugin or on the **Plugins** page. Until then it only warns. Reports of checks you did not declare are ignored. [wind-check-ts](https://github.com/uxduckhq/uxduck-core/tree/main/plugins/wind-check-ts) is an example.
 
 ## Ask the agent to write one
 

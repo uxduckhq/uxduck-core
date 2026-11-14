@@ -1,0 +1,13 @@
+{
+  "method": "preflight/configure",
+  "params": {
+    "vehicleId": "v9b1c2d3e4f5a6b7c",
+    "check": "rc-receiver",
+    "group": "Radio",
+    "groups": ["Battery", "Radio", "Controller"],
+    "renameGroup": {
+      "from": "Link",
+      "to": "Radio"
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "method": "mapping/update",
+  "params": {
+    "id": "radio",
+    "name": "TBS Joystick",
+    "roll": {
+      "axis": "left-stick-x",
+      "code": 65584,
+      "inverted": false,
+      "calibration": {
+        "min": -0.98,
+        "centre": 0.01,
+        "max": 0.97
+      }
+    },
+    "pitch": {
+      "axis": "left-stick-y",
+      "code": 65585,
+      "inverted": false
+    },
+    "yaw": {
+      "axis": "right-stick-y",
+      "code": 65587,
+      "inverted": false
+    },
+    "throttle": {
+      "axis": "right-stick-x",
+      "code": 65586,
+      "inverted": false,
+      "calibration": {
+        "min": -0.98,
+        "centre": -0.01,
+        "max": 0.97
+      }
+    },
+    "deadzone": 0.05,
+    "buttons": [],
+    "expectedVersion": 3,
+    "positions": [
+      {
+        "axis": "left-stick-x",
+        "code": 65589,
+        "at": -0.98,
+        "command": {
+          "type": "disarm"
+        },
+        "holdMs": 1000
+      },
+      {
+        "axis": "left-stick-x",
+        "code": 65589,
+        "at": 0.98,
+        "command": {
+          "type": "arm"
+        },
+        "holdMs": 1000
+      }
+    ],
+    "unused": ["pitch", "yaw"]
+  }
+}

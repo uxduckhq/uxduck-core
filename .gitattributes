@@ -1,0 +1,2 @@
+# Byte-compared goldens keep LF line endings on every platform.
+/crates/uxduck-contracts/tests/goldens/mission-read.json text eol=lf

@@ -62,6 +62,9 @@ An empty list means the service is running and waiting for a vehicle connection.
 | [Plugin guide](docs/site/write-a-plugin.md) | Build and test your own plugins.                      |
 | [RPC contracts](crates/uxduck-contracts/)   | Types and fixtures for building a client.             |
 
+The [user guides](docs/site/) cover all of UXDuck, including the interface that
+is not part of Core. They are also published at [uxduck.com/docs](https://uxduck.com/docs).
+
 MCP clients can launch `cargo run --locked -p uxduck -- mcp` over stdio from
 this directory. See the [CI workflow](.github/workflows/ci.yml) for build and test
 commands.

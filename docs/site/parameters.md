@@ -67,4 +67,4 @@ Parameter values can download even when descriptions are unavailable. Check `uxd
 
 A message about **no trusted public verification key** means this build cannot verify the publisher's parameter catalogue. You do not need to provide a secret or a release signing key. The publisher includes the public verification key in the build. Until a build with that key is available, add descriptions from the matching ArduPilot checkout using the command above.
 
-For a development firmware, use the exact commit that built it, rather than a nearby release. A PX4 vehicle's descriptions come from the vehicle itself. For an incomplete parameter download, check the link and message freshness in [Troubleshooting](/docs/troubleshooting).
+For a development firmware, use the exact commit that built it, rather than a nearby release. A PX4 vehicle's descriptions come from the vehicle itself. For an incomplete parameter download, check the link and message freshness in [Troubleshooting](troubleshooting.md).

@@ -8,7 +8,7 @@ summary: Install the UXDuck ground control station on macOS, Windows, Linux or R
 
 Install UXDuck to connect real vehicles over USB, radio or your network, and to keep things running without a browser tab.
 
-Download for your computer from [uxduck.com/download](/download). Then:
+Download for your computer from [uxduck.com/download](https://uxduck.com/download). Then:
 
 ## macOS
 
