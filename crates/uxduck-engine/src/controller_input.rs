@@ -270,7 +270,7 @@ impl Device {
                 None => *axis == Some(binding.axis),
             })
             .map(|(_, &value)| value)
-            .or_else(|| self.layout_known.then_some(0.0))
+            .or_else(|| (self.layout_known && binding.code.is_none()).then_some(0.0))
     }
 
     /// Ends the hold of `held`, if one is under way: whether there was.
@@ -327,12 +327,16 @@ impl Device {
 
     /// Whether the axis is in each position of the route's mapping now.
     fn in_positions(&self) -> Vec<bool> {
+        let inputs: Vec<_> = self.axes.keys().copied().collect();
         self.route.as_ref().map_or_else(Vec::new, |route| {
             route
                 .mapping
                 .positions
                 .iter()
-                .map(|p| self.read(&p.binding()).is_some_and(|v| p.holds(v)))
+                .map(|p| {
+                    !route.mapping.position_conflicts(p, &inputs)
+                        && self.read(&p.binding()).is_some_and(|v| p.holds(v))
+                })
                 .collect()
         })
     }
@@ -567,12 +571,23 @@ impl Controls {
     pub fn due_holds(&mut self, now_us: u64) -> Vec<Report> {
         let mut reports = Vec::new();
         for (id, device) in &mut self.devices {
+            let inputs: Vec<_> = device.axes.keys().copied().collect();
+            let safe = |held: &Held| match held {
+                Held::Button { .. } => true,
+                Held::Position(p) => device.route.as_ref().is_some_and(|r| {
+                    r.mapping.positions.contains(p) && !r.mapping.position_conflicts(p, &inputs)
+                }),
+            };
             for held in due(&mut device.holds, now_us) {
                 reports.push(Report::LetGo { id: id.clone() });
-                reports.push(held.report(id));
+                if safe(&held) {
+                    reports.push(held.report(id));
+                }
             }
             for held in due(&mut device.settling, now_us) {
-                reports.push(held.report(id));
+                if safe(&held) {
+                    reports.push(held.report(id));
+                }
             }
         }
         reports

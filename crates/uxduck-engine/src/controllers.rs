@@ -762,6 +762,62 @@ fn require_calibrations(params: &MappingUpdateParams) -> Result<(), ApiError> {
     Ok(())
 }
 
+type InputIdentity = (
+    Option<u32>,
+    Option<uxduck_core::domain::controller::GamepadAxis>,
+);
+
+fn input_identities(
+    inputs: &uxduck_contracts::dto::controller::ControllerInputsResult,
+    id: &str,
+) -> Vec<InputIdentity> {
+    inputs
+        .controllers
+        .iter()
+        .find(|c| c.id == id)
+        .map_or_else(Vec::new, |raw| {
+            raw.axes
+                .iter()
+                .map(|a| (a.code, a.axis.map(Into::into)))
+                .collect()
+        })
+}
+
+fn require_position_bindings(
+    mapping: &InputMapping,
+    inputs: &[InputIdentity],
+) -> Result<(), ApiError> {
+    if mapping
+        .positions
+        .iter()
+        .any(|p| mapping.position_conflicts(p, inputs))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{} has conflicting command positions. A driving input or extra RC input cannot also send commands, and command positions must not overlap. Remove the conflicting commands on the Mapping page before using it.",
+                mapping.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn require_mapping_positions(engine: &Engine, mapping: &InputMapping) -> Result<(), ApiError> {
+    require_position_bindings(mapping, &[])?;
+    let inputs = engine.system.controller_inputs();
+    for controller in engine
+        .state
+        .controllers
+        .values()
+        .filter(|c| c.mapping_id == mapping.id)
+    {
+        let axes = input_identities(&inputs, &controller.id);
+        require_position_bindings(mapping, &axes)?;
+    }
+    Ok(())
+}
+
 /// Every hold must be one a pilot can make: 0.1 to 10 seconds.
 /// The mapping's gripper buttons (S263), kept when the update names none: a
 /// button either sends a command or holds the gripper, and only once.
@@ -909,6 +965,7 @@ fn update_mapping(
         actions,
         version: current.version + 1,
     };
+    require_mapping_positions(engine, &mapping)?;
     engine.commit(
         connection,
         Change::InputMappingUpserted {
@@ -1141,6 +1198,9 @@ impl Engine {
             return Ok(());
         }
         let inputs = self.system.controller_inputs();
+        if let Some(mapping) = mapping(self, &controller.mapping_id) {
+            require_position_bindings(&mapping, &input_identities(&inputs, &controller.id))?;
+        }
         let raw = inputs.controllers.iter().find(|c| c.id == controller.id);
         let (Some(raw), Some(mapping)) = (raw, mapping(self, &controller.mapping_id)) else {
             return Ok(());
@@ -1156,7 +1216,7 @@ impl Engine {
                 .map(|a| a.value)
                 // A radio's input is unknown until it moves (see the data
                 // plane's `Device::read`); a gamepad's rests centred.
-                .or_else(|| raw.layout_known.then_some(0.0))
+                .or_else(|| (raw.layout_known && binding.code.is_none()).then_some(0.0))
         };
         let mut channels: Vec<_> = [
             ("roll", Some(StickControl::Roll), mapping.roll),
@@ -2091,9 +2151,28 @@ impl Engine {
         let Some((controller, connection, target)) = self.controller_sends(id) else {
             return;
         };
-        let Some(found) = mapping(self, &controller.mapping_id)
-            .and_then(|m| m.positions.into_iter().find(|p| p == position))
-        else {
+        let Some(mapping) = mapping(self, &controller.mapping_id) else {
+            return;
+        };
+        let inputs = self.system.controller_inputs();
+        if mapping.position_conflicts(position, &input_identities(&inputs, id)) {
+            return;
+        }
+        // A position queued behind an unanswered command may have been left
+        // while waiting. Recheck the current raw input before dispatching it.
+        if let Some(raw) = inputs.controllers.iter().find(|c| c.id == id)
+            && !raw
+                .axes
+                .iter()
+                .find(|a| match position.code {
+                    Some(code) => a.code == Some(code),
+                    None => a.axis == Some(position.axis.into()),
+                })
+                .is_some_and(|a| position.holds(a.value))
+        {
+            return;
+        }
+        let Some(found) = mapping.positions.into_iter().find(|p| p == position) else {
             return;
         };
         if let Some(waiting) = self.live.position_sends.get_mut(id)

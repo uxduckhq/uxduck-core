@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "44dae84bb62a3df19768a6f9b0acb9bf10a738e2",
+  "sourceCommit": "02c7cb5d6b204b9e17bc22f3d65499a026ec24d8",
   "licenseReady": true,
   "files": [
     {
@@ -5416,7 +5416,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/controller.rs",
-      "sha256": "99060b4615b478bc15fcd0797835f23ed3e06f26a811cbcb644cd9d37b05bc7a",
+      "sha256": "ff335b7168c90f40611ce1e2fa8af6498d7044d51fefa10ea4915a5ab995e411",
       "executable": false
     },
     {
@@ -5650,6 +5650,11 @@
       "executable": false
     },
     {
+      "path": "crates/uxduck-core/tests/controller_bindings.rs",
+      "sha256": "cc7311abd1183bace8ed5c18bc42e82946af3204426414d000b4393a4332b6b9",
+      "executable": false
+    },
+    {
       "path": "crates/uxduck-engine/Cargo.toml",
       "sha256": "392a4020561851dcf5e25b35cf7901121ad95569dd0f7e7bda1ba27149eec3a2",
       "executable": false
@@ -5721,12 +5726,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/controller_input.rs",
-      "sha256": "5da39a8da3aaddd34756ba267e26bcdd89b8c71ccd26bd81a52afa12b15be94d",
+      "sha256": "3cc5e13058a1ff692e05fc21fd47c7f9a2eaf89284a852e595bb4891c3ed0155",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/controllers.rs",
-      "sha256": "c4888e7c4d490ffc324322a266d6381353eeb7fd0f1a07e06bfa7b09070a588a",
+      "sha256": "e033ebede54e8ea40a93d251eb87912607f309ef38f8d8d55df187b33e11b977",
       "executable": false
     },
     {
@@ -6372,6 +6377,16 @@
     {
       "path": "crates/uxduck-engine/tests/companions.rs",
       "sha256": "4c736f78719cb21b8bcc402678e7a797d9d347026530516bdb9422ac2f74b492",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-engine/tests/controller_binding_safety.rs",
+      "sha256": "ff484e1249894168c2b63361d608c1f03a0ffec7a75261809bfda6f8f3df6004",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-engine/tests/controllers.rs",
+      "sha256": "3a37674c9c7475c1244b631b02dd7bcdd139ab2fa583bf29b402d110cb91f0d6",
       "executable": false
     },
     {

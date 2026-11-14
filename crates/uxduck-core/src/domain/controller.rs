@@ -148,6 +148,27 @@ impl AxisCalibration {
 }
 
 impl AxisBinding {
+    /// Names and platform codes can identify the same physical input. A code
+    /// takes precedence over its stored (possibly guessed) gamepad name.
+    #[must_use]
+    pub fn shares_input(
+        &self,
+        other: &Self,
+        inputs: &[(Option<u32>, Option<GamepadAxis>)],
+    ) -> bool {
+        let matches = |binding: &Self, code, axis| match binding.code {
+            Some(wanted) => code == Some(wanted),
+            None => axis == Some(binding.axis),
+        };
+        match (self.code, other.code) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.axis == other.axis,
+            _ => inputs
+                .iter()
+                .any(|&(code, axis)| matches(self, code, axis) && matches(other, code, axis)),
+        }
+    }
+
     /// A raw reading scaled by the calibration, so the measured ends read
     /// -1 and 1 and the rest reads 0; unchanged without one.
     #[must_use]
@@ -465,6 +486,32 @@ impl RoverThrottle {
 const HID_X: u32 = 0x1_0030;
 
 impl InputMapping {
+    /// A command position must have its own input and an unambiguous range.
+    /// Used at admission and again on live input, including old saved mappings
+    /// and aliases first learned after a route was granted.
+    #[must_use]
+    pub fn position_conflicts(
+        &self,
+        position: &PositionBinding,
+        inputs: &[(Option<u32>, Option<GamepadAxis>)],
+    ) -> bool {
+        let input = position.binding();
+        !(-1.0..=1.0).contains(&position.at)
+            || self
+                .stick_bindings()
+                .chain(self.rc_channels.iter().map(|b| &b.input))
+                .any(|b| input.shares_input(b, inputs))
+            || self
+                .positions
+                .iter()
+                .filter(|other| {
+                    input.shares_input(&other.binding(), inputs)
+                        && (position.at - other.at).abs() <= 2.0 * POSITION_TOLERANCE
+                })
+                .count()
+                > 1
+    }
+
     /// The inputs the sticks read: throttle's and those of the controls
     /// in use.
     pub fn stick_bindings(&self) -> impl Iterator<Item = &AxisBinding> {
