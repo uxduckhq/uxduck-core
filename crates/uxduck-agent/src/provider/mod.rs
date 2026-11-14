@@ -26,8 +26,8 @@ use crate::conversation::Wire;
 use crate::tools::Tool;
 
 /// The largest request the hosted model takes, in bytes: the API's
-/// `MAX_BODY` for HTTP and `MAX_INPUT` for its socket, which
-/// `apps/api/src/features/model/requestLimit.test.ts` checks.
+/// `MAX_BODY` for HTTP and `MAX_INPUT` for its socket, which a test of
+/// UXDuck's API checks.
 pub const HOSTED_MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 /// Said when a request would pass that limit even with every earlier tool

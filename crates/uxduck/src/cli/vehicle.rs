@@ -157,7 +157,7 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
     }
 }
 
-/// Hides vehicles, or shows them again (S247).
+/// Hides vehicles, or shows them again.
 async fn hide(client: &mut LocalClient, vehicles: &[String], hidden: bool) -> Result<(), CliError> {
     for wanted in vehicles {
         let id = resolve(client, wanted).await?;
@@ -188,7 +188,7 @@ fn labels_line(vehicle: &Value) -> String {
 }
 
 /// A vehicle's name where no tag can be drawn beside it: "Alpha", or
-/// "Alpha (replay)" for its replay, which has its name (S238).
+/// "Alpha (replay)" for its replay, which has its name.
 pub(crate) fn vehicle_text(vehicle: &Value) -> String {
     let name = vehicle["name"].as_str().unwrap_or("The vehicle");
     if vehicle["replay"] == true {

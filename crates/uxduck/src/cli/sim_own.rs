@@ -204,10 +204,9 @@ fn build_in(
     Ok(patched)
 }
 
-/// A waf step in the worktree. On macOS it links without chained fixups,
-/// as `scripts/sitl.sh` does: Xcode's linker refuses ArduPilot's packed
-/// version struct ("pointer not aligned") with them, and ignores the
-/// `-ld_classic` ArduPilot asks for.
+/// A waf step in the worktree. On macOS it links without chained fixups:
+/// Xcode's linker refuses ArduPilot's packed version struct ("pointer not
+/// aligned") with them, and ignores the `-ld_classic` ArduPilot asks for.
 fn waf(python: &str, work: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(python);
     command.args(args).current_dir(work);

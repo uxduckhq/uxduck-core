@@ -33,7 +33,7 @@ use crate::{ConnectionId, Engine};
 /// Where "Open documentation" goes, also when the desktop app is installed.
 pub const DOCS: &str = "https://uxduck.com/docs?from=tray";
 
-/// The docs on the website's dev server (apps/website, `pnpm dev`), which a
+/// The docs on the website's local development server, which a
 /// development build opens (maintainer, 2026-10-12: "not production").
 const LOCAL_DOCS: &str = "http://localhost:45102/docs?from=tray";
 

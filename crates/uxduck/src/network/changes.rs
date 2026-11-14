@@ -1,6 +1,6 @@
 //! Says when this computer's network changes: an interface came up or went
 //! down, or an address was added or removed. A UDP client waiting to retry
-//! then does so at once (`docs/plan/vehicle-connections.md`). One poll of the
+//! then does so at once. One poll of the
 //! interface list serves macOS, Windows and Linux alike, because if-addrs has
 //! no change notifier on macOS.
 

@@ -20,20 +20,19 @@ struct Active {
     path: PathBuf,
 }
 
+/// `UXDUCK_API_URL`, else production, in development executables too, so a
+/// build from source (UXDuck Core) finds places and signs in. The local
+/// development stack sets `UXDUCK_API_URL` to its own API.
 pub fn startup_url() -> Option<String> {
-    startup_target(
-        std::env::var("UXDUCK_API_URL").ok().as_deref(),
-        cfg!(debug_assertions),
-        &std::env::var("UXDUCK_LOCAL_API_URL").unwrap_or_else(|_| LOCAL.into()),
-    )
+    startup_target(std::env::var("UXDUCK_API_URL").ok().as_deref(), PRODUCTION)
 }
 
-fn startup_target(configured: Option<&str>, development: bool, local: &str) -> Option<String> {
+/// `configured`, `none` or empty for no server, else `default`.
+fn startup_target(configured: Option<&str>, default: &str) -> Option<String> {
     match configured {
         Some("none" | "") => None,
         Some(value) => Some(value.trim_end_matches('/').to_owned()),
-        None if development => Some(local.trim_end_matches('/').to_owned()),
-        None => Some(PRODUCTION.into()),
+        None => Some(default.trim_end_matches('/').to_owned()),
     }
 }
 
@@ -124,12 +123,15 @@ pub fn api_url() -> Option<String> {
 }
 
 /// Before server selection, debug executables defaulted to staging. Keep
-/// those legacy tokens there when a new development startup defaults to Local.
+/// those legacy tokens there, whatever a development startup defaults to now.
 pub fn legacy_api_url() -> Option<String> {
     startup_target(
         std::env::var("UXDUCK_API_URL").ok().as_deref(),
-        cfg!(debug_assertions),
-        STAGING,
+        if cfg!(debug_assertions) {
+            STAGING
+        } else {
+            PRODUCTION
+        },
     )
 }
 
@@ -187,40 +189,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn development_defaults_to_local_and_release_defaults_to_production() {
-        assert_eq!(startup_target(None, true, LOCAL).as_deref(), Some(LOCAL));
+    fn startup_is_production_unless_configured() {
         assert_eq!(
-            startup_target(None, false, LOCAL).as_deref(),
+            startup_target(None, PRODUCTION).as_deref(),
             Some(PRODUCTION)
         );
         assert_eq!(
-            startup_target(None, true, "http://127.0.0.1:47985/").as_deref(),
+            startup_target(Some("http://127.0.0.1:47985/"), PRODUCTION).as_deref(),
             Some("http://127.0.0.1:47985")
         );
         assert_eq!(
-            startup_target(Some(STAGING), true, LOCAL).as_deref(),
+            startup_target(Some(STAGING), PRODUCTION).as_deref(),
             Some(STAGING)
         );
-        assert_eq!(startup_target(Some("none"), true, LOCAL), None);
-        assert_eq!(startup_target(Some(""), true, LOCAL), None);
+        assert_eq!(startup_target(Some("none"), PRODUCTION), None);
+        assert_eq!(startup_target(Some(""), PRODUCTION), None);
         // Legacy tokens retain the pre-selector staging default.
-        assert_eq!(
-            startup_target(None, true, STAGING).as_deref(),
-            Some(STAGING)
-        );
+        assert_eq!(startup_target(None, STAGING).as_deref(), Some(STAGING));
     }
 
     #[test]
-    fn saved_choices_still_override_the_new_local_startup_default() {
+    fn saved_choices_and_the_local_stack_override_the_production_startup() {
         let dir = tempfile::tempdir().unwrap();
-        let startup = startup_target(None, true, LOCAL);
+        let startup = startup_target(None, PRODUCTION);
         let active = load_active(dir.path(), startup.clone(), true, LOCAL.into()).unwrap();
+        assert_eq!(
+            state(&active, None, true).environment,
+            Some(AccountEnvironment::Production)
+        );
+        // The local development stack sets UXDUCK_API_URL to its own API.
+        let local = startup_target(Some(LOCAL), PRODUCTION);
+        let active = load_active(dir.path(), local.clone(), true, LOCAL.into()).unwrap();
         assert_eq!(
             state(&active, None, true).environment,
             Some(AccountEnvironment::Local)
         );
         std::fs::write(dir.path().join(FILE), "\"staging\"").unwrap();
-        let active = load_active(dir.path(), startup, true, LOCAL.into()).unwrap();
+        let active = load_active(dir.path(), local, true, LOCAL.into()).unwrap();
         assert_eq!(active.api.as_deref(), Some(STAGING));
     }
 

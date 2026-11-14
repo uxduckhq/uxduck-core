@@ -357,7 +357,7 @@ pub async fn run(data_dir: &Path, command: SetupCommand) -> Result<(), CliError>
     Ok(())
 }
 
-/// The accelerometer calibration's positions (S186): each one the vehicle
+/// The accelerometer calibration's positions: each one the vehicle
 /// asks for, confirmed with Enter, until it ends. Ctrl-C cancels it.
 async fn positions(client: &mut LocalClient, id: &str) -> Result<(), CliError> {
     use tokio::io::AsyncBufReadExt;
@@ -422,7 +422,7 @@ async fn positions(client: &mut LocalClient, id: &str) -> Result<(), CliError> {
     }
 }
 
-/// The radio calibration's steps (S187): Enter for the centre and the
+/// The radio calibration's steps: Enter for the centre and the
 /// ends, each stick found as it moves, then the ranges and each fix, and
 /// Enter to write them. Ctrl-C cancels it.
 async fn radio(client: &mut LocalClient, id: &str, accept_fixes: bool) -> Result<(), CliError> {
@@ -791,7 +791,7 @@ fn progress_line(procedure: &Value) -> String {
     }
 }
 
-/// A PX4 calibration's sides in a line (S191): "Hold it nose down still
+/// A PX4 calibration's sides in a line: "Hold it nose down still
 /// (2 of 6 sides done, 33%)".
 fn sides_line(procedure: &Value) -> String {
     let sides = &procedure["sides"];
@@ -816,7 +816,7 @@ fn sides_line(procedure: &Value) -> String {
     format!("{what} ({done})")
 }
 
-/// The airspeed's zero, check or ratio in a line (S190).
+/// The airspeed's zero, check or ratio in a line.
 fn airspeed_line(procedure: &Value) -> String {
     let run = &procedure["airspeed"];
     let mps = |key: &str| run[key].as_f64().map(|v| format!("{v:.1} m/s"));
@@ -972,7 +972,7 @@ fn print_state(state: &Value) {
     }
 }
 
-/// The Restart row in words (S216): "Due: compass calibrated", "Due: 2
+/// The Restart row in words: "Due: compass calibrated", "Due: 2
 /// parameters changed (`SERIAL1_PROTOCOL`, …)", or "Nothing due".
 fn restart_words(restart: &Value) -> String {
     let rows: Vec<&str> = restart["rows"]

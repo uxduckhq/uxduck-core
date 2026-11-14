@@ -1,7 +1,7 @@
 //! The interface (ADR-0025 D3, S109): the pages people use UXDuck through,
 //! published by every web deploy and kept on disk by UXDuck, so an installed
 //! UXDuck serves the newest compatible one online and the last one it
-//! followed offline (`docs/plan/interface-updates.md`).
+//! followed offline.
 //!
 //! The manifest is not part of the RPC protocol: the web deploy writes it
 //! (`cargo xtask interface-manifest`) and UXDuck reads it. `InterfaceStatus`

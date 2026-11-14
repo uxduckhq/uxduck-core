@@ -25,7 +25,7 @@ use uxduck_contracts::dto::sim::{
 
 use super::{BUILD_FILE, PX4, Simulators};
 
-/// Where the catalogue is published (R2, `docs/plan/review.md` S18).
+/// Where the catalogue is published (R2).
 pub const DEFAULT_URL: &str = "https://simulators.uxduck.com/catalogue.json";
 /// Beta builds of UXDuck read the beta catalogue: simulators beta testers
 /// try before everyone (maintainer, 2026-10-30). The stable one serves
@@ -102,9 +102,9 @@ pub struct Catalogue {
 
 impl Catalogue {
     /// `UXDUCK_SIM_CATALOGUE_URL` points a development build elsewhere, and
-    /// `none` turns the catalogue off. The key is the release key built into this binary; a
-    /// development build takes `UXDUCK_SIM_CATALOGUE_KEY` instead, for
-    /// tests.
+    /// `none` turns the catalogue off. The key is the release key
+    /// (`crate::update::data_key`). A development build takes
+    /// `UXDUCK_SIM_CATALOGUE_KEY` instead, for tests.
     #[must_use]
     pub fn new(simulators: Arc<Simulators>, runtime: tokio::runtime::Handle) -> Arc<Self> {
         let url = match crate::update::url_override("UXDUCK_SIM_CATALOGUE_URL") {
@@ -115,10 +115,10 @@ impl Catalogue {
         let key = std::env::var("UXDUCK_SIM_CATALOGUE_KEY")
             .ok()
             .filter(|_| cfg!(debug_assertions))
-            .or_else(|| crate::update::PUBLIC_KEY.map(str::to_owned));
+            .unwrap_or_else(crate::update::data_key);
         Arc::new(Self {
             url,
-            key,
+            key: Some(key),
             simulators,
             runtime,
             state: Mutex::new(State::default()),

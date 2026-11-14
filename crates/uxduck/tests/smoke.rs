@@ -20,6 +20,8 @@ fn command(directory: &Path) -> Command {
         .env("UXDUCK_API_URL", "none")
         .env("UXDUCK_POSTHOG_KEY", "none")
         .env("UXDUCK_TERRAIN_URL", "none")
+        .env("UXDUCK_SIM_CATALOGUE_URL", "none")
+        .env("UXDUCK_PARAM_CATALOGUE_URL", "none")
         .env("UXDUCK_VIDEO_PORT", "0")
         .env_remove("SSH_CONNECTION")
         .env_remove("UXDUCK_NO_TRAY")

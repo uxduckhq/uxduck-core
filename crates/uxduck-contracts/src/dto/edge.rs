@@ -297,7 +297,7 @@ pub struct RemoteView {
 // Live video from anywhere (S84, ADR-0003 C11 to C13, "Live path"): a
 // computer publishes a camera's live rendition to a cloud media node only
 // while someone away watches it, with a publish grant from the media
-// coordinator in `apps/api`. The media node checks the grant itself against
+// coordinator in UXDuck's cloud API. The media node checks the grant itself against
 // the coordinator's keys, so a stream starts without a database (C6). Nobody
 // away plays one since the account's own viewers went (2026-11-03): guests
 // get no video (ADR-0023 W5).

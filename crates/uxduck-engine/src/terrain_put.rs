@@ -60,7 +60,7 @@ use crate::{ConnectionId, Engine};
 /// card has been tested on hardware (S312's maintainer step, ADR-0051's
 /// consequences). Until then they ask first on every link, and only
 /// simulators are written to by themselves. Flip this once the test is
-/// recorded in `docs/plan/review/`: radios still ask first after it.
+/// recorded: radios still ask first after it.
 pub(crate) const REAL_VEHICLES_AUTOMATIC: bool = false;
 
 /// Blocks in one FTP job: a vehicle that arms stops at most this many

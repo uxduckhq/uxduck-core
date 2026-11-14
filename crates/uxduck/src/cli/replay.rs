@@ -130,7 +130,7 @@ async fn finish(
 
 /// Brings forward what shows the replay. "Open a window" is the default
 /// choice, so where no desktop window is installed a page already open
-/// comes forward instead of failing that the window is missing (UXD-169).
+/// comes forward instead of failing that the window is missing.
 async fn show(client: &mut LocalClient) -> Result<(), CliError> {
     let desktop = client.call("desktopApp/status", json!({})).await?;
     if desktop["chosen"] == true

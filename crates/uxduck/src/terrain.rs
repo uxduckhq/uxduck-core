@@ -27,41 +27,23 @@ pub struct Source {
 impl Source {
     /// `UXDUCK_TERRAIN_URL` serves it from elsewhere (a test fixture), and
     /// `none` turns terrain off (tests fetch nothing). The public key is
-    /// the release key built into this binary; a development build takes
-    /// `UXDUCK_TERRAIN_KEY` instead, and the development daemon (`dev`)
-    /// the checkout's copy of the release key.
-    ///
-    /// # Errors
-    /// For the development daemon with terrain on and no key, which would
-    /// answer no heights: it says how to get the key.
-    pub fn from_env(dev: bool) -> Result<Option<Self>, String> {
+    /// the release key (`crate::update::data_key`). A development build
+    /// takes `UXDUCK_TERRAIN_KEY` instead.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
         let base_url = match crate::update::url_override("UXDUCK_TERRAIN_URL") {
-            Some(url) if url == "none" => return Ok(None),
+            Some(url) if url == "none" => return None,
             Some(url) if !url.trim().is_empty() => url,
             _ => DEFAULT_BASE_URL.to_owned(),
         };
         let key = std::env::var("UXDUCK_TERRAIN_KEY")
             .ok()
             .filter(|_| cfg!(debug_assertions))
-            .or_else(|| {
-                if dev {
-                    crate::update::development_key()
-                } else {
-                    crate::update::PUBLIC_KEY.map(str::to_owned)
-                }
-            });
-        if dev && key.is_none() {
-            return Err(
-                "terrain needs the release public key: run `cargo xtask release-key` \
-                 (it reads it from Infisical once), or set UXDUCK_TERRAIN_URL=none to run \
-                 without terrain"
-                    .into(),
-            );
-        }
-        Ok(Some(Self {
+            .unwrap_or_else(crate::update::data_key);
+        Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            key,
-        }))
+            key: Some(key),
+        })
     }
 }
 

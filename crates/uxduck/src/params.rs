@@ -40,9 +40,10 @@ pub struct Source {
 
 impl Source {
     /// `UXDUCK_PARAM_CATALOGUE_URL` points elsewhere, and `none` turns the
-    /// catalogue off. The public verification key is built into this binary;
-    /// a development build takes `UXDUCK_PARAM_CATALOGUE_KEY` instead, for
-    /// tests or a publisher's own catalogue.
+    /// catalogue off. The public verification key is the release key
+    /// (`crate::update::data_key`). A development build takes
+    /// `UXDUCK_PARAM_CATALOGUE_KEY` instead, for tests or a publisher's own
+    /// catalogue.
     #[must_use]
     pub fn from_env() -> Self {
         let url = match crate::update::url_override("UXDUCK_PARAM_CATALOGUE_URL") {
@@ -53,8 +54,11 @@ impl Source {
         let key = std::env::var("UXDUCK_PARAM_CATALOGUE_KEY")
             .ok()
             .filter(|_| cfg!(debug_assertions))
-            .or_else(|| crate::update::PUBLIC_KEY.map(str::to_owned));
-        Self { url, key }
+            .unwrap_or_else(crate::update::data_key);
+        Self {
+            url,
+            key: Some(key),
+        }
     }
 }
 

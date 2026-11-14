@@ -35,7 +35,7 @@ For intermittent GPS, EKF, vibration or battery problems, correlate messages wit
 
 ## Parameter descriptions are missing
 
-Run `uxduck params definitions list` and follow [Missing descriptions](parameters.md#missing-descriptions). Values and descriptions are separate downloads. A public catalogue verification key belongs in the published build; it is not a secret the user must supply. Custom firmware needs descriptions from its matching commit.
+Run `uxduck params definitions list` and follow [Missing descriptions](parameters.md#missing-descriptions). Values and descriptions are separate downloads. The public key that checks the catalogue is built into UXDuck, including a build from source, so there is nothing to supply. Custom firmware needs descriptions from its matching commit.
 
 ## Camera video is blank
 

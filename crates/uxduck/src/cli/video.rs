@@ -36,11 +36,11 @@ pub enum VideoCommand {
         #[arg(long)]
         deinterlace: bool,
         /// Record sound from this input, an exact id or unambiguous name from
-        /// `uxduck video devices`' sound inputs (S148). Without it, the
-        /// camera's own microphone when it has one (S161).
+        /// `uxduck video devices`' sound inputs. Without it, the
+        /// camera's own microphone when it has one.
         #[arg(long, conflicts_with = "no_sound")]
         sound: Option<String>,
-        /// No sound, not even the camera's own microphone (S161).
+        /// No sound, not even the camera's own microphone.
         #[arg(long)]
         no_sound: bool,
     },
@@ -91,7 +91,7 @@ pub enum VideoCommand {
     /// Removes a camera added by hand (its id from `uxduck video list`) or a
     /// UDP port (`udp:5601`).
     Remove { what: String },
-    /// Recordings, newest first, with where each file is (S40).
+    /// Recordings, newest first, with where each file is.
     Recordings {
         /// The answer as JSON, for scripts.
         #[arg(long)]
@@ -187,7 +187,7 @@ pub async fn run(data_dir: &Path, command: VideoCommand) -> Result<(), CliError>
 }
 
 /// Records or stops one camera, or with `all` every camera that records
-/// with the others (S153).
+/// with the others.
 async fn record(
     data_dir: &Path,
     source: Option<String>,

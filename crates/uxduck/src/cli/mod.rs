@@ -155,61 +155,61 @@ pub enum Command {
         #[command(subcommand)]
         command: vehicle::VehicleCommand,
     },
-    /// Practice exercises on a simulated vehicle (S100): `uxduck practice
+    /// Practice exercises on a simulated vehicle: `uxduck practice
     /// list`, `start <exercise> --vehicle <name>`, `status`, `stop` and `guide`.
     Practice {
         #[command(subcommand)]
         command: practice::PracticeCommand,
     },
-    /// A vehicle's missions over time (S134): `uxduck mission history Alpha`.
+    /// A vehicle's missions over time: `uxduck mission history Alpha`.
     Mission {
         #[command(subcommand)]
         command: mission::MissionCommand,
     },
-    /// Markers on the map (S177): `uxduck marker add --lat 53.07 --lon -4.08 --look flag`.
+    /// Markers on the map: `uxduck marker add --lat 53.07 --lon -4.08 --look flag`.
     Marker {
         #[command(subcommand)]
         command: marker::MarkerCommand,
     },
-    /// A vehicle's setup (S184): `uxduck setup status Alpha`, and `uxduck
+    /// A vehicle's setup: `uxduck setup status Alpha`, and `uxduck
     /// setup compass Alpha` to calibrate its compasses while it is turned.
     Setup {
         #[command(subcommand)]
         command: setup::SetupCommand,
     },
-    /// A vehicle's preflight checks (S192): `uxduck preflight Alpha`, and
+    /// A vehicle's preflight checks: `uxduck preflight Alpha`, and
     /// `uxduck preflight Alpha --check plan --severity block` to change one
     /// of UXDuck's own.
     Preflight(preflight::PreflightArgs),
-    /// Plays a flight back in UXDuck (ADR-0039): `uxduck replay` for the
+    /// Plays a flight back in UXDuck: `uxduck replay` for the
     /// replay open now or the last flight, `uxduck replay <flight id>`,
     /// `uxduck replay flight.tlog`,
     /// with `--play`, `--speed 5` and `--at 90`; `--close` shows live again.
     Replay(replay::ReplayArgs),
-    /// Operations (ADR-0039 R16): `uxduck operation list`, `rename <id>
+    /// Operations: `uxduck operation list`, `rename <id>
     /// "Night survey"`, `add <id> <flight id>…`, `create --name … <flight
     /// id>…`, `remove <id> <flight id>…`.
     Operation {
         #[command(subcommand)]
         command: operation::OperationCommand,
     },
-    /// A vehicle's own checklist (S193): `uxduck checklist Alpha`, `add
+    /// A vehicle's own checklist: `uxduck checklist Alpha`, `add
     /// "Propellers tight"`, `add "Battery" --rule "battery.voltage_v >=
     /// 22.2" --hold 3`, `tick 1`, `export`, `import list.md`, `copy
-    /// --from Bravo`. A preflight is a run of it (S350): `new`,
+    /// --from Bravo`. A preflight is a run of it: `new`,
     /// `finish`, `reopen`, `runs`.
     Checklist(checklist::ChecklistArgs),
-    /// Saved plans (S125): `uxduck plan import mission.plan`.
+    /// Saved plans: `uxduck plan import mission.plan`.
     Plan {
         #[command(subcommand)]
         command: plan::PlanCommand,
     },
-    /// Terrain heights (S23): `uxduck terrain at --lat 53.07 --lon -4.08`.
+    /// Terrain heights: `uxduck terrain at --lat 53.07 --lon -4.08`.
     Terrain {
         #[command(subcommand)]
         command: terrain::TerrainCommand,
     },
-    /// Other aircraft near the vehicles (S168): `uxduck traffic` lists
+    /// Other aircraft near the vehicles: `uxduck traffic` lists
     /// them, `uxduck traffic sources` lists who reports them, and `uxduck
     /// traffic on Alpha` uses Alpha's ADS-B receiver.
     Traffic {
@@ -355,7 +355,7 @@ pub struct DaemonArgs {
     /// web does; for tests. Repeatable.
     #[arg(long, value_name = "ORIGIN", hide = true)]
     hosted_origin: Vec<String>,
-    /// Serve a built app from this directory (apps/web/dist).
+    /// Serve a built UXDuck interface from this directory.
     #[arg(long, value_name = "DIR")]
     ui_dir: Option<PathBuf>,
     /// Open the app, already paired, once the daemon is listening.
@@ -429,7 +429,7 @@ pub struct DaemonArgs {
     #[arg(long, value_name = "PORT", hide = true)]
     fake_controller: Option<u16>,
     /// Burn a core in a busy loop, so `cargo xtask perf` can be seen to
-    /// fail (S24). For tests only.
+    /// fail. For tests only.
     #[arg(long, hide = true)]
     spin_for_tests: bool,
     #[command(subcommand)]
@@ -507,7 +507,7 @@ pub enum DaemonAction {
         yes: bool,
     },
     /// Start UXDuck in the background when it isn't running, and open
-    /// nothing: what Open at login runs (S108).
+    /// nothing: what Open at login runs.
     Start,
     /// Stop the running daemon, with a final checkpoint, and wait until it
     /// has gone. Nothing happens when none is running.
@@ -660,7 +660,7 @@ pub enum AccountCommand {
     /// Email yourself a link that deletes your account. Nothing is deleted
     /// until you open it and confirm.
     Delete,
-    /// Watch links (S95): anyone with one watches this computer, or one
+    /// Watch links: anyone with one watches this computer, or one
     /// vehicle on it, in a browser, read only, until it ends.
     WatchLink {
         #[command(subcommand)]
@@ -760,7 +760,7 @@ pub enum SimCommand {
     /// Starts a simulated vehicle again from where it started, by its
     /// link's id: after a crash, or to begin afresh. It keeps its name.
     Restart { id: String },
-    /// Saves a snapshot of a simulated vehicle, by its id (S34).
+    /// Saves a snapshot of a simulated vehicle, by its id.
     Snapshot {
         vehicle_id: String,
         #[arg(long)]
@@ -795,7 +795,7 @@ pub enum SimCommand {
         #[arg(long)]
         allow_network: bool,
     },
-    /// The catalogue's prebuilt builds for this computer (S18).
+    /// The catalogue's prebuilt builds for this computer.
     Catalogue {
         /// Fetch it again.
         #[arg(long)]
@@ -828,7 +828,7 @@ pub enum DevCommand {
     /// A fake vehicle on a serial port of its own (a pseudo-terminal whose
     /// path it prints) that restarts into a fake bootloader when asked and
     /// back into its firmware once installed, reporting the version
-    /// written (S189). Add a serial link to the path, then install.
+    /// written. Add a serial link to the path, then install.
     FakeBoard {
         #[arg(long, default_value_t = 1)]
         system_id: u8,
@@ -885,10 +885,10 @@ pub enum DevCommand {
         #[arg(long)]
         commit: Option<String>,
         /// A camera component that names this video stream when asked, such
-        /// as `rtsp://127.0.0.1:8554/main` or `udp://127.0.0.1:5600` (S39).
+        /// as `rtsp://127.0.0.1:8554/main` or `udp://127.0.0.1:5600`.
         #[arg(long)]
         camera: Option<String>,
-        /// Send ArduPilot's start-up messages, two of them warnings (S26).
+        /// Send ArduPilot's start-up messages, two of them warnings.
         #[arg(long)]
         startup_burst: bool,
         /// Say `PreArm: Throttle below failsafe` every 30 s while disarmed.
@@ -897,44 +897,44 @@ pub enum DevCommand {
         /// Repeat the warning "Vibration high" every second, from 12 s in.
         #[arg(long)]
         repeat_warning: bool,
-        /// Shake more and more from 10 s in, past 30 and 60 m/s² (S72).
+        /// Shake more and more from 10 s in, past 30 and 60 m/s².
         #[arg(long)]
         vibration_high: bool,
         /// Its ADS-B receiver hears this many aircraft circling home, sent as
-        /// `ADSB_VEHICLE` once a second (S168).
+        /// `ADSB_VEHICLE` once a second.
         #[arg(long, default_value_t = 0)]
         traffic: u8,
-        /// Say "Leak Detected!" every 10 s, as `ArduSub` does (S72).
+        /// Say "Leak Detected!" every 10 s, as `ArduSub` does.
         #[arg(long)]
         leak: bool,
         /// Send a fork's own messages, as `crates/uxduck-mavlink/fixtures/acme_fork.xml`
         /// describes them: `ACME_STATUS` (43001) and a `SYS_STATUS` with one more
-        /// extension (S252).
+        /// extension.
         #[arg(long)]
         fork_messages: bool,
         /// No MAVLink FTP: parameters come by the list, without defaults
-        /// (S74), and the Files tab has nothing to show (S121).
+        ///, and the Files tab has nothing to show.
         #[arg(long)]
         no_ftp: bool,
-        /// Lose every seventh MAVLink FTP answer, as a lossy radio does (S121).
+        /// Lose every seventh MAVLink FTP answer, as a lossy radio does.
         #[arg(long)]
         drop_ftp: bool,
         /// Start with no terrain and ask UXDuck for it, as ArduPilot with an
-        /// empty terrain folder (S118); without it, terrain is fixed.
+        /// empty terrain folder; without it, terrain is fixed.
         #[arg(long)]
         terrain: bool,
         /// With `--terrain`, keep every height this many metres off, as a
-        /// card holding another dataset (S119).
+        /// card holding another dataset.
         #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
         terrain_shift: i16,
-        /// Fail the pre-arm checks: arming is refused unless forced (S53).
+        /// Fail the pre-arm checks: arming is refused unless forced.
         #[arg(long)]
         refuse_arm: bool,
         /// Refuse to disarm unless forced, as a vehicle that thinks it is
         /// still flying does.
         #[arg(long)]
         refuse_disarm: bool,
-        /// The battery's % at the start, such as 45 to see it low (S77).
+        /// The battery's % at the start, such as 45 to see it low.
         #[arg(long, default_value_t = 100.0)]
         battery: f64,
         /// Never have a GPS fix, so never a position.
@@ -945,7 +945,7 @@ pub enum DevCommand {
         lose_gps_at: Option<f64>,
         /// List this many compasses (1 to 3), not calibrated: its pre-arm
         /// checks fail with "Compass not calibrated" until they are, and it
-        /// answers a compass calibration as ArduPilot does (S184).
+        /// answers a compass calibration as ArduPilot does.
         #[arg(long, default_value_t = 0)]
         compasses: u8,
         /// With `--compasses`, start calibrated.
@@ -957,7 +957,7 @@ pub enum DevCommand {
         compass_fails: Option<u8>,
         /// List its accelerometers' offsets, all zero: its pre-arm checks
         /// fail with "3D Accel calibration needed" until it is calibrated
-        /// in six positions, which it asks for as ArduPilot does (S186).
+        /// in six positions, which it asks for as ArduPilot does.
         #[arg(long)]
         accel_uncalibrated: bool,
         /// Fail the accelerometer calibration after its last position.
@@ -966,7 +966,7 @@ pub enum DevCommand {
         /// List its radio's parameters at ArduPilot's defaults: its pre-arm
         /// checks fail with "RC not calibrated" until it is calibrated. Asked
         /// for its channels, its sticks move as a person calibrating it would
-        /// (S187): centred for 8 s, swept to their ends until 16 s, centred
+        ///: centred for 8 s, swept to their ends until 16 s, centred
         /// until 24 s, then roll right, pitch forward, throttle up and yaw
         /// right in turn.
         #[arg(long)]
@@ -980,23 +980,23 @@ pub enum DevCommand {
         #[arg(long, requires = "radio", default_value_t = 1.0)]
         radio_pace: f64,
         /// List a quad X's frame class and type, so the Setup tab
-        /// draws its motors (S188). Every fake vehicle answers a motor test,
+        /// draws its motors. Every fake vehicle answers a motor test,
         /// listed or not: armed for it, the motor tested shows in its
         /// outputs until the test's time runs out.
         #[arg(long)]
         motors: bool,
         /// List a copter's ESC parameters with this `MOT_PWM_TYPE` (0 PWM,
-        /// 6 `DShot600`) and `ESC_CALIBRATION` 0 (S216). Set to 3, it
+        /// 6 `DShot600`) and `ESC_CALIBRATION` 0. Set to 3, it
         /// restarts by itself eight seconds later with it back at 0, as a
         /// person replugging its battery would have it.
         #[arg(long)]
         escs: Option<u8>,
         /// List `SCR_ENABLE` with this value (0 off, 1 Lua) and a
-        /// `hello.lua` in `/APM/scripts` (S259). It answers
+        /// `hello.lua` in `/APM/scripts`. It answers
         /// `MAV_CMD_SCRIPTING`'s restart and says "Scripting: restarted".
         #[arg(long)]
         scripting: Option<u8>,
-        /// Be a plane with an airspeed sensor (S190): it sits on the ground
+        /// Be a plane with an airspeed sensor: it sits on the ground
         /// until armed and circles once armed; it zeroes its sensor as
         /// `ArduPlane` does, and with `ARSPD_AUTOCAL` on in flight its ratio
         /// settles. Raise `SIM_ARSPD_OFS` by 60 to blow into its pitot, or
@@ -1007,7 +1007,7 @@ pub enum DevCommand {
         /// until it is.
         #[arg(long, requires = "airspeed")]
         airspeed_unzeroed: bool,
-        /// Be PX4 1.17 (S191): a quad X with PX4's parameters, calibrating
+        /// Be PX4 1.17: a quad X with PX4's parameters, calibrating
         /// as PX4 does and saying how in its `[cal]` status text, turned
         /// onto each side by itself; it answers `MAV_CMD_ACTUATOR_TEST`.
         /// With `--accel-uncalibrated` its accelerometer is not calibrated
@@ -1021,7 +1021,7 @@ pub enum DevCommand {
         px4_plane: bool,
     },
     /// Runs a SITL build and stops it when standard input closes: the
-    /// simulation manager's guard, so no build outlives the daemon (S17).
+    /// simulation manager's guard, so no build outlives the daemon.
     SimGuard {
         /// Where the build's output goes.
         #[arg(long)]
@@ -1032,7 +1032,7 @@ pub enum DevCommand {
     },
     /// Sends a tlog's frames over UDP with their recorded timing, as the
     /// vehicle sent them: a feedback report's `flight.tlog` brings back
-    /// the vehicle's side of the moment (S31). Frames ground stations sent
+    /// the vehicle's side of the moment. Frames ground stations sent
     /// (UXDuck's own, which its tlogs keep, ADR-0050 L1) are left out.
     Replay {
         tlog: PathBuf,
@@ -1043,7 +1043,7 @@ pub enum DevCommand {
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
         /// Sends nothing: judges a practice exercise over the tlog, such as
-        /// `bring-it-home`, and prints its steps and result (S100).
+        /// `bring-it-home`, and prints its steps and result.
         #[arg(long)]
         practice: Option<String>,
         /// With `--practice`, seconds into the tlog the attempt began.
@@ -1052,7 +1052,7 @@ pub enum DevCommand {
     },
     /// Prints a tlog's MAVLink messages by name, one JSON line each, as
     /// plugins receive them; `--plugin` adds that plugin's vendor dialect
-    /// (S60). Frames no dialect knows are printed by id.
+    ///. Frames no dialect knows are printed by id.
     Decode {
         tlog: PathBuf,
         /// A plugin folder whose `plugin.json` names a dialect.
@@ -1060,7 +1060,7 @@ pub enum DevCommand {
         plugin: Option<PathBuf>,
     },
     /// Sends an MPEG-TS capture over UDP as a camera would, byte for byte
-    /// and paced by its PCR: seven packets to a datagram (S38).
+    /// and paced by its PCR: seven packets to a datagram.
     VideoReplay {
         capture: PathBuf,
         /// Where to send, such as UXDuck's video port.
@@ -1507,7 +1507,7 @@ fn prompt(question: &str) -> Result<String, CliError> {
     Ok(line.trim().to_owned())
 }
 
-/// `uxduck login`: the email code sign-in, in a terminal (ADR-0013 P9).
+/// `uxduck login`: the email code sign-in, in a terminal.
 async fn login(
     data_dir: &std::path::Path,
     email: Option<String>,
@@ -1555,7 +1555,7 @@ const TERMS_URL: &str = "https://uxduck.com/terms";
 const PRIVACY_URL: &str = "https://uxduck.com/privacy";
 
 /// `uxduck terms`: agrees to the Terms of Service for an operator, as the
-/// app asks before it arms a real vehicle (ADR-0047), with no window.
+/// app asks before it arms a real vehicle, with no window.
 async fn terms(
     data_dir: &std::path::Path,
     operator: Option<&str>,
@@ -1675,7 +1675,7 @@ async fn select_login_operator(
     Ok(())
 }
 
-/// `uxduck account username [NAME]` (S73).
+/// `uxduck account username [NAME]`.
 async fn username(data_dir: &std::path::Path, name: Option<&str>) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
@@ -1701,7 +1701,7 @@ async fn username(data_dir: &std::path::Path, name: Option<&str>) -> Result<(), 
     Ok(())
 }
 
-/// `uxduck account sessions` (S114).
+/// `uxduck account sessions`.
 async fn sessions(data_dir: &std::path::Path, json: bool) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
@@ -1740,7 +1740,7 @@ async fn sessions(data_dir: &std::path::Path, json: bool) -> Result<(), CliError
     Ok(())
 }
 
-/// `uxduck account sign-out` (S114).
+/// `uxduck account sign-out`.
 async fn sign_out_session(
     data_dir: &std::path::Path,
     id: Option<String>,
@@ -1773,7 +1773,7 @@ async fn sign_out_session(
     Ok(())
 }
 
-/// `uxduck account delete` (S114, ADR-0013 P23).
+/// `uxduck account delete`.
 async fn request_deletion(data_dir: &std::path::Path) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
@@ -1926,7 +1926,7 @@ async fn logout(data_dir: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `uxduck sim`: the simulation manager through the API (S17).
+/// `uxduck sim`: the simulation manager through the API.
 async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliError> {
     match command {
         SimCommand::Start {
@@ -2212,7 +2212,7 @@ async fn vehicle_command(
     }
 }
 
-/// As the app does (S53): a command whose risk, on the ground or, while
+/// As the app does: a command whose risk, on the ground or, while
 /// the vehicle is armed, in flight, is to confirm or dangerous asks first
 /// in a terminal. A script is not asked, but a dangerous command from one
 /// needs `--yes`, so nothing sends one without saying so; `--yes` skips
@@ -2525,7 +2525,7 @@ async fn focus_after_update(
     Ok(false)
 }
 
-/// Release builds use the hosted model only (ADR-0013 P5).
+/// Release builds use the hosted model only.
 const DEFAULT_PROVIDER: &str = if cfg!(debug_assertions) {
     "auto"
 } else {
@@ -2648,7 +2648,7 @@ async fn plugin_install(
     Ok(())
 }
 
-/// What a plugin's checks do, in words (S194, ADR-0038 K13).
+/// What a plugin's checks do, in words.
 fn checks_words(plugin: &serde_json::Value) -> Option<String> {
     let checks = plugin["checks"].as_array().cloned().unwrap_or_default();
     if checks.is_empty() {
@@ -2978,8 +2978,8 @@ async fn open_target(client: &mut LocalClient) -> Result<Option<&'static str>, C
 
 /// `uxduck dev replay`: a recorded tlog's frames, one datagram each, at the
 /// pace they were recorded.
-/// `uxduck service install` and `uninstall` (S64): Open at login, as the
-/// switch in the menu bar and Settings turns it on and off (S108).
+/// `uxduck service install` and `uninstall`: Open at login, as the
+/// switch in the menu bar and Settings turns it on and off.
 fn service(command: &ServiceCommand) -> Result<(), CliError> {
     let said =
         crate::service::set(matches!(command, ServiceCommand::Install)).map_err(CliError::Usage)?;
@@ -3207,23 +3207,23 @@ struct FakeOptions {
     compasses: Option<(u8, bool, Option<u8>)>,
     /// Its accelerometers not calibrated, and failing their calibration.
     accel: (bool, bool),
-    /// Its radio (S187), uncalibrated: whether its roll runs backwards, and
+    /// Its radio, uncalibrated: whether its roll runs backwards, and
     /// its sticks' pace.
     radio: Option<(bool, f64)>,
-    /// Its frame listed for the motor test (S188).
+    /// Its frame listed for the motor test.
     motors: bool,
-    /// Its ESCs' `MOT_PWM_TYPE`, listed for their calibration (S216).
+    /// Its ESCs' `MOT_PWM_TYPE`, listed for their calibration.
     escs: Option<u8>,
-    /// Its `SCR_ENABLE`, listed with a script (S259).
+    /// Its `SCR_ENABLE`, listed with a script.
     scripting: Option<u8>,
-    /// A plane with an airspeed sensor (S190), zeroed or not.
+    /// A plane with an airspeed sensor, zeroed or not.
     airspeed: Option<bool>,
-    /// PX4 (S191): a plane, or a quad.
+    /// PX4: a plane, or a quad.
     px4: Option<bool>,
 }
 
-/// The fake vehicle's compasses (S184), accelerometers (S186), radio
-/// (S187), frame (S188) and airspeed sensor (S190), as the flags ask.
+/// The fake vehicle's compasses, accelerometers, radio
+///, frame and airspeed sensor, as the flags ask.
 fn fake_sensors(
     vehicle: &mut uxduck_mavlink::sim::FakeVehicle,
     compasses: Option<(u8, bool, Option<u8>)>,
@@ -3634,7 +3634,7 @@ async fn approvals(
 }
 
 /// A deliberate busy loop on its own thread, counted as a task, so the
-/// resource budget and `uxduck wakeups` can be seen to catch one (S24).
+/// resource budget and `uxduck wakeups` can be seen to catch one.
 fn spin_for_tests() {
     tracing::warn!("--spin-for-tests: burning a core on purpose");
     let _ = std::thread::Builder::new()
@@ -3784,5 +3784,57 @@ mod logbook_arguments {
             };
             assert!(json, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod help_text {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// A slice, plan or issue number (`S100`, `ADR-0039`, `FB-87`), which
+    /// UXDuck Core users cannot look up.
+    fn internal(word: &str) -> bool {
+        let digits = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+        let word = word.trim_end_matches(|c: char| c.is_ascii_lowercase());
+        word.strip_prefix('S').is_some_and(digits)
+            || ["ADR-", "FB-", "UXD-"]
+                .iter()
+                .any(|prefix| word.strip_prefix(prefix).is_some_and(digits))
+    }
+
+    fn visit(command: &mut clap::Command, path: &str, found: &mut Vec<String>) {
+        let help = command.render_long_help().to_string();
+        for line in help.lines() {
+            let private = ["docs/plan", "docs/adr", "apps/"]
+                .iter()
+                .any(|path| line.contains(path));
+            if private
+                || line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .any(internal)
+            {
+                found.push(format!("{path}: {}", line.trim()));
+            }
+        }
+        for sub in command.get_subcommands_mut() {
+            if sub.is_hide_set() {
+                continue;
+            }
+            let name = format!("{path} {}", sub.get_name());
+            visit(sub, &name, found);
+        }
+    }
+
+    /// Help is what people see, and in UXDuck Core they cannot look up the
+    /// private plan, its decisions or its paths.
+    #[test]
+    fn help_names_no_internal_slice_decision_issue_or_path() {
+        let mut command = Cli::command();
+        command.build();
+        let mut found = Vec::new();
+        visit(&mut command, "uxduck", &mut found);
+        assert!(found.is_empty(), "{}", found.join("\n"));
     }
 }

@@ -10,6 +10,26 @@ Connect an AI agent to UXDuck on this computer to read vehicle telemetry, parame
 
 <!-- mcp-setup -->
 
+With `uxduck` on your PATH, add it to your agent:
+
+- **Claude Code:** `claude mcp add uxduck -- uxduck mcp`
+- **Codex:** `codex mcp add uxduck -- uxduck mcp`
+- **Cursor** (`~/.cursor/mcp.json`) and **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on a Mac):
+
+  ```json
+  {
+    "mcpServers": {
+      "uxduck": { "command": "uxduck", "args": ["mcp"] }
+    }
+  }
+  ```
+
+  On a Mac, give Claude Desktop the full path, `/usr/local/bin/uxduck`, because an app opened from the Dock may not have it on its PATH.
+
+- **Other agents:** run `uxduck mcp` as a server over standard input and output.
+
+<!-- /mcp-setup -->
+
 ## Claude Desktop
 
 1. In Claude Desktop, open **Settings › Developer › Edit Config**.

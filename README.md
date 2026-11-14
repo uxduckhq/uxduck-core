@@ -36,6 +36,10 @@ cargo build --locked -p uxduck
 cargo run --locked -p uxduck -- --help
 ```
 
+The first build takes a few minutes and about 13 GB of disk, most of it in
+`target/`. The workspace tests also need OpenSSH's `sshd`, `openssh-server` on
+Debian or Ubuntu.
+
 Start a headless service on macOS or Linux:
 
 ```sh
@@ -53,20 +57,35 @@ cargo run --locked -p uxduck -- rpc call vehicle/list
 
 An empty list means the service is running and waiting for a vehicle connection.
 
+### Fly a simulated vehicle
+
+With the service running, start an ArduPilot simulation. The first start
+downloads UXDuck's prebuilt simulator for this computer, checked against the
+release key built into Core:
+
+```sh
+cargo run --locked -p uxduck -- sim start
+cargo run --locked -p uxduck -- rpc call vehicle/list
+```
+
+`sim start --autopilot px4` starts PX4 instead, and `sim start --help` lists
+the vehicles, places and options. To fly your own ArduPilot checkout, see
+[Your own simulator](docs/site/your-own-simulator.md).
+
 ## Explore
 
-| Start here                                  | What you will find                                    |
-| ------------------------------------------- | ----------------------------------------------------- |
-| [Command line](docs/site/cli.md)            | Inspect vehicles, read telemetry and script commands. |
-| [AI assistants and MCP](docs/site/mcp.md)   | Connect an assistant and investigate your vehicles.   |
-| [Plugin guide](docs/site/write-a-plugin.md) | Build and test your own plugins.                      |
-| [RPC contracts](crates/uxduck-contracts/)   | Types and fixtures for building a client.             |
+| Start here                                                  | What you will find                                    |
+| ----------------------------------------------------------- | ----------------------------------------------------- |
+| [Command line](docs/site/cli.md)                            | Inspect vehicles, read telemetry and script commands. |
+| [AI assistants and MCP](docs/site/mcp.md)                   | Connect an assistant and investigate your vehicles.   |
+| [Plugin guide](docs/site/write-a-plugin.md)                 | Build and test your own plugins.                      |
+| [RPC contracts](crates/uxduck-contracts/fixtures/README.md) | Types and fixtures for building a client.             |
 
 The [user guides](docs/site/) cover all of UXDuck, including the interface that
 is not part of Core. They are also published at [uxduck.com/docs](https://uxduck.com/docs).
 
 MCP clients can launch `cargo run --locked -p uxduck -- mcp` over stdio from
-this directory. See the [CI workflow](.github/workflows/ci.yml) for build and test
+this directory while the service runs. MCP never starts it. See the [CI workflow](.github/workflows/ci.yml) for build and test
 commands.
 
 ## Contributing

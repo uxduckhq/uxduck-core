@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     /// The hosted model takes at most 64 tools, named in lowercase with
-    /// underscores, in 128 KB (`apps/api/src/features/model/modelApp.ts`).
+    /// underscores, in 128 KB, as UXDuck's API checks.
     #[test]
     fn the_hosted_model_takes_every_tool() {
         let tools = model_tools();

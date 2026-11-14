@@ -17,6 +17,18 @@ third-party licenses or notices.
   `vendor/gilrs/UXDUCK-PATCH.md`. Their upstream MIT and Apache-2.0 licenses are
   retained in each directory. The bundled SDL controller database retains its
   own license at `vendor/gilrs/SDL_GameControllerDB/LICENSE`.
+- MAVLink definitions are read through `mavinspect` 0.6.6, vendored under
+  `vendor/mavinspect` with the changes its README describes. Its upstream MIT and
+  Apache-2.0 licenses are retained in that directory.
+- `scripts/px4-patches/` are UXDuck's changes to PX4, which `scripts/px4-sitl.sh`
+  applies to a PX4 checkout before building its simulator. PX4 is BSD-3-Clause
+  licensed, as above.
+- `scripts/sitl-patches/local-only-network.patch` and
+  `scripts/sitl-patches/older/local-only-network-4.5.patch` are UXDuck's changes
+  to ArduPilot, which `uxduck sim build` applies to an ArduPilot checkout so its
+  simulator keeps its connections on this computer. Their context and removed
+  lines are ArduPilot source, which is GPL-3.0 licensed, and ArduPilot's terms
+  apply to them.
 - Other Cargo dependencies are downloaded separately, not vendored in this source
   export. Their package manifests and license files govern those components.
   `Cargo.lock` pins the versions. Binary distributors must preserve the notices

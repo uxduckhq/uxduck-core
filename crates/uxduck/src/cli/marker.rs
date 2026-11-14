@@ -33,7 +33,7 @@ impl Look {
     }
 }
 
-/// A building's size (ADR-0052): a rectangle, width across its front and
+/// A building's size: a rectangle, width across its front and
 /// depth along its heading, or round.
 #[derive(Debug, clap::Args)]
 pub struct Size {
@@ -96,7 +96,7 @@ impl Colour {
     }
 }
 
-/// A line, an area or a circle and how it is drawn (ADR-0053).
+/// A line, an area or a circle and how it is drawn.
 #[derive(Debug, clap::Args)]
 pub struct Drawing {
     /// A line through points in order: "53.07,-4.08 53.08,-4.07".

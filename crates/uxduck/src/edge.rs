@@ -1,6 +1,6 @@
 //! This computer's connection to its account (S78, ADR-0003 C7 and "The
 //! edge connection"): one outbound WebSocket to the relay, a Durable Object
-//! per computer in `apps/api`'s Worker, while UXDuck is signed in, "Live
+//! per computer in UXDuck's cloud API, while UXDuck is signed in, "Live
 //! sharing from this computer" is on (ADR-0048) and one of its watch links has
 //! not ended. Otherwise nothing leaves. Its only watchers are guests on watch
 //! links (S95).

@@ -146,7 +146,7 @@ fn status_word(status: &str) -> &'static str {
     }
 }
 
-/// A check's title; a plugin's names its plugin (S194).
+/// A check's title; a plugin's names its plugin.
 fn title_of(check: &Value) -> String {
     let title = check["title"].as_str().unwrap_or_default();
     match check["plugin"]["name"].as_str() {

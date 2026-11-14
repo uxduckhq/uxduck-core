@@ -80,7 +80,7 @@ export function onItems(batch: ItemBatch): Effects {
 
 Change `test.json` to `{"expect":{"items":["battery_watch.remaining_pct"]}}` when
 changing the output key. Open the tab from **+** › **Plugins** › **Battery watch**.
-Before using other telemetry keys, inspect `uxduck rpc telemetry/get '{"vehicleId":"…"}'`.
+Before using other telemetry keys, inspect `uxduck rpc call telemetry/get --json '{"id":"…"}'`.
 Subscriptions deliver updates rather than a complete snapshot; retain earlier
 values per vehicle when a calculation needs several keys across batches.
 

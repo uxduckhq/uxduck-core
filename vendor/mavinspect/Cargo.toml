@@ -113,3 +113,7 @@ version = "0.16.1"
 [dependencies.thiserror]
 version = "2.0.9"
 
+
+# UXDuck: its elided lifetimes warn on every build of the workspace.
+[lints.rust]
+mismatched_lifetime_syntaxes = "allow"

@@ -1,0 +1,14 @@
+diff --git a/src/modules/mavlink/mavlink_main.cpp b/src/modules/mavlink/mavlink_main.cpp
+index 0312a0b..1bbadec 100644
+--- a/src/modules/mavlink/mavlink_main.cpp
++++ b/src/modules/mavlink/mavlink_main.cpp
+@@ -988,7 +988,8 @@ void Mavlink::init_udp()
+ 	PX4_DEBUG("Setting up UDP with port %hu", _network_port);
+ 
+ 	_myaddr.sin_family = AF_INET;
+-	_myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
++	// UXDuck: a simulation's MAVLink is for this computer only.
++	_myaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+ 	_myaddr.sin_port = htons(_network_port);
+ 
+ 	if ((_socket_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {

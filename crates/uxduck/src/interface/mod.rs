@@ -1,5 +1,4 @@
-//! The latest interface, also offline (S109, ADR-0025 D3 and D4; the
-//! design is `docs/plan/interface-updates.md`).
+//! The latest interface, also offline (S109, ADR-0025 D3 and D4).
 //!
 //! Online, UXDuck follows the interface app.uxduck.com publishes: it
 //! checks the signed manifest on start, every hour and when a page

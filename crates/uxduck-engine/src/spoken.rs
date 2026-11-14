@@ -140,7 +140,7 @@ fn place(position: &PositionEstimate, units: QuantityUnits, now_us: u64) -> Stri
 }
 
 /// A value in the operator's unit for its quantity, as UXDuck shows it
-/// (showValue in apps/web/src/lib/units.ts).
+/// (as the interface's `showValue` does).
 fn shown(item: &TelemetryItem, units: QuantityUnits) -> String {
     let Some(value) = item.value else {
         return item.text.clone().unwrap_or_else(|| "no value".to_owned());

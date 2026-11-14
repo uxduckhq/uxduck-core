@@ -41,7 +41,7 @@ pub const ACTOR: &str = "simulation-start";
 
 /// The speed-up while taking off. ArduPilot's SITL did not keep up at 10
 /// when the maintainer tried it (2026-10-01), so 9; the browser's build
-/// managed 100 in the S20 spike (docs/plan/s20-spike.md).
+/// managed 100 in the S20 spike.
 const TAKE_OFF_SPEEDUP: f64 = 9.0;
 
 /// The speed-up while a browser's simulator boots and waits to be ready to

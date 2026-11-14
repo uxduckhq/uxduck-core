@@ -1,6 +1,6 @@
 # Local camera runtime
 
-Build with `pnpm capture:build` (or `node scripts/capture-runtime.ts <Rust target>`).
+Build with `node scripts/capture-runtime.ts <Rust target>`.
 Use Xcode command-line tools on macOS, GCC/build-essential on Linux, and MSYS2
 MINGW64 on Windows. The build needs make, pkg-config, Python 3, tar and, on x86,
 NASM. Both macOS architectures can be built on a Mac; other targets build on

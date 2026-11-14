@@ -94,6 +94,8 @@ fn opening_explains_a_busy_port_without_touching_its_owner() {
         .env("UXDUCK_AGENT_PROVIDER", "fake")
         .env("UXDUCK_API_URL", "none")
         .env("UXDUCK_TERRAIN_URL", "none")
+        .env("UXDUCK_SIM_CATALOGUE_URL", "none")
+        .env("UXDUCK_PARAM_CATALOGUE_URL", "none")
         .env("UXDUCK_TRAY", "")
         .output()
         .expect("spawn uxduck");

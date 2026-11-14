@@ -123,8 +123,6 @@ pub enum DaemonError {
     Restart(std::io::Error),
     #[error("cannot start UXDuck's menu bar: {0}")]
     Tray(std::io::Error),
-    #[error("{0}")]
-    Terrain(String),
 }
 
 /// Why the daemon stopped.
@@ -149,9 +147,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     let parent_closed = crate::parent::stdin_closed(options.exit_on_stdin_close)
         .map_err(DaemonError::ParentPipe)?;
     let data_dir = &options.data_dir;
-    // Before anything starts: a development daemon without the key fails here.
-    let terrain = crate::terrain::Source::from_env(options.dev_origin.is_some())
-        .map_err(DaemonError::Terrain)?;
+    let terrain = crate::terrain::Source::from_env();
     create_private_dir(data_dir).map_err(|source| DaemonError::DataDir {
         path: data_dir.display().to_string(),
         source,

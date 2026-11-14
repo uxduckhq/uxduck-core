@@ -40,11 +40,22 @@ pub const IS_UPDATE_TEST: bool = option_env!("UXDUCK_UPDATE_TEST_URL").is_some()
 /// check.
 pub const PUBLIC_KEY: Option<&str> = option_env!("UXDUCK_RELEASE_PUBLIC_KEY");
 
-/// The release key for signed data (terrain) in a development daemon: the
-/// one built in, else the checkout's copy that `cargo xtask release-key`
-/// keeps. Only debug builds read the copy.
+/// The committed release public key, `packaging/release.pub`.
+const COMMITTED_KEY: &str = include_str!("../../../packaging/release.pub").trim_ascii();
+
+/// The key that signs what a daemon downloads (simulators, terrain and
+/// parameter definitions): the release key built in, else the checkout's copy
+/// a debug build keeps, else the committed key. So a build from source, as
+/// UXDuck Core is, checks them as a release does.
 #[must_use]
-pub fn development_key() -> Option<String> {
+pub fn data_key() -> String {
+    development_key().unwrap_or_else(|| COMMITTED_KEY.to_owned())
+}
+
+/// The release key built in, else the checkout's copy that
+/// `cargo xtask release-key` keeps. Only debug builds read the copy.
+#[must_use]
+fn development_key() -> Option<String> {
     PUBLIC_KEY.map(str::to_owned).or_else(|| {
         let kept = concat!(
             env!("CARGO_MANIFEST_DIR"),

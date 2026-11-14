@@ -31,7 +31,7 @@ pub enum TerrainCommand {
         json: bool,
     },
     /// Asks a vehicle for its own terrain height and compares it with its
-    /// dataset (S119): at a point, or at home and under it.
+    /// dataset: at a point, or at home and under it.
     Check {
         /// The vehicle, by name or id.
         #[arg(long)]
@@ -43,9 +43,9 @@ pub enum TerrainCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Keeps an area's terrain on this computer for use offline (S120): a
+    /// Keeps an area's terrain on this computer for use offline: a
     /// rectangle by its south-west and north-east corners, kept as a
-    /// four-cornered polygon (ADR-0051 A5). Draw other shapes on the map.
+    /// four-cornered polygon. Draw other shapes on the map.
     Keep {
         #[arg(long)]
         name: String,

@@ -53,7 +53,7 @@ pub enum PlanCommand {
         #[arg(long, value_enum)]
         vehicle_type: Option<VehicleType>,
     },
-    /// What stands in a plan's way (S129): errors stop its upload,
+    /// What stands in a plan's way: errors stop its upload,
     /// warnings do not. With a vehicle, against that vehicle's ground.
     Check {
         plan: String,
@@ -64,7 +64,7 @@ pub enum PlanCommand {
         json: bool,
     },
     /// Uploads a plan to a vehicle as its mission, then reads it back and
-    /// says whether it matches (S127). Replaces what the vehicle holds.
+    /// says whether it matches. Replaces what the vehicle holds.
     Upload {
         plan: String,
         /// The vehicle, by name or id.
