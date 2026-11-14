@@ -307,6 +307,12 @@ pub struct VideoSource {
     /// off, until set by hand (`video/vehicleCamera`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vehicle_camera: bool,
+    /// The companion computer serving an RTSP camera, by its id in the
+    /// vehicle's `companions`, chosen by hand (S358, `video/servedBy`): its
+    /// TIMESYNC clock dates the pictures. Absent: the computer whose host is
+    /// the camera address's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<String>,
     /// "Record with the others" is off (S153): neither the recording
     /// setting nor `video/recordAll` starts it, only `video/record`
     /// (`video/recordWithOthers`).
@@ -540,6 +546,18 @@ pub struct VideoVehicleCameraParams {
     pub source_id: String,
     /// Whether the vehicle's own camera takes photos and records along.
     pub on: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoServedByParams {
+    /// An RTSP camera with a vehicle.
+    pub source_id: String,
+    /// The id of a companion computer in the camera's vehicle's
+    /// `companions`. Absent: the computer whose host is the camera
+    /// address's host, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -338,6 +338,11 @@ pub struct VideoSource {
     /// Someone set `vehicle_camera`; announcements no longer do.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vehicle_camera_by_hand: bool,
+    /// The companion computer serving an RTSP camera, by its id in its
+    /// vehicle's profile, chosen by hand (S358): its clock dates the
+    /// pictures. None: the computer at the camera address's host (S357).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<String>,
     /// "Record with the others" is off (S153, ADR-0017 V24): neither the
     /// recording setting nor Record all starts it, only its own Record.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

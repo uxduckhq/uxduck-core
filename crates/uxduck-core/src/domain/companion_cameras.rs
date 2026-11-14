@@ -289,6 +289,39 @@ pub struct CompanionCameras {
     pub problem: Option<String>,
 }
 
+impl CompanionCameras {
+    /// The Raspberry Pi camera that one of a saved camera's addresses names:
+    /// an address whose path is the camera path's name or ends in `/` and
+    /// its name, such as `rtsp://gateway:8554/front` for `front` (ADR-0060
+    /// C8). A path with another source, such as a gateway's relay pulling
+    /// `/front` from the camera computer, never counts.
+    #[must_use]
+    pub fn named_by<'a>(
+        &self,
+        addresses: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&CompanionCameraPath> {
+        let paths: Vec<&str> = addresses.into_iter().filter_map(address_path).collect();
+        self.paths.iter().find(|camera| {
+            camera.source == "rpiCamera"
+                && paths.iter().any(|path| {
+                    *path == camera.name
+                        || path
+                            .strip_suffix(camera.name.as_str())
+                            .is_some_and(|before| before.ends_with('/'))
+                })
+        })
+    }
+}
+
+/// An address's path without its leading and trailing `/`, query or
+/// fragment: `video/rear` for `rtsp://user:pw@gateway:8554/video/rear/`.
+fn address_path(address: &str) -> Option<&str> {
+    let (_, rest) = address.trim().split_once("://")?;
+    let (_, path) = rest.split_once('/')?;
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    Some(path.trim_matches('/')).filter(|path| !path.is_empty())
+}
+
 /// The unit's login user and whether its sessions ending can stop the
 /// cameras (C7).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +539,57 @@ mod tests {
             bytes: 0,
         };
         assert!(proxy.adjustable().unwrap_err().contains("rpiCamera"));
+    }
+
+    #[test]
+    fn a_camera_is_named_by_the_path_its_address_ends_in() {
+        let path = |name: &str, source: &str| CompanionCameraPath {
+            name: name.to_owned(),
+            source: source.to_owned(),
+            camera_id: None,
+            sensor: None,
+            settings: None,
+            set_by_uxduck: false,
+            on_demand: false,
+            ready: false,
+            readers: 0,
+            bytes: 0,
+        };
+        let cameras = CompanionCameras {
+            unit: None,
+            config: None,
+            api: None,
+            drop_in: None,
+            linger: None,
+            paths: vec![
+                path("front", "rpiCamera"),
+                path("rear", "rpiCamera"),
+                path("relay", "rtsp"),
+            ],
+            watchdog: CameraWatchdog::default(),
+            applied: None,
+            problem: None,
+        };
+        let named = |addresses: &[&str]| {
+            cameras
+                .named_by(addresses.iter().copied())
+                .map(|p| p.name.as_str())
+        };
+        assert_eq!(named(&["rtsp://192.0.2.1:8554/front"]), Some("front"));
+        assert_eq!(
+            named(&["rtsp://user:pw@gateway:8554/video/rear/"]),
+            Some("rear")
+        );
+        assert_eq!(
+            named(&["rtsp://gateway/none", "rtsp://100.76.177.45:8554/rear?x=1"]),
+            Some("rear")
+        );
+        assert_eq!(named(&["rtsp://gateway/frontdoor"]), None);
+        assert_eq!(named(&["rtsp://gateway/relay"]), None);
+        assert_eq!(
+            named(&["rtsp://gateway/", "rtsp://gateway", "not an address"]),
+            None
+        );
     }
 
     #[test]

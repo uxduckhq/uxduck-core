@@ -544,7 +544,8 @@ pub(crate) fn handle(
         | ClientRequest::VideoReveal(_)
         | ClientRequest::VideoPhoto(_)
         | ClientRequest::VideoPhotoShow(_)
-        | ClientRequest::VideoVehicleCamera(_)) => {
+        | ClientRequest::VideoVehicleCamera(_)
+        | ClientRequest::VideoServedBy(_)) => {
             crate::video::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::ParamSearch(_)

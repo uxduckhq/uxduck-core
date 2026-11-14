@@ -96,6 +96,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::VideoRecordWithOthers(_)
         | ClientRequest::VideoPhoto(_)
         | ClientRequest::VideoVehicleCamera(_)
+        | ClientRequest::VideoServedBy(_)
         | ClientRequest::VehicleEditNote(_)
         | ClientRequest::VehicleDeleteNote(_)
         | ClientRequest::MappingUpdate(_)
@@ -547,6 +548,25 @@ impl Engine {
                 if params.on { "use" } else { "stop using" },
                 params.source_id
             ),
+            ClientRequest::VideoServedBy(params) => match &params.computer_id {
+                Some(id) => {
+                    let name = self
+                        .state
+                        .vehicles
+                        .values()
+                        .flat_map(|v| &v.companions)
+                        .find(|c| &c.id == id)
+                        .map_or_else(|| id.clone(), |c| c.name.clone());
+                    format!(
+                        "say the companion computer {name} serves the camera {}",
+                        params.source_id
+                    )
+                }
+                None => format!(
+                    "find the companion computer serving the camera {} by its address",
+                    params.source_id
+                ),
+            },
             ClientRequest::FindStart(_) | ClientRequest::FindVehicles(_) => {
                 let subnets = self.finding_subnets().join(", ");
                 if subnets.is_empty() {
@@ -640,6 +660,7 @@ impl Engine {
             | ClientRequest::VideoRecordWithOthers(_)
             | ClientRequest::VideoPhoto(_)
             | ClientRequest::VideoVehicleCamera(_)
+            | ClientRequest::VideoServedBy(_)
             | ClientRequest::FindStart(_)
             | ClientRequest::FindVehicles(_)) => self.video_summary(request),
             ClientRequest::VehicleDeleteNote(_) => "delete a note from a vehicle's history".into(),

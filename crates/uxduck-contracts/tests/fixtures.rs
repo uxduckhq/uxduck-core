@@ -534,6 +534,7 @@ fn check(name: &str) {
             | "video_capture_enable"
             | "video_file"
             | "video_vehicleCamera"
+            | "video_servedBy"
             | "video_recordWithOthers",
         ) => {
             round_trip::<uxduck_contracts::dto::video::VideoSource>(name, &json);

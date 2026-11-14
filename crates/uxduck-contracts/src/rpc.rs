@@ -95,8 +95,8 @@ use crate::dto::video::{
     VideoCaptureParams, VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams,
     VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams,
     VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams,
-    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams,
-    VideoWatchParams,
+    VideoRevealParams, VideoServedByParams, VideoTrackParams, VideoUnwatchParams,
+    VideoVehicleCameraParams, VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -1816,6 +1816,15 @@ pub enum ClientRequest {
     /// `VideoSource`.
     #[serde(rename = "video/vehicleCamera")]
     VideoVehicleCamera(VideoVehicleCameraParams),
+    /// Which companion computer serves an RTSP camera (S358, ADR-0017
+    /// V26): its clock, measured by MAVLink TIMESYNC, dates the camera's
+    /// pictures. For a camera reached through a gateway or a proxy, whose
+    /// address is not the computer's. Without `computerId`, the computer at
+    /// the camera address's host, as before. Kept with the camera, and
+    /// cleared when the camera moves to another vehicle. Needs `config`.
+    /// Result: `VideoSource`.
+    #[serde(rename = "video/servedBy")]
+    VideoServedBy(VideoServedByParams),
     /// Starts looking for vehicles for this client: plugged in, on this
     /// computer and its gateway, or, with `network`, on the local network
     /// too. Finds arrive as `find/changed` until `find/stop` or the
@@ -2112,7 +2121,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 387] = [
+    pub const METHODS: [&'static str; 388] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2413,6 +2422,7 @@ impl ClientRequest {
         "video/photo",
         "video/photo/show",
         "video/vehicleCamera",
+        "video/servedBy",
         "find/start",
         "find/stop",
         "find/vehicles",

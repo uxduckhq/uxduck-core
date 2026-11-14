@@ -516,6 +516,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "video/playback",
     "video/track",
     "video/addresses",
+    "video/servedBy",
     "video/internet",
     "video/reveal",
     "video/photo",

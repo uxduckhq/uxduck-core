@@ -12,8 +12,9 @@ use uxduck_contracts::dto::video::{
     VideoAddParams, VideoAddResult, VideoAddressesParams, VideoAssignParams,
     VideoCaptureEnableParams, VideoCaptureParams, VideoDevicesResult, VideoListResult,
     VideoMetadataWatchResult, VideoPortStatus, VideoRemoveParams, VideoRenameParams,
-    VideoRevealParams, VideoRevealResult, VideoSocket, VideoSource as VideoSourceDto,
-    VideoTrackParams, VideoUnwatchParams, VideoWatchParams, VideoWatchResult,
+    VideoRevealParams, VideoRevealResult, VideoServedByParams, VideoSocket,
+    VideoSource as VideoSourceDto, VideoTrackParams, VideoUnwatchParams, VideoWatchParams,
+    VideoWatchResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -637,6 +638,7 @@ impl Engine {
                 // The vehicle's own camera announced it: it can be told to shoot (V20).
                 vehicle_camera: true,
                 vehicle_camera_by_hand: false,
+                served_by: None,
                 record_alone: false,
                 klv: false,
                 url: Some(uri.to_owned()),
@@ -667,29 +669,46 @@ impl Engine {
         }
     }
 
-    /// The companion computer serving an RTSP camera at `host`, and its
-    /// clock (S357): the computer in the profile of the camera's vehicle
-    /// whose host is the camera's, letter case and IPv6 brackets aside.
-    /// The RTSP task asks once a second, and the camera's ⓘ tries its clock
-    /// before the RTSP server's.
+    /// The companion computer serving an RTSP camera playing from `host`,
+    /// and its clock (S357), among the computers in the profile of the
+    /// camera's vehicle: the one chosen for the camera (S358), else the one
+    /// whose Raspberry Pi camera one of the camera's addresses names, as
+    /// `/front` does through a gateway's relay (ADR-0060 C8), else the one
+    /// whose host is `host`, letter case and IPv6 brackets aside. A chosen
+    /// computer no longer in the profile serves nothing. The RTSP task asks
+    /// once a second, and the camera's ⓘ tries its clock before the RTSP
+    /// server's.
     #[must_use]
     pub fn camera_companion(&self, source_id: &str, host: &str) -> Option<Companion> {
-        let vehicle_id = self
-            .state
-            .video_sources
-            .get(source_id)?
-            .vehicle_id
-            .as_deref()?;
-        let vehicle = self.vehicle(vehicle_id)?;
+        let source = self.state.video_sources.get(source_id)?;
+        let vehicle = self.vehicle(source.vehicle_id.as_deref()?)?;
         let bare = |host: &str| {
             host.trim_start_matches('[')
                 .trim_end_matches(']')
                 .to_ascii_lowercase()
         };
-        let computer = vehicle
-            .companions
-            .iter()
-            .find(|c| bare(&c.host) == bare(host))?;
+        let computers = &vehicle.companions;
+        let computer = match &source.served_by {
+            Some(id) => computers.iter().find(|c| &c.id == id),
+            None => computers
+                .iter()
+                .find(|c| {
+                    c.check
+                        .as_ref()
+                        .and_then(|check| check.cameras.as_ref())
+                        .and_then(|cameras| {
+                            cameras.named_by(
+                                source
+                                    .url
+                                    .iter()
+                                    .chain(&source.fallback_urls)
+                                    .map(String::as_str),
+                            )
+                        })
+                        .is_some()
+                })
+                .or_else(|| computers.iter().find(|c| bare(&c.host) == bare(host))),
+        }?;
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -761,6 +780,7 @@ impl Engine {
             assigned_by_hand: false,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            served_by: None,
             record_alone: false,
             klv: false,
             url: None,
@@ -1114,10 +1134,15 @@ impl Engine {
             ));
         }
         source.assigned_by_hand = params.vehicle_id.is_some();
-        source.vehicle_id = match params.vehicle_id {
+        let vehicle_id = match params.vehicle_id {
             Some(id) => Some(id),
             None => self.vehicle_by_address(&source.sender),
         };
+        // A chosen computer is the old vehicle's (S358).
+        if vehicle_id != source.vehicle_id {
+            source.served_by = None;
+        }
+        source.vehicle_id = vehicle_id;
         source.version += 1;
         self.commit_as(
             actor(),
@@ -1617,6 +1642,45 @@ impl Engine {
         Ok(source)
     }
 
+    /// The companion computer serving an RTSP camera (S358): one of its
+    /// vehicle's, or none to find it by the camera address's host.
+    fn video_served_by(&mut self, params: VideoServedByParams) -> Result<VideoSource, ApiError> {
+        let mut source = self
+            .state
+            .video_sources
+            .get(&params.source_id)
+            .cloned()
+            .ok_or_else(|| not_found(&params.source_id))?;
+        if source.url.is_none() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Only an RTSP camera is served by a companion computer.",
+            ));
+        }
+        if let Some(id) = &params.computer_id {
+            let theirs = source
+                .vehicle_id
+                .as_deref()
+                .and_then(|v| self.vehicle(v))
+                .is_some_and(|v| v.companions.iter().any(|c| &c.id == id));
+            if !theirs {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Choose one of the companion computers of the camera's vehicle.",
+                ));
+            }
+        }
+        source.served_by = params.computer_id;
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        Ok(source)
+    }
+
     /// Whether the vehicle's own camera shoots along (S145): set by hand, kept.
     fn video_vehicle_camera(
         &mut self,
@@ -1840,6 +1904,7 @@ impl Engine {
                 assigned_by_hand: false,
                 vehicle_camera: false,
                 vehicle_camera_by_hand: false,
+                served_by: None,
                 record_alone: false,
                 klv: false,
                 url: None,
@@ -1964,6 +2029,7 @@ impl Engine {
             assigned_by_hand: false,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            served_by: None,
             record_alone: false,
             klv: false,
             url: None,
@@ -2166,6 +2232,7 @@ impl Engine {
                     assigned_by_hand: params.vehicle_id.is_some(),
                     vehicle_camera: false,
                     vehicle_camera_by_hand: false,
+                    served_by: None,
                     record_alone: false,
                     klv: false,
                     url: Some(url.clone()),
@@ -2246,6 +2313,7 @@ impl Engine {
             vehicle_id,
             vehicle_camera: false,
             vehicle_camera_by_hand: false,
+            served_by: None,
             record_alone: false,
             klv: false,
             url: None,
@@ -2874,6 +2942,11 @@ pub(crate) fn handle(
         ClientRequest::VideoVehicleCamera(params) => {
             require(Capability::Config)?;
             let source = engine.video_vehicle_camera(&params)?;
+            to_value(&VideoSourceDto::from(&source))
+        }
+        ClientRequest::VideoServedBy(params) => {
+            require(Capability::Config)?;
+            let source = engine.video_served_by(params)?;
             to_value(&VideoSourceDto::from(&source))
         }
         _ => Err(ApiError::new(ErrorKind::Internal, "not a video method")),
