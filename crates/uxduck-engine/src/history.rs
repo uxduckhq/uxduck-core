@@ -125,6 +125,32 @@ impl Engine {
             .max()
     }
 
+    /// A vehicle's preflights as they ended (S350, ADR-0038 K18), newest
+    /// first: its history's.
+    pub(crate) fn preflight_runs(
+        &self,
+        vehicle: &Vehicle,
+    ) -> Vec<&uxduck_core::domain::checklist::RunRecord> {
+        let mut ended: Vec<(&HistoryEntry, &uxduck_core::domain::checklist::RunRecord)> = self
+            .state
+            .history
+            .values()
+            .filter(|e| belongs(e, vehicle) && e.deleted.is_none())
+            .filter_map(|e| match &e.kind {
+                EntryKind::Event {
+                    event: HistoryEvent::PreflightRun { run, .. },
+                } => Some((e, run.as_ref())),
+                _ => None,
+            })
+            .collect();
+        ended.sort_by(|(a, _), (b, _)| {
+            b.happened_at_us
+                .cmp(&a.happened_at_us)
+                .then(b.written_at_us.cmp(&a.written_at_us))
+        });
+        ended.into_iter().map(|(_, run)| run).collect()
+    }
+
     /// Records an event in a vehicle's history (H3).
     pub(crate) fn record(&mut self, vehicle_id: &str, event: HistoryEvent) {
         self.record_by(vehicle_id, event, uxduck());

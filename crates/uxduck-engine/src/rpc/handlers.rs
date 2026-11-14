@@ -383,6 +383,9 @@ pub(crate) fn handle(
         | ClientRequest::ChecklistCopy(_)
         | ClientRequest::ChecklistTick(_)
         | ClientRequest::ChecklistReset(_)
+        | ClientRequest::ChecklistFinish(_)
+        | ClientRequest::ChecklistReopen(_)
+        | ClientRequest::ChecklistRuns(_)
         | ClientRequest::ChecklistExport(_)) => {
             crate::checklist::handle(engine, connection, request, &granted, operator)
         }

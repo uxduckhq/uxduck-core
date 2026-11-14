@@ -901,3 +901,14 @@ NetworkConnection.name
 NetworkPreference.cellular_id
 NetworkPreference.wifi_id
 VehicleConnectivity.video
+
+# A preflight as a run, and its record in history (S350, 2026-11-14).
+HistoryEvent::PreflightRun.run
+HistoryEvent::PreflightRun.text
+Reopening.finished
+Reopening.reopened
+Run.id
+Run.started
+RunRecord.id
+RunRecord.started
+RunRecord.steps

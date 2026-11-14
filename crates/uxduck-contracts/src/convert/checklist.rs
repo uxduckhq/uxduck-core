@@ -56,6 +56,40 @@ impl From<&c::Tick> for dto::Tick {
     }
 }
 
+impl From<&c::Reopening> for dto::ChecklistReopening {
+    fn from(v: &c::Reopening) -> Self {
+        Self {
+            finished: (&v.finished).into(),
+            reopened: (&v.reopened).into(),
+        }
+    }
+}
+
+impl From<&c::Run> for dto::ChecklistRun {
+    fn from(v: &c::Run) -> Self {
+        Self {
+            id: v.id.clone(),
+            started: (&v.started).into(),
+            finished: v.finished.as_ref().map(Into::into),
+            reopenings: v.reopenings.iter().map(Into::into).collect(),
+            restarted_at_us: v.restarted_at_us,
+        }
+    }
+}
+
+impl From<&c::RunRecord> for dto::ChecklistRunRecord {
+    fn from(v: &c::RunRecord) -> Self {
+        Self {
+            id: v.id.clone(),
+            started: (&v.started).into(),
+            finished: v.finished.as_ref().map(Into::into),
+            reopenings: v.reopenings.iter().map(Into::into).collect(),
+            steps: v.steps.iter().map(Into::into).collect(),
+            checks: v.checks.iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// A step as written, before it is checked: a rule needs its operator and
 /// value, which the check then asks for in words.
 impl From<dto::StepInput> for c::StepDef {
@@ -182,6 +216,7 @@ impl From<&c::ChecklistRecord> for dto::ChecklistRecord {
             overridden: v.overridden.iter().map(Into::into).collect(),
             override_by: v.override_by.as_ref().map(Into::into),
             failing: v.failing.iter().map(Into::into).collect(),
+            run: v.run.as_ref().map(Into::into),
         }
     }
 }

@@ -22,6 +22,7 @@ pub mod approvals;
 mod attachments;
 mod calculated;
 mod checklist;
+mod checklist_runs;
 pub mod commands;
 pub mod companions;
 mod controller_cleanup;

@@ -754,9 +754,14 @@ fn check(name: &str) {
             | "checklist_update"
             | "checklist_copy"
             | "checklist_tick"
-            | "checklist_reset",
+            | "checklist_reset"
+            | "checklist_finish"
+            | "checklist_reopen",
         ) => {
             round_trip::<uxduck_contracts::dto::preflight::Preflight>(name, &json);
+        }
+        ("result", "checklist_runs") => {
+            round_trip::<uxduck_contracts::dto::checklist::ChecklistRunsResult>(name, &json);
         }
         ("result", "checklist_export") => {
             round_trip::<uxduck_contracts::dto::checklist::ChecklistFile>(name, &json);

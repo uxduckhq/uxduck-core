@@ -3,7 +3,8 @@
 //! step or a rule, under a group, ticked by a person too or not, tick
 //! and clear, export it as a file and import a file or a Markdown list,
 //! copy another vehicle's, and set the parameter that makes the vehicle
-//! hold a rule itself.
+//! hold a rule itself. A preflight is a run of it (S350, K18, K19): start
+//! a new one, finish it, and read the earlier ones.
 
 use std::path::{Path, PathBuf};
 
@@ -69,8 +70,23 @@ pub enum ChecklistAction {
         #[arg(long)]
         clear: bool,
     },
-    /// Clears every tick.
-    Reset,
+    /// Starts a new preflight: every tick is cleared. The preflight
+    /// before it stays in the vehicle's history.
+    #[command(alias = "reset")]
+    New,
+    /// Finishes the preflight: it is stamped with who and when, kept in
+    /// the vehicle's history, and locked until it is reopened or a new
+    /// one starts.
+    Finish,
+    /// Reopens the finished preflight, with its ticks, to change it and
+    /// finish it again. What its finish wrote to the history stays.
+    Reopen,
+    /// The vehicle's earlier preflights, newest first.
+    Runs {
+        /// At most this many (20 unless given, at most 100).
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+    },
     /// Writes the checklist as a file (`uxduck.checklist/1`), without
     /// ticks; to standard output without a path.
     Export { path: Option<PathBuf> },
@@ -153,10 +169,33 @@ pub async fn run(data_dir: &Path, args: ChecklistArgs) -> Result<(), CliError> {
                 )
                 .await?
         }
-        ChecklistAction::Reset => {
+        ChecklistAction::New => {
             client
                 .call("checklist/reset", json!({ "vehicleId": id }))
                 .await?
+        }
+        ChecklistAction::Finish => {
+            client
+                .call("checklist/finish", json!({ "vehicleId": id }))
+                .await?
+        }
+        ChecklistAction::Reopen => {
+            client
+                .call("checklist/reopen", json!({ "vehicleId": id }))
+                .await?
+        }
+        ChecklistAction::Runs { limit } => {
+            let mut params = json!({ "vehicleId": id });
+            if let Some(limit) = limit {
+                params["limit"] = json!(limit);
+            }
+            let runs = client.call("checklist/runs", params).await?["runs"].take();
+            if args.json {
+                println!("{runs}");
+            } else {
+                print!("{}", run_lines(runs.as_array().map_or(&[], Vec::as_slice)));
+            }
+            return Ok(());
         }
         ChecklistAction::Export { path } => {
             let file = client
@@ -382,6 +421,147 @@ fn number(value: &Value) -> String {
     }
 }
 
+/// The person behind a tick or a stamp, or the client when no operator
+/// was known.
+fn who(tick: &Value) -> &str {
+    tick["by"]["operatorName"]
+        .as_str()
+        .or_else(|| tick["by"]["clientName"].as_str())
+        .unwrap_or("someone")
+}
+
+/// 2026-11-14 14:02 by Ben.
+fn stamp(tick: &Value) -> String {
+    format!(
+        "{} by {}",
+        tick["atUs"].as_i64().map(when).unwrap_or_default(),
+        who(tick)
+    )
+}
+
+/// A run's earlier finishes that a person reopened, oldest first, after
+/// a lead: " Before that: finished 14:14 by Ben, reopened 14:20 by Ada."
+fn reopenings(run: &Value, lead: &str) -> String {
+    let each: Vec<String> = run["reopenings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            format!(
+                "finished {}, reopened {}",
+                stamp(&r["finished"]),
+                stamp(&r["reopened"])
+            )
+        })
+        .collect();
+    if each.is_empty() {
+        String::new()
+    } else {
+        format!(" {lead}: {}.", each.join(", "))
+    }
+}
+
+/// The preflight under way or finished, in a line.
+fn run_line(run: &Value) -> String {
+    if !run["finished"].is_object() {
+        return format!(
+            "Preflight started {}.{} Finish it with `uxduck checklist <vehicle> finish`.\n",
+            stamp(&run["started"]),
+            reopenings(run, "Since then")
+        );
+    }
+    let restarted = run["restartedAtUs"]
+        .as_i64()
+        .zip(run["finished"]["atUs"].as_i64())
+        .is_some_and(|(restarted, finished)| restarted > finished);
+    format!(
+        "Preflight finished {}.{}{} Its steps and preflight ticks are locked until `uxduck checklist <vehicle> reopen` or `new`.\n",
+        stamp(&run["finished"]),
+        reopenings(run, "Before that"),
+        if restarted {
+            " The vehicle has restarted since."
+        } else {
+            ""
+        }
+    )
+}
+
+/// A vehicle's earlier preflights as the terminal shows them: how each
+/// ended, each step as it stood, and the checks that did not pass.
+#[must_use]
+pub fn run_lines(runs: &[Value]) -> String {
+    use std::fmt::Write;
+    if runs.is_empty() {
+        return "No earlier preflights. One is kept each time it is finished, or when a new one starts and it has ticks.\n".into();
+    }
+    let mut out = String::new();
+    for (n, run) in runs.iter().enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        let started = stamp(&run["started"]);
+        if run["finished"].is_object() {
+            let _ = writeln!(
+                out,
+                "Finished {}. Started {started}.{}",
+                stamp(&run["finished"]),
+                reopenings(run, "In between")
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Left unfinished. Started {started}.{}",
+                reopenings(run, "Since then")
+            );
+        }
+        for step in run["steps"].as_array().into_iter().flatten() {
+            let _ = write!(
+                out,
+                "    {:<8} {}{}{}",
+                status_word(step["status"].as_str().unwrap_or_default()),
+                step["group"]
+                    .as_str()
+                    .map(|group| format!("{group} · "))
+                    .unwrap_or_default(),
+                step["title"].as_str().unwrap_or_default(),
+                if step["when"] == "launch" {
+                    " [at launch]"
+                } else {
+                    ""
+                }
+            );
+            if !step["value"].is_null() {
+                let _ = write!(
+                    out,
+                    " (read {}{})",
+                    number(&step["value"]),
+                    step["unit"]
+                        .as_str()
+                        .map(|unit| format!(" {unit}"))
+                        .unwrap_or_default()
+                );
+            }
+            if step["tick"].is_object() {
+                let _ = write!(out, ", ticked {}", stamp(&step["tick"]));
+            }
+            out.push('\n');
+        }
+        // The launch's checks are for the place and the minute of the
+        // launch, not for the preflight.
+        let failing: Vec<&str> = run["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["when"] != "launch" && c["status"] != "pass")
+            .filter_map(|c| c["title"].as_str())
+            .collect();
+        if !failing.is_empty() {
+            let _ = writeln!(out, "    Not passing: {}.", failing.join(", "));
+        }
+    }
+    out
+}
+
 /// A step's line: its number, status, severity, group and words, a
 /// rule's comparison, and under it who ticked it.
 fn step_lines(n: usize, step: &Value, check: &Value) -> String {
@@ -423,12 +603,9 @@ fn step_lines(n: usize, step: &Value, check: &Value) -> String {
         }
     }
     out.push('\n');
-    if let Some(tick) = step["tick"].as_object() {
-        let by = tick["by"]["operatorName"]
-            .as_str()
-            .or_else(|| tick["by"]["clientName"].as_str())
-            .unwrap_or("someone");
-        let at = tick["atUs"].as_i64().map(when).unwrap_or_default();
+    if step["tick"].is_object() {
+        let by = who(&step["tick"]);
+        let at = step["tick"]["atUs"].as_i64().map(when).unwrap_or_default();
         let since = if step["flownSince"] == true {
             ", a flight since"
         } else {
@@ -457,6 +634,9 @@ pub fn lines(state: &Value) -> String {
     }
     if let Some(from) = state["checklist"]["copiedFrom"].as_str() {
         let _ = writeln!(out, "Copied from {from}; changed only here since.");
+    }
+    if state["checklist"]["run"].is_object() {
+        out.push_str(&run_line(&state["checklist"]["run"]));
     }
     let checks = state["checks"].as_array().cloned().unwrap_or_default();
     for (n, step) in steps.iter().enumerate() {
@@ -589,9 +769,116 @@ mod tests {
             text.ends_with("Holding the launch: Battery at least 22.2 V.\n"),
             "{text}"
         );
+        assert!(!text.contains("Preflight "), "no run, no line: {text}");
         let found = find(&state, "propellers tight").unwrap();
         assert_eq!(found["id"], "a");
         assert_eq!(find(&state, "2").unwrap()["id"], "b");
         assert!(find(&state, "4").is_err());
+    }
+
+    #[test]
+    fn a_preflight_and_the_earlier_ones_in_lines() {
+        let ben = |at_us: i64| json!({ "by": { "clientName": "uxduck-web", "operatorName": "Ben" }, "atUs": at_us });
+        let mut state = json!({
+            "checks": [],
+            "checklist": {
+                "steps": [{ "id": "a", "kind": "manual", "title": "Propellers tight", "severity": "warn" }],
+                "run": { "id": "r2", "started": ben(0) }
+            }
+        });
+        let under_way = lines(&state);
+        assert!(under_way.starts_with("Preflight started "), "{under_way}");
+        assert!(
+            under_way.contains(" by Ben. Finish it with `uxduck checklist <vehicle> finish`.\n"),
+            "{under_way}"
+        );
+        state["checklist"]["run"]["finished"] = ben(60_000_000);
+        let finished = lines(&state);
+        assert!(finished.starts_with("Preflight finished "), "{finished}");
+        assert!(
+            finished.contains(
+                " by Ben. Its steps and preflight ticks are locked until `uxduck checklist <vehicle> reopen` or `new`.\n"
+            ),
+            "{finished}"
+        );
+        // A restart before it was finished is not news. One since is.
+        state["checklist"]["run"]["restartedAtUs"] = json!(30_000_000);
+        assert_eq!(lines(&state), finished);
+        state["checklist"]["run"]["restartedAtUs"] = json!(90_000_000);
+        assert!(
+            lines(&state).contains(" by Ben. The vehicle has restarted since. Its steps and"),
+            "{}",
+            lines(&state)
+        );
+        // Reopened and finished again, it says each in turn.
+        let ada = json!({ "by": { "clientName": "uxduck-web", "operatorName": "Ada" }, "atUs": 120_000_000 });
+        state["checklist"]["run"]["restartedAtUs"] = Value::Null;
+        state["checklist"]["run"]["reopenings"] =
+            json!([{ "finished": ben(60_000_000), "reopened": ada }]);
+        state["checklist"]["run"]["finished"] = Value::Null;
+        let reopened = lines(&state);
+        assert!(reopened.starts_with("Preflight started "), "{reopened}");
+        assert!(
+            reopened.contains(" by Ben. Since then: finished "),
+            "{reopened}"
+        );
+        assert!(
+            reopened.contains(" by Ben, reopened ")
+                && reopened.contains(" by Ada. Finish it with "),
+            "{reopened}"
+        );
+        state["checklist"]["run"]["finished"] = ben(180_000_000);
+        let again = lines(&state);
+        assert!(again.starts_with("Preflight finished "), "{again}");
+        assert!(again.contains(" by Ben. Before that: finished "), "{again}");
+        assert!(again.contains(" by Ada. Its steps and"), "{again}");
+
+        assert!(run_lines(&[]).starts_with("No earlier preflights."));
+        let runs = [
+            json!({ "id": "r2", "started": ben(0), "steps": [
+                { "title": "Propellers tight", "kind": "manual", "severity": "warn", "status": "to-do" }
+            ] }),
+            json!({ "id": "r1", "started": ben(0), "finished": ben(60_000_000),
+                "steps": [
+                    { "title": "Propellers tight", "kind": "manual", "severity": "warn", "status": "pass", "tick": ben(0) },
+                    { "title": "At least 22.2 V", "kind": "rule", "group": "Battery", "severity": "block",
+                      "status": "pass", "unit": "V", "value": 22.6 },
+                    { "title": "Area clear", "kind": "manual", "severity": "warn", "when": "launch", "status": "to-do" }
+                ],
+                "checks": [
+                    { "id": "uxduck:link", "title": "Link", "status": "fail" },
+                    { "id": "uxduck:setup", "title": "Setup", "status": "pass" },
+                    { "id": "uxduck:home", "title": "Home", "status": "unknown", "when": "launch" }
+                ] }),
+        ];
+        let text = run_lines(&runs);
+        let (first, second) = text.split_once("\n\n").unwrap();
+        assert!(first.starts_with("Left unfinished. Started "), "{text}");
+        assert!(first.ends_with("    to do    Propellers tight"), "{text}");
+        assert!(second.starts_with("Finished "), "{text}");
+        assert!(second.contains(" by Ben. Started "), "{text}");
+        assert!(
+            second.contains("    ok       Propellers tight, ticked "),
+            "{text}"
+        );
+        assert!(
+            second.contains("    ok       Battery · At least 22.2 V (read 22.6 V)\n"),
+            "{text}"
+        );
+        assert!(
+            second.contains("    to do    Area clear [at launch]\n"),
+            "{text}"
+        );
+        assert!(second.ends_with("    Not passing: Link.\n"), "{text}");
+        let twice = run_lines(&[
+            json!({ "id": "r1", "started": ben(0), "finished": ben(180_000_000),
+            "reopenings": [{ "finished": ben(60_000_000), "reopened": ben(120_000_000) }], "steps": [] }),
+        ]);
+        assert!(twice.starts_with("Finished "), "{twice}");
+        assert!(
+            twice.contains(" by Ben. Started ") && twice.contains(" by Ben. In between: finished "),
+            "{twice}"
+        );
+        assert!(twice.trim_end().ends_with(" by Ben."), "{twice}");
     }
 }

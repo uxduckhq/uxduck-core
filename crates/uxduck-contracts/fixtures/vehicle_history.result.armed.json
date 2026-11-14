@@ -10,7 +10,7 @@
         "event": {
           "type": "armed",
           "flightId": "fl0123456789abcdef",
-          "text": "Armed with its checklist: 2 of 2 steps passed",
+          "text": "Armed with its checklist: 2 of 2 steps passed. Preflight finished by Ben",
           "record": {
             "steps": [
               {
@@ -40,7 +40,28 @@
                 "holdS": 3.0,
                 "value": 22.7
               }
-            ]
+            ],
+            "run": {
+              "id": "run4c81e0a97f3d",
+              "started": {
+                "by": {
+                  "clientName": "uxduck-web",
+                  "clientKind": "operator-ui",
+                  "operatorId": "op1",
+                  "operatorName": "Ben"
+                },
+                "atUs": 1790669190000000
+              },
+              "finished": {
+                "by": {
+                  "clientName": "uxduck-web",
+                  "clientKind": "operator-ui",
+                  "operatorId": "op1",
+                  "operatorName": "Ben"
+                },
+                "atUs": 1790669250000000
+              }
+            }
           }
         }
       },

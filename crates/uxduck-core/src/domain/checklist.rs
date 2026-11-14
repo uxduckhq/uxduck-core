@@ -14,6 +14,12 @@
 //! on. A tick stays until a person clears it (K9): nothing clears it on
 //! landing, a battery change or a restart. Arming writes the checklist as
 //! it stood to the vehicle's history and the flight (K14).
+//!
+//! The checklist is a template, and each time the preflight is done is a
+//! run of it (K18, S350): started by a person, holding the ticks made in
+//! it, and finished by a person, which locks its preflight steps (K19).
+//! A run as it ended is kept in the vehicle's history. A run is a
+//! record: it never holds or opens Arm (K21).
 
 use std::fmt::Write;
 
@@ -21,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::history::Author;
 use crate::domain::preflight::{
-    CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride,
+    Check, CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride,
 };
 
 /// The checklist file's format and version (K7).
@@ -222,6 +228,37 @@ impl Tick {
     }
 }
 
+/// A finish a person undid (K19): who finished the preflight and when,
+/// and who reopened it and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reopening {
+    pub finished: Tick,
+    pub reopened: Tick,
+}
+
+/// One time a vehicle's preflight is done (K18): a run of its checklist.
+/// A person starts it, with New preflight or the first tick, and the
+/// ticks on the steps are its ticks. A person finishes it (K19), which
+/// locks its steps and its preflight ticks, and can reopen it to change
+/// it and finish it again. A run never holds or opens Arm (K21).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub id: String,
+    /// Who started it, and when.
+    pub started: Tick,
+    /// Who finished it, and when. None while it is under way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Tick>,
+    /// Each earlier finish that a person reopened, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopenings: Vec<Reopening>,
+    /// When the vehicle last restarted since the run started (K27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at_us: Option<u64>,
+}
+
 /// One step of a vehicle's checklist.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +351,10 @@ pub struct Checklist {
     /// checklist", "props.md". Nothing links back to it (K7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copied_from: Option<String>,
+    /// The preflight under way, or the last one finished (K18). None
+    /// until a person starts one or ticks a step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Run>,
     pub updated_at_us: u64,
     pub version: u64,
 }
@@ -325,9 +366,43 @@ impl Checklist {
             vehicle_id: vehicle_id.to_owned(),
             steps: Vec::new(),
             copied_from: None,
+            run: None,
             updated_at_us: 0,
             version: 0,
         }
+    }
+
+    /// Whether its preflight is finished (K19). Its steps then stay as
+    /// they are until a person reopens it or starts a new one.
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.run.as_ref().is_some_and(|r| r.finished.is_some())
+    }
+
+    /// Whether a step takes no tick: its preflight is finished (K19). A
+    /// launch step is ticked where and when the vehicle launches, after
+    /// the preflight, so it stays open until a new preflight starts.
+    #[must_use]
+    pub fn locks(&self, step: &Step) -> bool {
+        step.when.is_preflight() && self.finished()
+    }
+
+    /// The run a stored checklist's ticks stand for when it has none
+    /// (K18): begun by its earliest tick.
+    #[must_use]
+    pub fn run_of_ticks(&self, id: String) -> Option<Run> {
+        let first = self
+            .steps
+            .iter()
+            .filter_map(|s| s.tick.as_ref())
+            .min_by_key(|t| t.at_us)?;
+        Some(Run {
+            id,
+            started: first.clone(),
+            finished: None,
+            reopenings: Vec::new(),
+            restarted_at_us: None,
+        })
     }
 
     #[must_use]
@@ -682,6 +757,71 @@ pub struct ChecklistRecord {
     /// say) while these checks set to hold did not pass (K23).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<CheckRef>,
+    /// The preflight it armed under (K19): under way, finished or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Run>,
+}
+
+/// A preflight as it ended (K18, K19), kept in the vehicle's history:
+/// finished by a person, which locked it, or left unfinished when a new
+/// one started.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecord {
+    pub id: String,
+    pub started: Tick,
+    /// None when it was left unfinished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Tick>,
+    /// Each earlier finish of it that a person reopened, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopenings: Vec<Reopening>,
+    /// Each step as it stood: its tick, its rule's value and its status.
+    pub steps: Vec<RecordStep>,
+    /// The vehicle's own reasons, UXDuck's checks and plugins' checks as
+    /// they stood.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+}
+
+impl RunRecord {
+    /// The run in a sentence, for the history and the agent: "Preflight
+    /// finished: 8 of 9 steps passed. Not passing: Link". One that was
+    /// reopened says so: "Preflight finished again".
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let preflight = || self.steps.iter().filter(|s| s.when.is_preflight());
+        let passed = preflight()
+            .filter(|s| s.status == CheckStatus::Pass)
+            .count();
+        let total = preflight().count();
+        let mut text = match (self.finished.is_some(), self.reopenings.is_empty()) {
+            (true, true) => "Preflight finished",
+            (true, false) => "Preflight finished again",
+            (false, true) => "Preflight left unfinished",
+            (false, false) => "Preflight reopened and left unfinished",
+        }
+        .to_owned();
+        if total > 0 {
+            let _ = write!(
+                text,
+                ": {passed} of {total} {} passed",
+                if total == 1 { "step" } else { "steps" }
+            );
+        }
+        // The launch's checks are for the place and the minute of the
+        // launch, not for the preflight.
+        let failing: Vec<&str> = self
+            .checks
+            .iter()
+            .filter(|c| c.when != Some(CheckWhen::Launch) && c.status != CheckStatus::Pass)
+            .map(|c| c.title.as_str())
+            .collect();
+        if !failing.is_empty() {
+            let _ = write!(text, ". Not passing: {}", failing.join(", "));
+        }
+        text
+    }
 }
 
 impl ChecklistRecord {
@@ -718,6 +858,11 @@ impl ChecklistRecord {
                 ". Left the ground without UXDuck launching it while {} did not pass",
                 titles.join(", ")
             );
+        }
+        // Under a finished preflight (K19). One under way says nothing:
+        // a vehicle is armed for a test on the ground too.
+        if let Some(finished) = self.run.as_ref().and_then(|r| r.finished.as_ref()) {
+            let _ = write!(text, ". Preflight finished by {}", finished.who());
         }
         text
     }
@@ -871,6 +1016,147 @@ mod tests {
         );
     }
 
+    fn ticked_at(at_us: u64, who: &str) -> Tick {
+        Tick {
+            by: Author {
+                client_name: "uxduck-web".into(),
+                client_kind: None,
+                operator_id: None,
+                operator_name: Some(who.into()),
+            },
+            at_us,
+        }
+    }
+
+    fn step(id: &str, when: CheckWhen, tick: Option<Tick>) -> Step {
+        Step {
+            id: id.into(),
+            kind: StepKind::Manual,
+            title: id.into(),
+            group: None,
+            severity: CheckSeverity::Warn,
+            when,
+            rule: None,
+            confirm: false,
+            tick,
+        }
+    }
+
+    #[test]
+    fn a_finished_run_locks_the_preflight_steps_and_leaves_the_launch_ones() {
+        let mut checklist = Checklist {
+            steps: vec![
+                step("props", CheckWhen::Preflight, Some(ticked_at(9, "Ada"))),
+                step("area", CheckWhen::Launch, None),
+                step("battery", CheckWhen::Preflight, Some(ticked_at(5, "Ben"))),
+            ],
+            ..Checklist::empty("v")
+        };
+        // A stored checklist's ticks are its first run, begun by the
+        // earliest of them.
+        let run = checklist.run_of_ticks("run1".into()).unwrap();
+        assert_eq!((run.started.at_us, run.started.who()), (5, "Ben"));
+        assert!(run.finished.is_none());
+        assert!(Checklist::empty("v").run_of_ticks("r".into()).is_none());
+        checklist.run = Some(run);
+        assert!(!checklist.locks(&checklist.steps[0]), "under way");
+        if let Some(run) = &mut checklist.run {
+            run.finished = Some(ticked_at(20, "Ben"));
+        }
+        assert!(checklist.finished() && checklist.locks(&checklist.steps[0]));
+        assert!(
+            !checklist.locks(&checklist.steps[1]),
+            "a launch step is ticked at the launch, after the preflight"
+        );
+        // Reopened, it takes ticks again and keeps when it was finished.
+        if let Some(run) = &mut checklist.run {
+            let finished = run.finished.take().unwrap();
+            run.reopenings.push(Reopening {
+                finished,
+                reopened: ticked_at(30, "Ada"),
+            });
+        }
+        assert!(!checklist.finished() && !checklist.locks(&checklist.steps[0]));
+        let stored = serde_json::to_value(&checklist).unwrap();
+        assert_eq!(stored["run"]["reopenings"][0]["finished"]["atUs"], 20);
+        assert_eq!(stored["run"]["reopenings"][0]["reopened"]["atUs"], 30);
+        // A checklist stored before runs reads as one with none.
+        let stored: Checklist = serde_json::from_value(serde_json::json!({
+            "vehicleId": "v", "steps": [], "updatedAtUs": 1, "version": 1
+        }))
+        .unwrap();
+        assert!(stored.run.is_none());
+        assert!(
+            serde_json::to_value(&stored).unwrap().get("run").is_none(),
+            "and is written back the same"
+        );
+    }
+
+    #[test]
+    fn a_run_as_it_ended_says_what_it_found() {
+        let record_step = |title: &str, when, status| RecordStep {
+            title: title.into(),
+            kind: StepKind::Manual,
+            group: None,
+            severity: CheckSeverity::Warn,
+            when,
+            status,
+            confirm: false,
+            tick: None,
+            rule: None,
+            value: None,
+        };
+        let check = |title: &str, when, status| Check {
+            id: format!("uxduck:{title}"),
+            source: crate::domain::preflight::CheckSource::Uxduck,
+            title: title.into(),
+            group: None,
+            severity: CheckSeverity::Warn,
+            when,
+            status,
+            detail: None,
+            fix: None,
+            plugin: None,
+        };
+        let mut run = RunRecord {
+            id: "run1".into(),
+            started: ticked_at(1, "Ben"),
+            finished: Some(ticked_at(2, "Ben")),
+            reopenings: Vec::new(),
+            steps: vec![
+                record_step("Props", CheckWhen::Preflight, CheckStatus::Pass),
+                record_step("Battery", CheckWhen::Preflight, CheckStatus::ToDo),
+                record_step("Area clear", CheckWhen::Launch, CheckStatus::ToDo),
+            ],
+            checks: vec![
+                check("Link", None, CheckStatus::Fail),
+                check("Plan on the vehicle", None, CheckStatus::Pass),
+                check("Home", Some(CheckWhen::Launch), CheckStatus::Unknown),
+            ],
+        };
+        assert_eq!(
+            run.describe(),
+            "Preflight finished: 1 of 2 steps passed. Not passing: Link",
+            "the launch's step and check are not the preflight's"
+        );
+        run.finished = None;
+        run.checks.clear();
+        assert_eq!(
+            run.describe(),
+            "Preflight left unfinished: 1 of 2 steps passed"
+        );
+        run.steps.clear();
+        assert_eq!(run.describe(), "Preflight left unfinished");
+        // One that was reopened says so, finished again or not.
+        run.reopenings.push(Reopening {
+            finished: ticked_at(2, "Ben"),
+            reopened: ticked_at(3, "Ada"),
+        });
+        assert_eq!(run.describe(), "Preflight reopened and left unfinished");
+        run.finished = Some(ticked_at(4, "Ada"));
+        assert_eq!(run.describe(), "Preflight finished again");
+    }
+
     #[test]
     fn a_file_has_no_ticks_and_names_its_version() {
         let checklist = Checklist {
@@ -895,6 +1181,7 @@ mod tests {
                 }),
             }],
             copied_from: None,
+            run: None,
             updated_at_us: 1,
             version: 1,
         };

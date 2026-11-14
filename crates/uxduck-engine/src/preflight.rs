@@ -78,7 +78,7 @@ pub(crate) struct Preflights {
     px4_checks: BTreeMap<String, ArmingChecks>,
 }
 
-fn actor() -> Actor {
+pub(crate) fn actor() -> Actor {
     Actor {
         client_id: "daemon".into(),
         operator_id: None,
@@ -189,6 +189,11 @@ fn configure(
         params.rename_group,
         params.groups,
     )?;
+    // A finished preflight's steps stay as they are (K19), their groups
+    // too.
+    if steps != checklist.steps && checklist.finished() {
+        return Err(crate::checklist::finished_list(&vehicle));
+    }
     if settings != vehicle.preflight {
         vehicle.preflight = settings;
         vehicle.version += 1;
@@ -507,6 +512,7 @@ impl Engine {
                 OwnCheck::Terrain => self.terrain_preflight(vehicle),
                 OwnCheck::Recording => self.recording_check(vehicle),
                 OwnCheck::Home => self.home_check(vehicle),
+                OwnCheck::Finished => self.finished_check(vehicle),
             };
             checks.push(Check {
                 id: check.id(),
@@ -694,12 +700,20 @@ impl Engine {
         self.review_preflight(&id);
     }
 
-    /// The vehicle restarted: no parameter waits for it any more.
+    /// The vehicle restarted: no parameter waits for it any more, and its
+    /// preflight says that it has (K27).
     pub(crate) fn preflight_restarted(&mut self, vehicle_id: &str) {
         let Some(id) = self.vehicle(vehicle_id).map(|v| v.id.clone()) else {
             return;
         };
-        if self.preflight.restart_params.remove(&id).is_some() {
+        let waited = self.preflight.restart_params.remove(&id).is_some();
+        let run = self
+            .state
+            .checklists
+            .get(&id)
+            .is_some_and(|c| c.run.is_some());
+        self.checklist_restarted(&id);
+        if waited || run {
             self.review_preflight(&id);
         }
     }
@@ -1271,6 +1285,39 @@ impl Engine {
             _ => not(
                 CheckStatus::Unknown,
                 format!("{name} has no home yet. It sets one once it knows where it is."),
+                None,
+            ),
+        }
+    }
+
+    /// "Preflight finished" (K27): a person finished the run of the
+    /// checklist under way. It never expires by itself. How long ago it
+    /// was is the client's to say from the run, so the words here do not
+    /// change with the clock.
+    fn finished_check(&self, vehicle: &Vehicle) -> Outcome {
+        let name = &vehicle.name;
+        let run = self
+            .state
+            .checklists
+            .get(&vehicle.id)
+            .and_then(|c| c.run.as_ref());
+        match run.and_then(|r| r.finished.as_ref().map(|f| (r, f))) {
+            Some((run, finished)) => {
+                let who = finished.who();
+                if run.restarted_at_us.is_some_and(|at| at > finished.at_us) {
+                    pass(format!("Finished by {who}. {name} has restarted since."))
+                } else {
+                    pass(format!("Finished by {who}."))
+                }
+            }
+            None if run.is_some() => not(
+                CheckStatus::ToDo,
+                format!("{name}'s preflight is under way. Finish it in Preflight."),
+                None,
+            ),
+            None => not(
+                CheckStatus::ToDo,
+                format!("No preflight is finished for {name}. Finish one in Preflight."),
                 None,
             ),
         }

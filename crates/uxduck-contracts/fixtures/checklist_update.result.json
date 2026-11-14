@@ -282,9 +282,29 @@
         "label": "Home within"
       },
       "when": "launch"
+    },
+    {
+      "check": "preflight-finished",
+      "id": "uxduck:preflight-finished",
+      "title": "Preflight finished",
+      "group": "Preflight",
+      "on": false,
+      "severity": "warn",
+      "defaultSeverity": "warn",
+      "when": "launch"
     }
   ],
-  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home", "Airframe", "Battery"],
+  "groups": [
+    "Setup",
+    "Link",
+    "Controller",
+    "Plan",
+    "Cameras",
+    "Home",
+    "Preflight",
+    "Airframe",
+    "Battery"
+  ],
   "updatedAtUs": 1790669310000000,
   "vehicleId": "v9b1c2d3e4f5a6b7c",
   "version": 12

@@ -4,12 +4,18 @@
 //! for a person's tick too, once it passes. It belongs to one vehicle: copying from another vehicle, a
 //! checklist file or a pasted list makes an independent copy. Its steps are
 //! checks in `preflight/state` with source `checklist`.
+//!
+//! Each time the preflight is done is a run of the checklist (K18, K19;
+//! S350): started and finished by a person, with the ticks on its steps.
+//! A run as it ended is in `checklist/runs` and the vehicle's history.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::history::Author;
-use crate::dto::preflight::{CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride};
+use crate::dto::preflight::{
+    Check, CheckRef, CheckSeverity, CheckStatus, CheckWhen, PreflightOverride,
+};
 
 /// How a rule compares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -44,6 +50,41 @@ pub struct Tick {
     pub by: Author,
     #[schemars(schema_with = "crate::safe::integer")]
     pub at_us: u64,
+}
+
+/// A finish of a preflight that a person undid with `checklist/reopen`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistReopening {
+    /// Who had finished it, and when.
+    pub finished: Tick,
+    /// Who reopened it, and when.
+    pub reopened: Tick,
+}
+
+/// One time a vehicle's preflight is done: a run of its checklist. The
+/// ticks on the steps are its ticks. A person starts it, with
+/// `checklist/reset` or the first tick, finishes it with
+/// `checklist/finish`, and can reopen it with `checklist/reopen`. It
+/// never holds or opens Arm.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistRun {
+    pub id: String,
+    /// Who started it, and when.
+    pub started: Tick,
+    /// Who finished it, and when. From then its steps stay as they are
+    /// and its preflight steps take no tick, until it is reopened or a
+    /// new preflight starts. Its launch steps still take a tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Tick>,
+    /// Each earlier finish of it that a person reopened, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopenings: Vec<ChecklistReopening>,
+    /// When the vehicle last restarted since the run started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub restarted_at_us: Option<u64>,
 }
 
 /// A step as written: in a checklist file, or added or copied in.
@@ -151,6 +192,10 @@ pub struct Checklist {
     /// Rules the vehicle can hold itself, with the parameter to set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub offers: Vec<ParamOffer>,
+    /// The preflight under way, or the last one finished. None until a
+    /// person starts one or ticks a step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ChecklistRun>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -269,7 +314,46 @@ pub struct ChecklistTickParams {
     pub ticked: bool,
 }
 
-/// A step as it stood when the vehicle armed.
+/// `checklist/runs`: a vehicle's earlier preflights.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistRunsParams {
+    pub vehicle_id: String,
+    /// At most this many (default 20, at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// A vehicle's earlier preflights, newest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistRunsResult {
+    pub runs: Vec<ChecklistRunRecord>,
+}
+
+/// A preflight as it ended: finished by a person, which locked it, or
+/// left unfinished when a new one started. One that was reopened and
+/// finished again has a record for each finish, with the same `id`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistRunRecord {
+    pub id: String,
+    pub started: Tick,
+    /// None when it was left unfinished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<Tick>,
+    /// Each earlier finish of it that a person reopened, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopenings: Vec<ChecklistReopening>,
+    /// Each step as it stood: its tick, its rule's value and its status.
+    pub steps: Vec<RecordStep>,
+    /// The vehicle's own reasons, UXDuck's checks and plugins' checks as
+    /// they stood.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+}
+
+/// A step as it stood when the vehicle armed, or when a preflight ended.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordStep {
@@ -300,7 +384,7 @@ pub struct RecordStep {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_s: Option<f64>,
-    /// What the rule read when the vehicle armed.
+    /// What the rule read then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
 }
@@ -320,4 +404,7 @@ pub struct ChecklistRecord {
     /// set to hold did not pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<CheckRef>,
+    /// The preflight it armed under: under way, finished or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ChecklistRun>,
 }

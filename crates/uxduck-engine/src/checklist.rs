@@ -13,6 +13,11 @@
 //! asks the operator first (K11). Arming writes the checklist as it stood
 //! to the vehicle's history and its flight (K14), and arming that UXDuck
 //! did not send while a blocking check failed raises a warning (K10).
+//!
+//! Each time the preflight is done is a run of the checklist (K18, K19,
+//! S350): `checklist_runs` starts, finishes and lists them. The ticks on
+//! the steps are the run's, and a finished run's preflight steps take no
+//! tick.
 
 use serde_json::Value;
 use uxduck_contracts::dto::checklist::{
@@ -23,8 +28,8 @@ use uxduck_contracts::dto::preflight::{Preflight as PreflightDto, PreflightParam
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::checklist::{
-    Checklist, ChecklistFile, ChecklistRecord, FILE_FORMAT, MAX_STEPS, Op, RecordStep, Rule, Step,
-    StepDef, StepKind, Tick, steps_from_markdown,
+    Checklist, ChecklistFile, ChecklistRecord, FILE_FORMAT, MAX_STEPS, Op, RecordStep, Rule, Run,
+    Step, StepDef, StepKind, Tick, steps_from_markdown,
 };
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::ReceiptStatus;
@@ -33,7 +38,7 @@ use uxduck_core::domain::parameter::{parameter_id, same_value};
 use uxduck_core::domain::preflight::{Check, CheckRef, CheckSource, CheckStatus, ParamOffer};
 use uxduck_core::domain::telemetry::{TelemetryItem, Unit, VehicleTelemetry};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
-use uxduck_core::events::Change;
+use uxduck_core::events::{Actor, Change};
 
 use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
@@ -60,11 +65,11 @@ const AVERAGE_ITEM: &str = "battery.cell_avg_v";
 /// The item for what is left in the battery.
 pub(crate) const LEFT_ITEM: &str = "battery.remaining_mah";
 
-fn no_vehicle(id: &str) -> ApiError {
+pub(crate) fn no_vehicle(id: &str) -> ApiError {
     ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}"))
 }
 
-fn invalid(message: impl Into<String>) -> ApiError {
+pub(crate) fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
 }
 
@@ -72,7 +77,16 @@ fn denied(capability: Capability) -> ApiError {
     ApiError::new(ErrorKind::CapabilityDenied, capability.denied_message())
 }
 
-fn only_a_person(what: &str) -> ApiError {
+/// A finished preflight's steps stay as they are (K19): the list is
+/// changed once a person reopens it or starts a new one.
+pub(crate) fn finished_list(vehicle: &Vehicle) -> ApiError {
+    invalid(format!(
+        "{}'s preflight is finished, so its list stays as it is. Reopen it or start a new preflight to change the list",
+        vehicle.name
+    ))
+}
+
+pub(crate) fn only_a_person(what: &str) -> ApiError {
     ApiError::new(
         ErrorKind::CapabilityDenied,
         format!("only a person {what}, from UXDuck or its CLI"),
@@ -107,11 +121,31 @@ pub(crate) fn handle(
             }
             tick(engine, connection, &params)
         }
+        // Starting and finishing a preflight are a person's too (K18,
+        // K19).
         ClientRequest::ChecklistReset(PreflightParams { vehicle_id }) => {
             if !operator {
-                return Err(only_a_person("clears a checklist's ticks"));
+                return Err(only_a_person("starts a new preflight"));
             }
-            reset(engine, connection, &vehicle_id)
+            crate::checklist_runs::start(engine, connection, &vehicle_id)
+        }
+        ClientRequest::ChecklistFinish(PreflightParams { vehicle_id }) => {
+            if !operator {
+                return Err(only_a_person("finishes a preflight"));
+            }
+            crate::checklist_runs::finish(engine, connection, &vehicle_id)
+        }
+        ClientRequest::ChecklistReopen(PreflightParams { vehicle_id }) => {
+            if !operator {
+                return Err(only_a_person("reopens a preflight"));
+            }
+            crate::checklist_runs::reopen(engine, connection, &vehicle_id)
+        }
+        ClientRequest::ChecklistRuns(params) => {
+            if !granted.contains(&Capability::Read) {
+                return Err(denied(Capability::Read));
+            }
+            crate::checklist_runs::list(engine, &params)
         }
         ClientRequest::ChecklistExport(PreflightParams { vehicle_id }) => {
             if !granted.contains(&Capability::Read) {
@@ -236,6 +270,9 @@ fn update(
         .cloned()
         .ok_or_else(|| no_vehicle(&params.vehicle_id))?;
     let before = engine.checklist_of(&vehicle.id);
+    if before.finished() {
+        return Err(finished_list(&vehicle));
+    }
     let mut steps = before.steps.clone();
     for id in &params.remove {
         let at = steps
@@ -377,6 +414,9 @@ fn copy(
         )
     };
     let before = engine.checklist_of(&vehicle.id);
+    if before.finished() {
+        return Err(finished_list(&vehicle));
+    }
     let mut steps = if params.replace {
         Vec::new()
     } else {
@@ -416,6 +456,13 @@ fn tick(
             step.title
         )));
     }
+    // A finished preflight is locked (K19). A new one takes ticks again.
+    if before.locks(step) {
+        return Err(invalid(format!(
+            "{}'s preflight is finished, so “{}” stays as it is. Reopen it or start a new preflight to change it",
+            vehicle.name, step.title
+        )));
+    }
     // A rule that asks for a tick takes it only while it passes (K17).
     // Clearing a tick is always a person's to do.
     if params.ticked
@@ -433,24 +480,6 @@ fn tick(
         by: engine.author(connection),
         at_us: engine.clock.now_us(),
     });
-    let copied_from = before.copied_from.clone();
-    engine.keep_checklist(connection, &vehicle, &before, steps, copied_from)
-}
-
-fn reset(
-    engine: &mut Engine,
-    connection: ConnectionId,
-    vehicle_id: &str,
-) -> Result<Value, ApiError> {
-    let vehicle = engine
-        .vehicle(vehicle_id)
-        .cloned()
-        .ok_or_else(|| no_vehicle(vehicle_id))?;
-    let before = engine.checklist_of(&vehicle.id);
-    let mut steps = before.steps.clone();
-    for step in &mut steps {
-        step.tick = None;
-    }
     let copied_from = before.copied_from.clone();
     engine.keep_checklist(connection, &vehicle, &before, steps, copied_from)
 }
@@ -480,7 +509,12 @@ impl Engine {
         }
     }
 
-    /// Journals a vehicle's steps when they changed.
+    pub(crate) fn new_run_id(&mut self) -> String {
+        format!("run{}", &self.random.token()[..12])
+    }
+
+    /// Journals a vehicle's steps when they changed, in the run under
+    /// way.
     pub(crate) fn store_steps(
         &mut self,
         connection: ConnectionId,
@@ -488,15 +522,39 @@ impl Engine {
         steps: Vec<Step>,
         copied_from: Option<String>,
     ) {
-        if steps != before.steps || copied_from != before.copied_from {
-            let checklist = Checklist {
-                vehicle_id: before.vehicle_id.clone(),
-                steps,
-                copied_from,
-                updated_at_us: self.clock.now_us(),
-                version: before.version + 1,
-            };
-            self.commit(connection, Change::ChecklistUpdated { checklist });
+        let actor = self.actor(connection);
+        self.store_checklist(actor, before, steps, copied_from, before.run.clone());
+    }
+
+    /// Journals a vehicle's checklist when its steps, where they came
+    /// from or its run changed. Ticks with no run begin one (K18): the
+    /// first tick starts a preflight, and a checklist stored with ticks
+    /// before runs has them as its first.
+    pub(crate) fn store_checklist(
+        &mut self,
+        actor: Actor,
+        before: &Checklist,
+        steps: Vec<Step>,
+        copied_from: Option<String>,
+        run: Option<Run>,
+    ) {
+        let mut checklist = Checklist {
+            vehicle_id: before.vehicle_id.clone(),
+            steps,
+            copied_from,
+            run,
+            updated_at_us: self.clock.now_us(),
+            version: before.version + 1,
+        };
+        if checklist.run.is_none() && checklist.steps.iter().any(|s| s.tick.is_some()) {
+            let id = self.new_run_id();
+            checklist.run = checklist.run_of_ticks(id);
+        }
+        if checklist.steps != before.steps
+            || checklist.copied_from != before.copied_from
+            || checklist.run != before.run
+        {
+            self.commit_as(actor, Change::ChecklistUpdated { checklist });
             self.track_rules(&before.vehicle_id);
         }
     }
@@ -511,12 +569,17 @@ impl Engine {
         copied_from: Option<String>,
     ) -> Result<Value, ApiError> {
         self.store_steps(connection, before, steps, copied_from);
-        self.review_preflight(&vehicle.id);
+        self.preflight_answer(&vehicle.id)
+    }
+
+    /// A vehicle's checks as they stand after a change, for its answer.
+    pub(crate) fn preflight_answer(&mut self, vehicle_id: &str) -> Result<Value, ApiError> {
+        self.review_preflight(vehicle_id);
         let preflight = self
             .state
             .preflights
-            .get(&vehicle.id)
-            .ok_or_else(|| no_vehicle(&vehicle.id))?;
+            .get(vehicle_id)
+            .ok_or_else(|| no_vehicle(vehicle_id))?;
         to_value(&PreflightDto::from(preflight))
     }
 
@@ -876,6 +939,38 @@ impl Engine {
         out
     }
 
+    /// Each step as it stands, for a record (K14, K19): its tick, its
+    /// status among `checks`, and what its rule reads now.
+    pub(crate) fn record_steps(
+        &self,
+        vehicle: &Vehicle,
+        checklist: &Checklist,
+        checks: &[Check],
+    ) -> Vec<RecordStep> {
+        checklist
+            .steps
+            .iter()
+            .map(|step| RecordStep {
+                title: step.title.clone(),
+                kind: step.kind,
+                group: step.group.clone(),
+                confirm: step.confirm,
+                severity: step.severity,
+                when: step.when,
+                status: checks
+                    .iter()
+                    .find(|c| c.id == step.check_id())
+                    .map_or(CheckStatus::Unknown, |c| c.status),
+                tick: step.tick.clone(),
+                rule: step.rule.clone(),
+                value: step
+                    .rule
+                    .as_ref()
+                    .and_then(|rule| self.reading(vehicle, rule).value),
+            })
+            .collect()
+    }
+
     /// The vehicle armed (K14): its checklist as it stood goes to its
     /// history and its flight. Armed as a step of a launch UXDuck sent
     /// past checks, the record says which (K24). Arming is never held and
@@ -910,28 +1005,7 @@ impl Engine {
             .max_by_key(|r| r.created_at_us)
             .cloned();
         let checklist = self.checklist_of(&vehicle.id);
-        let steps: Vec<RecordStep> = checklist
-            .steps
-            .iter()
-            .map(|step| RecordStep {
-                title: step.title.clone(),
-                kind: step.kind,
-                group: step.group.clone(),
-                confirm: step.confirm,
-                severity: step.severity,
-                when: step.when,
-                status: checks
-                    .iter()
-                    .find(|c| c.id == step.check_id())
-                    .map_or(CheckStatus::Unknown, |c| c.status),
-                tick: step.tick.clone(),
-                rule: step.rule.clone(),
-                value: step
-                    .rule
-                    .as_ref()
-                    .and_then(|rule| self.reading(vehicle, rule).value),
-            })
-            .collect();
+        let steps = self.record_steps(vehicle, &checklist, &checks);
         let (mut overridden, mut override_by) = match &sent {
             Some(r) if r.preflight_override.is_some() => {
                 (r.preflight.clone(), r.preflight_override.clone())
@@ -952,7 +1026,10 @@ impl Engine {
         {
             (overridden, override_by) = (lifted.overridden, lifted.override_by);
         }
-        if steps.is_empty() && overridden.is_empty() && failing.is_empty() {
+        // The preflight it armed under (K19), once a person finished one
+        // or has one under way.
+        let run = checklist.run;
+        if steps.is_empty() && overridden.is_empty() && failing.is_empty() && run.is_none() {
             return;
         }
         let record = ChecklistRecord {
@@ -960,6 +1037,7 @@ impl Engine {
             overridden,
             override_by,
             failing,
+            run,
         };
         let flight_id = self.open_flight(&vehicle.id).map(|f| f.id.clone());
         if let Some(id) = &flight_id
@@ -975,7 +1053,7 @@ impl Engine {
             uxduck_core::domain::history::HistoryEvent::Armed {
                 flight_id,
                 text,
-                record,
+                record: Box::new(record),
             },
         );
     }
@@ -1036,6 +1114,7 @@ impl Engine {
             overridden: Vec::new(),
             override_by: None,
             failing: Vec::new(),
+            run: None,
         });
         if record.overridden == overridden && record.failing == failing {
             return;

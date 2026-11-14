@@ -803,9 +803,13 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
             ("plan", "warn"),
             ("terrain", "warn"),
             ("recording", "warn"),
-            ("home", "warn")
+            ("home", "warn"),
+            ("preflight-finished", "warn")
         ]
     );
+    // "Preflight finished" is the one a person turns on (K29): until then it
+    // has a setting and no row.
+    assert_eq!(checks["settings"][9]["on"], false);
     // Everything passes now, but the RC receiver and Home: the vehicle has
     // not said whether it has RC input, nor where it and its home are.
     for check in &checks["checks"].as_array().unwrap()[1..] {

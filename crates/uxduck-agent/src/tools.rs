@@ -188,10 +188,12 @@ pub const AGENT_METHODS: &[&str] = &[
     // copying them in from another vehicle, a file or a pasted list,
     // asks the operator first without `config`. Ticking a step and arming
     // past one are a person's, so `checklist/tick` and `checklist/reset`
-    // are not here.
+    // are not here. Nor is finishing a preflight (S350, K19). Earlier
+    // preflights are read freely.
     "checklist/update",
     "checklist/copy",
     "checklist/export",
+    "checklist/runs",
     // Opening a tab when asked (S43), in the chat's operator's layout.
     "layout/open",
     // A suggestion card for what UXDuck cannot do (S73): the person reads
@@ -403,6 +405,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "preflight/configure",
     "checklist/tick",
     "checklist/reset",
+    "checklist/finish",
+    "checklist/reopen",
     "plugin/setChecksBlock",
     "account/sessions",
     "account/signOutSession",
@@ -637,6 +641,9 @@ pub const DEFERRED_METHODS: &[&str] = &[
     // Rare too, like the other exports, and kept them under budget for a
     // step's group, its tick on a rule and where it counts (S353, S352).
     "checklist/export",
+    // Rare: the preflight under way is in `preflight/state`, and each
+    // one that ended is in the vehicle's history too (S350).
+    "checklist/runs",
     // Found with operator/update's calculated values (ADR-0056 K5).
     "telemetry/calculate",
 ];

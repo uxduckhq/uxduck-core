@@ -108,7 +108,15 @@ pub enum HistoryEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flight_id: Option<String>,
         text: String,
-        record: crate::domain::checklist::ChecklistRecord,
+        record: Box<crate::domain::checklist::ChecklistRecord>,
+    },
+    /// A preflight ended (S350, ADR-0038 K18, K19): a person finished it,
+    /// which locked it, or it was left unfinished when a new one started.
+    /// The run as it stood, with what it found in words ("Preflight
+    /// finished: 8 of 9 steps passed").
+    PreflightRun {
+        text: String,
+        run: Box<crate::domain::checklist::RunRecord>,
     },
     /// A saved parameter set applied (S217, ADR-0037 V19), in words: how
     /// many were written, refused and skipped. Each value's change is its
@@ -208,6 +216,7 @@ impl HistoryEvent {
             | Self::Calibrated { text, .. }
             | Self::ParametersApplied { text, .. }
             | Self::AutoTuned { text, .. }
+            | Self::PreflightRun { text, .. }
             | Self::Armed { text, .. } => text.clone(),
             Self::ParameterChanged {
                 name,

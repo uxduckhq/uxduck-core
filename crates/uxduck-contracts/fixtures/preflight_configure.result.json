@@ -202,9 +202,19 @@
         "label": "Home within"
       },
       "when": "launch"
+    },
+    {
+      "check": "preflight-finished",
+      "id": "uxduck:preflight-finished",
+      "title": "Preflight finished",
+      "group": "Preflight",
+      "on": false,
+      "severity": "warn",
+      "defaultSeverity": "warn",
+      "when": "launch"
     }
   ],
-  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home"],
+  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home", "Preflight"],
   "planId": "pl4a1b2c3d4e5f6a7",
   "evaluating": true,
   "checklist": {

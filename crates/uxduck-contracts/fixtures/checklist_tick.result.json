@@ -37,7 +37,19 @@
         "value": 22.2
       }
     ],
-    "version": 2
+    "version": 2,
+    "run": {
+      "id": "run4c81e0a97f3d",
+      "started": {
+        "by": {
+          "clientName": "uxduck-web",
+          "clientKind": "operator-ui",
+          "operatorId": "op1",
+          "operatorName": "Ben"
+        },
+        "atUs": 1790669190000000
+      }
+    }
   },
   "checks": [
     {
@@ -249,9 +261,19 @@
         "label": "Home within"
       },
       "when": "launch"
+    },
+    {
+      "check": "preflight-finished",
+      "id": "uxduck:preflight-finished",
+      "title": "Preflight finished",
+      "group": "Preflight",
+      "on": false,
+      "severity": "warn",
+      "defaultSeverity": "warn",
+      "when": "launch"
     }
   ],
-  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home"],
+  "groups": ["Setup", "Link", "Controller", "Plan", "Cameras", "Home", "Preflight"],
   "updatedAtUs": 1790669310000000,
   "vehicleId": "v9b1c2d3e4f5a6b7c",
   "version": 14

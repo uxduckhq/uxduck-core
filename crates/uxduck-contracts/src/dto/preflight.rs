@@ -130,6 +130,11 @@ pub enum OwnCheck {
     /// once the vehicle is armed. Disarmed it passes, saying that most
     /// autopilots move home when they arm.
     Home,
+    /// A person finished the preflight under way (`checklist/finish`).
+    /// Counts at the launch only, and is off until a person turns it on.
+    /// It never expires: `checklist.run` says when it was finished and
+    /// whether the vehicle restarted since.
+    PreflightFinished,
 }
 
 /// One check in a vehicle's list.

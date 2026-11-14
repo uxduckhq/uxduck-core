@@ -195,8 +195,9 @@ pub enum Command {
     },
     /// A vehicle's own checklist (S193): `uxduck checklist Alpha`, `add
     /// "Propellers tight"`, `add "Battery" --rule "battery.voltage_v >=
-    /// 22.2" --hold 3`, `tick 1`, `reset`, `export`, `import list.md`,
-    /// `copy --from Bravo`.
+    /// 22.2" --hold 3`, `tick 1`, `export`, `import list.md`, `copy
+    /// --from Bravo`. A preflight is a run of it (S350): `new`,
+    /// `finish`, `reopen`, `runs`.
     Checklist(checklist::ChecklistArgs),
     /// Saved plans (S125): `uxduck plan import mission.plan`.
     Plan {

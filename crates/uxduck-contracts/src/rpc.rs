@@ -1489,10 +1489,42 @@ pub enum ClientRequest {
     /// MCP client or plugin cannot tick. Result: `Preflight`.
     #[serde(rename = "checklist/tick")]
     ChecklistTick(crate::dto::checklist::ChecklistTickParams),
-    /// A person clears every tick of a vehicle's checklist (Reset, S193).
-    /// Only from an operator client. Result: `Preflight`.
+    /// A person starts a new preflight for a vehicle (New preflight;
+    /// S193, S350, ADR-0038 K18, K29): every tick is cleared and a new
+    /// run of the checklist starts, stamped with who and when. The run
+    /// before it stays in the vehicle's history as it was. Only from an
+    /// operator client. Result: `Preflight`.
     #[serde(rename = "checklist/reset")]
     ChecklistReset(crate::dto::preflight::PreflightParams),
+    /// A person finishes a vehicle's preflight (S350, ADR-0038 K19): the
+    /// run is stamped with who and when, and each step's tick and rule
+    /// value and every check are recorded as they stood in the vehicle's
+    /// history. Until it is reopened or a new preflight starts, its
+    /// steps stay as they are (`checklist/update` and `checklist/copy`
+    /// are refused) and its preflight steps take no tick. Its launch
+    /// steps still do. Arming, a take-off and a landing never finish
+    /// one, and a run never holds or opens Arm. Only from an operator
+    /// client: an agent, MCP client or plugin cannot finish one. Result:
+    /// `Preflight`.
+    #[serde(rename = "checklist/finish")]
+    ChecklistFinish(crate::dto::preflight::PreflightParams),
+    /// A person reopens a vehicle's finished preflight (S350, ADR-0038
+    /// K19): it is under way again with its ticks, its steps can be
+    /// changed, and it can be finished again. The run keeps who finished
+    /// it and when and who reopened it and when (`reopenings`). What its
+    /// finish recorded in the vehicle's history stays as it was, and
+    /// finishing again records it anew beside that. Only from an
+    /// operator client. Result: `Preflight`.
+    #[serde(rename = "checklist/reopen")]
+    ChecklistReopen(crate::dto::preflight::PreflightParams),
+    /// A vehicle's earlier preflights, newest first (S350, ADR-0038 K18):
+    /// each run of its checklist as it ended, finished or left unfinished
+    /// when a new one started, with who started and finished it and when,
+    /// each step's tick and rule value, and the checks as they stood. The
+    /// one under way is `checklist.run` in `preflight/state`. Changes
+    /// nothing. Needs `read`. Result: `ChecklistRunsResult`.
+    #[serde(rename = "checklist/runs")]
+    ChecklistRuns(crate::dto::checklist::ChecklistRunsParams),
     /// A vehicle's checklist as a file (`uxduck.checklist/1`): its steps
     /// without ticks, to keep or to copy into another vehicle with
     /// `checklist/copy`. Changes nothing. Needs `read`. Result:
@@ -2072,7 +2104,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 383] = [
+    pub const METHODS: [&'static str; 386] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2321,6 +2353,9 @@ impl ClientRequest {
         "checklist/copy",
         "checklist/tick",
         "checklist/reset",
+        "checklist/finish",
+        "checklist/reopen",
+        "checklist/runs",
         "checklist/export",
         "setup/state",
         "setup/start",

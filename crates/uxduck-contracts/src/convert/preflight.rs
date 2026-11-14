@@ -115,6 +115,7 @@ impl From<p::OwnCheck> for dto::OwnCheck {
             p::OwnCheck::Terrain => Self::Terrain,
             p::OwnCheck::Recording => Self::Recording,
             p::OwnCheck::Home => Self::Home,
+            p::OwnCheck::Finished => Self::PreflightFinished,
         }
     }
 }
@@ -131,6 +132,7 @@ impl From<dto::OwnCheck> for p::OwnCheck {
             dto::OwnCheck::Terrain => Self::Terrain,
             dto::OwnCheck::Recording => Self::Recording,
             dto::OwnCheck::Home => Self::Home,
+            dto::OwnCheck::PreflightFinished => Self::Finished,
         }
     }
 }
@@ -229,6 +231,11 @@ impl From<&p::Preflight> for dto::Preflight {
                     .collect(),
                 copied_from: v.checklist.as_ref().and_then(|c| c.copied_from.clone()),
                 offers: v.offers.iter().map(Into::into).collect(),
+                run: v
+                    .checklist
+                    .as_ref()
+                    .and_then(|c| c.run.as_ref())
+                    .map(Into::into),
                 version: v.checklist.as_ref().map_or(0, |c| c.version),
             },
             updated_at_us: v.updated_at_us,

@@ -140,6 +140,10 @@ pub enum OwnCheck {
     /// Read at the launch only. A home far away fails once the vehicle is
     /// armed: before that most autopilots are still to move it.
     Home,
+    /// A person finished the preflight (K27): the run of the checklist
+    /// under way. Read at the launch only, and off until a person turns
+    /// it on. It never expires by itself.
+    Finished,
 }
 
 /// A check's threshold: what it means and its range.
@@ -155,7 +159,7 @@ pub struct Threshold {
 
 impl OwnCheck {
     /// In the list's order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Setup,
         Self::Restart,
         Self::Link,
@@ -165,6 +169,7 @@ impl OwnCheck {
         Self::Terrain,
         Self::Recording,
         Self::Home,
+        Self::Finished,
     ];
 
     /// Its key on the wire: "plan".
@@ -180,6 +185,7 @@ impl OwnCheck {
             Self::Terrain => "terrain",
             Self::Recording => "recording",
             Self::Home => "home",
+            Self::Finished => "preflight-finished",
         }
     }
 
@@ -208,6 +214,7 @@ impl OwnCheck {
             Self::Terrain => "Terrain loaded",
             Self::Recording => "Cameras ready to record",
             Self::Home => "Home is where the vehicle is",
+            Self::Finished => "Preflight finished",
         }
     }
 
@@ -223,6 +230,7 @@ impl OwnCheck {
             Self::Plan | Self::Terrain => "Plan",
             Self::Recording => "Cameras",
             Self::Home => "Home",
+            Self::Finished => "Preflight",
         }
     }
 
@@ -232,7 +240,7 @@ impl OwnCheck {
     #[must_use]
     pub const fn when(self) -> Option<CheckWhen> {
         match self {
-            Self::Home => Some(CheckWhen::Launch),
+            Self::Home | Self::Finished => Some(CheckWhen::Launch),
             _ => None,
         }
     }
@@ -279,11 +287,12 @@ impl OwnCheck {
         matches!(self, Self::RcReceiver)
     }
 
-    /// How it is set when nobody has set it.
+    /// How it is set when nobody has set it: on, but for the one that
+    /// asks a person to finish their preflight (K27).
     #[must_use]
     pub const fn default_setting(self) -> CheckSetting {
         CheckSetting {
-            on: true,
+            on: !matches!(self, Self::Finished),
             severity: self.default_severity(),
             threshold: None,
             input: None,
@@ -791,6 +800,28 @@ mod tests {
     }
 
     #[test]
+    fn asking_for_a_finished_preflight_is_off_until_a_person_turns_it_on() {
+        let mut settings = PreflightSettings::default();
+        let check = OwnCheck::Finished;
+        assert_eq!(OwnCheck::from_id("uxduck:preflight-finished"), Some(check));
+        assert_eq!(check.when(), Some(CheckWhen::Launch));
+        let fresh = settings.setting(check);
+        assert!(!fresh.on, "K27: off until a person turns it on");
+        assert_eq!(fresh.severity, CheckSeverity::Warn);
+        assert!(
+            OwnCheck::ALL
+                .iter()
+                .filter(|c| **c != check)
+                .all(|c| settings.setting(*c).on),
+            "the rest are on"
+        );
+        settings.set(check, CheckSetting { on: true, ..fresh });
+        assert!(settings.setting(check).on && !settings.is_default());
+        settings.set(check, fresh);
+        assert!(settings.is_default(), "off again keeps nothing");
+    }
+
+    #[test]
     fn a_person_arranges_the_groups_and_only_what_they_changed_is_kept() {
         let mut settings = PreflightSettings::default();
         let steps = [
@@ -808,6 +839,7 @@ mod tests {
                 "Plan",
                 "Cameras",
                 "Home",
+                "Preflight",
                 "Battery"
             ],
             "as they first appear, UXDuck's own first, capitals aside"
@@ -828,6 +860,7 @@ mod tests {
                 "Plan",
                 "Cameras",
                 "Home",
+                "Preflight",
                 "Battery"
             ]
         );
@@ -851,7 +884,8 @@ mod tests {
                 "Controller",
                 "Plan",
                 "Cameras",
-                "Home"
+                "Home",
+                "Preflight"
             ]
         );
 

@@ -91,7 +91,11 @@ impl From<&core::HistoryEvent> for dto::HistoryEvent {
             } => Self::Armed {
                 flight_id,
                 text,
-                record: (&record).into(),
+                record: Box::new(record.as_ref().into()),
+            },
+            core::HistoryEvent::PreflightRun { text, run } => Self::PreflightRun {
+                text,
+                run: Box::new(run.as_ref().into()),
             },
             core::HistoryEvent::ParametersApplied { set_id, name, text } => {
                 Self::ParametersApplied { set_id, name, text }

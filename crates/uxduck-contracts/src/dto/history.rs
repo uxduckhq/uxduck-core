@@ -98,7 +98,14 @@ pub enum HistoryEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flight_id: Option<String>,
         text: String,
-        record: crate::dto::checklist::ChecklistRecord,
+        record: Box<crate::dto::checklist::ChecklistRecord>,
+    },
+    /// A preflight ended (S350): a person finished it, or it was left
+    /// unfinished when a new one started. The run as it stood, and what
+    /// it found in words.
+    PreflightRun {
+        text: String,
+        run: Box<crate::dto::checklist::ChecklistRunRecord>,
     },
     /// A saved parameter set applied (S217): how many were written,
     /// refused and skipped, in words.

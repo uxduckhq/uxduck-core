@@ -1120,7 +1120,7 @@ fn arming_records_the_checklist_in_history_and_the_flight() {
     assert_eq!(record.steps[1].value, Some(22.7), "the value at arming");
     assert!(record.overridden.is_empty() && record.failing.is_empty());
     let flight = &b.engine.state().flights[flight_id.as_ref().unwrap()];
-    assert_eq!(flight.checklist.as_ref(), Some(record));
+    assert_eq!(flight.checklist.as_ref(), Some(record.as_ref()));
     // Nothing failing, no warning.
     assert!(
         !b.engine
@@ -1710,6 +1710,7 @@ fn a_person_arranges_the_groups() {
             "Plan",
             "Cameras",
             "Home",
+            "Preflight",
             "Battery"
         ])
     );
@@ -1739,6 +1740,7 @@ fn a_person_arranges_the_groups() {
             "Plan",
             "Cameras",
             "Home",
+            "Preflight",
             "Battery"
         ])
     );
@@ -1766,7 +1768,8 @@ fn a_person_arranges_the_groups() {
             "Controller",
             "Plan",
             "Cameras",
-            "Home"
+            "Home",
+            "Preflight"
         ])
     );
     let unknown = configure(&mut b, json!({ "groups": ["Battery", "Airframe"] }));
@@ -1799,7 +1802,8 @@ fn a_person_arranges_the_groups() {
             "Radio link",
             "Plan",
             "Cameras",
-            "Home"
+            "Home",
+            "Preflight"
         ])
     );
 
@@ -1813,7 +1817,14 @@ fn a_person_arranges_the_groups() {
     assert_eq!(
         joined["groups"],
         json!([
-            "Sticks", "Battery", "Setup", "Link", "Plan", "Cameras", "Home"
+            "Sticks",
+            "Battery",
+            "Setup",
+            "Link",
+            "Plan",
+            "Cameras",
+            "Home",
+            "Preflight"
         ])
     );
     let empty = configure(
@@ -1856,6 +1867,7 @@ fn a_person_arranges_the_groups() {
             "Plan",
             "Cameras",
             "Home",
+            "Preflight",
             "Battery"
         ])
     );
@@ -1872,6 +1884,495 @@ fn a_person_arranges_the_groups() {
         refused["error"]["data"]["kind"], "capability-denied",
         "{refused}"
     );
+}
+
+/// The vehicle's earlier preflights, newest first.
+fn runs(b: &mut Bench) -> Vec<Value> {
+    b.ok("checklist/runs", json!({ "vehicleId": "v" }))["runs"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_preflight_is_a_run_a_person_starts_and_finishes() {
+    const AREA: &str = "Area clear of people";
+    let mut b = bench();
+    b.demo_steps();
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": AREA, "when": "launch" }] }),
+    );
+    // Writing the list starts nothing. The first tick does (K18).
+    assert!(b.checks()["checklist"]["run"].is_null());
+    assert!(runs(&mut b).is_empty());
+    b.time.advance(S);
+    let started_at = b.time.now();
+    let run = b.tick(PROPS, true)["checklist"]["run"].clone();
+    assert_eq!(run["started"]["atUs"], started_at, "{run}");
+    assert_eq!(run["started"]["by"]["clientName"], "operator-ui");
+    assert!(run["finished"].is_null(), "{run}");
+    let id = run["id"].as_str().unwrap().to_owned();
+    b.volts(22.6);
+    b.time.advance(4 * S);
+    b.volts(22.6);
+    assert_eq!(b.checks()["checklist"]["run"], run, "the same run goes on");
+
+    // Only a person finishes it (K19): an agent reads the preflights and
+    // is never asked about finishing one.
+    let mut agent = connect(&mut b.engine, "agent");
+    let refused = call(
+        &mut b.engine,
+        &mut agent,
+        "checklist/finish",
+        json!({ "vehicleId": "v" }),
+    );
+    assert_eq!(
+        refused["error"]["data"]["kind"], "capability-denied",
+        "{refused}"
+    );
+    assert!(b.engine.state().approvals.is_empty());
+    let read = call(
+        &mut b.engine,
+        &mut agent,
+        "checklist/runs",
+        json!({ "vehicleId": "v" }),
+    );
+    assert_eq!(read["result"]["runs"], json!([]), "{read}");
+
+    // Arming and landing neither finish it nor wait for it (K21). The
+    // record on arming names the run.
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    b.seen(true);
+    b.time.advance(60 * S);
+    b.seen(false);
+    assert_eq!(b.checks()["checklist"]["run"], run);
+    let records = b.armed_records();
+    let HistoryEvent::Armed { text, record, .. } = records.last().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(record.run.as_ref().unwrap().id, id);
+    assert_eq!(text, "Armed with its checklist: 2 of 2 steps passed");
+    assert!(runs(&mut b).is_empty(), "nothing is kept until it ends");
+
+    // Finish stamps it and writes it to the history as it stood.
+    b.volts(22.6);
+    b.time.advance(4 * S);
+    b.volts(22.6);
+    let finished_at = b.time.now();
+    let done = b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    let finished = &done["checklist"]["run"];
+    assert_eq!(finished["id"], id.as_str());
+    assert_eq!(finished["started"]["atUs"], started_at);
+    assert_eq!(finished["finished"]["atUs"], finished_at, "{finished}");
+    assert_eq!(finished["finished"]["by"]["clientName"], "operator-ui");
+    let history = b.history();
+    let HistoryEvent::PreflightRun { text, run: kept } = history.last().unwrap() else {
+        panic!("{:?}", history.last())
+    };
+    assert!(
+        text.starts_with("Preflight finished: 2 of 2 steps passed"),
+        "{text}"
+    );
+    assert_eq!(kept.id, id);
+    assert_eq!(kept.finished.as_ref().unwrap().at_us, finished_at);
+    let titles: Vec<&str> = kept.steps.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, [PROPS, BATTERY, AREA]);
+    assert_eq!(kept.steps[0].tick.as_ref().unwrap().at_us, started_at);
+    assert_eq!(kept.steps[1].value, Some(22.6), "the value when it ended");
+    assert_eq!(kept.steps[2].status, CheckStatus::ToDo);
+    // The vehicle's and UXDuck's checks as they stood, and no steps twice.
+    assert!(kept.checks.iter().any(|c| c.id == "uxduck:link"));
+    assert!(kept.checks.iter().all(|c| !c.id.starts_with("checklist:")));
+    let listed = runs(&mut b);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["id"], id.as_str());
+    assert_eq!(listed[0]["finished"]["atUs"], finished_at);
+    assert_eq!(listed[0]["steps"][0]["tick"]["atUs"], started_at);
+
+    // Finished is locked: its preflight steps take no tick, and it is not
+    // finished twice. A launch step is for the launch, and still ticks.
+    let props = b.step_id(PROPS);
+    let locked = b.call(
+        "checklist/tick",
+        json!({ "vehicleId": "v", "stepId": props, "ticked": false }),
+    );
+    assert_eq!(
+        locked["error"]["message"],
+        "Alpha's preflight is finished, so “Propellers tight” stays as it is. Reopen it or start a new preflight to change it",
+        "{locked}"
+    );
+    assert_eq!(locked["error"]["data"]["kind"], "invalid-value");
+    let again = b.call("checklist/finish", json!({ "vehicleId": "v" }));
+    assert_eq!(
+        again["error"]["message"],
+        "Alpha's preflight is finished already. Reopen it or start a new preflight to finish again",
+        "{again}"
+    );
+    assert!(b.tick(AREA, true)["checklist"]["steps"][2]["tick"].is_object());
+    assert_eq!(runs(&mut b).len(), 1);
+    // Armed under it: the record says whose preflight it flew on.
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    b.seen(true);
+    b.seen(false);
+    let records = b.armed_records();
+    let HistoryEvent::Armed { text, .. } = records.last().unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        text,
+        "Armed with its checklist: 2 of 2 steps passed. Preflight finished by operator-ui"
+    );
+
+    // A restart of the vehicle is noted on the run and ends nothing. A
+    // restart of the daemon keeps it.
+    b.time.advance(S);
+    let restarted_at = b.time.now();
+    b.engine.vehicle_booted("v", 99 * S, true);
+    b.seen(false);
+    b.restart_daemon();
+    let kept = b.checks()["checklist"]["run"].clone();
+    assert_eq!(kept["id"], id.as_str());
+    assert_eq!(kept["finished"]["atUs"], finished_at);
+    assert_eq!(kept["restartedAtUs"], restarted_at, "{kept}");
+    assert!(b.step("v", PROPS)["tick"].is_object());
+
+    // New preflight: every tick is cleared and a new run starts. The
+    // finished one is in the history already, once.
+    b.time.advance(S);
+    let fresh = b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    let second = fresh["checklist"]["run"].clone();
+    assert_ne!(second["id"], id.as_str());
+    assert_eq!(second["started"]["atUs"], b.time.now());
+    assert!(second["finished"].is_null() && second["restartedAtUs"].is_null());
+    assert!(
+        fresh["checklist"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["tick"].is_null()),
+        "{fresh}"
+    );
+    assert_eq!(runs(&mut b).len(), 1);
+    // Left unfinished with a tick in it, it is kept as it stood. With
+    // none, there is nothing to keep.
+    b.tick(PROPS, true);
+    b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    let listed = runs(&mut b);
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0]["id"], second["id"]);
+    assert!(listed[0]["finished"].is_null());
+    assert!(listed[0]["steps"][0]["tick"].is_object());
+    assert_eq!(listed[1]["id"], id.as_str());
+    let history = b.history();
+    let HistoryEvent::PreflightRun { text, .. } = history.last().unwrap() else {
+        panic!("{:?}", history.last())
+    };
+    assert!(text.starts_with("Preflight left unfinished: "), "{text}");
+    b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    assert_eq!(runs(&mut b).len(), 2);
+    let one = b.ok("checklist/runs", json!({ "vehicleId": "v", "limit": 1 }));
+    assert_eq!(one["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(one["runs"][0]["id"], second["id"]);
+}
+
+#[test]
+fn a_finished_preflight_keeps_its_list_until_a_person_reopens_it() {
+    const LOCKED: &str = "Alpha's preflight is finished, so its list stays as it is. Reopen it or start a new preflight to change the list";
+    const PAYLOAD: &str = "Payload latched";
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [
+            { "kind": "manual", "title": PROPS, "group": "Airframe" },
+            { "kind": "manual", "title": "Battery strapped in", "group": "Airframe" }
+        ] }),
+    );
+    // Nothing is finished yet, so there is nothing to reopen.
+    let early = b.call("checklist/reopen", json!({ "vehicleId": "v" }));
+    assert_eq!(
+        early["error"]["message"],
+        "Alpha's preflight is not finished, so there is nothing to reopen",
+        "{early}"
+    );
+    b.time.advance(S);
+    let started_at = b.time.now();
+    b.tick(PROPS, true);
+    b.time.advance(60 * S);
+    let first_at = b.time.now();
+    let done = b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    let id = done["checklist"]["run"]["id"].as_str().unwrap().to_owned();
+    let listed = done["checklist"]["steps"].clone();
+
+    // Finished, the list itself stays as it is (K19): no step is added,
+    // changed, removed, moved, copied in or put under another group.
+    let props = b.step_id(PROPS);
+    let strapped = b.step_id("Battery strapped in");
+    for (method, params) in [
+        (
+            "checklist/update",
+            json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": PAYLOAD }] }),
+        ),
+        (
+            "checklist/update",
+            json!({ "vehicleId": "v", "change": [{ "id": props, "title": "Propellers on" }] }),
+        ),
+        (
+            "checklist/update",
+            json!({ "vehicleId": "v", "remove": [props] }),
+        ),
+        (
+            "checklist/update",
+            json!({ "vehicleId": "v", "order": [strapped, props] }),
+        ),
+        (
+            "checklist/copy",
+            json!({ "vehicleId": "v", "markdown": "- [ ] Payload latched" }),
+        ),
+        (
+            "preflight/configure",
+            json!({ "vehicleId": "v", "renameGroup": { "from": "Airframe", "to": "Frame" } }),
+        ),
+    ] {
+        let refused = b.call(method, params);
+        assert_eq!(refused["error"]["message"], LOCKED, "{method}: {refused}");
+        assert_eq!(refused["error"]["data"]["kind"], "invalid-value");
+    }
+    assert_eq!(b.checks()["checklist"]["steps"], listed);
+    // What UXDuck's own checks do is not the list: it can still be set.
+    b.ok(
+        "preflight/configure",
+        json!({ "vehicleId": "v", "check": "preflight-finished", "on": true }),
+    );
+    assert!(
+        b.checks()["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["check"] == "preflight-finished" && s["on"] == true)
+    );
+
+    // Only a person reopens it. Reopened, it is under way again with its
+    // ticks, and says who finished it and who reopened it, and when.
+    let mut agent = connect(&mut b.engine, "agent");
+    let refused = call(
+        &mut b.engine,
+        &mut agent,
+        "checklist/reopen",
+        json!({ "vehicleId": "v" }),
+    );
+    assert_eq!(
+        refused["error"]["data"]["kind"], "capability-denied",
+        "{refused}"
+    );
+    b.time.advance(30 * S);
+    let reopened_at = b.time.now();
+    let open = b.ok("checklist/reopen", json!({ "vehicleId": "v" }));
+    let run = &open["checklist"]["run"];
+    assert_eq!(run["id"], id.as_str());
+    assert_eq!(run["started"]["atUs"], started_at);
+    assert!(run["finished"].is_null(), "{run}");
+    assert_eq!(run["reopenings"][0]["finished"]["atUs"], first_at, "{run}");
+    assert_eq!(run["reopenings"][0]["reopened"]["atUs"], reopened_at);
+    assert_eq!(
+        run["reopenings"][0]["reopened"]["by"]["clientName"],
+        "operator-ui"
+    );
+    assert!(b.step("v", PROPS)["tick"].is_object(), "its ticks stay");
+    let check = b.checks()["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "uxduck:preflight-finished")
+        .cloned()
+        .unwrap();
+    assert_eq!(check["status"], "to-do", "{check}");
+    assert_eq!(runs(&mut b).len(), 1, "reopening writes nothing");
+
+    // It takes ticks and edits again, and is finished again. Both
+    // finishes are kept, and the first is as it was written.
+    b.tick(PROPS, false);
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": PAYLOAD }],
+                "change": [{ "id": props, "title": "Propellers tight and undamaged" }] }),
+    );
+    b.tick(PAYLOAD, true);
+    b.time.advance(30 * S);
+    let second_at = b.time.now();
+    let again = b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    let run = &again["checklist"]["run"];
+    assert_eq!(run["finished"]["atUs"], second_at, "{run}");
+    assert_eq!(run["reopenings"].as_array().unwrap().len(), 1);
+    let kept = runs(&mut b);
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!((&kept[0]["id"], &kept[1]["id"]), (&json!(id), &json!(id)));
+    assert_eq!(kept[0]["finished"]["atUs"], second_at);
+    assert_eq!(kept[0]["reopenings"][0]["reopened"]["atUs"], reopened_at);
+    let titles = |run: &Value| -> Vec<String> {
+        run["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["title"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        titles(&kept[0]),
+        [
+            "Propellers tight and undamaged",
+            "Battery strapped in",
+            PAYLOAD
+        ]
+    );
+    assert!(kept[0]["steps"][0]["tick"].is_null());
+    assert_eq!(kept[1]["finished"]["atUs"], first_at);
+    assert!(kept[1]["reopenings"].is_null(), "{}", kept[1]);
+    assert_eq!(titles(&kept[1]), [PROPS, "Battery strapped in"]);
+    assert_eq!(kept[1]["steps"][0]["tick"]["atUs"], started_at);
+    let history = b.history();
+    let said: Vec<&str> = history
+        .iter()
+        .filter_map(|e| match e {
+            HistoryEvent::PreflightRun { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said[0].starts_with("Preflight finished: 1 of 2 steps passed"));
+    assert!(
+        said[1].starts_with("Preflight finished again: 1 of 3 steps passed"),
+        "{said:?}"
+    );
+
+    // Reopened and left for a new preflight, it is kept as it stood,
+    // ticked or not. A daemon restart keeps the reopenings.
+    b.time.advance(S);
+    b.ok("checklist/reopen", json!({ "vehicleId": "v" }));
+    b.tick(PAYLOAD, false);
+    b.restart_daemon();
+    let run = b.checks()["checklist"]["run"].clone();
+    assert_eq!(run["reopenings"].as_array().unwrap().len(), 2, "{run}");
+    b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    let kept = runs(&mut b);
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert!(kept[0]["finished"].is_null());
+    assert_eq!(kept[0]["reopenings"].as_array().unwrap().len(), 2);
+    let history = b.history();
+    let HistoryEvent::PreflightRun { text, .. } = history.last().unwrap() else {
+        panic!("{:?}", history.last())
+    };
+    assert!(
+        text.starts_with("Preflight reopened and left unfinished"),
+        "{text}"
+    );
+    assert!(b.checks()["checklist"]["run"]["reopenings"].is_null());
+}
+
+#[test]
+fn ticks_stored_before_runs_are_the_first_preflight() {
+    let mut b = bench();
+    b.demo_steps();
+    b.time.advance(S);
+    let ticked_at = b.time.now();
+    b.tick(PROPS, true);
+    // As an earlier build stored it: ticks, and no run.
+    let mut state = b.engine.state().clone();
+    state.checklists.get_mut("v").unwrap().run = None;
+    b.engine = engine_with(state, &b.wire, &b.journal, &b.time);
+    b.ui = connect(&mut b.engine, "operator-ui");
+    b.seen(false);
+    assert!(b.checks()["checklist"]["run"].is_null());
+    assert!(b.step("v", PROPS)["tick"].is_object(), "the tick is kept");
+
+    // Finished, it began with its earliest tick.
+    b.time.advance(60 * S);
+    let done = b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    let run = &done["checklist"]["run"];
+    assert_eq!(run["started"]["atUs"], ticked_at, "{run}");
+    assert_eq!(run["started"]["by"]["clientName"], "operator-ui");
+    assert_eq!(run["finished"]["atUs"], b.time.now());
+    assert_eq!(runs(&mut b).len(), 1);
+}
+
+#[test]
+fn the_launch_can_wait_for_a_finished_preflight_and_arming_never_does() {
+    const FINISHED: &str = "uxduck:preflight-finished";
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": PROPS }] }),
+    );
+    let row = |b: &mut Bench| {
+        b.checks()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == FINISHED)
+            .cloned()
+    };
+    // Off until a person turns it on (K27): no row, nothing waits.
+    assert!(row(&mut b).is_none());
+    assert!(gating(&b.checks()).is_empty());
+
+    b.ok(
+        "preflight/configure",
+        json!({ "vehicleId": "v", "check": "preflight-finished", "on": true, "severity": "block" }),
+    );
+    let check = row(&mut b).unwrap();
+    assert_eq!(check["title"], "Preflight finished");
+    assert_eq!(check["group"], "Preflight");
+    assert_eq!(check["when"], "launch");
+    assert_eq!(check["status"], "to-do");
+    assert_eq!(
+        check["detail"],
+        "No preflight is finished for Alpha. Finish one in Preflight."
+    );
+    assert_eq!(gating(&b.checks()), ["Preflight finished"]);
+    // Arm goes (K21). The launch waits, and says for what.
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    let refused = b.launch(json!({}));
+    assert_eq!(refused["result"]["status"], "not-sent", "{refused}");
+    assert_eq!(refused["result"]["reason"], "preflight");
+    assert_eq!(refused["result"]["preflight"][0]["id"], FINISHED);
+
+    // Under way is not finished.
+    b.tick(PROPS, true);
+    assert_eq!(
+        row(&mut b).unwrap()["detail"],
+        "Alpha's preflight is under way. Finish it in Preflight."
+    );
+    assert_eq!(b.launch(json!({}))["result"]["status"], "not-sent");
+    b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    let check = row(&mut b).unwrap();
+    assert_eq!(check["status"], "pass", "{check}");
+    assert_eq!(check["detail"], "Finished by operator-ui.");
+    assert!(gating(&b.checks()).is_empty());
+    assert_eq!(b.launch(json!({}))["result"]["status"], "accepted");
+    b.seen(true);
+    b.time.advance(60 * S);
+    b.seen(false);
+
+    // It never expires: a flight and a restart of the vehicle leave it
+    // passing, and the restart is said.
+    b.time.advance(S);
+    b.engine.vehicle_booted("v", 99 * S, true);
+    b.seen(false);
+    let check = row(&mut b).unwrap();
+    assert_eq!(check["status"], "pass", "{check}");
+    assert_eq!(
+        check["detail"],
+        "Finished by operator-ui. Alpha has restarted since."
+    );
+
+    // A new preflight is to finish again, and the operator can still
+    // launch past it.
+    b.ok("checklist/reset", json!({ "vehicleId": "v" }));
+    let check = row(&mut b).unwrap();
+    assert_eq!(check["status"], "to-do", "{check}");
+    assert_eq!(b.launch(json!({}))["result"]["status"], "not-sent");
+    let past = b.launch(json!({ "overridePreflight": [FINISHED] }));
+    assert_eq!(past["result"]["status"], "accepted", "{past}");
 }
 
 fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State {
