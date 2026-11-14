@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in UXDuck Core does not work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run uxduck daemon
+        2. …
+  - type: input
+    id: version
+    attributes:
+      label: UXDuck version
+      description: The output of `uxduck --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15 on Apple silicon, Ubuntu 24.04 x86_64, Raspberry Pi OS 64-bit…
+    validations:
+      required: true
+  - type: textarea
+    id: vehicle
+    attributes:
+      label: Vehicle and connection
+      description: The autopilot and its firmware version, and how it connects (UDP, serial or a simulator), if it matters.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output from the daemon or the command, with anything private removed.
+      render: text

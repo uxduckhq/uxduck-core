@@ -1,12 +1,32 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "0b551c7b29c430894b7a05106f7e211a16336003",
+  "sourceCommit": "689f58b710c84566c80771b71bbc33c674c5b349",
   "licenseReady": true,
   "files": [
     {
       "path": ".gitattributes",
       "sha256": "4e26122efcafe93256bd570ad631a08b00fb866cdaf8d80361663acbee0ee60a",
+      "executable": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "sha256": "465103cb304c47ceef39c818830853b18a1884b16752dec2f97f7b5da47d3a4c",
+      "executable": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "sha256": "15fbd23a6333ea86f852477f1559aa1cac58e9dc09078303ddc7534b560cebf4",
+      "executable": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/idea.yml",
+      "sha256": "39ed5a3387bbdce9c0ceb2ba18434a375a766671f4718b4816bc8bbc379ccbd4",
+      "executable": false
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "sha256": "6dfe9d3f495ce66d9bfde6dd7f057169bf923384917a7ac25f803a69e1f13ecc",
       "executable": false
     },
     {
@@ -17,6 +37,16 @@
     {
       "path": ".gitignore",
       "sha256": "f2f012a25efbdd4195b1274adf1ed3790967870c6a1b5309a7353a7662e5f9bc",
+      "executable": false
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "sha256": "6c3b0f8048ea5c7d4ff2311e8eebe9666ad8d82b9fcd79c505f3648de76c590c",
+      "executable": false
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "380525ba4df402fb6b0ef06def8505c7593164edc9f0b477094352c8691d7edf",
       "executable": false
     },
     {
@@ -41,7 +71,12 @@
     },
     {
       "path": "README.md",
-      "sha256": "a1caff411c877aa9e772a82521c57de5cc4d250162479d6497a00fdc1fce41b9",
+      "sha256": "72fcfe135fb751f2f3f18dd201240734581adcdd600aaa0a16f9ba0e6f7ed8a2",
+      "executable": false
+    },
+    {
+      "path": "SECURITY.md",
+      "sha256": "8f8c23ed9c27b3bd77bbef6a6c2cf8b80be3b7e00a2d2b158056edd4c499ef4e",
       "executable": false
     },
     {

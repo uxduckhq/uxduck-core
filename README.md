@@ -74,7 +74,8 @@ commands.
 Bug reports, ideas, documentation improvements and pull requests are welcome.
 [Open an issue](https://github.com/uxduckhq/uxduck-core/issues) to share what you
 are building or discuss a change. For bugs, include your platform, the UXDuck
-version and steps to reproduce the problem.
+version and steps to reproduce the problem. [CONTRIBUTING.md](CONTRIBUTING.md)
+explains how a pull request lands here, credited to you.
 
 ## License
 
