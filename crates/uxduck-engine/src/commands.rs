@@ -1112,6 +1112,9 @@ fn mode_list(engine: &Engine, vehicle_id: Option<&str>) -> ModeListResult {
     }
 }
 
+/// Why a take-off was refused in the air, in place of the vehicle's bare answer.
+const ALREADY_FLYING: &str = "It's already flying. Use Land or Return to launch.";
+
 /// What a command's failure notice is bound to: the vehicle and the
 /// command, any mode change counting as one, so the next attempt's outcome
 /// replaces or clears it.
@@ -1147,12 +1150,16 @@ impl Engine {
     /// ArduPilot refuses a take-off with a bare "Failed" unless the vehicle
     /// is armed in GUIDED: say what it needs instead. Disarmed, it was
     /// switched and armed first (`take_off_steps`), unless it was not
-    /// heard. PX4 takes off from any mode.
+    /// heard. PX4 takes off from any mode. Already in the air, any
+    /// autopilot's refusal says so (FB-220).
     fn take_off_refusal(&self, receipt: &Receipt) -> Option<String> {
         if !receipt.command.is_take_off() {
             return None;
         }
         let vehicle = self.vehicle(&receipt.vehicle_id)?;
+        if crate::flight_time::flies(&vehicle.vehicle_type) && self.launched(vehicle) {
+            return Some(ALREADY_FLYING.into());
+        }
         let family = Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type);
         if !matches!(family, Some(Family::Copter | Family::Plane)) {
             return None;
