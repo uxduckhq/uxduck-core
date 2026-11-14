@@ -35,14 +35,21 @@ pub fn heartbeat_in(bytes: &[u8]) -> Option<Heard> {
                 autopilot,
                 base_mode,
                 ..
-            } if autopilot != "Invalid" && mav_type != "Gcs" => Some(Heard {
-                system_id: decoded.system_id,
-                component_id: decoded.component_id,
-                vehicle_type: mav_type,
-                autopilot,
-                armed: base_mode & 0x80 != 0,
-                uid: None,
-            }),
+            } if crate::autopilot::flight_controller(
+                &mav_type,
+                &autopilot,
+                decoded.component_id,
+            ) =>
+            {
+                Some(Heard {
+                    system_id: decoded.system_id,
+                    component_id: decoded.component_id,
+                    vehicle_type: mav_type,
+                    autopilot,
+                    armed: base_mode & 0x80 != 0,
+                    uid: None,
+                })
+            }
             _ => None,
         }
     })

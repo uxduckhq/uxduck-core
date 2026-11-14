@@ -41,7 +41,11 @@ pub fn without_ground_stations(records: Vec<(u64, &[u8])>) -> Vec<(u64, &[u8])> 
         {
             if mav_type == "Gcs" {
                 stations.insert(decoded.system_id);
-            } else if autopilot != "Invalid" {
+            } else if crate::autopilot::flight_controller(
+                &mav_type,
+                &autopilot,
+                decoded.component_id,
+            ) {
                 autopilots.insert((decoded.system_id, decoded.component_id));
             }
         }

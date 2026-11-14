@@ -399,7 +399,9 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
                     v.ambiguous = true;
                     v.invalidate(at, "The recorded autopilot identity is ambiguous.");
                 }
-            } else if autopilot != "Invalid" && h.component_id != crate::GCS_COMPONENT_ID {
+            } else if crate::autopilot::flight_controller(mav_type, autopilot, h.component_id)
+                && h.component_id != crate::GCS_COMPONENT_ID
+            {
                 let v = vehicles.entry(h.system_id).or_insert_with(|| Vehicle {
                     component: h.component_id,
                     ardupilot: autopilot.to_lowercase().contains("ardupilot"),

@@ -262,7 +262,7 @@ impl Inspector {
         }
         if direction == InspectDirection::Received
             && header.message_id == 0
-            && vehicle_heartbeat(payload)
+            && vehicle_heartbeat(header.component_id, payload)
         {
             vehicle.heartbeat_us = Some(vehicle.heartbeat_us.unwrap_or(0).max(at_us));
         }
@@ -345,8 +345,12 @@ impl Inspector {
     }
 }
 
-/// Match the session's vehicle classification, rather than counting every HEARTBEAT.
-fn vehicle_heartbeat(payload: &[u8]) -> bool {
+/// The session's flight-controller classification (UXD-222), rather than
+/// every HEARTBEAT: a gimbal's or a camera's says nothing about whether the
+/// vehicle is there. Unlike the session, the inspector does not know which
+/// component is the vehicle's autopilot, so another flight controller at
+/// the same address also refreshes the age.
+fn vehicle_heartbeat(component_id: u8, payload: &[u8]) -> bool {
     // HEARTBEAT has nine base bytes, ending in its nonzero MAVLink version.
     // The inspector's field decoder pads truncated payloads, which cannot prove liveness.
     if payload.len() < 9 {
@@ -355,16 +359,18 @@ fn vehicle_heartbeat(payload: &[u8]) -> bool {
     let Some(beat) = uxduck_mavlink::dialect::decode(0, payload) else {
         return false;
     };
-    // MAV_AUTOPILOT_INVALID (8) and MAV_TYPE_GCS (6) never establish vehicle presence.
-    beat.fields
-        .get("autopilot")
-        .and_then(Value::as_u64)
-        .is_some_and(|v| v != 8)
-        && beat
-            .fields
-            .get("type")
+    let field = |name: &str| {
+        beat.fields
+            .get(name)
             .and_then(Value::as_u64)
-            .is_some_and(|v| v != 6)
+            .and_then(|v| u8::try_from(v).ok())
+    };
+    match (field("type"), field("autopilot")) {
+        (Some(mav_type), Some(autopilot)) => {
+            uxduck_mavlink::autopilot::flight_controller_raw(mav_type, autopilot, component_id)
+        }
+        _ => false,
+    }
 }
 
 impl Inspector {
@@ -810,6 +816,40 @@ mod tests {
         }
         table.record("v", InspectDirection::Received, header(0), &beat, 6 * S);
         assert_eq!(table.heartbeat_us(&ids("v")), Some(6 * S));
+    }
+
+    /// UXD-222: a gimbal or ADS-B receiver that says it is a generic
+    /// autopilot, or a generic type away from the autopilot's component,
+    /// is not the vehicle's heartbeat.
+    #[test]
+    fn a_peripherals_heartbeat_does_not_refresh_vehicle_age() {
+        let mut table = Inspector::default();
+        let beat = [0, 0, 0, 0, 2, 3, 0, 3, 3];
+        table.record("v", InspectDirection::Received, header(0), &beat, 2 * S);
+        let gimbal = Header {
+            component_id: 154,
+            ..header(0)
+        };
+        for (at, from, payload) in [
+            (3 * S, header(0), vec![0, 0, 0, 0, 26, 0, 0, 3, 3]), // gimbal
+            (4 * S, header(0), vec![0, 0, 0, 0, 27, 0, 0, 3, 3]), // ADS-B
+            (5 * S, gimbal, vec![0, 0, 0, 0, 0, 0, 0, 3, 3]),     // generic peripheral
+        ] {
+            table.record("v", InspectDirection::Received, from, &payload, at);
+            assert_eq!(table.heartbeat_us(&ids("v")), Some(2 * S));
+        }
+        table.record(
+            "v",
+            InspectDirection::Received,
+            header(0),
+            &[0, 0, 0, 0, 0, 0, 0, 3, 3],
+            6 * S,
+        );
+        assert_eq!(
+            table.heartbeat_us(&ids("v")),
+            Some(6 * S),
+            "a generic autopilot at component 1"
+        );
     }
 
     #[test]

@@ -263,6 +263,11 @@ pub enum Effect {
         /// Seen restarting in this session, rather than first heard.
         restarted: bool,
     },
+    /// MAVLink's autopilot component took the vehicle over from the
+    /// component it was found at (UXD-222). What was read before came from
+    /// that component, so it is read again once the autopilot's boot is
+    /// announced, as for a vehicle first heard.
+    AutopilotChanged { vehicle_id: String },
     /// The vehicle's mission, fence or rally points changed on board, not
     /// by an upload of this session (S199): another ground station, a
     /// script. Told by `MISSION_CURRENT`'s mission count and plan ids.
@@ -1115,6 +1120,18 @@ impl Session {
                 // or mission traffic from a different on-board component.
                 continue;
             }
+            if autopilots_own(&decoded.message)
+                && self
+                    .vehicles
+                    .get(key)
+                    .is_some_and(|vehicle| vehicle.autopilot_component != decoded.component_id)
+            {
+                // The vehicle's state comes from its autopilot alone
+                // (UXD-222). Another component's copy, such as a gimbal's
+                // ATTITUDE or an onboard computer's SYS_STATUS, stays in
+                // the MAVLink inspector, which reads every frame.
+                continue;
+            }
             if let (Some(vehicle), Some(header)) =
                 (self.vehicles.get_mut(key), crate::framing::header(frame))
                 && let Some(stream) = vehicle.streams.get_mut(&header.message_id)
@@ -1588,8 +1605,15 @@ impl Session {
         Some(Effect::Vehicle(Box::new(vehicle.observation.clone())))
     }
 
-    /// A heartbeat: a vehicle's, or something else's. Ground stations,
-    /// including ourselves looped back, are not vehicles.
+    /// A heartbeat: a vehicle's flight controller's, or something else's
+    /// (UXD-222). Ground stations, including ourselves looped back, and the
+    /// vehicle's other components are not vehicles. Only the vehicle's
+    /// autopilot component says what the vehicle is: another flight
+    /// controller's heartbeat at its address joins it as a component,
+    /// except MAVLink's autopilot component (1), which takes over from one
+    /// heard before it, such as an onboard computer that wrongly reports an
+    /// autopilot. A vehicle never heard at component 1 keeps the one it was
+    /// found at.
     fn any_heartbeat(
         &mut self,
         key: &(String, String, u8),
@@ -1598,11 +1622,146 @@ impl Session {
         now_us: u64,
         processed_us: u64,
     ) -> Vec<Effect> {
-        if beat.autopilot == "Invalid" || beat.mav_type == "Gcs" {
-            self.not_a_vehicle(key, component_id, &beat.mav_type, now_us)
-        } else {
-            self.heartbeat(key, component_id, beat, now_us, processed_us)
+        // An ADS-B receiver's own heartbeat, on board or another system's,
+        // is never a vehicle or one of its components (Ben, 2026-11-14).
+        if beat.mav_type == "Adsb" {
+            return Vec::new();
         }
+        if !crate::autopilot::flight_controller(&beat.mav_type, &beat.autopilot, component_id) {
+            return self.not_a_vehicle(key, component_id, &beat.mav_type, now_us);
+        }
+        let mut effects = Vec::new();
+        let took_over = match self.vehicles.get(key).map(|v| v.autopilot_component) {
+            None => false,
+            Some(autopilot) if autopilot == component_id => false,
+            Some(_) if component_id != crate::autopilot::AUTOPILOT_COMPONENT_ID => {
+                return self.companion(key, component_id).into_iter().collect();
+            }
+            Some(_) => {
+                effects.extend(self.take_over(key, component_id, now_us));
+                true
+            }
+        };
+        effects.extend(self.heartbeat(key, component_id, beat, now_us, processed_us));
+        if took_over {
+            // Asked as a new vehicle is, for what its own autopilot streams.
+            let gcs = self.config.gcs_system_id;
+            let sequence = self.next_sequence();
+            if let Some(vehicle) = self.vehicles.get_mut(key) {
+                vehicle.streams = stream_rates(&vehicle.observation.autopilot)
+                    .map(|(id, _)| (id, Stream::default()))
+                    .collect();
+                effects.extend(first_asks(vehicle, gcs, sequence));
+            }
+        }
+        effects
+    }
+
+    /// MAVLink's autopilot component (1) takes the vehicle over from the
+    /// component it was found at (UXD-222). Nothing that component was
+    /// asked or said is the autopilot's: transfers and parameter writes in
+    /// progress end, and its boot, events, modes and calibration are
+    /// learned again from component 1, as after a restart.
+    fn take_over(
+        &mut self,
+        key: &(String, String, u8),
+        component_id: u8,
+        now_us: u64,
+    ) -> Vec<Effect> {
+        const CHANGED: &str = "the vehicle's autopilot changed";
+        let changed = || Failure::Rejected(CHANGED.into());
+        let mut effects = Vec::new();
+        if self
+            .vehicles
+            .get(key)
+            .is_some_and(|v| v.mission_download.is_some())
+        {
+            effects.extend(self.download_step(key, Some(Step::Failed(changed()))));
+        }
+        if self
+            .vehicles
+            .get(key)
+            .is_some_and(|v| v.mission_upload.is_some())
+        {
+            effects.extend(self.upload_step(key, Some(Step::Failed(changed()))));
+        }
+        let Some(vehicle) = self.vehicles.get_mut(key) else {
+            return effects;
+        };
+        let vehicle_id = vehicle.observation.id.clone();
+        let mut parameters_ended = vehicle.params.take().is_some();
+        if parameters_ended {
+            effects.push(Effect::Parameters {
+                vehicle_id: vehicle_id.clone(),
+                result: Err(changed()),
+                defaults: BTreeMap::new(),
+            });
+        }
+        for write in std::mem::take(&mut vehicle.writes) {
+            effects.push(Effect::ParamWritten {
+                order_id: write.protocol.order_id.clone(),
+                result: Err(changed()),
+                attempts: write.protocol.attempts(),
+            });
+        }
+        let mut unwritten: Vec<String> = std::mem::take(&mut vehicle.batch)
+            .into_iter()
+            .map(|(order_id, _)| order_id)
+            .collect();
+        for event in vehicle.ftp.interrupted(CHANGED, true) {
+            match event {
+                files::Event::Parameters(_) if parameters_ended => {}
+                files::Event::Parameters(_) => {
+                    parameters_ended = true;
+                    effects.push(Effect::Parameters {
+                        vehicle_id: vehicle_id.clone(),
+                        result: Err(changed()),
+                        defaults: BTreeMap::new(),
+                    });
+                }
+                files::Event::ParamsWritten { writes, .. } => {
+                    unwritten.extend(writes.into_iter().map(|(order_id, _)| order_id));
+                }
+                event if crate::px4_metadata::ours(&event) => {}
+                event => effects.push(Effect::File {
+                    vehicle_id: vehicle_id.clone(),
+                    event,
+                }),
+            }
+        }
+        effects.extend(unwritten.into_iter().map(|order_id| Effect::ParamWritten {
+            order_id,
+            result: Err(changed()),
+            attempts: 0,
+        }));
+        vehicle.autopilot_component = component_id;
+        if vehicle.observation.uid.is_none() {
+            vehicle.version_requests = 0;
+        }
+        vehicle.params_by_file = false;
+        vehicle.boot_instant_us = None;
+        vehicle.last_time_boot_ms = 0;
+        vehicle.online_since_us = now_us;
+        vehicle.position = None;
+        vehicle.heading = None;
+        vehicle.terrain = None;
+        vehicle.home_amsl_m = None;
+        vehicle.rc_input = crate::rc_input::RcInput::default();
+        vehicle.rc_overridden = [false; 18];
+        vehicle.manual_sent = None;
+        vehicle.plan_ids = None;
+        vehicle.after_upload = AfterUpload::Watching;
+        vehicle.px4_events = crate::px4_events::Events::default();
+        vehicle.px4_metadata = crate::px4_metadata::Metadata::default();
+        vehicle.arming = None;
+        vehicle.arming_said = None;
+        vehicle.modes.clear();
+        vehicle.modes_heard.clear();
+        vehicle.modes_seq = None;
+        vehicle.tuning = crate::tuning::Feed::default();
+        vehicle.boot_announced = false;
+        effects.push(Effect::AutopilotChanged { vehicle_id });
+        effects
     }
 
     /// An `AUTOPILOT_VERSION`: the vehicle's UID and firmware.
@@ -4157,6 +4316,52 @@ fn first_asks(vehicle: &Vehicle, gcs: u8, sequence: u8) -> Vec<Effect> {
         .collect()
 }
 
+/// Messages that say what the vehicle itself is doing, read only from its
+/// autopilot (UXD-222): its identity, modes, parameters and files, and the
+/// state the vehicle's tiles, reboot detection and stream checks use. Other
+/// components' messages, such as a gimbal's attitude, a camera's streams,
+/// a battery's status, a rangefinder's distance or a radio's status, are
+/// still read from whichever component sends them.
+const fn autopilots_own(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::AutopilotVersion { .. }
+            | Message::AvailableModes { .. }
+            | Message::AvailableModesMonitor { .. }
+            | Message::Event { .. }
+            | Message::ParamValue { .. }
+            | Message::Ftp { .. }
+            | Message::SysStatus { .. }
+            | Message::RcChannels { .. }
+            | Message::ExtendedSysState { .. }
+            | Message::GlobalPositionInt { .. }
+            | Message::GpsRawInt { .. }
+            | Message::GpsGlobalOrigin { .. }
+            | Message::HomePosition { .. }
+            | Message::Attitude { .. }
+            | Message::AttitudeQuaternion { .. }
+            | Message::AttitudeTarget { .. }
+            | Message::PidTuning { .. }
+            | Message::VfrHud { .. }
+            | Message::ServoOutputs { .. }
+            | Message::MissionCurrent { .. }
+            | Message::MissionItemReached { .. }
+            | Message::NavControllerOutput { .. }
+            | Message::PositionTarget { .. }
+            | Message::EkfStatus { .. }
+            | Message::EstimatorStatus { .. }
+            | Message::FenceStatus { .. }
+            | Message::Vibration { .. }
+            | Message::Wind { .. }
+            | Message::AirspeedAutocal { .. }
+            | Message::Rangefinder { .. }
+            | Message::TerrainRequest { .. }
+            | Message::TerrainReport { .. }
+            | Message::MagCalProgress { .. }
+            | Message::MagCalReport { .. }
+    )
+}
+
 /// What a heartbeat says about the vehicle.
 struct Beat {
     mav_type: String,
@@ -4254,6 +4459,7 @@ mod tests {
     use crate::sim::{
         FakeVehicle, gcs_heartbeat_frame, heartbeat_frame, status_text_frame, terrain_request_frame,
     };
+    use std::collections::BTreeSet;
     use uxduck_core::domain::command::Command;
 
     fn vehicles(effects: &[Effect]) -> Vec<&Observation> {
@@ -8491,5 +8697,954 @@ mod tests {
         // Not sent again when it times out.
         let retried = session.tick(9_000_000);
         assert!(sends(&retried).is_empty());
+    }
+
+    /// A heartbeat from `(system, component)` of a type and an autopilot.
+    fn beat_of(
+        (system, component): (u8, u8),
+        type_: mavio::dialects::ardupilotmega::enums::MavType,
+        autopilot: mavio::dialects::ardupilotmega::enums::MavAutopilot,
+        armed: bool,
+        custom_mode: u32,
+    ) -> Vec<u8> {
+        use mavio::dialects::ardupilotmega::enums::{MavModeFlag, MavState};
+        let mut base_mode = MavModeFlag::CUSTOM_MODE_ENABLED;
+        if armed {
+            base_mode |= MavModeFlag::SAFETY_ARMED;
+        }
+        crate::sim::frame(
+            system,
+            component,
+            0,
+            &mavio::dialects::ardupilotmega::messages::Heartbeat {
+                type_,
+                autopilot,
+                base_mode,
+                custom_mode,
+                system_status: MavState::Active,
+                mavlink_version: 3,
+            },
+        )
+    }
+
+    /// An armed copter running ArduPilot, at system 1 in Loiter (5).
+    fn armed_copter(session: &mut Session) -> Observation {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let effects = session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 1),
+                MavType::Quadrotor,
+                MavAutopilot::Ardupilotmega,
+                true,
+                5,
+            ),
+            0,
+        );
+        let copter = vehicles(&effects)[0].clone();
+        assert_eq!(
+            (
+                copter.autopilot.as_str(),
+                copter.vehicle_type.as_str(),
+                copter.armed
+            ),
+            ("Ardupilotmega", "Quadrotor", true)
+        );
+        assert!(copter.mode.is_some());
+        copter
+    }
+
+    fn rssi_pct(session: &mut Session, component: u8, at: u64) -> Option<f64> {
+        use mavio::dialects::ardupilotmega::messages::RcChannels;
+        let frame = crate::sim::frame(
+            1,
+            component,
+            0,
+            &RcChannels {
+                chancount: 1,
+                chan1_raw: 1500,
+                rssi: 127,
+                ..RcChannels::default()
+            },
+        );
+        session.ingest("l1", PEER, &frame, at);
+        session
+            .tick(at)
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Telemetry(telemetry) => Some(telemetry),
+                _ => None,
+            })
+            .flat_map(|telemetry| telemetry.items.iter())
+            .find(|item| item.key == "rc.rssi_pct")
+            .and_then(|item| item.value)
+    }
+
+    /// UXD-222: a gimbal or a camera that says `MAV_AUTOPILOT_GENERIC`
+    /// joins the vehicle as a component and changes nothing else about it:
+    /// not its autopilot, so not its modes or its receiver's RSSI.
+    #[test]
+    fn a_gimbal_or_camera_heartbeat_with_a_generic_autopilot_leaves_the_vehicle_alone() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        let copter = armed_copter(&mut session);
+        let mut joined = Vec::new();
+        for (component, kind) in [
+            (154, MavType::Gimbal),
+            (100, MavType::Camera),
+            (155, MavType::Generic),
+        ] {
+            joined.extend(session.ingest(
+                "l1",
+                PEER,
+                &beat_of((1, component), kind, MavAutopilot::Generic, false, 0),
+                10,
+            ));
+        }
+        let seen = &session.vehicles[&("l1".to_owned(), PEER.to_owned(), 1)];
+        assert_eq!(session.vehicles.len(), 1);
+        assert_eq!(seen.autopilot_component, 1);
+        let now = &seen.observation;
+        assert_eq!(
+            (
+                now.autopilot.as_str(),
+                now.vehicle_type.as_str(),
+                now.armed,
+                &now.mode
+            ),
+            ("Ardupilotmega", "Quadrotor", true, &copter.mode)
+        );
+        assert_eq!(now.component_ids, [1, 100, 154, 155]);
+        assert!(
+            vehicles(&joined)
+                .iter()
+                .all(|v| v.autopilot == "Ardupilotmega" && v.armed)
+        );
+        assert_eq!(
+            rssi_pct(&mut session, 1, 1_000),
+            Some(50.0),
+            "FB-212's percentage stays"
+        );
+    }
+
+    /// UXD-222: an ADS-B receiver's heartbeat is skipped, whether it is on
+    /// the vehicle or another system's, as Ben asked on 2026-11-14.
+    #[test]
+    fn an_adsb_receivers_heartbeat_is_skipped() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        let copter = armed_copter(&mut session);
+        for (system, autopilot) in [
+            (1, MavAutopilot::Generic),
+            (1, MavAutopilot::Ardupilotmega),
+            (77, MavAutopilot::Generic),
+        ] {
+            let effects = session.ingest(
+                "l1",
+                PEER,
+                &beat_of((system, 156), MavType::Adsb, autopilot, false, 0),
+                10,
+            );
+            assert!(effects.is_empty(), "{effects:?}");
+        }
+        assert_eq!(session.vehicles.len(), 1);
+        let now = &session.vehicles[&("l1".to_owned(), PEER.to_owned(), 1)].observation;
+        assert_eq!(now.component_ids, [1]);
+        assert_eq!(
+            (now.autopilot.as_str(), &now.mode),
+            ("Ardupilotmega", &copter.mode)
+        );
+    }
+
+    /// UXD-222: another system's peripheral, heard before or without its
+    /// own autopilot, is not a vehicle. Its autopilot is when it comes.
+    #[test]
+    fn a_stray_heartbeat_from_another_systems_peripheral_makes_no_vehicle() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        armed_copter(&mut session);
+        for (component, kind) in [
+            (154, MavType::Gimbal),
+            (100, MavType::Camera),
+            (155, MavType::Generic),
+            (180, MavType::Osd),
+            (30, MavType::Battery),
+            (220, MavType::Gps),
+        ] {
+            let effects = session.ingest(
+                "l1",
+                PEER,
+                &beat_of((2, component), kind, MavAutopilot::Generic, true, 3),
+                10,
+            );
+            assert!(vehicles(&effects).is_empty(), "{kind:?}: {effects:?}");
+        }
+        assert_eq!(session.vehicles.len(), 1);
+        let effects = session.ingest(
+            "l1",
+            PEER,
+            &beat_of((2, 1), MavType::FixedWing, MavAutopilot::Px4, false, 0),
+            20,
+        );
+        let plane = vehicles(&effects)[0];
+        assert_eq!(
+            (
+                plane.system_id,
+                plane.autopilot.as_str(),
+                plane.vehicle_type.as_str()
+            ),
+            (2, "Px4", "FixedWing")
+        );
+        assert_eq!(
+            session.vehicles[&("l1".to_owned(), PEER.to_owned(), 2)].autopilot_component,
+            1
+        );
+    }
+
+    /// UXD-222: an onboard computer joins the vehicle. One that wrongly
+    /// reports a vehicle's type and an autopilot neither changes the
+    /// vehicle nor keeps it online once its autopilot falls silent.
+    #[test]
+    fn a_companion_computer_heartbeat_joins_but_is_not_the_autopilot() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let config = Config::default();
+        let mut session = Session::new(config);
+        let copter = armed_copter(&mut session);
+        session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 191),
+                MavType::OnboardController,
+                MavAutopilot::Generic,
+                false,
+                0,
+            ),
+            10,
+        );
+        let late = config.stale_after_us + 1_000_000;
+        for at in (0..=late).step_by(500_000) {
+            session.ingest(
+                "l1",
+                PEER,
+                &beat_of(
+                    (1, 192),
+                    MavType::Quadrotor,
+                    MavAutopilot::Px4,
+                    false,
+                    0x0304_0000,
+                ),
+                at,
+            );
+        }
+        let now = &session.vehicles[&("l1".to_owned(), PEER.to_owned(), 1)].observation;
+        assert_eq!(now.component_ids, [1, 191, 192]);
+        assert_eq!(
+            (now.autopilot.as_str(), now.armed, &now.mode),
+            ("Ardupilotmega", true, &copter.mode)
+        );
+        session.tick(late);
+        let now = &session.vehicles[&("l1".to_owned(), PEER.to_owned(), 1)].observation;
+        assert_ne!(
+            now.presence,
+            Presence::Online,
+            "only the autopilot keeps it online"
+        );
+    }
+
+    /// UXD-222: the autopilot's own component may say something new about
+    /// the vehicle, such as another firmware after a reflash, and is heard.
+    #[test]
+    fn an_autopilot_that_changes_at_its_own_component_is_taken() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        armed_copter(&mut session);
+        let effects = session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 1),
+                MavType::Hexarotor,
+                MavAutopilot::Px4,
+                false,
+                0x0304_0000,
+            ),
+            10,
+        );
+        let changed = vehicles(&effects)[0];
+        assert_eq!(
+            (
+                changed.autopilot.as_str(),
+                changed.vehicle_type.as_str(),
+                changed.armed
+            ),
+            ("Px4", "Hexarotor", false)
+        );
+        assert_eq!(changed.component_ids, [1]);
+    }
+
+    /// UXD-222: the rest of the vehicle's state, its identity, power,
+    /// receiver and attitude, is its autopilot's too. Another component's
+    /// copies change none of it.
+    #[test]
+    fn a_peripherals_state_messages_do_not_become_the_vehicles() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        use mavio::dialects::ardupilotmega::messages::SysStatus;
+        let mut session = Session::new(Config::default());
+        armed_copter(&mut session);
+        session.ingest(
+            "l1",
+            PEER,
+            &beat_of((1, 154), MavType::Gimbal, MavAutopilot::Generic, false, 0),
+            10,
+        );
+        let version = crate::sim::autopilot_version_frame(1, 154, 0, 0x5150, 0x0102_0300);
+        assert!(vehicles(&session.ingest("l1", PEER, &version, 20)).is_empty());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        assert_eq!(session.vehicles[&key].observation.uid, None);
+        assert_eq!(session.vehicles[&key].observation.firmware, None);
+        assert_eq!(
+            rssi_pct(&mut session, 154, 30),
+            None,
+            "a gimbal's RC_CHANNELS"
+        );
+        let power = crate::sim::frame(
+            1,
+            154,
+            0,
+            &SysStatus {
+                voltage_battery: 5_000,
+                battery_remaining: 3,
+                ..SysStatus::default()
+            },
+        );
+        session.ingest("l1", PEER, &power, 40);
+        let attitude = crate::sim::frame(
+            1,
+            154,
+            0,
+            &mavio::dialects::ardupilotmega::messages::Attitude {
+                time_boot_ms: 1,
+                yaw: 1.0,
+                ..Default::default()
+            },
+        );
+        session.ingest("l1", PEER, &attitude, 50);
+        let items: Vec<_> = session
+            .tick(60)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Telemetry(telemetry) => Some(telemetry.items),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(
+            items.iter().all(|item| item.component_id != 154),
+            "{items:?}"
+        );
+        assert!(session.vehicles[&key].heading.is_none());
+        let version = crate::sim::autopilot_version_frame(1, 1, 0, 0xABCD, 0x0405_0100);
+        let identified = session.ingest("l1", PEER, &version, 70);
+        assert_eq!(
+            vehicles(&identified)[0].id,
+            vid_from_uid(0xABCD, [0; 18]).unwrap_or_default()
+        );
+        assert_eq!(rssi_pct(&mut session, 1, 80), Some(50.0));
+    }
+
+    /// UXD-222: two vehicles on one link, an ArduPilot copter and a PX4
+    /// plane, each with a gimbal that says it is a generic autopilot, are
+    /// two vehicles with their own autopilots.
+    #[test]
+    fn two_vehicles_with_gimbals_keep_their_own_autopilots() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        for at in [0, 1_000_000] {
+            for frame in [
+                beat_of((1, 154), MavType::Gimbal, MavAutopilot::Generic, false, 0),
+                beat_of(
+                    (1, 1),
+                    MavType::Quadrotor,
+                    MavAutopilot::Ardupilotmega,
+                    false,
+                    5,
+                ),
+                beat_of((2, 154), MavType::Generic, MavAutopilot::Generic, false, 0),
+                beat_of(
+                    (2, 1),
+                    MavType::FixedWing,
+                    MavAutopilot::Px4,
+                    false,
+                    0x0304_0000,
+                ),
+                beat_of((2, 154), MavType::Gimbal, MavAutopilot::Generic, false, 0),
+            ] {
+                session.ingest("l1", PEER, &frame, at);
+            }
+        }
+        let read = |system: u8| {
+            let vehicle = &session.vehicles[&("l1".to_owned(), PEER.to_owned(), system)];
+            (
+                vehicle.autopilot_component,
+                vehicle.observation.autopilot.clone(),
+                vehicle.observation.vehicle_type.clone(),
+                vehicle.observation.component_ids.clone(),
+            )
+        };
+        assert_eq!(session.vehicles.len(), 2);
+        assert_eq!(
+            read(1),
+            (1, "Ardupilotmega".into(), "Quadrotor".into(), vec![1, 154])
+        );
+        assert_eq!(read(2), (1, "Px4".into(), "FixedWing".into(), vec![1, 154]));
+        assert_eq!(
+            session.vehicles[&("l1".to_owned(), PEER.to_owned(), 2)]
+                .observation
+                .mode
+                .as_deref(),
+            Some("Hold")
+        );
+    }
+
+    /// The fake's replies, sent from `component` instead of its own.
+    fn from_component(component: u8, reply: &[u8]) -> Vec<Vec<u8>> {
+        crate::framing::split(reply)
+            .frames
+            .into_iter()
+            .filter_map(|frame| {
+                let header = crate::framing::header(frame)?;
+                let length = usize::from(*frame.get(1)?);
+                let extra = <mavio::dialects::ardupilotmega::Ardupilotmega as mavio::protocol::Dialect>::message_info(header.message_id)
+                    .ok()?
+                    .crc_extra();
+                Some(crate::custom::frame_from(
+                    (header.system_id, component, header.sequence),
+                    header.message_id,
+                    frame.get(10..10 + length)?,
+                    extra,
+                ))
+            })
+            .collect()
+    }
+
+    /// As [`converse`], with the fake's replies sent from `component`, and
+    /// `before` each of them whatever `extra` makes of it.
+    fn converse_from(
+        component: u8,
+        session: &mut Session,
+        fake: &mut FakeVehicle,
+        effects: Vec<Effect>,
+        now_us: u64,
+        extra: &mut dyn FnMut(&[u8]) -> Vec<Vec<u8>>,
+    ) -> Vec<Effect> {
+        let mut pending = effects;
+        let mut rest = Vec::new();
+        for _ in 0..10_000 {
+            if pending.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for effect in pending {
+                match effect {
+                    Effect::Send { bytes, .. } => {
+                        for reply in fake.answer(&bytes) {
+                            for frame in extra(&reply)
+                                .into_iter()
+                                .chain(from_component(component, &reply))
+                            {
+                                next.extend(session.ingest("l1", PEER, &frame, now_us));
+                            }
+                        }
+                    }
+                    other => rest.push(other),
+                }
+            }
+            pending = next;
+        }
+        rest
+    }
+
+    /// A parameter download from a fake without FTP, through `converse_from`:
+    /// FTP goes unanswered three times, then the list.
+    fn download_by_list(
+        component: u8,
+        session: &mut Session,
+        fake: &mut FakeVehicle,
+        vid: &str,
+        start_us: u64,
+        extra: &mut dyn FnMut(&[u8]) -> Vec<Vec<u8>>,
+    ) -> Vec<Effect> {
+        let started = session.download_parameters(vid, start_us);
+        let mut done = converse_from(component, session, fake, started, start_us, extra);
+        let mut now = start_us;
+        for _ in 0..6 {
+            if done.iter().any(|e| matches!(e, Effect::Parameters { .. })) {
+                break;
+            }
+            now += 1_600_000;
+            for frame in from_component(component, &fake.heartbeat()) {
+                session.ingest("l1", PEER, &frame, now);
+            }
+            let tick = session.tick(now);
+            done.extend(converse_from(component, session, fake, tick, now, extra));
+        }
+        done
+    }
+
+    /// What a vehicle was asked: the message ids of its `SET_MESSAGE_INTERVAL`
+    /// commands, whether `RUN_PREARM_CHECKS` was among them, and each
+    /// `COMMAND_LONG`'s target component.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a message id, exact in a float"
+    )]
+    fn asked(effects: &[Effect]) -> (BTreeSet<u32>, bool, Vec<u8>) {
+        let mut streams = BTreeSet::new();
+        let mut prearm = false;
+        let mut targets = Vec::new();
+        for bytes in sends(effects) {
+            let Some(Message::CommandLong {
+                command, param1, ..
+            }) = decode(bytes).map(|d| d.message)
+            else {
+                continue;
+            };
+            // After its seven params, command and target_system.
+            targets.push(bytes.get(10 + 31).copied().unwrap_or(0));
+            if command == 511 {
+                streams.insert(param1 as u32);
+            }
+            prearm |= command == RUN_PREARM_CHECKS;
+        }
+        (streams, prearm, targets)
+    }
+
+    /// UXD-222: an onboard computer that wrongly reports an autopilot and
+    /// is heard before the autopilot does not keep the vehicle. Component
+    /// 1 takes over, and its identity and readings are the vehicle's.
+    #[test]
+    fn the_autopilot_at_component_1_takes_over_from_a_companion_heard_first() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 192),
+                MavType::Quadrotor,
+                MavAutopilot::Px4,
+                false,
+                0x0304_0000,
+            ),
+            0,
+        );
+        assert_eq!(session.vehicles[&key].autopilot_component, 192);
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.armed = true;
+        fake.mode = 5;
+        let took = session.ingest("l1", PEER, &fake.heartbeat(), 10);
+        let vehicle = &session.vehicles[&key];
+        assert_eq!(vehicle.autopilot_component, 1);
+        let now = &vehicle.observation;
+        assert_eq!(
+            (now.autopilot.as_str(), now.armed, now.component_ids.clone()),
+            ("Ardupilotmega", true, vec![1, 192])
+        );
+        let ardupilot: BTreeSet<u32> = stream_rates("Ardupilotmega").map(|(id, _)| id).collect();
+        let (streams, prearm, targets) = asked(&took);
+        assert_eq!(streams, ardupilot, "ArduPilot's own streams");
+        assert!(!prearm, "nothing of PX4's is asked of ArduPilot");
+        assert!(
+            !targets.is_empty() && targets.iter().all(|target| *target == 1),
+            "{targets:?}"
+        );
+        assert_eq!(
+            session.vehicles[&key]
+                .streams
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            ardupilot
+        );
+        assert_eq!(version_requests(&took), 1);
+        converse(&mut session, &mut fake, took, 10);
+        assert_eq!(
+            session.vehicles[&key].observation.id,
+            vid_from_uid(0xABCD, [0; 18]).unwrap_or_default()
+        );
+        assert_eq!(rssi_pct(&mut session, 1, 1_000), Some(50.0));
+        assert_eq!(rssi_pct(&mut session, 192, 2_000), None);
+        let late = session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 192),
+                MavType::Quadrotor,
+                MavAutopilot::Px4,
+                false,
+                0x0304_0000,
+            ),
+            3_000,
+        );
+        assert!(vehicles(&late).is_empty());
+        assert_eq!(session.vehicles[&key].autopilot_component, 1);
+        assert_eq!(
+            session.vehicles[&key].observation.autopilot,
+            "Ardupilotmega"
+        );
+    }
+
+    /// UXD-222: a peripheral's `PARAM_VALUE` with the name of one of the
+    /// autopilot's never enters the autopilot's download, even one saying
+    /// it is the whole list.
+    #[test]
+    fn a_peripherals_param_value_stays_out_of_a_parameter_download() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.ftp = false;
+        let (mut session, vid) = identified(&mut fake);
+        let (name, value, kind) = fake.parameters[0].clone();
+        let mut stray = |_: &[u8]| {
+            vec![crate::sim::param_value_frame(
+                1,
+                154,
+                0,
+                &name,
+                value + 999.0,
+                kind,
+                1,
+                0,
+            )]
+        };
+        let done = download_by_list(1, &mut session, &mut fake, &vid, 10, &mut stray);
+        let Some(Effect::Parameters {
+            result: Ok(all), ..
+        }) = done
+            .iter()
+            .find(|effect| matches!(effect, Effect::Parameters { .. }))
+        else {
+            panic!("{done:?}");
+        };
+        assert_eq!(all.len(), fake.parameters.len());
+        let read = all
+            .iter()
+            .find(|param| param.name == name)
+            .map(|param| param.value);
+        assert_eq!(read, Some(value));
+        assert!(
+            !done
+                .iter()
+                .any(|effect| matches!(effect, Effect::ParamValue { .. })),
+            "{done:?}"
+        );
+    }
+
+    /// UXD-222: a peripheral's FTP refusal, in step with the autopilot's
+    /// answers, does not stop the parameter file.
+    #[test]
+    fn a_peripherals_ftp_reply_stays_out_of_a_parameter_download() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let (mut session, vid) = identified(&mut fake);
+        let started = session.download_parameters(&vid, 10);
+        let mut refusal = |reply: &[u8]| {
+            crate::framing::split(reply)
+                .frames
+                .into_iter()
+                .filter_map(|frame| match decode(frame)?.message {
+                    Message::Ftp { payload, .. } => {
+                        let mut nak = payload;
+                        nak[3] = 129;
+                        nak[4] = 1;
+                        nak[12] = 1;
+                        Some(crate::sim::ftp_frame((1, 154), (255, 190), 0, *nak))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let done = converse_from(1, &mut session, &mut fake, started, 10, &mut refusal);
+        assert!(
+            matches!(done.first(), Some(Effect::Parameters { result: Ok(_), .. })),
+            "{done:?}"
+        );
+        assert_eq!(
+            (fake.files.bursts, fake.files.reads),
+            (1, 0),
+            "by FTP, in one burst"
+        );
+    }
+
+    /// UXD-222: an autopilot that sends from a component other than 1,
+    /// such as PX4 with another `MAV_COMP_ID`, keeps it and downloads its
+    /// parameters from it.
+    #[test]
+    fn a_vehicle_whose_autopilot_is_not_component_1_downloads_its_parameters() {
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.ftp = false;
+        let mut session = Session::new(Config::default());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        let mut first = Vec::new();
+        for frame in from_component(2, &fake.heartbeat()) {
+            first.extend(session.ingest("l1", PEER, &frame, 0));
+        }
+        converse_from(2, &mut session, &mut fake, first, 0, &mut |_| Vec::new());
+        assert_eq!(session.vehicles[&key].autopilot_component, 2);
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        assert_eq!(vid, vid_from_uid(0xABCD, [0; 18]).unwrap_or_default());
+        let done = download_by_list(2, &mut session, &mut fake, &vid, 10, &mut |_| Vec::new());
+        let Some(Effect::Parameters {
+            result: Ok(all), ..
+        }) = done
+            .iter()
+            .find(|effect| matches!(effect, Effect::Parameters { .. }))
+        else {
+            panic!("{done:?}");
+        };
+        assert_eq!(all.len(), fake.parameters.len());
+        assert_eq!(session.vehicles[&key].autopilot_component, 2);
+    }
+
+    /// UXD-222: PX4 at component 1, taking over from a component heard
+    /// first that said it was ArduPilot, is asked for PX4's own streams and
+    /// its arming checks.
+    #[test]
+    fn px4_taking_over_at_component_1_is_asked_for_its_own_streams_and_checks() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut session = Session::new(Config::default());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 192),
+                MavType::Quadrotor,
+                MavAutopilot::Ardupilotmega,
+                false,
+                0,
+            ),
+            0,
+        );
+        let took = session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::px4_heartbeat_frame(1, 0, 0x0304_0000),
+            10,
+        );
+        let px4: BTreeSet<u32> = stream_rates("Px4").map(|(id, _)| id).collect();
+        let (streams, prearm, targets) = asked(&took);
+        assert_eq!(streams, px4);
+        assert!(prearm, "RUN_PREARM_CHECKS: {took:?}");
+        assert!(targets.iter().all(|target| *target == 1), "{targets:?}");
+        let vehicle = &session.vehicles[&key];
+        assert_eq!(
+            (
+                vehicle.autopilot_component,
+                vehicle.observation.autopilot.as_str()
+            ),
+            (1, "Px4")
+        );
+        assert_eq!(
+            vehicle.streams.keys().copied().collect::<BTreeSet<_>>(),
+            px4
+        );
+    }
+
+    /// UXD-222: a parameter download from the component heard first ends
+    /// when component 1 takes over, rather than finishing with the other
+    /// component's values and component 1's mixed. Component 1's own comes
+    /// whole afterwards.
+    #[test]
+    fn a_parameter_download_from_the_component_heard_first_ends_when_component_1_takes_over() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.ftp = false;
+        let mut session = Session::new(Config::default());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        let mut first = Vec::new();
+        for frame in from_component(192, &fake.heartbeat()) {
+            first.extend(session.ingest("l1", PEER, &frame, 0));
+        }
+        converse_from(192, &mut session, &mut fake, first, 0, &mut |_| Vec::new());
+        assert_eq!(session.vehicles[&key].autopilot_component, 192);
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let autopilot = beat_of(
+            (1, 1),
+            MavType::Quadrotor,
+            MavAutopilot::Ardupilotmega,
+            false,
+            0,
+        );
+        let mut values = 0;
+        let mut take_over = |reply: &[u8]| {
+            if matches!(
+                decode(reply).map(|d| d.message),
+                Some(Message::ParamValue { .. })
+            ) {
+                values += 1;
+            }
+            if values == 3 {
+                values += 1;
+                vec![autopilot.clone()]
+            } else {
+                Vec::new()
+            }
+        };
+        let done = download_by_list(192, &mut session, &mut fake, &vid, 10, &mut take_over);
+        let ended: Vec<_> = done
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Parameters { .. }))
+            .collect();
+        assert!(
+            matches!(
+                ended.as_slice(),
+                [Effect::Parameters {
+                    result: Err(Failure::Rejected(_)),
+                    ..
+                }]
+            ),
+            "{ended:?}"
+        );
+        assert_eq!(session.vehicles[&key].autopilot_component, 1);
+        let again = download_by_list(1, &mut session, &mut fake, &vid, 20_000_000, &mut |_| {
+            Vec::new()
+        });
+        let Some(Effect::Parameters {
+            result: Ok(all), ..
+        }) = again
+            .iter()
+            .find(|effect| matches!(effect, Effect::Parameters { .. }))
+        else {
+            panic!("{again:?}");
+        };
+        assert_eq!(all.len(), fake.parameters.len());
+    }
+
+    /// UXD-222: a parameter download by FTP from the component heard first
+    /// ends once, as a failure, when component 1 takes over mid-transfer,
+    /// so the engine is never left waiting for it.
+    #[test]
+    fn a_parameter_download_by_ftp_from_the_component_heard_first_ends_once_when_component_1_takes_over()
+     {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.ftp = true;
+        let mut session = Session::new(Config::default());
+        let key = ("l1".to_owned(), PEER.to_owned(), 1);
+        let mut first = Vec::new();
+        for frame in from_component(192, &fake.heartbeat()) {
+            first.extend(session.ingest("l1", PEER, &frame, 0));
+        }
+        converse_from(192, &mut session, &mut fake, first, 0, &mut |_| Vec::new());
+        assert_eq!(session.vehicles[&key].autopilot_component, 192);
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let autopilot = beat_of(
+            (1, 1),
+            MavType::Quadrotor,
+            MavAutopilot::Ardupilotmega,
+            false,
+            0,
+        );
+        let mut replies = 0;
+        let mut take_over = |reply: &[u8]| {
+            if matches!(decode(reply).map(|d| d.message), Some(Message::Ftp { .. })) {
+                replies += 1;
+            }
+            if replies == 2 {
+                replies += 1;
+                vec![autopilot.clone()]
+            } else {
+                Vec::new()
+            }
+        };
+        let started = session.download_parameters(&vid, 10);
+        let done = converse_from(192, &mut session, &mut fake, started, 10, &mut take_over);
+        assert!(replies > 2, "taken over during the FTP transfer");
+        let ended: Vec<_> = done
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Parameters { .. }))
+            .collect();
+        assert!(
+            matches!(
+                ended.as_slice(),
+                [Effect::Parameters {
+                    result: Err(Failure::Rejected(_)),
+                    ..
+                }]
+            ),
+            "{ended:?}"
+        );
+        assert_eq!(session.vehicles[&key].autopilot_component, 1);
+    }
+
+    /// UXD-222: when component 1 takes over, the engine is told, and the
+    /// autopilot's own boot is announced as a vehicle first heard is, not
+    /// as a restart, so its parameters and mission are read from it.
+    #[test]
+    fn component_1_taking_over_announces_its_own_boot_as_first_heard() {
+        use mavio::dialects::ardupilotmega::enums::{MavAutopilot, MavType};
+        let s = 1_000_000;
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        fake.ftp = false;
+        let mut session = Session::new(Config::default());
+        let mut first = Vec::new();
+        for frame in from_component(192, &fake.heartbeat()) {
+            first.extend(session.ingest("l1", PEER, &frame, 0));
+        }
+        converse_from(192, &mut session, &mut fake, first, 0, &mut |_| Vec::new());
+        let vid = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
+        let booted = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Booted {
+                        boot_instant_us,
+                        restarted,
+                        ..
+                    } => Some((*boot_instant_us, *restarted)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let heard = |session: &mut Session, fake: &mut FakeVehicle, component: u8, at: u64| {
+            let mut effects = Vec::new();
+            for frame in from_component(component, &fake.telemetry(10.0).concat()) {
+                effects.extend(session.ingest("l1", PEER, &frame, at));
+            }
+            effects.extend(session.tick(at));
+            effects
+        };
+        assert_eq!(
+            booted(&heard(&mut session, &mut fake, 192, 100 * s)),
+            [(90 * s, false)]
+        );
+
+        let took_over = session.ingest(
+            "l1",
+            PEER,
+            &beat_of(
+                (1, 1),
+                MavType::Quadrotor,
+                MavAutopilot::Ardupilotmega,
+                false,
+                0,
+            ),
+            200 * s,
+        );
+        assert!(
+            took_over.iter().any(|e| matches!(
+                e,
+                Effect::AutopilotChanged { vehicle_id } if *vehicle_id == vid
+            )),
+            "{took_over:?}"
+        );
+        assert_eq!(
+            booted(&heard(&mut session, &mut fake, 1, 200 * s)),
+            [(190 * s, false)],
+            "announced again, not as a restart"
+        );
+        assert!(booted(&heard(&mut session, &mut fake, 1, 201 * s)).is_empty());
     }
 }

@@ -741,6 +741,23 @@ impl Engine {
         }
     }
 
+    /// MAVLink's autopilot component took the vehicle over from the one it
+    /// was found at (UXD-222). Its parameters and mission were read from
+    /// that component, so they no longer stand for any boot: the next boot
+    /// announcement reads them again, without a restart notice, since
+    /// nothing restarted.
+    pub fn autopilot_changed(&mut self, vehicle_id: &str) {
+        self.transfers.boots.remove(vehicle_id);
+        let mut set = self.parameter_set(vehicle_id);
+        if set.boot_instant_us.take().is_some() {
+            self.commit_as(daemon(), Change::ParameterSetUpserted { set });
+        }
+        let mut mission = self.mission(vehicle_id);
+        if mission.boot_instant_us.take().is_some() {
+            self.commit_as(daemon(), Change::MissionUpserted { mission });
+        }
+    }
+
     /// What the data plane's session holds of the vehicle's RC calibration:
     /// whether it has read it, and why a rover's throttle calibration can't
     /// be used.

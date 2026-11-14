@@ -458,8 +458,11 @@ fn parameter_timelines(inputs: &[Input], state: &[Vec<(u64, &[u8])>]) -> BTreeMa
                     autopilot,
                     ..
                 } = decoded.message
-                && mav_type != "Gcs"
-                && autopilot != "Invalid"
+                && uxduck_mavlink::autopilot::flight_controller(
+                    &mav_type,
+                    &autopilot,
+                    decoded.component_id,
+                )
                 && decoded.component_id != uxduck_mavlink::GCS_COMPONENT_ID
             {
                 autopilots

@@ -6,6 +6,7 @@
 //! The only crate that sees MAVLink library types (`mavio` today, Maviola
 //! for serial and TCP links from S7).
 
+pub mod autopilot;
 pub mod bootloader;
 pub mod camera;
 pub mod commands;

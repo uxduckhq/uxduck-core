@@ -254,6 +254,9 @@ fn transfer_report(effect: Effect) -> Option<Report> {
             restarted,
         } => Box::new(move |e| e.vehicle_booted(&vehicle_id, boot_instant_us, restarted)),
         Effect::MissionChanged { vehicle_id } => Box::new(move |e| e.mission_changed(&vehicle_id)),
+        Effect::AutopilotChanged { vehicle_id } => {
+            Box::new(move |e| e.autopilot_changed(&vehicle_id))
+        }
         Effect::RcCalibration {
             vehicle_id,
             read,
