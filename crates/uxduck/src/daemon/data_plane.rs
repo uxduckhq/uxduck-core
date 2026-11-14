@@ -282,6 +282,7 @@ pub fn start(
     tokio::spawn(async move {
         let mut plane = Plane::new(engine, config, tlog_dir, plugin_feed, simulators, sender);
         plane.onboard = onboard.map(super::onboard::Computer::new);
+        crate::network::changes::watch(plane.network.clone());
         // MANUAL_CONTROL for routed controllers, 25 times a second.
         let mut manual = timer(Duration::from_millis(40));
         // The tick also flushes telemetry, so it sets the update rate: 10 Hz.
@@ -429,6 +430,9 @@ struct Plane {
     commands: mpsc::UnboundedSender<Command>,
     /// Links waiting for their host to be looked up, by the latest lookup.
     resolving: HashMap<String, Arc<()>>,
+    /// Says when this computer's network changes, so a UDP client waiting to
+    /// retry does so at once.
+    network: links::NetworkChanges,
 }
 
 /// Why a vehicle is not sent MAVLink's ping (S261): exactly where the
@@ -479,6 +483,7 @@ impl Plane {
             onboard: None,
             commands,
             resolving: HashMap::new(),
+            network: links::NetworkChanges::default(),
         }
     }
 
@@ -869,6 +874,7 @@ impl Plane {
                 *port,
                 self.gcs.clone(),
                 registration.clone(),
+                &self.network,
                 events,
             ))
         } else {

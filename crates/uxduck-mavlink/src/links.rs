@@ -20,7 +20,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 
 mod udp;
-pub use udp::{RegistrationGate, udp_client_host};
+pub use udp::{NetworkChanges, RegistrationGate, udp_client_host};
 use uxduck_core::domain::link::UsbId;
 
 /// What a link reports.

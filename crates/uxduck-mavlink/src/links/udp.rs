@@ -15,6 +15,24 @@ use uxduck_core::domain::transport::{SocketSend, TransportDiagnostics, Transport
 
 const QUIET_RECOVERY: Duration = Duration::from_secs(30);
 const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
+/// The longest wait, in seconds, after a failure that only says the network
+/// cannot reach the host right now. The socket is sound, and the path can
+/// return with no event to announce it, so this cap is the delay left once
+/// it has. It is the schedule's own second step.
+const UNREACHABLE_BACKOFF: u64 = 2;
+/// `EHOSTDOWN`, which has no `io::ErrorKind`: `WSAEHOSTDOWN` on Windows, 112
+/// on Linux and 64 on macOS and the BSDs.
+const HOST_DOWN: i32 = if cfg!(windows) {
+    10064
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    112
+} else {
+    64
+};
+/// Ends a recovery's reason once a network change has cut a wait short, and
+/// stays until the socket hears its peer again.
+const RETRIED_ON_CHANGE: &str =
+    ". The network changed during this recovery and the connection retried at once";
 const SEND_HISTORY: usize = 128;
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -49,6 +67,33 @@ impl RegistrationGate {
     }
 }
 
+/// Says that the computer's network changed: an interface came up or went
+/// down, or an address was added or removed. The daemon's watcher announces
+/// it. A test announces it by hand, so recovery keeps its controlled clock.
+#[derive(Clone, Debug, Default)]
+pub struct NetworkChanges(watch::Sender<u64>);
+impl NetworkChanges {
+    /// A UDP client waiting to retry does so at once, on a fresh schedule.
+    /// One that has heard its peer since the last change is left alone.
+    pub fn announce(&self) {
+        self.0
+            .send_modify(|changes| *changes = changes.wrapping_add(1));
+    }
+}
+
+/// Whether an OS error only says the network cannot reach the host right
+/// now: no interface, route or address for it, or no answer to ARP. The
+/// socket is sound, and the path can return at any moment.
+fn is_unreachable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NetworkDown
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::AddrNotAvailable
+    ) || error.raw_os_error() == Some(HOST_DOWN)
+}
+
 fn now_us() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,9 +124,18 @@ pub fn udp_client_host(
     port: u16,
     gcs: Arc<AtomicU8>,
     gate: RegistrationGate,
+    network: &NetworkChanges,
     events: Events,
 ) -> LinkHandle {
-    run(None, None, Some((host, port)), Some(gcs), gate, events)
+    run(
+        None,
+        None,
+        Some((host, port)),
+        Some(gcs),
+        gate,
+        network,
+        events,
+    )
 }
 
 pub(super) fn start(
@@ -92,7 +146,15 @@ pub(super) fn start(
     gate: RegistrationGate,
     events: Events,
 ) -> LinkHandle {
-    run(Some(socket), destination, host, hello, gate, events)
+    run(
+        Some(socket),
+        destination,
+        host,
+        hello,
+        gate,
+        &NetworkChanges::default(),
+        events,
+    )
 }
 
 type Resolve = Arc<
@@ -116,19 +178,36 @@ fn resolver() -> Resolve {
     })
 }
 
+/// The OS error a send meets in place of the socket's own answer. Only a
+/// controlled test gives one, because no real socket fails as an unreachable
+/// host does on every system.
+type SendFault = Arc<dyn Fn() -> Option<io::Error> + Send + Sync>;
+
 fn run(
     initial: Option<UdpSocket>,
     destination: Option<SocketAddr>,
     host: Option<(String, u16)>,
     hello: Option<Arc<AtomicU8>>,
     gate: RegistrationGate,
+    network: &NetworkChanges,
     events: Events,
 ) -> LinkHandle {
-    run_resolved(initial, destination, host, hello, gate, events, resolver())
+    run_resolved(
+        initial,
+        destination,
+        host,
+        hello,
+        gate,
+        network,
+        events,
+        resolver(),
+        Arc::new(|| None),
+    )
 }
 
 #[allow(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "one cancellable socket lifecycle owns send and receive evidence"
 )]
 fn run_resolved(
@@ -137,12 +216,15 @@ fn run_resolved(
     host: Option<(String, u16)>,
     hello: Option<Arc<AtomicU8>>,
     gate: RegistrationGate,
+    network: &NetworkChanges,
     events: Events,
     resolve: Resolve,
+    send_fault: SendFault,
 ) -> LinkHandle {
     let (commands, mut outgoing) = mpsc::unbounded_channel::<Outgoing>();
     let (diagnostics, updates) = watch::channel(TransportDiagnostics::default());
     let stop = Arc::new(AtomicBool::new(false));
+    let mut network = network.0.subscribe();
     let task = tokio::spawn(async move {
         let mut state = TransportDiagnostics {
             configured_destination: host
@@ -155,6 +237,12 @@ fn run_resolved(
         let mut socket = initial;
         let mut remote = destination;
         let mut attempt = 0usize;
+        // Whether the failure that closed the socket only said the host is
+        // unreachable.
+        let mut unreachable = false;
+        // Whether a network change cut a wait short since the socket last
+        // heard its peer.
+        let mut retried_on_change = false;
         let mut sequence = 0u8;
         let mut send_id = 0u64;
         loop {
@@ -194,6 +282,7 @@ fn run_resolved(
                         clear(&mut state.recovery_error);
                     }
                     Err(error) => {
+                        unreachable = is_unreachable(&error);
                         state.recovery_error = Some(failure(
                             "resolve-or-bind",
                             state.configured_destination.clone(),
@@ -238,7 +327,12 @@ fn run_resolved(
                                 let at_us = now_us();
                                 last_received = Some(Instant::now());
                                 registration_since = None;
-                                if !state.send_error.as_ref().is_some_and(|e| e.active) { attempt = 0; }
+                                if !state.send_error.as_ref().is_some_and(|e| e.active) {
+                                    // Healthy. An earlier network change is spent.
+                                    attempt = 0;
+                                    retried_on_change = false;
+                                    network.mark_unchanged();
+                                }
                                 state.last_receive_us = Some(at_us);
                                 clear(&mut state.receive_error);
                                 if !state.send_error.as_ref().is_some_and(|e| e.active) { state.recovery_reason = None; }
@@ -259,6 +353,7 @@ fn run_resolved(
                             Ok(_) => {},
                             Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {},
                             Err(error) => {
+                                unreachable = is_unreachable(&error);
                                 state.receive_error = Some(failure("receive", state.local_endpoint.clone(), &error));
                                 state.recovery_reason = Some(format!("UDP receive failed: {error}"));
                                 break;
@@ -277,6 +372,7 @@ fn run_resolved(
                                 // A never-answering server gets lightweight registration for
                                 // 30 seconds before a new socket, not one rebind per hello.
                                 if registration_since.is_some_and(|at| at.elapsed() >= QUIET_RECOVERY) {
+                                    unreachable = false;
                                     state.recovery_reason = Some("No reply to UDP registration for 30 seconds".into());
                                     break;
                                 }
@@ -314,7 +410,11 @@ fn run_resolved(
                             state.sends.remove(0);
                         }
                         diagnostics.send_replace(state.clone());
-                        match active.send_to(&bytes, to).await {
+                        let outcome = match send_fault() {
+                            Some(error) => Err(error),
+                            None => active.send_to(&bytes, to).await,
+                        };
+                        match outcome {
                             Ok(_) => {
                                 sent.outcome = "accepted-by-os".into();
                                 state.last_socket_send_us = Some(now_us());
@@ -323,6 +423,7 @@ fn run_resolved(
                             }
                             Err(error) => {
                                 sent.outcome = "failed".into();
+                                unreachable = is_unreachable(&error);
                                 let error = failure(
                                     if registration {
                                         "registration-send"
@@ -355,8 +456,21 @@ fn run_resolved(
             // Drop before backoff. No old generation can send or receive again.
             socket = None;
             state.socket_open = false;
-            state.backoff_ms = BACKOFF[attempt.min(BACKOFF.len() - 1)] * 1000;
-            attempt = attempt.saturating_add(1);
+            let wait = BACKOFF[attempt.min(BACKOFF.len() - 1)];
+            // An unreachable host is not a broken socket. It waits at most
+            // the cap and never moves the schedule past it.
+            let wait = if unreachable {
+                wait.min(UNREACHABLE_BACKOFF)
+            } else {
+                wait
+            };
+            if !unreachable || wait < UNREACHABLE_BACKOFF {
+                attempt = attempt.saturating_add(1);
+            }
+            state.backoff_ms = wait * 1000;
+            if retried_on_change && let Some(reason) = &mut state.recovery_reason {
+                reason.push_str(RETRIED_ON_CHANGE);
+            }
             state.next_retry_us = Some(now_us().saturating_add(state.backoff_ms * 1000));
             diagnostics.send_replace(state.clone());
             let sleep = tokio::time::sleep(Duration::from_millis(state.backoff_ms));
@@ -364,6 +478,16 @@ fn run_resolved(
             loop {
                 tokio::select! {
                     () = &mut sleep => break,
+                    // The path may be back, and earlier failures say little
+                    // about it. Frames queued so far are still discarded.
+                    Ok(()) = network.changed() => {
+                        attempt = 0;
+                        if !retried_on_change && let Some(reason) = &mut state.recovery_reason {
+                            reason.push_str(RETRIED_ON_CHANGE);
+                        }
+                        retried_on_change = true;
+                        break;
+                    }
                     next = outgoing.recv() => if next.is_none() { return; },
                 }
             }
@@ -387,6 +511,43 @@ mod tests {
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
+    }
+    async fn step(seconds: u64) {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        settle().await;
+    }
+    fn snapshot(link: &LinkHandle) -> TransportDiagnostics {
+        link.diagnostics.as_ref().unwrap().borrow().clone()
+    }
+    /// The wait each of the next closures announces, a second at a time.
+    async fn waits(link: &LinkHandle, count: usize) -> Vec<u64> {
+        let mut waits = Vec::new();
+        let mut open = snapshot(link).socket_open;
+        while waits.len() < count {
+            step(1).await;
+            let state = snapshot(link);
+            if open && !state.socket_open {
+                waits.push(state.backoff_ms);
+            }
+            open = state.socket_open;
+        }
+        waits
+    }
+    /// The send fault a test turns on and off.
+    type Fault = Arc<Mutex<Option<fn() -> io::Error>>>;
+    fn fault() -> (Fault, SendFault) {
+        let chosen = Fault::default();
+        let asked = chosen.clone();
+        (
+            chosen,
+            Arc::new(move || asked.lock().unwrap().map(|error| error())),
+        )
+    }
+    fn host_down() -> io::Error {
+        io::Error::from_raw_os_error(HOST_DOWN)
+    }
+    fn denied() -> io::Error {
+        io::Error::from(io::ErrorKind::PermissionDenied)
     }
 
     #[tokio::test(start_paused = true)]
@@ -430,8 +591,10 @@ mod tests {
             Some(("vehicle.test".into(), 14550)),
             Some(Arc::new(AtomicU8::new(255))),
             gate.clone(),
+            &NetworkChanges::default(),
             tx,
             resolve,
+            Arc::new(|| None),
         );
         settle().await;
         assert_eq!(link.diagnostics.as_ref().unwrap().borrow().backoff_ms, 1000);
@@ -503,8 +666,10 @@ mod tests {
             Some(("moving.test".into(), 14550)),
             Some(Arc::new(AtomicU8::new(255))),
             RegistrationGate::unrestricted(),
+            &NetworkChanges::default(),
             tx,
             resolve,
+            Arc::new(|| None),
         );
         settle().await;
         let generation = link.diagnostics.as_ref().unwrap().borrow().generation;
@@ -528,5 +693,274 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(received, vec![b"new destination".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_network_change_retries_at_once_and_restarts_the_backoff() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = server.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        // The fifth call is the retry the change causes. It fails too, as the
+        // retry at link-up did on 2026-11-13, and the sixth succeeds.
+        let resolve: Resolve = Arc::new(move |_, _| {
+            let call = count.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                if call < 5 {
+                    Err(io::Error::other("no resolver yet"))
+                } else {
+                    Ok(destination)
+                }
+            })
+        });
+        let (tx, mut events) = super::super::event_channel();
+        let gate = RegistrationGate::default();
+        let network = NetworkChanges::default();
+        let link = run_resolved(
+            None,
+            None,
+            Some(("radio.test".into(), 15010)),
+            Some(Arc::new(AtomicU8::new(255))),
+            gate.clone(),
+            &network,
+            tx,
+            resolve,
+            Arc::new(|| None),
+        );
+        settle().await;
+        for wait in [1, 2, 5] {
+            assert_eq!(snapshot(&link).backoff_ms, wait * 1000);
+            step(wait).await;
+        }
+        let waiting = snapshot(&link);
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        assert_eq!(waiting.backoff_ms, 10_000);
+        assert_eq!(
+            waiting.recovery_reason.as_deref(),
+            Some("Could not open UDP socket: no resolver yet")
+        );
+        link.send(Outgoing {
+            peer: None,
+            bytes: b"stale movement".to_vec(),
+        });
+        settle().await;
+        // No time passes. The change alone ends the ten-second wait.
+        network.announce();
+        settle().await;
+        let retried = snapshot(&link);
+        assert_eq!(calls.load(Ordering::Relaxed), 5);
+        assert_eq!(retried.recreation_attempts, waiting.recreation_attempts + 1);
+        assert_eq!(retried.backoff_ms, 1000, "the schedule starts again");
+        assert_eq!(
+            retried.recovery_reason.as_deref(),
+            Some(
+                "Could not open UDP socket: no resolver yet. The network changed during this recovery and the connection retried at once"
+            )
+        );
+        step(1).await;
+        let open = snapshot(&link);
+        assert_eq!(calls.load(Ordering::Relaxed), 6);
+        assert!(open.socket_open);
+        assert!(open.generation > waiting.generation);
+        assert_eq!(open.recovery_reason, retried.recovery_reason);
+        let mut buffer = [0; 512];
+        assert!(
+            server.try_recv_from(&mut buffer).is_err(),
+            "the hello still needs its lease and the queued frame is gone"
+        );
+        gate.renew(true);
+        step(1).await;
+        let (len, client) = server.try_recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            crate::framing::header(&buffer[..len]).unwrap().message_id,
+            0
+        );
+        server.send_to(b"recovered", client).await.unwrap();
+        settle().await;
+        assert_eq!(snapshot(&link).recovery_reason, None);
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|e| matches!(e.event,LinkEvent::Received{bytes,..} if bytes == b"recovered"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_network_change_leaves_a_receiving_connection_alone() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = server.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let resolve: Resolve = Arc::new(move |_, _| {
+            count.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(destination) })
+        });
+        let (failing, send_fault) = fault();
+        let (tx, _events) = super::super::event_channel();
+        let network = NetworkChanges::default();
+        let link = run_resolved(
+            None,
+            None,
+            Some(("radio.test".into(), 15010)),
+            Some(Arc::new(AtomicU8::new(255))),
+            RegistrationGate::unrestricted(),
+            &network,
+            tx,
+            resolve,
+            send_fault,
+        );
+        settle().await;
+        let mut buffer = [0; 512];
+        let (_, client) = server.try_recv_from(&mut buffer).unwrap();
+        server.send_to(b"telemetry", client).await.unwrap();
+        settle().await;
+        let receiving = snapshot(&link);
+        assert!(receiving.last_receive_us.is_some());
+        network.announce();
+        step(1).await;
+        let after = snapshot(&link);
+        assert!(after.socket_open);
+        assert_eq!(after.generation, receiving.generation);
+        assert_eq!(after.recreation_attempts, receiving.recreation_attempts);
+        // It hears its peer after the change, so the change is spent. A
+        // failure long after waits out its own backoff.
+        server.send_to(b"telemetry", client).await.unwrap();
+        settle().await;
+        *failing.lock().unwrap() = Some(denied);
+        assert_eq!(waits(&link, 1).await, [1000]);
+        let closed = snapshot(&link);
+        assert!(!closed.socket_open);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            closed.recovery_reason.as_deref(),
+            Some("Three consecutive UDP socket sends failed")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_network_change_while_sends_fail_counts_when_the_socket_closes() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = server.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let resolve: Resolve = Arc::new(move |_, _| {
+            count.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(destination) })
+        });
+        let (failing, send_fault) = fault();
+        *failing.lock().unwrap() = Some(denied);
+        let (tx, _events) = super::super::event_channel();
+        let network = NetworkChanges::default();
+        let link = run_resolved(
+            None,
+            None,
+            Some(("radio.test".into(), 15010)),
+            Some(Arc::new(AtomicU8::new(255))),
+            RegistrationGate::unrestricted(),
+            &network,
+            tx,
+            resolve,
+            send_fault,
+        );
+        settle().await;
+        assert_eq!(waits(&link, 2).await, [1000, 2000]);
+        step(2).await;
+        let open = snapshot(&link);
+        assert!(open.socket_open);
+        // The change does not close an open socket, whatever its sends meet.
+        network.announce();
+        settle().await;
+        assert_eq!(snapshot(&link).generation, open.generation);
+        // It has not heard its peer since, so the change still counts when the
+        // socket closes: it retries at once and the next wait is the first.
+        assert_eq!(waits(&link, 1).await, [1000]);
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            snapshot(&link).recovery_reason.as_deref(),
+            Some(
+                "Three consecutive UDP socket sends failed. The network changed during this recovery and the connection retried at once"
+            )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreachable_host_never_waits_longer_than_two_seconds() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = server.local_addr().unwrap();
+        let resolve: Resolve = Arc::new(move |_, _| Box::pin(async move { Ok(destination) }));
+        let (failing, send_fault) = fault();
+        // "Host is down", as every send met on 2026-11-13 while the radio
+        // bridge was not forwarding yet.
+        *failing.lock().unwrap() = Some(host_down);
+        let (tx, _events) = super::super::event_channel();
+        let link = run_resolved(
+            None,
+            None,
+            Some(("radio.test".into(), 15010)),
+            Some(Arc::new(AtomicU8::new(255))),
+            RegistrationGate::unrestricted(),
+            &NetworkChanges::default(),
+            tx,
+            resolve,
+            send_fault,
+        );
+        settle().await;
+        assert_eq!(waits(&link, 5).await, [1000, 2000, 2000, 2000, 2000]);
+        let unreachable = snapshot(&link);
+        assert_eq!(
+            unreachable.recovery_reason.as_deref(),
+            Some("Three consecutive UDP socket sends failed")
+        );
+        let error = unreachable.send_error.unwrap();
+        assert_eq!(error.operation, "registration-send");
+        assert_eq!(error.os_code, Some(HOST_DOWN));
+        // The path returns with nothing to announce it. The wait in progress
+        // is all that is left before the hello goes out.
+        *failing.lock().unwrap() = None;
+        step(2).await;
+        let mut buffer = [0; 512];
+        let (len, client) = server.try_recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            crate::framing::header(&buffer[..len]).unwrap().message_id,
+            0
+        );
+        server.send_to(b"reachable", client).await.unwrap();
+        settle().await;
+        let receiving = snapshot(&link);
+        assert!(receiving.socket_open);
+        assert_eq!(receiving.recovery_reason, None);
+        // Any other failure keeps the whole schedule.
+        *failing.lock().unwrap() = Some(denied);
+        assert_eq!(
+            waits(&link, 6).await,
+            [1000, 2000, 5000, 10_000, 30_000, 30_000]
+        );
+    }
+
+    #[test]
+    fn only_an_error_that_says_the_host_is_unreachable_caps_the_wait() {
+        // ENETDOWN, ENETUNREACH, EHOSTDOWN, EHOSTUNREACH and EADDRNOTAVAIL as
+        // this system numbers them: Winsock, Linux, or macOS and the BSDs.
+        let codes = if cfg!(windows) {
+            [10050, 10051, 10064, 10065, 10049]
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
+            [100, 101, 112, 113, 99]
+        } else {
+            [50, 51, 64, 65, 49]
+        };
+        for code in codes {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(is_unreachable(&error), "{error}");
+        }
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::NotFound,
+        ] {
+            assert!(!is_unreachable(&io::Error::from(kind)), "{kind}");
+        }
+        assert!(!is_unreachable(&io::Error::other("no resolver yet")));
     }
 }

@@ -3,6 +3,7 @@
 //! shutdown signal. Removing or losing one address leaves the others running.
 //! Newly joined networks are never selected automatically.
 
+pub mod changes;
 mod names;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
