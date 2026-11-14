@@ -447,6 +447,26 @@ mod tests {
         assert_eq!(sqlite::projected_seq(&db).unwrap(), 3);
     }
 
+    /// The vehicle `nan_parameter` belongs to: a parameter without its
+    /// vehicle is dropped when the store opens.
+    fn its_vehicle(seq: u64) -> Event {
+        Event {
+            seq,
+            ts_us: seq,
+            actor: Actor::default(),
+            change: Change::VehicleUpserted {
+                vehicle: serde_json::from_value(serde_json::json!({
+                    "id": "v1", "name": "Scout", "aliases": [], "linkId": "lk", "peer": "p",
+                    "systemId": 1, "componentIds": [1], "autopilot": "Ardupilotmega",
+                    "vehicleType": "Quadrotor", "presence": "online", "lastHeartbeatUs": 0,
+                    "armed": false, "mode": "LOITER", "saved": false, "dismissed": false,
+                    "version": 1
+                }))
+                .unwrap(),
+            },
+        }
+    }
+
     fn nan_parameter(seq: u64) -> Event {
         Event {
             seq,
@@ -481,10 +501,15 @@ mod tests {
             let (store, _) = open(dir.path()).unwrap();
             let mut handle = store.handle.clone();
             let mut state = State::default();
-            for event in [upsert(1, "Ana"), nan_parameter(2), upsert(3, "Ben")] {
+            for event in [
+                upsert(1, "Ana"),
+                its_vehicle(2),
+                nan_parameter(3),
+                upsert(4, "Ben"),
+            ] {
                 state.apply(&event).unwrap();
                 handle.append(&event);
-                if event.seq == 2 {
+                if event.seq == 3 {
                     handle.checkpoint(&state);
                 }
             }
@@ -494,7 +519,7 @@ mod tests {
         assert!(log.contains(r#""value":0"#), "{log}");
         let (store, loaded) = open(dir.path()).unwrap();
         store.close();
-        assert_eq!(loaded.state.seq, 3);
+        assert_eq!(loaded.state.seq, 4);
         assert_eq!(loaded.state.operators.len(), 2);
         assert!(parameter_value(&loaded.state).abs() < f64::EPSILON);
     }
@@ -504,7 +529,12 @@ mod tests {
     #[test]
     fn an_older_log_and_checkpoint_with_null_for_a_float_are_read() {
         let dir = tempfile::tempdir().unwrap();
-        let events = [upsert(1, "Ana"), nan_parameter(2), upsert(3, "Ben")];
+        let events = [
+            upsert(1, "Ana"),
+            its_vehicle(2),
+            nan_parameter(3),
+            upsert(4, "Ben"),
+        ];
         let mut lines = String::new();
         for event in &events {
             lines.push_str(&serde_json::to_string(event).unwrap());
@@ -513,12 +543,12 @@ mod tests {
         assert!(lines.contains(r#""value":null"#));
         std::fs::write(dir.path().join("events.ndjson"), lines).unwrap();
         let mut state = State::default();
-        for event in &events[..2] {
+        for event in &events[..3] {
             state.apply(event).unwrap();
         }
         let db = sqlite::open(&dir.path().join("uxduck.db")).unwrap();
         db.execute(
-            "INSERT INTO checkpoint (id, seq, state, written_at_us) VALUES (1, 2, ?1, 0)",
+            "INSERT INTO checkpoint (id, seq, state, written_at_us) VALUES (1, 3, ?1, 0)",
             [serde_json::to_string(&state).unwrap()],
         )
         .unwrap();
@@ -526,12 +556,12 @@ mod tests {
 
         let (store, loaded) = open(dir.path()).unwrap();
         store.close();
-        assert_eq!(loaded.state.seq, 3);
+        assert_eq!(loaded.state.seq, 4);
         assert_eq!(loaded.state.operators.len(), 2);
         assert!(parameter_value(&loaded.state).abs() < f64::EPSILON);
-        assert!(!dir.path().join("events.ndjson.damaged-3").exists());
+        assert!(!dir.path().join("events.ndjson.damaged-4").exists());
         let log = std::fs::read_to_string(dir.path().join("events.ndjson")).unwrap();
-        assert_eq!(log.lines().count(), 3, "nothing truncated");
+        assert_eq!(log.lines().count(), 4, "nothing truncated");
     }
 
     /// A camera as 0.8.0 wrote it, before its counters had `recoveryPoints`.
