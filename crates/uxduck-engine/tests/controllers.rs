@@ -907,6 +907,70 @@ fn the_controller_check_wants_a_centred_throttle_in_the_middle_and_an_aircraft_s
     }
 }
 
+/// PX4 refuses a mode you steer until it hears sticks. With nothing flying
+/// it, the refusal says how to give it sticks. With the keyboard on, for a
+/// mode that flies itself, or on `ArduPilot`, the vehicle's words stand.
+#[test]
+fn a_px4_refusal_of_a_mode_you_steer_says_how_to_give_it_sticks() {
+    use uxduck_core::domain::command::ReceiptStatus;
+    use uxduck_engine::commands::Outcome;
+
+    let refused = |engine: &mut Engine, ui: &mut Client, mode: &str, why: &str| {
+        let _ = send(
+            engine,
+            ui,
+            "command/send",
+            json!({ "vehicleId": "v3", "command": { "type": "set-mode", "mode": mode } }),
+        );
+        let receipt = engine
+            .state()
+            .receipts
+            .values()
+            .find(|r| r.vehicle_id == "v3" && r.status == ReceiptStatus::Sent)
+            .expect("a sent mode change")
+            .id
+            .clone();
+        engine.command_result(&receipt, Outcome::Rejected(why.into()), 1);
+        engine.state().receipts[&receipt].detail.clone().unwrap()
+    };
+    let not_available = |mode: &str| format!("Switching to {mode} is currently not available");
+
+    let (mut engine, mut ui, _orders) = setup();
+    observe_v3(&mut engine, "Px4", "Quadrotor", true);
+    assert_eq!(
+        refused(&mut engine, &mut ui, "Position", &not_available("Position")),
+        "PX4 flies Position from sticks: turn on the keyboard or a controller in Cockpit → Controls, then choose Position again. PX4 said: Switching to Position is currently not available."
+    );
+    // PX4's own name for it, and a mode with no stabilisation at all.
+    assert!(
+        refused(&mut engine, &mut ui, "POSCTL", "Failed.")
+            .starts_with("PX4 flies Position from sticks:")
+    );
+    assert!(
+        refused(&mut engine, &mut ui, "Acro", "Failed.")
+            .ends_with("then choose Acro again. PX4 said: Failed.")
+    );
+    assert_eq!(
+        refused(&mut engine, &mut ui, "Mission", &not_available("Mission")),
+        not_available("Mission")
+    );
+    let started = call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": 0.0 }),
+    );
+    assert_eq!(started["result"]["target"], "v3", "{started}");
+    assert_eq!(
+        refused(&mut engine, &mut ui, "Altitude", &not_available("Altitude")),
+        not_available("Altitude")
+    );
+
+    let (mut engine, mut ui, _orders) = setup();
+    observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", true);
+    assert_eq!(refused(&mut engine, &mut ui, "LOITER", "Failed"), "Failed");
+}
+
 /// Where the throttle centres, keyboard control starts at neutral,
 /// armed or not, and a start away from it reaches neither a route nor the
 /// data plane; an aircraft's keyboard still starts where the page says.

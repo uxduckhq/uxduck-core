@@ -1171,6 +1171,49 @@ impl Engine {
         }
     }
 
+    /// PX4 flies a mode you steer, such as Position, only once it hears
+    /// sticks (`MANUAL_CONTROL`), and until then refuses it with "Switching
+    /// to Position is currently not available". With no controller or
+    /// keyboard flying the vehicle, its refusal says first how to give it
+    /// sticks, since a notice's first words are what a list shows.
+    fn stick_mode_refusal(&self, receipt: &Receipt, why: &str) -> Option<String> {
+        let Command::SetMode { mode } = &receipt.command else {
+            return None;
+        };
+        let vehicle = self.vehicle(&receipt.vehicle_id)?;
+        if Family::for_vehicle(&vehicle.autopilot, &vehicle.vehicle_type) != Some(Family::Px4)
+            || Family::Px4
+                .kind(mode)
+                .is_none_or(|kind| kind == modes::ModeKind::Automatic)
+        {
+            return None;
+        }
+        let flown = self.state.controllers.values().any(|controller| {
+            controller.claim.is_some()
+                && controller
+                    .target
+                    .as_deref()
+                    .and_then(|id| self.vehicle(id))
+                    .is_some_and(|target| target.id == vehicle.id)
+        });
+        if flown {
+            return None;
+        }
+        let mode = Family::Px4.name(Family::Px4.number(mode)?)?;
+        Some(format!(
+            "PX4 flies {mode} from sticks: turn on the keyboard or a controller in Cockpit → Controls, then choose {mode} again. PX4 said: {}.",
+            why.trim_end_matches('.')
+        ))
+    }
+
+    /// A refusal in words that say what the vehicle needs first, where
+    /// UXDuck knows it, else in the vehicle's own.
+    fn refusal(&self, receipt: &Receipt, why: String) -> String {
+        self.take_off_refusal(receipt)
+            .or_else(|| self.stick_mode_refusal(receipt, &why))
+            .unwrap_or(why)
+    }
+
     /// The data plane finished a command: complete its receipt, answer the
     /// request that sent it, and tell people when it did not go through.
     pub fn command_result(&mut self, receipt_id: &str, outcome: Outcome, attempts: u8) {
@@ -1188,10 +1231,7 @@ impl Engine {
         let was_pending = receipt.status == ReceiptStatus::Sent;
         let (status, detail) = match outcome {
             Outcome::Accepted => (ReceiptStatus::Accepted, None),
-            Outcome::Rejected(why) => (
-                ReceiptStatus::Rejected,
-                Some(self.take_off_refusal(&receipt).unwrap_or(why)),
-            ),
+            Outcome::Rejected(why) => (ReceiptStatus::Rejected, Some(self.refusal(&receipt, why))),
             Outcome::Timeout => (
                 ReceiptStatus::Timeout,
                 Some(format!("no answer after {attempts} tries")),
