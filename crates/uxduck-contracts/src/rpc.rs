@@ -1206,10 +1206,12 @@ pub enum ClientRequest {
     /// Result: `Empty`.
     #[serde(rename = "sim/stop")]
     SimStop(IdParams),
-    /// Starts a simulated vehicle again from where it started, after a
-    /// crash or to begin afresh: the same link, place, height and speed, so
-    /// it keeps its name, history and tabs. Configuration capability; an
-    /// agent asks first. Result: `Link`.
+    /// Starts a simulated plane, multicopter or other vehicle again at its
+    /// start place, which becomes its home position again. Use it to put
+    /// the vehicle back after a crash, reset it or move it home, since a
+    /// running simulation can't be teleported. It keeps its link, height,
+    /// speed, name, history and tabs, and its current flight ends.
+    /// Configuration capability, and an agent asks first. Result: `Link`.
     #[serde(rename = "sim/restart")]
     SimRestart(IdParams),
     /// Pauses a simulated vehicle where it is, or resumes it: no time

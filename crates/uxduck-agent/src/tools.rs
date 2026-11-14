@@ -1185,4 +1185,25 @@ mod deferred_tests {
         let history = find_deferred("mission history", 3);
         assert_eq!(history[0].name, "mission_history");
     }
+
+    /// FB-214: asked to move a simulated vehicle home, put it back or reset
+    /// it, the agent finds Start again.
+    #[test]
+    fn start_again_is_found_to_move_a_simulated_vehicle_home() {
+        for query in [
+            "teleport the simulated vehicle to its home position",
+            "move my simulated plane home",
+            "put the simulated plane back",
+            "reset the simulation",
+        ] {
+            let found: Vec<String> = find_deferred(query, 3)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            assert!(
+                found.contains(&"sim_restart".to_owned()),
+                "{query}: {found:?}"
+            );
+        }
+    }
 }
