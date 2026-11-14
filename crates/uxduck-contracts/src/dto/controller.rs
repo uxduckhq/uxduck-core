@@ -35,6 +35,8 @@ pub struct Controller {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<Claim>,
     pub mode: TargetMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_target: Option<TargetBinding>,
     /// The vehicle it drives while claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -52,6 +54,14 @@ pub struct Controller {
     pub holding: Option<ControllerHold>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetBinding {
+    pub mode: TargetMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
 }
 
 /// A hold under way on a controller, for the app to show it filling from
@@ -287,9 +297,8 @@ pub struct ControllerClaimParams {
     pub mapping_id: Option<String>,
 }
 
-/// Changes what a claimed controller drives: the mode, and for `pinned`
-/// the vehicle. Moving to another vehicle needs the sticks centred; this is
-/// also how a pending switch can be retried explicitly.
+/// Changes what a claimed controller drives, retaining its admission checks.
+/// Unclaimed, remembers only the next target binding without claiming or routing it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerSetTargetParams {

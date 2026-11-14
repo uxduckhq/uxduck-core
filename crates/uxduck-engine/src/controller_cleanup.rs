@@ -82,6 +82,7 @@ pub(crate) fn reset(engine: &mut Engine, connection: ConnectionId, mut controlle
     }
     controller.mapping_id = fresh.id;
     controller.mode = TargetMode::FollowsSelection;
+    controller.last_target = None;
     controller.target = None;
     controller.pending_target = None;
     controller.input_pause = None;

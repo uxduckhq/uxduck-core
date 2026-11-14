@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "bbbbd7426ff529a0065a5948872b62f25280e63a",
+  "sourceCommit": "4c0f0b42609ef4c1730d73cf0e50c95d5a0fd21d",
   "licenseReady": true,
   "files": [
     {
@@ -16,12 +16,12 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "49ebece2c71d146829f1dbb945f6382d15f5c585f0c3009439db1e0db9d4c87d",
+      "sha256": "f2f7c2a61707fe35e6db630f6df8dfe6dc15026107bca366680e9b0fc4d867db",
       "executable": false
     },
     {
       "path": "Cargo.toml",
-      "sha256": "6c63c328deb5fcf9b939efad0b175809d580550abddf7f4ce896619911ae144f",
+      "sha256": "4d6185ef192005bd2cb5f23a38b8297dc5ff334cb04b1cc9a9975cf7254becf7",
       "executable": false
     },
     {
@@ -41,7 +41,7 @@
     },
     {
       "path": "THIRD_PARTY.md",
-      "sha256": "8ad434b14036e9eb41e5c0f68a7ed454c38eb61766eeea2d2e7840d2bb9e6a92",
+      "sha256": "e8f8b2b7a1506e80676e46715e245cfbfd537334441d719dc9e2c6b0a3e8a523",
       "executable": false
     },
     {
@@ -4901,7 +4901,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/controller.rs",
-      "sha256": "5c5ca95afd59302e397f373842be95f31402146562667cd3265b84125a5a9231",
+      "sha256": "9f16e3af43ae89cc8ddd0dd1914abdcd22e52f90b88e2141b35d0efad1f259ba",
       "executable": false
     },
     {
@@ -5066,7 +5066,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/controller.rs",
-      "sha256": "d974f153c699ddf7bd933a75ed52163f51914a104a2df49fd0bd2ceb57a8ff28",
+      "sha256": "84d81ceaed118f2084c694fa61a5913c8cf576a6b03d2f5147843cf407c598c9",
       "executable": false
     },
     {
@@ -5436,7 +5436,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/controller.rs",
-      "sha256": "ff335b7168c90f40611ce1e2fa8af6498d7044d51fefa10ea4915a5ab995e411",
+      "sha256": "2cf65251802498ad3964df84c5dc40c30c679a4e31ff1d0d4abb2fc490fbe8a3",
       "executable": false
     },
     {
@@ -5741,7 +5741,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/controller_cleanup.rs",
-      "sha256": "d0de3740ac21ebc623c14eb6b575486e8bbf7b63601fdbe3aee8b3ebf5631c5b",
+      "sha256": "becfe99a18249ca0380e18ba23b53260141d7f7692c95ba74e566a653830723d",
       "executable": false
     },
     {
@@ -5751,7 +5751,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/controllers.rs",
-      "sha256": "e033ebede54e8ea40a93d251eb87912607f309ef38f8d8d55df187b33e11b977",
+      "sha256": "ad866092cf6547bc2d8a5e98de6d2f773a2a3f4e9fd439c54c4bb80d501fba98",
       "executable": false
     },
     {
@@ -6371,7 +6371,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/vehicles.rs",
-      "sha256": "b0bb373c7715dadadb1e1a6c55ece631b0cefb7b6a3fae80824c35500e4295b8",
+      "sha256": "b400fcdaf9a1d56dfc9f807964913c7b64478277fec3a0a5066729ae30668309",
       "executable": false
     },
     {
@@ -6406,7 +6406,7 @@
     },
     {
       "path": "crates/uxduck-engine/tests/controllers.rs",
-      "sha256": "117d4dfd973a9893dcf8c80afeb1d1d0add6cd2ceaacd86ea57154f959ddd4dc",
+      "sha256": "641e419c02ff858d2e655234f0b2cda12ae1c6f9a5588018cc97eb9cb4668150",
       "executable": false
     },
     {
@@ -6436,7 +6436,7 @@
     },
     {
       "path": "crates/uxduck-engine/tests/stored-required-fields.txt",
-      "sha256": "e6ca1f589d2f07e0261aa381de6427994a69b9edd306906b2610764fff4f2fb3",
+      "sha256": "4807417400a088ff937660f610d6bc2eed803005c0516c5cb954730fd91a5dc1",
       "executable": false
     },
     {
@@ -7340,8 +7340,13 @@
       "executable": false
     },
     {
+      "path": "crates/uxduck/src/daemon/controller_identity.rs",
+      "sha256": "12119d307193dff078b1e911cc7f29ffb85740129c9c2a1c7e7bd04a542d2220",
+      "executable": false
+    },
+    {
       "path": "crates/uxduck/src/daemon/controllers.rs",
-      "sha256": "0ee713ec6e2da059dd65cddf344090536d1d0dd80c95d8deb345095d817f2c50",
+      "sha256": "736d93e73e9e394140008f4f6b9d7300b2bd65ba0fa464d6799969443301a568",
       "executable": false
     },
     {
@@ -7361,12 +7366,12 @@
     },
     {
       "path": "crates/uxduck/src/daemon/hid.rs",
-      "sha256": "0b03d426b9fdb097616a8158640096b67bd1098b3442f4dfab54a0150c160c22",
+      "sha256": "999cde23e8431e44038a7017cc61dac8a261e036c6d288304f51cdbee654d971",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/daemon/mod.rs",
-      "sha256": "3d252a9dfd84b5632dc050c95ca32f5ecc6216bd1f72981cb367ed2fd83d0c4d",
+      "sha256": "0a9d451b57ccd9ab4cdbb90bdc531bd2efb6d2408a932bc8b122625c7a3b5cd7",
       "executable": false
     },
     {
@@ -7736,7 +7741,7 @@
     },
     {
       "path": "crates/uxduck/src/store/sqlite.rs",
-      "sha256": "fbb5337f8f399ad564c142ee2c7a28fa3e197ddebe2faec8dec7a0223d53f26f",
+      "sha256": "55ed3c7b5af4e20e0a1e9be937cd8b588d8646b3b02860ecf8330994d35b4fd2",
       "executable": false
     },
     {
@@ -8207,6 +8212,341 @@
     {
       "path": "tools/capture-runtime/test-frame-rate.py",
       "sha256": "523aa2ad58a42dc51cf0d0101c12d3abef432ae4d85e2e53b573e8390e94161c",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/CHANGELOG.md",
+      "sha256": "784f74551ad17bcaad9bc84bce6b6d487e420572a0f16d6eea8bbff3afa5a1a5",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/Cargo.toml",
+      "sha256": "5f45ee9dbb6b3de1227910e352caf53be0d9c43c39e65b834f669a61cf13d608",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/Cargo.toml.orig",
+      "sha256": "f6795fcff5dfd29f71404f7d9b79b3906f17664d096331667d4b53dd2d8e3297",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/LICENSE-MIT",
+      "sha256": "74497fa3c93ebb5ec32d85de117469cb3fab3276f7c02426f14c0f19f31f4424",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/README.md",
+      "sha256": "c06d73dde0802fc0794821b679414c0845db901ddd4d4aa65a9fd4a99be80270",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/examples/ev_core.rs",
+      "sha256": "f20b81bc66ad5e35f3f06466b8a5594d3ba2bc9e84b9e5a8da75ed97b321405e",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/lib.rs",
+      "sha256": "4dbb55f6bde85dfbf5e1ec0a72ada56e00920fc5b268ca187f58ac64e5688bab",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/default/ff.rs",
+      "sha256": "1781423e91daf0669b08824be64d378185b9715e67be88eabbfa9b3911cc430b",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/default/gamepad.rs",
+      "sha256": "c6b76785454109a44402afb29d4ab7f469c2bca685c4c5ccd3d1fe04f98c30ae",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/default/mod.rs",
+      "sha256": "6eb16af421252b824e594309b20503f8bddfa943937a597cef11b84da70bddb3",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/linux/ff.rs",
+      "sha256": "79ceb860bfdbadfcd19196cba59da3c4c2b7c0fd5303e576e6ce65892110d83f",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/linux/gamepad.rs",
+      "sha256": "49c6a720f91d98d78955a8ac863ea99a980049e071086809c420953b1c97ae3c",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/linux/ioctl.rs",
+      "sha256": "b52a41e395e9d2fe67bff4d76be720c3b56826077f6c06a06055383aa18b10bf",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/linux/mod.rs",
+      "sha256": "e1bc0b31cb742d0afb4612ffdd884db778511a68d31f1657d9df7f444c62b9d4",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/linux/udev.rs",
+      "sha256": "e90cba4d59481b587f51a7e6efbd98de37f95a3c71ee3716a22884b8fe7abbf1",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/macos/ff.rs",
+      "sha256": "a964c5f137ae105ca84d306178107865d903912c185ab979c146d4d7ab026643",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/macos/gamepad.rs",
+      "sha256": "b31452b80c85cdf4a6f216c12b83b1a799eb7ab1f3e01d2bc1867837a91c0f39",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/macos/io_kit.rs",
+      "sha256": "3512eb71e4e8bfb5f4e01dfa5c7b5913f6a5e346b611c270314605d9831b9fd6",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/macos/mod.rs",
+      "sha256": "0d917656dcceb167692261b2612f48edff6a5ef2ceb53f7c4957bee822b07483",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/mod.rs",
+      "sha256": "e02c475576a638418848bb7f5990d29eadf06c9c4617f1fb276bbbb590ea1697",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/wasm/ff.rs",
+      "sha256": "afac021047e93585cac4e312ad40220c0f162ca6716dc1f13c36cfc302f8f0c4",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/wasm/gamepad.rs",
+      "sha256": "7cd1883ef1f55fdabb65150f55d9f712899ab5189ba8c547de09ff2944d4464f",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/wasm/mod.rs",
+      "sha256": "83a51121a371a308a1b0164b61a5e2e1d95ccb4e24b2e2f7068ae94ec2912350",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_wgi/ff.rs",
+      "sha256": "d870c04e176f02395cb0ec65f021ca08c6c9c9546c27900002b48f7087de39f3",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_wgi/gamepad.rs",
+      "sha256": "bfaaf5b6a002431b6c352a06d1eb86f1c6faa64a64b8bdbccc8af06cf2995650",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_wgi/mod.rs",
+      "sha256": "be70fc8060f0bd315bb178986e67ad238ff0f46616c84511811d2b3f59bf3ab6",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_xinput/ff.rs",
+      "sha256": "defad2540ed9282b067f9612503263d427fca5799cf6233141d429bbd29ee596",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_xinput/gamepad.rs",
+      "sha256": "c020d969ab05d2ea518ed29ede5799bfea4cbb8125b5837ff6721a311d020ffb",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/platform/windows_xinput/mod.rs",
+      "sha256": "2db10284e653d020c0af0e3e16aa5fdd21dfb94e782508445f0c2bc580e64d35",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs-core/src/utils.rs",
+      "sha256": "7891ebf61a0ae6390441dd3850cf344c6997548cb7f2f2f8a40ffd677fc5c7b5",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/CHANGELOG.md",
+      "sha256": "80e0cf7fdaf627f92b78874ef907bfefd9b111696e079e3afde94a682d764758",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/Cargo.toml",
+      "sha256": "cfbf37d275593ece1e992f5cb51653f91ece3ce2485f819ccc4d7079a4ef1590",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/Cargo.toml.orig",
+      "sha256": "7ff9cb727f20265c51773f70bea16866276bd62b50b518d8d408263c99fd3417",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/LICENSE-MIT",
+      "sha256": "74497fa3c93ebb5ec32d85de117469cb3fab3276f7c02426f14c0f19f31f4424",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/README.md",
+      "sha256": "69905a69870b7710f49e0c68ba259903571598ba3ae0c59b5e9a44a168889af3",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/SDL_GameControllerDB/LICENSE",
+      "sha256": "97f35b302b361680ec1e891e95d2d52097bb95abff361434916d99dc1305f127",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/SDL_GameControllerDB/README.md",
+      "sha256": "d8d7b5231b86f7e4c40447fda627fa732743b224a63806fa60aa88628903258b",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/SDL_GameControllerDB/duplicates.py",
+      "sha256": "7d5a666da6d468c68cc38394db9ac769b19094ca902dd896da8f7c97f1455695",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/SDL_GameControllerDB/gamecontrollerdb.txt",
+      "sha256": "a2c5ebc716ea92b0a43f58d6a9470dbb87e0f0cccd5b94faf188dcba8ba0a48f",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/SDL_GameControllerDB/mapping_guide.png",
+      "sha256": "b9b01f2e527e68c272ad90d76a974c29f9b1da2c2dcb0cad0b6b8c7a62ce9cf8",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/UXDUCK-PATCH.md",
+      "sha256": "7be97a66e9a6a8c72e01a8136c83709506e467f2d11f7d8b87b6f0a575bf0e38",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/build.rs",
+      "sha256": "e4dfb30aa9fc293142e92228607a17d484fd2bcdf5fddbf16299783e5ad368eb",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/ev.rs",
+      "sha256": "3fdf0f69393685f0173ed99f6096c6a944ae6c3105ff11a5b8d8ef8bc8ec2cc7",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/ff.rs",
+      "sha256": "46ff5172c162739bb1c465e3a8c5b8b1fa8660133d200a86dbe7bb61f0cbdc87",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/ff_pos.rs",
+      "sha256": "49257e800a76b740a3a59f5314d6b531c5e1fea349e1efc2c90395f62aac6904",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/gamepad_info.rs",
+      "sha256": "b375a657341169679aa3429a08f214a90f86b7aac7bd95c1c726d5eceed3933d",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/gui.rs",
+      "sha256": "b070d624badaeb7b8aa0dbcf7c42e46aa36ebe99d6201b1a65ed5b7b1a743c10",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/wasm/README.md",
+      "sha256": "272d13d1a8ab491b5292cef1ca68268da0e4734c6f99ac49b0be2eb3bd46e271",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/wasm/index.html",
+      "sha256": "60659deab4b6e7265761f88429bb40f6e1b63198ed1f57c4a0ec89d42d626307",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/wasm/wasm_gui.ps1",
+      "sha256": "21bad1d8ecb46101bd33dcff8344060f75988359a6837ea0e4387747aa43bef8",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/examples/wasm/wasm_gui.sh",
+      "sha256": "1f2bdd04fda9311c0a98ce071d8a4b62fb4206d56bae4b9af1da7373ff594dc1",
+      "executable": true
+    },
+    {
+      "path": "vendor/gilrs/src/constants.rs",
+      "sha256": "79b2bcdb359939aa0fd41837c09b5180600c05f571b4081416ff1d797cb00d23",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ev/filter.rs",
+      "sha256": "d339dccacd9f537f0a139f9eafd579cf5110cbdb9a37808b7346a980a9758976",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ev/mod.rs",
+      "sha256": "f77411cafab57d0c440e5b88b367f52ee6f41cfdcf0fe485e2fcd26e13b13eb3",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ev/state.rs",
+      "sha256": "0edad90084a765ff3a1f5f6b1210d40cf2d2a129c35ddc8b321d867d5484d75a",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ff/base_effect.rs",
+      "sha256": "7d8eb113cff3fee9e276ba037e76d812690a86aef71166a00170a5820ed819f5",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ff/effect_source.rs",
+      "sha256": "afb2c777f3af781994065d6b27e220ceaa5b934d73ce2ae39c98bb7de8842b23",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ff/mod.rs",
+      "sha256": "7b2a1bd709ede0f5b8f2d13f38ca88d965aaceb6fa3e00a42f105214ea7753b7",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ff/server.rs",
+      "sha256": "3b2bc4b74b9a5913e91964188ee4b4733140cdcb4c9a092c3fa77387a6ddaa96",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/ff/time.rs",
+      "sha256": "b7dbbb1d9a9c7dfba44d80cf4ec3b2a42556068c99a46aec232e9f9fa5d3b6d6",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/gamepad.rs",
+      "sha256": "92bd63e3d1384d530ff4f64d4bf90b0aeae5a141c514512fe810c84855a9b11d",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/lib.rs",
+      "sha256": "5d92965e1f623c33b51ec38ece921d62a7cac7c971b8332e5abb64d0f17b9842",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/mapping/mod.rs",
+      "sha256": "58880a158c0d721f5788994a91b07968af64265051fcda46c808f848a224a412",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/mapping/parser.rs",
+      "sha256": "368739de829c5c6f05b1d3fc2db6c26110dad8d08b2e1d7af9cc032a4b9627ee",
+      "executable": false
+    },
+    {
+      "path": "vendor/gilrs/src/utils.rs",
+      "sha256": "cdfe19b1e4a384a59f469f1e82b5120fef2fcb98df97139b270e19acd25604e5",
       "executable": false
     },
     {

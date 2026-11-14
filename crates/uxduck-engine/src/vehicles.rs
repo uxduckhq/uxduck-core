@@ -245,6 +245,27 @@ impl Engine {
         let after = vehicle.clone();
         self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
         self.vehicle_upserted(before.as_ref(), &after, presence_changed);
+        let bindings: Vec<_> = self
+            .state
+            .controllers
+            .values()
+            .filter_map(|controller| {
+                let binding = controller.last_target.as_ref()?;
+                let id = binding.vehicle_id.as_ref()?;
+                if id == &after.id || !after.aliases.contains(id) {
+                    return None;
+                }
+                let mut controller = controller.clone();
+                if let Some(binding) = controller.last_target.as_mut() {
+                    binding.vehicle_id = Some(after.id.clone());
+                }
+                controller.version += 1;
+                Some(controller)
+            })
+            .collect();
+        for controller in bindings {
+            self.commit_as(data_plane(), Change::ControllerUpserted { controller });
+        }
     }
 
     /// The record of a vehicle heard for the first time: named and coloured

@@ -12,6 +12,8 @@ use crate::domain::command::Command;
 use crate::domain::gripper::GripperAction;
 use crate::domain::modes::Family;
 
+pub const CONTROLLER_UNIT_ID_PREFIX: &str = "unit-";
+
 /// What a claimed controller drives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -42,6 +44,8 @@ pub struct Controller {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<Claim>,
     pub mode: TargetMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_target: Option<TargetBinding>,
     /// The vehicle it drives while claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -58,6 +62,14 @@ pub struct Controller {
     #[serde(skip)]
     pub holding: Option<Hold>,
     pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetBinding {
+    pub mode: TargetMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
 }
 
 /// A hold under way: what it sends when complete, and how long it takes.

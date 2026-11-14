@@ -18,14 +18,16 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFNumber, CFRetained, CFRunLoop, CFString, kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFRunLoop, CFString,
+    kCFRunLoopDefaultMode,
 };
 use objc2_io_kit::{
-    IOHIDDevice, IOHIDElement, IOHIDElementType, IOHIDManager, IOHIDValue, IOReturn,
-    kHIDPage_Button, kHIDPage_GenericDesktop, kHIDPage_Simulation, kHIDUsage_GD_GamePad,
-    kHIDUsage_GD_Joystick, kHIDUsage_GD_MultiAxisController, kIOHIDDeviceUsageKey,
-    kIOHIDDeviceUsagePageKey, kIOHIDOptionsTypeNone, kIOHIDProductIDKey, kIOHIDVendorIDKey,
-    kIOReturnSuccess,
+    IOHIDDevice, IOHIDElement, IOHIDElementType, IOHIDManager, IOHIDValue, IOObjectConformsTo,
+    IORegistryEntryGetRegistryEntryID, IOReturn, kHIDPage_Button, kHIDPage_GenericDesktop,
+    kHIDPage_Simulation, kHIDUsage_GD_GamePad, kHIDUsage_GD_Joystick,
+    kHIDUsage_GD_MultiAxisController, kIOHIDDeviceUsageKey, kIOHIDDeviceUsagePageKey,
+    kIOHIDOptionsTypeNone, kIOHIDProductIDKey, kIOHIDSerialNumberKey, kIOHIDTransportKey,
+    kIOHIDVendorIDKey, kIOReturnSuccess,
 };
 use uxduck_engine::controller_input::{InputEvent, macos_hid_axis_code};
 
@@ -69,7 +71,7 @@ impl Element {
 /// product, in the order the device describes them, one per element. Empty
 /// when `IOKit` cannot be opened or the device is not found.
 #[must_use]
-pub fn elements(vendor: u16, product: u16) -> Vec<Element> {
+pub fn elements(vendor: u16, product: u16, entry: u64) -> Vec<Element> {
     let manager = IOHIDManager::new(None, kIOHIDOptionsTypeNone);
     let matchers = CFArray::from_retained_objects(&[
         matcher(kHIDUsage_GD_Joystick),
@@ -93,7 +95,8 @@ pub fn elements(vendor: u16, product: u16) -> Vec<Element> {
         // alive while `devices` is.
         let device = unsafe { device.cast::<IOHIDDevice>().as_ref() }?;
         (number(device, kIOHIDVendorIDKey) == Some(i64::from(vendor))
-            && number(device, kIOHIDProductIDKey) == Some(i64::from(product)))
+            && number(device, kIOHIDProductIDKey) == Some(i64::from(product))
+            && registry_entry_id(device) == Some(entry))
         .then(|| read(device))
     });
     manager.close(kIOHIDOptionsTypeNone);
@@ -115,6 +118,86 @@ fn matcher(usage: u32) -> CFRetained<CFDictionary<CFString, CFNumber>> {
 fn number(device: &IOHIDDevice, key: &CStr) -> Option<i64> {
     let key = CFString::from_str(key.to_str().ok()?);
     device.property(&key)?.downcast::<CFNumber>().ok()?.as_i64()
+}
+
+fn text(device: &IOHIDDevice, key: &CStr) -> Option<String> {
+    let key = CFString::from_str(key.to_str().ok()?);
+    Some(
+        device
+            .property(&key)?
+            .downcast::<CFString>()
+            .ok()?
+            .to_string(),
+    )
+}
+
+fn registry_entry_id(device: &IOHIDDevice) -> Option<u64> {
+    let mut entry = 0;
+    // SAFETY: entry is a live u64 output, and service belongs to this device.
+    let result = unsafe { IORegistryEntryGetRegistryEntryID(device.service(), &raw mut entry) };
+    (result == kIOReturnSuccess && entry != 0).then_some(entry)
+}
+
+pub(super) fn identities() -> Vec<super::controller_identity::Device> {
+    let manager = IOHIDManager::new(None, kIOHIDOptionsTypeNone);
+    let matchers = CFArray::from_retained_objects(&[
+        matcher(kHIDUsage_GD_Joystick),
+        matcher(kHIDUsage_GD_GamePad),
+        matcher(kHIDUsage_GD_MultiAxisController),
+    ]);
+    // SAFETY: these are the same usage dictionaries used by the input reader.
+    unsafe { manager.set_device_matching_multiple(Some(matchers.as_opaque())) };
+    if manager.open(kIOHIDOptionsTypeNone) != kIOReturnSuccess {
+        return Vec::new();
+    }
+    let Some(devices) = manager.devices() else {
+        manager.close(kIOHIDOptionsTypeNone);
+        return Vec::new();
+    };
+    let count = usize::try_from(devices.count()).unwrap_or(0);
+    let mut values: Vec<*const c_void> = vec![std::ptr::null(); count];
+    // SAFETY: values has space for every retained device in the set.
+    unsafe { devices.values(values.as_mut_ptr()) };
+    let found = values
+        .into_iter()
+        .filter_map(|device| {
+            // SAFETY: IOHIDManagerCopyDevices retains these IOHIDDevices until devices drops.
+            let device = unsafe { device.cast::<IOHIDDevice>().as_ref() }?;
+            let entry = registry_entry_id(device)?;
+            let vendor = u16::try_from(number(device, kIOHIDVendorIDKey)?).ok()?;
+            let product = u16::try_from(number(device, kIOHIDProductIDKey)?).ok()?;
+            let transport = text(device, kIOHIDTransportKey)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let virtual_device = device
+                .property(&CFString::from_str("VirtualHIDDevice"))
+                .and_then(|value| value.downcast::<CFBoolean>().ok())
+                .is_some_and(|value| value.value());
+            let mut class = [0; 128];
+            for (output, input) in class
+                .iter_mut()
+                .zip(c"AppleGCSyntheticDevice".to_bytes_with_nul())
+            {
+                *output = i8::from_ne_bytes([*input]);
+            }
+            // SAFETY: class is the required live, nul-terminated 128-byte buffer.
+            let synthetic = unsafe { IOObjectConformsTo(device.service(), &raw mut class) };
+            Some(super::controller_identity::Device {
+                entry,
+                vendor,
+                product,
+                serial: text(device, kIOHIDSerialNumberKey),
+                physical: !virtual_device
+                    && !synthetic
+                    && matches!(
+                        transport.as_str(),
+                        "usb" | "bluetooth" | "bluetooth low energy"
+                    ),
+            })
+        })
+        .collect();
+    manager.close(kIOHIDOptionsTypeNone);
+    found
 }
 
 /// An axis as gilrs takes one: X to Wheel on the generic desktop page, or a
@@ -300,9 +383,14 @@ unsafe extern "C-unwind" fn input_value(
 
 /// Establish the reader synchronously so gilrs events are suppressed only once
 /// the native reader is ready. Opening uses shared, read-only HID access.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded HID observer setup and shutdown"
+)]
 pub fn observe_duplicates(
     vendor: u16,
     product: u16,
+    entry: u64,
     id: String,
     events: impl Fn(InputEvent) + Send + 'static,
 ) -> Option<Duplicates> {
@@ -350,6 +438,10 @@ pub fn observe_duplicates(
                 manager.close(kIOHIDOptionsTypeNone);
                 return;
             };
+            if registry_entry_id(device) != Some(entry) {
+                manager.close(kIOHIDOptionsTypeNone);
+                return;
+            }
             let all = identified(device);
             let usages: BTreeSet<u32> = all
                 .iter()

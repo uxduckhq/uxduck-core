@@ -158,10 +158,7 @@ fn setup_with(system: NoSystem) -> (Engine, Client, Orders) {
     setup_with_state(system, uxduck_engine::state::State::default())
 }
 
-fn setup_with_state(
-    system: NoSystem,
-    state: uxduck_engine::state::State,
-) -> (Engine, Client, Orders) {
+fn load_state(system: NoSystem, state: uxduck_engine::state::State) -> (Engine, Client, Orders) {
     let orders = Orders::default();
     let config = EngineConfig {
         daemon_version: "0.1.0".into(),
@@ -193,7 +190,15 @@ fn setup_with_state(
             sessions: vec![],
         },
     );
-    let mut ui = connect(&mut engine, "operator-ui");
+    let ui = connect(&mut engine, "operator-ui");
+    (engine, ui, orders)
+}
+
+fn setup_with_state(
+    system: NoSystem,
+    state: uxduck_engine::state::State,
+) -> (Engine, Client, Orders) {
+    let (mut engine, mut ui, orders) = load_state(system, state);
     let link = call(
         &mut engine,
         &mut ui,
@@ -228,6 +233,476 @@ fn setup_with_state(
 
 fn error_kind(reply: &Value) -> &str {
     reply["error"]["data"]["kind"].as_str().unwrap_or("none")
+}
+
+#[test]
+fn disconnected_local_sessions_retire_records_and_presence_without_resetting_mappings() {
+    let mut state = uxduck_engine::State::default();
+    let mut mapping = uxduck_core::domain::controller::InputMapping::mode_2();
+    mapping.id = "kept-calibration".into();
+    mapping.roll.calibration = Some(uxduck_core::domain::controller::AxisCalibration {
+        min: -0.9,
+        centre: 0.1,
+        max: 0.8,
+    });
+    state
+        .input_mappings
+        .insert(mapping.id.clone(), mapping.clone());
+    let (mut engine, mut ui, orders) = setup_with_state(NoSystem::default(), state);
+    let ana = as_ana(&mut engine, &mut ui);
+    engine.controller_connected("unit-other", "Other pad", true);
+    let other = engine.state().controllers["unit-other"].clone();
+    let mappings = engine.state().input_mappings.clone();
+    let notices = engine.state().notifications.clone();
+    for i in 0..64 {
+        let id = format!("gp-session-local-{i}");
+        engine.controller_connected(&id, "Radio", true);
+        let chosen = call(
+            &mut engine,
+            &mut ui,
+            "controller/chooseMapping",
+            json!({
+                "id": id, "vehicleId": "v2", "mappingId": mapping.id,
+            }),
+        );
+        assert!(chosen.get("error").is_none(), "{chosen}");
+        engine.controller_disconnected(&id);
+        assert!(!engine.state().controllers.contains_key(&id));
+        assert_eq!(engine.state().controllers["unit-other"], other);
+        assert_eq!(engine.state().input_mappings, mappings);
+        assert_eq!(engine.state().notifications, notices);
+        assert!(orders.take().is_empty());
+    }
+    let operator = &engine.state().operators[&ana];
+    assert_eq!(operator.controller_mappings.len(), 64);
+    assert_eq!(
+        operator.mapping_for("gp-session-next", "Radio", &["v2"]),
+        Some(mapping.id.as_str())
+    );
+    engine.controller_connected("gp-session-next", "Radio", true);
+    let fresh = &engine.state().controllers["gp-session-next"];
+    assert!(fresh.claim.is_none() && fresh.target.is_none() && fresh.last_target.is_none());
+    assert!(orders.take().is_empty());
+}
+
+#[test]
+fn a_session_keeps_its_detached_claim_until_disconnect_releases_before_pruning() {
+    let (mut engine, mut ui, orders) = setup();
+    let id = "gp-session-held";
+    engine.controller_connected(id, "Session pad", true);
+    engine.controller_neutral(id, true);
+    let claim = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({
+            "id": id, "mode": "pinned", "vehicleId": "v1",
+        }),
+    );
+    assert!(claim.get("error").is_none(), "{claim}");
+    let mappings = engine.state().input_mappings.clone();
+    orders.take();
+    engine.disconnect(ui.id);
+    engine.expire_detached_claims(1_000 + CLAIM_GRACE_US - 1);
+    assert!(engine.state().controllers[id].claim.is_some());
+    assert!(orders.take().is_empty());
+    let mut other = connect(&mut engine, "operator-ui");
+    let refused = call(
+        &mut engine,
+        &mut other,
+        "controller/claim",
+        json!({
+            "id": "g1", "mode": "pinned", "vehicleId": "v1",
+        }),
+    );
+    assert_eq!(error_kind(&refused), "busy", "{refused}");
+    engine.controller_disconnected(id);
+    assert_eq!(orders.take(), [format!("route {id} none")]);
+    assert!(!engine.state().controllers.contains_key(id));
+    assert_eq!(engine.state().input_mappings, mappings);
+    assert!(
+        titles(&engine)
+            .iter()
+            .any(|title| title.starts_with("Session pad stopped driving ")
+                && title.ends_with(": it was unplugged"))
+    );
+    assert!(
+        !engine.state().notifications.values().any(
+            |notice| notice.condition.as_deref() == Some("controller-presence:gp-session-held")
+        )
+    );
+    let accepted = call(
+        &mut engine,
+        &mut other,
+        "controller/claim",
+        json!({
+            "id": "g1", "mode": "pinned", "vehicleId": "v1",
+        }),
+    );
+    assert!(accepted.get("error").is_none(), "{accepted}");
+}
+
+#[test]
+fn restarts_retire_old_session_records_but_preserve_synced_mapping_refs_and_calibration() {
+    let (mut engine, mut ui, _) = setup();
+    let ana = as_ana(&mut engine, &mut ui);
+    let mut state = engine.state().clone();
+    let operator = state.operators.get_mut(&ana).unwrap();
+    operator.choose_mapping("gp-session-foreign", "Radio", Some("v1"), "mode-1");
+    operator.choose_mapping("gp-session-another-computer", "Radio", Some("v1"), "mode-2");
+    let kept_refs = operator.controller_mappings.clone();
+    let mut mapping = uxduck_core::domain::controller::InputMapping::mode_2();
+    mapping.id = "saved-radio".into();
+    mapping.pitch.calibration = Some(uxduck_core::domain::controller::AxisCalibration {
+        min: -0.8,
+        centre: 0.1,
+        max: 0.9,
+    });
+    state.input_mappings.insert(mapping.id.clone(), mapping);
+    let mut legacy = state.controllers["g1"].clone();
+    legacy.id = "gp-030000005e0400008e02000000007801".into();
+    state.controllers.insert(legacy.id.clone(), legacy);
+    for generation in 0..4 {
+        let (mut engine, _, orders) = load_state(NoSystem::default(), state);
+        assert!(
+            engine
+                .state()
+                .controllers
+                .keys()
+                .all(|id| !id.starts_with("gp-session-"))
+        );
+        assert!(
+            engine
+                .state()
+                .controllers
+                .contains_key("gp-030000005e0400008e02000000007801")
+        );
+        assert_eq!(
+            engine.state().operators[&ana].controller_mappings,
+            kept_refs
+        );
+        let mappings = engine.state().input_mappings.clone();
+        for index in 0..16 {
+            engine.controller_connected(&format!("gp-session-{generation}-{index}"), "Radio", true);
+        }
+        state = serde_json::from_str(&serde_json::to_string(engine.state()).unwrap()).unwrap();
+        for (index, controller) in state
+            .controllers
+            .values_mut()
+            .filter(|c| c.id.starts_with("gp-session-"))
+            .enumerate()
+        {
+            controller.connected = index % 2 == 0;
+            if index % 3 == 0 {
+                controller.claim = Some(uxduck_core::domain::controller::Claim {
+                    client_id: "closed-window".into(),
+                    client_name: "Old window".into(),
+                    operator_id: Some(ana.clone()),
+                });
+                controller.target = Some("v1".into());
+                controller.pending_target = Some("v2".into());
+            }
+        }
+        let (restarted, _, _) = load_state(NoSystem::default(), state);
+        assert!(
+            restarted
+                .state()
+                .controllers
+                .keys()
+                .all(|id| !id.starts_with("gp-session-"))
+        );
+        assert!(!restarted.state().notifications.values().any(|notice| {
+            notice
+                .condition
+                .as_deref()
+                .is_some_and(|condition| condition.starts_with("controller-presence:gp-session-"))
+        }));
+        assert_eq!(restarted.state().input_mappings, mappings);
+        assert_eq!(
+            restarted.state().operators[&ana].controller_mappings,
+            kept_refs
+        );
+        assert!(orders.take().is_empty());
+        state = restarted.state().clone();
+    }
+}
+
+#[test]
+fn a_promoted_alias_cannot_admit_a_second_controller_for_the_same_aircraft() {
+    let (mut engine, mut ui, orders) = setup();
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    let vehicle = engine.state().vehicles["v2"].clone();
+    engine.vehicle_observed(Observation {
+        connections: None,
+        id: "lasting-vid".into(),
+        aliases: vec!["v2".into()],
+        link_id: vehicle.link_id,
+        peer: vehicle.peer,
+        system_id: vehicle.system_id,
+        component_ids: vehicle.component_ids,
+        autopilot: vehicle.autopilot,
+        vehicle_type: vehicle.vehicle_type,
+        uid: Some("unit-uid".into()),
+        firmware: None,
+        firmware_commit: None,
+        presence: Presence::Online,
+        last_heartbeat_us: 7,
+        armed: false,
+        mode: None,
+    });
+    engine.controller_connected("g2", "Second controller", true);
+    orders.take();
+    let refused = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g2", "mode": "pinned", "vehicleId": "lasting-vid" }),
+    );
+    assert_eq!(error_kind(&refused), "busy", "{refused}");
+    assert!(engine.state().controllers["g2"].claim.is_none());
+    assert!(orders.take().is_empty());
+}
+
+#[test]
+fn native_and_browser_model_ids_never_persist_a_physical_controllers_pin() {
+    let (mut engine, mut ui, orders) = setup();
+    for id in [
+        "g1",
+        "keyboard:page",
+        "unknown-id",
+        "gp-030000005e0400008e02000000007801",
+        "gp-0",
+        "web-045e-028e",
+    ] {
+        engine.controller_connected(id, "Controller model", true);
+        orders.take();
+        let answer = call(
+            &mut engine,
+            &mut ui,
+            "controller/setTarget",
+            json!({ "id": id, "mode": "pinned", "vehicleId": "v2" }),
+        );
+        if id.starts_with("keyboard:") {
+            assert_eq!(error_kind(&answer), "capability-denied", "{answer}");
+        } else {
+            assert!(answer.get("error").is_none(), "{answer}");
+            assert!(answer["result"]["lastTarget"].is_null(), "{id}: {answer}");
+        }
+        assert!(engine.state().controllers[id].last_target.is_none());
+        assert!(orders.take().is_empty());
+    }
+}
+
+fn offline_vehicle(engine: &mut Engine, id: &str) {
+    let vehicle = engine.state().vehicles[id].clone();
+    engine.vehicle_observed(Observation {
+        connections: None,
+        id: vehicle.id,
+        aliases: vehicle.aliases,
+        link_id: vehicle.link_id,
+        peer: vehicle.peer,
+        system_id: vehicle.system_id,
+        component_ids: vehicle.component_ids,
+        autopilot: vehicle.autopilot,
+        vehicle_type: vehicle.vehicle_type,
+        uid: vehicle.uid,
+        firmware: vehicle.firmware,
+        firmware_commit: vehicle.firmware_commit,
+        presence: Presence::Offline,
+        last_heartbeat_us: vehicle.last_heartbeat_us,
+        armed: vehicle.armed,
+        mode: vehicle.mode,
+    });
+    assert_eq!(engine.state().vehicles[id].presence, Presence::Offline);
+}
+
+#[test]
+fn a_saved_target_is_a_binding_not_a_claim_or_a_control_route() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("unit-g1", "Xbox", true);
+    offline_vehicle(&mut engine, "v2");
+    orders.take();
+    let pinned = call(
+        &mut engine,
+        &mut ui,
+        "controller/setTarget",
+        json!({
+            "id": "unit-g1", "mode": "pinned", "vehicleId": "v2"
+        }),
+    );
+    assert_eq!(
+        pinned["result"]["lastTarget"],
+        json!({ "mode": "pinned", "vehicleId": "v2" }),
+        "{pinned}"
+    );
+    assert!(pinned["result"]["claim"].is_null());
+    assert!(pinned["result"]["target"].is_null());
+    assert!(orders.take().is_empty());
+    call(
+        &mut engine,
+        &mut ui,
+        "client/select",
+        json!({ "vehicleId": "v1" }),
+    );
+    engine.controller_disconnected("unit-g1");
+    engine.controller_connected("unit-g1", "Xbox", true);
+    assert!(
+        orders
+            .take()
+            .iter()
+            .all(|order| order == "route unit-g1 none")
+    );
+    let stored = serde_json::to_value(engine.state()).unwrap();
+    assert_eq!(
+        stored["controllers"]["unit-g1"]["lastTarget"]["vehicleId"],
+        "v2"
+    );
+    let mut agent = connect(&mut engine, "agent");
+    let denied = call(
+        &mut engine,
+        &mut agent,
+        "controller/setTarget",
+        json!({ "id": "unit-g1", "mode": "follows-selection" }),
+    );
+    assert_eq!(error_kind(&denied), "capability-denied");
+    let selected = call(
+        &mut engine,
+        &mut ui,
+        "controller/setTarget",
+        json!({ "id": "unit-g1", "mode": "follows-selection" }),
+    );
+    assert_eq!(
+        selected["result"]["lastTarget"],
+        json!({ "mode": "follows-selection" })
+    );
+    assert!(orders.take().is_empty());
+}
+
+#[test]
+fn release_keeps_the_last_pin_and_a_missing_vehicle_does_not_redirect_it() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("unit-g1", "Xbox", true);
+    let pinned = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "unit-g1", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    assert_eq!(
+        pinned["result"]["lastTarget"]["vehicleId"], "v2",
+        "{pinned}"
+    );
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/release",
+        json!({ "id": "unit-g1" }),
+    );
+    let kept = serde_json::to_value(&engine.state().controllers["unit-g1"]).unwrap();
+    assert_eq!(kept["lastTarget"]["vehicleId"], "v2");
+    assert!(kept["target"].is_null());
+    offline_vehicle(&mut engine, "v2");
+    let hidden = call(
+        &mut engine,
+        &mut ui,
+        "vehicle/hide",
+        json!({ "id": "v2", "hidden": true }),
+    );
+    assert!(hidden.get("error").is_none(), "{hidden}");
+    let removed = call(
+        &mut engine,
+        &mut ui,
+        "vehicle/delete",
+        json!({ "id": "v2" }),
+    );
+    assert!(removed.get("error").is_none(), "{removed}");
+    assert!(engine.vehicle("v2").is_none());
+    call(
+        &mut engine,
+        &mut ui,
+        "client/select",
+        json!({ "vehicleId": "v1" }),
+    );
+    orders.take();
+    let refused = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "unit-g1", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    assert_eq!(error_kind(&refused), "not-found", "{refused}");
+    assert!(orders.take().is_empty());
+    assert!(engine.state().controllers["unit-g1"].claim.is_none());
+    assert_eq!(
+        serde_json::to_value(&engine.state().controllers["unit-g1"]).unwrap()["lastTarget"]["vehicleId"],
+        "v2"
+    );
+}
+
+#[test]
+fn transient_native_indices_never_remember_a_pin_for_the_next_device() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("gp-0", "Unknown device", true);
+    orders.take();
+    let answer = call(
+        &mut engine,
+        &mut ui,
+        "controller/setTarget",
+        json!({ "id": "gp-0", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    assert!(answer.get("error").is_none(), "{answer}");
+    assert!(answer["result"]["lastTarget"].is_null());
+    assert!(answer["result"]["claim"].is_null());
+    assert!(orders.take().is_empty());
+}
+
+#[test]
+fn a_remembered_pin_promotes_to_the_vehicles_lasting_identity_without_routing() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("unit-g1", "Xbox", true);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/setTarget",
+        json!({ "id": "unit-g1", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    let vehicle = engine.state().vehicles["v2"].clone();
+    orders.take();
+    engine.vehicle_observed(Observation {
+        connections: None,
+        id: "lasting-uid-vid".into(),
+        aliases: vec!["v2".into()],
+        link_id: vehicle.link_id,
+        peer: vehicle.peer,
+        system_id: 1,
+        component_ids: vehicle.component_ids,
+        autopilot: vehicle.autopilot,
+        vehicle_type: vehicle.vehicle_type,
+        uid: Some("board-uid".into()),
+        firmware: None,
+        firmware_commit: None,
+        presence: Presence::Online,
+        last_heartbeat_us: 7,
+        armed: false,
+        mode: None,
+    });
+    let controller = serde_json::to_value(&engine.state().controllers["unit-g1"]).unwrap();
+    assert_eq!(controller["lastTarget"]["vehicleId"], "lasting-uid-vid");
+    assert!(controller["claim"].is_null() && controller["target"].is_null());
+    assert!(orders.take().is_empty());
+    let claim = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "unit-g1", "mode": "pinned", "vehicleId": "v2" }),
+    );
+    assert_eq!(claim["result"]["target"], "lasting-uid-vid", "{claim}");
+    assert_eq!(orders.take(), ["route unit-g1 lasting-uid-vid 1"]);
 }
 
 /// Vehicle v3 on v1's link, of this autopilot and type.
@@ -2458,6 +2933,79 @@ fn reset_connected_controller_clears_choices_without_editing_shared_mappings() {
         restored.operators[&ana].mapping_for("g1", "Xbox", &["v2"]),
         Some(fresh.id.as_str())
     );
+}
+
+#[test]
+fn resetting_a_connected_controller_forgets_only_its_target_without_restoring_control() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("unit-g1", "Xbox", true);
+    engine.controller_connected("unit-g2", "Other controller", true);
+    for id in ["unit-g1", "unit-g2"] {
+        let saved = call(
+            &mut engine,
+            &mut ui,
+            "controller/setTarget",
+            json!({ "id": id, "mode": "pinned", "vehicleId": "v2" }),
+        );
+        assert_eq!(saved["result"]["lastTarget"]["vehicleId"], "v2", "{saved}");
+    }
+    let other = engine.state().controllers["unit-g2"].clone();
+    let mappings = engine.state().input_mappings.clone();
+    orders.take();
+    let reset = call(
+        &mut engine,
+        &mut ui,
+        "controller/forget",
+        json!({ "id": "unit-g1" }),
+    );
+    assert_eq!(reset["result"], json!({}), "{reset}");
+    let controller = &engine.state().controllers["unit-g1"];
+    assert!(controller.connected);
+    assert!(controller.last_target.is_none());
+    assert!(controller.claim.is_none());
+    assert!(controller.target.is_none());
+    assert!(controller.pending_target.is_none());
+    assert_eq!(engine.state().controllers["unit-g2"], other);
+    for (id, mapping) in mappings {
+        assert_eq!(engine.state().input_mappings[&id], mapping);
+    }
+    assert_eq!(orders.take(), vec!["route unit-g1 none"]);
+    let restored: uxduck_engine::State =
+        serde_json::from_str(&serde_json::to_string(engine.state()).unwrap()).unwrap();
+    assert!(restored.controllers["unit-g1"].last_target.is_none());
+    assert!(restored.controllers["unit-g1"].claim.is_none());
+    assert_eq!(
+        restored.controllers["unit-g2"].last_target,
+        other.last_target
+    );
+}
+
+#[test]
+fn a_refused_reset_keeps_the_remembered_target_and_current_control_unchanged() {
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_connected("unit-g1", "Xbox", true);
+    engine.controller_neutral("unit-g1", true);
+    let claimed = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "unit-g1", "mode": "pinned", "vehicleId": "v2", "mappingId": "mode-2" }),
+    );
+    assert_eq!(
+        claimed["result"]["lastTarget"]["vehicleId"], "v2",
+        "{claimed}"
+    );
+    let before = engine.state().controllers["unit-g1"].clone();
+    orders.take();
+    let refused = call(
+        &mut engine,
+        &mut ui,
+        "controller/forget",
+        json!({ "id": "unit-g1" }),
+    );
+    assert_eq!(error_kind(&refused), "busy", "{refused}");
+    assert_eq!(engine.state().controllers["unit-g1"], before);
+    assert!(orders.take().is_empty());
 }
 
 #[test]

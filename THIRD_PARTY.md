@@ -12,6 +12,11 @@ third-party licenses or notices.
   from the events catalogue PX4 1.17.0 builds (`etc/extras/all_events.json`):
   its health and arming check messages. PX4 is BSD-3-Clause licensed. Its
   licence is beside the file, in `crates/uxduck-mavlink/px4/LICENSE`.
+- Native controller input includes `gilrs` 0.11.2 and `gilrs-core` 0.6.8 under
+  `vendor/`, with bounded macOS attachment/removal patches documented in
+  `vendor/gilrs/UXDUCK-PATCH.md`. Their upstream MIT and Apache-2.0 licenses are
+  retained in each directory. The bundled SDL controller database retains its
+  own license at `vendor/gilrs/SDL_GameControllerDB/LICENSE`.
 - Other Cargo dependencies are downloaded separately, not vendored in this source
   export. Their package manifests and license files govern those components.
   `Cargo.lock` pins the versions. Binary distributors must preserve the notices

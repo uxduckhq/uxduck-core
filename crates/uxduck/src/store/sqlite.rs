@@ -972,6 +972,7 @@ mod tests {
             connected: false,
             claim: None,
             mode: TargetMode::FollowsSelection,
+            last_target: None,
             target: None,
             input_pause: None,
             holding: None,

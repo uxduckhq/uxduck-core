@@ -245,6 +245,7 @@ ControlActions.class
 Controller.connected
 Controller.id
 Controller.mapping_id
+TargetBinding.mode
 MapCameraOptions.following
 MapCameraOptions.resume
 MapCameraOptions.viewpoint

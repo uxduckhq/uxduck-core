@@ -136,7 +136,7 @@ fn fake_events(message: &serde_json::Value, known: &mut BTreeSet<String>) -> Vec
     events
 }
 
-#[cfg(feature = "gamepad")]
+#[cfg(all(feature = "gamepad", not(target_os = "macos")))]
 fn gamepad_id(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
     let uuid = gilrs.gamepad(id).uuid();
     if uuid == [0; 16] {
@@ -151,11 +151,11 @@ fn gamepad_id(gilrs: &gilrs::Gilrs, id: gilrs::GamepadId) -> String {
 }
 
 #[cfg(feature = "gamepad")]
-fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId) -> InputEvent {
+fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId, id: String) -> InputEvent {
     let gamepad = gilrs.gamepad(pad);
     // Otherwise gilrs guesses gamepad names, wrong for a radio in joystick mode.
     let connected = InputEvent::Connected {
-        id: gamepad_id(gilrs, pad),
+        id,
         name: gamepad.name().to_owned(),
         layout_known: gamepad.mapping_source() == gilrs::MappingSource::SdlMappings,
     };
@@ -193,13 +193,25 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
             let events = super::bluetooth::watch(events);
             #[cfg(target_os = "macos")]
             let mut duplicates = std::collections::HashMap::new();
+            #[cfg(target_os = "macos")]
+            let mut identities = match super::controller_identity::Attachments::new() {
+                Ok(identities) => identities,
+                Err(error) => {
+                    tracing::error!(%error, "cannot create safe controller connection identities");
+                    return;
+                }
+            };
             let pads: Vec<gilrs::GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
             for pad in pads {
-                events(gamepad_connected(&gilrs, pad));
                 #[cfg(target_os = "macos")]
-                if let Some(observer) =
-                    announce_native(&gilrs, pad, gamepad_id(&gilrs, pad), events.clone())
-                {
+                let Some(id) = connect_native(&gilrs, pad, &mut identities) else {
+                    continue;
+                };
+                #[cfg(not(target_os = "macos"))]
+                let id = gamepad_id(&gilrs, pad);
+                events(gamepad_connected(&gilrs, pad, id.clone()));
+                #[cfg(target_os = "macos")]
+                if let Some(observer) = announce_native(&gilrs, pad, id, events.clone()) {
                     duplicates.insert(pad, observer);
                 }
             }
@@ -209,7 +221,46 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                     || gilrs.next_event_blocking(None),
                     std::thread::sleep,
                 );
+                #[cfg(not(target_os = "macos"))]
                 let id = gamepad_id(&gilrs, event.id);
+                #[cfg(target_os = "macos")]
+                let id = {
+                    use gilrs::MacOSGamepadExt;
+                    let slot = usize::from(event.id);
+                    match event.event {
+                        gilrs::EventType::Connected => {
+                            duplicates.remove(&event.id);
+                            if let Some(old) = identities.remove(slot) {
+                                steady.last.retain(|(device, _), _| device != &old);
+                                events(InputEvent::Disconnected { id: old });
+                            }
+                            let Some(id) = connect_native(&gilrs, event.id, &mut identities) else {
+                                continue;
+                            };
+                            id
+                        }
+                        gilrs::EventType::Disconnected => {
+                            let Some(id) = identities.remove(slot) else {
+                                continue;
+                            };
+                            id
+                        }
+                        _ => {
+                            let entry = gilrs
+                                .connected_gamepad(event.id)
+                                .and_then(|pad| pad.registry_entry_id());
+                            let Some(id) = identities.get(slot, entry) else {
+                                duplicates.remove(&event.id);
+                                if let Some(old) = identities.remove(slot) {
+                                    steady.last.retain(|(device, _), _| device != &old);
+                                    events(InputEvent::Disconnected { id: old });
+                                }
+                                continue;
+                            };
+                            id
+                        }
+                    }
+                };
                 let known =
                     gilrs.gamepad(event.id).mapping_source() == gilrs::MappingSource::SdlMappings;
                 #[cfg(target_os = "macos")]
@@ -224,7 +275,7 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                     gilrs::EventType::Connected => {
                         #[cfg(target_os = "macos")]
                         duplicates.remove(&event.id);
-                        events(gamepad_connected(&gilrs, event.id));
+                        events(gamepad_connected(&gilrs, event.id, id.clone()));
                         #[cfg(target_os = "macos")]
                         if let Some(observer) =
                             announce_native(&gilrs, event.id, id.clone(), events.clone())
@@ -290,6 +341,34 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
     }
 }
 
+#[cfg(all(feature = "gamepad", target_os = "macos"))]
+fn connect_native(
+    gilrs: &gilrs::Gilrs,
+    pad: gilrs::GamepadId,
+    identities: &mut super::controller_identity::Attachments,
+) -> Option<String> {
+    use gilrs::MacOSGamepadExt;
+    let gamepad = gilrs.connected_gamepad(pad)?;
+    let entry = gamepad.registry_entry_id()?;
+    let admitted: Vec<u64> = gilrs
+        .gamepads()
+        .filter_map(|(_, pad)| pad.registry_entry_id())
+        .collect();
+    let persistent = gamepad
+        .vendor_id()
+        .zip(gamepad.product_id())
+        .and_then(|(vendor, product)| {
+            super::controller_identity::persistent_id(
+                entry,
+                vendor,
+                product,
+                &admitted,
+                &super::hid::identities(),
+            )
+        });
+    Some(identities.connect(usize::from(pad), entry, persistent))
+}
+
 /// Native snapshots and repeated-axis events must use exactly the same codes.
 #[cfg(all(feature = "gamepad", target_os = "macos"))]
 fn announce_native(
@@ -298,13 +377,15 @@ fn announce_native(
     id: String,
     events: impl Fn(InputEvent) + Send + Clone + 'static,
 ) -> Option<super::hid::Duplicates> {
+    use gilrs::MacOSGamepadExt;
     let gamepad = gilrs.gamepad(pad);
+    let entry = gamepad.registry_entry_id()?;
     let (vendor, product) = (gamepad.vendor_id()?, gamepad.product_id()?);
     let mut observer = (gamepad.mapping_source() != gilrs::MappingSource::SdlMappings)
-        .then(|| super::hid::observe_duplicates(vendor, product, id.clone(), events.clone()))
+        .then(|| super::hid::observe_duplicates(vendor, product, entry, id.clone(), events.clone()))
         .flatten();
     let elements = observer.as_ref().map_or_else(
-        || super::hid::elements(vendor, product),
+        || super::hid::elements(vendor, product, entry),
         |observer| observer.initial.clone(),
     );
     if let Some(snapshot) = present(gilrs, pad, id, elements) {
@@ -584,6 +665,39 @@ fn button_of(button: gilrs::Button) -> Option<GamepadButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "gamepad", target_os = "macos"))]
+    #[test]
+    #[ignore = "read-only native metadata diagnostic; requires an attached controller"]
+    fn native_unit_metadata() {
+        let mut gilrs = gilrs::GilrsBuilder::new()
+            .with_force_feedback(false)
+            .build()
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < until {
+            let _ = gilrs.next_event_blocking(Some(std::time::Duration::from_millis(100)));
+        }
+        let pads: Vec<_> = gilrs.gamepads().map(|(id, _)| id).collect();
+        let mut identities = super::super::controller_identity::Attachments::new().unwrap();
+        let ids: Vec<_> = pads
+            .iter()
+            .filter_map(|pad| connect_native(&gilrs, *pad, &mut identities))
+            .collect();
+        let unit_keys: Vec<_> = ids
+            .iter()
+            .filter(|id| id.starts_with(uxduck_core::domain::controller::CONTROLLER_UNIT_ID_PREFIX))
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({ "admitted": pads.len(), "serialBacked": unit_keys.len(),
+            "sessionOnly": ids.len() - unit_keys.len(), "unitKeys": unit_keys })
+        );
+        assert!(
+            !ids.is_empty(),
+            "No admitted native controller; attach a joystick or gamepad first"
+        );
+    }
 
     #[cfg(feature = "gamepad")]
     #[test]

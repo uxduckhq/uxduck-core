@@ -4,6 +4,8 @@
 pub mod agent;
 #[cfg(any(all(feature = "gamepad", target_os = "linux"), test))]
 mod bluetooth;
+#[cfg(any(all(feature = "gamepad", target_os = "macos"), test))]
+mod controller_identity;
 pub mod controllers;
 pub mod data_plane;
 pub mod engine_task;

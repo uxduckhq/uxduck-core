@@ -201,6 +201,10 @@ impl From<&c::Controller> for dto::Controller {
                 operator_id: claim.operator_id.clone(),
             }),
             mode: v.mode.into(),
+            last_target: v.last_target.as_ref().map(|binding| dto::TargetBinding {
+                mode: binding.mode.into(),
+                vehicle_id: binding.vehicle_id.clone(),
+            }),
             target: v.target.clone(),
             pending_target: v.pending_target.clone(),
             mapping_id: v.mapping_id.clone(),

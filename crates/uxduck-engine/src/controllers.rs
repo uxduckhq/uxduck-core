@@ -34,8 +34,8 @@ use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::command::{Command, ReceiptStatus};
 use uxduck_core::domain::controller::{
-    ActionBinding, Claim, Controller, GamepadButton, HOLD_MS, Hold, InputMapping, NEUTRAL,
-    PositionBinding, StickControl, Sticks, TargetMode, centred_throttle,
+    ActionBinding, CONTROLLER_UNIT_ID_PREFIX, Claim, Controller, GamepadButton, HOLD_MS, Hold,
+    InputMapping, NEUTRAL, PositionBinding, StickControl, Sticks, TargetMode, centred_throttle,
 };
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
@@ -477,6 +477,7 @@ fn claim(
     });
     controller.mode = mode;
     controller.target = target;
+    remember_target(&mut controller);
     controller.pending_target = None;
     controller.version += 1;
     engine
@@ -580,6 +581,50 @@ fn set_target(
         .get(&params.id)
         .cloned()
         .ok_or_else(|| not_found(&format!("controller {}", params.id)))?;
+    if controller.claim.is_none()
+        && !engine.live.claimant.contains_key(&controller.id)
+        && !engine.live.detached.contains_key(&controller.id)
+    {
+        engine.ensure_identity_settled()?;
+        let mode: TargetMode = params.mode.into();
+        let vehicle_id = if mode == TargetMode::Pinned {
+            let id = params
+                .vehicle_id
+                .ok_or_else(|| not_found("target vehicle"))?;
+            Some(
+                engine
+                    .vehicle(&id)
+                    .map(|v| v.id.clone())
+                    .or_else(|| {
+                        controller
+                            .last_target
+                            .as_ref()
+                            .filter(|binding| {
+                                binding.mode == TargetMode::Pinned
+                                    && binding.vehicle_id.as_ref() == Some(&id)
+                            })
+                            .and_then(|binding| binding.vehicle_id.clone())
+                    })
+                    .ok_or_else(|| not_found(&format!("vehicle {id}")))?,
+            )
+        } else {
+            None
+        };
+        if stable_controller_id(&controller.id) {
+            controller.last_target =
+                Some(uxduck_core::domain::controller::TargetBinding { mode, vehicle_id });
+        } else {
+            controller.last_target = None;
+        }
+        controller.version += 1;
+        engine.commit(
+            connection,
+            Change::ControllerUpserted {
+                controller: controller.clone(),
+            },
+        );
+        return to_value(&ControllerDto::from(&controller));
+    }
     if engine.live.claimant.get(&controller.id) != Some(&connection) {
         return Err(ApiError::new(
             ErrorKind::CapabilityDenied,
@@ -614,6 +659,7 @@ fn set_target(
     }
     controller.mode = mode;
     controller.target = Some(target);
+    remember_target(&mut controller);
     controller.pending_target = None;
     controller.version += 1;
     engine.commit(
@@ -695,6 +741,25 @@ fn choose_mapping(
         vehicle_id.as_deref(),
     );
     Ok(json!({}))
+}
+
+fn stable_controller_id(id: &str) -> bool {
+    id.starts_with(CONTROLLER_UNIT_ID_PREFIX)
+}
+
+fn remember_target(controller: &mut Controller) {
+    if !stable_controller_id(&controller.id) {
+        controller.last_target = None;
+        return;
+    }
+    controller.last_target = Some(uxduck_core::domain::controller::TargetBinding {
+        mode: controller.mode,
+        vehicle_id: if controller.mode == TargetMode::Pinned {
+            controller.target.clone()
+        } else {
+            None
+        },
+    });
 }
 
 fn create_mapping(
@@ -1273,7 +1338,12 @@ impl Engine {
             .vehicle(&vehicle_id)
             .ok_or_else(|| not_found(&format!("vehicle {vehicle_id}")))?;
         if let Some(other) = self.state.controllers.values().find(|c| {
-            c.id != controller_id && c.claim.is_some() && c.target.as_deref() == Some(&vehicle.id)
+            c.id != controller_id
+                && c.claim.is_some()
+                && c.target
+                    .as_deref()
+                    .and_then(|id| self.vehicle(id))
+                    .is_some_and(|target| target.id == vehicle.id)
         }) {
             return Err(ApiError::new(
                 ErrorKind::Busy,
@@ -1754,10 +1824,23 @@ impl Engine {
             .state
             .controllers
             .values()
-            .filter(|c| c.connected || c.claim.is_some())
+            .filter(|c| {
+                c.connected
+                    || c.claim.is_some()
+                    || (c.last_target.is_some() && !stable_controller_id(&c.id))
+            })
             .cloned()
             .collect();
         for mut controller in stale {
+            if !stable_controller_id(&controller.id) {
+                controller.last_target = None;
+            }
+            if controller.last_target.is_none()
+                && controller.mode == TargetMode::Pinned
+                && controller.target.is_some()
+            {
+                remember_target(&mut controller);
+            }
             if controller.claim.is_some() {
                 self.raise(Raise {
                     severity: Severity::Warning,
@@ -1785,6 +1868,32 @@ impl Engine {
             controller.version += 1;
             self.commit_as(daemon(), Change::ControllerUpserted { controller });
         }
+        let sessions: Vec<_> = self
+            .state
+            .controllers
+            .keys()
+            .filter(|id| id.starts_with("gp-session-"))
+            .cloned()
+            .collect();
+        for id in sessions {
+            self.prune_disconnected_session(&id);
+        }
+    }
+
+    fn prune_disconnected_session(&mut self, id: &str) {
+        if !id.starts_with("gp-session-")
+            || self.live.claimant.contains_key(id)
+            || self.live.detached.contains_key(id)
+            || self
+                .state
+                .controllers
+                .get(id)
+                .is_none_or(|controller| controller.connected || controller.claim.is_some())
+        {
+            return;
+        }
+        self.resolve(&format!("controller-presence:{id}"));
+        self.commit_as(daemon(), Change::ControllerRemoved { id: id.to_owned() });
     }
 
     /// The data plane found a controller. One whose layout the platform
@@ -1833,6 +1942,7 @@ impl Engine {
                 connected: true,
                 claim: None,
                 mode: TargetMode::FollowsSelection,
+                last_target: None,
                 target: None,
                 input_pause: None,
                 holding: None,
@@ -1975,6 +2085,7 @@ impl Engine {
                 controller.version += 1;
                 self.commit_as(daemon(), Change::ControllerUpserted { controller });
             }
+            self.prune_disconnected_session(id);
             return;
         };
         if let Some(mut controller) = self.state.controllers.get(id).cloned() {
@@ -1991,6 +2102,7 @@ impl Engine {
                 "it was unplugged"
             }),
         );
+        self.prune_disconnected_session(id);
     }
 
     /// Missing browser input pauses output, retaining an existing activation.
