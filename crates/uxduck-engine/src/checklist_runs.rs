@@ -29,8 +29,6 @@ use crate::{ConnectionId, Engine};
 /// How many earlier runs `checklist/runs` answers with, unless asked.
 const DEFAULT_RUNS: u32 = 20;
 const MAX_RUNS: u32 = 100;
-/// How many times one preflight is reopened, so its record stays small.
-const MAX_REOPENINGS: usize = 20;
 
 /// New preflight (K18, K29): every tick is cleared and a new run starts.
 /// The run before it stays in the vehicle's history. A finished one is
@@ -151,12 +149,6 @@ pub(crate) fn reopen(
             vehicle.name
         )));
     };
-    if run.reopenings.len() >= MAX_REOPENINGS {
-        return Err(invalid(format!(
-            "{}'s preflight has been reopened {MAX_REOPENINGS} times. Start a new preflight",
-            vehicle.name
-        )));
-    }
     run.reopenings.push(Reopening {
         finished,
         reopened: Tick {

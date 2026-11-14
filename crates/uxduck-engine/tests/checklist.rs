@@ -2270,6 +2270,32 @@ fn a_finished_preflight_keeps_its_list_until_a_person_reopens_it() {
 }
 
 #[test]
+fn a_preflight_is_reopened_as_often_as_a_person_needs() {
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": PROPS }] }),
+    );
+    b.tick(PROPS, true);
+    b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    // No count is refused (maintainer, 2026-11-14): each reopening is a
+    // person's own act, and each finish and reopening is kept in turn.
+    for n in 1..=25 {
+        b.time.advance(S);
+        let open = b.ok("checklist/reopen", json!({ "vehicleId": "v" }));
+        let reopenings = open["checklist"]["run"]["reopenings"].as_array().unwrap();
+        assert_eq!(reopenings.len(), n);
+        b.time.advance(S);
+        b.ok("checklist/finish", json!({ "vehicleId": "v" }));
+    }
+    let kept = b.ok("checklist/runs", json!({ "vehicleId": "v", "limit": 100 }));
+    let kept = kept["runs"].as_array().unwrap();
+    assert_eq!(kept.len(), 26, "one record for each finish");
+    assert_eq!(kept[0]["reopenings"].as_array().unwrap().len(), 25);
+    assert!(kept[25]["reopenings"].is_null(), "{}", kept[25]);
+}
+
+#[test]
 fn ticks_stored_before_runs_are_the_first_preflight() {
     let mut b = bench();
     b.demo_steps();
