@@ -243,6 +243,12 @@ pub struct VideoSource {
     /// Kept with any password, which the wire never shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Other addresses of this same camera, in preference order. Only one plays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_urls: Vec<String>,
+    /// The address currently being tried or played, redacted on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_url: Option<String>,
     /// Someone added it; it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,

@@ -32,7 +32,7 @@ pub struct VideoHost {
     runtime: tokio::runtime::Handle,
     /// Ports added by hand, each with its listener's stop flag.
     listeners: HashMap<u16, Arc<AtomicBool>>,
-    rtsp: HashMap<String, tokio::task::JoinHandle<()>>,
+    rtsp: HashMap<String, rtsp::Worker>,
     captures: HashMap<String, tokio::task::JoinHandle<()>>,
     selections: HashMap<String, permission::Selection>,
     devices: Arc<capture::Devices>,
@@ -75,12 +75,15 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         }
     }
 
-    fn open_rtsp(&mut self, source_id: &str, url: &str) {
-        self.close_rtsp(source_id);
+    fn open_rtsp(&mut self, source_id: &str, urls: &[String], epoch: u64) {
+        let previous = self.rtsp.remove(source_id);
+        self.rtsp.retain(|_, worker| !worker.finished());
         let task = rtsp::spawn(
             &self.runtime,
             source_id.to_owned(),
-            url.to_owned(),
+            urls.to_vec(),
+            epoch,
+            previous,
             self.hub.clone(),
             self.engine.clone(),
         );
@@ -88,8 +91,8 @@ impl uxduck_engine::video::VideoPort for VideoHost {
     }
 
     fn close_rtsp(&mut self, source_id: &str) {
-        if let Some(task) = self.rtsp.remove(source_id) {
-            task.abort();
+        if let Some(task) = self.rtsp.get(source_id) {
+            task.task.abort();
         }
     }
 
@@ -392,7 +395,7 @@ impl Drop for VideoHost {
             task.abort();
         }
         for task in self.rtsp.values() {
-            task.abort();
+            task.task.abort();
         }
         for stop in self.listeners.values() {
             stop.store(true, Ordering::Relaxed);

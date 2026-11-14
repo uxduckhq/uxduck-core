@@ -9,11 +9,11 @@ use serde_json::Value;
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::state::{EntityChange, EntityType};
 use uxduck_contracts::dto::video::{
-    VideoAddParams, VideoAddResult, VideoAssignParams, VideoCaptureEnableParams,
-    VideoCaptureParams, VideoDevicesResult, VideoListResult, VideoMetadataWatchResult,
-    VideoPortStatus, VideoRemoveParams, VideoRenameParams, VideoRevealParams, VideoRevealResult,
-    VideoSocket, VideoSource as VideoSourceDto, VideoTrackParams, VideoUnwatchParams,
-    VideoWatchParams, VideoWatchResult,
+    VideoAddParams, VideoAddResult, VideoAddressesParams, VideoAssignParams,
+    VideoCaptureEnableParams, VideoCaptureParams, VideoDevicesResult, VideoListResult,
+    VideoMetadataWatchResult, VideoPortStatus, VideoRemoveParams, VideoRenameParams,
+    VideoRevealParams, VideoRevealResult, VideoSocket, VideoSource as VideoSourceDto,
+    VideoTrackParams, VideoUnwatchParams, VideoWatchParams, VideoWatchResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -58,7 +58,7 @@ pub trait VideoPort: Send + std::fmt::Debug {
     }
     fn unlisten(&mut self, _port: u16) {}
     /// Connects to an RTSP source and keeps reconnecting until closed.
-    fn open_rtsp(&mut self, _source_id: &str, _url: &str) {}
+    fn open_rtsp(&mut self, _source_id: &str, _urls: &[String], _epoch: u64) {}
     fn close_rtsp(&mut self, _source_id: &str) {}
     /// Whether a UDP source should be demuxed instead of just discovered.
     fn demand(&mut self, _source_id: &str, _needed: bool) {}
@@ -275,6 +275,8 @@ pub(crate) struct Video {
     watched_listens: std::collections::BTreeSet<u16>,
     /// Announced RTSP sources fetched this session.
     opened: std::collections::BTreeSet<String>,
+    rtsp_epochs: BTreeMap<String, u64>,
+    next_rtsp_epoch: u64,
     /// The recording in progress for each camera (S40).
     pub(crate) recording: BTreeMap<String, String>,
     /// Vehicles whose onboard cameras were told to record (S145): the start
@@ -611,6 +613,8 @@ impl Engine {
                 record_alone: false,
                 klv: false,
                 url: Some(uri.to_owned()),
+                fallback_urls: Vec::new(),
+                active_url: None,
                 added_by_hand: false,
                 capture: None,
                 file: None,
@@ -685,6 +689,8 @@ impl Engine {
             record_alone: false,
             klv: false,
             url: None,
+            fallback_urls: Vec::new(),
+            active_url: None,
             added_by_hand: false,
             capture: None,
             file: None,
@@ -1046,9 +1052,119 @@ impl Engine {
         Ok(source)
     }
 
-    /// Plays another of an RTSP camera's tracks (S90): the choice goes on
-    /// its address as `#track=N`, which never goes on the wire, and the
-    /// camera is opened again.
+    /// Updates the routes to one physical camera, retaining its identity.
+    fn video_addresses(&mut self, params: &VideoAddressesParams) -> Result<VideoSource, ApiError> {
+        let mut source = self
+            .state
+            .video_sources
+            .get(&params.source_id)
+            .cloned()
+            .ok_or_else(|| not_found(&params.source_id))?;
+        if source.url.is_none() || !source.added_by_hand {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Only RTSP cameras you added can have fallback addresses.",
+            ));
+        }
+        if params.urls.is_empty() || params.urls.len() > 4 {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Give one preferred address and up to three fallbacks.",
+            ));
+        }
+        let previous: Vec<_> = source
+            .url
+            .iter()
+            .chain(source.fallback_urls.iter())
+            .collect();
+        let mut urls = Vec::new();
+        for given in &params.urls {
+            let given = given.trim();
+            let url = previous
+                .iter()
+                .find(|u| redact(u) == given)
+                .map_or_else(|| given.to_owned(), |u| (*u).clone());
+            if !matches!(input(&url)?, Input::Rtsp { .. }) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Fallback addresses must use RTSP.",
+                ));
+            }
+            if urls.iter().any(|u: &String| redact(u) == redact(&url)) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Each camera address must be different.",
+                ));
+            }
+            if self.state.video_sources.values().any(|other| {
+                other.id != source.id
+                    && other
+                        .url
+                        .iter()
+                        .chain(other.fallback_urls.iter())
+                        .any(|u| redact(u) == redact(&url))
+            }) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "That address belongs to another camera. Remove the duplicate camera first, then add its address here.",
+                ));
+            }
+            urls.push(url);
+        }
+        if previous.iter().copied().eq(urls.iter()) {
+            return Ok(source);
+        }
+        let primary = urls.remove(0);
+        if let Input::Rtsp { host, port } = input(&primary)? {
+            source.port = port;
+            source.sender = format!("{host}:{port}");
+        }
+        source.url = Some(primary);
+        source.fallback_urls = urls;
+        source.active_url = None;
+        source.tracks.clear();
+        if !source.named_by_hand {
+            source.name = redact(source.url.as_deref().unwrap_or_default());
+        }
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.video.rtsp_epochs.remove(&source.id);
+        if self.video.opened.remove(&source.id)
+            && let Some(port) = self.video.port.as_mut()
+        {
+            port.close_rtsp(&source.id);
+        }
+        self.video_stopped_because(&source.id, Some("Camera addresses changed".into()));
+        self.review_recordings();
+        Ok(self
+            .state
+            .video_sources
+            .get(&source.id)
+            .cloned()
+            .unwrap_or(source))
+    }
+
+    /// Run a callback only for the current RTSP worker. Closed workers cannot
+    /// revive an idle camera or overwrite a newly configured stream.
+    pub fn rtsp_event(&mut self, id: &str, epoch: u64, event: impl FnOnce(&mut Self)) {
+        if self.video.opened.contains(id) && self.video.rtsp_epochs.get(id) == Some(&epoch) {
+            event(self);
+        }
+    }
+
+    pub fn rtsp_address(&mut self, id: &str, url: String) {
+        if let Some(mut source) = self.state.video_sources.get(id).cloned() {
+            source.active_url = Some(url);
+            source.version += 1;
+            self.commit_as(actor(), Change::VideoSourceUpserted { source });
+        }
+    }
+
     fn video_track(&mut self, params: &VideoTrackParams) -> Result<VideoSource, ApiError> {
         let mut source = self
             .state
@@ -1389,6 +1505,8 @@ impl Engine {
                 record_alone: false,
                 klv: false,
                 url: None,
+                fallback_urls: Vec::new(),
+                active_url: None,
                 added_by_hand: true,
                 capture: None,
                 file: None,
@@ -1509,6 +1627,8 @@ impl Engine {
             record_alone: false,
             klv: false,
             url: None,
+            fallback_urls: Vec::new(),
+            active_url: None,
             added_by_hand: true,
             capture: None,
             file: None,
@@ -1670,6 +1790,17 @@ impl Engine {
                         port: None,
                     });
                 }
+                if self
+                    .state
+                    .video_sources
+                    .values()
+                    .any(|s| s.fallback_urls.iter().any(|u| redact(u) == redact(&url)))
+                {
+                    return Err(ApiError::new(
+                        ErrorKind::InvalidValue,
+                        "This address is already a fallback for another camera.",
+                    ));
+                }
                 let now = self.clock.now_us();
                 let source = VideoSource {
                     recording_requested: false,
@@ -1696,6 +1827,8 @@ impl Engine {
                     record_alone: false,
                     klv: false,
                     url: Some(url.clone()),
+                    fallback_urls: Vec::new(),
+                    active_url: None,
                     added_by_hand: true,
                     capture: None,
                     file: None,
@@ -1772,6 +1905,8 @@ impl Engine {
             record_alone: false,
             klv: false,
             url: None,
+            fallback_urls: Vec::new(),
+            active_url: None,
             added_by_hand: true,
             capture: None,
             file: None,
@@ -1882,6 +2017,7 @@ impl Engine {
             self.video.capture_permission_issues.remove(id);
             self.video.file_epochs.remove(id);
             self.video.opened.remove(id);
+            self.video.rtsp_epochs.remove(id);
             self.video.needed.remove(id);
             if let Some(port) = self.video.port.as_mut() {
                 port.demand(id, false);
@@ -2038,7 +2174,13 @@ impl Engine {
                     if self.video.opened.insert(source.id.clone())
                         && let Some(port) = self.video.port.as_mut()
                     {
-                        port.open_rtsp(&source.id, url);
+                        self.video.next_rtsp_epoch += 1;
+                        let epoch = self.video.next_rtsp_epoch;
+                        self.video.rtsp_epochs.insert(source.id.clone(), epoch);
+                        let urls: Vec<_> = std::iter::once(url.clone())
+                            .chain(source.fallback_urls.clone())
+                            .collect();
+                        port.open_rtsp(&source.id, &urls, epoch);
                     }
                 } else if let Some(input) = source.file.clone() {
                     if !self.video.file_epochs.contains_key(&source.id) {
@@ -2076,6 +2218,7 @@ impl Engine {
                     self.listen_for_watch(&source.id);
                 }
             } else {
+                self.video.rtsp_epochs.remove(&source.id);
                 if self.video.opened.remove(&source.id)
                     && let Some(port) = self.video.port.as_mut()
                 {
@@ -2102,12 +2245,14 @@ impl Engine {
                     "Camera idle".to_owned()
                 };
                 if source.state != VideoState::Stopped
+                    || source.active_url.is_some()
                     || source.state_detail.as_deref() != Some(detail.as_str())
                 {
                     if source.state != VideoState::Stopped {
                         source.changed_at_us = self.clock.now_us();
                     }
                     source.state = VideoState::Stopped;
+                    source.active_url = None;
                     source.state_detail = Some(detail);
                     source.counters.stop();
                     source.version += 1;
@@ -2313,6 +2458,11 @@ pub(crate) fn handle(
         ClientRequest::VideoRename(params) => {
             require(Capability::Config)?;
             let source = engine.video_rename(&params)?;
+            to_value(&VideoSourceDto::from(&source))
+        }
+        ClientRequest::VideoAddresses(params) => {
+            require(Capability::Config)?;
+            let source = engine.video_addresses(&params)?;
             to_value(&VideoSourceDto::from(&source))
         }
         ClientRequest::VideoTrack(params) => {

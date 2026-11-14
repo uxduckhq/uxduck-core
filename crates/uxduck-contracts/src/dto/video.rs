@@ -235,6 +235,12 @@ pub struct VideoSource {
     /// Where UXDuck fetches it, such as an RTSP address, without its password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Other addresses of this same camera, in preference order. Only one plays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_urls: Vec<String>,
+    /// The address currently being tried or played, redacted on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_url: Option<String>,
     /// Added by hand: it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,
@@ -331,6 +337,15 @@ pub struct VideoAddResult {
     /// The UDP port now listened on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAddressesParams {
+    pub source_id: String,
+    /// Preferred RTSP address first, followed by up to three fallbacks.
+    /// Unchanged redacted addresses retain their stored credentials.
+    pub urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

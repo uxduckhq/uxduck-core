@@ -211,7 +211,7 @@ fn check(name: &str) {
             "vehicle_get" | "vehicle_save" | "vehicle_size" | "vehicle_bookmarks"
             | "vehicle_dismiss" | "vehicle_traffic" | "vehicle_look" | "vehicle_colour"
             | "vehicle_simulated" | "vehicle_hide" | "vehicle_gripper" | "computer_add"
-            | "computer_check" | "computer_remove",
+            | "computer_check" | "computer_network" | "computer_remove",
         ) => {
             round_trip::<Vehicle>(name, &json);
         }
@@ -514,6 +514,7 @@ fn check(name: &str) {
             "video_assign"
             | "video_rename"
             | "video_track"
+            | "video_addresses"
             | "video_capture"
             | "video_capture_enable"
             | "video_file"

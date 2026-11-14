@@ -955,6 +955,7 @@ impl Engine {
 
     /// The restart safety rules (ADR-0007), applied on every start.
     pub(crate) fn restore_after_restart(&mut self) {
+        self.restore_companions();
         // The old seven-day / 5 GB defaults did not record consent. Reset
         // those once, preserving custom policies that required an explicit choice.
         // Telemetry logs and recordings are never deleted automatically

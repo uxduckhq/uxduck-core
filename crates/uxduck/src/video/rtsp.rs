@@ -865,6 +865,7 @@ async fn set_up(
     source_id: &str,
     address: &Address,
     engine: &EngineHandle,
+    epoch: u64,
 ) -> Result<Playing, String> {
     let mut s = Session::connect(address.clone()).await?;
     let (headers, body) = s
@@ -888,7 +889,7 @@ async fn set_up(
         .map(|(i, t)| t.describe(i + 1, i + 1 == chosen))
         .collect();
     let id = source_id.to_owned();
-    engine.post(move |e| e.video_tracks(&id, described));
+    engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_tracks(&id, described)));
     let count = offered.len();
     let video = offered.into_iter().nth(chosen - 1).ok_or_else(|| {
         format!(
@@ -928,7 +929,7 @@ async fn set_up(
             Ok(_) => {
                 klv = Some((KlvDepacketizer::new(), KlvClock::new(track.clock_rate)));
                 let id = source_id.to_owned();
-                engine.post(move |e| e.video_metadata_announced(&id));
+                engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_metadata_announced(&id)));
             }
             Err(error) => {
                 tracing::info!(source = %source_id, %error, "an RTSP camera refused its KLV track");
@@ -1015,6 +1016,7 @@ async fn play(
     hub: &Hub,
     engine: &EngineHandle,
     connection_log: &mut ConnectionLog,
+    epoch: u64,
 ) -> Result<(), String> {
     let address = address(url)?;
     let Playing {
@@ -1026,7 +1028,12 @@ async fn play(
         sound_description,
         note,
         keepalive,
-    } = set_up(source_id, &address, engine).await?;
+    } = tokio::time::timeout(
+        Duration::from_secs(15),
+        set_up(source_id, &address, engine, epoch),
+    )
+    .await
+    .map_err(|_| "the camera did not start within 15 s".to_owned())??;
     let peer = s
         .peer()
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], address.port)));
@@ -1038,6 +1045,7 @@ async fn play(
     if let Some(description) = sound_description {
         source.sound_track(description);
     }
+    let mut last_picture = tokio::time::Instant::now();
     let mut last_keepalive = Instant::now();
     let mut reported = (Instant::now(), 0u64, 0u64);
     let mut klv_posted = None;
@@ -1045,17 +1053,21 @@ async fn play(
     let relay = |output: uxduck_media::source::Output, posted: &mut Option<Instant>| {
         if let Some(metadata) = metadata_due(&output, posted) {
             let id = source_id.to_owned();
-            engine.post(move |e| e.video_klv(&id, &metadata));
+            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_klv(&id, &metadata)));
         }
         hub.publish(source_id, &item(output));
     };
     loop {
-        match s.frame().await? {
+        match tokio::time::timeout_at(last_picture + SILENT_FOR, s.frame())
+            .await
+            .map_err(|_| "no video pictures for 5 s".to_owned())??
+        {
             Frame::Interleaved { channel: 0, data } => {
                 // MPEG-TS over RTSP is kept as received; RTP video is not TS.
                 hub.publish_ts(source_id, &data);
                 for output in source.push(&data) {
                     if let uxduck_media::source::Output::Unit(unit) = &output {
+                        last_picture = tokio::time::Instant::now();
                         video_us = unit.timestamp_us;
                         connection_log.receiving(source_id, Instant::now());
                     }
@@ -1115,7 +1127,8 @@ async fn play(
                 status.counters.bytes,
                 status.counters.pictures,
             );
-            engine.post(move |e| e.rtsp_observed(observed));
+            let id = source_id.to_owned();
+            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_observed(observed)));
         }
         if last_keepalive.elapsed() >= keepalive {
             last_keepalive = Instant::now();
@@ -1124,35 +1137,139 @@ async fn play(
     }
 }
 
-/// Keeps an RTSP source playing, reconnecting with backoff, until aborted.
+/// A preference probe never SETUPs or PLAYs, so the standby carries no media.
+async fn probe(url: &str) -> Result<(), String> {
+    let address = address(url)?;
+    let mut session = Session::connect(address.clone()).await?;
+    let (_, body) = session
+        .ask(
+            "DESCRIBE",
+            &address.url,
+            &[("Accept", "application/sdp".into())],
+        )
+        .await?;
+    let offered = tracks(&String::from_utf8_lossy(&body), &address.url)?;
+    if offered.len() < address.track.unwrap_or(1) {
+        return Err("the requested video track is absent".into());
+    }
+    Ok(())
+}
+
+/// Wait for a preferred address to answer twice. Playback continues during
+/// these small control-only probes. The delay also limits flapping when a
+/// server answers DESCRIBE but its video still cannot play.
+async fn preferred(urls: &[String]) -> usize {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut previous = None;
+    loop {
+        let mut healthy = None;
+        for (index, url) in urls.iter().enumerate() {
+            if matches!(
+                tokio::time::timeout(SILENT_FOR, probe(url)).await,
+                Ok(Ok(()))
+            ) {
+                healthy = Some(index);
+                break;
+            }
+        }
+        if healthy.is_some() && healthy == previous {
+            return healthy.unwrap_or(0);
+        }
+        previous = healthy;
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
+/// The shared gate survives rapid edits that cancel a replacement worker
+/// before its predecessor has finished dropping the old TCP session.
+#[derive(Debug)]
+pub struct Worker {
+    pub task: tokio::task::JoinHandle<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Worker {
+    pub fn finished(&self) -> bool {
+        self.task.is_finished() && Arc::strong_count(&self.gate) == 1
+    }
+}
+
+/// One worker per physical camera, with at most one PLAY session. Dropping
+/// `play` closes its TCP session before the next address is opened.
 pub fn spawn(
     runtime: &tokio::runtime::Handle,
     source_id: String,
-    url: String,
+    urls: Vec<String>,
+    epoch: u64,
+    previous: Option<Worker>,
     hub: Arc<Hub>,
     engine: EngineHandle,
-) -> tokio::task::JoinHandle<()> {
-    runtime.spawn(async move {
+) -> Worker {
+    let gate = previous.map_or_else(
+        || Arc::new(tokio::sync::Mutex::new(())),
+        |previous| {
+            previous.task.abort();
+            previous.gate
+        },
+    );
+    let held = gate.clone();
+    let task = runtime.spawn(async move {
+        let _session = held.lock().await;
+        if urls.is_empty() {
+            return;
+        }
+        let mut current = 0;
         let mut failures = 0usize;
         let mut connection_log = ConnectionLog::default();
         loop {
-            let started = Instant::now();
-            let error = play(&source_id, &url, &hub, &engine, &mut connection_log)
-                .await
-                .err()
-                .unwrap_or_default();
-            // Playing for a while is a fresh start for the backoff.
-            if started.elapsed() > Duration::from_secs(30) {
-                failures = 0;
-            }
-            let why = format!("Can't reach {}: {error}", redact(&url));
-            connection_log.failed(&source_id, &error, Instant::now());
+            hub.restart_source(&source_id);
+            let url = &urls[current];
             let id = source_id.clone();
-            engine.post(move |e| e.rtsp_stopped(&id, why));
-            tokio::time::sleep(BACKOFF[failures.min(BACKOFF.len() - 1)]).await;
-            failures = failures.saturating_add(1);
+            let active = url.clone();
+            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_address(&id, active)));
+            let started = Instant::now();
+            let outcome = {
+                let playing = play(&source_id, url, &hub, &engine, &mut connection_log, epoch);
+                tokio::pin!(playing);
+                tokio::select! {
+                    result = &mut playing => Err(result.err().unwrap_or_default()),
+                    index = preferred(&urls[..current]), if current > 0 => Ok(index),
+                }
+            }; // `playing` and its socket have been dropped here.
+            let why = match outcome {
+                Ok(index) => {
+                    current = index;
+                    failures = 0;
+                    "Returning to a preferred camera address".to_owned()
+                }
+                Err(error) => {
+                    if started.elapsed() > Duration::from_secs(30) {
+                        failures = 0;
+                    }
+                    connection_log.failed(&source_id, &error, Instant::now());
+                    current = (current + 1) % urls.len();
+                    failures = failures.saturating_add(1);
+                    format!("Can't reach {}: {error}", redact(url))
+                }
+            };
+            let id = source_id.clone();
+            // Finish detaching the current recording before new media can
+            // arrive. Posting without awaiting can mix two session clocks
+            // in the old segment while the engine is busy.
+            if engine
+                .run(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_stopped(&id, why)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if failures >= urls.len() {
+                tokio::time::sleep(BACKOFF[(failures / urls.len() - 1).min(BACKOFF.len() - 1)])
+                    .await;
+            }
         }
-    })
+    });
+    Worker { task, gate }
 }
 
 #[cfg(test)]

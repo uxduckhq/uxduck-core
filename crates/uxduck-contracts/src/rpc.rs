@@ -91,11 +91,12 @@ use crate::dto::vehicle::{
     VehicleSizeParams,
 };
 use crate::dto::video::{
-    VideoAddParams, VideoAssignParams, VideoCaptureEnableParams, VideoCaptureParams,
-    VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams, VideoPhotoParams,
-    VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams, VideoRecordParams,
-    VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams, VideoRevealParams,
-    VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams, VideoWatchParams,
+    VideoAddParams, VideoAddressesParams, VideoAssignParams, VideoCaptureEnableParams,
+    VideoCaptureParams, VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams,
+    VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams,
+    VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams,
+    VideoRevealParams, VideoTrackParams, VideoUnwatchParams, VideoVehicleCameraParams,
+    VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -271,6 +272,9 @@ pub enum ClientRequest {
     /// this computer's UXDuck key to the companion's `authorized_keys`. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/check")]
     ComputerCheck(crate::dto::companion::ComputerCheckParams),
+    /// Read or configure a companion network over pinned SSH. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/network")]
+    ComputerNetwork(crate::dto::companion::ComputerNetworkParams),
     /// A vehicle's web pages, such as its radio's settings page, all of
     /// them in order; an empty list removes them. Doesn't save it. Needs
     /// `config`. Result: `Vehicle`.
@@ -1735,6 +1739,9 @@ pub enum ClientRequest {
     /// Only cameras added by hand. Needs `config`. Result: `VideoSource`.
     #[serde(rename = "video/track")]
     VideoTrack(VideoTrackParams),
+    /// Set one physical camera's preferred and fallback RTSP addresses. Needs `config`. Result: `VideoSource`.
+    #[serde(rename = "video/addresses")]
+    VideoAddresses(VideoAddressesParams),
     /// Shows where recordings are kept in the computer's file manager
     /// (Finder, Explorer), with a recording selected if one is named. Only
     /// on the computer UXDuck runs on. Needs `read`. Result:
@@ -2054,7 +2061,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 378] = [
+    pub const METHODS: [&'static str; 380] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2096,6 +2103,7 @@ impl ClientRequest {
         "computer/add",
         "computer/remove",
         "computer/check",
+        "computer/network",
         "vehicle/bookmarks",
         "vehicle/dismiss",
         "vehicle/hide",
@@ -2342,6 +2350,7 @@ impl ClientRequest {
         "video/playback",
         "video/rename",
         "video/track",
+        "video/addresses",
         "video/reveal",
         "video/photo",
         "video/photo/show",

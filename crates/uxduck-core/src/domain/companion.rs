@@ -50,6 +50,8 @@ pub struct CompanionCheck {
     /// Why it failed, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<CompanionNetwork>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,4 +136,24 @@ mod tests {
         assert!(check_address("host", Some("-l")).is_err());
         assert!(check_address("", None).is_err());
     }
+}
+
+/// A saved network, without its credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiNetwork {
+    pub id: String,
+    pub ssid: String,
+    pub active: bool,
+    /// Profiles created by UXDuck can be updated here.
+    pub managed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionNetwork {
+    pub wifi: Vec<WifiNetwork>,
+    pub connectivity: String,
+    pub checks_enabled: bool,
+    pub check_uri: String,
 }

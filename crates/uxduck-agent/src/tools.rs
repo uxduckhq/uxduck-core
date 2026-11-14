@@ -251,6 +251,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "computer/add",
     "computer/remove",
     "computer/check",
+    "computer/network",
     // Whether a vehicle is a simulation is the person's word (ADR-0039 R14).
     "vehicle/simulated",
     // Agreeing to the Terms of Service is the person's (ADR-0047).
@@ -507,6 +508,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "video/recordWithOthers",
     "video/playback",
     "video/track",
+    "video/addresses",
     "video/reveal",
     "video/photo",
     "video/photo/show",

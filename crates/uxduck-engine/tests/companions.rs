@@ -324,6 +324,7 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
         vehicle_id: "v".into(),
         computer_id: id.clone(),
         result: Ok(Found {
+            network: None,
             os: Some("Debian GNU/Linux 12 (bookworm)".into()),
             arch: Some("aarch64".into()),
             uxduck: None,
@@ -348,6 +349,11 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     );
     assert!(!format!("{:?}", engine.state()).contains("raspberry"));
 
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Err("check completed".into()),
+    });
     // A refused change keeps the key it pinned, so the next check refuses too.
     ok(&mut engine, &mut ui, "computer/check", params.clone());
     let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
@@ -369,4 +375,93 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     ok(&mut engine, &mut ui, "computer/remove", params);
     let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
     assert_eq!(orders, [CompanionOrder::Forget { computer_id: id }]);
+}
+
+#[test]
+fn network_changes_require_a_pin_and_disarm_and_never_persist_passwords() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    let request = json!({"vehicleId":"v","computerId":id,"wifi":{"ssid":"Field hotspot","security":"wpa-psk","password":"keep-this-secret","priority":10,"hidden":false,"metered":true}});
+    assert!(
+        refused(&mut engine, &mut ui, "computer/network", request.clone())
+            .contains("Check the computer first")
+    );
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            ..Found::default()
+        }),
+    });
+    let result = ok(&mut engine, &mut ui, "computer/network", request.clone());
+    assert_eq!(result["companions"][0]["check"]["state"], "checking");
+    assert!(!result.to_string().contains("keep-this-secret"));
+    assert!(!format!("{:?}", engine.state()).contains("keep-this-secret"));
+    let restarted = self::engine(engine.state().clone(), &keys);
+    assert_eq!(
+        restarted.state().vehicles["v"].companions[0]
+            .check
+            .as_ref()
+            .unwrap()
+            .state,
+        uxduck_core::domain::companion::CheckState::Failed
+    );
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    assert!(
+        matches!(&orders[..], [CompanionOrder::Network {input,..}] if input.0.contains("keep-this-secret"))
+    );
+    assert!(!format!("{orders:?}").contains("keep-this-secret"));
+    assert!(
+        refused(&mut engine, &mut ui, "computer/network", request.clone())
+            .contains("already running")
+    );
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/check",
+            json!({"vehicleId":"v","computerId":id})
+        )
+        .contains("already running")
+    );
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Err("permission denied".into()),
+    });
+    assert_eq!(
+        engine.state().vehicles["v"].companions[0]
+            .check
+            .as_ref()
+            .unwrap()
+            .host_key
+            .as_deref(),
+        Some("SHA256:known")
+    );
+    let mut state = engine.state().clone();
+    state.vehicles.get_mut("v").unwrap().armed = true;
+    let mut armed = self::engine(state, &keys);
+    armed.set_companions(Box::new(ssh));
+    let mut ui = connect(&mut armed);
+    assert!(refused(&mut armed, &mut ui, "computer/network", request).contains("Disarm"));
+    assert!(refused(&mut armed, &mut ui, "computer/network", json!({"vehicleId":"v","computerId":id,"connectivity":{"uri":"https://example.test/204","interval":60}})).contains("Disarm"));
+    // Read-only status remains available while armed.
+    ok(
+        &mut armed,
+        &mut ui,
+        "computer/network",
+        json!({"vehicleId":"v","computerId":id}),
+    );
 }

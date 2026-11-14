@@ -236,6 +236,10 @@ CompanionComputer.component_id
 CompanionComputer.host
 CompanionComputer.id
 CompanionComputer.name
+CompanionNetwork.check_uri
+CompanionNetwork.checks_enabled
+CompanionNetwork.connectivity
+CompanionNetwork.wifi
 ControlActions.actions
 ControlActions.class
 Controller.connected
@@ -860,3 +864,9 @@ Widget::TimeInput.label
 Widget::Value.item
 Widget::Value.label
 WrittenBy.agent
+
+# New optional companion-network snapshot types (2026-11-13).
+WifiNetwork.active
+WifiNetwork.id
+WifiNetwork.managed
+WifiNetwork.ssid

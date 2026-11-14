@@ -164,6 +164,42 @@ impl CompanionPort for Host {
                     let _ = engine.run(move |e| e.companion_checked(answer)).await;
                 });
             }
+            CompanionOrder::Network {
+                vehicle_id,
+                computer,
+                input,
+            } => {
+                let dir = self.dir.clone();
+                let mut credentials = FileCredentials::new(&self.data_dir);
+                let key = computer.key.then(|| credentials.get(&computer.key_name()));
+                let own = own_key(&mut credentials);
+                let engine = self.engine.clone();
+                tokio::spawn(async move {
+                    let result = match (key, own) {
+                        (Some(None), _) => Err("Its saved SSH private key is missing.".to_owned()),
+                        (_, Err(why)) => Err(why),
+                        (key, Ok(own)) => {
+                            network(
+                                &dir,
+                                &computer,
+                                SignIn {
+                                    pasted: key.as_ref().and_then(Option::as_deref),
+                                    own: Some(&own),
+                                    password: None,
+                                },
+                                &input.0,
+                            )
+                            .await
+                        }
+                    };
+                    let answer = CheckAnswer {
+                        vehicle_id,
+                        computer_id: computer.id,
+                        result,
+                    };
+                    let _ = engine.run(move |e| e.companion_checked(answer)).await;
+                });
+            }
             CompanionOrder::Forget { computer_id } => {
                 let path = self.dir.join(format!("{computer_id}.known_hosts"));
                 if let Err(error) = std::fs::remove_file(&path)
@@ -216,7 +252,7 @@ pub(crate) async fn check(
     };
     let mut output = None;
     for way in ways {
-        let tried = run(dir, config, computer, &known_hosts, way).await?;
+        let tried = run(dir, config, computer, &known_hosts, way, None).await?;
         let again = !tried.status.success() && refused(&String::from_utf8_lossy(&tried.stderr));
         output = Some(tried);
         if !again {
@@ -234,17 +270,120 @@ fn refused(stderr: &str) -> bool {
     stderr.contains("Permission denied") || stderr.contains("Too many authentication failures")
 }
 
+/// Reach networking only through the exact previously verified raw host key.
+/// Keys in either UXDuck's or the person's `known_hosts` are accepted only when
+/// their fingerprint matches the pin. No keyscan or trust-on-first-use here.
+async fn network(
+    dir: &Path,
+    computer: &CompanionComputer,
+    sign_in: SignIn<'_>,
+    input: &str,
+) -> Result<Found, String> {
+    let pinned = computer
+        .check
+        .as_ref()
+        .and_then(|c| c.host_key.as_deref())
+        .ok_or_else(|| "Check this computer's SSH host key first.".to_owned())?;
+    let temporary =
+        tempfile::tempdir().map_err(|_| "Cannot prepare SSH host verification".to_owned())?;
+    let trusted = temporary.path().join("known_hosts");
+    let mut files = vec![dir.join(format!("{}.known_hosts", computer.id))];
+    files.extend(
+        their_known_hosts(None, computer)
+            .await
+            .into_iter()
+            .map(|path| {
+                if let Some(suffix) = path.strip_prefix("~/") {
+                    directories::BaseDirs::new()
+                        .map_or_else(|| PathBuf::from(&path), |base| base.home_dir().join(suffix))
+                } else {
+                    PathBuf::from(path)
+                }
+            }),
+    );
+    let mut matched = false;
+    'files: for file in files {
+        let Ok(contents) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 3 || fields[0].starts_with(['@', '#']) {
+                continue;
+            }
+            write_private(
+                &trusted,
+                &format!("uxduck-network {} {}", fields[1], fields[2]),
+            )?;
+            let output = tokio::process::Command::new("ssh-keygen")
+                .args(["-l", "-E", "sha256", "-f"])
+                .arg(&trusted)
+                .output()
+                .await
+                .map_err(|_| "Cannot run ssh-keygen to verify the pinned host".to_owned())?;
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .nth(1)
+                    == Some(pinned)
+            {
+                matched = true;
+                break 'files;
+            }
+        }
+    }
+    if !matched {
+        return Err("The pinned SSH host key is missing from known_hosts. Check the computer with its raw host key before configuring networks.".into());
+    }
+    let ways = if let Some(key) = sign_in.pasted {
+        vec![Way::Pasted(key)]
+    } else if let Some(own) = sign_in.own {
+        vec![Way::Person, Way::Own(own)]
+    } else {
+        vec![Way::Person]
+    };
+    for way in ways {
+        let output = run(dir, None, computer, &trusted, way, Some(input)).await?;
+        if !output.status.success() && refused(&String::from_utf8_lossy(&output.stderr)) {
+            continue;
+        }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+                || stderr.contains("Host key verification failed")
+            {
+                return Err(
+                    "The companion's SSH host key no longer matches. No network changes were made."
+                        .into(),
+                );
+            }
+            return Err("Network setup failed. The companion needs Linux with NetworkManager, Python 3 and busctl. Saving needs passwordless sudo. Check its network values and service logs.".into());
+        }
+        return answer(computer, sign_in, &output);
+    }
+    Err("SSH could not sign in. Check the computer again before configuring networks.".into())
+}
+
 /// One `ssh` to the computer, signing in one `way`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "SSH options and temporary credential lifetimes stay in one scope"
+)]
 async fn run(
     dir: &Path,
     config: Option<&Path>,
     computer: &CompanionComputer,
     known_hosts: &Path,
     way: Way<'_>,
+    network: Option<&str>,
 ) -> Result<std::process::Output, String> {
     let key_file = dir.join(format!("{}.key", computer.id));
     let askpass_file = dir.join(format!("{}.askpass", computer.id));
-    let theirs = their_known_hosts(config, computer).await;
+    let theirs = if network.is_none() {
+        their_known_hosts(config, computer).await
+    } else {
+        Vec::new()
+    };
     let mut script = SCRIPT.to_owned();
     let mut command = tokio::process::Command::new("ssh");
     let only = |command: &mut tokio::process::Command, key: &str| -> Result<(), String> {
@@ -285,11 +424,39 @@ async fn run(
             script.push_str(&add_key(&own.public));
         }
     }
+    if network.is_some() {
+        let script_python = include_str!("companions/network.py").replace('\'', "'\"'\"'");
+        let input: serde_json::Value = serde_json::from_str(network.unwrap_or_default())
+            .map_err(|_| "Invalid network request".to_owned())?;
+        let sudo = if input["wifi"].is_null() && input["connectivity"].is_null() {
+            ""
+        } else {
+            "sudo -n "
+        };
+        script = format!("{SCRIPT}; {sudo}python3 -c '{script_python}'");
+        // For any network operation trust only the key matching the stored pin.
+        // A user known-hosts entry changed elsewhere cannot authorize a mutation.
+        command.args([
+            "-o",
+            "HostKeyAlias=uxduck-network",
+            "-o",
+            "GlobalKnownHostsFile=none",
+            "-o",
+            "CheckHostIP=no",
+        ]);
+    }
     command
         .arg("-T")
         .args(["-o", "ConnectTimeout=10"])
         .args(["-o", "AddKeysToAgent=no"])
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args([
+            "-o",
+            if network.is_some() {
+                "StrictHostKeyChecking=yes"
+            } else {
+                "StrictHostKeyChecking=accept-new"
+            },
+        ])
         .args(["-o", "HashKnownHosts=no"])
         .arg("-v")
         .arg("-o")
@@ -311,11 +478,28 @@ async fn run(
         .arg("--")
         .arg(&computer.host)
         .arg(&script)
-        .stdin(Stdio::null())
+        .stdin(if network.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let ran = tokio::time::timeout(CHECK_TIMEOUT, command.output()).await;
+    let ran = tokio::time::timeout(CHECK_TIMEOUT, async {
+        use tokio::io::AsyncWriteExt as _;
+        let mut child = command.spawn()?;
+        if let Some(input) = network {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("SSH stdin is missing"))?;
+            stdin.write_all(input.as_bytes()).await?;
+            stdin.shutdown().await?;
+        }
+        child.wait_with_output().await
+    })
+    .await;
     for file in [&key_file, &askpass_file] {
         let _ = std::fs::remove_file(file);
     }
@@ -369,6 +553,10 @@ fn answer(
             .map(str::to_owned)
     };
     Ok(Found {
+        network: field("network")
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| "The computer returned an invalid network status".to_owned())?,
         os: field("os"),
         arch: field("arch"),
         uxduck: field("uxduck").map(|v| v.strip_prefix("uxduck ").unwrap_or(&v).to_owned()),
@@ -493,6 +681,18 @@ mod tests {
     use super::*;
     use uxduck_core::domain::companion::{CheckState, CompanionCheck, CompanionRole};
 
+    #[test]
+    fn network_manager_adapter_regressions() {
+        let status = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/companions/network_test.py"
+            ))
+            .status()
+            .expect("the NetworkManager adapter tests need Python 3");
+        assert!(status.success());
+    }
+
     /// An sshd of this user's on a free port, with its own host key and
     /// one client key, run from a temporary folder.
     struct Server {
@@ -611,6 +811,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_network_change_refuses_a_replaced_host_before_running_commands() {
+        let first = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = keys.path().join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        let mut computer = computer(&first);
+        let found = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&first)),
+        )
+        .await
+        .unwrap();
+        computer.check = Some(CompanionCheck {
+            state: CheckState::Reached,
+            at_us: 1,
+            os: None,
+            arch: None,
+            uxduck: None,
+            host_key: found.host_key,
+            problem: None,
+            network: None,
+        });
+        let port = first.port;
+        drop(first);
+        let second = start("replacement", Some(port));
+        let error = network(
+            keys.path(),
+            &computer,
+            pasted(&client_key(&second)),
+            r#"{"connectivity":{"uri":"https://example.test/204","interval":60}}"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("host key no longer matches"), "{error}");
+    }
+
+    #[tokio::test]
     async fn a_check_reads_the_system_and_pins_the_host_key() {
         let server = start("host", None);
         let keys = tempfile::tempdir().unwrap();
@@ -648,6 +887,7 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            network: None,
         });
         let again = check(
             keys.path(),
@@ -684,6 +924,7 @@ mod tests {
             uxduck: None,
             host_key: Some(pinned.clone()),
             problem: None,
+            network: None,
         });
         let port = first.port;
         drop(first);
@@ -769,6 +1010,7 @@ mod tests {
             uxduck: None,
             host_key: found.host_key,
             problem: None,
+            network: None,
         });
         let port = first.port;
         drop(first);

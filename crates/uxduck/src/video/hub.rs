@@ -463,6 +463,19 @@ impl Hub {
             .collect()
     }
 
+    /// A new RTSP session has its own clock and decoder references. Drop
+    /// queued pictures/metadata and resume at a fresh keyframe, even when
+    /// the next address has exactly the same codec and dimensions.
+    pub fn restart_source(&self, source_id: &str) {
+        for watcher in self.watchers_of(source_id) {
+            let mut q = watcher.lock();
+            q.dropped += q.items.len() as u64;
+            q.items.clear();
+            q.skipping = true;
+            q.recoveries_waited = 0;
+        }
+    }
+
     /// Asks once for a source to be re-encoded, unless it is already or
     /// failed a moment ago.
     fn want_reencode(&self, source_id: &str, now: Instant) {
@@ -583,6 +596,35 @@ mod tests {
         watcher.push(unit(true, 2), now);
         watcher.push(unit(false, 3), now);
         assert_eq!(drain(&watcher), [(2, false), (3, false)]);
+    }
+
+    #[test]
+    fn switching_addresses_resets_only_that_cameras_watchers() {
+        let hub = Hub::default();
+        hub.allow("front", "camera");
+        let (_, browser) = hub.open("front").unwrap();
+        let publisher = hub.tap("publisher", "camera");
+        let other = hub.tap("rear", "other-camera");
+        hub.publish("camera", &unit(true, 100));
+        assert_eq!(drain(&browser), [(100, false)]);
+        assert_eq!(drain(&publisher), [(100, false)]);
+        hub.publish("camera", &unit(false, 101));
+        hub.publish(
+            "camera",
+            &Item::Klv {
+                timestamp_us: 101,
+                data: vec![1].into(),
+            },
+        );
+        hub.publish("other-camera", &unit(true, 200));
+        hub.restart_source("camera");
+        assert!(browser.lock().items.is_empty());
+        // The fallback clock starts over and may begin between keyframes.
+        hub.publish("camera", &unit(false, 0));
+        hub.publish("camera", &unit(true, 1));
+        assert_eq!(drain(&browser), [(1, true)]);
+        assert_eq!(drain(&publisher), [(1, true)]);
+        assert_eq!(drain(&other), [(200, false)]);
     }
 
     fn recovery(timestamp_us: u64) -> Item {

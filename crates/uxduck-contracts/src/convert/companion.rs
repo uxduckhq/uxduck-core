@@ -43,6 +43,21 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                 uxduck: check.uxduck.clone(),
                 host_key: check.host_key.clone(),
                 problem: check.problem.clone(),
+                network: check.network.as_ref().map(|n| dto::CompanionNetwork {
+                    wifi: n
+                        .wifi
+                        .iter()
+                        .map(|w| dto::WifiNetwork {
+                            id: w.id.clone(),
+                            ssid: w.ssid.clone(),
+                            active: w.active,
+                            managed: w.managed,
+                        })
+                        .collect(),
+                    connectivity: n.connectivity.clone(),
+                    checks_enabled: n.checks_enabled,
+                    check_uri: n.check_uri.clone(),
+                }),
             }),
         }
     }

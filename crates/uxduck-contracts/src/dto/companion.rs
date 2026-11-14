@@ -45,6 +45,8 @@ pub struct CompanionCheck {
     /// Why it failed, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<CompanionNetwork>,
 }
 
 /// A companion computer as the person added it. Its private key, if one
@@ -112,4 +114,76 @@ pub struct ComputerCheckParams {
 pub struct ComputerParams {
     pub vehicle_id: String,
     pub computer_id: String,
+}
+
+/// A saved network, without its credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiNetwork {
+    pub id: String,
+    pub ssid: String,
+    pub active: bool,
+    /// Profiles created by UXDuck can be updated here.
+    pub managed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionNetwork {
+    pub wifi: Vec<WifiNetwork>,
+    pub connectivity: String,
+    pub checks_enabled: bool,
+    pub check_uri: String,
+}
+
+/// Read networking, save Wi-Fi for automatic connection when available, or
+/// configure internet health checks. At most one change per request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerNetworkParams {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi: Option<WifiProfileParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectivity: Option<ConnectivityParams>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WifiSecurity {
+    Open,
+    WpaPsk,
+    Sae,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiProfileParams {
+    pub ssid: String,
+    pub security: WifiSecurity,
+    /// Used once on the companion. Never stored in UXDuck or returned.
+    pub password: String,
+    pub priority: i32,
+    pub hidden: bool,
+    pub metered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectivityParams {
+    /// An HTTP(S) endpoint returning 204 or an empty response.
+    pub uri: String,
+    /// Seconds between checks. Zero disables them, otherwise 30 to 3600.
+    pub interval: u32,
+}
+
+impl std::fmt::Debug for WifiProfileParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WifiProfileParams")
+            .field("ssid", &self.ssid)
+            .field("security", &self.security)
+            .field("password", &"[redacted]")
+            .finish_non_exhaustive()
+    }
 }

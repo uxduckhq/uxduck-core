@@ -86,6 +86,8 @@ impl From<&core::VideoSource> for dto::VideoSource {
             record_alone: v.record_alone,
             klv: v.klv,
             url: v.url.as_deref().map(core::redact),
+            fallback_urls: v.fallback_urls.iter().map(|u| core::redact(u)).collect(),
+            active_url: v.active_url.as_deref().map(core::redact),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),
             file: v.file.as_ref().map(Into::into),

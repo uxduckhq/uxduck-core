@@ -5,7 +5,9 @@
 //! with where to do it.
 
 use serde_json::Value;
-use uxduck_contracts::dto::companion::{ComputerAddParams, ComputerCheckParams, ComputerParams};
+use uxduck_contracts::dto::companion::{
+    ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams, WifiSecurity,
+};
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::companion::{
@@ -26,6 +28,12 @@ pub enum CompanionOrder {
         computer: Box<CompanionComputer>,
         /// Used for this check alone, to add this computer's UXDuck key.
         password: Option<Password>,
+    },
+    Network {
+        vehicle_id: String,
+        computer: Box<CompanionComputer>,
+        /// JSON on SSH stdin, wrapped so neither PSK nor credentials reach logs.
+        input: Password,
     },
     /// Forget its pinned host key.
     Forget { computer_id: String },
@@ -60,17 +68,20 @@ pub struct Found {
     pub arch: Option<String>,
     pub uxduck: Option<String>,
     pub host_key: Option<String>,
+    pub network: Option<companion::CompanionNetwork>,
 }
 
 #[derive(Default)]
 pub(crate) struct Companions {
     port: Option<Box<dyn CompanionPort>>,
+    busy: std::collections::BTreeSet<String>,
 }
 
 impl std::fmt::Debug for Companions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Companions")
             .field("port", &self.port.is_some())
+            .field("busy", &self.busy)
             .finish()
     }
 }
@@ -85,6 +96,34 @@ fn to_value(vehicle: &Vehicle) -> Result<Value, ApiError> {
 }
 
 impl Engine {
+    pub(crate) fn restore_companions(&mut self) {
+        let interrupted: Vec<_> = self
+            .state
+            .vehicles
+            .values()
+            .filter(|v| {
+                v.companions.iter().any(|c| {
+                    c.check
+                        .as_ref()
+                        .is_some_and(|check| check.state == CheckState::Checking)
+                })
+            })
+            .cloned()
+            .collect();
+        for mut vehicle in interrupted {
+            for computer in &mut vehicle.companions {
+                if let Some(check) = &mut computer.check
+                    && check.state == CheckState::Checking
+                {
+                    check.state = CheckState::Failed;
+                    check.at_us = self.clock.now_us();
+                    check.problem = Some("UXDuck restarted before the computer answered. Check it or refresh its networks to see what completed.".into());
+                }
+            }
+            self.save_companions(None, vehicle);
+        }
+    }
+
     pub fn set_companions(&mut self, port: Box<dyn CompanionPort>) {
         self.companions.port = Some(port);
     }
@@ -199,6 +238,11 @@ impl Engine {
                 format!("computer {computer_id} not found"),
             ));
         };
+        if self.companions.busy.contains(&computer_id) {
+            return Err(invalid(
+                "Wait for the computer check or network update to finish before removing it.",
+            ));
+        }
         let computer = vehicle.companions.remove(at);
         if computer.key {
             self.credentials
@@ -211,6 +255,111 @@ impl Engine {
             });
         }
         to_value(&self.save_companions(Some(connection), vehicle))
+    }
+
+    /// `NetworkManager` settings on a reached companion, with no live Wi-Fi handover.
+    pub(crate) fn network_computer(
+        &mut self,
+        connection: ConnectionId,
+        params: &ComputerNetworkParams,
+    ) -> Result<Value, ApiError> {
+        if self.companions.port.is_none() {
+            return Err(invalid(
+                "Use UXDuck Desktop or the uxduck daemon to configure companion Wi-Fi.",
+            ));
+        }
+        let mut vehicle = self.companion_vehicle(&params.vehicle_id)?;
+        if params.wifi.is_some() && params.connectivity.is_some() {
+            return Err(invalid("Make one network change at a time."));
+        }
+        if (params.wifi.is_some() || params.connectivity.is_some()) && vehicle.armed {
+            return Err(invalid("Disarm the vehicle before changing its networks."));
+        }
+        if let Some(wifi) = &params.wifi {
+            if wifi.ssid.is_empty()
+                || wifi.ssid.len() > 32
+                || wifi.ssid.chars().any(char::is_control)
+            {
+                return Err(invalid(
+                    "A Wi-Fi name must be 1 to 32 bytes without control characters.",
+                ));
+            }
+            if !(-999..=999).contains(&wifi.priority) {
+                return Err(invalid("Wi-Fi priority must be between -999 and 999."));
+            }
+            let hex =
+                wifi.password.len() == 64 && wifi.password.bytes().all(|b| b.is_ascii_hexdigit());
+            if wifi.security == WifiSecurity::Open {
+                if !wifi.password.is_empty() {
+                    return Err(invalid("An open Wi-Fi network has no password."));
+                }
+            } else if !((8..=63).contains(&wifi.password.len())
+                || (wifi.security == WifiSecurity::WpaPsk && hex))
+                || wifi.password.chars().any(char::is_control)
+            {
+                return Err(invalid(
+                    "Use an 8 to 63 byte Wi-Fi password, or a 64 digit hexadecimal WPA2 key.",
+                ));
+            }
+        }
+        if let Some(check) = &params.connectivity {
+            if check.interval != 0 && !(30..=3600).contains(&check.interval) {
+                return Err(invalid(
+                    "Check every 30 to 3600 seconds, or use zero to disable checks.",
+                ));
+            }
+            let authority = check
+                .uri
+                .strip_prefix("https://")
+                .or_else(|| check.uri.strip_prefix("http://"))
+                .and_then(|rest| rest.split('/').next());
+            if authority.is_none_or(|a| a.is_empty() || a.contains('@'))
+                || check.uri.chars().any(char::is_whitespace)
+            {
+                return Err(invalid(
+                    "Use an HTTP or HTTPS health-check address without credentials.",
+                ));
+            }
+        }
+        let computer = vehicle
+            .companions
+            .iter_mut()
+            .find(|c| c.id == params.computer_id)
+            .ok_or_else(|| invalid("Companion computer not found."))?;
+        if computer
+            .check
+            .as_ref()
+            .and_then(|c| c.host_key.as_ref())
+            .is_none()
+        {
+            return Err(invalid(
+                "Check the computer first to verify its SSH host key.",
+            ));
+        }
+        if !self.companions.busy.insert(computer.id.clone()) {
+            return Err(invalid(
+                "A check or network update is already running on this computer.",
+            ));
+        }
+        let input = Password(
+            serde_json::json!({"wifi": params.wifi, "connectivity": params.connectivity})
+                .to_string(),
+        );
+        let order = CompanionOrder::Network {
+            vehicle_id: vehicle.id.clone(),
+            computer: Box::new(computer.clone()),
+            input,
+        };
+        if let Some(check) = &mut computer.check {
+            check.state = CheckState::Checking;
+            check.problem = None;
+            check.at_us = self.clock.now_us();
+        }
+        let vehicle = self.save_companions(Some(connection), vehicle);
+        if let Some(port) = self.companions.port.as_mut() {
+            port.request(order);
+        }
+        to_value(&vehicle)
     }
 
     /// `computer/check`: marks it checking and asks the host.
@@ -237,6 +386,11 @@ impl Engine {
                 format!("computer {computer_id} not found"),
             ));
         };
+        if !self.companions.busy.insert(computer.id.clone()) {
+            return Err(invalid(
+                "A check or network update is already running on this computer.",
+            ));
+        }
         let pinned = computer.check.as_ref().and_then(|c| c.host_key.clone());
         computer.check = Some(CompanionCheck {
             state: CheckState::Checking,
@@ -246,6 +400,7 @@ impl Engine {
             uxduck: None,
             host_key: pinned,
             problem: None,
+            network: None,
         });
         let order = CompanionOrder::Check {
             vehicle_id: vehicle.id.clone(),
@@ -262,6 +417,7 @@ impl Engine {
     /// A check's answer from the host. The pinned host key is kept through
     /// a failure, so a refused change still names the one it expected.
     pub fn companion_checked(&mut self, answer: CheckAnswer) {
+        self.companions.busy.remove(&answer.computer_id);
         let Some(mut vehicle) = self.vehicle(&answer.vehicle_id).cloned() else {
             return;
         };
@@ -278,6 +434,7 @@ impl Engine {
             Ok(found) => CompanionCheck {
                 state: CheckState::Reached,
                 at_us,
+                network: found.network,
                 os: found.os,
                 arch: found.arch,
                 uxduck: found.uxduck,
@@ -292,6 +449,7 @@ impl Engine {
                 uxduck: None,
                 host_key: pinned,
                 problem: Some(problem),
+                network: computer.check.as_ref().and_then(|c| c.network.clone()),
             },
         });
         self.save_companions(None, vehicle);

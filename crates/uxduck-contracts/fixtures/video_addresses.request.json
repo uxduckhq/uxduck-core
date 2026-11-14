@@ -1,0 +1,7 @@
+{
+  "method": "video/addresses",
+  "params": {
+    "sourceId": "vsfront",
+    "urls": ["rtsp://local/front", "rtsp://backup/front"]
+  }
+}
