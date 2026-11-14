@@ -48,6 +48,7 @@ use uxduck_mavlink::mission_log;
 use uxduck_mavlink::param_log::{self, Known, Timeline};
 use uxduck_mavlink::session::{Config, Effect, Observation, Session};
 
+use crate::flight_time::{Hop, HopChange};
 use crate::rpc::handlers::to_value;
 use crate::runtime::{ReplayRead, ReplayWork, ReplayWorked};
 use crate::{ConnectionId, Engine};
@@ -1044,8 +1045,7 @@ fn checkpoint_every(records: usize) -> usize {
 struct Track {
     armed: bool,
     mode: Option<(String, u64)>,
-    air: Option<u64>,
-    in_air: bool,
+    hop: Hop,
     telemetry: VehicleTelemetry,
     /// Its latest attitude items, for each position's sample.
     attitude: Vec<TelemetryItem>,
@@ -1192,15 +1192,10 @@ impl Scan {
                             samples.push(motion_sample(position, &track.attitude));
                         }
                     }
-                    let was = track.in_air;
-                    track.in_air = in_the_air(&track.telemetry, was);
-                    if track.in_air && !was {
-                        track.air = Some(at);
-                    } else if !track.in_air
-                        && was
-                        && let Some(from) = track.air.take()
+                    let up = in_the_air(&track.telemetry, track.hop.up());
+                    if let Some(HopChange::Landed { from_us, until_us }) = track.hop.observe(up, at)
                     {
-                        out.marks.push((system, air_mark(from, at)));
+                        out.marks.push((system, air_mark(from_us, until_us)));
                     }
                     if let Some(fused) = update.positions.iter().find(|p| p.source == "fused")
                         && at.saturating_sub(track.last_point) >= PATH_EVERY_US
@@ -1308,12 +1303,12 @@ impl Scan {
             exact,
             ..
         } = self;
-        for (system, track) in tracks {
+        for (system, mut track) in tracks {
             if let Some((mode, since)) = track.mode {
                 out.marks.push((system, mode_mark(mode, since, track.last)));
             }
-            if let Some(from) = track.air {
-                out.marks.push((system, air_mark(from, track.last)));
+            if let Some((from, until)) = track.hop.end(track.last) {
+                out.marks.push((system, air_mark(from, until)));
             }
         }
         out.marks.sort_by_key(|(_, m)| m.at_us);
@@ -1479,7 +1474,7 @@ fn air_mark(from: u64, until: u64) -> ReplayMark {
 }
 
 /// Off the ground, as the live flight timer decides it: the autopilot's
-/// word, else the height above home.
+/// word, else the height above home. A [`Hop`] makes its span of it.
 fn in_the_air(telemetry: &VehicleTelemetry, was: bool) -> bool {
     let said = telemetry
         .items
@@ -4722,6 +4717,71 @@ mod tests {
             1,
         );
         assert!(unplaced.finish().checkpoints.is_empty());
+    }
+
+    /// A landed state that flickers in flight, as some simulators' land
+    /// detectors give, is one span in the air that ends where the vehicle
+    /// came down.
+    #[test]
+    fn a_landed_state_that_flickers_in_flight_is_one_span_in_the_air() {
+        let mut scan = Scan {
+            out: Pass::default(),
+            ids: HashMap::new(),
+            tracks: BTreeMap::new(),
+            exact: true,
+        };
+        let heard = Observation {
+            id: "v".into(),
+            aliases: Vec::new(),
+            connections: None,
+            link_id: "log".into(),
+            peer: String::new(),
+            system_id: 1,
+            component_ids: vec![1],
+            autopilot: "Ardupilotmega".into(),
+            vehicle_type: "Quadrotor".into(),
+            uid: None,
+            firmware: None,
+            firmware_commit: None,
+            presence: uxduck_mavlink::session::Presence::Online,
+            last_heartbeat_us: T0,
+            armed: true,
+            mode: None,
+        };
+        scan.take(vec![Effect::Vehicle(Box::new(heard))], T0, 1);
+        // On the ground, up at 5 s, said to be down every other second
+        // until it lands at 26 s, and heard for a while after.
+        for second in 0..=40u64 {
+            let up = (5..26).contains(&second) && (second == 5 || second % 2 == 1);
+            let at = T0 + second * S;
+            let said = TelemetryItem {
+                key: "flight.state".into(),
+                label: "Flight state".into(),
+                unit: uxduck_core::domain::telemetry::Unit::None,
+                value: None,
+                text: Some(if up { "In the air" } else { "On the ground" }.into()),
+                source: "health".into(),
+                component_id: 1,
+                time_us: at,
+            };
+            scan.take(
+                vec![Effect::Telemetry(VehicleTelemetry {
+                    vehicle_id: "v".into(),
+                    positions: Vec::new(),
+                    items: vec![said],
+                })],
+                at,
+                2,
+            );
+        }
+        let air: Vec<(u64, Option<u64>)> = scan
+            .finish()
+            .marks
+            .iter()
+            .filter(|(_, mark)| mark.kind == ReplayMarkKind::Air)
+            .map(|(_, mark)| (mark.at_us, mark.until_us))
+            .collect();
+        assert_eq!(air, [(T0 + 5 * S, Some(T0 + 26 * S))]);
     }
 
     /// Where two values differ, each with its path.

@@ -10,6 +10,10 @@
 //!   the ground is what the autopilot says (`flight.state`, from
 //!   `EXTENDED_SYS_STATE`) when it says it; otherwise above
 //!   [`AIR_ABOVE_M`] above home, and back down below [`GROUND_BELOW_M`].
+//!   A hop ends once the vehicle has stayed down for [`LANDED_AFTER_US`],
+//!   timed from when it came down: a land detector that says "on the
+//!   ground" for a moment in flight, as some simulators' do, neither ends
+//!   the hop nor costs it time ([`Hop`]).
 //!
 //! Sent with the vehicle's telemetry, at most once a second each, never
 //! journaled; a daemon start forgets them.
@@ -38,6 +42,8 @@ use crate::Engine;
 const AIR_ABOVE_M: f64 = FLYING_ABOVE_HOME_M;
 /// Back on the ground below this, so a hover at the line does not flicker.
 const GROUND_BELOW_M: f64 = 1.0;
+/// Down for this long is a landing. A shorter spell is the same hop still.
+const LANDED_AFTER_US: u64 = 3_000_000;
 
 const SOURCE: &str = "flight";
 
@@ -53,14 +59,90 @@ pub(crate) const MAX_FLIGHT_NAME_CHARS: usize = 80;
 #[derive(Debug, Default)]
 pub(crate) struct FlightTimes(BTreeMap<String, Timer>);
 
+/// One stretch off the ground, as the flight timer and a replay's marks
+/// follow it. It begins the moment the vehicle is off the ground, and ends
+/// only once the vehicle has stayed down for [`LANDED_AFTER_US`], from when
+/// it came down. Down for less than that and up again, it is one hop that
+/// counts the time between.
+#[derive(Debug, Default)]
+pub(crate) struct Hop {
+    /// Off the ground since.
+    since_us: Option<u64>,
+    /// Down again since, and not yet for long enough to have landed.
+    down_since_us: Option<u64>,
+}
+
+/// What a look at the vehicle did to its hop.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HopChange {
+    /// It left the ground.
+    Lifted,
+    /// It landed: off the ground from and until these.
+    Landed { from_us: u64, until_us: u64 },
+}
+
+impl Hop {
+    /// In the air: off the ground, or down too briefly to have landed.
+    pub(crate) fn flying(&self) -> bool {
+        self.since_us.is_some()
+    }
+
+    /// Off the ground as last looked at, for the band between the two
+    /// heights, which keeps what was.
+    pub(crate) fn up(&self) -> bool {
+        self.since_us.is_some() && self.down_since_us.is_none()
+    }
+
+    /// How long the hop has lasted, stopped while the vehicle is down.
+    fn lasted_us(&self, now_us: u64) -> u64 {
+        self.since_us.map_or(0, |from| {
+            self.down_since_us
+                .map_or(now_us, |down| down.min(now_us))
+                .saturating_sub(from)
+        })
+    }
+
+    /// The vehicle is `up`, off the ground, or not, at `now_us`.
+    pub(crate) fn observe(&mut self, up: bool, now_us: u64) -> Option<HopChange> {
+        let Some(from_us) = self.since_us else {
+            if !up {
+                return None;
+            }
+            self.since_us = Some(now_us);
+            return Some(HopChange::Lifted);
+        };
+        if up {
+            self.down_since_us = None;
+            return None;
+        }
+        let until_us = *self.down_since_us.get_or_insert(now_us);
+        if now_us.saturating_sub(until_us) < LANDED_AFTER_US {
+            return None;
+        }
+        *self = Self::default();
+        Some(HopChange::Landed { from_us, until_us })
+    }
+
+    /// The flight or the log ends at `now_us`, and the hop with it: from
+    /// and until when it was off the ground, if it was.
+    pub(crate) fn end(&mut self, now_us: u64) -> Option<(u64, u64)> {
+        let from_us = self.since_us.take()?;
+        let until_us = self
+            .down_since_us
+            .take()
+            .map_or(now_us, |down| down.min(now_us));
+        Some((from_us, until_us))
+    }
+}
+
 #[derive(Debug, Default)]
 struct Timer {
     /// While armed: when.
     armed_at_us: Option<u64>,
     /// After a disarm: how long it was armed.
     armed_us: u64,
-    /// While in the air: since when.
-    air_since_us: Option<u64>,
+    /// Its hop off the ground now.
+    hop: Hop,
     /// Time in the air banked before the current hop.
     air_us: u64,
     /// Whole seconds last sent, so a second is sent once.
@@ -87,7 +169,7 @@ impl Timer {
     }
 
     fn air_us(&self, now_us: u64) -> u64 {
-        self.air_us + self.air_since_us.map_or(0, |at| now_us.saturating_sub(at))
+        self.air_us + self.hop.lasted_us(now_us)
     }
 }
 
@@ -1199,8 +1281,8 @@ impl Engine {
                 if let Some(at) = timer.armed_at_us.take() {
                     timer.armed_us = now.saturating_sub(at);
                 }
-                if let Some(at) = timer.air_since_us.take() {
-                    timer.air_us += now.saturating_sub(at);
+                if let Some((from, until)) = timer.hop.end(now) {
+                    timer.air_us += until.saturating_sub(from);
                 }
             }
         }
@@ -1236,8 +1318,8 @@ impl Engine {
             if let Some(at) = timer.armed_at_us.take() {
                 timer.armed_us = now.saturating_sub(at);
             }
-            if let Some(at) = timer.air_since_us.take() {
-                timer.air_us += now.saturating_sub(at);
+            if let Some((from, until)) = timer.hop.end(now) {
+                timer.air_us += until.saturating_sub(from);
             }
             timer.sent = None;
         }
@@ -1246,6 +1328,7 @@ impl Engine {
 
     /// Whether a vehicle is off the ground now: the autopilot's word, else
     /// its height above home, with `was` for the band between the two lines.
+    /// As it is said this moment: a [`Hop`] is what lasts through a flicker.
     pub(crate) fn off_the_ground(&self, vehicle_id: &str, was: bool) -> bool {
         let said = self
             .telemetry(vehicle_id)
@@ -1267,6 +1350,8 @@ impl Engine {
     /// for one that flies, and armed for one that does not, which has no
     /// leaving the ground to tell by. Until then its checks are read live
     /// and hold a launch. Armed alone for a motor test is not launched.
+    /// In the air as its hop has it, so "on the ground" for a moment in
+    /// flight does not read its checks live or hold a mission's start.
     pub(crate) fn launched(&self, vehicle: &uxduck_core::domain::vehicle::Vehicle) -> bool {
         if !vehicle.armed {
             return false;
@@ -1278,8 +1363,8 @@ impl Engine {
             .flight_times
             .0
             .get(&vehicle.id)
-            .is_some_and(|t| t.air_since_us.is_some());
-        self.off_the_ground(&vehicle.id, flying)
+            .is_some_and(|t| t.hop.flying());
+        flying || self.off_the_ground(&vehicle.id, false)
     }
 
     /// When the vehicle armed, while it is armed.
@@ -1373,26 +1458,18 @@ impl Engine {
                 }
             }
         }
-        let flying = self
-            .flight_times
-            .0
-            .get(&id)
-            .is_some_and(|t| t.air_since_us.is_some());
-        let up = armed && aerial && self.off_the_ground(&id, flying);
+        let was_up = self.flight_times.0.get(&id).is_some_and(|t| t.hop.up());
+        let up = armed && aerial && self.off_the_ground(&id, was_up);
         let Some(timer) = self.flight_times.0.get_mut(&id) else {
             return;
         };
-        let lifted = match (up, timer.air_since_us) {
-            (true, None) => {
-                timer.air_since_us = Some(now);
-                true
-            }
-            (false, Some(at)) => {
-                timer.air_us += now.saturating_sub(at);
-                timer.air_since_us = None;
+        let lifted = match timer.hop.observe(up, now) {
+            Some(HopChange::Lifted) => true,
+            Some(HopChange::Landed { from_us, until_us }) => {
+                timer.air_us += until_us.saturating_sub(from_us);
                 false
             }
-            _ => false,
+            None => false,
         };
         // It left the ground: what its launch went past, and a warning
         // when UXDuck did not launch it (ADR-0038 K23).
@@ -1428,6 +1505,61 @@ impl Engine {
             positions: Vec::new(),
             items,
         });
+    }
+}
+
+#[cfg(test)]
+mod hop_tests {
+    use super::{Hop, HopChange, LANDED_AFTER_US};
+
+    const S: u64 = 1_000_000;
+
+    #[test]
+    fn a_moment_on_the_ground_in_flight_is_the_same_hop_and_counts() {
+        let mut hop = Hop::default();
+        assert_eq!(hop.observe(false, 0), None);
+        assert_eq!(hop.observe(true, 10 * S), Some(HopChange::Lifted));
+        // A land detector that flickers: on the ground every other second.
+        for second in 11..=40 {
+            let up = second % 2 == 0;
+            assert_eq!(hop.observe(up, second * S), None, "{second}");
+            assert!(hop.flying(), "{second}");
+            assert_eq!(hop.up(), up, "{second}");
+        }
+        assert_eq!(hop.lasted_us(40 * S), 30 * S);
+        // Down for good: the time stops where it came down, and that is
+        // when it landed, once it has stayed down.
+        assert_eq!(hop.observe(false, 41 * S), None);
+        assert_eq!(hop.lasted_us(43 * S), 31 * S);
+        assert_eq!(hop.observe(false, 41 * S + LANDED_AFTER_US - 1), None);
+        assert_eq!(
+            hop.observe(false, 41 * S + LANDED_AFTER_US),
+            Some(HopChange::Landed {
+                from_us: 10 * S,
+                until_us: 41 * S
+            })
+        );
+        assert!(!hop.flying());
+        assert_eq!(hop.lasted_us(50 * S), 0);
+        // Up again is another hop.
+        assert_eq!(hop.observe(true, 50 * S), Some(HopChange::Lifted));
+    }
+
+    #[test]
+    fn a_hop_that_ends_with_its_flight_ends_where_it_came_down() {
+        let mut hop = Hop::default();
+        assert_eq!(hop.end(S), None);
+        hop.observe(true, 5 * S);
+        assert_eq!(hop.end(9 * S), Some((5 * S, 9 * S)), "still up");
+        hop.observe(true, 20 * S);
+        hop.observe(false, 30 * S);
+        assert_eq!(hop.end(31 * S), Some((20 * S, 30 * S)), "down a second");
+        assert!(!hop.flying());
+        // Ended at a time before it came down, as a flight whose contact
+        // was lost is: no later than that.
+        hop.observe(true, 40 * S);
+        hop.observe(false, 50 * S);
+        assert_eq!(hop.end(45 * S), Some((40 * S, 45 * S)));
     }
 }
 

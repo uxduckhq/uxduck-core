@@ -1761,6 +1761,43 @@ fn the_list_is_journaled_when_it_changes_read_live_on_the_ground_and_kept_in_the
         || c.id == "uxduck:home"));
 }
 
+/// "On the ground" for a moment in flight, as a land detector that
+/// flickers says, is still in the air: the list stays as it launched and a
+/// mission's start is not held. Down for good, it is read live again.
+#[test]
+fn a_moment_on_the_ground_in_flight_is_still_launched() {
+    let mut b = bench();
+    b.wrong_plan();
+    b.arm(None);
+    b.seen(true);
+    b.flight_state("On the ground");
+    assert_eq!(b.checks()["evaluating"], true);
+    b.flight_state("In the air");
+    assert_eq!(b.checks()["evaluating"], false);
+    let launched_with = b.journal.preflight_updates();
+    let start = json!({ "command": { "type": "long", "command": 300, "params": [0, 0] } });
+    for _ in 0..3 {
+        b.time.advance(S);
+        b.flight_state("On the ground");
+        assert_eq!(b.checks()["evaluating"], false, "down for a moment");
+        let receipt = b.command(None, start.clone());
+        assert_eq!(receipt["result"]["status"], "accepted", "{receipt}");
+        b.time.advance(S);
+        b.flight_state("In the air");
+    }
+    assert_eq!(
+        b.journal.preflight_updates(),
+        launched_with,
+        "the list it launched with stays"
+    );
+    b.flight_state("On the ground");
+    b.time.advance(3 * S);
+    b.flight_state("On the ground");
+    assert_eq!(b.checks()["evaluating"], true, "landed");
+    let receipt = b.command(None, start);
+    assert_eq!(receipt["result"]["reason"], "preflight", "{receipt}");
+}
+
 #[test]
 fn a_refusal_is_a_receipt_with_its_reason_for_every_client() {
     let mut b = bench();
