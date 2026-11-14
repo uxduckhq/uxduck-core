@@ -77,8 +77,10 @@ impl From<dto::StepInput> for c::StepDef {
         Self {
             kind,
             title: v.title,
+            group: v.group,
             severity: v.severity.map_or(CheckSeverity::Block, Into::into),
             rule,
+            confirm: v.confirm,
         }
     }
 }
@@ -89,6 +91,8 @@ impl From<&c::StepDef> for dto::StepInput {
         Self {
             kind: v.kind.into(),
             title: v.title.clone(),
+            group: v.group.clone(),
+            confirm: v.confirm,
             severity: Some(v.severity.into()),
             item: rule.and_then(|r| r.item.clone()),
             param: rule.and_then(|r| r.param.clone()),
@@ -118,6 +122,8 @@ pub fn step(v: &c::Step, flown_since: bool) -> dto::ChecklistStep {
         id: v.id.clone(),
         kind: v.kind.into(),
         title: v.title.clone(),
+        group: v.group.clone(),
+        confirm: v.confirm,
         severity: v.severity.into(),
         item: rule.and_then(|r| r.item.clone()),
         param: rule.and_then(|r| r.param.clone()),
@@ -149,6 +155,8 @@ impl From<&c::RecordStep> for dto::RecordStep {
         Self {
             title: v.title.clone(),
             kind: v.kind.into(),
+            group: v.group.clone(),
+            confirm: v.confirm,
             severity: v.severity.into(),
             status: v.status.into(),
             tick: v.tick.as_ref().map(Into::into),

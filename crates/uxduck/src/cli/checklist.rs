@@ -1,5 +1,6 @@
-//! `uxduck checklist` (S193, ADR-0038 K7 to K11): a vehicle's own
-//! checklist from a terminal: list it, add a manual step or a rule, tick
+//! `uxduck checklist` (S193 and S353, ADR-0038 K7 to K11, K16, K17): a
+//! vehicle's own checklist from a terminal: list it by group, add a manual
+//! step or a rule, under a group, ticked by a person too or not, tick
 //! and clear, export it as a file and import a file or a Markdown list,
 //! copy another vehicle's, and set the parameter that makes the vehicle
 //! hold a rule itself.
@@ -42,10 +43,17 @@ pub enum ChecklistAction {
         /// Only warn: the step never stops arming.
         #[arg(long)]
         warn: bool,
+        /// The concept the step sits under, such as Battery or Controller.
+        #[arg(long, value_name = "NAME")]
+        group: Option<String>,
+        /// A person ticks the rule too, once it passes.
+        #[arg(long, requires = "rule")]
+        confirm: bool,
     },
     /// Removes a step, by its number, id or title.
     Remove { step: String },
-    /// Ticks a manual step, by its number, id or title.
+    /// Ticks a manual step, or a rule added with `--confirm` once it
+    /// passes, by its number, id or title.
     Tick {
         step: String,
         /// Clears its tick instead.
@@ -96,8 +104,16 @@ pub async fn run(data_dir: &Path, args: ChecklistArgs) -> Result<(), CliError> {
             rule,
             hold,
             warn,
+            group,
+            confirm,
         } => {
-            let step = new_step(&title, rule.as_deref(), hold, warn)?;
+            let mut step = new_step(&title, rule.as_deref(), hold, warn)?;
+            if let Some(group) = group {
+                step["group"] = json!(group);
+            }
+            if confirm {
+                step["confirm"] = json!(true);
+            }
             client
                 .call(
                     "checklist/update",
@@ -352,6 +368,58 @@ fn number(value: &Value) -> String {
     }
 }
 
+/// A step's line: its number, status, severity, group and words, a
+/// rule's comparison, and under it who ticked it.
+fn step_lines(n: usize, step: &Value, check: &Value) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let blocks = if step["severity"] == "block" {
+        "blocks"
+    } else {
+        "warns"
+    };
+    let _ = write!(
+        out,
+        "{n:>2}. {:<8} {blocks:<6} {}{}",
+        status_word(check["status"].as_str().unwrap_or_default()),
+        step["group"]
+            .as_str()
+            .map(|group| format!("{group} · "))
+            .unwrap_or_default(),
+        step["title"].as_str().unwrap_or_default()
+    );
+    if step["kind"] == "rule" {
+        let _ = write!(
+            out,
+            " ({}{})",
+            rule_words(step),
+            if step["confirm"] == true {
+                ", then ticked"
+            } else {
+                ""
+            }
+        );
+        if let Some(detail) = check["detail"].as_str() {
+            let _ = write!(out, ": {detail}");
+        }
+    }
+    out.push('\n');
+    if let Some(tick) = step["tick"].as_object() {
+        let by = tick["by"]["operatorName"]
+            .as_str()
+            .or_else(|| tick["by"]["clientName"].as_str())
+            .unwrap_or("someone");
+        let at = tick["atUs"].as_i64().map(when).unwrap_or_default();
+        let since = if step["flownSince"] == true {
+            ", a flight since"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "                    ticked by {by} at {at}{since}");
+    }
+    out
+}
+
 /// The checklist as the terminal shows it.
 #[must_use]
 pub fn lines(state: &Value) -> String {
@@ -379,39 +447,7 @@ pub fn lines(state: &Value) -> String {
             .find(|c| c["id"] == format!("checklist:{id}"))
             .cloned()
             .unwrap_or(Value::Null);
-        let blocks = if step["severity"] == "block" {
-            "blocks"
-        } else {
-            "warns"
-        };
-        let _ = write!(
-            out,
-            "{:>2}. {:<8} {:<6} {}",
-            n + 1,
-            status_word(check["status"].as_str().unwrap_or_default()),
-            blocks,
-            step["title"].as_str().unwrap_or_default()
-        );
-        if step["kind"] == "rule" {
-            let _ = write!(out, " ({})", rule_words(step));
-            if let Some(detail) = check["detail"].as_str() {
-                let _ = write!(out, ": {detail}");
-            }
-        }
-        out.push('\n');
-        if let Some(tick) = step["tick"].as_object() {
-            let by = tick["by"]["operatorName"]
-                .as_str()
-                .or_else(|| tick["by"]["clientName"].as_str())
-                .unwrap_or("someone");
-            let at = tick["atUs"].as_i64().map(when).unwrap_or_default();
-            let since = if step["flownSince"] == true {
-                ", a flight since"
-            } else {
-                ""
-            };
-            let _ = writeln!(out, "                    ticked by {by} at {at}{since}");
-        }
+        out.push_str(&step_lines(n + 1, step, &check));
     }
     for offer in state["checklist"]["offers"]
         .as_array()
@@ -471,6 +507,7 @@ mod tests {
         assert!(parse_rule("battery.voltage_v 22").is_err());
         assert!(parse_rule(">= 22").is_err());
         let step = new_step("Arming checks", Some("ARMING_CHECK == 1"), None, true).unwrap();
+        assert!(step.get("group").is_none() && step.get("confirm").is_none());
         assert_eq!(step["param"], "ARMING_CHECK");
         assert_eq!(step["severity"], "warn");
         let step = new_step(
@@ -497,7 +534,9 @@ mod tests {
                     { "id": "a", "kind": "manual", "title": "Propellers tight", "severity": "block",
                       "tick": { "by": { "clientName": "uxduck-web", "operatorName": "Ben" }, "atUs": 0 }, "flownSince": true },
                     { "id": "b", "kind": "rule", "title": "Battery at least 22.2 V", "severity": "block",
-                      "item": "battery.voltage_v", "op": ">=", "value": 22.2, "unit": "V", "holdS": 3.0 }
+                      "item": "battery.voltage_v", "op": ">=", "value": 22.2, "unit": "V", "holdS": 3.0 },
+                    { "id": "c", "kind": "rule", "title": "Charged and strapped", "group": "Battery", "confirm": true,
+                      "severity": "block", "item": "battery.cell_v", "op": ">=", "value": 4.1, "unit": "V" }
                 ],
                 "offers": [{ "stepId": "b", "name": "BATT_ARM_VOLT", "value": 22.2, "current": 0.0, "held": false }],
                 "version": 3
@@ -516,6 +555,12 @@ mod tests {
         );
         assert!(
             text.contains(
+                " 3. ?        blocks Battery · Charged and strapped (battery.cell_v >= 4.1 V, then ticked)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
                 "BATT_ARM_VOLT is 0; set it to 22.2 with `uxduck checklist <vehicle> set-param 2`"
             ),
             "{text}"
@@ -527,6 +572,6 @@ mod tests {
         let found = find(&state, "propellers tight").unwrap();
         assert_eq!(found["id"], "a");
         assert_eq!(find(&state, "2").unwrap()["id"], "b");
-        assert!(find(&state, "3").is_err());
+        assert!(find(&state, "4").is_err());
     }
 }

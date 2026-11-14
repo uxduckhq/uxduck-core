@@ -14,7 +14,8 @@
         "id": "st3f9a2c71be",
         "kind": "manual",
         "severity": "block",
-        "title": "Propellers tight"
+        "title": "Propellers tight",
+        "group": "Airframe"
       },
       {
         "holdS": 3.0,
@@ -26,6 +27,18 @@
         "title": "Battery at least 22.2 V",
         "unit": "V",
         "value": 22.2
+      },
+      {
+        "id": "st5c2e77a10f",
+        "kind": "rule",
+        "title": "Battery charged and strapped",
+        "group": "Battery",
+        "confirm": true,
+        "severity": "block",
+        "item": "battery.cell_v",
+        "op": ">=",
+        "value": 4.1,
+        "unit": "V"
       }
     ],
     "version": 1
@@ -47,7 +60,8 @@
       "severity": "block",
       "source": "uxduck",
       "status": "pass",
-      "title": "No setup procedure running"
+      "title": "No setup procedure running",
+      "group": "Setup"
     },
     {
       "detail": "Nothing waits for a restart.",
@@ -56,7 +70,8 @@
       "severity": "block",
       "source": "uxduck",
       "status": "pass",
-      "title": "No restart due"
+      "title": "No restart due",
+      "group": "Setup"
     },
     {
       "detail": "Heard just now.",
@@ -65,7 +80,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Link"
+      "title": "Link",
+      "group": "Link"
     },
     {
       "detail": "No controller drives Alpha.",
@@ -74,7 +90,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Controller at neutral"
+      "title": "Controller at neutral",
+      "group": "Controller"
     },
     {
       "detail": "No plan chosen for Alpha.",
@@ -83,7 +100,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Plan on the vehicle"
+      "title": "Plan on the vehicle",
+      "group": "Plan"
     },
     {
       "detail": "Alpha's mission has no heights above terrain.",
@@ -92,7 +110,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Terrain loaded"
+      "title": "Terrain loaded",
+      "group": "Plan"
     },
     {
       "detail": "No camera records with Alpha.",
@@ -101,7 +120,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Cameras ready to record"
+      "title": "Cameras ready to record",
+      "group": "Cameras"
     },
     {
       "detail": "For a person to tick.",
@@ -110,7 +130,8 @@
       "severity": "block",
       "source": "checklist",
       "status": "to-do",
-      "title": "Propellers tight"
+      "title": "Propellers tight",
+      "group": "Airframe"
     },
     {
       "detail": "Alpha isn't reporting battery.voltage_v now.",
@@ -120,6 +141,16 @@
       "source": "checklist",
       "status": "unknown",
       "title": "Battery at least 22.2 V"
+    },
+    {
+      "id": "checklist:st5c2e77a10f",
+      "source": "checklist",
+      "title": "Battery charged and strapped",
+      "group": "Battery",
+      "severity": "block",
+      "status": "to-do",
+      "detail": "Battery per cell is at least 4.1 V. For a person to tick.",
+      "gates": true
     }
   ],
   "evaluating": true,

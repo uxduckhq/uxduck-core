@@ -1,4 +1,6 @@
-//! A vehicle's checklist (S193, ADR-0038 K7 to K11, K14): manual steps and
+//! A vehicle's checklist (S193 and S353, ADR-0038 K7 to K11, K14, K16,
+//! K17): steps under their groups beside UXDuck's own checks, and a rule a
+//! person ticks too, only once it passes; manual steps and
 //! rules join the vehicle's preflight checks and hold arming while a
 //! blocking one does not pass; ticks come only from operators, say who and
 //! when, and are never cleared by themselves (not by arming, landing, a
@@ -938,6 +940,14 @@ fn a_checklist_file_round_trips_and_a_pasted_list_becomes_manual_steps() {
             .iter()
             .all(|s| s["kind"] == "manual" && s["tick"].is_null() && s["severity"] == "block")
     );
+    assert!(
+        pasted["checklist"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["group"] == "At the field"),
+        "the heading is their group"
+    );
     assert_eq!(pasted["checklist"]["copiedFrom"], "a pasted list");
     // Two sources at once are refused.
     let two = b.call(
@@ -1255,6 +1265,253 @@ fn reordering_and_removing_steps() {
 
 /// Someone at this computer agreed to the Terms of Service (ADR-0047), so a
 /// real vehicle arms for a window that acts as no one in particular.
+#[test]
+fn a_rule_a_person_ticks_too_passes_once_both_have() {
+    const CHARGED: &str = "Battery charged and strapped";
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [{
+                "kind": "rule", "title": CHARGED, "group": "Battery", "confirm": true,
+                "item": "battery.voltage_v", "op": ">=", "value": 22.2
+            }]
+        }),
+    );
+    let step = b.step("v", CHARGED);
+    assert_eq!(step["confirm"], true);
+    assert_eq!(step["group"], "Battery");
+    let id = b.step_id(CHARGED);
+
+    // Until its rule passes nobody can tick it, and it says so.
+    let unread = b.step_check(CHARGED);
+    assert_eq!(unread["status"], "unknown");
+    assert!(
+        unread["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("A person ticks it once that passes."),
+        "{unread}"
+    );
+    b.volts(21.9);
+    let low = b.step_check(CHARGED);
+    assert_eq!(low["status"], "fail");
+    assert_eq!(
+        low["detail"],
+        "Battery is below 22.2 V. A person ticks it once that passes."
+    );
+    let refused = b.call(
+        "checklist/tick",
+        json!({ "vehicleId": "v", "stepId": id, "ticked": true }),
+    );
+    assert!(
+        refused["error"]["message"].as_str().unwrap().contains(
+            "“Battery charged and strapped” can be ticked once its rule passes. Battery is below 22.2 V."
+        ),
+        "{refused}"
+    );
+    assert!(b.step("v", CHARGED)["tick"].is_null());
+
+    // The rule passes: it waits for a person, and still holds arming.
+    b.volts(22.6);
+    let waiting = b.step_check(CHARGED);
+    assert_eq!(waiting["status"], "to-do");
+    assert_eq!(
+        waiting["detail"],
+        "Battery is at least 22.2 V. For a person to tick."
+    );
+    assert_eq!(gating(&b.checks()), [CHARGED]);
+    assert_eq!(b.arm()["result"]["status"], "not-sent");
+    b.tick(CHARGED, true);
+    let passed = b.step_check(CHARGED);
+    assert_eq!(passed["status"], "pass");
+    assert_eq!(passed["detail"], "Battery is at least 22.2 V.");
+    assert!(gating(&b.checks()).is_empty());
+
+    // The rule failing again holds arming. The tick stays for when it
+    // passes again: only a person clears it (K9).
+    b.volts(21.0);
+    let dropped = b.step_check(CHARGED);
+    assert_eq!(dropped["status"], "fail");
+    assert_eq!(dropped["detail"], "Battery is below 22.2 V.");
+    assert_eq!(gating(&b.checks()), [CHARGED]);
+    assert!(!b.step("v", CHARGED)["tick"].is_null());
+    b.volts(22.6);
+    assert_eq!(b.step_check(CHARGED)["status"], "pass");
+
+    // A new group or severity leaves the tick. Another value needs a new one.
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "group": "Power", "severity": "warn" }] }),
+    );
+    let moved = b.step("v", CHARGED);
+    assert_eq!(moved["group"], "Power");
+    assert!(!moved["tick"].is_null(), "{moved}");
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "value": 22.4, "severity": "block" }] }),
+    );
+    assert!(
+        b.step("v", CHARGED)["tick"].is_null(),
+        "the tick was for the old rule"
+    );
+    assert_eq!(b.step_check(CHARGED)["status"], "to-do");
+
+    // Clearing a tick needs no passing rule.
+    b.tick(CHARGED, true);
+    b.volts(20.0);
+    b.tick(CHARGED, false);
+    assert!(b.step("v", CHARGED)["tick"].is_null());
+
+    // Without `confirm` it is a plain rule again, in no group.
+    b.volts(22.6);
+    b.tick(CHARGED, true);
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "confirm": false, "group": null }] }),
+    );
+    let plain = b.step("v", CHARGED);
+    assert!(
+        plain["tick"].is_null() && plain["confirm"].is_null() && plain["group"].is_null(),
+        "{plain}"
+    );
+    let check = b.step_check(CHARGED);
+    assert_eq!(check["status"], "pass");
+    assert_eq!(check["detail"], "Battery is at least 22.4 V.");
+}
+
+#[test]
+fn the_record_on_arming_keeps_a_ticked_rule_and_its_group() {
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [{
+                "kind": "rule", "title": BATTERY, "group": "Battery", "confirm": true,
+                "item": "battery.voltage_v", "op": ">=", "value": 22.2
+            }]
+        }),
+    );
+    b.volts(22.6);
+    b.tick(BATTERY, true);
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    b.seen(true);
+    let records = b.armed_records();
+    let HistoryEvent::Armed { record, .. } = &records[0] else {
+        unreachable!()
+    };
+    let step = &record.steps[0];
+    assert_eq!(step.group.as_deref(), Some("Battery"));
+    assert!(step.confirm);
+    assert_eq!(step.status, CheckStatus::Pass);
+    assert_eq!(step.value, Some(22.6));
+    assert_eq!(step.tick.as_ref().unwrap().by.client_name, "operator-ui");
+}
+
+#[test]
+fn checks_sit_under_their_concepts() {
+    let mut b = bench();
+    let checks = b.checks();
+    let list = checks["checks"].as_array().unwrap();
+    // UXDuck's own checks name their group. The vehicle's reasons have none.
+    for (id, group) in [
+        ("uxduck:setup", "Setup"),
+        ("uxduck:restart", "Setup"),
+        ("uxduck:link", "Link"),
+        ("uxduck:rc-receiver", "Controller"),
+        ("uxduck:controller", "Controller"),
+        ("uxduck:plan", "Plan"),
+        ("uxduck:terrain", "Plan"),
+        ("uxduck:recording", "Cameras"),
+    ] {
+        let check = list
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {checks}"));
+        assert_eq!(check["group"], group, "{id}");
+    }
+    assert!(
+        list.iter()
+            .filter(|c| c["source"] == "vehicle")
+            .all(|c| c["group"].is_null())
+    );
+
+    // A step joins a group by its name, tidied. One without stays loose.
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [
+                { "kind": "manual", "title": "Sticks move the right surfaces", "group": "  Controller " },
+                { "kind": "manual", "title": PROPS }
+            ]
+        }),
+    );
+    assert_eq!(
+        b.step_check("Sticks move the right surfaces")["group"],
+        "Controller"
+    );
+    assert!(b.step_check(PROPS)["group"].is_null());
+    let long = b.call(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": "X", "group": "g".repeat(61) }] }),
+    );
+    assert!(
+        long["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most 60 characters"),
+        "{long}"
+    );
+
+    // A pasted list's headings are its groups. A file and a copy keep
+    // groups, and a rule's need for a tick.
+    b.observe("w", 2, false);
+    let pasted = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "w", "markdown": "# Battery\n- [ ] Strapped\n## Airframe\n- Propellers tight" }),
+    );
+    let groups: Vec<(&str, &str)> = pasted["checklist"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["title"].as_str().unwrap(), s["group"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        groups,
+        [("Strapped", "Battery"), ("Propellers tight", "Airframe")]
+    );
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "w",
+            "add": [{
+                "kind": "rule", "title": "Charged", "group": "Battery", "confirm": true,
+                "item": "battery.voltage_v", "op": ">=", "value": 22.2
+            }]
+        }),
+    );
+    let file = b.ok("checklist/export", json!({ "vehicleId": "w" }));
+    assert_eq!(file["format"], "uxduck.checklist/1");
+    assert_eq!(
+        file["steps"][0],
+        json!({ "kind": "manual", "title": "Strapped", "group": "Battery", "severity": "block" })
+    );
+    assert_eq!(file["steps"][2]["confirm"], true);
+    let copied = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "v", "replace": true, "fromVehicleId": "w" }),
+    );
+    let step = &copied["checklist"]["steps"][2];
+    assert_eq!(
+        (step["group"].as_str(), step["confirm"].as_bool()),
+        (Some("Battery"), Some(true))
+    );
+    assert!(step["tick"].is_null());
+}
+
 fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State {
     let operator = serde_json::from_value(json!({
         "id": "op-agreed",

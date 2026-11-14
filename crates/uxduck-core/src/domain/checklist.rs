@@ -4,6 +4,10 @@
 //! warning. They join the vehicle's preflight checks with source
 //! `checklist`.
 //!
+//! A step can sit under a concept ("Battery", "Controller") beside
+//! UXDuck's own checks of that group (K16), and a rule can ask for a
+//! person's tick too, once it passes (K17).
+//!
 //! A checklist belongs to one vehicle (K7): another vehicle's, a checklist
 //! file or a pasted Markdown list is copied in and independent from then
 //! on. A tick stays until a person clears it (K9): nothing clears it on
@@ -23,6 +27,8 @@ pub const FILE_FORMAT: &str = "uxduck.checklist/1";
 pub const MAX_STEPS: usize = 100;
 /// The longest step title, in characters.
 pub const MAX_TITLE: usize = 200;
+/// The longest group name, in characters.
+pub const MAX_GROUP: usize = 60;
 /// The longest a rule waits for its value to hold, in seconds.
 pub const MAX_HOLD_S: f64 = 600.0;
 
@@ -221,12 +227,20 @@ pub struct Step {
     pub id: String,
     pub kind: StepKind,
     pub title: String,
+    /// The concept it sits under in the list ("Battery"), beside UXDuck's
+    /// own checks of that group (K16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Blocking by default, a manual step too.
     pub severity: CheckSeverity,
     /// A rule's comparison; none for a manual step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<Rule>,
-    /// A manual step's tick, until a person clears it.
+    /// A rule a person ticks too, once it passes (K17).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+    /// A person's tick, on a manual step or a rule that asks for one,
+    /// until a person clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick: Option<Tick>,
 }
@@ -238,14 +252,23 @@ impl Step {
         format!("checklist:{}", self.id)
     }
 
+    /// Whether a person ticks it: a manual step, or a rule that asks for
+    /// a tick once it passes (K17).
+    #[must_use]
+    pub const fn needs_tick(&self) -> bool {
+        self.rule.is_none() || self.confirm
+    }
+
     /// The step's definition without its tick: what a copy takes.
     #[must_use]
     pub fn definition(&self) -> StepDef {
         StepDef {
             kind: self.kind,
             title: self.title.clone(),
+            group: self.group.clone(),
             severity: self.severity,
             rule: self.rule.clone(),
+            confirm: self.confirm,
         }
     }
 }
@@ -262,9 +285,13 @@ pub fn step_of_check(check_id: &str) -> Option<&str> {
 pub struct StepDef {
     pub kind: StepKind,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub severity: CheckSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<Rule>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
 }
 
 /// A vehicle's checklist, by vehicle id. Journaled; kept with the vehicle
@@ -361,13 +388,15 @@ impl StepDef {
         Self {
             kind: StepKind::Manual,
             title: title.into(),
+            group: None,
             severity: CheckSeverity::Block,
             rule: None,
+            confirm: false,
         }
     }
 
-    /// The step tidied (title trimmed, a rule's unit from its key when not
-    /// given).
+    /// The step tidied (title and group trimmed, a rule's unit from its
+    /// key when not given, no tick asked of a manual step twice).
     ///
     /// # Errors
     /// Why it cannot be kept, in words.
@@ -396,10 +425,24 @@ impl StepDef {
             }
             (StepKind::Rule, Some(rule)) => Some(checked_rule(&title, rule)?),
         };
+        let group = self
+            .group
+            .map(|g| g.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|g| !g.is_empty());
+        if group
+            .as_ref()
+            .is_some_and(|g| g.chars().count() > MAX_GROUP)
+        {
+            return Err(invalid(format!(
+                "“{title}”: a group's name is at most {MAX_GROUP} characters"
+            )));
+        }
         Ok(Self {
             kind: self.kind,
             title,
+            group,
             severity: self.severity,
+            confirm: self.confirm && rule.is_some(),
             rule,
         })
     }
@@ -502,16 +545,27 @@ impl ChecklistFile {
 
 /// A pasted Markdown or Notion checklist as manual steps (K11): each list
 /// item, to-do or plain line is a step, ticked or not (ticks are never
-/// copied); headings, rules and blank lines are left out.
+/// copied); a heading is the group of the steps under it (K16), unless it
+/// is too long to be one; rules and blank lines are left out.
 ///
 /// # Errors
 /// No step in the text, or a line too long to be one.
 pub fn steps_from_markdown(text: &str) -> Result<Vec<StepDef>, Invalid> {
     let mut steps = Vec::new();
+    let mut group: Option<String> = None;
     for line in text.lines() {
         let mut rest = line.trim();
+        if let Some(heading) = rest.strip_prefix('#') {
+            let name = heading
+                .trim_matches('#')
+                .trim()
+                .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
+                .trim();
+            group =
+                (!name.is_empty() && name.chars().count() <= MAX_GROUP).then(|| name.to_owned());
+            continue;
+        }
         if rest.is_empty()
-            || rest.starts_with('#')
             || rest.starts_with("```")
             || rest
                 .chars()
@@ -547,7 +601,13 @@ pub fn steps_from_markdown(text: &str) -> Result<Vec<StepDef>, Invalid> {
         if title.is_empty() {
             continue;
         }
-        steps.push(StepDef::manual(title).checked()?);
+        steps.push(
+            StepDef {
+                group: group.clone(),
+                ..StepDef::manual(title)
+            }
+            .checked()?,
+        );
     }
     if steps.is_empty() {
         return Err(invalid("no steps in that text: one step per line"));
@@ -561,9 +621,14 @@ pub fn steps_from_markdown(text: &str) -> Result<Vec<StepDef>, Invalid> {
 pub struct RecordStep {
     pub title: String,
     pub kind: StepKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub severity: CheckSeverity,
     pub status: CheckStatus,
-    /// Who ticked it and when, for a manual step.
+    /// A rule that asked for a person's tick too (K17).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+    /// Who ticked it and when, for a step a person ticks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick: Option<Tick>,
     /// A rule's comparison and the value it read at arming.
@@ -637,6 +702,7 @@ mod tests {
         StepDef {
             kind: StepKind::Rule,
             title: "Battery".into(),
+            group: None,
             severity: CheckSeverity::Block,
             rule: Some(Rule {
                 item: Some(item.into()),
@@ -646,6 +712,7 @@ mod tests {
                 unit: None,
                 hold_s: Some(3.0),
             }),
+            confirm: false,
         }
     }
 
@@ -701,6 +768,25 @@ mod tests {
     }
 
     #[test]
+    fn a_group_is_tidied_and_only_a_rule_asks_for_a_tick_too() {
+        let mut step = rule("battery.voltage_v", Op::Ge, 22.2);
+        step.group = Some("  Battery   and power ".into());
+        step.confirm = true;
+        let step = step.checked().unwrap();
+        assert_eq!(step.group.as_deref(), Some("Battery and power"));
+        assert!(step.confirm);
+        let mut manual = StepDef::manual("Props");
+        manual.group = Some("   ".into());
+        manual.confirm = true;
+        let manual = manual.checked().unwrap();
+        assert_eq!(manual.group, None);
+        assert!(!manual.confirm, "a manual step is ticked anyway");
+        let mut long = StepDef::manual("Props");
+        long.group = Some("g".repeat(MAX_GROUP + 1));
+        assert!(long.checked().unwrap_err().0.contains("group"));
+    }
+
+    #[test]
     fn markdown_and_notion_lists_become_manual_steps() {
         let steps = steps_from_markdown(
             "# Before the flight\n\n- [ ] Propellers tight\n- [x] Payload latched\n* Battery strapped\n1. **Area clear**\n☐ Camera on\n---\nPlain line\n",
@@ -723,7 +809,36 @@ mod tests {
                 .iter()
                 .all(|s| s.kind == StepKind::Manual && s.severity == CheckSeverity::Block)
         );
+        assert!(
+            steps
+                .iter()
+                .all(|s| s.group.as_deref() == Some("Before the flight")),
+            "a heading is the group of the steps under it"
+        );
         assert!(steps_from_markdown("# Only a heading\n\n").is_err());
+    }
+
+    #[test]
+    fn markdown_headings_become_groups() {
+        let long = "x".repeat(MAX_GROUP + 1);
+        let steps = steps_from_markdown(&format!(
+            "Loose step\n## **Battery** ##\n- [ ] Strapped\n- Charged\n### Controller\n1. Sticks free\n# {long}\n- Under a long heading\n"
+        ))
+        .unwrap();
+        let groups: Vec<(&str, Option<&str>)> = steps
+            .iter()
+            .map(|s| (s.title.as_str(), s.group.as_deref()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("Loose step", None),
+                ("Strapped", Some("Battery")),
+                ("Charged", Some("Battery")),
+                ("Sticks free", Some("Controller")),
+                ("Under a long heading", None)
+            ]
+        );
     }
 
     #[test]
@@ -734,8 +849,10 @@ mod tests {
                 id: "s1".into(),
                 kind: StepKind::Manual,
                 title: "Propellers tight".into(),
+                group: Some("Airframe".into()),
                 severity: CheckSeverity::Block,
                 rule: None,
+                confirm: false,
                 tick: Some(Tick {
                     by: Author {
                         client_name: "uxduck-web".into(),
@@ -753,8 +870,11 @@ mod tests {
         let file = checklist.to_file(Some("Alpha".into()));
         assert_eq!(
             file.steps,
-            [StepDef::manual("Propellers tight")],
-            "no ticks"
+            [StepDef {
+                group: Some("Airframe".into()),
+                ..StepDef::manual("Propellers tight")
+            }],
+            "no ticks, and its group"
         );
         assert_eq!(file.clone().checked().unwrap(), file);
         let newer = ChecklistFile {

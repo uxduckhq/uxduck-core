@@ -11,6 +11,11 @@
       {
         "id": "st3f9a2c71be",
         "severity": "warn"
+      },
+      {
+        "id": "st5c2e77a10f",
+        "group": null,
+        "confirm": true
       }
     ],
     "remove": ["st5b7e19c0d4"],

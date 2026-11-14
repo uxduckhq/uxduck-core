@@ -173,6 +173,19 @@ impl OwnCheck {
         }
     }
 
+    /// The concept it sits under in the list (K16), where a checklist's
+    /// steps of the same group join it.
+    #[must_use]
+    pub const fn group(self) -> &'static str {
+        match self {
+            Self::Setup | Self::Restart => "Setup",
+            Self::Link => "Link",
+            Self::RcReceiver | Self::Controller => "Controller",
+            Self::Plan | Self::Terrain => "Plan",
+            Self::Recording => "Cameras",
+        }
+    }
+
     /// A fresh vehicle's (ADR-0038's open question, as assumed): every one
     /// on, as a warning, but a running procedure and a restart due, which
     /// block. A simulation is never held up by the rest.
@@ -310,6 +323,11 @@ pub struct Check {
     pub id: String,
     pub source: CheckSource,
     pub title: String,
+    /// The concept it sits under in the list (K16): "Plan" for UXDuck's
+    /// own, a checklist step's own group. None for the vehicle's reasons
+    /// and plugins' checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub severity: CheckSeverity,
     pub status: CheckStatus,
     /// What UXDuck found, in words.
@@ -463,6 +481,7 @@ mod tests {
             id: "x".into(),
             source,
             title: "X".into(),
+            group: None,
             severity,
             status,
             detail: None,

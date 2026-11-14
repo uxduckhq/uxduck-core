@@ -5,7 +5,8 @@
     "add": [
       {
         "kind": "manual",
-        "title": "Propellers tight"
+        "title": "Propellers tight",
+        "group": "Airframe"
       },
       {
         "kind": "rule",
@@ -15,6 +16,15 @@
         "value": 22.2,
         "holdS": 3.0,
         "severity": "block"
+      },
+      {
+        "kind": "rule",
+        "title": "Battery charged and strapped",
+        "group": "Battery",
+        "confirm": true,
+        "item": "battery.cell_v",
+        "op": ">=",
+        "value": 4.1
       }
     ]
   }

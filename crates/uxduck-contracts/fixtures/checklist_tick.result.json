@@ -56,7 +56,8 @@
       "severity": "block",
       "source": "uxduck",
       "status": "pass",
-      "title": "No setup procedure running"
+      "title": "No setup procedure running",
+      "group": "Setup"
     },
     {
       "detail": "Nothing waits for a restart.",
@@ -65,7 +66,8 @@
       "severity": "block",
       "source": "uxduck",
       "status": "pass",
-      "title": "No restart due"
+      "title": "No restart due",
+      "group": "Setup"
     },
     {
       "detail": "Heard just now.",
@@ -74,7 +76,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Link"
+      "title": "Link",
+      "group": "Link"
     },
     {
       "detail": "No controller drives Alpha.",
@@ -83,7 +86,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Controller at neutral"
+      "title": "Controller at neutral",
+      "group": "Controller"
     },
     {
       "detail": "No plan chosen for Alpha.",
@@ -92,7 +96,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Plan on the vehicle"
+      "title": "Plan on the vehicle",
+      "group": "Plan"
     },
     {
       "detail": "Alpha's mission has no heights above terrain.",
@@ -101,7 +106,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Terrain loaded"
+      "title": "Terrain loaded",
+      "group": "Plan"
     },
     {
       "detail": "No camera records with Alpha.",
@@ -110,7 +116,8 @@
       "severity": "warn",
       "source": "uxduck",
       "status": "pass",
-      "title": "Cameras ready to record"
+      "title": "Cameras ready to record",
+      "group": "Cameras"
     },
     {
       "detail": "Ticked by operator-ui.",

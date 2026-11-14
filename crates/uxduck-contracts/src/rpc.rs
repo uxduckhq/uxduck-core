@@ -1441,11 +1441,18 @@ pub enum ClientRequest {
     #[serde(rename = "preflight/configure")]
     PreflightConfigure(crate::dto::preflight::PreflightConfigureParams),
     /// Adds, changes, removes or reorders steps of one vehicle's checklist
-    /// (S193, ADR-0038 K8, K11), all or none. A manual step is ticked by a
-    /// person ("Propellers tight"); a rule compares one telemetry item or
-    /// parameter with a value and passes once it has held for `holdS`
-    /// seconds: `{ "kind": "rule", "title": "Battery at least 22.2 V",
-    /// "item": "battery.voltage_v", "op": ">=", "value": 22.2, "holdS": 3 }`.
+    /// (S193, S353, ADR-0038 K8, K11, K16, K17), all or none. A manual step
+    /// is ticked by a person ("Propellers tight"); a rule compares one
+    /// telemetry item or parameter with a value and passes once it has held
+    /// for `holdS` seconds: `{ "kind": "rule", "title": "Battery at least
+    /// 22.2 V", "item": "battery.voltage_v", "op": ">=", "value": 22.2,
+    /// "holdS": 3 }`. A rule with `"confirm": true` is ticked by a person
+    /// too, and only once it passes, for what UXDuck can measure and a
+    /// person must also see ("Battery charged and strapped"). Give each
+    /// step a `group` for the concept it belongs to ("Battery", "Airframe",
+    /// "Controller"): the list is shown by group, never as automatic and
+    /// manual sections, and a step in "Setup", "Link", "Controller", "Plan"
+    /// or "Cameras" sits with UXDuck's own checks there.
     /// Use `battery.cell_v` (the lowest cell, or the pack over its cell
     /// count) so one rule reads the same on 4S and 6S. A step blocks arming
     /// until it passes unless its severity is `warn`. The checklist is this
@@ -1459,7 +1466,8 @@ pub enum ClientRequest {
     /// from one source: another vehicle's checklist (`fromVehicleId`), a
     /// checklist file (`file`, `uxduck.checklist/1`) or a pasted Markdown or
     /// Notion checklist (`markdown`: each line, `- [ ]` item or numbered
-    /// item a manual step; headings left out). A copy, independent from
+    /// item a manual step; each heading the group of the steps under it).
+    /// A copy, independent from
     /// then on; ticks are never copied. After pasting a list, tell the
     /// person which steps could be rules over telemetry or a parameter
     /// (such as "Battery charged" as `battery.cell_v >= 4.1`) and change
@@ -1467,8 +1475,9 @@ pub enum ClientRequest {
     /// asked for by the operator first. Result: `Preflight`.
     #[serde(rename = "checklist/copy")]
     ChecklistCopy(crate::dto::checklist::ChecklistCopyParams),
-    /// A person ticks a manual step of a vehicle's checklist, or clears its
-    /// tick (S193, ADR-0038 K9), recorded with who and when. A tick stays
+    /// A person ticks a manual step of a vehicle's checklist, or a rule
+    /// with `confirm` while that rule passes, or clears its tick (S193,
+    /// S353, ADR-0038 K9, K17), recorded with who and when. A tick stays
     /// until a person clears it. Only from an operator client: an agent,
     /// MCP client or plugin cannot tick. Result: `Preflight`.
     #[serde(rename = "checklist/tick")]

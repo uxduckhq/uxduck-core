@@ -114,6 +114,12 @@ pub struct Check {
     pub id: String,
     pub source: CheckSource,
     pub title: String,
+    /// The concept it sits under in the list: "Plan" or "Controller" for
+    /// UXDuck's own checks, a checklist step's own group ("Battery"). A
+    /// step given the same group sits with them. None for the vehicle's
+    /// own reasons and plugins' checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub severity: CheckSeverity,
     pub status: CheckStatus,
     /// What UXDuck found, in words.

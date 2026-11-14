@@ -1,6 +1,7 @@
-//! A vehicle's checklist on the wire (ADR-0038 K7 to K11, K14; S193):
-//! manual steps a person ticks and rules over a telemetry item or a
-//! parameter. It belongs to one vehicle: copying from another vehicle, a
+//! A vehicle's checklist on the wire (ADR-0038 K7 to K11, K14, K16, K17;
+//! S193, S353): manual steps a person ticks and rules over a telemetry
+//! item or a parameter, each under a group when it has one. A rule can ask
+//! for a person's tick too, once it passes. It belongs to one vehicle: copying from another vehicle, a
 //! checklist file or a pasted list makes an independent copy. Its steps are
 //! checks in `preflight/state` with source `checklist`.
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::dto::history::Author;
 use crate::dto::preflight::{CheckRef, CheckSeverity, CheckStatus, PreflightOverride};
 
-/// How a rule compares its value with the step's.
+/// How a rule compares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum RuleOp {
     #[serde(rename = ">=")]
@@ -27,7 +28,7 @@ pub enum RuleOp {
     Ne,
 }
 
-/// A manual step for a person to tick, or a rule UXDuck checks.
+/// Ticked by a person, or a rule UXDuck checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum StepKind {
@@ -35,8 +36,8 @@ pub enum StepKind {
     Rule,
 }
 
-/// Who ticked a manual step, and when. A tick stays until a person clears
-/// it: nothing clears it on landing, a battery change or a restart.
+/// Who ticked a step, and when. A tick stays until a person clears it:
+/// nothing clears it on landing, a battery change or a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Tick {
@@ -45,16 +46,18 @@ pub struct Tick {
     pub at_us: u64,
 }
 
-/// A step as written: in a checklist file, or added or copied in. A rule
-/// reads one telemetry item (`item`, such as `battery.voltage_v` or
-/// `battery.cell_v`) or one parameter (`param`), compares it (`op`) with
-/// `value`, in the item's unit, and passes once that has held for `holdS`
-/// seconds.
+/// A step as written: in a checklist file, or added or copied in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StepInput {
     pub kind: StepKind,
     pub title: String,
+    /// The concept the step sits under, such as "Battery".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// A rule a person ticks too, once it passes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
     /// Block (the default) stops arming until it passes; warn only warns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
@@ -66,8 +69,7 @@ pub struct StepInput {
     pub op: Option<RuleOp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// How people read the value's unit; from the item's key or the
-    /// parameter's definition when left out.
+    /// The value's unit, from the item's key when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +84,12 @@ pub struct ChecklistStep {
     pub id: String,
     pub kind: StepKind,
     pub title: String,
+    /// The concept it sits under in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// A rule a person ticks too, once it passes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
     pub severity: CheckSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
@@ -95,7 +103,8 @@ pub struct ChecklistStep {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_s: Option<f64>,
-    /// A manual step's tick, until a person clears it.
+    /// A person's tick, on a manual step or a rule with `confirm`, until
+    /// a person clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick: Option<Tick>,
     /// Ticked before the vehicle's last flight began.
@@ -151,9 +160,8 @@ pub struct ChecklistFile {
     pub steps: Vec<StepInput>,
 }
 
-/// A change to one step: what is given changes, the rest stays. Giving
-/// `item` reads that item instead of a parameter, and `param` the other
-/// way round. A manual step's tick stays through a change of words.
+/// A change to one step: what is given changes, the rest stays. A tick
+/// goes with new words, a changed rule or a change of `confirm`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StepChange {
@@ -162,6 +170,17 @@ pub struct StepChange {
     pub kind: Option<StepKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Null takes the step out of its group.
+    #[serde(
+        default,
+        deserialize_with = "crate::nullable::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[allow(clippy::option_option, reason = "absent, null or a value")]
+    pub group: Option<Option<String>>,
+    /// Whether a person ticks the rule too, once it passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,8 +209,7 @@ pub struct StepChange {
     pub hold_s: Option<Option<f64>>,
 }
 
-/// `checklist/update`: steps to add, change and remove on one vehicle, and
-/// optionally their new order. Applied together, or not at all.
+/// `checklist/update`: applied together, or not at all.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistUpdateParams {
@@ -212,8 +230,8 @@ pub struct ChecklistUpdateParams {
 
 /// `checklist/copy`: copies steps into one vehicle's checklist from one
 /// source: another vehicle's checklist, a checklist file, or a pasted
-/// Markdown or Notion list (each line or `- [ ]` item a manual step,
-/// headings left out). Ticks are never copied.
+/// Markdown or Notion list (each line or `- [ ]` item a manual step, each
+/// heading the group of the steps under it). Ticks are never copied.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistCopyParams {
@@ -233,7 +251,9 @@ pub struct ChecklistCopyParams {
     pub replace: bool,
 }
 
-/// `checklist/tick`: a person ticks a manual step, or clears its tick.
+/// `checklist/tick`: a person ticks a manual step or a rule with
+/// `confirm`, or clears its tick. A rule with `confirm` is ticked only
+/// while its rule passes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecklistTickParams {
@@ -248,6 +268,11 @@ pub struct ChecklistTickParams {
 pub struct RecordStep {
     pub title: String,
     pub kind: StepKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// A rule that asked for a person's tick too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
     pub severity: CheckSeverity,
     pub status: CheckStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -100,6 +100,7 @@ impl From<&p::Check> for dto::Check {
             id: v.id.clone(),
             source: v.source.into(),
             title: v.title.clone(),
+            group: v.group.clone(),
             severity: v.severity.into(),
             status: v.status.into(),
             detail: v.detail.clone(),

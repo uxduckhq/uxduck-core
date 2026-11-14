@@ -183,8 +183,9 @@ pub const AGENT_METHODS: &[&str] = &[
     // list the window and the CLI read. Arming past a failing blocking one
     // is put to an operator; changing the checks is a person's.
     "preflight/state",
-    // A vehicle's checklist (S193, ADR-0038 K11): writing steps and rules,
-    // or copying them in from another vehicle, a file or a pasted list,
+    // A vehicle's checklist (S193, S353, ADR-0038 K11): writing steps and
+    // rules, with their groups and whether a person ticks a rule too, or
+    // copying them in from another vehicle, a file or a pasted list,
     // asks the operator first without `config`. Ticking a step and arming
     // past one are a person's, so `checklist/tick` and `checklist/reset`
     // are not here.
@@ -628,6 +629,9 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "feedback/suggest",
     // Rare, and kept the tools sent each turn under budget for set home (S308).
     "checklist/copy",
+    // Rare too, like the other exports, and kept them under budget for a
+    // step's group and its tick on a rule (S353).
+    "checklist/export",
     // Found with operator/update's calculated values (ADR-0056 K5).
     "telemetry/calculate",
 ];

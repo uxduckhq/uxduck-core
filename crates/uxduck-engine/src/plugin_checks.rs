@@ -249,6 +249,7 @@ impl Engine {
                     id: format!("plugin:{}:{}", plugin.id, declared.id),
                     source: CheckSource::Plugin,
                     title: declared.title.clone(),
+                    group: None,
                     severity: if asks && may_block {
                         CheckSeverity::Block
                     } else {

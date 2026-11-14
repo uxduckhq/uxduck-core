@@ -1,7 +1,10 @@
-//! A vehicle's checklist (S193, ADR-0038 K7 to K11, K14).
+//! A vehicle's checklist (S193 and S353, ADR-0038 K7 to K11, K14, K16,
+//! K17).
 //!
 //! Each vehicle has its own steps: manual ones a person ticks and rules
-//! over a telemetry item or a parameter, held for some seconds. They are
+//! over a telemetry item or a parameter, held for some seconds. A rule can
+//! ask for a person's tick too, given only while it passes (K17), and a
+//! step can sit under a group beside UXDuck's own checks (K16). They are
 //! checks in the vehicle's preflight list (`checklist:<id>`), so the gate
 //! holds arming for a blocking one that does not pass. Copying from another
 //! vehicle, a checklist file or a pasted list makes an independent copy
@@ -150,6 +153,8 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
     let mut input = StepInput {
         kind: kind.into(),
         title: change.title.unwrap_or_else(|| before.title.clone()),
+        group: change.group.unwrap_or_else(|| before.group.clone()),
+        confirm: change.confirm.unwrap_or(before.confirm),
         severity: Some(change.severity.map_or(before.severity, Into::into).into()),
         item: rule.as_ref().and_then(|r| r.item.clone()),
         param: rule.as_ref().and_then(|r| r.param.clone()),
@@ -194,9 +199,14 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
         input.hold_s = None;
     }
     let def = step_def(input)?;
-    // A tick was for the step's words: new words, or a rule, need a new
-    // tick from a person.
-    let tick = if def.kind == StepKind::Manual && def.title == before.title {
+    // A tick was for the step's words and the rule it waited for: new
+    // words, another rule, or a tick no longer asked for, need a new tick
+    // from a person. A new group or severity leaves it.
+    let tick = if (def.rule.is_none() || def.confirm)
+        && def.title == before.title
+        && def.rule == before.rule
+        && def.confirm == before.confirm
+    {
         step.tick.clone()
     } else {
         None
@@ -205,8 +215,10 @@ fn changed(step: &Step, change: StepChange) -> Result<Step, ApiError> {
         id: step.id.clone(),
         kind: def.kind,
         title: def.title,
+        group: def.group,
         severity: def.severity,
         rule: def.rule,
+        confirm: def.confirm,
         tick,
     })
 }
@@ -267,8 +279,10 @@ fn new_step(id: String, def: StepDef) -> Step {
         id,
         kind: def.kind,
         title: def.title,
+        group: def.group,
         severity: def.severity,
         rule: def.rule,
+        confirm: def.confirm,
         tick: None,
     }
 }
@@ -392,11 +406,24 @@ fn tick(
         .iter_mut()
         .find(|s| s.id == params.step_id)
         .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no step {}", params.step_id)))?;
-    if step.kind == StepKind::Rule {
+    if !step.needs_tick() {
         return Err(invalid(format!(
             "“{}” is a rule: UXDuck checks it, nobody ticks it",
             step.title
         )));
+    }
+    // A rule that asks for a tick takes it only while it passes (K17).
+    // Clearing a tick is always a person's to do.
+    if params.ticked
+        && let Some(rule) = &step.rule
+    {
+        let (status, detail) = engine.rule_outcome(&vehicle, &step.id, rule);
+        if status != CheckStatus::Pass {
+            return Err(invalid(format!(
+                "“{}” can be ticked once its rule passes. {detail}",
+                step.title
+            )));
+        }
     }
     step.tick = params.ticked.then(|| Tick {
         by: engine.author(connection),
@@ -559,12 +586,27 @@ impl Engine {
                         Some(tick) => (CheckStatus::Pass, format!("Ticked by {}.", tick.who())),
                         None => (CheckStatus::ToDo, "For a person to tick.".to_owned()),
                     },
-                    Some(rule) => self.rule_outcome(vehicle, &step.id, rule),
+                    Some(rule) => {
+                        let (status, detail) = self.rule_outcome(vehicle, &step.id, rule);
+                        // A rule a person ticks too (K17) passes once
+                        // both have: the rule first, then the tick.
+                        match (step.confirm, status, &step.tick) {
+                            (true, CheckStatus::Pass, None) => {
+                                (CheckStatus::ToDo, format!("{detail} For a person to tick."))
+                            }
+                            (true, _, None) => (
+                                status,
+                                format!("{detail} A person ticks it once that passes."),
+                            ),
+                            _ => (status, detail),
+                        }
+                    }
                 };
                 Check {
                     id: step.check_id(),
                     source: CheckSource::Checklist,
                     title: step.title.clone(),
+                    group: step.group.clone(),
                     severity: step.severity,
                     status,
                     detail: Some(detail),
@@ -860,6 +902,8 @@ impl Engine {
             .map(|step| RecordStep {
                 title: step.title.clone(),
                 kind: step.kind,
+                group: step.group.clone(),
+                confirm: step.confirm,
                 severity: step.severity,
                 status: checks
                     .iter()

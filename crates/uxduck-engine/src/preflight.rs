@@ -308,6 +308,7 @@ fn px4_checks(vehicle: &Vehicle, report: &ArmingChecks) -> Vec<Check> {
             detail: Some(detail),
             fix: Some(fix),
             plugin: None,
+            group: None,
         });
     }
     if checks.iter().any(|c| c.severity == CheckSeverity::Block) {
@@ -335,6 +336,7 @@ fn px4_checks(vehicle: &Vehicle, report: &ArmingChecks) -> Vec<Check> {
             detail: Some(detail),
             fix: None,
             plugin: None,
+            group: None,
         },
     );
     checks
@@ -402,6 +404,7 @@ impl Engine {
                 id: check.id(),
                 source: CheckSource::Uxduck,
                 title: check.title().to_owned(),
+                group: Some(check.group().to_owned()),
                 severity: setting.severity,
                 status: outcome.status,
                 detail: Some(outcome.detail),
@@ -617,6 +620,7 @@ impl Engine {
                 id: "vehicle:ready".into(),
                 source: CheckSource::Vehicle,
                 title: format!("{}'s own checks", vehicle.name),
+                group: None,
                 severity: CheckSeverity::Block,
                 status,
                 detail: Some(detail.into()),
@@ -639,6 +643,7 @@ impl Engine {
                     id: format!("vehicle:{reason}"),
                     source: CheckSource::Vehicle,
                     title: reason,
+                    group: None,
                     severity: CheckSeverity::Block,
                     status: CheckStatus::Fail,
                     detail: Some(format!(
@@ -690,6 +695,7 @@ impl Engine {
             id: "uxduck:simulation-position".into(),
             source: CheckSource::Uxduck,
             title: "Position".into(),
+            group: None,
             severity: CheckSeverity::Block,
             status,
             detail: Some(detail),
