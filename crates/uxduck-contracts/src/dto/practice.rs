@@ -67,6 +67,10 @@ pub struct PracticeExercise {
     /// vehicle, and says so in `unavailable` until one does.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_controller: bool,
+    /// Flies on a PX4 simulation too. The tab lists only these for a PX4
+    /// vehicle, and `unavailable` says why the others cannot run on one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub px4: bool,
     /// What to do, step by step.
     pub steps: Vec<PracticeStep>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

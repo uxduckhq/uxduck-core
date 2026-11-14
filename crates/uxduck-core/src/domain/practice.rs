@@ -320,6 +320,11 @@ pub struct Exercise {
     /// Needs a controller claimed for the vehicle (ADR-0024's controller rule).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_controller: bool,
+    /// Flies on a PX4 simulation as well as an ArduPilot one: its start,
+    /// steps and checks name neither autopilot's modes, parameters or
+    /// commands. The rest are ArduPilot's for now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub px4: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

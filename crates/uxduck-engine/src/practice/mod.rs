@@ -217,6 +217,7 @@ fn listed(
         guide: exercise.guide,
         goal: exercise.goal.clone(),
         needs_controller: exercise.needs_controller,
+        px4: exercise.px4,
         steps: exercise
             .steps
             .iter()
@@ -266,9 +267,9 @@ fn only_for(vehicles: &[SimVehicle]) -> String {
 }
 
 impl Engine {
-    /// What kind of simulated vehicle UXDuck started this is (X1), or why
-    /// it cannot practise.
-    fn simulated_kind(&self, vehicle_id: &str) -> Result<SimVehicle, String> {
+    /// What kind of simulated vehicle UXDuck started this is (X1), and on
+    /// which autopilot, or why it cannot practise.
+    fn simulated_kind(&self, vehicle_id: &str) -> Result<(SimVehicle, SimAutopilot), String> {
         let Some(vehicle) = self.state.vehicles.get(vehicle_id) else {
             return Err("Choose a simulated vehicle to practise with.".into());
         };
@@ -279,10 +280,8 @@ impl Engine {
             .map(|link| &link.kind)
         {
             Some(LinkKind::Simulator {
-                vehicle,
-                autopilot: SimAutopilot::Ardupilot,
-                ..
-            }) => Ok(*vehicle),
+                vehicle, autopilot, ..
+            }) => Ok((*vehicle, *autopilot)),
             _ => Err("Practice needs a simulated vehicle started in UXDuck.".into()),
         }
     }
@@ -293,12 +292,15 @@ impl Engine {
         vehicle_id: &str,
         exercise: &Exercise,
     ) -> Option<String> {
-        let kind = match self.simulated_kind(vehicle_id) {
-            Ok(kind) => kind,
+        let (kind, autopilot) = match self.simulated_kind(vehicle_id) {
+            Ok(simulated) => simulated,
             Err(why) => return Some(why),
         };
         if !exercise.vehicles.contains(&kind) {
             return Some(only_for(&exercise.vehicles));
+        }
+        if autopilot == SimAutopilot::Px4 && !exercise.px4 {
+            return Some("This exercise is for ArduPilot simulations for now.".into());
         }
         if exercise.needs_controller && !self.controller_drives(vehicle_id) {
             return Some("Fly it with your keyboard or a controller to try this.".into());
@@ -436,7 +438,7 @@ impl Engine {
             }
             None => {}
         }
-        let kind = self
+        let (kind, _) = self
             .simulated_kind(vehicle_id)
             .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
         let guide = exercises()
@@ -887,7 +889,9 @@ impl Engine {
                 return;
             }
             let near = match self.simulated_kind(&vehicle.id) {
-                Ok(SimVehicle::Plane | SimVehicle::Vtol | SimVehicle::Jet) => AT_START_CIRCLING_M,
+                Ok((SimVehicle::Plane | SimVehicle::Vtol | SimVehicle::Jet, _)) => {
+                    AT_START_CIRCLING_M
+                }
                 _ => AT_START_M,
             };
             if view

@@ -37,6 +37,8 @@ Once you know the basics:
 - **Through the gates**: by hand, fly through five gates in order. On the VTOL and the plane, in FBWB, with the gates 300 m out.
 - **Parameter puzzle**: it is too slow to reach the ring in time; find the parameter and fix it.
 
+A PX4 multicopter lists Read the panel, Fly there and Land in the circle, and a PX4 VTOL lists Read the panel. The others use ArduPilot's modes, settings or speeds, so they are for ArduPilot simulations for now.
+
 ## Flying by hand
 
 The exercises flown by hand need a controller or your keyboard flying the vehicle; **Open Cockpit** in the exercise opens the Cockpit's **Controls** subtab with the keyboard picked under **Fly with**; pick a controller there instead to fly with it. Get started's **Fly it by hand** opens the first of them.

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "b009496a9b3bfff0ede4c5fc2d14f5507bd567fe",
+  "sourceCommit": "78efdf5ea052567fe4cf99a212f7f5374bb4713e",
   "licenseReady": true,
   "files": [
     {
@@ -5241,7 +5241,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/practice.rs",
-      "sha256": "bea35c39ff0e4f2f3321f6ed590e41bdb83bf3e3ea5c44169fe3a7948590a4d2",
+      "sha256": "b5540389729872914633e6f45ca925f0f68e85c80cb64d218c5ba7c4e1ea714a",
       "executable": false
     },
     {
@@ -5576,7 +5576,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/practice.rs",
-      "sha256": "807def4106dba60dd3994adf3c80efda0b25099936897542b1e0d19d9db25342",
+      "sha256": "ce6a343c894126058c1fef2d3cffc559029ad2b329638799d168b2f1ca90b6d5",
       "executable": false
     },
     {
@@ -6021,7 +6021,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/exercises.rs",
-      "sha256": "f4fc5fc8e583d8d9196f5ee130d3f75794084717941797dfeaba471fbb6ffc40",
+      "sha256": "5d8e29a518fd3f840bea5ac5464d2de02d1a2e1315d9369fc3753e4236eb05af",
       "executable": false
     },
     {
@@ -6051,7 +6051,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/exercises/fly-there.json",
-      "sha256": "ab5259bbd0aca49ccf4cb75b7477b998a8e6b1cbd3b066cbe52ea0c6ffd403b8",
+      "sha256": "cb957b0c18e49d475ca904dedb6dfa0c47b7151b87b12b69b8ad33f6cc75d71e",
       "executable": false
     },
     {
@@ -6111,7 +6111,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/exercises/land-in-the-circle.json",
-      "sha256": "5689b304962cfc63cd85f4fdb78a4e29b6826a61537b7a821776aadc7577fa9c",
+      "sha256": "7eb2cdfff65417cd27974a645ca5980e3af7835b46abf7c9efa1d8b164084724",
       "executable": false
     },
     {
@@ -6146,12 +6146,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/exercises/read-the-panel-vtol.json",
-      "sha256": "3ab40fc62295e226a7395c8d1e6f0fdb023997dc66d58c4b36126de91ee791dc",
+      "sha256": "e86975328d56dae973340f99ec6a38a36436319d123d6e8c2b72a0804079403c",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/practice/exercises/read-the-panel.json",
-      "sha256": "16417a6990fc596721a5a263cdf61176191346836fc65fcf5acecf4fabadc330",
+      "sha256": "80d4d8b29178a89902a69d01605b1bfa8129eeb32ac2a5ed3daaac8974f81274",
       "executable": false
     },
     {
@@ -6181,7 +6181,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/practice/mod.rs",
-      "sha256": "eb66df79fcf0ef1775fbc1452d479e48312e570bd3f7e53e76eb4536eb2d477b",
+      "sha256": "cb764c7de101e697cf16c3399480b3196c6546bbe0e7cae7eda2f9a66223b1d3",
       "executable": false
     },
     {
@@ -7971,7 +7971,7 @@
     },
     {
       "path": "docs/site/practice.md",
-      "sha256": "5e04f5a7fd92d39da9adbbddcc79372c1b42ef034d7d9058042a7d760e36a918",
+      "sha256": "f884ef09ae6393c1374f40c5e2741011c0c59f69279ed9a3a303930497d8bd22",
       "executable": false
     },
     {

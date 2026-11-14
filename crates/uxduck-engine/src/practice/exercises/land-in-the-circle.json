@@ -4,6 +4,7 @@
   "title": "Land in the circle",
   "audience": "first-flight",
   "vehicles": ["multicopter"],
+  "px4": true,
   "goal": "Land inside the ring.",
   "start": { "heightM": 40 },
   "features": [

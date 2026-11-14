@@ -4,6 +4,7 @@
   "title": "Read the panel",
   "audience": "first-flight",
   "vehicles": ["vtol"],
+  "px4": true,
   "goal": "Answer two questions from Telemetry: how high it is and its mode.",
   "start": { "heightM": 60 },
   "questions": [

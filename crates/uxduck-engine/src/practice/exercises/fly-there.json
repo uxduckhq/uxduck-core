@@ -4,6 +4,7 @@
   "title": "Fly there",
   "audience": "first-flight",
   "vehicles": ["multicopter"],
+  "px4": true,
   "goal": "Send it to each ring in turn with Go to.",
   "start": { "heightM": 50 },
   "features": [

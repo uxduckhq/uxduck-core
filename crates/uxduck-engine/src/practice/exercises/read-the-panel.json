@@ -4,6 +4,7 @@
   "title": "Read the panel",
   "audience": "first-flight",
   "vehicles": ["multicopter"],
+  "px4": true,
   "goal": "Answer three questions from Telemetry: how high it is, its mode and its battery.",
   "start": { "heightM": 60 },
   "questions": [

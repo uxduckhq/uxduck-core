@@ -161,6 +161,44 @@ mod tests {
         }
     }
 
+    /// One that flies on PX4 too sets nothing of ArduPilot's at its start
+    /// and judges no mode by name. A guide and one flown by hand are
+    /// ArduPilot's: PX4 holds still in Hold until switched to Position.
+    #[test]
+    fn those_for_px4_too_set_and_judge_nothing_of_ardupilots() {
+        let px4: Vec<&str> = all()
+            .iter()
+            .filter(|e| e.px4)
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(
+            px4,
+            [
+                "read-the-panel",
+                "read-the-panel-vtol",
+                "fly-there",
+                "land-in-the-circle"
+            ]
+        );
+        for exercise in all().iter().filter(|e| e.px4) {
+            assert!(
+                !exercise.guide && !exercise.needs_controller,
+                "{}",
+                exercise.id
+            );
+            assert!(exercise.start.parameters.is_empty(), "{}", exercise.id);
+            assert!(exercise.start.battery_pct.is_none(), "{}", exercise.id);
+            let checks = exercise
+                .steps
+                .iter()
+                .flat_map(|s| &s.all)
+                .chain(exercise.fails.iter().flat_map(|r| &r.all));
+            for check in checks {
+                assert!(!matches!(check, Check::Mode { .. }), "{}", exercise.id);
+            }
+        }
+    }
+
     /// A guide (S117): one per kind of simulated vehicle, called Get
     /// started, for a first flight, judged on the vehicle as it is, never
     /// failed and without a measure; 4 to 6 steps, each with its hint.
