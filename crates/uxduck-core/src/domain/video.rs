@@ -111,6 +111,39 @@ pub struct VideoAudio {
     pub recorded: bool,
 }
 
+/// Why a camera with fallback addresses is on the address it tries or
+/// plays (ADR-0057 D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AddressReason {
+    /// Its first address, or an earlier one that answered again.
+    Preferred,
+    /// The address before showed no pictures for 5 s.
+    NoPictures,
+    /// The address before could not connect or start.
+    ConnectionFailed,
+    /// The vehicle moved to the connection on this address's host.
+    FollowedVehicle,
+    /// The vehicle came back to the preferred address's connection, which
+    /// answered a probe.
+    ReturnedWithVehicle,
+}
+
+/// Why a camera is on its active address, since when, and when it next
+/// checks an earlier one (ADR-0057 D10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressChoice {
+    pub reason: AddressReason,
+    pub since_us: u64,
+    /// The vehicle connection whose remote host is this address's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+    /// While on a fallback: when it next probes the earlier addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_us: Option<u64>,
+}
+
 /// Counted since the source was first seen, except the bitrate. A counter
 /// missing from a checkpoint or event an older build wrote reads as 0.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +358,9 @@ pub struct VideoSource {
     /// The address currently being tried or played, redacted on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_url: Option<String>,
+    /// Why it is on `active_url` and since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_choice: Option<AddressChoice>,
     /// Someone added it; it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,
@@ -443,6 +479,23 @@ pub fn sender_host(sender: &str) -> &str {
         }
     });
     host.trim_start_matches('[').trim_end_matches(']')
+}
+
+/// `10.0.0.5` from `rtsp://admin:secret@10.0.0.5:8554/main`, `::1` from
+/// `rtsp://[::1]/main`.
+#[must_use]
+pub fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(bracketed) = host_port.strip_prefix('[') {
+        return bracketed
+            .split_once(']')
+            .map_or(bracketed, |(host, _)| host);
+    }
+    host_port
+        .split_once(':')
+        .map_or(host_port, |(host, _)| host)
 }
 
 /// When a camera's video is recorded (ADR-0017 V16, S40).
@@ -659,6 +712,15 @@ mod tests {
         assert_eq!(source_id(5600, "10.0.0.5:41000"), "udp-5600-10.0.0.5");
         assert_eq!(source_id(5600, "[::1]:41000"), "udp-5600-::1");
         assert_eq!(sender_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    #[test]
+    fn an_rtsp_address_has_the_host_a_connection_peer_has() {
+        let url = "rtsp://admin:secret@192.168.50.21:8554/front#track=2";
+        assert_eq!(url_host(url), sender_host("192.168.50.21:14550"));
+        assert_eq!(url_host("rtsp://100.76.177.45/front"), "100.76.177.45");
+        assert_eq!(url_host("rtsp://[fd7a::1]:8554/front"), "fd7a::1");
+        assert_eq!(url_host("rtsp://user@camera.local"), "camera.local");
     }
 
     #[test]

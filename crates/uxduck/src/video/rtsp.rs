@@ -26,7 +26,7 @@ use base64::Engine as _;
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use uxduck_core::domain::video::{VideoTrack, redact};
+use uxduck_core::domain::video::{AddressReason, VideoTrack, redact};
 use uxduck_media::audio::AudioUnit;
 use uxduck_media::latency::Arrival;
 use uxduck_media::nal::Codec;
@@ -48,6 +48,8 @@ const BACKOFF: [Duration; 4] = [
 ];
 /// Nothing at all from the camera for this long: the connection is dead.
 const SILENT_FOR: Duration = Duration::from_secs(5);
+/// Why playing ends when the pictures stop.
+const NO_PICTURES: &str = "no video pictures for 5 s";
 const OFFLINE_LOG_EVERY: Duration = Duration::from_mins(5);
 const REPORT_EVERY: Duration = Duration::from_secs(1);
 /// Sound with neither `RTP-Info` nor sender reports for this long is lined
@@ -106,13 +108,21 @@ pub fn address(url: &str) -> Result<Address, String> {
         },
         None => (None, None),
     };
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => (
-            h.to_owned(),
-            p.parse().map_err(|_| format!("{p} is not a port"))?,
-        ),
-        _ => (host_port.to_owned(), 554),
+    // An IPv6 address is in brackets, which it connects without.
+    let (host, port) = match host_port.strip_prefix('[') {
+        Some(bracketed) => bracketed
+            .split_once(']')
+            .map(|(host, rest)| (host, rest.strip_prefix(':')))
+            .ok_or_else(|| "the RTSP address has no closing ]".to_owned())?,
+        None => match host_port.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        },
     };
+    let port = port.map_or(Ok(554), |p| {
+        p.parse().map_err(|_| format!("{p} is not a port"))
+    })?;
+    let host = host.to_owned();
     if host.is_empty() {
         return Err("the RTSP address has no host".into());
     }
@@ -1089,7 +1099,7 @@ async fn play(
     loop {
         match tokio::time::timeout_at(last_picture + SILENT_FOR, s.frame())
             .await
-            .map_err(|_| "no video pictures for 5 s".to_owned())??
+            .map_err(|_| NO_PICTURES.to_owned())??
         {
             Frame::Interleaved { channel: 0, data } => {
                 // MPEG-TS over RTSP is kept as received; RTP video is not TS.
@@ -1209,8 +1219,10 @@ async fn probe(url: &str) -> Result<(), String> {
 
 /// Wait for a preferred address to answer twice. Playback continues during
 /// these small control-only probes. The delay also limits flapping when a
-/// server answers DESCRIBE but its video still cannot play.
-async fn preferred(urls: &[String]) -> usize {
+/// server answers DESCRIBE but its video still cannot play. `next` hears
+/// how long until each round of probes.
+async fn preferred(urls: &[String], next: impl Fn(Duration)) -> usize {
+    next(Duration::from_secs(30));
     tokio::time::sleep(Duration::from_secs(30)).await;
     let mut previous = None;
     loop {
@@ -1228,6 +1240,7 @@ async fn preferred(urls: &[String]) -> usize {
             return healthy.unwrap_or(0);
         }
         previous = healthy;
+        next(Duration::from_secs(15));
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
@@ -1238,16 +1251,34 @@ async fn preferred(urls: &[String]) -> usize {
 pub struct Worker {
     pub task: tokio::task::JoinHandle<()>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    steer: tokio::sync::watch::Sender<Option<usize>>,
 }
 
 impl Worker {
     pub fn finished(&self) -> bool {
         self.task.is_finished() && Arc::strong_count(&self.gate) == 1
     }
+
+    /// The vehicle moved to the connection on the address at `index`
+    /// (ADR-0057 D10). Only the latest move counts.
+    pub fn steer(&self, index: usize) {
+        self.steer.send_replace(Some(index));
+    }
+}
+
+/// Why one address ends.
+enum Move {
+    Failed(String),
+    Recovered(usize),
+    Steered(usize, AddressReason),
 }
 
 /// One worker per physical camera, with at most one PLAY session. Dropping
 /// `play` closes its TCP session before the next address is opened.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one worker loop: pick an address, play it until it moves, back off"
+)]
 pub fn spawn(
     runtime: &tokio::runtime::Handle,
     source_id: String,
@@ -1265,41 +1296,104 @@ pub fn spawn(
         },
     );
     let held = gate.clone();
+    let (steer, mut steered) = tokio::sync::watch::channel(None);
     let task = runtime.spawn(async move {
         let _session = held.lock().await;
         if urls.is_empty() {
             return;
         }
         let mut current = 0;
+        let mut reason = AddressReason::Preferred;
         let mut failures = 0usize;
         let mut connection_log = ConnectionLog::default();
         loop {
+            // A move to a fallback that came before connecting goes first.
+            let pending = steered
+                .has_changed()
+                .unwrap_or(false)
+                .then(|| *steered.borrow())
+                .flatten();
+            if let Some(index) = pending.filter(|index| (1..urls.len()).contains(index)) {
+                steered.mark_unchanged();
+                if index != current {
+                    current = index;
+                    reason = AddressReason::FollowedVehicle;
+                }
+            }
             hub.restart_source(&source_id);
             let url = &urls[current];
             let id = source_id.clone();
             let active = url.clone();
-            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_address(&id, active)));
+            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_address(&id, active, reason)));
             let started = Instant::now();
             let outcome = {
                 let playing = play(&source_id, url, &hub, &engine, &mut connection_log, epoch);
                 tokio::pin!(playing);
-                tokio::select! {
-                    result = &mut playing => Err(result.err().unwrap_or_default()),
-                    index = preferred(&urls[..current]), if current > 0 => Ok(index),
+                let recovered = preferred(&urls[..current], |wait| {
+                    let id = source_id.clone();
+                    let in_us = u64::try_from(wait.as_micros()).unwrap_or(u64::MAX);
+                    engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_next_check(&id, in_us)));
+                });
+                tokio::pin!(recovered);
+                // A return to the first address waits for one DESCRIBE, and
+                // the current address keeps playing meanwhile.
+                let mut probing = None;
+                loop {
+                    tokio::select! {
+                        biased;
+                        Ok(()) = steered.changed() => {
+                            let Some(index) = *steered.borrow_and_update() else {
+                                continue;
+                            };
+                            probing = None;
+                            if index == current || index >= urls.len() {
+                                continue;
+                            }
+                            if index > 0 {
+                                break Move::Steered(index, AddressReason::FollowedVehicle);
+                            }
+                            probing = Some(Box::pin(tokio::time::timeout(SILENT_FOR, probe(&urls[0]))));
+                        }
+                        Some(answered) = async {
+                            match probing.as_mut() {
+                                Some(answer) => Some(answer.await),
+                                None => None,
+                            }
+                        }, if probing.is_some() => {
+                            probing = None;
+                            if matches!(answered, Ok(Ok(()))) {
+                                break Move::Steered(0, AddressReason::ReturnedWithVehicle);
+                            }
+                        }
+                        result = &mut playing => break Move::Failed(result.err().unwrap_or_default()),
+                        index = &mut recovered, if current > 0 => break Move::Recovered(index),
+                    }
                 }
             }; // `playing` and its socket have been dropped here.
             let why = match outcome {
-                Ok(index) => {
+                Move::Recovered(index) => {
                     current = index;
+                    reason = AddressReason::Preferred;
                     failures = 0;
                     "Returning to a preferred camera address".to_owned()
                 }
-                Err(error) => {
+                Move::Steered(index, because) => {
+                    current = index;
+                    reason = because;
+                    failures = 0;
+                    "Following the vehicle's connection".to_owned()
+                }
+                Move::Failed(error) => {
                     if started.elapsed() > Duration::from_secs(30) {
                         failures = 0;
                     }
                     connection_log.failed(&source_id, &error, Instant::now());
                     current = (current + 1) % urls.len();
+                    reason = if error == NO_PICTURES {
+                        AddressReason::NoPictures
+                    } else {
+                        AddressReason::ConnectionFailed
+                    };
                     failures = failures.saturating_add(1);
                     format!("Can't reach {}: {error}", redact(url))
                 }
@@ -1321,7 +1415,7 @@ pub fn spawn(
             }
         }
     });
-    Worker { task, gate }
+    Worker { task, gate, steer }
 }
 
 #[cfg(test)]
@@ -1430,6 +1524,11 @@ mod tests {
         assert_eq!(a.password.as_deref(), Some("p@ss"));
         assert_eq!(address("rtsp://cam").unwrap().port, 554);
         assert!(address("http://cam").is_err());
+        // An IPv6 address connects without its brackets.
+        let v6 = address("rtsp://[::1]:8554/front").unwrap();
+        assert_eq!((v6.host.as_str(), v6.port), ("::1", 8554));
+        assert_eq!(v6.url, "rtsp://[::1]:8554/front");
+        assert_eq!(address("rtsp://[fd7a::1]/front").unwrap().host, "fd7a::1");
     }
 
     #[test]

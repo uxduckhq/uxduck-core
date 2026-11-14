@@ -26,6 +26,8 @@ Action::UseTerrainDataset.dataset
 Action::UseTerrainDataset.vehicle_id
 ActionBinding.action
 ActionBinding.button
+AddressChoice.reason
+AddressChoice.since_us
 Actor.client_id
 ActorIdentity.operator_name
 Approval.capability

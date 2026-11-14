@@ -96,6 +96,12 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         }
     }
 
+    fn steer_rtsp(&mut self, source_id: &str, index: usize) {
+        if let Some(worker) = self.rtsp.get(source_id) {
+            worker.steer(index);
+        }
+    }
+
     fn devices(&mut self) -> uxduck_contracts::dto::video::VideoDevicesResult {
         self.devices.list(&self.runtime)
     }

@@ -411,6 +411,7 @@ impl Engine {
         if presence_changed {
             self.flight_presence(&after.id);
         }
+        self.video_vehicle_changed(before, after);
         self.refresh_wake_lock();
         self.drive_launch_of_vehicle(&after.id);
         self.drive_plan_run_of_vehicle(&after.id);

@@ -22,8 +22,10 @@ use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
 use uxduck_core::domain::telemetry::ClockMeasured;
+use uxduck_core::domain::vehicle::{Vehicle, VehicleRoute};
 use uxduck_core::domain::video::{
-    CaptureInput, VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name,
+    AddressChoice, AddressReason, CaptureInput, VideoReport, VideoSource, VideoState, VideoTrack,
+    redact, sender_host, udp_name, url_host,
 };
 use uxduck_core::events::{Actor, Change};
 use uxduck_media::latency::{Companion, CompanionClock, Offset};
@@ -62,6 +64,10 @@ pub trait VideoPort: Send + std::fmt::Debug {
     /// Connects to an RTSP source and keeps reconnecting until closed.
     fn open_rtsp(&mut self, _source_id: &str, _urls: &[String], _epoch: u64) {}
     fn close_rtsp(&mut self, _source_id: &str) {}
+    /// Moves an open RTSP camera to its address at `index`, because its
+    /// vehicle moved to the connection on that address's host (ADR-0057
+    /// D10): straight away, or to the first address once it answers a probe.
+    fn steer_rtsp(&mut self, _source_id: &str, _index: usize) {}
     /// Whether a UDP source should be demuxed instead of just discovered.
     fn demand(&mut self, _source_id: &str, _needed: bool) {}
     /// Cached enumeration; the host refreshes outside the engine thread.
@@ -278,6 +284,8 @@ pub(crate) struct Video {
     /// Announced RTSP sources fetched this session.
     opened: std::collections::BTreeSet<String>,
     rtsp_epochs: BTreeMap<String, u64>,
+    /// The addresses each open RTSP worker was given, in its order: a steer
+    /// names one by its place in this list (ADR-0057 D10).
     rtsp_urls: BTreeMap<String, Vec<String>>,
     next_rtsp_epoch: u64,
     /// The recording in progress for each camera (S40).
@@ -366,6 +374,22 @@ fn same_machine(a: &str, b: &str) -> bool {
             })
     };
     a == b && !local(a)
+}
+
+/// Whether a camera address is on a vehicle connection's remote host: the
+/// hosts as written, never resolved (ADR-0057 D10).
+fn on_route(url: &str, route: &VehicleRoute) -> bool {
+    url_host(url).eq_ignore_ascii_case(sender_host(&route.peer))
+}
+
+/// The connection a vehicle uses now: its selected route, else its
+/// telemetry route.
+fn route_in_use(vehicle: &Vehicle) -> Option<&VehicleRoute> {
+    let routes = &vehicle.connections.as_ref()?.routes;
+    routes
+        .iter()
+        .find(|r| r.selected)
+        .or_else(|| routes.iter().find(|r| r.telemetry))
 }
 
 fn validate_capture(input: &CaptureInput) -> Result<(), ApiError> {
@@ -619,6 +643,7 @@ impl Engine {
                 fallback_urls: Vec::new(),
                 internet: None,
                 active_url: None,
+                active_choice: None,
                 added_by_hand: false,
                 capture: None,
                 file: None,
@@ -742,6 +767,7 @@ impl Engine {
             fallback_urls: Vec::new(),
             internet: None,
             active_url: None,
+            active_choice: None,
             added_by_hand: false,
             capture: None,
             file: None,
@@ -1208,6 +1234,7 @@ impl Engine {
                 .collect();
         }
         source.active_url = None;
+        source.active_choice = None;
         source.tracks.clear();
         if !source.named_by_hand {
             source.name = redact(source.url.as_deref().unwrap_or_default());
@@ -1219,6 +1246,7 @@ impl Engine {
                 source: source.clone(),
             },
         );
+        self.video.rtsp_urls.remove(&source.id);
         self.video.rtsp_epochs.remove(&source.id);
         if self.video.opened.remove(&source.id)
             && let Some(port) = self.video.port.as_mut()
@@ -1243,9 +1271,164 @@ impl Engine {
         }
     }
 
-    pub fn rtsp_address(&mut self, id: &str, url: String) {
-        if let Some(mut source) = self.state.video_sources.get(id).cloned() {
-            source.active_url = Some(url);
+    /// The RTSP worker tries `url` now, for `reason`. A move with the
+    /// vehicle says where it connects, a failure keeps saying what failed.
+    pub fn rtsp_address(&mut self, id: &str, url: String, reason: AddressReason) {
+        let Some(mut source) = self.state.video_sources.get(id).cloned() else {
+            return;
+        };
+        if matches!(
+            reason,
+            AddressReason::FollowedVehicle | AddressReason::ReturnedWithVehicle
+        ) && source.state == VideoState::Stopped
+        {
+            source.state_detail = Some(self.connecting(&source, &url));
+        }
+        source.active_choice = (!source.fallback_urls.is_empty()).then(|| AddressChoice {
+            reason,
+            since_us: self.clock.now_us(),
+            link_id: self.address_link(&source, &url),
+            next_check_us: None,
+        });
+        source.active_url = Some(url);
+        source.version += 1;
+        self.commit_as(actor(), Change::VideoSourceUpserted { source });
+    }
+
+    /// While on a fallback, the RTSP worker probes the earlier addresses
+    /// again in `in_us`.
+    pub fn rtsp_next_check(&mut self, id: &str, in_us: u64) {
+        let Some(mut source) = self.state.video_sources.get(id).cloned() else {
+            return;
+        };
+        let Some(choice) = source.active_choice.as_mut() else {
+            return;
+        };
+        choice.next_check_us = Some(self.clock.now_us().saturating_add(in_us));
+        source.version += 1;
+        self.commit_as(actor(), Change::VideoSourceUpserted { source });
+    }
+
+    /// The vehicle of a camera with fallback addresses: its own, else the
+    /// vehicle last heard on one of its addresses' hosts.
+    fn camera_vehicle(&self, source: &VideoSource) -> Option<&Vehicle> {
+        if source.fallback_urls.is_empty() {
+            return None;
+        }
+        if let Some(id) = &source.vehicle_id {
+            return self.state.vehicles.get(id);
+        }
+        let urls: Vec<&String> = source.url.iter().chain(&source.fallback_urls).collect();
+        self.state
+            .vehicles
+            .values()
+            .filter(|v| !v.dismissed)
+            .filter(|v| {
+                v.connections.as_ref().is_some_and(|c| {
+                    c.routes
+                        .iter()
+                        .any(|r| urls.iter().any(|url| on_route(url, r)))
+                })
+            })
+            .max_by_key(|v| v.last_heartbeat_us)
+    }
+
+    /// The vehicle connection on an address's host, which names it.
+    fn address_link(&self, source: &VideoSource, url: &str) -> Option<String> {
+        self.camera_vehicle(source)?
+            .connections
+            .as_ref()?
+            .routes
+            .iter()
+            .find(|r| on_route(url, r))
+            .map(|r| r.link_id.clone())
+    }
+
+    /// `Connecting to the Internet address, rtsp://…`: the address tried,
+    /// named by the vehicle connection on its host when it has one.
+    fn connecting(&self, source: &VideoSource, url: &str) -> String {
+        match self
+            .address_link(source, url)
+            .and_then(|id| self.state.links.get(&id))
+        {
+            Some(link) => format!("Connecting to the {} address, {}", link.name, redact(url)),
+            None => format!("Connecting to {}", redact(url)),
+        }
+    }
+
+    /// Moves an open camera to the address on the host of the connection
+    /// its vehicle uses, when the address it is on is on another of the
+    /// vehicle's connections (ADR-0057 D10). An address on none of them
+    /// gives no hint, and its health checks decide alone.
+    fn steer_camera(&mut self, source_id: &str) {
+        // Only the addresses its worker was given count, in their order.
+        let Some(urls) = self
+            .video
+            .rtsp_urls
+            .get(source_id)
+            .filter(|_| self.video.opened.contains(source_id))
+        else {
+            return;
+        };
+        let Some(source) = self.state.video_sources.get(source_id) else {
+            return;
+        };
+        let (Some(first), Some(vehicle)) = (urls.first(), self.camera_vehicle(source)) else {
+            return;
+        };
+        let (Some(using), Some(connections)) = (route_in_use(vehicle), &vehicle.connections) else {
+            return;
+        };
+        let current = source
+            .active_url
+            .as_ref()
+            .filter(|url| urls.contains(url))
+            .unwrap_or(first);
+        let elsewhere = connections
+            .routes
+            .iter()
+            .any(|r| r.link_id != using.link_id && on_route(current, r));
+        if !elsewhere || on_route(current, using) {
+            return;
+        }
+        let Some(index) = urls.iter().position(|url| on_route(url, using)) else {
+            return;
+        };
+        if let Some(port) = self.video.port.as_mut() {
+            port.steer_rtsp(source_id, index);
+        }
+    }
+
+    /// A vehicle changed: when the connection it uses moved, its cameras
+    /// with fallback addresses follow it, and say which connection each
+    /// address is on.
+    pub(crate) fn video_vehicle_changed(&mut self, before: Option<&Vehicle>, after: &Vehicle) {
+        let link = |v: &Vehicle| route_in_use(v).map(|r| r.link_id.clone());
+        if before.is_some_and(|b| link(b) == link(after)) {
+            return;
+        }
+        let cameras: Vec<VideoSource> = self
+            .state
+            .video_sources
+            .values()
+            .filter(|s| self.video.opened.contains(&s.id))
+            .filter(|s| self.camera_vehicle(s).is_some_and(|v| v.id == after.id))
+            .cloned()
+            .collect();
+        for mut source in cameras {
+            self.steer_camera(&source.id);
+            let Some(url) = source.active_url.as_deref() else {
+                continue;
+            };
+            let link_id = self.address_link(&source, url);
+            let Some(choice) = source
+                .active_choice
+                .as_mut()
+                .filter(|c| c.link_id != link_id)
+            else {
+                continue;
+            };
+            choice.link_id = link_id;
             source.version += 1;
             self.commit_as(actor(), Change::VideoSourceUpserted { source });
         }
@@ -1356,6 +1539,7 @@ impl Engine {
             track.playing = track.number == params.track;
         }
         source.active_url = None;
+        source.active_choice = None;
         source.version += 1;
         self.commit_as(
             actor(),
@@ -1363,6 +1547,7 @@ impl Engine {
                 source: source.clone(),
             },
         );
+        self.video.rtsp_urls.remove(&source.id);
         self.video.rtsp_epochs.remove(&source.id);
         if self.video.opened.remove(&source.id)
             && let Some(port) = self.video.port.as_mut()
@@ -1661,6 +1846,7 @@ impl Engine {
                 fallback_urls: Vec::new(),
                 internet: None,
                 active_url: None,
+                active_choice: None,
                 added_by_hand: true,
                 capture: None,
                 file: None,
@@ -1784,6 +1970,7 @@ impl Engine {
             fallback_urls: Vec::new(),
             internet: None,
             active_url: None,
+            active_choice: None,
             added_by_hand: true,
             capture: None,
             file: None,
@@ -1985,6 +2172,7 @@ impl Engine {
                     fallback_urls: Vec::new(),
                     internet: None,
                     active_url: None,
+                    active_choice: None,
                     added_by_hand: true,
                     capture: None,
                     file: None,
@@ -2064,6 +2252,7 @@ impl Engine {
             fallback_urls: Vec::new(),
             internet: None,
             active_url: None,
+            active_choice: None,
             added_by_hand: true,
             capture: None,
             file: None,
@@ -2174,6 +2363,7 @@ impl Engine {
             self.video.capture_permission_issues.remove(id);
             self.video.file_epochs.remove(id);
             self.video.opened.remove(id);
+            self.video.rtsp_urls.remove(id);
             self.video.rtsp_epochs.remove(id);
             self.video.needed.remove(id);
             if let Some(port) = self.video.port.as_mut() {
@@ -2277,6 +2467,7 @@ impl Engine {
             .chain(self.video.remote_watches.iter().cloned())
             .collect();
         let sources: Vec<_> = self.state.video_sources.values().cloned().collect();
+        let mut opened = Vec::new();
         for mut source in sources {
             let recording = self.recording_intent(&source).is_some()
                 && source.capture.as_ref().is_none_or(|c| c.enabled);
@@ -2301,6 +2492,7 @@ impl Engine {
                 && self.video.rtsp_urls.get(&source.id) != Some(&urls)
             {
                 self.video.opened.remove(&source.id);
+                self.video.rtsp_urls.remove(&source.id);
                 self.video.rtsp_epochs.remove(&source.id);
                 if let Some(port) = self.video.port.as_mut() {
                     port.close_rtsp(&source.id);
@@ -2310,6 +2502,7 @@ impl Engine {
                 }
                 source.state = VideoState::Stopped;
                 source.active_url = None;
+                source.active_choice = None;
                 source.counters.stop();
                 source.state_detail = Some("Camera connection policy changed".into());
                 source.version += 1;
@@ -2337,7 +2530,7 @@ impl Engine {
             if wanted {
                 if !was_needed && source.state == VideoState::Stopped {
                     source.state_detail = Some(if let Some(url) = &source.url {
-                        format!("Connecting to {}", redact(url))
+                        self.connecting(&source, url)
                     } else if source.file.is_some() {
                         "Starting recorded video".into()
                     } else if source.capture.is_some() {
@@ -2362,6 +2555,7 @@ impl Engine {
                         self.video.rtsp_epochs.insert(source.id.clone(), epoch);
                         self.video.rtsp_urls.insert(source.id.clone(), urls.clone());
                         port.open_rtsp(&source.id, &urls, epoch);
+                        opened.push(source.id.clone());
                     }
                 } else if let Some(input) = source.file.clone() {
                     if !self.video.file_epochs.contains_key(&source.id) {
@@ -2438,12 +2632,17 @@ impl Engine {
                     }
                     source.state = VideoState::Stopped;
                     source.active_url = None;
+                    source.active_choice = None;
                     source.state_detail = Some(detail);
                     source.counters.stop();
                     source.version += 1;
                     self.commit_as(actor(), Change::VideoSourceUpserted { source });
                 }
             }
+        }
+        // A vehicle already on another address's connection: start there.
+        for id in opened {
+            self.steer_camera(&id);
         }
         self.release_watched_ports();
     }

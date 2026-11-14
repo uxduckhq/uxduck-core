@@ -118,6 +118,12 @@ impl From<&core::VideoSource> for dto::VideoSource {
                 low_data_url: i.low_data_url.as_deref().map(core::redact),
             }),
             active_url: v.active_url.as_deref().map(core::redact),
+            active_choice: v.active_choice.as_ref().map(|c| dto::AddressChoice {
+                reason: c.reason.into(),
+                since_us: c.since_us,
+                link_id: c.link_id.clone(),
+                next_check_us: c.next_check_us,
+            }),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),
             file: v.file.as_ref().map(Into::into),
@@ -130,6 +136,18 @@ impl From<&core::VideoSource> for dto::VideoSource {
             first_seen_us: v.first_seen_us,
             changed_at_us: v.changed_at_us,
             version: v.version,
+        }
+    }
+}
+
+impl From<core::AddressReason> for dto::AddressReason {
+    fn from(v: core::AddressReason) -> Self {
+        match v {
+            core::AddressReason::Preferred => Self::Preferred,
+            core::AddressReason::NoPictures => Self::NoPictures,
+            core::AddressReason::ConnectionFailed => Self::ConnectionFailed,
+            core::AddressReason::FollowedVehicle => Self::FollowedVehicle,
+            core::AddressReason::ReturnedWithVehicle => Self::ReturnedWithVehicle,
         }
     }
 }

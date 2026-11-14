@@ -327,6 +327,9 @@ pub struct VideoSource {
     /// The address currently being tried or played, redacted on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_url: Option<String>,
+    /// Why it is on `activeUrl` and since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_choice: Option<AddressChoice>,
     /// Added by hand: it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,
@@ -478,6 +481,41 @@ pub struct VideoAudio {
     /// such as "MPEG audio".
     pub name: String,
     pub recorded: bool,
+}
+
+/// Why a camera with fallback addresses is on the address it tries or
+/// plays (ADR-0057 D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AddressReason {
+    /// Its first address, or an earlier one that answered again.
+    Preferred,
+    /// The address before showed no pictures for 5 s.
+    NoPictures,
+    /// The address before could not connect or start.
+    ConnectionFailed,
+    /// The vehicle moved to the connection on this address's host.
+    FollowedVehicle,
+    /// The vehicle came back to the preferred address's connection, which
+    /// answered a probe.
+    ReturnedWithVehicle,
+}
+
+/// Why a camera is on its active address, since when, and when it next
+/// checks an earlier one (ADR-0057 D10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressChoice {
+    pub reason: AddressReason,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub since_us: u64,
+    /// The vehicle connection whose remote host is this address's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+    /// While on a fallback: when it next probes the earlier addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub next_check_us: Option<u64>,
 }
 
 /// The largest photo `video/photo` takes, in bytes.
