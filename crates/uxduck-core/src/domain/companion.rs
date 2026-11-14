@@ -57,6 +57,8 @@ pub struct CompanionCheck {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionComputer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectivity: Option<VehicleConnectivity>,
     pub id: String,
     pub name: String,
     /// A host name, an address, or a `Host` in the person's `~/.ssh/config`.
@@ -155,5 +157,190 @@ pub struct CompanionNetwork {
     pub wifi: Vec<WifiNetwork>,
     pub connectivity: String,
     pub checks_enabled: bool,
+    #[serde(default)]
+    pub checks_available: bool,
     pub check_uri: String,
+    #[serde(default)]
+    pub connections: Vec<NetworkConnection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference: Option<NetworkPreference>,
+    #[serde(default)]
+    pub default_devices: Vec<String>,
+    /// False for ambiguous, multipath or unsupported default routing.
+    #[serde(default)]
+    pub routes_known: bool,
+    /// Daemon observation time, never refreshed by a failed check.
+    #[serde(default)]
+    pub sampled_at_us: u64,
+}
+
+/// Internet video policy for cameras assigned to this vehicle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CellularVideoPolicy {
+    #[default]
+    Allow,
+    LowData,
+    TelemetryOnly,
+}
+
+/// Its presence selects this companion as the vehicle's internet gateway.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnectivity {
+    pub video: CellularVideoPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPreference {
+    pub wifi_id: String,
+    pub cellular_id: String,
+}
+
+/// A saved connection and its current device, without credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConnection {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub device: Option<String>,
+    pub ipv4: String,
+    pub ipv6: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InternetTransport {
+    Wifi,
+    Cellular,
+    Unknown,
+}
+
+impl CompanionNetwork {
+    /// Conservatively classify all effective default routes, including IPv6.
+    #[must_use]
+    pub fn transport(&self) -> InternetTransport {
+        if !self.routes_known
+            || !self.checks_enabled
+            || !self.checks_available
+            || self.default_devices.is_empty()
+        {
+            return InternetTransport::Unknown;
+        }
+        let Some(preference) = &self.preference else {
+            return InternetTransport::Unknown;
+        };
+        let device = |id: &str| {
+            self.connections
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| c.device.as_deref())
+        };
+        let wifi = self
+            .connections
+            .iter()
+            .find(|c| c.kind == "802-11-wireless" && c.device.is_some())
+            .and_then(|c| c.device.as_deref());
+        let cellular = device(&preference.cellular_id);
+        if self
+            .default_devices
+            .iter()
+            .any(|d| Some(d.as_str()) != wifi && Some(d.as_str()) != cellular)
+        {
+            return InternetTransport::Unknown;
+        }
+        if self
+            .default_devices
+            .iter()
+            .any(|d| Some(d.as_str()) == cellular)
+        {
+            if self
+                .connections
+                .iter()
+                .any(|c| c.id == preference.cellular_id && (c.ipv4 == "full" || c.ipv6 == "full"))
+            {
+                InternetTransport::Cellular
+            } else {
+                InternetTransport::Unknown
+            }
+        } else if self
+            .connections
+            .iter()
+            .any(|c| c.device.as_deref() == wifi && (c.ipv4 == "full" || c.ipv6 == "full"))
+        {
+            InternetTransport::Wifi
+        } else {
+            InternetTransport::Unknown
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
+mod network_tests {
+    use super::*;
+    fn network() -> CompanionNetwork {
+        CompanionNetwork {
+            wifi: vec![],
+            connectivity: "full".into(),
+            checks_enabled: true,
+            checks_available: true,
+            check_uri: "https://check.test/204".into(),
+            preference: Some(NetworkPreference {
+                wifi_id: "wifi".into(),
+                cellular_id: "cell".into(),
+            }),
+            connections: vec![
+                NetworkConnection {
+                    id: "wifi".into(),
+                    name: "Office".into(),
+                    kind: "802-11-wireless".into(),
+                    device: Some("wlan0".into()),
+                    ipv4: "full".into(),
+                    ipv6: "none".into(),
+                },
+                NetworkConnection {
+                    id: "cell".into(),
+                    name: "Modem".into(),
+                    kind: "802-3-ethernet".into(),
+                    device: Some("usb0".into()),
+                    ipv4: "full".into(),
+                    ipv6: "full".into(),
+                },
+            ],
+            default_devices: vec!["wlan0".into()],
+            routes_known: true,
+            sampled_at_us: 1,
+        }
+    }
+    #[test]
+    fn transport_requires_healthy_known_routes_and_counts_cellular_ipv6() {
+        let mut n = network();
+        assert_eq!(n.transport(), InternetTransport::Wifi);
+        n.default_devices.push("usb0".into());
+        assert_eq!(n.transport(), InternetTransport::Cellular);
+        n.default_devices.push("tun0".into());
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+        n = network();
+        n.connections[0].ipv4 = "limited".into();
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+        n = network();
+        n.checks_available = false;
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+        n = network();
+        n.routes_known = false;
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+        n = network();
+        n.preference = None;
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+    }
+    #[test]
+    fn old_snapshots_do_not_claim_verified_internet() {
+        let n: CompanionNetwork = serde_json::from_value(serde_json::json!({
+            "wifi":[], "connectivity":"full", "checksEnabled":true, "checkUri":"https://check.test/204"
+        })).unwrap();
+        assert_eq!(n.transport(), InternetTransport::Unknown);
+        assert_eq!(n.sampled_at_us, 0);
+    }
 }

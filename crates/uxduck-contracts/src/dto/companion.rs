@@ -54,6 +54,8 @@ pub struct CompanionCheck {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionComputer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectivity: Option<VehicleConnectivity>,
     pub id: String,
     pub name: String,
     /// A host name, an address, or a `Host` in the person's `~/.ssh/config`.
@@ -133,7 +135,24 @@ pub struct CompanionNetwork {
     pub wifi: Vec<WifiNetwork>,
     pub connectivity: String,
     pub checks_enabled: bool,
+    #[serde(default)]
+    pub checks_available: bool,
     pub check_uri: String,
+    #[serde(default)]
+    pub connections: Vec<NetworkConnection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference: Option<NetworkPreference>,
+    #[serde(default)]
+    pub default_devices: Vec<String>,
+    /// False for ambiguous, multipath or unsupported default routing.
+    #[serde(default)]
+    pub routes_known: bool,
+    #[serde(default)]
+    pub transport: InternetTransport,
+    /// Daemon observation time, never refreshed by a failed check.
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub sampled_at_us: u64,
 }
 
 /// Read networking, save Wi-Fi for automatic connection when available, or
@@ -141,12 +160,18 @@ pub struct CompanionNetwork {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerNetworkParams {
+    /// A periodic read leaves editable fields and the last good status alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
     pub vehicle_id: String,
     pub computer_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wifi: Option<WifiProfileParams>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connectivity: Option<ConnectivityParams>,
+    /// Apply Wi-Fi preference and cellular backup with automatic rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference: Option<NetworkPreference>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -186,4 +211,58 @@ impl std::fmt::Debug for WifiProfileParams {
             .field("password", &"[redacted]")
             .finish_non_exhaustive()
     }
+}
+
+/// Internet video policy for cameras assigned to this vehicle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CellularVideoPolicy {
+    #[default]
+    Allow,
+    LowData,
+    TelemetryOnly,
+}
+
+/// Its presence selects this companion as the vehicle's internet gateway.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnectivity {
+    pub video: CellularVideoPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPreference {
+    pub wifi_id: String,
+    pub cellular_id: String,
+}
+
+/// A saved connection and its current device, without credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConnection {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub device: Option<String>,
+    pub ipv4: String,
+    pub ipv6: String,
+}
+
+/// Select a vehicle's internet gateway and save its video policy locally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerConnectivityParams {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    pub video: CellularVideoPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum InternetTransport {
+    Wifi,
+    Cellular,
+    #[default]
+    Unknown,
 }

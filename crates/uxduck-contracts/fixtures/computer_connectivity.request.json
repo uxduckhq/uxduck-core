@@ -1,0 +1,8 @@
+{
+  "method": "computer/connectivity",
+  "params": {
+    "vehicleId": "v1",
+    "computerId": "ccpi",
+    "video": "telemetry-only"
+  }
+}

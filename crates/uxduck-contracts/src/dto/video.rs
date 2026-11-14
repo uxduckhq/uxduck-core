@@ -238,6 +238,9 @@ pub struct VideoSource {
     /// Other addresses of this same camera, in preference order. Only one plays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_urls: Vec<String>,
+    /// Direct local routes and an optional smaller stream from the same camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internet: Option<CameraInternet>,
     /// The address currently being tried or played, redacted on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_url: Option<String>,
@@ -823,4 +826,20 @@ pub struct VideoAlignParams {
     pub recording_id: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub started_at_us: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraInternet {
+    pub local_urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_data_url: Option<String>,
+}
+
+/// Configure direct local routes and the cellular low-data stream of one camera.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoInternetParams {
+    pub source_id: String,
+    pub internet: CameraInternet,
 }

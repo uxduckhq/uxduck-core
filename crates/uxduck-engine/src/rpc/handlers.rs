@@ -167,6 +167,10 @@ pub(crate) fn handle(
             require(Config)?;
             engine.remove_computer(connection, params)
         }
+        ClientRequest::ComputerConnectivity(params) => {
+            require(Config)?;
+            engine.configure_connectivity(connection, &params)
+        }
         ClientRequest::ComputerNetwork(params) => {
             require(Config)?;
             engine.network_computer(connection, &params)
@@ -527,6 +531,7 @@ pub(crate) fn handle(
         | ClientRequest::VideoPlayback(_)
         | ClientRequest::VideoRename(_)
         | ClientRequest::VideoAddresses(_)
+        | ClientRequest::VideoInternet(_)
         | ClientRequest::VideoTrack(_)
         | ClientRequest::VideoReveal(_)
         | ClientRequest::VideoPhoto(_)

@@ -359,6 +359,20 @@ async fn network(
             }
             return Err("Network setup failed. The companion needs Linux with NetworkManager, Python 3 and busctl. Saving needs passwordless sudo. Check its network values and service logs.".into());
         }
+        if let Some(token) = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("checkpoint="))
+        {
+            let confirm = serde_json::json!({"confirm": token}).to_string();
+            // A new TCP/SSH connection must reach the same pinned host after
+            // reapplying routes. Otherwise the companion restores its checkpoint.
+            let confirmed = run(dir, None, computer, &trusted, way, Some(&confirm)).await
+                .map_err(|_| "The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".to_owned())?;
+            if !confirmed.status.success() {
+                return Err("The routing change could not be confirmed. Automatic rollback starts after 90 seconds on the companion.".into());
+            }
+            return answer(computer, sign_in, &confirmed);
+        }
         return answer(computer, sign_in, &output);
     }
     Err("SSH could not sign in. Check the computer again before configuring networks.".into())
@@ -428,7 +442,10 @@ async fn run(
         let script_python = include_str!("companions/network.py").replace('\'', "'\"'\"'");
         let input: serde_json::Value = serde_json::from_str(network.unwrap_or_default())
             .map_err(|_| "Invalid network request".to_owned())?;
-        let sudo = if input["wifi"].is_null() && input["connectivity"].is_null() {
+        let sudo = if ["wifi", "connectivity", "preference", "confirm"]
+            .iter()
+            .all(|key| input[key].is_null())
+        {
             ""
         } else {
             "sudo -n "
@@ -443,6 +460,10 @@ async fn run(
             "GlobalKnownHostsFile=none",
             "-o",
             "CheckHostIP=no",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
         ]);
     }
     command
@@ -787,6 +808,7 @@ mod tests {
 
     fn computer(server: &Server) -> CompanionComputer {
         CompanionComputer {
+            connectivity: None,
             id: "cctest".into(),
             name: "test".into(),
             host: "127.0.0.1".into(),

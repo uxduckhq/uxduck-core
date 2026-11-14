@@ -246,6 +246,9 @@ pub struct VideoSource {
     /// Other addresses of this same camera, in preference order. Only one plays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_urls: Vec<String>,
+    /// Direct local routes and an optional smaller stream from the same camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internet: Option<CameraInternet>,
     /// The address currently being tried or played, redacted on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_url: Option<String>,
@@ -613,4 +616,12 @@ mod tests {
         assert_eq!(redact("rtsp://10.0.0.5/a@b"), "rtsp://10.0.0.5/a@b");
         assert_eq!(redact("rtsp://cam"), "rtsp://cam");
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraInternet {
+    pub local_urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_data_url: Option<String>,
 }

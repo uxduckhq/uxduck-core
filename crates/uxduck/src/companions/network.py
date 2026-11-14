@@ -142,32 +142,251 @@ def set_connectivity(check):
         raise
 
 
-def status():
-    wifi = []
-    for line in run("nmcli", "-t", "-f", "UUID,TYPE,ACTIVE", "connection", "show").splitlines():
-        ident, kind, active = fields(line)
-        if kind != "802-11-wireless":
+PREFERENCE = ROOT / "uxduck-preference.json"
+PENDING = ROOT / ".uxduck-routing-pending.json"
+
+# This same restoration code runs both on an immediate failure and in a
+# detached watchdog. It survives a broken SSH connection or a stopped daemon.
+RESTORE = r'''
+import base64, fcntl, json, os, pathlib, subprocess, tempfile, time
+
+def restore_routing(snapshot):
+    def call(*args):
+        result = subprocess.run(args, capture_output=True, timeout=15)
+        if result.returncode:
+            raise RuntimeError("Routing rollback failed")
+    errors = []
+    for ident, values in snapshot["profiles"].items():
+        try:
+            args = ["nmcli", "connection", "modify", "uuid", ident]
+            for key, value in values.items(): args.extend([key, value])
+            call(*args)
+        except Exception as error: errors.append(error)
+    for name, saved in snapshot["files"].items():
+        try:
+            path = pathlib.Path(name)
+            if saved is None:
+                path.unlink(missing_ok=True)
+            else:
+                fd, temporary = tempfile.mkstemp(prefix=".uxduck-restore-", dir=path.parent)
+                with os.fdopen(fd, "wb") as file: file.write(base64.b64decode(saved["data"]))
+                os.chmod(temporary, saved["mode"])
+                os.replace(temporary, path)
+        except Exception as error: errors.append(error)
+    try:
+        call("nmcli", "general", "reload", "conf")
+        call("busctl", "set-property", "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager", "ConnectivityCheckEnabled", "b", snapshot["enabled"])
+        # The automatic checkpoint may have expired before our file rollback.
+        checkpoints = subprocess.run(["busctl", "get-property", "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager", "Checkpoints"], capture_output=True, text=True, timeout=15)
+        if checkpoints.returncode: raise RuntimeError("Cannot read routing checkpoints")
+        if json.dumps(snapshot["checkpoint"]) in checkpoints.stdout:
+            call("busctl", "call", "org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager", "org.freedesktop.NetworkManager", "CheckpointRollback", "o", snapshot["checkpoint"])
+    except Exception as error: errors.append(error)
+    for device in snapshot["devices"]:
+        try: call("nmcli", "device", "reapply", device)
+        except Exception as error: errors.append(error)
+    if errors: raise RuntimeError("Routing rollback needs attention")
+
+def routing_watchdog(path, token):
+    time.sleep(90)
+    path = pathlib.Path(path)
+    for attempt in range(3):
+        with open(str(path) + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not path.exists(): return
+            snapshot = json.loads(path.read_text())
+            if snapshot["token"] != token: return
+            try:
+                restore_routing(snapshot)
+                path.unlink(missing_ok=True)
+                return
+            except Exception:
+                # Keep recovery inputs if NM remains unavailable.
+                pass
+        if attempt < 2: time.sleep(15)
+'''
+exec(RESTORE)
+
+
+def preference_status():
+    if not PREFERENCE.exists():
+        return None
+    saved = json.loads(PREFERENCE.read_text())
+    return {"wifiId": saved["wifiId"], "cellularId": saved["cellularId"]}
+
+
+def default_routes():
+    devices, known = set(), True
+    for family in ("-4", "-6"):
+        routes = json.loads(run("ip", "-j", family, "route", "show", "table", "all", "default"))
+        if any(route.get("table", "main") not in ("main", 254) for route in routes):
+            known = False  # A VPN/default policy table needs explicit evidence.
+        main = [route for route in routes if route.get("table", "main") in ("main", 254)]
+        if not main:
             continue
-        ssid = run("nmcli", "-g", "802-11-wireless.ssid", "connection", "show", "uuid", ident)
-        # -g escapes colons/backslashes as terse output does.
-        ssid = fields(ssid)[0]
-        wifi.append({"id": ident, "ssid": ssid, "active": active == "yes", "managed": ident == str(uuid.uuid5(uuid.NAMESPACE_DNS, "uxduck-wifi:" + ssid))})
+        best = min(route.get("metric", 0) for route in main)
+        chosen = [route for route in main if route.get("metric", 0) == best]
+        if len(chosen) != 1 or not chosen[0].get("dev") or chosen[0].get("nexthops"):
+            known = False
+        else:
+            devices.add(chosen[0]["dev"])
+    return sorted(devices), known
+
+
+def health(value):
+    return {"0": "unknown", "1": "none", "2": "portal", "3": "limited", "4": "full"}.get(value.split(" ")[0], "unknown")
+
+
+def routing_call(method, signature, *args):
+    return run("busctl", "call", *DBUS, method, signature, *args)
+
+
+def profile_values(ident):
+    keys = ("ipv4.route-metric", "ipv6.route-metric", "connection.autoconnect", "connection.metered")
+    values = run("nmcli", "-g", ",".join(keys), "connection", "show", "uuid", ident).splitlines()
+    if len(values) != len(keys):
+        raise RuntimeError("Cannot read the saved route preference")
+    return dict(zip(keys, values))
+
+
+def private_json(path, value):
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".uxduck-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as file:
+            json.dump(value, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def set_preference(preference, before):
+    import base64
+    wifi_id, cellular_id = preference["wifiId"], preference["cellularId"]
+    if str(uuid.UUID(wifi_id)) != wifi_id or str(uuid.UUID(cellular_id)) != cellular_id or wifi_id == cellular_id:
+        raise ValueError("Choose two different saved connections")
+    connections = {c["id"]: c for c in before["connections"]}
+    wifi, cellular = connections[wifi_id], connections[cellular_id]
+    if wifi["kind"] != "802-11-wireless" or cellular["kind"] not in ("gsm", "cdma", "802-3-ethernet"):
+        raise ValueError("Choose Wi-Fi and a cellular modem connection")
+    if PENDING.exists():
+        raise RuntimeError("A routing change is awaiting confirmation or rollback")
+    for ident in (wifi_id, cellular_id):
+        # Preserve isolated radio/LAN connections and custom policy routing.
+        for family in ("ipv4", "ipv6"):
+            if run("nmcli", "-g", family + ".never-default", "connection", "show", "uuid", ident) == "yes":
+                raise ValueError("This profile is configured never to provide internet")
+            if run("nmcli", "-g", family + ".route-table", "connection", "show", "uuid", ident) not in ("0", "254"):
+                raise ValueError("Custom routing tables cannot be configured here")
+    profiles = {ident: profile_values(ident) for ident in (wifi_id, cellular_id)}
+    devices = list(dict.fromkeys(c["device"] for c in (wifi, cellular) if c["device"]))
+    checkpoint = json.loads(routing_call("CheckpointCreate", "aouu", "0", "90", "0")[2:])
+    files = {}
+    for path in (ROOT / "conf.d/90-uxduck-connectivity.conf", PREFERENCE):
+        files[str(path)] = {"data": base64.b64encode(path.read_bytes()).decode(), "mode": path.stat().st_mode & 0o777} if path.exists() else None
+    snapshot = {"token": str(uuid.uuid4()), "checkpoint": checkpoint, "profiles": profiles, "files": files,
+                "devices": devices, "enabled": "true" if before["checksEnabled"] else "false", "preference": preference}
+    private_json(PENDING, snapshot)
+    try:
+        # Start recovery before touching any route or health-check setting.
+        subprocess.Popen([sys.executable, "-c", RESTORE + "\nrouting_watchdog(" + repr(str(PENDING)) + ", " + repr(snapshot["token"]) + ")"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+        for ident, metric in ((wifi_id, "600"), (cellular_id, "700")):
+            args = ["nmcli", "connection", "modify", "uuid", ident, "ipv4.route-metric", metric,
+                    "ipv6.route-metric", metric, "connection.autoconnect", "yes"]
+            if ident == cellular_id: args += ["connection.metered", "yes"]
+            run(*args)
+        set_connectivity({"uri": before["checkUri"] or "https://connectivitycheck.gstatic.com/generate_204", "interval": 60})
+        for device in devices: run("nmcli", "device", "reapply", device)
+    except Exception:
+        try:
+            restore_routing(snapshot)
+            PENDING.unlink(missing_ok=True)
+        finally:
+            raise
+    return snapshot["token"]
+
+
+def confirm_preference(token):
+    if not isinstance(token, str) or not PENDING.exists():
+        raise ValueError("The routing change expired")
+    snapshot = json.loads(PENDING.read_text())
+    if snapshot["token"] != token:
+        raise ValueError("This is not the pending routing change")
+    # Require the checkpoint to still exist, so a late SSH cannot confirm
+    # a configuration NetworkManager already rolled back.
+    checkpoints = prop("Checkpoints")
+    if json.dumps(snapshot["checkpoint"]) not in checkpoints:
+        raise RuntimeError("The routing checkpoint already expired")
+    preference = snapshot["preference"]
+    for ident, metric in ((preference["wifiId"], "600"), (preference["cellularId"], "700")):
+        values = profile_values(ident)
+        if values["ipv4.route-metric"] != metric or values["ipv6.route-metric"] != metric or values["connection.autoconnect"] != "yes":
+            raise RuntimeError("The route preferences did not apply")
+        if ident == preference["cellularId"] and values["connection.metered"] != "yes":
+            raise RuntimeError("The cellular connection is not marked metered")
+    if prop("ConnectivityCheckEnabled") != "b true" or prop("ConnectivityCheckAvailable") != "b true":
+        raise RuntimeError("The internet health checks did not apply")
+    private_json(PREFERENCE, preference)
+    PREFERENCE.chmod(0o644)  # Profile IDs only, readable by the status command.
+    routing_call("CheckpointDestroy", "o", snapshot["checkpoint"])
+    PENDING.unlink()
+
+
+def status():
+    wifi, connections = [], []
+    states = {}
+    for line in run("nmcli", "-t", "-f", "UUID,TYPE,ACTIVE,NAME,DEVICE", "connection", "show").splitlines():
+        ident, kind, active, name, device = fields(line)
+        if kind not in ("802-11-wireless", "802-3-ethernet", "gsm", "cdma"):
+            continue
+        device = device if active == "yes" and device != "--" else None
+        if device and device not in states:
+            values = run("nmcli", "-g", "GENERAL.IP4-CONNECTIVITY,GENERAL.IP6-CONNECTIVITY", "device", "show", device).splitlines()
+            if len(values) != 2: raise RuntimeError("Cannot read interface connectivity")
+            states[device] = [health(v) for v in values]
+        v4, v6 = states.get(device, ("none", "none"))
+        connections.append({"id": ident, "name": name, "kind": kind, "device": device, "ipv4": v4, "ipv6": v6})
+        if kind == "802-11-wireless":
+            ssid = fields(run("nmcli", "-g", "802-11-wireless.ssid", "connection", "show", "uuid", ident))[0]
+            wifi.append({"id": ident, "ssid": ssid, "active": active == "yes", "managed": ident == str(uuid.uuid5(uuid.NAMESPACE_DNS, "uxduck-wifi:" + ssid))})
+    devices, known = default_routes()
     return {"wifi": wifi, "connectivity": run("nmcli", "-t", "-f", "CONNECTIVITY", "general"),
-            "checksEnabled": prop("ConnectivityCheckEnabled") == "b true",
-            "checkUri": json.loads(prop("ConnectivityCheckUri")[2:])}
+            "checksEnabled": prop("ConnectivityCheckEnabled") == "b true", "checksAvailable": prop("ConnectivityCheckAvailable") == "b true", "checkUri": json.loads(prop("ConnectivityCheckUri")[2:]),
+            "connections": connections, "preference": preference_status(), "defaultDevices": devices, "routesKnown": known}
 
 
 def main():
     request = json.load(sys.stdin)
-    if request.get("wifi") and request.get("connectivity"):
+    changes = [request.get(key) for key in ("wifi", "connectivity", "preference", "confirm")]
+    if sum(value is not None for value in changes) > 1:
         raise ValueError("Make one network change at a time.")
-    # Fail before changing anything if NetworkManager or its D-Bus API is absent.
-    status()
-    if request.get("wifi"):
-        save_wifi(request["wifi"])
-    if request.get("connectivity"):
-        set_connectivity(request["connectivity"])
-    print("network=" + json.dumps(status(), ensure_ascii=True))
+    before = status()
+    token = None
+    # Serialize writes with rollback. Read-only polling needs no root lock.
+    lock = None
+    try:
+        if any(value is not None for value in changes):
+            import fcntl
+            lock = open(str(PENDING) + ".lock", "a")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if PENDING.exists() and not request.get("confirm"):
+                raise RuntimeError("A routing change is still pending")
+        if request.get("wifi"):
+            save_wifi(request["wifi"])
+        if request.get("connectivity"):
+            set_connectivity(request["connectivity"])
+        if request.get("preference"):
+            token = set_preference(request["preference"], before)
+        if request.get("confirm"):
+            confirm_preference(request["confirm"])
+        print("network=" + json.dumps(status(), ensure_ascii=True))
+        if token: print("checkpoint=" + token)
+    finally:
+        if lock: lock.close()
 
 
 if __name__ == "__main__":

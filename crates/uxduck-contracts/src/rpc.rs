@@ -275,6 +275,9 @@ pub enum ClientRequest {
     /// Read or configure a companion network over pinned SSH. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/network")]
     ComputerNetwork(crate::dto::companion::ComputerNetworkParams),
+    /// Select the vehicle internet gateway and its cellular video policy. Needs config. Result: Vehicle.
+    #[serde(rename = "computer/connectivity")]
+    ComputerConnectivity(crate::dto::companion::ComputerConnectivityParams),
     /// A vehicle's web pages, such as its radio's settings page, all of
     /// them in order; an empty list removes them. Doesn't save it. Needs
     /// `config`. Result: `Vehicle`.
@@ -1741,6 +1744,9 @@ pub enum ClientRequest {
     /// Set one physical camera's preferred and fallback RTSP addresses. Needs `config`. Result: `VideoSource`.
     #[serde(rename = "video/addresses")]
     VideoAddresses(VideoAddressesParams),
+    /// Configure a camera's local routes and low-data address. Needs config. Result: `VideoSource`.
+    #[serde(rename = "video/internet")]
+    VideoInternet(crate::dto::video::VideoInternetParams),
     /// Shows where recordings are kept in the computer's file manager
     /// (Finder, Explorer), with a recording selected if one is named. Only
     /// on the computer UXDuck runs on. Needs `read`. Result:
@@ -2060,7 +2066,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 380] = [
+    pub const METHODS: [&'static str; 382] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2103,6 +2109,7 @@ impl ClientRequest {
         "computer/remove",
         "computer/check",
         "computer/network",
+        "computer/connectivity",
         "vehicle/bookmarks",
         "vehicle/dismiss",
         "vehicle/hide",
@@ -2350,6 +2357,7 @@ impl ClientRequest {
         "video/rename",
         "video/track",
         "video/addresses",
+        "video/internet",
         "video/reveal",
         "video/photo",
         "video/photo/show",

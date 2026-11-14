@@ -75,6 +75,7 @@ pub struct Found {
 pub(crate) struct Companions {
     port: Option<Box<dyn CompanionPort>>,
     busy: std::collections::BTreeSet<String>,
+    network_polled_at: std::collections::BTreeMap<String, u64>,
 }
 
 impl std::fmt::Debug for Companions {
@@ -82,6 +83,7 @@ impl std::fmt::Debug for Companions {
         f.debug_struct("Companions")
             .field("port", &self.port.is_some())
             .field("busy", &self.busy)
+            .field("network_polled_at", &self.network_polled_at)
             .finish()
     }
 }
@@ -95,6 +97,72 @@ fn to_value(vehicle: &Vehicle) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))
 }
 
+fn validate_network_change(params: &ComputerNetworkParams) -> Result<(), ApiError> {
+    if let Some(wifi) = &params.wifi {
+        if wifi.ssid.is_empty() || wifi.ssid.len() > 32 || wifi.ssid.chars().any(char::is_control) {
+            return Err(invalid(
+                "A Wi-Fi name must be 1 to 32 bytes without control characters.",
+            ));
+        }
+        if !(-999..=999).contains(&wifi.priority) {
+            return Err(invalid("Wi-Fi priority must be between -999 and 999."));
+        }
+        let hex = wifi.password.len() == 64 && wifi.password.bytes().all(|b| b.is_ascii_hexdigit());
+        if wifi.security == WifiSecurity::Open {
+            if !wifi.password.is_empty() {
+                return Err(invalid("An open Wi-Fi network has no password."));
+            }
+        } else if !((8..=63).contains(&wifi.password.len())
+            || (wifi.security == WifiSecurity::WpaPsk && hex))
+            || wifi.password.chars().any(char::is_control)
+        {
+            return Err(invalid(
+                "Use an 8 to 63 byte Wi-Fi password, or a 64 digit hexadecimal WPA2 key.",
+            ));
+        }
+    }
+    if let Some(preference) = &params.preference {
+        let uuid = |id: &str| {
+            id.len() == 36
+                && id.bytes().enumerate().all(|(i, c)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        c == b'-'
+                    } else {
+                        c.is_ascii_hexdigit()
+                    }
+                })
+        };
+        if preference.wifi_id == preference.cellular_id
+            || !uuid(&preference.wifi_id)
+            || !uuid(&preference.cellular_id)
+        {
+            return Err(invalid(
+                "Choose different saved Wi-Fi and cellular connections.",
+            ));
+        }
+    }
+    if let Some(check) = &params.connectivity {
+        if check.interval != 0 && !(30..=3600).contains(&check.interval) {
+            return Err(invalid(
+                "Check every 30 to 3600 seconds, or use zero to disable checks.",
+            ));
+        }
+        let authority = check
+            .uri
+            .strip_prefix("https://")
+            .or_else(|| check.uri.strip_prefix("http://"))
+            .and_then(|rest| rest.split('/').next());
+        if authority.is_none_or(|a| a.is_empty() || a.contains('@'))
+            || check.uri.chars().any(char::is_whitespace)
+        {
+            return Err(invalid(
+                "Use an HTTP or HTTPS health-check address without credentials.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Engine {
     pub(crate) fn restore_companions(&mut self) {
         let interrupted: Vec<_> = self
@@ -103,15 +171,19 @@ impl Engine {
             .values()
             .filter(|v| {
                 v.companions.iter().any(|c| {
-                    c.check
-                        .as_ref()
-                        .is_some_and(|check| check.state == CheckState::Checking)
+                    c.check.as_ref().is_some_and(|check| {
+                        check.state == CheckState::Checking
+                            || check.network.as_ref().is_some_and(|n| n.sampled_at_us > 0)
+                    })
                 })
             })
             .cloned()
             .collect();
         for mut vehicle in interrupted {
             for computer in &mut vehicle.companions {
+                if let Some(network) = computer.check.as_mut().and_then(|c| c.network.as_mut()) {
+                    network.sampled_at_us = 0;
+                }
                 if let Some(check) = &mut computer.check
                     && check.state == CheckState::Checking
                 {
@@ -199,6 +271,7 @@ impl Engine {
             ));
         }
         let computer = CompanionComputer {
+            connectivity: None,
             id: format!("cc{}", &self.random.token()[..12]),
             name: params
                 .name
@@ -243,6 +316,15 @@ impl Engine {
                 "Wait for the computer check or network update to finish before removing it.",
             ));
         }
+        if vehicle.companions[at]
+            .connectivity
+            .as_ref()
+            .is_some_and(|c| c.video != companion::CellularVideoPolicy::Allow)
+        {
+            return Err(invalid(
+                "Choose another internet gateway or allow full cellular video before removing this one.",
+            ));
+        }
         let computer = vehicle.companions.remove(at);
         if computer.key {
             self.credentials
@@ -269,58 +351,24 @@ impl Engine {
             ));
         }
         let mut vehicle = self.companion_vehicle(&params.vehicle_id)?;
-        if params.wifi.is_some() && params.connectivity.is_some() {
+        if [
+            params.wifi.is_some(),
+            params.connectivity.is_some(),
+            params.preference.is_some(),
+        ]
+        .into_iter()
+        .filter(|v| *v)
+        .count()
+            > 1
+        {
             return Err(invalid("Make one network change at a time."));
         }
-        if (params.wifi.is_some() || params.connectivity.is_some()) && vehicle.armed {
+        if (params.wifi.is_some() || params.connectivity.is_some() || params.preference.is_some())
+            && vehicle.armed
+        {
             return Err(invalid("Disarm the vehicle before changing its networks."));
         }
-        if let Some(wifi) = &params.wifi {
-            if wifi.ssid.is_empty()
-                || wifi.ssid.len() > 32
-                || wifi.ssid.chars().any(char::is_control)
-            {
-                return Err(invalid(
-                    "A Wi-Fi name must be 1 to 32 bytes without control characters.",
-                ));
-            }
-            if !(-999..=999).contains(&wifi.priority) {
-                return Err(invalid("Wi-Fi priority must be between -999 and 999."));
-            }
-            let hex =
-                wifi.password.len() == 64 && wifi.password.bytes().all(|b| b.is_ascii_hexdigit());
-            if wifi.security == WifiSecurity::Open {
-                if !wifi.password.is_empty() {
-                    return Err(invalid("An open Wi-Fi network has no password."));
-                }
-            } else if !((8..=63).contains(&wifi.password.len())
-                || (wifi.security == WifiSecurity::WpaPsk && hex))
-                || wifi.password.chars().any(char::is_control)
-            {
-                return Err(invalid(
-                    "Use an 8 to 63 byte Wi-Fi password, or a 64 digit hexadecimal WPA2 key.",
-                ));
-            }
-        }
-        if let Some(check) = &params.connectivity {
-            if check.interval != 0 && !(30..=3600).contains(&check.interval) {
-                return Err(invalid(
-                    "Check every 30 to 3600 seconds, or use zero to disable checks.",
-                ));
-            }
-            let authority = check
-                .uri
-                .strip_prefix("https://")
-                .or_else(|| check.uri.strip_prefix("http://"))
-                .and_then(|rest| rest.split('/').next());
-            if authority.is_none_or(|a| a.is_empty() || a.contains('@'))
-                || check.uri.chars().any(char::is_whitespace)
-            {
-                return Err(invalid(
-                    "Use an HTTP or HTTPS health-check address without credentials.",
-                ));
-            }
-        }
+        validate_network_change(params)?;
         let computer = vehicle
             .companions
             .iter_mut()
@@ -342,7 +390,7 @@ impl Engine {
             ));
         }
         let input = Password(
-            serde_json::json!({"wifi": params.wifi, "connectivity": params.connectivity})
+            serde_json::json!({"wifi": params.wifi, "connectivity": params.connectivity, "preference": params.preference})
                 .to_string(),
         );
         let order = CompanionOrder::Network {
@@ -350,7 +398,9 @@ impl Engine {
             computer: Box::new(computer.clone()),
             input,
         };
-        if let Some(check) = &mut computer.check {
+        if !params.background
+            && let Some(check) = &mut computer.check
+        {
             check.state = CheckState::Checking;
             check.problem = None;
             check.at_us = self.clock.now_us();
@@ -434,7 +484,10 @@ impl Engine {
             Ok(found) => CompanionCheck {
                 state: CheckState::Reached,
                 at_us,
-                network: found.network,
+                network: found.network.map(|mut n| {
+                    n.sampled_at_us = at_us;
+                    n
+                }),
                 os: found.os,
                 arch: found.arch,
                 uxduck: found.uxduck,
@@ -453,5 +506,80 @@ impl Engine {
             },
         });
         self.save_companions(None, vehicle);
+        self.review_recordings();
+    }
+}
+
+impl Engine {
+    pub(crate) fn configure_connectivity(
+        &mut self,
+        connection: ConnectionId,
+        params: &uxduck_contracts::dto::companion::ComputerConnectivityParams,
+    ) -> Result<Value, ApiError> {
+        let mut vehicle = self.companion_vehicle(&params.vehicle_id)?;
+        if !vehicle
+            .companions
+            .iter()
+            .any(|c| c.id == params.computer_id)
+        {
+            return Err(invalid("Companion computer not found."));
+        }
+        for computer in &mut vehicle.companions {
+            computer.connectivity =
+                (computer.id == params.computer_id).then(|| companion::VehicleConnectivity {
+                    video: params.video.into(),
+                });
+        }
+        let vehicle = self.save_companions(Some(connection), vehicle);
+        self.review_recordings();
+        to_value(&vehicle)
+    }
+
+    /// Poll only gateways serving demanded cameras. The screen requests its
+    /// own reads when open. Expiry enforcement is independent of the UI.
+    pub fn connectivity_tick(&mut self, now: u64) {
+        self.review_recordings();
+        if self.companions.port.is_none() {
+            return;
+        }
+        let gateways: Vec<_> = self
+            .state
+            .vehicles
+            .values()
+            .filter(|v| self.vehicle_video_wanted(&v.id))
+            .flat_map(|v| {
+                v.companions
+                    .iter()
+                    .filter(|c| c.connectivity.is_some())
+                    .map(|c| (v.id.clone(), c.clone()))
+            })
+            .collect();
+        for (vehicle_id, computer) in gateways {
+            if computer
+                .check
+                .as_ref()
+                .and_then(|c| c.host_key.as_ref())
+                .is_none()
+                || self.companions.busy.contains(&computer.id)
+                || self
+                    .companions
+                    .network_polled_at
+                    .get(&computer.id)
+                    .is_some_and(|at| now.saturating_sub(*at) < 5_000_000)
+            {
+                continue;
+            }
+            self.companions
+                .network_polled_at
+                .insert(computer.id.clone(), now);
+            self.companions.busy.insert(computer.id.clone());
+            if let Some(port) = self.companions.port.as_mut() {
+                port.request(CompanionOrder::Network {
+                    vehicle_id,
+                    computer: Box::new(computer),
+                    input: Password("{}".into()),
+                });
+            }
+        }
     }
 }

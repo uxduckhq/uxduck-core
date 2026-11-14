@@ -1,0 +1,10 @@
+{
+  "method": "video/internet",
+  "params": {
+    "sourceId": "vsfront",
+    "internet": {
+      "localUrls": ["rtsp://radio/front"],
+      "lowDataUrl": "rtsp://gateway/front-low"
+    }
+  }
+}

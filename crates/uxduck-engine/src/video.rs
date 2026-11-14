@@ -276,6 +276,7 @@ pub(crate) struct Video {
     /// Announced RTSP sources fetched this session.
     opened: std::collections::BTreeSet<String>,
     rtsp_epochs: BTreeMap<String, u64>,
+    rtsp_urls: BTreeMap<String, Vec<String>>,
     next_rtsp_epoch: u64,
     /// The recording in progress for each camera (S40).
     pub(crate) recording: BTreeMap<String, String>,
@@ -614,6 +615,7 @@ impl Engine {
                 klv: false,
                 url: Some(uri.to_owned()),
                 fallback_urls: Vec::new(),
+                internet: None,
                 active_url: None,
                 added_by_hand: false,
                 capture: None,
@@ -690,6 +692,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            internet: None,
             active_url: None,
             added_by_hand: false,
             capture: None,
@@ -1053,6 +1056,10 @@ impl Engine {
     }
 
     /// Updates the routes to one physical camera, retaining its identity.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "validate camera routes and preserve identity in one atomic edit"
+    )]
     fn video_addresses(&mut self, params: &VideoAddressesParams) -> Result<VideoSource, ApiError> {
         let mut source = self
             .state
@@ -1096,12 +1103,29 @@ impl Engine {
                     "Each camera address must be different.",
                 ));
             }
+            if source
+                .internet
+                .as_ref()
+                .and_then(|i| i.low_data_url.as_ref())
+                .is_some_and(|low| redact(low) == redact(&url))
+            {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Keep the low-data address separate from the camera's normal addresses.",
+                ));
+            }
             if self.state.video_sources.values().any(|other| {
                 other.id != source.id
                     && other
                         .url
                         .iter()
                         .chain(other.fallback_urls.iter())
+                        .chain(
+                            other
+                                .internet
+                                .iter()
+                                .filter_map(|i| i.low_data_url.as_ref()),
+                        )
                         .any(|u| redact(u) == redact(&url))
             }) {
                 return Err(ApiError::new(
@@ -1121,6 +1145,20 @@ impl Engine {
         }
         source.url = Some(primary);
         source.fallback_urls = urls;
+        if let Some(internet) = &mut source.internet {
+            internet.local_urls = source
+                .url
+                .iter()
+                .chain(&source.fallback_urls)
+                .filter(|url| {
+                    internet
+                        .local_urls
+                        .iter()
+                        .any(|local| redact(local) == redact(url))
+                })
+                .cloned()
+                .collect();
+        }
         source.active_url = None;
         source.tracks.clear();
         if !source.named_by_hand {
@@ -1165,6 +1203,10 @@ impl Engine {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "edit the active route without changing its data policy and restart its worker atomically"
+    )]
     fn video_track(&mut self, params: &VideoTrackParams) -> Result<VideoSource, ApiError> {
         let mut source = self
             .state
@@ -1199,17 +1241,73 @@ impl Engine {
                 ),
             ));
         }
-        let url = with_track(&url, params.track);
-        if source.url.as_deref() == Some(url.as_str()) {
+        let current = source
+            .active_url
+            .as_ref()
+            .filter(|active| {
+                source
+                    .url
+                    .iter()
+                    .chain(&source.fallback_urls)
+                    .chain(
+                        source
+                            .internet
+                            .iter()
+                            .filter_map(|i| i.low_data_url.as_ref()),
+                    )
+                    .any(|saved| saved == *active)
+            })
+            .unwrap_or(&url)
+            .clone();
+        let next = with_track(&current, params.track);
+        if current == next {
             return Ok(source);
         }
-        if !source.named_by_hand {
-            source.name = redact(&url);
+        if self.state.video_sources.values().any(|other| {
+            other
+                .url
+                .iter()
+                .chain(&other.fallback_urls)
+                .chain(
+                    other
+                        .internet
+                        .iter()
+                        .filter_map(|i| i.low_data_url.as_ref()),
+                )
+                .any(|saved| {
+                    (other.id != source.id || *saved != current) && redact(saved) == redact(&next)
+                })
+        }) {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "That track address is already configured. Keep each camera address separate.",
+            ));
         }
-        source.url = Some(url.clone());
+        if source.url.as_deref() == Some(current.as_str()) {
+            if !source.named_by_hand {
+                source.name = redact(&next);
+            }
+            source.url = Some(next.clone());
+        }
+        for fallback in &mut source.fallback_urls {
+            if *fallback == current {
+                fallback.clone_from(&next);
+            }
+        }
+        if let Some(internet) = &mut source.internet {
+            for local in &mut internet.local_urls {
+                if *local == current {
+                    local.clone_from(&next);
+                }
+            }
+            if internet.low_data_url.as_deref() == Some(current.as_str()) {
+                internet.low_data_url = Some(next);
+            }
+        }
         for track in &mut source.tracks {
             track.playing = track.number == params.track;
         }
+        source.active_url = None;
         source.version += 1;
         self.commit_as(
             actor(),
@@ -1217,13 +1315,20 @@ impl Engine {
                 source: source.clone(),
             },
         );
+        self.video.rtsp_epochs.remove(&source.id);
         if self.video.opened.remove(&source.id)
             && let Some(port) = self.video.port.as_mut()
         {
             port.close_rtsp(&source.id);
         }
+        self.video_stopped_because(&source.id, Some("Camera track changed".into()));
         self.review_recordings();
-        Ok(source)
+        Ok(self
+            .state
+            .video_sources
+            .get(&source.id)
+            .cloned()
+            .unwrap_or(source))
     }
 
     /// The tracks an RTSP camera offers, from its SDP, each time it answers.
@@ -1506,6 +1611,7 @@ impl Engine {
                 klv: false,
                 url: None,
                 fallback_urls: Vec::new(),
+                internet: None,
                 active_url: None,
                 added_by_hand: true,
                 capture: None,
@@ -1628,6 +1734,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            internet: None,
             active_url: None,
             added_by_hand: true,
             capture: None,
@@ -1790,12 +1897,12 @@ impl Engine {
                         port: None,
                     });
                 }
-                if self
-                    .state
-                    .video_sources
-                    .values()
-                    .any(|s| s.fallback_urls.iter().any(|u| redact(u) == redact(&url)))
-                {
+                if self.state.video_sources.values().any(|s| {
+                    s.fallback_urls
+                        .iter()
+                        .chain(s.internet.iter().filter_map(|i| i.low_data_url.as_ref()))
+                        .any(|u| redact(u) == redact(&url))
+                }) {
                     return Err(ApiError::new(
                         ErrorKind::InvalidValue,
                         "This address is already a fallback for another camera.",
@@ -1828,6 +1935,7 @@ impl Engine {
                     klv: false,
                     url: Some(url.clone()),
                     fallback_urls: Vec::new(),
+                    internet: None,
                     active_url: None,
                     added_by_hand: true,
                     capture: None,
@@ -1906,6 +2014,7 @@ impl Engine {
             klv: false,
             url: None,
             fallback_urls: Vec::new(),
+            internet: None,
             active_url: None,
             added_by_hand: true,
             capture: None,
@@ -2138,8 +2247,34 @@ impl Engine {
                     },
                 );
             }
+            let (urls, restricted) = self.camera_internet_routes(&source);
+            if source.url.is_some()
+                && self.video.opened.contains(&source.id)
+                && self.video.rtsp_urls.get(&source.id) != Some(&urls)
+            {
+                self.video.opened.remove(&source.id);
+                self.video.rtsp_epochs.remove(&source.id);
+                if let Some(port) = self.video.port.as_mut() {
+                    port.close_rtsp(&source.id);
+                    if let Some(recording) = self.video.recording.remove(&source.id) {
+                        port.stop_recording(&recording);
+                    }
+                }
+                source.state = VideoState::Stopped;
+                source.active_url = None;
+                source.counters.stop();
+                source.state_detail = Some("Camera connection policy changed".into());
+                source.version += 1;
+                self.commit_as(
+                    actor(),
+                    Change::VideoSourceUpserted {
+                        source: source.clone(),
+                    },
+                );
+            }
             let wanted = (watched.contains(&source.id) || recording)
-                && source.capture.as_ref().is_none_or(|c| c.enabled);
+                && source.capture.as_ref().is_none_or(|c| c.enabled)
+                && (source.url.is_none() || !urls.is_empty());
             let was_needed = self.video.needed.contains(&source.id);
             if wanted != was_needed {
                 if wanted {
@@ -2170,16 +2305,14 @@ impl Engine {
                         },
                     );
                 }
-                if let Some(url) = &source.url {
+                if source.url.is_some() {
                     if self.video.opened.insert(source.id.clone())
                         && let Some(port) = self.video.port.as_mut()
                     {
                         self.video.next_rtsp_epoch += 1;
                         let epoch = self.video.next_rtsp_epoch;
                         self.video.rtsp_epochs.insert(source.id.clone(), epoch);
-                        let urls: Vec<_> = std::iter::once(url.clone())
-                            .chain(source.fallback_urls.clone())
-                            .collect();
+                        self.video.rtsp_urls.insert(source.id.clone(), urls.clone());
                         port.open_rtsp(&source.id, &urls, epoch);
                     }
                 } else if let Some(input) = source.file.clone() {
@@ -2218,6 +2351,7 @@ impl Engine {
                     self.listen_for_watch(&source.id);
                 }
             } else {
+                self.video.rtsp_urls.remove(&source.id);
                 self.video.rtsp_epochs.remove(&source.id);
                 if self.video.opened.remove(&source.id)
                     && let Some(port) = self.video.port.as_mut()
@@ -2234,7 +2368,10 @@ impl Engine {
                 {
                     port.close_file(&source.id);
                 }
-                let detail = if source.capture.as_ref().is_some_and(|c| !c.enabled) {
+                let detail = if (watched.contains(&source.id) || recording) && restricted.is_some()
+                {
+                    restricted.unwrap_or_default()
+                } else if source.capture.as_ref().is_some_and(|c| !c.enabled) {
                     "Camera capture paused".to_owned()
                 } else if self.video.capture_permission_issues.contains(&source.id) {
                     source
@@ -2460,6 +2597,11 @@ pub(crate) fn handle(
             let source = engine.video_rename(&params)?;
             to_value(&VideoSourceDto::from(&source))
         }
+        ClientRequest::VideoInternet(params) => {
+            require(Capability::Config)?;
+            let source = engine.video_internet(&params)?;
+            to_value(&VideoSourceDto::from(&source))
+        }
         ClientRequest::VideoAddresses(params) => {
             require(Capability::Config)?;
             let source = engine.video_addresses(&params)?;
@@ -2502,5 +2644,182 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
             ..upsert(EntityType::VideoSource, id)
         }],
         _ => Vec::new(),
+    }
+}
+
+impl Engine {
+    pub(crate) fn vehicle_video_wanted(&self, vehicle_id: &str) -> bool {
+        self.state
+            .video_sources
+            .values()
+            .filter(|s| s.vehicle_id.as_deref() == Some(vehicle_id))
+            .any(|s| {
+                self.recording_intent(s).is_some()
+                    || self.video.remote_watches.contains(&s.id)
+                    || self
+                        .video
+                        .watches
+                        .values()
+                        .chain(self.video.metadata_watches.values())
+                        .any(|(_, id)| id == &s.id)
+            })
+    }
+
+    fn camera_internet_routes(&self, source: &VideoSource) -> (Vec<String>, Option<String>) {
+        use uxduck_core::domain::companion::{CellularVideoPolicy, CheckState, InternetTransport};
+        let urls: Vec<_> = source
+            .url
+            .iter()
+            .chain(&source.fallback_urls)
+            .cloned()
+            .collect();
+        let gateway = source
+            .vehicle_id
+            .as_ref()
+            .and_then(|id| self.state.vehicles.get(id))
+            .and_then(|v| v.companions.iter().find(|c| c.connectivity.is_some()));
+        let Some(gateway) = gateway else {
+            return (urls, None);
+        };
+        let policy = gateway
+            .connectivity
+            .as_ref()
+            .map_or(CellularVideoPolicy::Allow, |c| c.video);
+        if policy == CellularVideoPolicy::Allow {
+            return (urls, None);
+        }
+        let now = self.clock.now_us();
+        let transport = gateway
+            .check
+            .as_ref()
+            .filter(|c| c.state != CheckState::Failed)
+            .and_then(|c| c.network.as_ref())
+            .filter(|n| {
+                n.sampled_at_us > 0
+                    && n.sampled_at_us >= self.started_us
+                    && now
+                        .checked_sub(n.sampled_at_us)
+                        .is_some_and(|age| age < 15_000_000)
+            })
+            .map_or(
+                InternetTransport::Unknown,
+                uxduck_core::domain::companion::CompanionNetwork::transport,
+            );
+        if transport == InternetTransport::Wifi {
+            return (urls, None);
+        }
+        let mut local: Vec<_> = urls
+            .into_iter()
+            .filter(|url| {
+                source
+                    .internet
+                    .as_ref()
+                    .is_some_and(|i| i.local_urls.contains(url))
+            })
+            .collect();
+        if policy == CellularVideoPolicy::LowData
+            && transport == InternetTransport::Cellular
+            && let Some(low) = source
+                .internet
+                .as_ref()
+                .and_then(|i| i.low_data_url.as_ref())
+        {
+            local.push(low.clone());
+        }
+        let detail = if transport == InternetTransport::Unknown {
+            "Remote video paused until the gateway's internet connection is known"
+        } else if policy == CellularVideoPolicy::LowData {
+            "Remote video paused: configure a low-data camera address for cellular"
+        } else {
+            "Remote video paused: telemetry only on cellular"
+        };
+        (local, Some(detail.into()))
+    }
+
+    fn video_internet(
+        &mut self,
+        params: &uxduck_contracts::dto::video::VideoInternetParams,
+    ) -> Result<VideoSource, ApiError> {
+        let mut source = self
+            .state
+            .video_sources
+            .get(&params.source_id)
+            .cloned()
+            .ok_or_else(|| not_found(&params.source_id))?;
+        if source.url.is_none() || !source.added_by_hand {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Internet video controls require an RTSP camera you added.",
+            ));
+        }
+        let urls: Vec<_> = source.url.iter().chain(&source.fallback_urls).collect();
+        let mut local_urls: Vec<String> = Vec::new();
+        for local in &params.internet.local_urls {
+            let Some(url) = urls.iter().find(|u| redact(u) == redact(local.trim())) else {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Choose direct local addresses from this camera's saved addresses.",
+                ));
+            };
+            if !local_urls.contains(*url) {
+                local_urls.push((*url).clone());
+            }
+        }
+        let low_data_url = params
+            .internet
+            .low_data_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .map(|given| {
+                source
+                    .internet
+                    .as_ref()
+                    .and_then(|i| i.low_data_url.as_ref())
+                    .filter(|old| redact(old) == given.trim())
+                    .map_or_else(|| given.trim().to_owned(), Clone::clone)
+            });
+        if let Some(low) = &low_data_url {
+            if !matches!(input(low)?, Input::Rtsp { .. }) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Use an RTSP address for the camera's low-data stream.",
+                ));
+            }
+            if self.state.video_sources.values().any(|s| {
+                s.url
+                    .iter()
+                    .chain(&s.fallback_urls)
+                    .chain(
+                        s.internet
+                            .iter()
+                            .filter_map(|i| i.low_data_url.as_ref())
+                            .filter(|_| s.id != source.id),
+                    )
+                    .any(|u| redact(u) == redact(low))
+            }) {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "The low-data stream needs its own address, separate from existing camera addresses.",
+                ));
+            }
+        }
+        source.internet = Some(uxduck_core::domain::video::CameraInternet {
+            local_urls,
+            low_data_url,
+        });
+        source.version += 1;
+        self.commit_as(
+            actor(),
+            Change::VideoSourceUpserted {
+                source: source.clone(),
+            },
+        );
+        self.review_recordings();
+        Ok(self
+            .state
+            .video_sources
+            .get(&source.id)
+            .cloned()
+            .unwrap_or(source))
     }
 }

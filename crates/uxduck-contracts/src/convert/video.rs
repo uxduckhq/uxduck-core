@@ -87,6 +87,10 @@ impl From<&core::VideoSource> for dto::VideoSource {
             klv: v.klv,
             url: v.url.as_deref().map(core::redact),
             fallback_urls: v.fallback_urls.iter().map(|u| core::redact(u)).collect(),
+            internet: v.internet.as_ref().map(|i| dto::CameraInternet {
+                local_urls: i.local_urls.iter().map(|u| core::redact(u)).collect(),
+                low_data_url: i.low_data_url.as_deref().map(core::redact),
+            }),
             active_url: v.active_url.as_deref().map(core::redact),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),

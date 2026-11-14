@@ -871,3 +871,14 @@ WifiNetwork.active
 WifiNetwork.id
 WifiNetwork.managed
 WifiNetwork.ssid
+
+# New optional connectivity and camera data policy types (2026-11-13).
+CameraInternet.local_urls
+NetworkConnection.id
+NetworkConnection.ipv4
+NetworkConnection.ipv6
+NetworkConnection.kind
+NetworkConnection.name
+NetworkPreference.cellular_id
+NetworkPreference.wifi_id
+VehicleConnectivity.video

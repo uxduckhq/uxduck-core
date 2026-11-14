@@ -40,7 +40,13 @@
           ],
           "connectivity": "full",
           "checksEnabled": true,
-          "checkUri": "https://example.test/204"
+          "checkUri": "https://example.test/204",
+          "checksAvailable": false,
+          "connections": [],
+          "defaultDevices": [],
+          "routesKnown": false,
+          "sampledAtUs": 0,
+          "transport": "unknown"
         }
       }
     }

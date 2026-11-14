@@ -804,6 +804,7 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.review_preflights();
                 e.expire_display_pulls(now);
                 e.expire_video_watches(now);
+                e.connectivity_tick(now);
                 e.expire_pairings();
                 // Aircraft not heard for a minute (S168).
                 e.expire_traffic(now);
