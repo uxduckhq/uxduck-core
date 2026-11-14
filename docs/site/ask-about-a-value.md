@@ -11,6 +11,8 @@ Find out what a value means, or hand it to the agent and ask about it.
 
 Choose the **ⓘ** beside a value in the Telemetry tab, a setting, or a field of the simulation form. It says what the value is, its unit and where it comes from.
 
+In the Telemetry tab, a tile's **ⓘ** shows in the tile's corner when you point at the tile or reach it with the keyboard. On a touchscreen it always shows, after the tile's name.
+
 ## Ask the agent about it
 
 **Preview:** the in-app AI chat is currently hidden in production. These steps apply to development and staging builds. For external coding agents, use [MCP](/docs/mcp).

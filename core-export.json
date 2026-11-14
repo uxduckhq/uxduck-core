@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "acffa8c1032ed10f2df25a41e9c43da7df3dd08e",
+  "sourceCommit": "652e581e4b42df59dc36a59da11d772efca26e9b",
   "licenseReady": true,
   "files": [
     {
@@ -7976,7 +7976,7 @@
     },
     {
       "path": "docs/site/ask-about-a-value.md",
-      "sha256": "1e940bd3a4f8e2d921f2cab44873e2303feab6d988c7ab99919b43c29f3043ce",
+      "sha256": "6e2cbcc301339286dbe544cf9eb27140c292972deb367ff39980e2fbec211aae",
       "executable": false
     },
     {
