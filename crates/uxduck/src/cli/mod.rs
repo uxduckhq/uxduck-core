@@ -779,7 +779,11 @@ pub enum SimCommand {
         #[arg(long)]
         speedup: Option<u8>,
     },
-    /// The SITL builds UXDuck found, with their frames.
+    /// The builds `uxduck sim start` chooses from, with their frames: the
+    /// catalogue's downloads and any in UXDuck's `simulators/bin` folder.
+    ///
+    /// Builds of your own from `uxduck sim build` are not listed. Start one
+    /// with `uxduck sim start --binary <path>`.
     Builds,
     /// Builds the commit an ArduPilot checkout has checked out as a
     /// simulator UXDuck can start, with UXDuck's local-only network patch,
@@ -1472,8 +1476,10 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             from,
             ..
         } => {
-            let replayed = practice_replay::judge_tlog(&std::fs::read(&tlog)?, &exercise, from)
-                .map_err(CliError::Usage)?;
+            let bytes = std::fs::read(&tlog)
+                .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", tlog.display())))?;
+            let replayed =
+                practice_replay::judge_tlog(&bytes, &exercise, from).map_err(CliError::Usage)?;
             practice_replay::print(&exercise, &replayed);
             Ok(())
         }
@@ -1503,7 +1509,9 @@ fn prompt(question: &str) -> Result<String, CliError> {
         eprint!("{question}");
     }
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| CliError::Usage(format!("cannot read standard input: {e}")))?;
     Ok(line.trim().to_owned())
 }
 
@@ -2369,25 +2377,29 @@ pub(crate) async fn start_daemon(
 ) -> Result<LocalClient, CliError> {
     // Several explicit app launches may arrive together. Serialize startup,
     // then check again: the daemon's lifetime lock alone only rejects a loser.
-    std::fs::create_dir_all(data_dir)?;
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| CliError::Usage(format!("cannot create {}: {e}", data_dir.display())))?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(data_dir.join("daemon-start.lock"))?;
+        .open(data_dir.join("daemon-start.lock"))
+        .map_err(|e| CliError::Usage(format!("cannot open UXDuck's startup lock: {e}")))?;
     let _startup = tokio::task::spawn_blocking(move || {
         lock.lock()?;
         Ok::<_, std::io::Error>(lock)
     })
     .await
-    .map_err(|error| CliError::Usage(format!("could not coordinate UXDuck startup: {error}")))??;
+    .map_err(|error| CliError::Usage(format!("could not coordinate UXDuck startup: {error}")))?
+    .map_err(|error| CliError::Usage(format!("could not coordinate UXDuck startup: {error}")))?;
     if let Ok(client) = LocalClient::connect(data_dir).await {
         return Ok(client);
     }
     let exe = crate::paths::executable()
         .map_err(|e| CliError::Usage(format!("cannot find uxduck to start it: {e}")))?;
     let mut command = std::process::Command::new(exe);
-    let mut diagnostic = tempfile::NamedTempFile::new()?;
+    let mut diagnostic = tempfile::NamedTempFile::new()
+        .map_err(|e| CliError::Usage(format!("cannot make a temporary file: {e}")))?;
     command.env(crate::startup::ERROR_FILE, diagnostic.path());
     command.env("UXDUCK_BACKGROUND_LOG", data_dir.join("logs/daemon.log"));
     // This command exits once the daemon answers, and macOS refuses the
@@ -2426,7 +2438,8 @@ pub(crate) async fn start_daemon(
             return Ok(client);
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let reason = crate::startup::read(diagnostic.as_file_mut())?;
+            let reason = crate::startup::read(diagnostic.as_file_mut())
+                .map_err(|e| CliError::Usage(format!("cannot read why UXDuck stopped: {e}")))?;
             return Err(CliError::Usage(format!(
                 "UXDuck stopped while starting ({status}). {reason}"
             )));
@@ -2591,7 +2604,9 @@ async fn config_set(
             eprintln!("Paste the value for {name}, then press Enter:");
         }
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| CliError::Usage(format!("cannot read standard input: {e}")))?;
         line.trim().to_owned()
     };
     let mut client = LocalClient::connect(data_dir).await?;
@@ -2616,7 +2631,8 @@ async fn plugin_install(
     checks_block: bool,
     checks_warn: bool,
 ) -> Result<(), CliError> {
-    let path = std::fs::canonicalize(path)?;
+    let path = std::fs::canonicalize(path)
+        .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", path.display())))?;
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
     let mut params = serde_json::json!({ "path": path.display().to_string() });
@@ -2764,7 +2780,12 @@ fn plugin_test(
         ),
         None => None,
     };
-    let bytes = std::fs::read(tlog)?;
+    let bytes = std::fs::read(tlog).map_err(|e| {
+        CliError::Usage(format!(
+            "cannot read {}: {e}. Give a recording with --tlog.",
+            tlog.display()
+        ))
+    })?;
     // What it produced, for its own test (`test.json`).
     let mut produced = std::collections::BTreeSet::new();
     let mut failed = None;
@@ -2889,7 +2910,9 @@ async fn stop_daemon(data_dir: &std::path::Path, for_update: bool) -> Result<(),
     client.initialize().await?;
     if for_update {
         if let Some(target) = open_target(&mut client).await? {
-            std::fs::write(data_dir.join(REOPEN_AFTER_UPDATE), target)?;
+            let file = data_dir.join(REOPEN_AFTER_UPDATE);
+            std::fs::write(&file, target)
+                .map_err(|e| CliError::Usage(format!("cannot write {}: {e}", file.display())))?;
         } else {
             let _ = std::fs::remove_file(data_dir.join(REOPEN_AFTER_UPDATE));
         }
@@ -3014,7 +3037,8 @@ fn register_tlog_dialect(dir: &std::path::Path) -> Result<(), CliError> {
 }
 
 fn decode_tlog_frames(tlog: &std::path::Path) -> Result<(), CliError> {
-    let bytes = std::fs::read(tlog)?;
+    let bytes = std::fs::read(tlog)
+        .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", tlog.display())))?;
     for (at, frame) in uxduck_mavlink::tlog::read(&bytes) {
         let Some(header) = uxduck_mavlink::framing::header(frame) else {
             continue;
@@ -3043,7 +3067,8 @@ async fn replay(tlog: &std::path::Path, to: &str, speed: f64) -> Result<(), CliE
     if !(speed.is_finite() && speed > 0.0) {
         return Err(CliError::Usage("--speed must be above 0".into()));
     }
-    let bytes = std::fs::read(tlog)?;
+    let bytes = std::fs::read(tlog)
+        .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", tlog.display())))?;
     let every = uxduck_mavlink::tlog::read(&bytes);
     let total = every.len();
     let records = uxduck_mavlink::tlog::without_ground_stations(every);
@@ -3055,7 +3080,9 @@ async fn replay(tlog: &std::path::Path, to: &str, speed: f64) -> Result<(), CliE
             tlog.display()
         )));
     };
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| CliError::Usage(format!("cannot open a UDP socket: {e}")))?;
     eprintln!(
         "replaying {} verified telemetry frames to {target}; omitted {} frames that are not \
          verified autopilot telemetry (commands, transfers, unknown messages or senders). \
@@ -3072,7 +3099,10 @@ async fn replay(tlog: &std::path::Path, to: &str, speed: f64) -> Result<(), CliE
         )]
         let offset = std::time::Duration::from_micros(((at - first) as f64 / speed) as u64);
         tokio::time::sleep_until(started + offset).await;
-        socket.send_to(frame, target).await?;
+        socket
+            .send_to(frame, target)
+            .await
+            .map_err(|e| CliError::Usage(format!("cannot send to {target}: {e}")))?;
     }
     Ok(())
 }
@@ -3088,8 +3118,11 @@ async fn video_replay(
     let target: std::net::SocketAddr = to
         .parse()
         .map_err(|e| CliError::Usage(format!("--to: {e}")))?;
-    let file = std::fs::read(capture)?;
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let file = std::fs::read(capture)
+        .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", capture.display())))?;
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| CliError::Usage(format!("cannot open a UDP socket: {e}")))?;
     let ssrc = u32::from_be_bytes(*b"uxdk");
     let mut sequence = 0u16;
     let mut start = 0;
@@ -3110,7 +3143,10 @@ async fn video_replay(
         for datagram in &plan {
             tokio::time::sleep_until(began + std::time::Duration::from_micros(datagram.at_us))
                 .await;
-            socket.send_to(&datagram.bytes, target).await?;
+            socket
+                .send_to(&datagram.bytes, target)
+                .await
+                .map_err(|e| CliError::Usage(format!("cannot send to {target}: {e}")))?;
             sent += 1;
         }
         #[allow(clippy::cast_possible_truncation, reason = "RTP sequence numbers wrap")]
@@ -3294,7 +3330,9 @@ async fn fake_vehicle(
         .map_err(|e| CliError::Usage(format!("--to: {e}")))?;
     let uid = u64::from_str_radix(uid.trim_start_matches("0x"), 16)
         .map_err(|e| CliError::Usage(format!("--uid: {e}")))?;
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| CliError::Usage(format!("cannot open a UDP socket: {e}")))?;
     let mut vehicle = uxduck_mavlink::sim::FakeVehicle::new(system_id, uid);
     vehicle.answers_version = !no_uid;
     vehicle.flight_sw_version = version.flight_sw_version;
@@ -3348,23 +3386,24 @@ async fn fake_vehicle(
     let mut telemetry = tokio::time::interval(std::time::Duration::from_millis(200));
     let started = std::time::Instant::now();
     let mut buffer = vec![0u8; 2048];
+    let unsent = |e: std::io::Error| CliError::Usage(format!("cannot send to {target}: {e}"));
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                socket.send_to(&vehicle.heartbeat(), target).await?;
+                socket.send_to(&vehicle.heartbeat(), target).await.map_err(unsent)?;
                 if let Some(camera) = vehicle.camera_heartbeat() {
-                    socket.send_to(&camera, target).await?;
+                    socket.send_to(&camera, target).await.map_err(unsent)?;
                 }
             }
             _ = telemetry.tick() => {
                 let t_s = started.elapsed().as_secs_f64();
                 for frame in vehicle.telemetry(t_s) {
-                    socket.send_to(&frame, target).await?;
+                    socket.send_to(&frame, target).await.map_err(unsent)?;
                 }
                 // After its first second, so the daemon knows it by then.
                 if t_s > 1.0 {
                     for frame in vehicle.status_texts(t_s) {
-                        socket.send_to(&frame, target).await?;
+                        socket.send_to(&frame, target).await.map_err(unsent)?;
                     }
                 }
             }
@@ -3374,10 +3413,15 @@ async fn fake_vehicle(
                     // Windows reports an earlier datagram's port unreachable
                     // here when nothing listens at --to yet; keep sending.
                     Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        return Err(CliError::Usage(format!("cannot receive replies: {error}")));
+                    }
                 };
                 for reply in vehicle.answer(&buffer[..len]) {
-                    socket.send_to(&reply, from).await?;
+                    socket
+                        .send_to(&reply, from)
+                        .await
+                        .map_err(|e| CliError::Usage(format!("cannot answer {from}: {e}")))?;
                 }
             }
             _ = tokio::signal::ctrl_c() => return Ok(()),
@@ -3520,6 +3564,23 @@ async fn ports_list(data_dir: &std::path::Path) -> Result<(), CliError> {
             "the app and API (127.0.0.1)",
             init["daemonVersion"].as_str().unwrap_or("")
         );
+    }
+    let video = client.call("video/list", serde_json::json!({})).await?;
+    let listens = |port: String, error: Option<&str>| {
+        let status =
+            error.map_or_else(|| "listening".to_owned(), |e| format!("not listening: {e}"));
+        println!(
+            "{port:<6} {:<6} {:<36} {status}",
+            "UDP", "camera video (every network)"
+        );
+    };
+    match (video["port"].as_u64(), video["listenError"].as_str()) {
+        (Some(port), _) => listens(port.to_string(), None),
+        (None, Some(error)) => listens("-".into(), Some(error)),
+        (None, None) => {}
+    }
+    for extra in video["extraPorts"].as_array().into_iter().flatten() {
+        listens(extra["port"].to_string(), extra["error"].as_str());
     }
     for link in state["snapshot"]["links"].as_array().into_iter().flatten() {
         let kind = &link["kind"];

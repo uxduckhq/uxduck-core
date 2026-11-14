@@ -43,15 +43,25 @@ pub async fn run(data_dir: &Path, args: ReplayArgs) -> Result<(), CliError> {
     let mut client = LocalClient::connect(data_dir).await?;
     client.initialize().await?;
     if args.close {
+        let open = client.call("replay/state", json!({})).await?["open"] == true;
         client.call("replay/close", json!({})).await?;
-        println!("Closed the replay.");
+        println!(
+            "{}",
+            if open {
+                "Closed the replay."
+            } else {
+                "No replay was open."
+            }
+        );
         return Ok(());
     }
     if args.restart {
-        let mut state = client.call("replay/restart", json!({})).await?;
-        if state["open"] != true {
-            return Err(CliError::Usage("no replay is open".into()));
+        if client.call("replay/state", json!({})).await?["open"] != true {
+            return Err(CliError::Usage(
+                "No replay is open. Open one with `uxduck replay <flight or tlog file>`.".into(),
+            ));
         }
+        let mut state = client.call("replay/restart", json!({})).await?;
         if let Some(speed) = args.speed {
             state = client
                 .call("replay/speed", json!({ "speed": speed }))
@@ -139,7 +149,14 @@ async fn show(client: &mut LocalClient) -> Result<(), CliError> {
     {
         return Ok(());
     }
-    let opened = client.call("app/open", json!({ "reopened": true })).await?;
+    let opened = match client.call("app/open", json!({ "reopened": true })).await {
+        Ok(opened) => opened,
+        Err(CliError::Api(_)) if desktop["state"] != "installed" => {
+            eprintln!("No window opened: UXDuck's desktop window isn't installed.");
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(url) = opened["url"].as_str() {
         let _ = crate::adapters::browser::open(url);
     }

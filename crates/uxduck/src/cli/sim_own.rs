@@ -70,7 +70,8 @@ pub fn build(
         );
     }
     let sources = data_dir.join("simulators").join("source");
-    std::fs::create_dir_all(&sources)?;
+    std::fs::create_dir_all(&sources)
+        .map_err(|e| CliError::Usage(format!("cannot create {}: {e}", sources.display())))?;
     let work = sources.join(short);
     let folder = data_dir.join("simulators").join("own").join(short);
     let built = remove_worktree(&checkout, &work).and_then(|()| {
@@ -93,16 +94,18 @@ pub fn build(
         std::fs::write(
             folder.join(crate::sim::ALLOW_NETWORK),
             "Built with `uxduck sim build --allow-network`: no version of UXDuck's local-only network patch fits this release, so this simulator can be reached from your network while it runs.\n",
-        )?;
+        )
+        .map_err(|e| CliError::Usage(format!("cannot write {}: {e}", folder.display())))?;
         println!("{}", path.display());
         eprintln!(
-            "Built {program} from {short} without UXDuck's local-only network patch, as none fits this release. While it runs, other computers on your network can connect to it, send it RC input and receive its state. Start it with `uxduck sim start --binary {}`, or choose it in New simulation › Advanced › Your own build.",
-            path.display()
+            "Built {program} from {short} without UXDuck's local-only network patch, as none fits this release. While it runs, other computers on your network can connect to it, send it RC input and receive its state. {}",
+            how_to_start(&path)
         );
         return Ok(());
     }
     let check = folder.join("check");
-    std::fs::create_dir_all(&check)?;
+    std::fs::create_dir_all(&check)
+        .map_err(|e| CliError::Usage(format!("cannot create {}: {e}", check.display())))?;
     let checked = match network_address() {
         Some(network) => crate::sim::check_local_only(&binary, &check, network).map(|()| network),
         None => Err("this computer has no network address to check it from".to_owned()),
@@ -116,10 +119,30 @@ pub fn build(
     })?;
     println!("{}", path.display());
     eprintln!(
-        "Built {program} from {short} with UXDuck's local-only network patch; its port took connections on this computer and refused them from {network}. Start it with `uxduck sim start --binary {}`, or choose it in New simulation › Advanced › Your own build.",
-        path.display()
+        "Built {program} from {short} with UXDuck's local-only network patch. Its port took connections on this computer and refused them from {network}. {}",
+        how_to_start(&path)
     );
     Ok(())
+}
+
+/// How to start the build: by its path on the command line, quoted when it
+/// has a space (macOS keeps UXDuck's data under "Application Support"), and
+/// in New simulation only where this UXDuck has the app built in. Core has
+/// none.
+fn how_to_start(path: &Path) -> String {
+    let path = path.display().to_string();
+    let path = if path.contains(' ') {
+        format!("'{path}'")
+    } else {
+        path
+    };
+    if cfg!(feature = "embed-ui") {
+        format!(
+            "Start it with `uxduck sim start --binary {path}`, or choose it in New simulation › Advanced › Your own build."
+        )
+    } else {
+        format!("Start it with `uxduck sim start --binary {path}`.")
+    }
 }
 
 /// Builds the program in a worktree of the commit and lays it out in
@@ -166,7 +189,12 @@ fn build_in(
         }
         let linked = work.join(path);
         let _ = std::fs::remove_dir(&linked);
-        symlink(&source, &linked)?;
+        symlink(&source, &linked).map_err(|e| {
+            CliError::Usage(format!(
+                "cannot link {} into the build: {e}",
+                source.display()
+            ))
+        })?;
     }
     let patched = apply(work, sources)?;
     if !patched && !allow_network {
@@ -186,7 +214,9 @@ fn build_in(
         ],
         vec!["waf", target],
     ] {
-        let status = waf(&python, work, &args).status()?;
+        let status = waf(&python, work, &args)
+            .status()
+            .map_err(not_run(&python))?;
         if !status.success() {
             return Err(CliError::Usage(format!(
                 "`{python} {}` failed (see above)",
@@ -195,11 +225,18 @@ fn build_in(
         }
     }
     let _ = std::fs::remove_dir_all(folder);
-    std::fs::create_dir_all(folder.join("defaults"))?;
+    std::fs::create_dir_all(folder.join("defaults"))
+        .map_err(|e| CliError::Usage(format!("cannot create {}: {e}", folder.display())))?;
     std::fs::copy(
         work.join("build/sitl/bin").join(program),
         folder.join(program),
-    )?;
+    )
+    .map_err(|e| {
+        CliError::Usage(format!(
+            "cannot copy the built {program} to {}: {e}",
+            folder.display()
+        ))
+    })?;
     frame_table(work, folder, &python, program)?;
     Ok(patched)
 }
@@ -226,7 +263,8 @@ fn waf(python: &str, work: &Path, args: &[&str]) -> Command {
 fn apply(work: &Path, sources: &Path) -> Result<bool, CliError> {
     for (release, patch) in LOCAL_ONLY_PATCHES {
         let file = sources.join(format!("local-only-network-{release}.patch"));
-        std::fs::write(&file, patch)?;
+        std::fs::write(&file, patch)
+            .map_err(|e| CliError::Usage(format!("cannot write {}: {e}", file.display())))?;
         let file = file.display().to_string();
         if git(work, &["apply", "--check", &file]).is_ok() {
             git(work, &["apply", &file])?;
@@ -243,20 +281,28 @@ fn frame_table(work: &Path, folder: &Path, python: &str, program: &str) -> Resul
     let pysim = work.join("Tools/autotest/pysim");
     let table_file = folder.join("vehicleinfo.json");
     if pysim.join("vehicleinfo.json").is_file() {
-        std::fs::copy(pysim.join("vehicleinfo.json"), &table_file)?;
+        std::fs::copy(pysim.join("vehicleinfo.json"), &table_file).map_err(|e| {
+            CliError::Usage(format!(
+                "cannot copy the frame table to {}: {e}",
+                table_file.display()
+            ))
+        })?;
     } else {
         let status = Command::new(python)
             .args(["-c", FRAME_TABLE_FROM_PY])
             .arg(&pysim)
             .arg(&table_file)
-            .status()?;
+            .status()
+            .map_err(not_run(python))?;
         if !status.success() {
             return Err(CliError::Usage(
                 "cannot read the frame table from Tools/autotest/pysim/vehicleinfo.py".into(),
             ));
         }
     }
-    let table: Value = serde_json::from_str(&std::fs::read_to_string(&table_file)?)
+    let table = std::fs::read_to_string(&table_file)
+        .map_err(|e| CliError::Usage(format!("cannot read {}: {e}", table_file.display())))?;
+    let table: Value = serde_json::from_str(&table)
         .map_err(|e| CliError::Usage(format!("the frame table: {e}")))?;
     let target = format!("bin/{program}");
     let frames: Vec<&Value> = table
@@ -283,7 +329,9 @@ fn frame_table(work: &Path, folder: &Path, python: &str, program: &str) -> Resul
             if let Some(file) = Path::new(name).file_name()
                 && source.is_file()
             {
-                std::fs::copy(&source, folder.join("defaults").join(file))?;
+                std::fs::copy(&source, folder.join("defaults").join(file)).map_err(|e| {
+                    CliError::Usage(format!("cannot copy {}: {e}", source.display()))
+                })?;
             }
         }
     }
@@ -294,13 +342,19 @@ fn frame_table(work: &Path, folder: &Path, python: &str, program: &str) -> Resul
 /// first so nothing of the checkout's is touched.
 fn remove_worktree(checkout: &Path, work: &Path) -> Result<(), CliError> {
     if work.exists() {
-        unlink_all(work)?;
+        unlink_all(work).map_err(|e| {
+            CliError::Usage(format!(
+                "cannot unlink the checkout from {}: {e}",
+                work.display()
+            ))
+        })?;
         let _ = git(
             checkout,
             &["worktree", "remove", "--force", &work.display().to_string()],
         );
         if work.exists() {
-            std::fs::remove_dir_all(work)?;
+            std::fs::remove_dir_all(work)
+                .map_err(|e| CliError::Usage(format!("cannot remove {}: {e}", work.display())))?;
         }
     }
     let _ = git(checkout, &["worktree", "prune"]);
@@ -334,7 +388,8 @@ fn git(directory: &Path, args: &[&str]) -> Result<String, CliError> {
     let output = Command::new("git")
         .args(args)
         .current_dir(directory)
-        .output()?;
+        .output()
+        .map_err(not_run("git"))?;
     if !output.status.success() {
         return Err(CliError::Usage(format!(
             "`git {}` failed: {}",
@@ -343,6 +398,18 @@ fn git(directory: &Path, args: &[&str]) -> Result<String, CliError> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Why a program could not be run: "python3 not found" when it is not
+/// installed, rather than the system's "No such file or directory".
+fn not_run(program: &str) -> impl FnOnce(std::io::Error) -> CliError + '_ {
+    move |error| {
+        CliError::Usage(if error.kind() == std::io::ErrorKind::NotFound {
+            format!("{program} not found. Building a simulator needs it. Install it and try again.")
+        } else {
+            format!("cannot run {program}: {error}")
+        })
+    }
 }
 
 /// This computer's address on its network: the one a packet out would
@@ -392,6 +459,35 @@ mod tests {
         } else {
             assert_eq!(ldflags, None, "the toolchain's own flags elsewhere");
         }
+    }
+
+    /// macOS keeps the build under "Application Support", and Core has no
+    /// New simulation to choose it in (fresh-user test, 2026-11-14).
+    #[test]
+    fn the_start_command_can_be_pasted_and_names_the_app_only_with_one() {
+        let said = how_to_start(Path::new(
+            "/Users/me/Library/Application Support/UXDuck/simulators/own/732bedc6/arducopter",
+        ));
+        assert!(
+            said.starts_with(
+                "Start it with `uxduck sim start --binary '/Users/me/Library/Application Support/UXDuck/simulators/own/732bedc6/arducopter'`"
+            ),
+            "{said}"
+        );
+        assert_eq!(
+            said.contains("New simulation"),
+            cfg!(feature = "embed-ui"),
+            "{said}"
+        );
+        let plain = how_to_start(Path::new(
+            "/home/me/.local/share/uxduck/simulators/own/732bedc6/arducopter",
+        ));
+        assert!(
+            plain.starts_with(
+                "Start it with `uxduck sim start --binary /home/me/.local/share/uxduck/simulators/own/732bedc6/arducopter`"
+            ),
+            "{plain}"
+        );
     }
 
     #[test]

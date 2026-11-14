@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "037c6ca8b9c05b71f9a20d18524073c17b820628",
+  "sourceCommit": "996f580e9411cf3a9e12d4f1c436185c010e7661",
   "licenseReady": true,
   "files": [
     {
@@ -6991,7 +6991,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/sim.rs",
-      "sha256": "26ba5de1aeb332c8be07905e42ef52bb94cf513e4a56989291beb16fa4cbffe3",
+      "sha256": "4b379b50a411f341f17c88c6631e67d3003e77ae703ce37c28376671736d8cd6",
       "executable": false
     },
     {
@@ -7431,12 +7431,12 @@
     },
     {
       "path": "crates/uxduck/src/cli/client.rs",
-      "sha256": "1e546afa91591d67be1b09a11af32d88be4f759478b54c505e55289043591a30",
+      "sha256": "0e928c482e08c65e40af00e31d4da3482b663e7eccb6b7f9b047932c4e896e72",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/cli/companion.rs",
-      "sha256": "d476be5cf471b824d358749238bdb1e612cba540756f5c572f5f23dee794a48b",
+      "sha256": "e128eb887498f7f80a74ae3a95a655b57149b653fc0d3c029e7f79e7c9a80d56",
       "executable": false
     },
     {
@@ -7476,7 +7476,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/mod.rs",
-      "sha256": "372315393932a400a5b44832feca21c54d93f7135358028a25954347cb6cff8b",
+      "sha256": "64d32dae9a5d2d2bc26aa76c2ffb39dade4d0ca171688feff8086f2ea3021c50",
       "executable": false
     },
     {
@@ -7516,7 +7516,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/replay.rs",
-      "sha256": "39f2c85b0db558c9643a2442a04c5c91f835b674af8987d1ebc651d8610c2ad9",
+      "sha256": "c469eac1dd83926dd56fe2e3225a05be72bb376de47b4ba57af7eeb6fde5c949",
       "executable": false
     },
     {
@@ -7526,7 +7526,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/setup.rs",
-      "sha256": "db18eaf210af579e071081d876d8e0a100ad3380db6692799a81b3ce5c1d4569",
+      "sha256": "1aca2868b059892704b29095ff36b58b57b30f536756997c2f9cdee9134fad47",
       "executable": false
     },
     {
@@ -7536,7 +7536,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/sim_own.rs",
-      "sha256": "860a90064a208bcd305e9acc332def96494a4ec0b632c92967261f684f65a9e5",
+      "sha256": "5231760bd22891deacc4f71bb65d7deda18942a119cf3ec42c88e2a4ebb344e9",
       "executable": false
     },
     {
@@ -7556,7 +7556,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/video.rs",
-      "sha256": "c50621e7a3d30c94d6dd0fb7dea066e34dd003d83f7351d597620ba84c9dd454",
+      "sha256": "952243fbf668fa1a0696635f67102fe9e637e32cd80f813add3c572c6bfeb276",
       "executable": false
     },
     {
@@ -7826,7 +7826,7 @@
     },
     {
       "path": "crates/uxduck/src/mcp.rs",
-      "sha256": "5c8e19be93c4340253bcae92c1b2f5764cb27a9fd63cb0af8f0710480fa1d9d6",
+      "sha256": "e06a089c321505677f0c851b17b3f14338cafe9369f548aa1bbab318df74fb97",
       "executable": false
     },
     {
@@ -8156,7 +8156,7 @@
     },
     {
       "path": "crates/uxduck/tests/cli.rs",
-      "sha256": "51d498dfe82c8c9d3c73ae3521ccfb7f97fd63940fa54124765c6c9518380777",
+      "sha256": "90daf4d4e51654768eb7eb0cdd5bdf3a7810290f4ad0f327fbe828a824b11509",
       "executable": false
     },
     {
@@ -8191,7 +8191,7 @@
     },
     {
       "path": "crates/uxduck/tests/smoke.rs",
-      "sha256": "13f4dbca3032c32c09ac7ed36f5d5162c436a5b047f9ea93365ef499b67a35a3",
+      "sha256": "0a0b7f716c3fede2a780d2ee360d623f2fc373537982c845cdbc6d99e666bb58",
       "executable": false
     },
     {
@@ -8436,12 +8436,12 @@
     },
     {
       "path": "plugins/home-distance-ts/index.ts",
-      "sha256": "be1b5588e97463ac374fdf886c03db68c92797fdc66b982139d92d40125971f3",
+      "sha256": "f829313c68fe7a31f1e6dbb89fa091d3f3f6ee9069fe6d9e39b0498d58d207bc",
       "executable": false
     },
     {
       "path": "plugins/home-distance-ts/plugin.json",
-      "sha256": "e86e1dd2c673bc50e50c5c00bb4f8d09824e8680514cbe75a1f6a99e471adbfc",
+      "sha256": "0fce3a2dfe8b7e80e5615d009b14063b0645cd4e604a12b98d0fbd805dfc7636",
       "executable": false
     },
     {
@@ -8451,12 +8451,12 @@
     },
     {
       "path": "plugins/home-distance/plugin.json",
-      "sha256": "1cbadbbe2f07dc6d7a0e688bdb2eb30a8ac2d2ffb6e5c1c92e7ab6c11ee9ec23",
+      "sha256": "1ac76db49dd63de457e2ccf2906f136f3ccbde9c285288704572c1dd3669ab77",
       "executable": false
     },
     {
       "path": "plugins/home-distance/src/lib.rs",
-      "sha256": "be1817063a4bc1eac98edd69ba657691b0be6b958c6cc9f21c238fb65c0f9431",
+      "sha256": "0a6b4a13e9693b5987ef4b9df5e317413f5447cc7758457ac93876583dd108d7",
       "executable": false
     },
     {

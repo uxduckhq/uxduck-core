@@ -13,8 +13,10 @@ pub enum CliError {
     Usage(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// The daemon's socket failed after connecting. A file or program on
+    /// this computer is never this: it says what it was.
     #[error("connection lost: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
     /// The daemon answered with a JSON-RPC error object.
     #[error("{0}")]
     Api(Value),
@@ -171,7 +173,10 @@ impl LocalClient {
     async fn write(&mut self, frame: Value) -> Result<(), CliError> {
         let mut line = frame.to_string();
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).await?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(CliError::Io)?;
         Ok(())
     }
 
@@ -201,7 +206,7 @@ impl LocalClient {
     }
 
     pub(crate) async fn read(&mut self) -> Result<Option<Value>, CliError> {
-        let Some(line) = self.lines.next_line().await? else {
+        let Some(line) = self.lines.next_line().await.map_err(CliError::Io)? else {
             return Ok(None);
         };
         let mut frame: Value =

@@ -50,7 +50,9 @@ pub async fn run(args: CompanionArgs) -> Result<(), CliError> {
             },
         )
         .collect::<Result<Vec<_>, _>>()?;
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| CliError::Usage(format!("cannot open a UDP socket: {e}")))?;
     let mut computer = Computer::new(Onboard {
         component_id: Some(args.computer_id),
     });

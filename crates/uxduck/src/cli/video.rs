@@ -338,7 +338,9 @@ async fn probe(data_dir: &Path, port: u16, seconds: u64) -> Result<(), CliError>
         return Ok(());
     }
     let socket = crate::video::listener::bind(port).map_err(CliError::Usage)?;
-    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| CliError::Usage(format!("cannot listen on UDP {port}: {e}")))?;
     println!("Listening on UDP {port} for {seconds} s…");
     let mut senders: BTreeMap<String, Source> = BTreeMap::new();
     let mut buffer = vec![0u8; 65_536];

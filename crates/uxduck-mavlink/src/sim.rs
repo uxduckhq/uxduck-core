@@ -11,9 +11,9 @@ use mavio::dialects::ardupilotmega::enums::{
 use mavio::dialects::ardupilotmega::messages::{
     Attitude, AutopilotVersion, AvailableModes, AvailableModesMonitor, BatteryStatus, CommandLong,
     ComponentMetadata, DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat,
-    MissionCurrent, NavControllerOutput, PositionTargetGlobalInt, RadioStatus, RcChannels,
-    ServoOutputRaw, SysStatus, TerrainReport, Timesync, VfrHud, Vibration, VideoStreamInformation,
-    Wind,
+    HomePosition, MissionCurrent, NavControllerOutput, PositionTargetGlobalInt, RadioStatus,
+    RcChannels, ServoOutputRaw, SysStatus, TerrainReport, Timesync, VfrHud, Vibration,
+    VideoStreamInformation, Wind,
 };
 use mavio::protocol::{V2, Versionless};
 use mavio::{Frame, Message};
@@ -205,6 +205,23 @@ pub fn global_position_at_frame(
         ..GlobalPositionInt::default()
     };
     frame(system_id, 1, sequence, &position)
+}
+
+/// `HOME_POSITION` at a place (degrees times 10^7) and an altitude above
+/// mean sea level in millimetres.
+#[must_use]
+pub fn home_position_frame(
+    (system_id, sequence): (u8, u8),
+    (latitude_e7, longitude_e7): (i32, i32),
+    altitude_mm: i32,
+) -> Vec<u8> {
+    let home = HomePosition {
+        latitude: latitude_e7,
+        longitude: longitude_e7,
+        altitude: altitude_mm,
+        ..HomePosition::default()
+    };
+    frame(system_id, 1, sequence, &home)
 }
 
 /// `ATTITUDE`: roll, pitch and yaw in degrees, at a time since boot.

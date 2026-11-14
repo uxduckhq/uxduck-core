@@ -60,12 +60,27 @@ export function onMessages(batch: MessageBatch): Effects {
   const items: ProducedItem[] = [];
   const features = [];
   for (const message of batch.messages) {
-    // `lat` and `lon` are in degE7, as MAVLink sends them.
+    const state = vehicle(message.vehicleId);
+    // Positions are in degE7, as MAVLink sends them, and 0, 0 is no
+    // position: MAVLink's before a GPS fix. Home is the vehicle's own once it
+    // reports one, else where it first had a fix.
+    if (message.name === "HOME_POSITION") {
+      const home: [number, number] = [
+        (message.fields.latitude as number) / 1e7,
+        (message.fields.longitude as number) / 1e7,
+      ];
+      const moved = !state.home || state.home[0] !== home[0] || state.home[1] !== home[1];
+      if ((home[0] !== 0 || home[1] !== 0) && moved) {
+        state.home = home;
+        features.push({ ...circle("home-circle", home[0], home[1], 100), fill: true });
+      }
+      continue;
+    }
     const here: [number, number] = [
       (message.fields.lat as number) / 1e7,
       (message.fields.lon as number) / 1e7,
     ];
-    const state = vehicle(message.vehicleId);
+    if (here[0] === 0 && here[1] === 0) continue;
     if (!state.home) {
       state.home = here;
       features.push({ ...circle("home-circle", here[0], here[1], 100), fill: true });

@@ -142,3 +142,76 @@ fn as_ssh_askpass_it_prints_the_password_file() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "raspberry\n");
 }
+
+/// A local program that is missing is named, rather than reported as a lost
+/// connection to UXDuck: `sim build` without Python (fresh-user test,
+/// 2026-11-14).
+#[cfg(unix)]
+#[test]
+fn a_missing_python_is_named_rather_than_a_lost_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let checkout = temp.path().join("ardupilot");
+    std::fs::create_dir_all(checkout.join("Tools/autotest/pysim")).unwrap();
+    std::fs::write(checkout.join("waf"), "").unwrap();
+    std::fs::write(checkout.join("Tools/autotest/pysim/vehicleinfo.json"), "{}").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"],
+        &[
+            "-c",
+            "user.name=UXDuck test",
+            "-c",
+            "user.email=test@uxduck.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "An ArduPilot checkout in outline",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .arg("--data-dir")
+        .arg(temp.path().join("data"))
+        .args(["sim", "build"])
+        .arg(&checkout)
+        .arg("--allow-network")
+        .env("PYTHON", "uxduck-test-missing-python")
+        .output()
+        .expect("spawn uxduck");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("uxduck-test-missing-python not found"),
+        "{error}"
+    );
+    assert!(!error.contains("connection lost"), "{error}");
+}
+
+/// A missing recording is named by its path, rather than reported as a lost
+/// connection to UXDuck (fresh-user test, 2026-11-14).
+#[cfg(feature = "plugins")]
+#[test]
+fn a_plugin_test_without_its_recording_names_the_missing_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_uxduck"))
+        .args(["plugin", "test"])
+        .arg(temp.path())
+        .output()
+        .expect("spawn uxduck");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let error = String::from_utf8(output.stderr).unwrap();
+    let missing = temp.path().join("test.tlog");
+    assert!(
+        error.contains(&format!("cannot read {}", missing.display())),
+        "{error}"
+    );
+    assert!(error.contains("--tlog"), "{error}");
+    assert!(!error.contains("connection lost"), "{error}");
+}

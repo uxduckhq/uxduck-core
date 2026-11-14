@@ -2,8 +2,8 @@
   "abi": 2,
   "id": "home-distance",
   "name": "Home distance",
-  "version": "0.2.0",
-  "description": "How far each vehicle is from where it started, and a notice when its battery is low.",
+  "version": "0.2.1",
+  "description": "How far each vehicle is from its home, and a notice when its battery is low.",
   "wasm": "home_distance.wasm",
   "capabilities": ["read"],
   "subscribe": {
@@ -12,7 +12,7 @@
       "cadenceMs": 1000
     },
     "messages": {
-      "names": ["GLOBAL_POSITION_INT"],
+      "names": ["GLOBAL_POSITION_INT", "HOME_POSITION"],
       "cadenceMs": 500
     }
   },

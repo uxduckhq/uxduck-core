@@ -389,7 +389,7 @@ async fn positions(client: &mut LocalClient, id: &str) -> Result<(), CliError> {
             println!("{} Then press Enter.", position_line(&position));
             tokio::select! {
                 line = lines.next_line() => {
-                    if line?.is_none() {
+                    if line.map_err(|e| CliError::Usage(format!("cannot read standard input: {e}")))?.is_none() {
                         return Err(CliError::Usage("Standard input closed.".into()));
                     }
                 }
@@ -518,7 +518,7 @@ async fn read_line(
 ) -> Result<String, CliError> {
     tokio::select! {
         line = lines.next_line() => {
-            line?.ok_or_else(|| CliError::Usage("Standard input closed.".into()))
+            line.map_err(|e| CliError::Usage(format!("cannot read standard input: {e}")))?.ok_or_else(|| CliError::Usage("Standard input closed.".into()))
         }
         _ = tokio::signal::ctrl_c() => {
             client.call("setup/cancel", json!({ "vehicleId": id })).await?;

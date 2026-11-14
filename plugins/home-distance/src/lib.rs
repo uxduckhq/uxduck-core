@@ -1,8 +1,9 @@
 //! The plugin ABI's example (ADR-0006 X1 to X5, X10): telemetry items
-//! (`battery.*`) and a decoded message (`GLOBAL_POSITION_INT`) in; an item
-//! with its unit (`home.distance_m`), a notification below 20 % battery,
-//! declared commands with a parameter, a panel with every kind of widget,
-//! and a 100 m circle around home on the map out.
+//! (`battery.*`) and decoded messages (`GLOBAL_POSITION_INT`,
+//! `HOME_POSITION`) in; an item with its unit (`home.distance_m`), a
+//! notification below 20 % battery, declared commands with a parameter, a
+//! panel with every kind of widget, and a 100 m circle around home on the
+//! map out.
 
 // Plugin functions return `FnResult` because the ABI says so.
 #![allow(clippy::unnecessary_wraps)]
@@ -12,7 +13,7 @@ use std::collections::BTreeMap;
 
 use uxduck_sdk::extism_pdk;
 use uxduck_sdk::extism_pdk::{FnResult, Json, plugin_fn};
-use uxduck_sdk::messages::GlobalPositionInt;
+use uxduck_sdk::messages::{GlobalPositionInt, HomePosition};
 use uxduck_sdk::{
     CommandCall, Description, Effects, ItemBatch, MapFeature, Message, MessageBatch, Panel,
     Severity, Tone, Unit, Widget, circle, notify, point, table, value,
@@ -27,8 +28,11 @@ const CIRCLE_M: f64 = 100.0;
 
 #[derive(Default)]
 struct Vehicle {
-    /// Where it started, or was last told home is, in degrees.
+    /// Home, in degrees: the vehicle's own, else where it was first heard
+    /// with a fix, or where Set home here last put it.
     home: Option<(f64, f64)>,
+    /// Home was put with Set home here, so the vehicle's own leaves it.
+    set_here: bool,
     /// Where it was last heard.
     here: Option<(f64, f64)>,
     warned: bool,
@@ -63,7 +67,7 @@ pub fn description() -> Description {
                     heading: true,
                     tone: None,
                     help: help(
-                        "Home is where the vehicle was first heard, or where you last chose Set home here.",
+                        "Home is the vehicle's home position, or where it first had a GPS fix until it reports one. Set home here moves it to where the vehicle is now.",
                     ),
                 },
                 Widget::Value {
@@ -131,18 +135,34 @@ fn home_features(home: (f64, f64)) -> Vec<MapFeature> {
     vec![ring, centre]
 }
 
-/// Positions: the first is home; each after it, how far from home.
+/// Home from the vehicle's `HOME_POSITION`, else its first position with
+/// a fix. Each position with a fix, how far it is from home.
 #[must_use]
 pub fn messages(batch: &MessageBatch) -> Effects {
     let mut effects = Effects::default();
     VEHICLES.with_borrow_mut(|vehicles| {
         for input in &batch.messages {
+            let vehicle = vehicles.entry(input.vehicle_id.clone()).or_default();
+            // `latitude`, `longitude`, `lat` and `lon` are in degE7, and
+            // 0, 0 is no position: MAVLink's before a GPS fix.
+            if let Some(home) = HomePosition::from_input(input) {
+                let home = (
+                    f64::from(home.latitude) / 1e7,
+                    f64::from(home.longitude) / 1e7,
+                );
+                if home != (0.0, 0.0) && !vehicle.set_here && vehicle.home != Some(home) {
+                    vehicle.home = Some(home);
+                    effects.features.extend(home_features(home));
+                }
+                continue;
+            }
             let Some(position) = GlobalPositionInt::from_input(input) else {
                 continue;
             };
-            // `lat` and `lon` are in degE7.
+            if position.lat == 0 && position.lon == 0 {
+                continue;
+            }
             let here = (f64::from(position.lat) / 1e7, f64::from(position.lon) / 1e7);
-            let vehicle = vehicles.entry(input.vehicle_id.clone()).or_default();
             vehicle.here = Some(here);
             let home = if let Some(home) = vehicle.home {
                 home
@@ -228,6 +248,7 @@ pub fn command(call: &CommandCall) -> Effects {
             "set-home" => match vehicle.here {
                 Some(here) => {
                     vehicle.home = Some(here);
+                    vehicle.set_here = true;
                     Effects {
                         features: home_features(here),
                         items: vec![value(

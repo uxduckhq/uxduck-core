@@ -42,7 +42,7 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
     loop {
         let answer = tokio::select! {
             line = lines.next_line() => {
-                let Some(line) = line? else { break };
+                let Some(line) = line.map_err(|e| CliError::Usage(format!("cannot read from the MCP client: {e}")))? else { break };
                 let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
                 session.dispatch(data_dir, &catalogue, all_tools, message).await?
             }
@@ -51,8 +51,14 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
         if let Some(answer) = answer {
             let mut text = answer.to_string();
             text.push('\n');
-            stdout.write_all(text.as_bytes()).await?;
-            stdout.flush().await?;
+            stdout
+                .write_all(text.as_bytes())
+                .await
+                .map_err(|e| CliError::Usage(format!("cannot write to the MCP client: {e}")))?;
+            stdout
+                .flush()
+                .await
+                .map_err(|e| CliError::Usage(format!("cannot write to the MCP client: {e}")))?;
         }
     }
     Ok(())
