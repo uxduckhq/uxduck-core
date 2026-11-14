@@ -73,6 +73,9 @@ CalculatedItem.formula
 CalculatedItem.key
 CalculatedItem.label
 CalculatedItem.unit
+CameraLinger.lingering
+CameraLinger.remove_ipc
+CameraLinger.user
 CaptureInput.device_id
 CaptureInput.name
 Change::ApprovalUpserted.approval
@@ -231,6 +234,8 @@ Command::Long.params
 Command::SetEkfOrigin.place
 Command::SetMode.mode
 CommandParam.index
+CompanionCameraPath.name
+CompanionCameraPath.source
 CompanionCheck.at_us
 CompanionCheck.state
 CompanionClock.offset_ms
@@ -556,6 +561,13 @@ PatternShape::Survey.angle_deg
 PatternShape::Survey.area
 PatternShape::Survey.spacing_m
 PatternShape::Survey.turnaround_m
+PictureApplied.outcome
+PictureApplied.path
+PictureSettings.bitrate
+PictureSettings.fps
+PictureSettings.height
+PictureSettings.idr_period
+PictureSettings.width
 PlaceAmsl.altitude_amsl_m
 PlaceAmsl.latitude_deg
 PlaceAmsl.longitude_deg
@@ -848,6 +860,8 @@ VideoSource.state
 VideoSource.version
 VideoTrack.codec
 VideoTrack.number
+WatchdogRestart.at_us
+WatchdogRestart.path
 Widget::Button.command
 Widget::Button.label
 Widget::Chart.item

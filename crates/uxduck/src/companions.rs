@@ -26,6 +26,20 @@ use crate::daemon::engine_task::EngineHandle;
 /// How long a check may take, signing in included.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a camera change may take: a restart, up to 20 s for the cameras,
+/// and the same again for a rollback (ADR-0060 C5). It goes on on the
+/// computer if SSH gives up first.
+const CAMERA_CHANGE_TIMEOUT: Duration = Duration::from_secs(200);
+
+/// What a pinned SSH command runs on the computer, with JSON on its stdin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Adapter {
+    /// `NetworkManager` (ADR-0057).
+    Network,
+    /// `MediaMTX`'s cameras (ADR-0060).
+    Cameras,
+}
+
 /// The environment variable naming the file `ssh`'s password prompt reads.
 pub const ASKPASS_FILE: &str = "UXDUCK_ASKPASS_FILE";
 
@@ -143,6 +157,48 @@ impl Host {
             engine,
         }
     }
+
+    /// Runs one adapter through the computer's exact pinned host key and
+    /// tells the engine what it answered.
+    fn run_pinned(
+        &self,
+        vehicle_id: String,
+        computer: Box<CompanionComputer>,
+        adapter: Adapter,
+        input: String,
+    ) {
+        let dir = self.dir.clone();
+        let mut credentials = FileCredentials::new(&self.data_dir);
+        let key = computer.key.then(|| credentials.get(&computer.key_name()));
+        let own = own_key(&mut credentials);
+        let engine = self.engine.clone();
+        tokio::spawn(async move {
+            let result = match (key, own) {
+                (Some(None), _) => Err("Its saved SSH private key is missing.".to_owned()),
+                (_, Err(why)) => Err(why),
+                (key, Ok(own)) => {
+                    pinned(
+                        &dir,
+                        &computer,
+                        SignIn {
+                            pasted: key.as_ref().and_then(Option::as_deref),
+                            own: Some(&own),
+                            password: None,
+                        },
+                        adapter,
+                        &input,
+                    )
+                    .await
+                }
+            };
+            let answer = CheckAnswer {
+                vehicle_id,
+                computer_id: computer.id,
+                result,
+            };
+            let _ = engine.run(move |e| e.companion_checked(answer)).await;
+        });
+    }
 }
 
 impl CompanionPort for Host {
@@ -186,37 +242,19 @@ impl CompanionPort for Host {
                 vehicle_id,
                 computer,
                 input,
+            } => self.run_pinned(vehicle_id, computer, Adapter::Network, input.0),
+            CompanionOrder::Cameras {
+                vehicle_id,
+                computer,
+                input,
             } => {
-                let dir = self.dir.clone();
-                let mut credentials = FileCredentials::new(&self.data_dir);
-                let key = computer.key.then(|| credentials.get(&computer.key_name()));
-                let own = own_key(&mut credentials);
-                let engine = self.engine.clone();
-                tokio::spawn(async move {
-                    let result = match (key, own) {
-                        (Some(None), _) => Err("Its saved SSH private key is missing.".to_owned()),
-                        (_, Err(why)) => Err(why),
-                        (key, Ok(own)) => {
-                            network(
-                                &dir,
-                                &computer,
-                                SignIn {
-                                    pasted: key.as_ref().and_then(Option::as_deref),
-                                    own: Some(&own),
-                                    password: None,
-                                },
-                                &input.0,
-                            )
-                            .await
-                        }
-                    };
-                    let answer = CheckAnswer {
-                        vehicle_id,
-                        computer_id: computer.id,
-                        result,
-                    };
-                    let _ = engine.run(move |e| e.companion_checked(answer)).await;
-                });
+                let mut request: serde_json::Value =
+                    serde_json::from_str(&input).unwrap_or_default();
+                if request["watchdog"] == "install" {
+                    request["watchdogScript"] =
+                        include_str!("companions/camera_watchdog.py").into();
+                }
+                self.run_pinned(vehicle_id, computer, Adapter::Cameras, request.to_string());
             }
             CompanionOrder::Forget { computer_id } => {
                 let path = self.dir.join(format!("{computer_id}.known_hosts"));
@@ -289,15 +327,25 @@ fn refused(stderr: &str) -> bool {
     stderr.contains("Permission denied") || stderr.contains("Too many authentication failures")
 }
 
-/// Reach networking only through the exact previously verified raw host key.
-/// Keys in either UXDuck's or the person's `known_hosts` are accepted only when
-/// their fingerprint matches the pin. No keyscan or trust-on-first-use here.
-async fn network(
+/// Reach networking and cameras only through the exact previously verified
+/// raw host key. Keys in either UXDuck's or the person's `known_hosts` are
+/// accepted only when their fingerprint matches the pin. No keyscan or
+/// trust-on-first-use here.
+#[allow(
+    clippy::too_many_lines,
+    reason = "host key verification, the ways to sign in and the routing checkpoint stay in one scope"
+)]
+async fn pinned(
     dir: &Path,
     computer: &CompanionComputer,
     sign_in: SignIn<'_>,
+    adapter: Adapter,
     input: &str,
 ) -> Result<Found, String> {
+    let what = match adapter {
+        Adapter::Network => "networks",
+        Adapter::Cameras => "cameras",
+    };
     let pinned = computer
         .check
         .as_ref()
@@ -352,7 +400,9 @@ async fn network(
         }
     }
     if !matched {
-        return Err("The pinned SSH host key is missing from known_hosts. Check the computer with its raw host key before configuring networks.".into());
+        return Err(format!(
+            "The pinned SSH host key is missing from known_hosts. Check the computer with its raw host key before setting up its {what}."
+        ));
     }
     let ways = if let Some(key) = sign_in.pasted {
         vec![Way::Pasted(key)]
@@ -362,7 +412,7 @@ async fn network(
         vec![Way::Person]
     };
     for way in ways {
-        let ran = run(dir, None, computer, &trusted, way, Some(input)).await?;
+        let ran = run_adapter(dir, None, computer, &trusted, way, Some((adapter, input))).await?;
         let output = &ran.output;
         if !output.status.success() && refused(&String::from_utf8_lossy(&output.stderr)) {
             continue;
@@ -372,10 +422,12 @@ async fn network(
             if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
                 || stderr.contains("Host key verification failed")
             {
-                return Err(
-                    "The companion's SSH host key no longer matches. No network changes were made."
-                        .into(),
-                );
+                return Err(format!(
+                    "The companion's SSH host key no longer matches. No {what} were changed."
+                ));
+            }
+            if adapter == Adapter::Cameras {
+                return Err(camera_failure(&stderr));
             }
             return Err("Network setup failed. The companion needs Linux with NetworkManager, Python 3 and busctl. Saving needs passwordless sudo. Check its network values and service logs.".into());
         }
@@ -395,14 +447,32 @@ async fn network(
         }
         return answer(computer, sign_in, &ran);
     }
-    Err("SSH could not sign in. Check the computer again before configuring networks.".into())
+    Err(format!(
+        "SSH could not sign in. Check the computer again before setting up its {what}."
+    ))
 }
 
-/// One `ssh` to the computer, signing in one `way`.
-#[allow(
-    clippy::too_many_lines,
-    reason = "SSH options and temporary credential lifetimes stay in one scope"
-)]
+/// Why the camera adapter failed, for people: its own reason when it gave
+/// one, which never holds a secret.
+fn camera_failure(stderr: &str) -> String {
+    if let Some(reason) = stderr
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("uxduck-camera: "))
+    {
+        return reason.trim().to_owned();
+    }
+    if stderr.contains("sudo:") {
+        return "Changing cameras needs passwordless sudo on the computer for the user UXDuck signs in as.".to_owned();
+    }
+    if stderr.contains("python3: not found") || stderr.contains("python3: command not found") {
+        return "Reading cameras needs Python 3 on the computer.".to_owned();
+    }
+    "Reading or changing the cameras failed. The computer needs Linux with systemd, Python 3 and MediaMTX's API. Changes need passwordless sudo.".to_owned()
+}
+
+/// One `ssh` to the computer for a check, or with a network request on its
+/// stdin.
 async fn run(
     dir: &Path,
     config: Option<&Path>,
@@ -411,6 +481,33 @@ async fn run(
     way: Way<'_>,
     network: Option<&str>,
 ) -> Result<Ran, String> {
+    run_adapter(
+        dir,
+        config,
+        computer,
+        known_hosts,
+        way,
+        network.map(|input| (Adapter::Network, input)),
+    )
+    .await
+}
+
+/// One `ssh` to the computer, signing in one `way`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "SSH options and temporary credential lifetimes stay in one scope"
+)]
+async fn run_adapter(
+    dir: &Path,
+    config: Option<&Path>,
+    computer: &CompanionComputer,
+    known_hosts: &Path,
+    way: Way<'_>,
+    adapter: Option<(Adapter, &str)>,
+) -> Result<Ran, String> {
+    let network = adapter.map(|(_, input)| input);
+    let cameras = matches!(adapter, Some((Adapter::Cameras, _)));
+    let mut timeout = CHECK_TIMEOUT;
     let key_file = dir.join(format!("{}.key", computer.id));
     let askpass_file = dir.join(format!("{}.askpass", computer.id));
     let theirs = if network.is_none() {
@@ -471,6 +568,17 @@ async fn run(
             "sudo -n "
         };
         script = format!("{SCRIPT}; {sudo}python3 -c '{script_python}'");
+        if cameras {
+            let change = input["apply"].is_object()
+                || input["linger"] == true
+                || !input["watchdog"].is_null();
+            if change {
+                timeout = CAMERA_CHANGE_TIMEOUT;
+            }
+            let sudo = if change { "sudo -n " } else { "" };
+            let quoted = include_str!("companions/camera.py").replace('\'', "'\"'\"'");
+            script = format!("{SCRIPT}; {sudo}python3 -c '{quoted}'");
+        }
         // For any network operation trust only the key matching the stored pin.
         // A user known-hosts entry changed elsewhere cannot authorize a mutation.
         command.args([
@@ -528,7 +636,7 @@ async fn run(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let started_ns = wall_ns();
-    let ran = tokio::time::timeout(CHECK_TIMEOUT, async {
+    let ran = tokio::time::timeout(timeout, async {
         use tokio::io::AsyncWriteExt as _;
         let mut child = command.spawn()?;
         if let Some(input) = network {
@@ -550,7 +658,7 @@ async fn run(
         Err(_) => Err(format!(
             "{} did not answer within {} s",
             computer.host,
-            CHECK_TIMEOUT.as_secs()
+            timeout.as_secs()
         )),
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Err(
             "UXDuck reaches companion computers with OpenSSH's ssh command, and it is not installed on this computer"
@@ -611,6 +719,10 @@ fn answer(computer: &CompanionComputer, sign_in: SignIn<'_>, ran: &Ran) -> Resul
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(|_| "The computer returned an invalid network status".to_owned())?,
+        cameras: field("cameras")
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| "The computer returned an invalid camera status".to_owned())?,
         os: field("os"),
         arch: field("arch"),
         uxduck: field("uxduck").map(|v| v.strip_prefix("uxduck ").unwrap_or(&v).to_owned()),
@@ -774,6 +886,62 @@ mod tests {
         assert!(status.success());
     }
 
+    #[test]
+    fn camera_adapter_regressions() {
+        for test in ["camera_test.py", "camera_watchdog_test.py"] {
+            let status = std::process::Command::new("python3")
+                .arg(format!(
+                    "{}/src/companions/{test}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .status()
+                .expect("the camera adapter tests need Python 3");
+            assert!(status.success(), "{test}");
+        }
+    }
+
+    #[test]
+    fn the_camera_adapter_answer_is_read_field_for_field() {
+        let cameras: uxduck_core::domain::companion_cameras::CompanionCameras = serde_json::from_str(
+            r#"{"paths": [{"name": "cam", "source": "rpiCamera", "onDemand": false, "ready": true, "readers": 1, "bytes": 123456, "cameraId": 0,
+                "settings": {"width": 1536, "height": 864, "fps": 50, "mode": "2304:1296:10:P", "idrPeriod": 50, "bitrate": 2000000},
+                "setByUxduck": true, "sensor": "imx708"}, {"name": "relay", "source": "rtsp", "onDemand": true, "ready": false, "readers": 0, "bytes": 0}],
+               "watchdog": {"installed": true, "running": true, "gaveUp": true, "restarts": [{"atUs": 1700000000500000, "path": "cam"}]},
+               "unit": "mediamtx.service", "dropIn": "/etc/systemd/system/mediamtx.service.d/60-uxduck-camera.conf",
+               "config": "/usr/local/etc/mediamtx.yml", "linger": {"user": "pi", "lingering": false, "removeIpc": true},
+               "api": "127.0.0.1:9997", "applied": {"path": "cam", "outcome": "rolled-back", "failed": "cam", "log": ["ERR [path cam] gone"]}}"#,
+        )
+        .unwrap();
+        let cam = &cameras.paths[0];
+        assert!(cam.set_by_uxduck && cam.ready && !cam.on_demand);
+        assert_eq!(
+            (cam.camera_id, cam.readers, cam.bytes),
+            (Some(0), 1, 123_456)
+        );
+        assert_eq!(cam.settings.as_ref().unwrap().idr_period, 50);
+        assert!(cameras.paths[1].on_demand);
+        assert!(cameras.linger.unwrap().at_risk());
+        assert!(cameras.watchdog.gave_up && cameras.watchdog.running);
+        assert_eq!(cameras.watchdog.restarts[0].at_us, 1_700_000_000_500_000);
+        let applied = cameras.applied.unwrap();
+        assert_eq!(
+            applied.outcome,
+            uxduck_core::domain::companion_cameras::PictureOutcome::RolledBack
+        );
+        assert_eq!(applied.log, ["ERR [path cam] gone"]);
+        assert!(cameras.drop_in.unwrap().ends_with("60-uxduck-camera.conf"));
+    }
+
+    #[test]
+    fn camera_failures_name_the_adapter_reason() {
+        assert_eq!(
+            camera_failure("debug1: x\nuxduck-camera: Use 1 to 120 pictures a second.\n"),
+            "Use 1 to 120 pictures a second."
+        );
+        assert!(camera_failure("sudo: a password is required\n").contains("passwordless sudo"));
+        assert!(camera_failure("bash: python3: command not found\n").contains("Python 3"));
+    }
+
     /// An sshd of this user's on a free port, with its own host key and
     /// one client key, run from a temporary folder.
     struct Server {
@@ -917,19 +1085,64 @@ mod tests {
             problem: None,
             clock: None,
             network: None,
+            cameras: None,
         });
         let port = first.port;
         drop(first);
         let second = start("replacement", Some(port));
-        let error = network(
+        let error = pinned(
             keys.path(),
             &computer,
             pasted(&client_key(&second)),
+            Adapter::Network,
             r#"{"connectivity":{"uri":"https://example.test/204","interval":60}}"#,
         )
         .await
         .unwrap_err();
         assert!(error.contains("host key no longer matches"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_camera_change_refuses_a_replaced_host_before_running_commands() {
+        let first = start("host", None);
+        let keys = tempfile::tempdir().unwrap();
+        let config = keys.path().join("ssh_config");
+        std::fs::write(&config, "UserKnownHostsFile /dev/null\n").unwrap();
+        let mut computer = computer(&first);
+        let found = check(
+            keys.path(),
+            Some(&config),
+            &computer,
+            pasted(&client_key(&first)),
+        )
+        .await
+        .unwrap();
+        computer.check = Some(CompanionCheck {
+            state: CheckState::Reached,
+            at_us: 1,
+            os: None,
+            arch: None,
+            uxduck: None,
+            host_key: found.host_key,
+            problem: None,
+            clock: None,
+            network: None,
+            cameras: None,
+        });
+        let port = first.port;
+        drop(first);
+        let second = start("replacement", Some(port));
+        let error = pinned(
+            keys.path(),
+            &computer,
+            pasted(&client_key(&second)),
+            Adapter::Cameras,
+            r#"{"apply":{"path":"cam","settings":{"width":1536,"height":864,"fps":50,"mode":"2304:1296:10:P","idrPeriod":50,"bitrate":2000000}},"linger":false}"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("host key no longer matches"), "{error}");
+        assert!(error.contains("No cameras were changed"), "{error}");
     }
 
     #[tokio::test]
@@ -979,6 +1192,7 @@ mod tests {
             problem: None,
             clock: None,
             network: None,
+            cameras: None,
         });
         let again = check(
             keys.path(),
@@ -1017,6 +1231,7 @@ mod tests {
             problem: None,
             clock: None,
             network: None,
+            cameras: None,
         });
         let port = first.port;
         drop(first);
@@ -1104,6 +1319,7 @@ mod tests {
             problem: None,
             clock: None,
             network: None,
+            cameras: None,
         });
         let port = first.port;
         drop(first);

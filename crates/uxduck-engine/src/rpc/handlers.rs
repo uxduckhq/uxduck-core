@@ -175,6 +175,10 @@ pub(crate) fn handle(
             require(Config)?;
             engine.network_computer(connection, &params)
         }
+        ClientRequest::ComputerCameras(params) => {
+            require(Config)?;
+            engine.cameras_computer(connection, &params)
+        }
         ClientRequest::ComputerCheck(params) => {
             require(Config)?;
             engine.check_computer(connection, params)

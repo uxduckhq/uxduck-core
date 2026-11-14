@@ -206,6 +206,7 @@ fn check(name: &str) {
         ("result", "vehicle_list" | "vehicle_label") => {
             round_trip::<VehicleListResult>(name, &json);
         }
+        ("result", "computer_cameras") => round_trip::<Vehicle>(name, &json),
         (
             "result",
             "vehicle_get"

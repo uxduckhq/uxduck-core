@@ -1,0 +1,153 @@
+{
+  "id": "5b0c2e1a-7d3f-5e8b-9c4a-2f1e0d3c4b5a",
+  "name": "Skimmer",
+  "aliases": [],
+  "linkId": "lk5e6f7a8b9c0d1e2f",
+  "peer": "127.0.0.1:14550",
+  "systemId": 1,
+  "componentIds": [1, 191],
+  "autopilot": "Ardupilotmega",
+  "vehicleType": "Quadrotor",
+  "firmware": "4.6.2",
+  "presence": "online",
+  "lastHeartbeatUs": 1790668800123456,
+  "armed": false,
+  "saved": true,
+  "dismissed": false,
+  "version": 4,
+  "companions": [
+    {
+      "id": "cc3f9a1b2c4d5e6f",
+      "name": "pi-vision.local",
+      "host": "pi-vision.local",
+      "user": "pi",
+      "role": "report",
+      "componentId": 191,
+      "check": {
+        "state": "reached",
+        "atUs": 1790668805123456,
+        "os": "Debian GNU/Linux 12 (bookworm)",
+        "arch": "aarch64",
+        "hostKey": "SHA256:k3Yl2mO7v8bQx1J0a9cR4tE6wZ5nH2pD3sF7gU1iL0o",
+        "cameras": {
+          "unit": "mediamtx.service",
+          "config": "/usr/local/etc/mediamtx.yml",
+          "api": "127.0.0.1:9997",
+          "dropIn": "/etc/systemd/system/mediamtx.service.d/60-uxduck-camera.conf",
+          "linger": {
+            "user": "pi",
+            "lingering": true,
+            "removeIpc": true,
+            "atRisk": false
+          },
+          "paths": [
+            {
+              "name": "cam",
+              "source": "rpiCamera",
+              "cameraId": 0,
+              "sensor": "imx708",
+              "settings": {
+                "width": 1536,
+                "height": 864,
+                "fps": 50,
+                "mode": "2304:1296:10:P",
+                "idrPeriod": 50,
+                "bitrate": 2000000
+              },
+              "preset": "low-latency",
+              "presets": [
+                {
+                  "preset": "low-latency",
+                  "settings": {
+                    "width": 1536,
+                    "height": 864,
+                    "fps": 50,
+                    "mode": "2304:1296:10:P",
+                    "idrPeriod": 50,
+                    "bitrate": 2000000
+                  }
+                },
+                {
+                  "preset": "detail",
+                  "settings": {
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "mode": "",
+                    "idrPeriod": 30,
+                    "bitrate": 2000000
+                  }
+                },
+                {
+                  "preset": "fastest",
+                  "settings": {
+                    "width": 1280,
+                    "height": 720,
+                    "fps": 60,
+                    "mode": "1536:864:10:P",
+                    "idrPeriod": 60,
+                    "bitrate": 2000000
+                  }
+                },
+                {
+                  "preset": "data-saver",
+                  "settings": {
+                    "width": 1280,
+                    "height": 720,
+                    "fps": 30,
+                    "mode": "2304:1296:10:P",
+                    "idrPeriod": 30,
+                    "bitrate": 1000000
+                  }
+                }
+              ],
+              "setByUxduck": true,
+              "ready": true,
+              "readers": 1,
+              "bytes": 182340112
+            },
+            {
+              "name": "front_cam",
+              "source": "rpiCamera",
+              "cameraId": 1,
+              "settings": {
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "mode": "",
+                "idrPeriod": 60,
+                "bitrate": 5000000
+              },
+              "refused": "MediaMTX ends a path's name at the first _ in the environment, so UXDuck cannot set front_cam. Rename it without _ to adjust it here.",
+              "ready": true,
+              "readers": 0,
+              "bytes": 90311220
+            },
+            {
+              "name": "relay",
+              "source": "rtsp",
+              "refused": "Only a Raspberry Pi camera (source rpiCamera) can be adjusted here.",
+              "onDemand": true,
+              "readers": 0,
+              "bytes": 0
+            }
+          ],
+          "watchdog": {
+            "installed": true,
+            "running": true,
+            "restarts": [
+              {
+                "atUs": 1790668700123456,
+                "path": "cam"
+              }
+            ]
+          },
+          "applied": {
+            "path": "cam",
+            "outcome": "applied"
+          }
+        }
+      }
+    }
+  ]
+}

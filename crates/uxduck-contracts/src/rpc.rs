@@ -272,6 +272,12 @@ pub enum ClientRequest {
     /// this computer's UXDuck key to the companion's `authorized_keys`. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/check")]
     ComputerCheck(crate::dto::companion::ComputerCheckParams),
+    /// Read the cameras `MediaMTX` serves on a companion computer over pinned SSH, or
+    /// make one change: a camera's picture (restarting `MediaMTX`, rolled back by the
+    /// computer if a camera does not come back), lingering for its user, or the camera
+    /// watchdog. Changes need a disarmed vehicle. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/cameras")]
+    ComputerCameras(crate::dto::companion_cameras::ComputerCamerasParams),
     /// Read or configure a companion network over pinned SSH. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/network")]
     ComputerNetwork(crate::dto::companion::ComputerNetworkParams),
@@ -2066,7 +2072,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 382] = [
+    pub const METHODS: [&'static str; 383] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2108,6 +2114,7 @@ impl ClientRequest {
         "computer/add",
         "computer/remove",
         "computer/check",
+        "computer/cameras",
         "computer/network",
         "computer/connectivity",
         "vehicle/bookmarks",

@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::DaemonCapabilities;
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_core::domain::companion::CompanionClock;
+use uxduck_core::domain::companion_cameras::{
+    CameraLinger, CameraWatchdog, CompanionCameraPath, CompanionCameras, PicturePreset,
+};
 use uxduck_core::domain::link::Link;
 use uxduck_core::domain::vehicle::{Observation, Presence};
 use uxduck_core::policy::admission::Trust;
@@ -177,6 +180,10 @@ fn refused(engine: &mut Engine, client: &mut Client, method: &str, params: Value
 }
 
 fn heard(engine: &mut Engine) {
+    observed(engine, false);
+}
+
+fn observed(engine: &mut Engine, armed: bool) {
     engine.vehicle_observed(Observation {
         connections: None,
         id: "v".into(),
@@ -192,7 +199,7 @@ fn heard(engine: &mut Engine) {
         firmware_commit: None,
         presence: Presence::Online,
         last_heartbeat_us: 5,
-        armed: false,
+        armed,
         mode: None,
     });
 }
@@ -326,6 +333,7 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
         computer_id: id.clone(),
         result: Ok(Found {
             network: None,
+            cameras: None,
             os: Some("Debian GNU/Linux 12 (bookworm)".into()),
             arch: Some("aarch64".into()),
             uxduck: None,
@@ -489,5 +497,353 @@ fn network_changes_require_a_pin_and_disarm_and_never_persist_passwords() {
         &mut ui,
         "computer/network",
         json!({"vehicleId":"v","computerId":id}),
+    );
+}
+
+fn cameras(linger_at_risk: bool) -> CompanionCameras {
+    CompanionCameras {
+        unit: Some("mediamtx.service".into()),
+        config: Some("/etc/mediamtx/mediamtx.yml".into()),
+        api: Some("127.0.0.1:9997".into()),
+        drop_in: Some("/etc/systemd/system/mediamtx.service.d/60-uxduck-camera.conf".into()),
+        linger: Some(CameraLinger {
+            user: "pi".into(),
+            lingering: !linger_at_risk,
+            remove_ipc: true,
+        }),
+        paths: vec![
+            CompanionCameraPath {
+                name: "cam".into(),
+                source: "rpiCamera".into(),
+                camera_id: Some(0),
+                sensor: Some("imx708".into()),
+                settings: Some(PicturePreset::Detail.settings()),
+                set_by_uxduck: false,
+                on_demand: false,
+                ready: true,
+                readers: 1,
+                bytes: 4_000_000,
+            },
+            CompanionCameraPath {
+                name: "front_cam".into(),
+                source: "rpiCamera".into(),
+                camera_id: Some(1),
+                sensor: None,
+                settings: None,
+                set_by_uxduck: false,
+                on_demand: false,
+                ready: true,
+                readers: 0,
+                bytes: 0,
+            },
+            CompanionCameraPath {
+                name: "relay".into(),
+                source: "rtsp".into(),
+                camera_id: None,
+                sensor: None,
+                settings: None,
+                set_by_uxduck: false,
+                on_demand: true,
+                ready: false,
+                readers: 0,
+                bytes: 0,
+            },
+        ],
+        watchdog: CameraWatchdog::default(),
+        applied: None,
+        problem: None,
+    }
+}
+
+fn picture(path: &str, settings: Value) -> Value {
+    json!({"path": path, "settings": settings})
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario from the first read to the armed refusal"
+)]
+fn camera_changes_are_checked_serialized_with_networks_and_refused_while_armed() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    let read = json!({"vehicleId":"v","computerId":id});
+    assert!(
+        refused(&mut engine, &mut ui, "computer/cameras", read.clone())
+            .contains("Check the computer first")
+    );
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            ..Found::default()
+        }),
+    });
+    let detail = serde_json::to_value(PicturePreset::Detail.settings()).unwrap();
+    let low = serde_json::to_value(PicturePreset::LowLatency.settings()).unwrap();
+    let apply = |path: &str, settings: &Value, despite: bool| {
+        let mut picture = picture(path, settings.clone());
+        if despite {
+            picture["despiteLinger"] = true.into();
+        }
+        json!({"vehicleId":"v","computerId":id,"apply":picture})
+    };
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/cameras",
+            apply("cam", &low, false)
+        )
+        .contains("Read the cameras on")
+    );
+
+    let result = ok(&mut engine, &mut ui, "computer/cameras", read.clone());
+    assert_eq!(result["companions"][0]["check"]["state"], "checking");
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    assert!(matches!(&orders[..], [CompanionOrder::Cameras { input, .. }] if input == "{}"));
+    let wifi = json!({"vehicleId":"v","computerId":id,"connectivity":{"uri":"https://example.test/204","interval":60}});
+    for (method, params) in [
+        ("computer/cameras", read.clone()),
+        ("computer/network", wifi),
+        ("computer/check", read.clone()),
+    ] {
+        assert!(refused(&mut engine, &mut ui, method, params).contains("already running"));
+    }
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            cameras: Some(cameras(true)),
+            ..Found::default()
+        }),
+    });
+    let vehicle = ok(&mut engine, &mut ui, "computer/check", read.clone());
+    assert_eq!(
+        vehicle["companions"][0]["check"]["cameras"]["paths"][0]["preset"],
+        "detail"
+    );
+    ssh.0.lock().unwrap().clear();
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            ..Found::default()
+        }),
+    });
+    assert!(
+        engine.state().vehicles["v"].companions[0]
+            .check
+            .as_ref()
+            .unwrap()
+            .cameras
+            .is_some(),
+        "a check keeps the last cameras read"
+    );
+
+    let mut fast = low.clone();
+    fast["fps"] = 200.into();
+    for (params, why) in [
+        (apply("nowhere", &low, true), "has not seen nowhere"),
+        (apply("relay", &low, true), "Only a Raspberry Pi camera"),
+        (apply("front_cam", &low, true), "without _"),
+        (apply("cam", &fast, true), "120"),
+        (apply("cam", &low, false), "lingering"),
+        (
+            json!({"vehicleId":"v","computerId":id,"linger":true,"watchdog":"install"}),
+            "one camera change",
+        ),
+    ] {
+        let error = refused(&mut engine, &mut ui, "computer/cameras", params);
+        assert!(error.contains(why), "{error}");
+    }
+    assert!(ssh.0.lock().unwrap().is_empty());
+
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/cameras",
+        apply("cam", &low, true),
+    );
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    let [CompanionOrder::Cameras { input, .. }] = &orders[..] else {
+        panic!("{orders:?}");
+    };
+    let input: Value = serde_json::from_str(input).unwrap();
+    assert_eq!(input["apply"]["path"], "cam");
+    assert_eq!(input["apply"]["settings"], low);
+    assert_eq!(input["linger"], false);
+
+    let restarted = self::engine(engine.state().clone(), &keys);
+    let check = restarted.state().vehicles["v"].companions[0]
+        .check
+        .clone()
+        .unwrap();
+    assert_eq!(
+        check.state,
+        uxduck_core::domain::companion::CheckState::Failed
+    );
+    assert!(check.problem.unwrap().contains("cameras again"));
+    assert!(check.cameras.is_some());
+
+    let mut state = restarted.state().clone();
+    state.vehicles.get_mut("v").unwrap().armed = true;
+    let mut armed = self::engine(state, &keys);
+    armed.set_companions(Box::new(ssh.clone()));
+    let mut ui = connect(&mut armed);
+    for params in [
+        apply("cam", &detail, true),
+        json!({"vehicleId":"v","computerId":id,"linger":true}),
+        json!({"vehicleId":"v","computerId":id,"watchdog":"install"}),
+        json!({"vehicleId":"v","computerId":id,"watchdog":"remove"}),
+    ] {
+        assert!(refused(&mut armed, &mut ui, "computer/cameras", params).contains("Disarm"));
+    }
+    ok(&mut armed, &mut ui, "computer/cameras", read);
+    let orders = std::mem::take(&mut *ssh.0.lock().unwrap());
+    assert!(matches!(&orders[..], [CompanionOrder::Cameras { input, .. }] if input == "{}"));
+}
+
+/// A person's change that arrives during a background network read waits for
+/// it and runs when it answers, and a restart marks it interrupted while it
+/// waits. Another person's change, running or waiting, still refuses one. A
+/// waiting change is dropped if the vehicle arms first, and a read still goes.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one computer through waiting, running, refusing and arming"
+)]
+fn a_change_waits_for_a_background_read_and_refuses_while_another_change_runs() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({"vehicleId":"v","host":"pi.local"}),
+    );
+    let id = vehicle["companions"][0]["id"].as_str().unwrap().to_owned();
+    let answer = |cameras: Option<CompanionCameras>| CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: id.clone(),
+        result: Ok(Found {
+            host_key: Some("SHA256:known".into()),
+            cameras,
+            ..Found::default()
+        }),
+    };
+    engine.companion_checked(answer(None));
+    let sent = |ssh: &Ssh| std::mem::take(&mut *ssh.0.lock().unwrap());
+    let state = |engine: &Engine| {
+        engine.state().vehicles["v"].companions[0]
+            .check
+            .clone()
+            .unwrap()
+    };
+    let background = json!({"vehicleId":"v","computerId":id,"background":true});
+    let watchdog = json!({"vehicleId":"v","computerId":id,"watchdog":"install"});
+    let wifi = json!({"vehicleId":"v","computerId":id,"connectivity":{"uri":"https://example.test/204","interval":60}});
+
+    ok(&mut engine, &mut ui, "computer/network", background.clone());
+    assert!(matches!(&sent(&ssh)[..], [CompanionOrder::Network { .. }]));
+    let waiting = ok(&mut engine, &mut ui, "computer/cameras", watchdog.clone());
+    assert_eq!(waiting["companions"][0]["check"]["state"], "checking");
+    assert!(sent(&ssh).is_empty(), "the change waits for the read");
+    for (method, params) in [
+        ("computer/network", wifi.clone()),
+        ("computer/cameras", watchdog.clone()),
+        ("computer/check", json!({"vehicleId":"v","computerId":id})),
+    ] {
+        let error = refused(&mut engine, &mut ui, method, params);
+        assert!(error.contains("already running"), "{method}: {error}");
+    }
+
+    let restarted = self::engine(engine.state().clone(), &keys);
+    let interrupted = state(&restarted);
+    assert_eq!(
+        interrupted.state,
+        uxduck_core::domain::companion::CheckState::Failed
+    );
+    assert!(interrupted.problem.unwrap().contains("UXDuck restarted"));
+
+    engine.companion_checked(answer(None));
+    let [CompanionOrder::Cameras { input, .. }] = &sent(&ssh)[..] else {
+        panic!("the waiting change was not sent");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(input).unwrap()["watchdog"],
+        "install"
+    );
+    assert_eq!(
+        state(&engine).state,
+        uxduck_core::domain::companion::CheckState::Checking
+    );
+    for (method, params) in [
+        ("computer/network", wifi.clone()),
+        ("computer/network", background.clone()),
+        ("computer/cameras", watchdog.clone()),
+    ] {
+        let error = refused(&mut engine, &mut ui, method, params);
+        assert!(error.contains("already running"), "{method}: {error}");
+    }
+    assert!(sent(&ssh).is_empty());
+
+    engine.companion_checked(answer(Some(cameras(false))));
+    assert_eq!(
+        state(&engine).state,
+        uxduck_core::domain::companion::CheckState::Reached
+    );
+    ok(&mut engine, &mut ui, "computer/network", wifi);
+    assert!(matches!(&sent(&ssh)[..], [CompanionOrder::Network { .. }]));
+    engine.companion_checked(answer(None));
+
+    ok(&mut engine, &mut ui, "computer/network", background.clone());
+    sent(&ssh);
+    ok(&mut engine, &mut ui, "computer/cameras", watchdog);
+    observed(&mut engine, true);
+    assert!(engine.state().vehicles["v"].armed);
+    engine.companion_checked(answer(None));
+    assert!(
+        sent(&ssh).is_empty(),
+        "nothing changes once the vehicle armed"
+    );
+    let stopped = state(&engine);
+    assert_eq!(
+        stopped.state,
+        uxduck_core::domain::companion::CheckState::Failed
+    );
+    assert!(
+        stopped
+            .problem
+            .unwrap()
+            .contains("armed before the change started, so nothing changed")
+    );
+
+    ok(&mut engine, &mut ui, "computer/network", background);
+    sent(&ssh);
+    let read = json!({"vehicleId":"v","computerId":id});
+    ok(&mut engine, &mut ui, "computer/cameras", read);
+    engine.companion_checked(answer(None));
+    assert!(
+        matches!(&sent(&ssh)[..], [CompanionOrder::Cameras { input, .. }] if input == "{}"),
+        "a waiting read still goes while armed"
     );
 }

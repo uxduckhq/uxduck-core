@@ -50,6 +50,9 @@ pub struct CompanionCheck {
     pub clock: Option<CompanionClock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<CompanionNetwork>,
+    /// What its `MediaMTX` serves, as last read (ADR-0060).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cameras: Option<crate::dto::companion_cameras::CompanionCameras>,
 }
 
 /// A computer's clock as `computer/check` read it (S356): its time against

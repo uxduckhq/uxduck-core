@@ -2,17 +2,21 @@
 //! name, and checked over SSH by the host through [`CompanionPort`], which
 //! answers through [`Engine::companion_checked`]. Only UXDuck Desktop and
 //! the daemon have SSH; without a port, adding works and checking is refused
-//! with where to do it.
+//! with where to do it. Networks (ADR-0057) and cameras (ADR-0060) go through
+//! the same port, one operation per computer at a time. A person's operation
+//! that finds only a background network read running waits for it to answer.
 
 use serde_json::Value;
 use uxduck_contracts::dto::companion::{
     ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams, WifiSecurity,
 };
+use uxduck_contracts::dto::companion_cameras::ComputerCamerasParams;
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::companion::{
     self, CheckState, CompanionCheck, CompanionClock, CompanionComputer, CompanionRole,
 };
+use uxduck_core::domain::companion_cameras::{self, CompanionCameras};
 use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::{Actor, Change};
 
@@ -34,6 +38,14 @@ pub enum CompanionOrder {
         computer: Box<CompanionComputer>,
         /// JSON on SSH stdin, wrapped so neither PSK nor credentials reach logs.
         input: Password,
+    },
+    /// Read the cameras its `MediaMTX` serves, or make one change
+    /// (ADR-0060), through the exact pinned host key only.
+    Cameras {
+        vehicle_id: String,
+        computer: Box<CompanionComputer>,
+        /// JSON on SSH stdin: empty to read, else one change.
+        input: String,
     },
     /// Forget its pinned host key.
     Forget { computer_id: String },
@@ -71,12 +83,18 @@ pub struct Found {
     /// Its clock against this computer's (S356), when it could be read.
     pub clock: Option<CompanionClock>,
     pub network: Option<companion::CompanionNetwork>,
+    pub cameras: Option<CompanionCameras>,
 }
 
 #[derive(Default)]
 pub(crate) struct Companions {
     port: Option<Box<dyn CompanionPort>>,
     busy: std::collections::BTreeSet<String>,
+    /// Computers whose running operation is a background network read.
+    reading: std::collections::BTreeSet<String>,
+    /// A person's operation that arrived during a background read, sent
+    /// when the read answers, and whether it changes the computer.
+    waiting: std::collections::BTreeMap<String, (CompanionOrder, bool)>,
     network_polled_at: std::collections::BTreeMap<String, u64>,
 }
 
@@ -85,6 +103,8 @@ impl std::fmt::Debug for Companions {
         f.debug_struct("Companions")
             .field("port", &self.port.is_some())
             .field("busy", &self.busy)
+            .field("reading", &self.reading)
+            .field("waiting", &self.waiting)
             .field("network_polled_at", &self.network_polled_at)
             .finish()
     }
@@ -92,6 +112,10 @@ impl std::fmt::Debug for Companions {
 
 fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::InvalidValue, message)
+}
+
+fn busy() -> ApiError {
+    invalid("A check, network or camera change is already running on this computer.")
 }
 
 fn to_value(vehicle: &Vehicle) -> Result<Value, ApiError> {
@@ -191,7 +215,7 @@ impl Engine {
                 {
                     check.state = CheckState::Failed;
                     check.at_us = self.clock.now_us();
-                    check.problem = Some("UXDuck restarted before the computer answered. Check it or refresh its networks to see what completed.".into());
+                    check.problem = Some("UXDuck restarted before the computer answered. Check it, or read its networks or cameras again, to see what completed.".into());
                 }
             }
             self.save_companions(None, vehicle);
@@ -206,6 +230,44 @@ impl Engine {
         self.vehicle(id)
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("vehicle {id} not found")))
+    }
+
+    /// Takes the computer for one operation: `Ok(false)` to send it now, or
+    /// `Ok(true)` when it is a person's and waits for the background read
+    /// running there. A check or another person's operation, running or
+    /// waiting, refuses it, and a background read never waits.
+    fn take_computer(&mut self, computer_id: &str, background: bool) -> Result<bool, ApiError> {
+        if self.companions.busy.insert(computer_id.to_owned()) {
+            if background {
+                self.companions.reading.insert(computer_id.to_owned());
+            }
+            return Ok(false);
+        }
+        if background
+            || !self.companions.reading.contains(computer_id)
+            || self.companions.waiting.contains_key(computer_id)
+        {
+            return Err(busy());
+        }
+        Ok(true)
+    }
+
+    /// Sends an order, or keeps it for when the background read it waits for
+    /// answers, with whether it `changes` the computer.
+    fn send_companion(
+        &mut self,
+        computer_id: String,
+        order: CompanionOrder,
+        waits: bool,
+        changes: bool,
+    ) {
+        if waits {
+            self.companions
+                .waiting
+                .insert(computer_id, (order, changes));
+        } else if let Some(port) = self.companions.port.as_mut() {
+            port.request(order);
+        }
     }
 
     fn save_companions(
@@ -315,7 +377,7 @@ impl Engine {
         };
         if self.companions.busy.contains(&computer_id) {
             return Err(invalid(
-                "Wait for the computer check or network update to finish before removing it.",
+                "Wait for the computer's check, network or camera change to finish before removing it.",
             ));
         }
         if vehicle.companions[at]
@@ -365,9 +427,9 @@ impl Engine {
         {
             return Err(invalid("Make one network change at a time."));
         }
-        if (params.wifi.is_some() || params.connectivity.is_some() || params.preference.is_some())
-            && vehicle.armed
-        {
+        let changes =
+            params.wifi.is_some() || params.connectivity.is_some() || params.preference.is_some();
+        if changes && vehicle.armed {
             return Err(invalid("Disarm the vehicle before changing its networks."));
         }
         validate_network_change(params)?;
@@ -386,11 +448,7 @@ impl Engine {
                 "Check the computer first to verify its SSH host key.",
             ));
         }
-        if !self.companions.busy.insert(computer.id.clone()) {
-            return Err(invalid(
-                "A check or network update is already running on this computer.",
-            ));
-        }
+        let waits = self.take_computer(&computer.id, params.background)?;
         let input = Password(
             serde_json::json!({"wifi": params.wifi, "connectivity": params.connectivity, "preference": params.preference})
                 .to_string(),
@@ -408,9 +466,95 @@ impl Engine {
             check.at_us = self.clock.now_us();
         }
         let vehicle = self.save_companions(Some(connection), vehicle);
-        if let Some(port) = self.companions.port.as_mut() {
-            port.request(order);
+        self.send_companion(params.computer_id.clone(), order, waits, changes);
+        to_value(&vehicle)
+    }
+
+    /// `computer/cameras` (ADR-0060): reads the cameras its `MediaMTX`
+    /// serves, or makes one change, through the pinned SSH networks use (C6).
+    /// A picture is checked here against the last read, and again on the
+    /// computer before anything is written.
+    pub(crate) fn cameras_computer(
+        &mut self,
+        connection: ConnectionId,
+        params: &ComputerCamerasParams,
+    ) -> Result<Value, ApiError> {
+        if self.companions.port.is_none() {
+            return Err(invalid(
+                "Use UXDuck Desktop or the uxduck daemon to set up a companion's cameras.",
+            ));
         }
+        let mut vehicle = self.companion_vehicle(&params.vehicle_id)?;
+        let changes = usize::from(params.apply.is_some())
+            + usize::from(params.linger)
+            + usize::from(params.watchdog.is_some());
+        if changes > 1 {
+            return Err(invalid("Make one camera change at a time."));
+        }
+        if changes > 0 && vehicle.armed {
+            return Err(invalid("Disarm the vehicle before changing its cameras."));
+        }
+        let computer = vehicle
+            .companions
+            .iter_mut()
+            .find(|c| c.id == params.computer_id)
+            .ok_or_else(|| invalid("Companion computer not found."))?;
+        if computer
+            .check
+            .as_ref()
+            .and_then(|c| c.host_key.as_ref())
+            .is_none()
+        {
+            return Err(invalid(
+                "Check the computer first to verify its SSH host key.",
+            ));
+        }
+        if let Some(apply) = &params.apply {
+            let cameras = computer.check.as_ref().and_then(|c| c.cameras.as_ref());
+            let path = cameras
+                .and_then(|c| c.paths.iter().find(|p| p.name == apply.path))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "Read the cameras on {} first. UXDuck has not seen {} there.",
+                        computer.name, apply.path
+                    ))
+                })?;
+            path.adjustable().map_err(invalid)?;
+            companion_cameras::check_picture(&(&apply.settings).into(), path.sensor.as_deref())
+                .map_err(invalid)?;
+            if !apply.despite_linger
+                && cameras
+                    .and_then(|c| c.linger.as_ref())
+                    .is_some_and(companion_cameras::CameraLinger::at_risk)
+            {
+                return Err(invalid(
+                    "Signing in over SSH can stop these cameras. Turn lingering on, or dismiss the warning, before changing them.",
+                ));
+            }
+        }
+        let waits = self.take_computer(&computer.id, false)?;
+        let input = if changes == 0 {
+            "{}".to_owned()
+        } else {
+            serde_json::json!({
+                "apply": params.apply,
+                "linger": params.linger,
+                "watchdog": params.watchdog,
+            })
+            .to_string()
+        };
+        let order = CompanionOrder::Cameras {
+            vehicle_id: vehicle.id.clone(),
+            computer: Box::new(computer.clone()),
+            input,
+        };
+        if let Some(check) = &mut computer.check {
+            check.state = CheckState::Checking;
+            check.problem = None;
+            check.at_us = self.clock.now_us();
+        }
+        let vehicle = self.save_companions(Some(connection), vehicle);
+        self.send_companion(params.computer_id.clone(), order, waits, changes > 0);
         to_value(&vehicle)
     }
 
@@ -438,22 +582,19 @@ impl Engine {
                 format!("computer {computer_id} not found"),
             ));
         };
-        if !self.companions.busy.insert(computer.id.clone()) {
-            return Err(invalid(
-                "A check or network update is already running on this computer.",
-            ));
-        }
-        let pinned = computer.check.as_ref().and_then(|c| c.host_key.clone());
+        let waits = self.take_computer(&computer.id, false)?;
+        let last = computer.check.take();
         computer.check = Some(CompanionCheck {
             state: CheckState::Checking,
             at_us,
             os: None,
             arch: None,
             uxduck: None,
-            host_key: pinned,
+            host_key: last.as_ref().and_then(|c| c.host_key.clone()),
             problem: None,
             clock: None,
-            network: None,
+            network: last.as_ref().and_then(|c| c.network.clone()),
+            cameras: last.and_then(|c| c.cameras),
         });
         let order = CompanionOrder::Check {
             vehicle_id: vehicle.id.clone(),
@@ -461,20 +602,23 @@ impl Engine {
             password: password.filter(|p| !p.is_empty()).map(Password),
         };
         let vehicle = self.save_companions(Some(connection), vehicle);
-        if let Some(port) = self.companions.port.as_mut() {
-            port.request(order);
-        }
+        self.send_companion(computer_id, order, waits, false);
         to_value(&vehicle)
     }
 
     /// A check's answer from the host. The pinned host key is kept through
-    /// a failure, so a refused change still names the one it expected.
+    /// a failure, so a refused change still names the one it expected, and
+    /// the last networks and cameras read are kept until read again.
     pub fn companion_checked(&mut self, answer: CheckAnswer) {
         self.companions.busy.remove(&answer.computer_id);
+        self.companions.reading.remove(&answer.computer_id);
+        let waiting = self.companions.waiting.remove(&answer.computer_id);
         let Some(mut vehicle) = self.vehicle(&answer.vehicle_id).cloned() else {
             return;
         };
         let at_us = self.clock.now_us();
+        let stopped = vehicle.armed && waiting.as_ref().is_some_and(|(_, changes)| *changes);
+        let waiting = waiting.filter(|_| !stopped).map(|(order, _)| order);
         let Some(computer) = vehicle
             .companions
             .iter_mut()
@@ -483,17 +627,26 @@ impl Engine {
             return;
         };
         let pinned = computer.check.as_ref().and_then(|c| c.host_key.clone());
+        let (network, cameras) = computer
+            .check
+            .as_ref()
+            .map(|c| (c.network.clone(), c.cameras.clone()))
+            .unwrap_or_default();
         computer.check = Some(match answer.result {
             Ok(found) => CompanionCheck {
                 state: CheckState::Reached,
                 at_us,
-                network: found.network.map(|mut n| {
-                    n.sampled_at_us = at_us;
-                    n
-                }),
+                network: found
+                    .network
+                    .map(|mut n| {
+                        n.sampled_at_us = at_us;
+                        n
+                    })
+                    .or(network),
                 os: found.os,
                 arch: found.arch,
                 uxduck: found.uxduck,
+                cameras: found.cameras.or(cameras),
                 host_key: found.host_key.or(pinned),
                 problem: None,
                 clock: found.clock,
@@ -507,11 +660,30 @@ impl Engine {
                 host_key: pinned,
                 problem: Some(problem),
                 clock: None,
-                network: computer.check.as_ref().and_then(|c| c.network.clone()),
+                network,
+                cameras,
             },
         });
+        if let Some(check) = &mut computer.check {
+            if waiting.is_some() {
+                check.state = CheckState::Checking;
+                check.problem = None;
+            } else if stopped {
+                check.state = CheckState::Failed;
+                check.problem = Some(
+                    "The vehicle armed before the change started, so nothing changed. Disarm it to try again."
+                        .into(),
+                );
+            }
+        }
         self.save_companions(None, vehicle);
         self.review_recordings();
+        if let Some(order) = waiting {
+            self.companions.busy.insert(answer.computer_id);
+            if let Some(port) = self.companions.port.as_mut() {
+                port.request(order);
+            }
+        }
     }
 }
 
@@ -578,6 +750,7 @@ impl Engine {
                 .network_polled_at
                 .insert(computer.id.clone(), now);
             self.companions.busy.insert(computer.id.clone());
+            self.companions.reading.insert(computer.id.clone());
             if let Some(port) = self.companions.port.as_mut() {
                 port.request(CompanionOrder::Network {
                     vehicle_id,

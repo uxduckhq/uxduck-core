@@ -251,6 +251,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "computer/add",
     "computer/remove",
     "computer/check",
+    "computer/cameras",
     "computer/network",
     "computer/connectivity",
     // Whether a vehicle is a simulation is the person's word (ADR-0039 R14).

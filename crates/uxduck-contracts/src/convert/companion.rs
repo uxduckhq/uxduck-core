@@ -46,6 +46,7 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                 uxduck: check.uxduck.clone(),
                 host_key: check.host_key.clone(),
                 problem: check.problem.clone(),
+                cameras: check.cameras.as_ref().map(Into::into),
                 clock: check.clock.as_ref().map(|clock| dto::CompanionClock {
                     offset_ms: clock.offset_ms,
                     within_ms: clock.within_ms,
