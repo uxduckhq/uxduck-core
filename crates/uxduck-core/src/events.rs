@@ -128,6 +128,10 @@ pub enum Change {
     InputMappingUpserted {
         mapping: InputMapping,
     },
+    /// A custom mapping deleted after its controller references were reset.
+    InputMappingRemoved {
+        id: String,
+    },
     SettingsChanged {
         settings: Settings,
     },

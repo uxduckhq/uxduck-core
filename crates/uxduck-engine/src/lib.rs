@@ -24,6 +24,7 @@ mod calculated;
 mod checklist;
 pub mod commands;
 pub mod companions;
+mod controller_cleanup;
 pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
@@ -1368,6 +1369,7 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::MissionUpserted { .. }) => transfers::entity_changes(change),
         change @ (Change::ControllerUpserted { .. }
         | Change::ControllerRemoved { .. }
+        | Change::InputMappingRemoved { .. }
         | Change::InputMappingUpserted { .. }) => controllers::entity_changes(change),
         change @ (Change::PluginUpserted { .. } | Change::PluginRemoved { .. }) => {
             plugins::entity_changes(change)

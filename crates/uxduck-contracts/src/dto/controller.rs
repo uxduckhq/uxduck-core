@@ -360,6 +360,15 @@ pub struct MappingCreateParams {
     pub from: Option<String>,
 }
 
+/// Deletes the custom mapping the person reviewed. Concurrent edits are refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MappingRemoveParams {
+    pub id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub expected_version: u64,
+}
+
 /// One axis as the device reports it, before any mapping: -1 to 1.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

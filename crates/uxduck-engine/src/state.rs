@@ -522,6 +522,7 @@ impl State {
                 self.input_mappings
                     .insert(mapping.id.clone(), mapping.clone());
             }
+            Change::InputMappingRemoved { id } => drop(self.input_mappings.remove(id)),
             Change::MissionUpserted { mission } => {
                 self.missions
                     .insert(mission.vehicle_id.clone(), mission.clone());

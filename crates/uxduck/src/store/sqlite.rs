@@ -300,6 +300,7 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::ControllerUpserted { .. }
             | Change::ControllerRemoved { .. }
             | Change::InputMappingUpserted { .. }
+            | Change::InputMappingRemoved { .. }
             | Change::PluginUpserted { .. }
             | Change::PluginRemoved { .. }) => {
                 project_controllers(&tx, change, event.seq)?;
@@ -583,6 +584,9 @@ fn project_controllers(
                     to_i64(seq)
                 ],
             )?;
+        }
+        Change::InputMappingRemoved { id } => {
+            tx.execute("DELETE FROM input_mappings WHERE id = ?1", params![id])?;
         }
         _ => {}
     }
@@ -1001,5 +1005,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count(&db), 0);
+    }
+
+    #[test]
+    fn a_deleted_mapping_leaves_the_projection_after_reopening() {
+        use uxduck_core::domain::controller::InputMapping;
+        use uxduck_core::events::Actor;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uxduck.db");
+        let mut db = open(&path).unwrap();
+        let mut mapping = InputMapping::mode_2();
+        mapping.id = "custom".into();
+        for (seq, change) in [
+            (1, Change::InputMappingUpserted { mapping }),
+            (
+                2,
+                Change::InputMappingRemoved {
+                    id: "custom".into(),
+                },
+            ),
+        ] {
+            project(
+                &mut db,
+                &[Event {
+                    seq,
+                    ts_us: seq,
+                    actor: Actor::default(),
+                    change,
+                }],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let db = open(&path).unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM input_mappings WHERE id = 'custom'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

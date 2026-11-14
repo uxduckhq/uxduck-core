@@ -1,0 +1,7 @@
+{
+  "method": "mapping/remove",
+  "params": {
+    "id": "my-controller",
+    "expectedVersion": 3
+  }
+}

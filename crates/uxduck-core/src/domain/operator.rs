@@ -1797,6 +1797,10 @@ impl Operator {
                 .is_some_and(|id| vehicle_ids.contains(&id))
         };
         let newest = self.controller_mappings.iter().rev();
+        let known = self
+            .controller_mappings
+            .iter()
+            .any(|m| m.controller_id == controller_id);
         newest
             .clone()
             .filter(on)
@@ -1804,7 +1808,7 @@ impl Operator {
             .or_else(|| {
                 newest
                     .filter(on)
-                    .find(|m| m.controller_name == controller_name)
+                    .find(|m| !known && m.controller_name == controller_name)
             })
             .map(|m| m.mapping_id.as_str())
     }

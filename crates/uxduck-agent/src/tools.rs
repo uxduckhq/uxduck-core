@@ -470,6 +470,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "controller/inputs",
     "mapping/update",
     "mapping/create",
+    "mapping/remove",
     "storage/usage",
     "storage/clearSimulatorLogs",
     "storage/reveal",

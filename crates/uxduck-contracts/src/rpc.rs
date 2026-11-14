@@ -23,7 +23,7 @@ use crate::dto::client::{
 use crate::dto::command::{CommandSendParams, ModeListParams};
 use crate::dto::controller::{
     ClientSelectParams, ControllerChooseMappingParams, ControllerClaimParams,
-    ControllerSetTargetParams, MappingCreateParams, MappingUpdateParams,
+    ControllerSetTargetParams, MappingCreateParams, MappingRemoveParams, MappingUpdateParams,
 };
 use crate::dto::diagnostics::{
     DaemonLogsParams, LinkDiagnoseParams, RouterEventsParams, SocketInspectParams,
@@ -645,9 +645,10 @@ pub enum ClientRequest {
     /// closed moments ago. Result: `Controller`.
     #[serde(rename = "controller/takeOver")]
     ControllerTakeOver(IdParams),
-    /// Forgets a known controller: it leaves the list until it is plugged
-    /// in again. Refused while it is plugged in or held. Operators only,
-    /// needs `config`. Result: `Empty`.
+    /// Resets a controller's saved choices to a fresh, uncalibrated mapping.
+    /// Connected devices stay visible. Disconnected devices leave the list.
+    /// Refused while held. Existing mappings stay available for explicit deletion.
+    /// Operators only, needs `config`. Result: `Empty`.
     #[serde(rename = "controller/forget")]
     ControllerForget(IdParams),
     /// Changes what a claimed controller drives, or confirms a pending
@@ -680,6 +681,11 @@ pub enum ClientRequest {
     /// Its id comes from the name. Needs `config`. Result: `InputMapping`.
     #[serde(rename = "mapping/create")]
     MappingCreate(MappingCreateParams),
+    /// Deletes a custom mapping and clears its saved selections. Built-in
+    /// mappings and mappings held by a controller cannot be deleted.
+    /// Operators only, needs `config`. Result: `Empty`.
+    #[serde(rename = "mapping/remove")]
+    MappingRemove(MappingRemoveParams),
     /// Restarts the daemon after answering: a final checkpoint, then the
     /// same program in its place. Refused with `confirmation-required`
     /// while a vehicle is armed, unless `confirm`. Operators only. Result:
@@ -2044,7 +2050,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 377] = [
+    pub const METHODS: [&'static str; 378] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2162,6 +2168,7 @@ impl ClientRequest {
         "client/select",
         "mapping/update",
         "mapping/create",
+        "mapping/remove",
         "daemon/restart",
         "settings/update",
         "settings/get",

@@ -842,6 +842,7 @@ fn check(name: &str) {
             | "controller_keyboardStop"
             | "gripper_hold"
             | "controller_forget"
+            | "mapping_remove"
             | "controller_chooseMapping"
             | "daemon_restart"
             | "daemon_stop"

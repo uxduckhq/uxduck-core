@@ -711,6 +711,7 @@ pub(crate) fn handle(
         | ClientRequest::ControllerInputs(_)
         | ClientRequest::ClientSelect(_)
         | ClientRequest::MappingUpdate(_)
+        | ClientRequest::MappingRemove(_)
         | ClientRequest::MappingCreate(_)) => {
             crate::controllers::handle(engine, connection, request, &granted, operator)
         }

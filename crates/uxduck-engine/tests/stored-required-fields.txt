@@ -101,6 +101,7 @@ Change::FlightUpserted.flight
 Change::FolderUpserted.folder
 Change::HistoryCleared.vehicle_id
 Change::HistoryUpserted.entry
+Change::InputMappingRemoved.id
 Change::InputMappingUpserted.mapping
 Change::ItemUpserted.item
 Change::LibraryUpserted.vehicle

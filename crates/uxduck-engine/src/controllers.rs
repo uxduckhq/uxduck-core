@@ -215,6 +215,12 @@ pub(crate) fn handle(
             }
             forget(engine, connection, &id)
         }
+        ClientRequest::MappingRemove(params) => {
+            if !operator || !granted.contains(&Capability::Config) {
+                return denied("Only an operator with configuration access may delete a mapping.");
+            }
+            crate::controller_cleanup::remove_mapping(engine, connection, params)
+        }
         _ if !operator || !granted.contains(&Capability::Control) => {
             denied("only an operator client may hold a controller")
         }
@@ -372,20 +378,18 @@ fn keyboard_input(
     Ok(json!({}))
 }
 
-/// Forgets an unplugged, unheld controller. One that is plugged in would
-/// come straight back, and one that is held is driving.
-fn forget(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Value, ApiError> {
+/// Resets an unheld controller without requiring a physical disconnect.
+pub(crate) fn forget(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    id: &str,
+) -> Result<Value, ApiError> {
     let controller = engine
         .state
         .controllers
         .get(id)
+        .cloned()
         .ok_or_else(|| not_found(&format!("controller {id}")))?;
-    if controller.connected {
-        return Err(ApiError::new(
-            ErrorKind::Busy,
-            format!("Unplug {} before forgetting it.", controller.name),
-        ));
-    }
     if controller.claim.is_some() || engine.live.claimant.contains_key(id) {
         return Err(ApiError::new(
             ErrorKind::Busy,
@@ -393,7 +397,10 @@ fn forget(engine: &mut Engine, connection: ConnectionId, id: &str) -> Result<Val
         ));
     }
     engine.resolve(&reclaim(id));
-    engine.commit(connection, Change::ControllerRemoved { id: id.to_owned() });
+    engine.live.detached.remove(id);
+    engine.live.input_lost.remove(id);
+    engine.live.position_sends.remove(id);
+    crate::controller_cleanup::reset(engine, connection, controller);
     Ok(json!({}))
 }
 
@@ -2200,6 +2207,10 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
         Change::InputMappingUpserted { mapping } => vec![EntityChange {
             input_mapping: Some(mapping.into()),
             ..upsert(EntityType::InputMapping, &mapping.id)
+        }],
+        Change::InputMappingRemoved { id } => vec![EntityChange {
+            op: uxduck_contracts::dto::state::ChangeOp::Remove,
+            ..upsert(EntityType::InputMapping, id)
         }],
         _ => Vec::new(),
     }
