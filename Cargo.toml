@@ -4,15 +4,13 @@ members = ["crates/uxduck","crates/uxduck-core","crates/uxduck-contracts","crate
 # Plugins build for WebAssembly in a workspace of their own.
 exclude = [
   "plugins",
-  "vendor/glib",
   "vendor/mavinspect",
-  "vendor/tray-icon",
   "vendor/gilrs",
   "vendor/gilrs-core",
 ]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
