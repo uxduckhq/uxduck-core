@@ -1005,7 +1005,14 @@ impl Engine {
             parts.push(format!("window {}", short(window)));
         }
         parts.push(self.vehicles_line());
-        parts.push("not signed in".to_owned());
+        parts.push(
+            if self.account_identity.signed_in {
+                "signed in"
+            } else {
+                "not signed in"
+            }
+            .to_owned(),
+        );
         fitted(&parts, &params.ui.panes)
     }
 }

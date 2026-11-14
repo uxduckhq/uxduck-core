@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "cc505862446bed9e7cc0a02f6914bc649583f32c",
+  "sourceCommit": "b009496a9b3bfff0ede4c5fc2d14f5507bd567fe",
   "licenseReady": true,
   "files": [
     {
@@ -5801,7 +5801,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/feedback.rs",
-      "sha256": "90cfc9a3f7ae996d9c3c2015b006ff75420f5ebc94847a97eb360bf800ae07ec",
+      "sha256": "71f753a696878cb71172721a888a703b1a8d922874b4335c3173b3e291a0526d",
       "executable": false
     },
     {
