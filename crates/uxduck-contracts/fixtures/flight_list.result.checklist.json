@@ -82,6 +82,19 @@
     "realArmedUsSince": 0,
     "simulatedArmedUsSince": 720000000,
     "count": 1,
-    "grounded": 0
-  }
+    "grounded": 0,
+    "realMovingUs": 0,
+    "realMovingUsSince": 0,
+    "simulatedMovingUs": 0,
+    "simulatedMovingUsSince": 0,
+    "withoutMovingTime": 1,
+    "vehicles": 1
+  },
+  "operators": [
+    {
+      "operatorId": "op1",
+      "name": "Ana",
+      "count": 1
+    }
+  ]
 }

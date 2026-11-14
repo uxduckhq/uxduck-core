@@ -55,6 +55,11 @@ pub struct Flight {
     pub end: FlightEnd,
     #[schemars(schema_with = "crate::safe::integer")]
     pub air_us: u64,
+    /// Time with its ground speed above 0.5 m/s, for every vehicle.
+    /// Omitted for an entry recorded before UXDuck kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub moving_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_height_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,6 +262,9 @@ pub struct FlightListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub totals_since_us: Option<u64>,
+    /// Only the entries this operator acted on, and totals over them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -270,9 +278,23 @@ pub struct FlightListResult {
     /// Time in the air and time armed over every entry, listed or not (C9).
     #[serde(default)]
     pub totals: FlightTotals,
+    /// The operators who acted on entries, with how many each, over the
+    /// whole logbook whatever `operatorId` asked, by name.
+    #[serde(default)]
+    pub operators: Vec<FlightListOperator>,
 }
 
-/// Time in the air and time armed, real and simulated apart (C9), all time
+/// An operator with entries in the logbook.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightListOperator {
+    pub operator_id: String,
+    pub name: String,
+    pub count: u32,
+}
+
+/// Time in the air, time armed and time moving, real and simulated apart
+/// (C9, FB-228), all time
 /// and since `totalsSinceUs` (zero when not asked).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -299,6 +321,27 @@ pub struct FlightTotals {
     #[serde(default)]
     #[schemars(schema_with = "crate::safe::integer")]
     pub simulated_armed_us_since: u64,
+    /// Time moving, ground speed above 0.5 m/s, over every vehicle and
+    /// the entries that have it (FB-228).
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub real_moving_us: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub simulated_moving_us: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub real_moving_us_since: u64,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub simulated_moving_us_since: u64,
+    /// Of `count`, entries with no moving time: recorded before UXDuck
+    /// kept it.
+    #[serde(default)]
+    pub without_moving_time: u32,
+    /// The vehicles among the entries.
+    #[serde(default)]
+    pub vehicles: u32,
     /// Entries in all, of which `flights` holds the newest.
     pub count: u32,
     /// Of `count`, those of vehicles that never fly: rovers, boats and subs.
@@ -326,6 +369,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 Core::ContactLost => FlightEnd::ContactLost,
             },
             air_us: f.air_us,
+            moving_us: f.moving_us,
             max_height_m: f.max_height_m,
             max_speed_mps: f.max_speed_mps,
             modes: f.modes.clone(),

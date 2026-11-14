@@ -122,6 +122,10 @@ pub struct Flight {
     /// Time off the ground, for one that flies.
     #[serde(default)]
     pub air_us: u64,
+    /// Time moving, for every vehicle: its ground speed above 0.5 m/s
+    /// (FB-228). None for an entry recorded before UXDuck kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_height_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

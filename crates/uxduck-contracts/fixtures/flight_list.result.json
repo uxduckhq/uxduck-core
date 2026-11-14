@@ -36,7 +36,8 @@
       "params": {
         "digest": "54ef63fab15e8236074387e18732bcc53802a65f8b0b400edba888baf078442f",
         "count": 912
-      }
+      },
+      "movingUs": 540000000
     }
   ],
   "totals": {
@@ -49,6 +50,13 @@
     "realArmedUsSince": 0,
     "simulatedArmedUsSince": 720000000,
     "count": 1,
-    "grounded": 0
-  }
+    "grounded": 0,
+    "realMovingUs": 0,
+    "simulatedMovingUs": 540000000,
+    "realMovingUsSince": 0,
+    "simulatedMovingUsSince": 540000000,
+    "withoutMovingTime": 0,
+    "vehicles": 1
+  },
+  "operators": [{ "operatorId": "op1", "name": "Ana", "count": 1 }]
 }

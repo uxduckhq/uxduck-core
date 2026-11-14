@@ -3882,6 +3882,7 @@ impl Engine {
                 ended_at_us: Some(to),
                 end: uxduck_core::domain::flight::FlightEnd::Disarmed,
                 air_us,
+                moving_us: None,
                 max_height_m: None,
                 max_speed_mps: None,
                 modes,

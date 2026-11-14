@@ -18,6 +18,10 @@
 //! Sent with the vehicle's telemetry, at most once a second each, never
 //! journaled; a daemon start forgets them.
 //!
+//! Each flight also adds up its time moving (FB-228), for every vehicle:
+//! while armed with its ground speed above [`MOVING_ABOVE_MPS`]. Kept with
+//! the flight when it ends, not sent as telemetry.
+//!
 //! Each arm to disarm is also kept as a [`Flight`] (C8), journaled when it
 //! begins and when it ends, with its highest point, top speed, modes,
 //! battery and who acted on the vehicle; one left open by a crash is ended
@@ -42,6 +46,9 @@ use crate::Engine;
 const AIR_ABOVE_M: f64 = FLYING_ABOVE_HOME_M;
 /// Back on the ground below this, so a hover at the line does not flicker.
 const GROUND_BELOW_M: f64 = 1.0;
+/// Moving above this ground speed (FB-228): above GPS drift standing
+/// still, and the same as a phone's NMEA position counts moving.
+const MOVING_ABOVE_MPS: f64 = 0.5;
 /// Down for this long is a landing. A shorter spell is the same hop still.
 const LANDED_AFTER_US: u64 = 3_000_000;
 
@@ -145,6 +152,10 @@ struct Timer {
     hop: Hop,
     /// Time in the air banked before the current hop.
     air_us: u64,
+    /// While moving: since when.
+    moving_since_us: Option<u64>,
+    /// Time moving banked before.
+    moving_us: u64,
     /// Whole seconds last sent, so a second is sent once.
     sent: Option<(u64, u64)>,
     /// The flight this arming began (C8), and what it has seen so far.
@@ -170,6 +181,13 @@ impl Timer {
 
     fn air_us(&self, now_us: u64) -> u64 {
         self.air_us + self.hop.lasted_us(now_us)
+    }
+
+    fn moving_us(&self, now_us: u64) -> u64 {
+        self.moving_us
+            + self
+                .moving_since_us
+                .map_or(0, |at| now_us.saturating_sub(at))
     }
 }
 
@@ -333,6 +351,7 @@ impl Engine {
             ended_at_us: None,
             end: FlightEnd::Open,
             air_us: 0,
+            moving_us: Some(0),
             max_height_m: None,
             max_speed_mps: None,
             modes: vehicle.mode.iter().cloned().collect(),
@@ -411,6 +430,7 @@ impl Engine {
             return;
         };
         let air_us = timer.air_us(at_us);
+        let moving_us = timer.moving_us(at_us);
         let (height, speed, modes) = (
             timer.max_height_m,
             timer.max_speed_mps,
@@ -430,6 +450,7 @@ impl Engine {
         flight.end = end;
         flight.contact_lost_at_us = None;
         flight.air_us = air_us;
+        flight.moving_us = Some(moving_us);
         flight.max_height_m = height;
         flight.max_speed_mps = speed;
         flight.modes = modes;
@@ -506,43 +527,14 @@ impl Engine {
             .values()
             .filter(|f| vehicle.as_ref().is_none_or(|v| &f.vehicle_id == v))
             .collect();
+        let operators = self.logbook_operators(&flights);
+        if let Some(id) = &params.operator_id {
+            flights.retain(|f| f.operators.iter().any(|o| &o.operator_id == id));
+        }
         // Newest first, and the same order every time, so a page ends where
         // the next begins even when two flights armed together.
         flights.sort_by(|a, b| (b.armed_at_us, &b.id).cmp(&(a.armed_at_us, &a.id)));
-        let mut totals = uxduck_contracts::dto::flight::FlightTotals {
-            count: u32::try_from(flights.len()).unwrap_or(u32::MAX),
-            ..Default::default()
-        };
-        let since = params.totals_since_us;
-        for flight in &flights {
-            let recent = since.is_some_and(|s| flight.armed_at_us >= s);
-            let t = &mut totals;
-            let (all, lately, armed, armed_lately) = if flight.simulated {
-                (
-                    &mut t.simulated_air_us,
-                    &mut t.simulated_air_us_since,
-                    &mut t.simulated_armed_us,
-                    &mut t.simulated_armed_us_since,
-                )
-            } else {
-                (
-                    &mut t.real_air_us,
-                    &mut t.real_air_us_since,
-                    &mut t.real_armed_us,
-                    &mut t.real_armed_us_since,
-                )
-            };
-            let armed_us = armed_for_us(flight);
-            *all += flight.air_us;
-            *armed += armed_us;
-            if recent {
-                *lately += flight.air_us;
-                *armed_lately += armed_us;
-            }
-            if VehicleClass::of(&flight.vehicle_type).never_flies() {
-                totals.grounded += 1;
-            }
-        }
+        let totals = logbook_totals(&flights, params.totals_since_us);
         let (page, older) = if params.ids.is_empty() {
             let mut page: Vec<_> = flights
                 .into_iter()
@@ -572,7 +564,51 @@ impl Engine {
                 .collect(),
             older,
             totals,
+            operators,
         })
+    }
+
+    /// Who acted on the entries, over every entry whatever the operator
+    /// filter, each named as now, else as on their newest entry (FB-228).
+    fn logbook_operators(
+        &self,
+        flights: &[&Flight],
+    ) -> Vec<uxduck_contracts::dto::flight::FlightListOperator> {
+        let mut named: BTreeMap<&str, (u64, &str, u32)> = BTreeMap::new();
+        for flight in flights {
+            let mut seen = std::collections::BTreeSet::new();
+            for operator in &flight.operators {
+                if !seen.insert(operator.operator_id.as_str()) {
+                    continue;
+                }
+                let entry = named.entry(&operator.operator_id).or_insert((
+                    flight.armed_at_us,
+                    &operator.name,
+                    0,
+                ));
+                entry.2 += 1;
+                if flight.armed_at_us > entry.0 {
+                    (entry.0, entry.1) = (flight.armed_at_us, &operator.name);
+                }
+            }
+        }
+        let mut operators: Vec<_> = named
+            .into_iter()
+            .map(
+                |(id, (_, name, count))| uxduck_contracts::dto::flight::FlightListOperator {
+                    operator_id: id.to_owned(),
+                    name: self
+                        .state
+                        .operators
+                        .get(id)
+                        .map_or(name, |o| o.name.as_str())
+                        .to_owned(),
+                    count,
+                },
+            )
+            .collect();
+        operators.sort_by(|a, b| (&a.name, &a.operator_id).cmp(&(&b.name, &b.operator_id)));
+        operators
     }
 
     fn flight_dto(&self, flight: &Flight) -> uxduck_contracts::dto::flight::Flight {
@@ -1019,6 +1055,8 @@ impl Engine {
                 .unwrap_or(0);
             flight.ended_at_us = Some(heard.max(logged).max(flight.armed_at_us));
             flight.end = FlightEnd::Interrupted;
+            // Its moving time died with the process, so it has none.
+            flight.moving_us = None;
             flight.version += 1;
             self.commit_as(flight_actor(), Change::FlightUpserted { flight });
         }
@@ -1303,6 +1341,7 @@ impl Engine {
             flight.ended_at_us = Some(at.max(flight.armed_at_us));
             flight.end = FlightEnd::Interrupted;
             flight.contact_lost_at_us = None;
+            flight.moving_us = None;
             flight.version += 1;
             self.commit_as(flight_actor(), Change::FlightUpserted { flight });
         }
@@ -1433,6 +1472,15 @@ impl Engine {
             {
                 timer.max_height_m = higher(timer.max_height_m, height);
                 timer.max_speed_mps = higher(timer.max_speed_mps, speed);
+                let moving = speed.is_some_and(|s| s > MOVING_ABOVE_MPS);
+                match (moving, timer.moving_since_us) {
+                    (true, None) => timer.moving_since_us = Some(now),
+                    (false, Some(at)) => {
+                        timer.moving_us += now.saturating_sub(at);
+                        timer.moving_since_us = None;
+                    }
+                    _ => {}
+                }
                 // MISSION_CURRENT: state 3 active, 5 complete; mode 1 in a mission mode.
                 match (mission_state, mission_mode) {
                     (Some(3), _) | (_, Some(1)) => timer.mission_flown = true,
@@ -1506,6 +1554,66 @@ impl Engine {
             items,
         });
     }
+}
+
+/// Totals over the listed entries: time in the air, armed and moving, real
+/// and simulated, all-time and since `since`. Moving time adds up only the
+/// entries that kept it, and the rest are counted apart (FB-228).
+fn logbook_totals(
+    flights: &[&Flight],
+    since: Option<u64>,
+) -> uxduck_contracts::dto::flight::FlightTotals {
+    let mut totals = uxduck_contracts::dto::flight::FlightTotals {
+        count: u32::try_from(flights.len()).unwrap_or(u32::MAX),
+        ..Default::default()
+    };
+    totals.vehicles = u32::try_from(
+        flights
+            .iter()
+            .map(|f| f.vehicle_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+    )
+    .unwrap_or(u32::MAX);
+    for flight in flights {
+        let recent = since.is_some_and(|s| flight.armed_at_us >= s);
+        let t = &mut totals;
+        let (all, lately, armed, armed_lately, moving, moving_lately) = if flight.simulated {
+            (
+                &mut t.simulated_air_us,
+                &mut t.simulated_air_us_since,
+                &mut t.simulated_armed_us,
+                &mut t.simulated_armed_us_since,
+                &mut t.simulated_moving_us,
+                &mut t.simulated_moving_us_since,
+            )
+        } else {
+            (
+                &mut t.real_air_us,
+                &mut t.real_air_us_since,
+                &mut t.real_armed_us,
+                &mut t.real_armed_us_since,
+                &mut t.real_moving_us,
+                &mut t.real_moving_us_since,
+            )
+        };
+        let armed_us = armed_for_us(flight);
+        *all += flight.air_us;
+        *armed += armed_us;
+        *moving += flight.moving_us.unwrap_or(0);
+        if recent {
+            *lately += flight.air_us;
+            *armed_lately += armed_us;
+            *moving_lately += flight.moving_us.unwrap_or(0);
+        }
+        if flight.moving_us.is_none() {
+            totals.without_moving_time += 1;
+        }
+        if VehicleClass::of(&flight.vehicle_type).never_flies() {
+            totals.grounded += 1;
+        }
+    }
+    totals
 }
 
 #[cfg(test)]

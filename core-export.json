@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "e482a33b6ab89ac14e124a0ea849c9f1bdc9b5e0",
+  "sourceCommit": "22e9fe80bb83814f8ef6fc2c533fafdcf8523704",
   "licenseReady": true,
   "files": [
     {
@@ -1531,12 +1531,12 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/flight_list.result.checklist.json",
-      "sha256": "5e9b81551769c698cc9f60950ec3b3f87cce4f2efc9a9ee987190c1b7e0dd47a",
+      "sha256": "ae52776c0b8d0a0faf68956e1887f5ba6852693c8bac7a9679f1c204d22d8f29",
       "executable": false
     },
     {
       "path": "crates/uxduck-contracts/fixtures/flight_list.result.json",
-      "sha256": "58fe0b51d3430ca0c25235b8f84b5b02c5ec8f4ac73131f5b6c061f8f04665ed",
+      "sha256": "ab501901e1b7394236e45256843cad275e95ac8cfeac4b8b417f1039e08406e6",
       "executable": false
     },
     {
@@ -5211,7 +5211,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/flight.rs",
-      "sha256": "778e29fa493c6846274d55c3c2febbd58a08817e769e96c0ec151431bff23157",
+      "sha256": "efe4f247983899b3808c5eaba1123c4c77dd35b6fbb11a2cafbfcdc4199a65f5",
       "executable": false
     },
     {
@@ -5576,7 +5576,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/flight.rs",
-      "sha256": "4a06b5c31ca6ef435e5e0371e248d1e9caabdf06288bed277ab44c0167171010",
+      "sha256": "ddc6df62e56321a91a66394cc4cee2473247c7d2b3b4501485b1971df24c344d",
       "executable": false
     },
     {
@@ -5911,7 +5911,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/flight_time.rs",
-      "sha256": "3851daf5dfe88cf52ac69b18414bdc2f8971c341bbda279761a40b44e824b47b",
+      "sha256": "64c8499407754270db76ec1d2807d8bfc3705028926f612f39acaa12dbbfd539",
       "executable": false
     },
     {
@@ -6291,7 +6291,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/replay.rs",
-      "sha256": "30aad2b31ab9cf9dd0c90be2ae441e5635cf10db437fcc4fa5f7a41b7d3f0d02",
+      "sha256": "b2ce0c811a13f090bda2d05816f6fe2d655e2424d71a8d79b15c891bc7510331",
       "executable": false
     },
     {
