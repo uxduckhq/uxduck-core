@@ -111,22 +111,27 @@ pub fn without_ground_stations(records: Vec<(u64, &[u8])>) -> Vec<(u64, &[u8])> 
 /// is not a whole frame.
 #[must_use]
 pub fn read(bytes: &[u8]) -> Vec<(u64, &[u8])> {
-    let mut records = Vec::new();
+    records(bytes).collect()
+}
+
+/// The records [`read`] gives, one at a time: a long log has millions, and
+/// most of its readers only pass over them.
+pub fn records(bytes: &[u8]) -> impl Iterator<Item = (u64, &[u8])> {
     let mut at = 0;
-    while at + 8 < bytes.len() {
+    std::iter::from_fn(move || {
+        if at + 8 >= bytes.len() {
+            return None;
+        }
         let mut stamp = [0u8; 8];
         stamp.copy_from_slice(&bytes[at..at + 8]);
         let start = at + 8;
-        let Some(len) = crate::framing::frame_len(&bytes[start..]) else {
-            break;
-        };
+        let len = crate::framing::frame_len(&bytes[start..])?;
         if start + len > bytes.len() {
-            break;
+            return None;
         }
-        records.push((u64::from_be_bytes(stamp), &bytes[start..start + len]));
         at = start + len;
-    }
-    records
+        Some((u64::from_be_bytes(stamp), &bytes[start..start + len]))
+    })
 }
 
 /// The first of the year 2000, in microseconds since the Unix epoch:

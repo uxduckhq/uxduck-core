@@ -9,7 +9,7 @@ use uxduck_core::domain::vehicle::{VehicleConnections, VehicleRoute};
 type Address = (String, String, u8);
 const RECOVERED_US: u64 = 10_000_000;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Routing {
     pub replay: bool,
     pub command: BTreeMap<String, Address>,

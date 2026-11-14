@@ -25,6 +25,9 @@ pub struct Host {
     card_copying: crate::card_logs::Copying,
     /// Flights in other apps' tlogs (S215).
     found_flights: crate::found_flights::Found,
+    /// Where work on a replay's log goes to be done off the engine's task
+    /// ([`crate::replay::work`]).
+    replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
 }
 
 impl Host {
@@ -34,6 +37,7 @@ impl Host {
         simulators: std::sync::Arc<crate::sim::Simulators>,
         catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
         desktop_app: std::sync::Arc<crate::desktop_app::DesktopApp>,
+        replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
     ) -> Self {
         Self {
             wake: None,
@@ -44,6 +48,7 @@ impl Host {
             desktop_app,
             card_copying: crate::card_logs::Copying::default(),
             found_flights: crate::found_flights::Found::new(data_dir),
+            replay_work,
         }
     }
 }
@@ -289,6 +294,17 @@ impl System for Host {
 
     fn replay_clock(&mut self, running: bool) {
         crate::replay::running(running);
+    }
+
+    fn replay_work(
+        &mut self,
+        work: uxduck_engine::runtime::ReplayWork,
+    ) -> Option<uxduck_engine::runtime::ReplayWorked> {
+        // Nobody takes it once the daemon is stopping: done here then.
+        match self.replay_work.send(work) {
+            Ok(()) => None,
+            Err(back) => Some(back.0.run()),
+        }
     }
 
     fn tlog_position(&self, link_id: &str) -> Option<(String, u64)> {

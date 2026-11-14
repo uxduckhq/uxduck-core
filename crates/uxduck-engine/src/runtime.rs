@@ -428,6 +428,39 @@ pub enum ReplayRead {
     VehicleFile { local: String },
 }
 
+/// Work on a replay's log that a long log makes long (ADR-0039, long
+/// logs): going through one to open it, or to read its values. It asks
+/// nothing of the engine, so a host with threads does it off the engine's
+/// ([`System::replay_work`]) and the engine goes on answering meanwhile.
+pub struct ReplayWork(Box<dyn FnOnce() -> ReplayWorked + Send>);
+
+impl ReplayWork {
+    pub(crate) fn new(work: impl FnOnce() -> ReplayWorked + Send + 'static) -> Self {
+        Self(Box::new(work))
+    }
+
+    /// Does the work: seconds for a long log.
+    #[must_use]
+    pub fn run(self) -> ReplayWorked {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for ReplayWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplayWork")
+    }
+}
+
+/// What [`ReplayWork`] made, for [`crate::Engine::replay_worked`].
+pub struct ReplayWorked(pub(crate) crate::replay::Worked);
+
+impl std::fmt::Debug for ReplayWorked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReplayWorked")
+    }
+}
+
 /// What only the host can answer: binding ports, its own addresses, serial
 /// devices, keeping the machine awake (ADR-0004 port ownership, wake lock).
 /// A video file as `System::probe_video` reads it (ADR-0039 R8), times
@@ -478,6 +511,13 @@ pub trait System: Send {
     /// (`Engine::replay_tick`) while one plays, and nothing when none does.
     fn replay_clock(&mut self, running: bool) {
         let _ = running;
+    }
+    /// Work on a replay's log (ADR-0039, long logs). A host with threads
+    /// runs it off the engine's and returns None, then gives what it made
+    /// to `Engine::replay_worked` on the engine's. One without does it
+    /// here and returns it, and the engine waits as it always did.
+    fn replay_work(&mut self, work: ReplayWork) -> Option<ReplayWorked> {
+        Some(work.run())
     }
     /// What a video file says of itself (ADR-0039 R8), and its playable
     /// copy started when it needs one. UXDuck Desktop only.

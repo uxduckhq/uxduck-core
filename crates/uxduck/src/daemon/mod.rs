@@ -469,6 +469,7 @@ fn start_engine(
     #[cfg(not(feature = "plugins"))]
     let (plugin_port, plugin_feed): (Box<dyn uxduck_engine::runtime::PluginPort>, _) =
         (Box::new(uxduck_engine::runtime::NoPlugins), None);
+    let (replay_work, replay_works) = tokio::sync::mpsc::unbounded_channel();
     let engine = Engine::new(
         EngineConfig {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -504,16 +505,15 @@ fn start_engine(
                 &options.data_dir,
                 simulators.clone(),
                 catalogue,
-                crate::desktop_app::DesktopApp::new(
-                    &options.data_dir,
-                    tokio::runtime::Handle::current(),
-                ),
+                crate::desktop_app::DesktopApp::new(data_dir, tokio::runtime::Handle::current()),
+                replay_work,
             )),
             plugins: plugin_port,
         },
         loaded,
     );
     let engine = EngineHandle::spawn(engine);
+    tokio::spawn(crate::replay::work(replay_works, engine.clone()));
     #[cfg(feature = "plugins")]
     if let Some(host) = plugin_host {
         host.start(engine.clone());

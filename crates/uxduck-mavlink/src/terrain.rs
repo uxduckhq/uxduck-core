@@ -52,7 +52,7 @@ const RADIO_FRESH_US: u64 = 5_000_000;
 const RADIO_MAX_PER_S: f64 = 56.0;
 const RADIO_MIN_PER_S: f64 = 2.0;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Queue {
     link_id: String,
     pace: Pace,
@@ -65,7 +65,7 @@ struct Queue {
 /// pace it has earned so far. Paced like ArduPilot paces its own streams
 /// (`GCS_MAVLINK::handle_radio_status`): slower as the buffer fills, faster
 /// while it has room.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Radio {
     /// Free transmit buffer, percent.
     txbuf: u8,
@@ -94,7 +94,7 @@ impl Radio {
 }
 
 /// Answers waiting to go, by vehicle.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Outbox {
     queues: BTreeMap<String, Queue>,
     /// Telemetry radios heard, by link.

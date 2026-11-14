@@ -158,7 +158,7 @@ pub(crate) fn handle(
 }
 
 /// Samples and marks are kept this long: the graph's minute.
-const KEEP_US: u64 = 60_000_000;
+pub(crate) const KEEP_US: u64 = 60_000_000;
 /// A sample this much older than the newest kept means the clock went
 /// back, as a replay moved back does: what was kept is not before it.
 const BACK_US: u64 = 1_000_000;

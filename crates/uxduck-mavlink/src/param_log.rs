@@ -19,6 +19,13 @@ const ECHO_US: u64 = 5_000_000;
 /// How far `time_boot_ms` must go back to be a restart, not a late frame.
 const REBOOT_MS: u32 = 5_000;
 
+/// The messages a timeline is read from, and the only ones [`timelines`]
+/// decodes: `HEARTBEAT` for whose autopilot is PX4, `PARAM_VALUE`,
+/// `PARAM_SET`, `FILE_TRANSFER_PROTOCOL`, and the time since boot in
+/// `ATTITUDE` and `GLOBAL_POSITION_INT`. A message it starts to read
+/// goes here too.
+const READ: [u32; 6] = [0, 22, 23, 30, 33, 110];
+
 /// How a value was read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -281,6 +288,10 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
     // PX4 sends an integer parameter's bits, not its number, as it does live.
     let mut px4: BTreeSet<(u8, u8)> = BTreeSet::new();
     for &(at_us, frame) in records {
+        // Most of a long log is neither: only these are decoded.
+        if crate::framing::header(frame).is_none_or(|h| !READ.contains(&h.message_id)) {
+            continue;
+        }
         let Some(decoded) = decode(frame) else {
             continue;
         };

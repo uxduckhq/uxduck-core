@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use tokio::sync::watch;
-use uxduck_engine::runtime::{Clock, LinkLog, ReplayRead};
+use tokio::sync::{mpsc, watch};
+use uxduck_engine::runtime::{Clock, LinkLog, ReplayRead, ReplayWork};
 
 use crate::adapters::system::SystemClock;
 use crate::daemon::engine_task::EngineHandle;
@@ -49,6 +49,20 @@ pub async fn clock(engine: EngineHandle) {
                 return;
             }
         }
+    }
+}
+
+/// Does the engine's work on replays' logs off its task (ADR-0039, long logs):
+/// each on a thread of its own, since one that gave way stops by itself
+/// and a log's values are read while another opens. What it made goes back
+/// to the engine in order with everything else.
+pub async fn work(mut works: mpsc::UnboundedReceiver<ReplayWork>, engine: EngineHandle) {
+    while let Some(work) = works.recv().await {
+        let engine = engine.clone();
+        tokio::task::spawn_blocking(move || {
+            let worked = work.run();
+            engine.post(move |e| e.replay_worked(worked));
+        });
     }
 }
 

@@ -11,6 +11,9 @@ use crate::framing::{header, payload};
 const DEADLINE_US: u64 = 30_000_000;
 const REBOOT_MS: u32 = 5_000;
 pub const MESSAGE_IDS: [u32; 11] = [38, 39, 40, 42, 43, 44, 45, 46, 47, 51, 73];
+/// Read beside them: `HEARTBEAT` for who is who, and the time since boot in
+/// `ATTITUDE` and `GLOBAL_POSITION_INT`.
+const BESIDE: [u32; 3] = [0, 30, 33];
 
 #[derive(Clone, Debug)]
 pub struct Reading {
@@ -375,7 +378,11 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
             }
             continue;
         }
-        let decoded = decode(frame);
+        // Most of a long log is none of the messages read below: only
+        // those are decoded.
+        let decoded = (MESSAGE_IDS.contains(&h.message_id) || BESIDE.contains(&h.message_id))
+            .then(|| decode(frame))
+            .flatten();
         if let Some(d) = &decoded
             && let Message::Heartbeat {
                 mav_type,

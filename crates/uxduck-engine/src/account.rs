@@ -457,8 +457,18 @@ impl Engine {
         {
             self.feedback_sent(&item);
         }
-        let result = if let Some((connection, params)) = self.replays.awaiting.remove(id) {
-            self.account_log_joined(connection, &params, result)
+        let result = if let Some((_, params)) = self.replays.awaiting.remove(id) {
+            // The replay answers once it is open, as `replay/open` does: the
+            // request is its to answer, unless it could not begin.
+            let outer = std::mem::replace(&mut self.replying_to, self.awaiting_account.remove(id));
+            let opening = self.account_log_joined(&params, result);
+            match (opening, std::mem::replace(&mut self.replying_to, outer)) {
+                (Err(why), Some(waiting)) => {
+                    self.awaiting_account.insert(id.to_owned(), waiting);
+                    Err(why)
+                }
+                _ => return,
+            }
         } else if let Some(awaiting) = self.awaiting_watch.remove(id) {
             self.watch_done(awaiting, result)
         } else {

@@ -32,7 +32,7 @@ pub struct Altitude {
 
 /// Where a vehicle is, according to one source. The map draws every
 /// estimate the same way and never knows which producer made it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionEstimate {
     /// The producer: `fused` (the autopilot's estimate), `gps`, or a plugin's id.
@@ -53,6 +53,57 @@ pub struct PositionEstimate {
     pub vertical_accuracy_m: Option<f64>,
     /// When the daemon received it.
     pub time_us: u64,
+}
+
+// Field by field, so `clone_from` keeps the room its source and altitudes
+// have: a vehicle's latest telemetry takes each estimate again several
+// times a second, and a long log's replay millions of times.
+impl Clone for PositionEstimate {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            component_id: self.component_id,
+            latitude_deg: self.latitude_deg,
+            longitude_deg: self.longitude_deg,
+            altitudes: self.altitudes.clone(),
+            heading_deg: self.heading_deg,
+            course_deg: self.course_deg,
+            ground_speed_mps: self.ground_speed_mps,
+            climb_mps: self.climb_mps,
+            horizontal_accuracy_m: self.horizontal_accuracy_m,
+            vertical_accuracy_m: self.vertical_accuracy_m,
+            time_us: self.time_us,
+        }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        let Self {
+            source,
+            component_id,
+            latitude_deg,
+            longitude_deg,
+            altitudes,
+            heading_deg,
+            course_deg,
+            ground_speed_mps,
+            climb_mps,
+            horizontal_accuracy_m,
+            vertical_accuracy_m,
+            time_us,
+        } = from;
+        self.source.clone_from(source);
+        self.component_id = *component_id;
+        self.latitude_deg = *latitude_deg;
+        self.longitude_deg = *longitude_deg;
+        self.altitudes.clone_from(altitudes);
+        self.heading_deg = *heading_deg;
+        self.course_deg = *course_deg;
+        self.ground_speed_mps = *ground_speed_mps;
+        self.climb_mps = *climb_mps;
+        self.horizontal_accuracy_m = *horizontal_accuracy_m;
+        self.vertical_accuracy_m = *vertical_accuracy_m;
+        self.time_us = *time_us;
+    }
 }
 
 /// The unit of a telemetry value. Presentation converts; contracts do not.
@@ -161,7 +212,7 @@ pub const RC_LOST: &str = "Signal lost";
 pub const RC_NOT_SEEN: &str = "Not seen";
 
 /// A named value for panels.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryItem {
     /// Stable, such as `battery.voltage_v`.
@@ -175,6 +226,44 @@ pub struct TelemetryItem {
     pub source: String,
     pub component_id: u8,
     pub time_us: u64,
+}
+
+// Field by field, as [`PositionEstimate`] is: `clone_from` keeps the room
+// its strings have.
+impl Clone for TelemetryItem {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            label: self.label.clone(),
+            unit: self.unit,
+            value: self.value,
+            text: self.text.clone(),
+            source: self.source.clone(),
+            component_id: self.component_id,
+            time_us: self.time_us,
+        }
+    }
+
+    fn clone_from(&mut self, from: &Self) {
+        let Self {
+            key,
+            label,
+            unit,
+            value,
+            text,
+            source,
+            component_id,
+            time_us,
+        } = from;
+        self.key.clone_from(key);
+        self.label.clone_from(label);
+        self.unit = *unit;
+        self.value = *value;
+        self.text.clone_from(text);
+        self.source.clone_from(source);
+        self.component_id = *component_id;
+        self.time_us = *time_us;
+    }
 }
 
 /// A vehicle's latest telemetry: one estimate per source, one item per key.
@@ -195,7 +284,7 @@ impl VehicleTelemetry {
                 .iter_mut()
                 .find(|p| p.source == position.source && p.component_id == position.component_id)
             {
-                Some(existing) => *existing = position.clone(),
+                Some(existing) => existing.clone_from(position),
                 None => self.positions.push(position.clone()),
             }
         }
@@ -205,8 +294,36 @@ impl VehicleTelemetry {
                 .iter_mut()
                 .find(|i| i.key == item.key && i.component_id == item.component_id)
             {
-                Some(existing) => *existing = item.clone(),
+                Some(existing) => existing.clone_from(item),
                 None => self.items.push(item.clone()),
+            }
+        }
+    }
+
+    /// As [`Self::merge`], taking the estimates and items themselves, so
+    /// what a tick gathered goes out without a copy made of it.
+    pub fn absorb(&mut self, positions: Vec<PositionEstimate>, items: Vec<TelemetryItem>) {
+        if self.items.is_empty() {
+            self.items.reserve(items.len());
+        }
+        for position in positions {
+            match self
+                .positions
+                .iter_mut()
+                .find(|p| p.source == position.source && p.component_id == position.component_id)
+            {
+                Some(existing) => *existing = position,
+                None => self.positions.push(position),
+            }
+        }
+        for item in items {
+            match self
+                .items
+                .iter_mut()
+                .find(|i| i.key == item.key && i.component_id == item.component_id)
+            {
+                Some(existing) => *existing = item,
+                None => self.items.push(item),
             }
         }
     }

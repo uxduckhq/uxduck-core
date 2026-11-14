@@ -862,11 +862,13 @@ fn heading_to(lat: f64, lon: f64, target_lat: f64, target_lon: f64) -> Option<f3
     Some(y.atan2(x).to_degrees().rem_euclid(360.0) as f32)
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Session {
     config: Config,
     routing: routes::Routing,
-    producers: Vec<Box<dyn Producer>>,
+    /// Shared by a copy of the session (a replay's checkpoint): they keep
+    /// nothing between messages.
+    producers: Vec<std::sync::Arc<dyn Producer>>,
     commands: Vec<PendingCommand>,
     deferred_effects: Vec<Effect>,
     /// By `(link, peer, system id)`: one autopilot per address.
@@ -894,6 +896,10 @@ pub struct Session {
     terrain_checks: BTreeMap<String, Vec<(i32, i32, u64)>>,
     /// Frames that were not whole frames or failed their checksum.
     pub dropped: u64,
+    /// The peer and the address last read, kept so that reading a frame
+    /// makes no new strings for them: a link's frames come from the same
+    /// few places, thousands of times a second.
+    reading: ((String, String), (String, String, u8)),
 }
 
 /// How long a ground station counts as there after its last heartbeat,
@@ -905,7 +911,7 @@ impl Session {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            producers: core_producers(),
+            producers: core_producers().into_iter().map(Into::into).collect(),
             ..Self::default()
         }
     }
@@ -978,7 +984,7 @@ impl Session {
 
     /// Adds a producer after the core ones, as a plugin's estimator would be.
     pub fn add_producer(&mut self, producer: Box<dyn Producer>) {
-        self.producers.push(producer);
+        self.producers.push(producer.into());
     }
 
     /// Peers heard from within the expiry, by link.
@@ -1012,8 +1018,17 @@ impl Session {
         received_us: u64,
         processed_us: u64,
     ) -> Vec<Effect> {
-        self.peers
-            .insert((link_id.to_owned(), peer.to_owned()), received_us);
+        let (mut heard, mut address) = std::mem::take(&mut self.reading);
+        heard.0.clear();
+        heard.0.push_str(link_id);
+        heard.1.clear();
+        heard.1.push_str(peer);
+        match self.peers.get_mut(&heard) {
+            Some(at) => *at = received_us,
+            None => {
+                self.peers.insert(heard.clone(), received_us);
+            }
+        }
         let split = split(bytes);
         self.dropped += u64::from(split.junk > 0);
         let mut effects = Vec::new();
@@ -1022,16 +1037,17 @@ impl Session {
                 self.dropped += 1;
                 continue;
             };
-            let key = self.companion_address(
-                (link_id.to_owned(), peer.to_owned(), decoded.system_id),
-                decoded.component_id,
-            );
+            address.0.clone_from(&heard.0);
+            address.1.clone_from(&heard.1);
+            address.2 = decoded.system_id;
+            let at_vehicle = self.companion_address(&address, decoded.component_id);
+            let key = at_vehicle.as_ref().unwrap_or(&address);
             if let Some((system, component)) = decoded.mission_target
                 && ((system != 0 && system != self.config.gcs_system_id)
                     || (component != 0 && component != crate::GCS_COMPONENT_ID)
                     || self
                         .vehicles
-                        .get(&key)
+                        .get(key)
                         .is_none_or(|vehicle| vehicle.autopilot_component != decoded.component_id))
             {
                 // A shared link may carry another ground station's transfer,
@@ -1039,7 +1055,7 @@ impl Session {
                 continue;
             }
             if let (Some(vehicle), Some(header)) =
-                (self.vehicles.get_mut(&key), crate::framing::header(frame))
+                (self.vehicles.get_mut(key), crate::framing::header(frame))
                 && let Some(stream) = vehicle.streams.get_mut(&header.message_id)
             {
                 // Receiving it proves the stream is available again. Clear
@@ -1066,7 +1082,7 @@ impl Session {
                     | Message::MissionRequest { .. }
                     | Message::MissionAck { .. }
             );
-            if !protocol && !self.accept_telemetry(&key, &decoded.message, received_us) {
+            if !protocol && !self.accept_telemetry(key, &decoded.message, received_us) {
                 continue;
             }
             match decoded.message {
@@ -1077,7 +1093,7 @@ impl Session {
                     ..
                 } => {
                     if target_system == self.config.gcs_system_id || target_system == 0 {
-                        effects.extend(self.acknowledged(&key, command, result, received_us));
+                        effects.extend(self.acknowledged(key, command, result, received_us));
                     }
                 }
                 Message::Heartbeat {
@@ -1094,7 +1110,7 @@ impl Session {
                         custom_mode,
                     };
                     effects.extend(self.any_heartbeat(
-                        &key,
+                        key,
                         decoded.component_id,
                         &beat,
                         received_us,
@@ -1107,7 +1123,7 @@ impl Session {
                     flight_sw_version,
                     flight_custom_version,
                 } => effects.extend(self.version(
-                    &key,
+                    key,
                     uid,
                     uid2,
                     (flight_sw_version, flight_custom_version),
@@ -1118,11 +1134,11 @@ impl Session {
                 | Message::MissionItem(_)
                 | Message::MissionRequest { .. }
                 | Message::MissionAck { .. }) => {
-                    effects.extend(self.transfer(&key, message, received_us, processed_us));
+                    effects.extend(self.transfer(key, message, received_us, processed_us));
                 }
                 Message::ComponentMetadata { uri } => {
                     effects.extend(self.component_metadata(
-                        &key,
+                        key,
                         decoded.component_id,
                         &uri,
                         processed_us,
@@ -1135,7 +1151,7 @@ impl Session {
                     ..
                 } => {
                     effects.extend(self.video_stream(
-                        &key,
+                        key,
                         decoded.component_id,
                         stream_id,
                         kind,
@@ -1147,10 +1163,10 @@ impl Session {
                     sequence,
                     log_levels,
                     arguments,
-                } => effects.extend(self.px4_event(&key, id, sequence, log_levels, arguments)),
+                } => effects.extend(self.px4_event(key, id, sequence, log_levels, arguments)),
                 message @ Message::StatusText { .. } => {
                     effects.extend(self.status_text(
-                        &key,
+                        key,
                         decoded.component_id,
                         message,
                         received_us,
@@ -1164,10 +1180,10 @@ impl Session {
                     name,
                 } => {
                     let mode = AvailableMode::new(custom_mode, &name, properties);
-                    effects.extend(self.available_mode(&key, number_modes, mode_index, mode));
+                    effects.extend(self.available_mode(key, number_modes, mode_index, mode));
                 }
                 Message::AvailableModesMonitor { seq } => {
-                    effects.extend(self.modes_changed(&key, seq));
+                    effects.extend(self.modes_changed(key, seq));
                 }
                 // Answered by the engine from UXDuck's own terrain (S118).
                 Message::TerrainRequest {
@@ -1176,7 +1192,7 @@ impl Session {
                     grid_spacing,
                     mask,
                 } => {
-                    if let Some(vehicle) = self.vehicles.get(&key) {
+                    if let Some(vehicle) = self.vehicles.get(key) {
                         effects.push(Effect::TerrainRequest {
                             vehicle_id: vehicle.observation.id.clone(),
                             block: crate::terrain::Block {
@@ -1198,7 +1214,7 @@ impl Session {
                     param1,
                     ..
                 } if target_system == self.config.gcs_system_id || target_system == 0 => {
-                    if let Some(vehicle) = self.vehicles.get(&key)
+                    if let Some(vehicle) = self.vehicles.get(key)
                         && vehicle.autopilot_component == decoded.component_id
                         && param1.is_finite()
                         && param1 >= 0.0
@@ -1224,7 +1240,7 @@ impl Session {
                     completion_mask,
                     direction,
                 } => {
-                    if let Some(vehicle) = self.vehicles.get(&key) {
+                    if let Some(vehicle) = self.vehicles.get(key) {
                         effects.push(Effect::MagCal {
                             vehicle_id: vehicle.observation.id.clone(),
                             report: MagCal::Progress {
@@ -1247,7 +1263,7 @@ impl Session {
                     fitness,
                     offsets,
                 } => {
-                    if let Some(vehicle) = self.vehicles.get(&key) {
+                    if let Some(vehicle) = self.vehicles.get(key) {
                         effects.push(Effect::MagCal {
                             vehicle_id: vehicle.observation.id.clone(),
                             report: MagCal::Report {
@@ -1263,7 +1279,7 @@ impl Session {
                 }
                 ref message @ Message::AdsbVehicle { .. } => {
                     if let (Some(vehicle), Some(report)) = (
-                        self.vehicles.get(&key),
+                        self.vehicles.get(key),
                         crate::traffic::report(message, received_us),
                     ) {
                         effects.push(Effect::Traffic {
@@ -1278,9 +1294,9 @@ impl Session {
                     spacing,
                     terrain_height,
                     ..
-                } if self.checked(&key, lat, lon) => {
+                } if self.checked(key, lat, lon) => {
                     // The answer to a check is not the ground under it.
-                    let vehicle_id = self.vehicles.get(&key).map(|v| v.observation.id.clone());
+                    let vehicle_id = self.vehicles.get(key).map(|v| v.observation.id.clone());
                     if let Some(vehicle_id) = vehicle_id {
                         effects.push(Effect::TerrainChecked {
                             vehicle_id,
@@ -1298,7 +1314,7 @@ impl Session {
                     | Message::AttitudeQuaternion { time_boot_ms, .. }
                     | Message::GlobalPositionInt { time_boot_ms, .. } = message
                     {
-                        effects.extend(self.boot_time(&key, time_boot_ms, received_us));
+                        effects.extend(self.boot_time(key, time_boot_ms, received_us));
                     }
                     if let Message::MissionCurrent {
                         state,
@@ -1311,7 +1327,7 @@ impl Session {
                     {
                         let ids = [u32::from(total), mission_id, fence_id, rally_id];
                         effects.extend(self.plan_ids(
-                            &key,
+                            key,
                             decoded.component_id,
                             ids,
                             state,
@@ -1320,13 +1336,13 @@ impl Session {
                     }
                     if let Message::Attitude { yaw, .. } = message
                         && yaw.is_finite()
-                        && let Some(vehicle) = self.vehicles.get_mut(&key)
+                        && let Some(vehicle) = self.vehicles.get_mut(key)
                     {
                         vehicle.heading =
                             Some((f64::from(yaw).to_degrees().rem_euclid(360.0), received_us));
                     }
-                    self.note_home(&key, &message, received_us);
-                    if let Some(vehicle) = self.vehicles.get_mut(&key) {
+                    self.note_home(key, &message, received_us);
+                    if let Some(vehicle) = self.vehicles.get_mut(key) {
                         vehicle.note_terrain(&message, received_us);
                         vehicle.tuning.take(&message, received_us);
                         let produced = vehicle.pending.items.len();
@@ -1348,6 +1364,7 @@ impl Session {
                 }
             }
         }
+        self.reading = (heard, address);
         effects.extend(self.rc_calibrations());
         self.reconcile(effects, processed_us)
     }
@@ -1481,21 +1498,20 @@ impl Session {
     /// on the same link with its system id. Anything else keeps its address.
     fn companion_address(
         &self,
-        key: (String, String, u8),
+        key: &(String, String, u8),
         component_id: u8,
-    ) -> (String, String, u8) {
-        if self.vehicles.contains_key(&key)
-            || !crate::computer::COMPUTER_IDS.contains(&component_id)
+    ) -> Option<(String, String, u8)> {
+        if self.vehicles.contains_key(key) || !crate::computer::COMPUTER_IDS.contains(&component_id)
         {
-            return key;
+            return None;
         }
         let mut same = self
             .vehicles
             .keys()
             .filter(|(link, _, system)| *link == key.0 && *system == key.2);
         match (same.next(), same.next()) {
-            (Some(vehicle), None) => vehicle.clone(),
-            _ => key,
+            (Some(vehicle), None) => Some(vehicle.clone()),
+            _ => None,
         }
     }
 
@@ -2071,11 +2087,7 @@ impl Session {
                     ..VehicleTelemetry::default()
                 };
                 // Newest wins: several frames of one kind in a tick coalesce.
-                telemetry.merge(&VehicleTelemetry {
-                    vehicle_id: String::new(),
-                    positions: produced.positions,
-                    items: produced.items,
-                });
+                telemetry.absorb(produced.positions, produced.items);
                 effects.push(Effect::Telemetry(telemetry));
             }
             effects.extend(vehicle.tuning_samples());

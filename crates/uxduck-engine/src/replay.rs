@@ -15,6 +15,8 @@
 //! the generation raised.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -37,6 +39,7 @@ use uxduck_core::domain::parameter::{ParamKind, Parameter};
 use uxduck_core::domain::telemetry::{
     AltitudeFrame, PositionEstimate, TelemetryItem, VehicleTelemetry, off_the_ground,
 };
+use uxduck_core::domain::tuning_response::Sample;
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change};
 use uxduck_mavlink::decode::Message;
@@ -46,7 +49,7 @@ use uxduck_mavlink::param_log::{self, Known, Timeline};
 use uxduck_mavlink::session::{Config, Effect, Observation, Session};
 
 use crate::rpc::handlers::to_value;
-use crate::runtime::ReplayRead;
+use crate::runtime::{ReplayRead, ReplayWork, ReplayWorked};
 use crate::{ConnectionId, Engine};
 
 /// A replay vehicle's link: no link entity, nothing open, nothing sent.
@@ -227,7 +230,7 @@ struct Hint {
     mission: Vec<uxduck_mavlink::decode::MissionItemInt>,
     /// The parameter frames of its link's log before it (ADR-0050 L7), as
     /// a tlog: where its vehicle's download usually is.
-    state_before: Vec<u8>,
+    state_before: Arc<Vec<u8>>,
     /// A `.bin`'s parameters' defaults, from its `PARM` records.
     param_defaults: BTreeMap<String, f32>,
 }
@@ -237,9 +240,12 @@ type Opened = (Vec<u8>, ReplaySource, Option<(u64, u64)>, Hint);
 
 /// One source as read, kept to build the replay again on an added source
 /// or a nudge.
+#[derive(Clone)]
 struct Input {
     source: ReplaySource,
-    bytes: Vec<u8>,
+    /// Shared with the replay it is the one source of, and with what reads
+    /// the log off the engine.
+    bytes: Arc<Vec<u8>>,
     range: Option<(u64, u64)>,
     hint: Hint,
     /// Recorded on this computer: on its clock.
@@ -260,26 +266,188 @@ struct Kept {
     saved: Vec<String>,
 }
 
-/// The parameters each source's log holds over time (ADR-0050 L3 to L7),
-/// on the replay's clock: from the part of its link's log before it, then
-/// its own. Only a uniquely identified autopilot's component supplies a
-/// system's set; a larger companion set is not evidence of identity.
-fn parameter_timelines(inputs: &[Input], sources: &[ReplaySource]) -> BTreeMap<Key, Timeline> {
-    let mut out = BTreeMap::new();
+/// A replay's log gone through off the engine (ADR-0039, long logs):
+/// everything of it that asks nothing of the engine's state.
+pub(crate) struct Prepared {
+    inputs: Vec<Input>,
+    /// Every source, on the replay's clock (R17).
+    sources: Vec<ReplaySource>,
+    bytes: Arc<Vec<u8>>,
+    records: Arc<Vec<Record>>,
+    /// The union of the sources' ranges.
+    start_us: u64,
+    end_us: u64,
+    found: Pass,
+    params: BTreeMap<Key, Timeline>,
+    missions: BTreeMap<Key, mission_log::Timeline>,
+}
+
+fn nothing_to_play() -> ApiError {
+    ApiError::new(
+        ErrorKind::NotFound,
+        "Nothing UXDuck can play was recorded there.",
+    )
+}
+
+/// What a request is told when its replay gave way before it was ready.
+fn gave_way(why: &str) -> ApiError {
+    ApiError::new(ErrorKind::VersionConflict, why)
+}
+
+/// Goes through the sources' logs: each on the replay's clock (R17), the
+/// union of their ranges, one pass over them all (R6), and the parameters
+/// and missions they hold. None when `cancelled` is set on the way: nobody
+/// waits for it.
+fn prepare(inputs: Vec<Input>, cancelled: &AtomicBool) -> Option<Result<Prepared, ApiError>> {
+    let mut joined = Vec::new();
+    let mut records: Vec<Record> = Vec::new();
+    let mut sources = Vec::new();
     for (index, input) in inputs.iter().enumerate() {
-        let Ok(source) = u16::try_from(index) else {
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        let mut own = index_of(&input.bytes);
+        let (Some(first), Some(last)) = (own.first().copied(), own.last().copied()) else {
             continue;
         };
-        let offset = sources.get(index).map_or(0, |s| s.offset_us);
+        let (matched, matched_us) = if input.here {
+            (ReplayMatch::SameComputer, 0)
+        } else if input.clock_from_flight {
+            (ReplayMatch::NotMatched, 0)
+        } else if let Some(gps) = gps_offset(&input.bytes, &own) {
+            (ReplayMatch::Gps, gps)
+        } else {
+            (ReplayMatch::NotMatched, 0)
+        };
+        let offset = matched_us.saturating_add(input.nudge_us);
         let shift = |stamp: u64| -> u64 {
             u64::try_from((i128::from(stamp) + i128::from(offset)).max(0)).unwrap_or(0)
         };
-        let records: Vec<(u64, &[u8])> = state_records(input)
-            .into_iter()
-            .map(|(stamp, frame)| (shift(stamp), frame))
+        // One source's log is the replay's as it is. Several are joined.
+        let base = if inputs.len() == 1 {
+            0
+        } else {
+            let base = joined.len();
+            joined.extend_from_slice(&input.bytes);
+            base
+        };
+        let (from, to) = input.range.map_or((first.stamp, last.stamp), |(from, to)| {
+            (
+                from.max(first.stamp),
+                to.min(last.stamp).max(from.max(first.stamp)),
+            )
+        });
+        for record in &mut own {
+            record.stamp = shift(record.stamp);
+            record.at += base;
+            record.source = index;
+        }
+        if records.is_empty() {
+            records = own;
+        } else {
+            records.append(&mut own);
+        }
+        let mut source = input.source.clone();
+        source.start_us = shift(from);
+        source.end_us = shift(to);
+        source.matched = matched;
+        source.offset_us = offset;
+        source.nudge_us = input.nudge_us;
+        sources.push(source);
+    }
+    if sources.is_empty() {
+        return Some(Err(nothing_to_play()));
+    }
+    let bytes = match inputs.as_slice() {
+        [only] => Arc::clone(&only.bytes),
+        _ => Arc::new(joined),
+    };
+    records.sort_by_key(|r| r.stamp);
+    let start_us = sources.iter().map(|s| s.start_us).min().unwrap_or(0);
+    let end_us = sources.iter().map(|s| s.end_us).max().unwrap_or(start_us);
+    // Before the first record of a source, nothing of it plays.
+    records.retain(|r| {
+        sources
+            .get(usize::from(r.source))
+            .is_some_and(|s| r.stamp >= s.start_us && r.stamp <= s.end_us)
+    });
+    let found = pass(&bytes, &records, cancelled)?;
+    let (params, missions) = {
+        let state: Vec<Vec<(u64, &[u8])>> = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                state_records(input, sources.get(index).map_or(0, |s| s.offset_us))
+            })
             .collect();
+        let params = parameter_timelines(&inputs, &state);
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        (params, mission_timelines(&inputs, &state))
+    };
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(Ok(Prepared {
+        inputs,
+        sources,
+        bytes,
+        records: Arc::new(records),
+        start_us,
+        end_us,
+        found,
+        params,
+        missions,
+    }))
+}
+
+/// A replay being made off the engine (ADR-0039, long logs).
+struct Building {
+    /// Which one it is: work on another is dropped when it comes.
+    id: u64,
+    /// Set when it is not wanted any more: its work stops.
+    cancelled: Arc<AtomicBool>,
+    /// Its sources, for a change made on top of it.
+    inputs: Vec<Input>,
+    /// The requests it answers, with the replay as it then is.
+    replies: Vec<(ConnectionId, Value)>,
+    then: Then,
+}
+
+/// What a replay being made is for.
+#[derive(Clone, Copy)]
+enum Then {
+    /// `replay/open`: it takes the open one's place, at `time_us` when given.
+    Open { time_us: Option<u64> },
+    /// A source added or nudged: the open one built again with its clock
+    /// where it was, and its nudges kept in its operation for `offsets_of`.
+    Rebuild { offsets_of: Option<ConnectionId> },
+}
+
+/// What the host's work on a log made ([`ReplayWork`]). None inside:
+/// stopped on the way, since nobody waits for it.
+pub(crate) enum Worked {
+    Built {
+        id: u64,
+        prepared: Option<Result<Box<Prepared>, ApiError>>,
+    },
+    Series {
+        reply: Option<(ConnectionId, Value)>,
+        result: Option<FlightSeriesResult>,
+    },
+}
+
+/// The parameters each source's log holds over time (ADR-0050 L3 to L7),
+/// on the replay's clock, from its [`state_records`]. Only a uniquely
+/// identified autopilot's component supplies a system's set; a larger
+/// companion set is not evidence of identity.
+fn parameter_timelines(inputs: &[Input], state: &[Vec<(u64, &[u8])>]) -> BTreeMap<Key, Timeline> {
+    let mut out = BTreeMap::new();
+    for (index, (input, records)) in inputs.iter().zip(state).enumerate() {
+        let Ok(source) = u16::try_from(index) else {
+            continue;
+        };
         let mut autopilots: BTreeMap<u8, BTreeSet<u8>> = BTreeMap::new();
-        for (_, frame) in &records {
+        for (_, frame) in records {
             if uxduck_mavlink::framing::header(frame).is_none_or(|h| h.message_id != 0) {
                 continue;
             }
@@ -299,7 +467,7 @@ fn parameter_timelines(inputs: &[Input], sources: &[ReplaySource]) -> BTreeMap<K
                     .insert(decoded.component_id);
             }
         }
-        for ((system, component), mut timeline) in param_log::timelines(&records) {
+        for ((system, component), mut timeline) in param_log::timelines(records) {
             if autopilots
                 .get(&system)
                 .is_none_or(|components| components.len() != 1 || !components.contains(&component))
@@ -318,41 +486,45 @@ fn parameter_timelines(inputs: &[Input], sources: &[ReplaySource]) -> BTreeMap<K
     out
 }
 
-fn state_records(input: &Input) -> Vec<(u64, &[u8])> {
-    let own = uxduck_mavlink::tlog::read(&input.bytes);
-    let present: std::collections::HashSet<_> = own.iter().copied().collect();
-    let mut records: Vec<_> = uxduck_mavlink::tlog::read(&input.hint.state_before)
-        .into_iter()
-        .filter(|record| !present.contains(record))
-        .chain(own)
-        .collect();
+/// A source's records for its recorded state, in time order on the
+/// replay's clock (`offset_us` from its own): the part of its link's log
+/// before it (ADR-0050 L7), then its own.
+fn state_records(input: &Input, offset_us: i64) -> Vec<(u64, &[u8])> {
+    let before = uxduck_mavlink::tlog::read(&input.hint.state_before);
+    let mut records: Vec<(u64, &[u8])> = Vec::new();
+    // A record in both is its own. Only its records no later than the last
+    // one before it can be in both, so a long log is not gone through for
+    // the few that are.
+    if let Some(last) = before.iter().map(|(stamp, _)| *stamp).max() {
+        let present: std::collections::HashSet<(u64, &[u8])> =
+            uxduck_mavlink::tlog::records(&input.bytes)
+                .filter(|(stamp, _)| *stamp <= last)
+                .collect();
+        records.extend(before.into_iter().filter(|r| !present.contains(r)));
+    }
+    records.extend(uxduck_mavlink::tlog::records(&input.bytes));
     records.sort_by_key(|(stamp, _)| *stamp);
+    for (stamp, _) in &mut records {
+        *stamp = u64::try_from((i128::from(*stamp) + i128::from(offset_us)).max(0)).unwrap_or(0);
+    }
     records
 }
 
+/// The mission each source's telemetry log holds over time (FB-122), from
+/// its [`state_records`]. A DataFlash log gives its mission whole instead.
 fn mission_timelines(
     inputs: &[Input],
-    sources: &[ReplaySource],
+    state: &[Vec<(u64, &[u8])>],
 ) -> BTreeMap<Key, mission_log::Timeline> {
     let mut out = BTreeMap::new();
-    for (index, input) in inputs.iter().enumerate() {
+    for (index, (input, records)) in inputs.iter().zip(state).enumerate() {
         if input.hint.log.is_some() {
             continue;
         }
         let Ok(source) = u16::try_from(index) else {
             continue;
         };
-        let offset = sources.get(index).map_or(0, |s| s.offset_us);
-        let records: Vec<_> = state_records(input)
-            .into_iter()
-            .map(|(stamp, frame)| {
-                (
-                    u64::try_from((i128::from(stamp) + i128::from(offset)).max(0)).unwrap_or(0),
-                    frame,
-                )
-            })
-            .collect();
-        for ((system, _), timeline) in mission_log::timelines(&records) {
+        for ((system, _), timeline) in mission_log::timelines(records) {
             out.insert((source, system), timeline);
         }
     }
@@ -437,8 +609,20 @@ struct Replay {
     inputs: Vec<Input>,
     gaps: Vec<ReplayGap>,
     clock: ReplayClock,
-    bytes: Vec<u8>,
-    records: Vec<Record>,
+    /// Its log, shared with what reads it off the engine (`flight/series`).
+    bytes: Arc<Vec<u8>>,
+    records: Arc<Vec<Record>>,
+    /// Each source's link in the session, by its number.
+    links: Vec<String>,
+    /// Set when it is unloaded: work on its log stops.
+    gone: Arc<AtomicBool>,
+    /// Where a seek starts from instead of the range's start (R4), in
+    /// the order of the log.
+    checkpoints: Vec<Checkpoint>,
+    /// Every message the log's vehicles said, in its order.
+    texts: Vec<Said>,
+    /// A checkpoint taken up, for the batch fed on from it.
+    resumed: Option<Resumed>,
     start_us: u64,
     end_us: u64,
     /// The clock.
@@ -512,19 +696,48 @@ impl Replay {
         }
     }
 
+    /// Starts from the last checkpoint at or before `t` when it is further
+    /// on than `past` records (R4): the session as it was there, and what a
+    /// batch fed from the range's start holds by then, for the batch fed on
+    /// from it. With `past` nothing, that batch is the whole prefix.
+    fn resume(&mut self, t: u64, past: usize) -> bool {
+        let before = self.checkpoints.partition_point(|c| c.at_us <= t);
+        let Some(checkpoint) = before
+            .checked_sub(1)
+            .and_then(|i| self.checkpoints.get(i))
+            .filter(|c| c.next > past)
+        else {
+            return false;
+        };
+        self.session = checkpoint.session.clone();
+        self.session_ids.clone_from(&checkpoint.ids);
+        self.next = checkpoint.next;
+        self.last_tick = checkpoint.last_tick;
+        // The messages said while the records past `past` were fed.
+        let said = self.texts.partition_point(|said| said.fed <= past);
+        self.resumed = Some(Resumed {
+            whole: past == 0,
+            seen: checkpoint.seen.clone(),
+            telemetry: checkpoint.telemetry.clone(),
+            tuning: checkpoint.tuning.clone(),
+            texts: said.min(checkpoint.texts)..checkpoint.texts,
+        });
+        true
+    }
+
     /// Feeds the records up to `t`, returning the session's effects.
-    fn feed(&mut self, t: u64) -> Vec<Effect> {
+    /// `taken_up`: from a checkpoint, so what was fed before it counts.
+    fn feed(&mut self, t: u64, taken_up: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         let first = self.next;
         while let Some(&record) = self.records.get(self.next) {
             if record.stamp > t {
                 break;
             }
-            let frame = self.bytes[record.at..record.at + record.len].to_vec();
             effects.extend(self.session.ingest(
-                &link_of(record.source),
+                &self.links[usize::from(record.source)],
                 PEER,
-                &frame,
+                &self.bytes[record.at..record.at + record.len],
                 record.stamp,
             ));
             if tick_due(&self.records, self.next, self.last_tick) {
@@ -536,7 +749,7 @@ impl Replay {
         // What is pending goes out now, at the last record fed: also when
         // it came at the moment of the last tick, after it, as a position
         // logged with the first heartbeat does.
-        if self.next > first {
+        if self.next > first || (taken_up && self.next > 0) {
             let last = self.records[self.next - 1].stamp;
             effects.extend(self.session.tick(last));
             self.last_tick = last;
@@ -583,6 +796,9 @@ pub(crate) struct Replays {
     pub(crate) now_us: Option<u64>,
     /// Account logs being joined for a replay, by account order (R12).
     pub(crate) awaiting: BTreeMap<String, (ConnectionId, ReplayOpenParams)>,
+    /// The replay being made off the engine, and how many were.
+    building: Option<Building>,
+    builds: u64,
 }
 
 impl std::fmt::Debug for Replays {
@@ -637,17 +853,17 @@ const BOOT_FIRST: [u32; 5] = [29, 30, 32, 33, 65];
 /// `time_boot_ms` heard before it. None when its stamps are good, or it
 /// gives no time since boot either.
 fn on_boot_time(bytes: &[u8]) -> Option<Vec<u8>> {
-    let records = uxduck_mavlink::tlog::read(bytes);
-    let sane = records
-        .iter()
-        .filter(|(stamp, _)| uxduck_mavlink::tlog::sane(*stamp))
-        .count();
-    if records.is_empty() || sane * 2 > records.len() {
+    let (mut records, mut sane) = (0usize, 0usize);
+    for (stamp, _) in uxduck_mavlink::tlog::records(bytes) {
+        records += 1;
+        sane += usize::from(uxduck_mavlink::tlog::sane(stamp));
+    }
+    if records == 0 || sane * 2 > records {
         return None;
     }
     let mut boot_us: Option<u64> = None;
     let mut out = Vec::with_capacity(bytes.len());
-    for (_, frame) in &records {
+    for (_, frame) in uxduck_mavlink::tlog::records(bytes) {
         let header = uxduck_mavlink::framing::header(frame);
         if let (Some(header), Some(payload)) = (header, uxduck_mavlink::framing::payload(frame))
             && BOOT_FIRST.contains(&header.message_id)
@@ -670,8 +886,7 @@ fn index_of(bytes: &[u8]) -> Vec<Record> {
 /// A log's records in time order.
 fn index(bytes: &[u8]) -> Vec<Record> {
     let base = bytes.as_ptr() as usize;
-    let mut records: Vec<Record> = uxduck_mavlink::tlog::read(bytes)
-        .into_iter()
+    let mut records: Vec<Record> = uxduck_mavlink::tlog::records(bytes)
         .map(|(stamp, frame)| Record {
             stamp,
             at: frame.as_ptr() as usize - base,
@@ -741,7 +956,7 @@ impl Pass {
 }
 
 /// What one pass over a log finds (R6): the vehicles heard, the marks and
-/// each vehicle's whole path.
+/// each vehicle's whole path, and where a seek may start from (R4).
 #[derive(Default)]
 struct Pass {
     /// By key: the session's last id for it.
@@ -760,39 +975,123 @@ struct Pass {
     paths: BTreeMap<Key, Vec<ReplayPathPoint>>,
     /// Every position each vehicle logged, oldest first.
     motion: BTreeMap<Key, Vec<ReplayMotionSample>>,
+    /// Where a seek starts from, in the log's order. None for a short
+    /// log, or one whose vehicles the pass could not keep apart as a batch
+    /// fed from the range's start does ([`Scan::exact`]).
+    checkpoints: Vec<Checkpoint>,
+    /// Every message the vehicles said, in the log's order.
+    texts: Vec<Said>,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one pass, one arm per kind of effect"
-)]
-fn pass(bytes: &[u8], records: &[Record]) -> Pass {
-    #[derive(Default)]
-    struct Track {
-        armed: bool,
-        mode: Option<(String, u64)>,
-        air: Option<u64>,
-        in_air: bool,
-        telemetry: VehicleTelemetry,
-        /// Its latest attitude items, for each position's sample.
-        attitude: Vec<TelemetryItem>,
-        /// The mission step it last reached, and when.
-        reached: Option<(i64, u64)>,
-        last_point: u64,
-        last: u64,
-    }
-    let mut out = Pass::default();
-    let mut session = Session::for_replay(Config::default());
-    let mut ids: HashMap<String, Key> = HashMap::new();
-    let mut tracks: BTreeMap<Key, Track> = BTreeMap::new();
-    let mut last_tick = 0u64;
-    let mut handle = |effects: Vec<Effect>, at: u64, out: &mut Pass| {
+/// A message a vehicle said in the log.
+#[derive(Clone)]
+struct Said {
+    /// How many of the log's records were fed when it came.
+    fed: usize,
+    key: Key,
+    component_id: u8,
+    severity: u8,
+    text: String,
+}
+
+/// The replay as it is once the log's first `next` records are fed (R4):
+/// a seek feeds on from the last one before its time instead of from the
+/// range's start. Taken by the pass that opens the replay, whose session is
+/// fed as the replay's is.
+struct Checkpoint {
+    next: usize,
+    /// The last of those records' stamps.
+    at_us: u64,
+    session: Session,
+    last_tick: u64,
+    /// The session's ids by then, and their keys.
+    ids: HashMap<String, Key>,
+    /// What a batch fed from the range's start holds by then: each
+    /// vehicle as last observed, its telemetry merged, and the last minute
+    /// of its rate controller samples.
+    seen: BTreeMap<Key, Observation>,
+    telemetry: BTreeMap<Key, VehicleTelemetry>,
+    tuning: BTreeMap<Key, Vec<Sample>>,
+    /// How many of the log's messages came before it.
+    texts: usize,
+}
+
+/// What a checkpoint taken up gives the batch fed on from it.
+struct Resumed {
+    /// From the range's start: the batch is the whole prefix.
+    whole: bool,
+    seen: BTreeMap<Key, Observation>,
+    telemetry: BTreeMap<Key, VehicleTelemetry>,
+    tuning: BTreeMap<Key, Vec<Sample>>,
+    /// The log's messages the batch begins with.
+    texts: std::ops::Range<usize>,
+}
+
+/// A checkpoint at least every so many records: a seek then feeds no more
+/// than about a tenth of a second's work.
+const CHECKPOINT_RECORDS: usize = 20_000;
+/// The most checkpoints a log keeps, each a session and its vehicles'
+/// telemetry: a longer log has them further apart.
+const CHECKPOINTS: usize = 128;
+
+/// How many records apart a log's checkpoints are.
+fn checkpoint_every(records: usize) -> usize {
+    (records / CHECKPOINTS).max(CHECKPOINT_RECORDS)
+}
+
+/// A vehicle as the pass follows it.
+#[derive(Default)]
+struct Track {
+    armed: bool,
+    mode: Option<(String, u64)>,
+    air: Option<u64>,
+    in_air: bool,
+    telemetry: VehicleTelemetry,
+    /// Its latest attitude items, for each position's sample.
+    attitude: Vec<TelemetryItem>,
+    /// The mission step it last reached, and when.
+    reached: Option<(i64, u64)>,
+    /// Its rate controller samples of the last minute, as the response
+    /// graph keeps them (S330).
+    tuning: std::collections::VecDeque<Sample>,
+    last_point: u64,
+    last: u64,
+}
+
+/// One pass over a log, as it goes.
+struct Scan {
+    out: Pass,
+    ids: HashMap<String, Key>,
+    tracks: BTreeMap<Key, Track>,
+    /// Whether every effect so far named a vehicle already heard, by an id
+    /// that was never another vehicle's. A batch fed from the range's start
+    /// gives each vehicle what was said under the ids it has by the batch's
+    /// end. While this holds that is what the pass gave it as it went, so
+    /// its checkpoints hold what such a batch does.
+    exact: bool,
+}
+
+impl Scan {
+    /// The session's effects of the record fed last, the `fed`th.
+    #[allow(clippy::too_many_lines, reason = "one arm per kind of effect")]
+    fn take(&mut self, effects: Vec<Effect>, at: u64, fed: usize) {
+        let Self {
+            out,
+            ids,
+            tracks,
+            exact,
+        } = self;
         for effect in effects {
             match effect {
                 Effect::Vehicle(seen) => {
                     let system = (source_of(&seen.link_id), seen.system_id);
                     for id in std::iter::once(&seen.id).chain(&seen.aliases) {
-                        ids.insert(id.clone(), system);
+                        if ids
+                            .insert(id.clone(), system)
+                            .is_some_and(|was| was != system)
+                        {
+                            *exact = false;
+                        }
                     }
                     out.heard.insert(system, seen.id.clone());
                     if let Some(uid) = &seen.uid {
@@ -826,6 +1125,7 @@ fn pass(bytes: &[u8], records: &[Record]) -> Pass {
                 }
                 Effect::Telemetry(update) => {
                     let Some(&system) = ids.get(&update.vehicle_id) else {
+                        *exact = false;
                         continue;
                     };
                     if !update.positions.is_empty() {
@@ -918,25 +1218,51 @@ fn pass(bytes: &[u8], records: &[Record]) -> Pass {
                         });
                     }
                 }
-                Effect::StatusText {
+                Effect::TuningSamples {
                     vehicle_id,
-                    severity,
-                    text,
-                    ..
-                } if severity <= WARNING => {
+                    samples,
+                } => {
                     let Some(&system) = ids.get(&vehicle_id) else {
+                        *exact = false;
                         continue;
                     };
-                    out.marks.push((
-                        system,
-                        ReplayMark {
-                            kind: ReplayMarkKind::Message,
-                            at_us: at,
-                            text: Some(text),
-                            severity: Some(severity),
-                            ..ReplayMark::default()
-                        },
-                    ));
+                    let kept = &mut tracks.entry(system).or_default().tuning;
+                    kept.extend(samples);
+                    let newest = kept.iter().map(|s| s.t_us).max().unwrap_or(0);
+                    let keep = newest.saturating_sub(crate::tuning::KEEP_US);
+                    while kept.front().is_some_and(|s| s.t_us < keep) {
+                        kept.pop_front();
+                    }
+                }
+                Effect::StatusText {
+                    vehicle_id,
+                    component_id,
+                    severity,
+                    text,
+                } => {
+                    let Some(&system) = ids.get(&vehicle_id) else {
+                        *exact = false;
+                        continue;
+                    };
+                    if severity <= WARNING {
+                        out.marks.push((
+                            system,
+                            ReplayMark {
+                                kind: ReplayMarkKind::Message,
+                                at_us: at,
+                                text: Some(text.clone()),
+                                severity: Some(severity),
+                                ..ReplayMark::default()
+                            },
+                        ));
+                    }
+                    out.texts.push(Said {
+                        fed,
+                        key: system,
+                        component_id,
+                        severity,
+                        text,
+                    });
                 }
                 Effect::ParamValue {
                     vehicle_id, param, ..
@@ -948,34 +1274,99 @@ fn pass(bytes: &[u8], records: &[Record]) -> Pass {
                 _ => {}
             }
         }
+    }
+
+    /// The replay as it is now, `next` records in, kept for seeks.
+    fn checkpoint(&mut self, next: usize, at_us: u64, session: &Session, last_tick: u64) {
+        self.out.checkpoints.push(Checkpoint {
+            next,
+            at_us,
+            session: session.clone(),
+            last_tick,
+            ids: self.ids.clone(),
+            seen: self.out.observed.clone(),
+            telemetry: self
+                .tracks
+                .iter()
+                .filter(|(_, t)| !t.telemetry.positions.is_empty() || !t.telemetry.items.is_empty())
+                .map(|(key, t)| (*key, t.telemetry.clone()))
+                .collect(),
+            tuning: self
+                .tracks
+                .iter()
+                .filter(|(_, t)| !t.tuning.is_empty())
+                .map(|(key, t)| (*key, t.tuning.iter().copied().collect()))
+                .collect(),
+            texts: self.out.texts.len(),
+        });
+    }
+
+    fn finish(self) -> Pass {
+        let Self {
+            mut out,
+            tracks,
+            exact,
+            ..
+        } = self;
+        for (system, track) in tracks {
+            if let Some((mode, since)) = track.mode {
+                out.marks.push((system, mode_mark(mode, since, track.last)));
+            }
+            if let Some(from) = track.air {
+                out.marks.push((system, air_mark(from, track.last)));
+            }
+        }
+        out.marks.sort_by_key(|(_, m)| m.at_us);
+        for points in out.paths.values_mut() {
+            thin(points, PATH_POINTS);
+        }
+        if !exact {
+            out.checkpoints.clear();
+        }
+        out
+    }
+}
+
+/// How often a pass over a log looks whether it is still wanted.
+const LOOK_EVERY: usize = 4_096;
+
+/// One pass over a log, fed to a session as the replay feeds its own.
+/// None when `cancelled` is set on the way: nobody waits for it.
+fn pass(bytes: &[u8], records: &[Record], cancelled: &AtomicBool) -> Option<Pass> {
+    let mut scan = Scan {
+        out: Pass::default(),
+        ids: HashMap::new(),
+        tracks: BTreeMap::new(),
+        exact: true,
     };
+    let mut session = Session::for_replay(Config::default());
+    let links: Vec<String> = (0..=records.iter().map(|r| r.source).max().unwrap_or(0))
+        .map(link_of)
+        .collect();
+    let every = checkpoint_every(records.len());
+    let mut last_tick = 0u64;
     for (i, record) in records.iter().enumerate() {
+        if i % LOOK_EVERY == 0 && cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        if i > 0 && i % every == 0 {
+            scan.checkpoint(i, records[i - 1].stamp, &session, last_tick);
+        }
         let frame = &bytes[record.at..record.at + record.len];
-        let effects = session.ingest(&link_of(record.source), PEER, frame, record.stamp);
-        handle(effects, record.stamp, &mut out);
+        let link = &links[usize::from(record.source)];
+        let effects = session.ingest(link, PEER, frame, record.stamp);
+        scan.take(effects, record.stamp, i + 1);
         if tick_due(records, i, last_tick) {
             let effects = session.tick(record.stamp);
-            handle(effects, record.stamp, &mut out);
+            scan.take(effects, record.stamp, i + 1);
             last_tick = record.stamp;
         }
     }
     if let Some(last) = records.last() {
         let effects = session.tick(last.stamp);
-        handle(effects, last.stamp, &mut out);
+        scan.take(effects, last.stamp, records.len());
     }
-    for (system, track) in tracks {
-        if let Some((mode, since)) = track.mode {
-            out.marks.push((system, mode_mark(mode, since, track.last)));
-        }
-        if let Some(from) = track.air {
-            out.marks.push((system, air_mark(from, track.last)));
-        }
-    }
-    out.marks.sort_by_key(|(_, m)| m.at_us);
-    for points in out.paths.values_mut() {
-        thin(points, PATH_POINTS);
-    }
-    out
+    Some(scan.finish())
 }
 
 /// A vehicle as logged with `position`: there, facing its heading, else
@@ -1129,16 +1520,84 @@ fn frame_of(name: &str) -> Option<AltitudeFrame> {
     })
 }
 
+/// A replay vehicle's autopilot log fields as logged (R15): `df.` keys, on
+/// the replay's clock and within its source's range.
+fn log_series(log: &[u8], source: &ReplaySource, keys: &[String], max: usize) -> Vec<FlightSeries> {
+    let mut logged = if uxduck_mavlink::ulog::is_ulog(log) {
+        uxduck_mavlink::ulog::series(log, keys)
+    } else {
+        uxduck_mavlink::dataflash::series(log, keys)
+    };
+    keys.iter()
+        .filter_map(|key| {
+            let samples: Vec<FlightSample> = logged
+                .remove(key)?
+                .into_iter()
+                .map(|(stamp, value)| FlightSample {
+                    time_us: u64::try_from(
+                        (i128::from(stamp) + i128::from(source.offset_us)).max(0),
+                    )
+                    .unwrap_or(0),
+                    value,
+                })
+                .filter(|s| (source.start_us..=source.end_us).contains(&s.time_us))
+                .collect();
+            if samples.is_empty() {
+                return None;
+            }
+            let min = samples
+                .iter()
+                .min_by(|a, b| a.value.total_cmp(&b.value))
+                .cloned();
+            let max_sample = samples
+                .iter()
+                .max_by(|a, b| a.value.total_cmp(&b.value))
+                .cloned();
+            Some(FlightSeries {
+                key: key.clone(),
+                samples: thin_extremes(samples, max),
+                min,
+                max: max_sample,
+            })
+        })
+        .collect()
+}
+
+/// What `flight/series` answers: the series found, and the keys with none.
+fn series_result(
+    series: Vec<FlightSeries>,
+    keys: &[String],
+    start_us: u64,
+    end_us: u64,
+) -> FlightSeriesResult {
+    let missing_keys = keys
+        .iter()
+        .filter(|k| !series.iter().any(|s| s.key == **k))
+        .cloned()
+        .collect();
+    FlightSeriesResult {
+        start_us,
+        end_us,
+        series,
+        missing_keys,
+    }
+}
+
 /// One system's values for `keys` over a log (R13), each at most `max`
-/// points with the highs and lows kept.
+/// points with the highs and lows kept. None when `cancelled` is set on
+/// the way: nobody waits for them.
 fn series_of(
     bytes: &[u8],
     records: &[Record],
     system: Option<Key>,
     keys: &[String],
     max: usize,
-) -> Vec<FlightSeries> {
+    cancelled: &AtomicBool,
+) -> Option<Vec<FlightSeries>> {
     let mut session = Session::for_replay(Config::default());
+    let links: Vec<String> = (0..=records.iter().map(|r| r.source).max().unwrap_or(0))
+        .map(link_of)
+        .collect();
     let mut ids: HashMap<String, Key> = HashMap::new();
     let mut out: BTreeMap<&str, Vec<FlightSample>> = BTreeMap::new();
     let mut last_tick = 0u64;
@@ -1188,8 +1647,12 @@ fn series_of(
         }
     };
     for (i, record) in records.iter().enumerate() {
+        if i % LOOK_EVERY == 0 && cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let frame = &bytes[record.at..record.at + record.len];
-        let effects = session.ingest(&link_of(record.source), PEER, frame, record.stamp);
+        let link = &links[usize::from(record.source)];
+        let effects = session.ingest(link, PEER, frame, record.stamp);
         take(effects, record.stamp, &mut ids);
         if tick_due(records, i, last_tick) {
             let effects = session.tick(record.stamp);
@@ -1201,7 +1664,8 @@ fn series_of(
         let effects = session.tick(last.stamp);
         take(effects, last.stamp, &mut ids);
     }
-    keys.iter()
+    let series = keys
+        .iter()
         .filter_map(|key| {
             let samples = out.remove(key.as_str())?;
             let min = samples
@@ -1219,7 +1683,8 @@ fn series_of(
                 max: max_sample,
             })
         })
-        .collect()
+        .collect();
+    Some(series)
 }
 
 /// At most `n` samples: per bucket of the time, its lowest and highest in
@@ -1361,19 +1826,23 @@ impl Engine {
 
     pub(crate) fn open_replay(&mut self, params: &ReplayOpenParams) -> Result<(), ApiError> {
         let inputs = self.replay_inputs(params)?;
-        self.open_replay_inputs(inputs)
+        self.open_replay_inputs(inputs, params.time_us)
     }
 
-    fn open_replay_inputs(&mut self, inputs: Vec<Input>) -> Result<(), ApiError> {
+    /// Opens a replay of `inputs`, at `time_us` when given. Its logs are
+    /// gone through off the engine where the host can (ADR-0039, long
+    /// logs), and the request being handled is answered once it is open.
+    fn open_replay_inputs(
+        &mut self,
+        inputs: Vec<Input>,
+        time_us: Option<u64>,
+    ) -> Result<(), ApiError> {
         // A file with nothing to play leaves an open replay as it was.
         if inputs
             .iter()
-            .all(|i| uxduck_mavlink::tlog::read(&i.bytes).is_empty())
+            .all(|i| uxduck_mavlink::tlog::records(&i.bytes).next().is_none())
         {
-            return Err(ApiError::new(
-                ErrorKind::NotFound,
-                "Nothing UXDuck can play was recorded there.",
-            ));
+            return Err(nothing_to_play());
         }
         let mut inputs = inputs;
         // An operation's flights open as a person matched them (R17).
@@ -1387,8 +1856,155 @@ impl Engine {
                     .unwrap_or(0);
             }
         }
-        self.close_replay();
-        self.start_replay(inputs, None)
+        self.build_replay(inputs, Then::Open { time_us });
+        Ok(())
+    }
+
+    /// Makes a replay of `inputs` and does `then` with it, answering the
+    /// request being handled once that is done. One being made before
+    /// gives way and its work stops: a change on top of a change is
+    /// answered with it, and any other is told another took its place.
+    fn build_replay(&mut self, inputs: Vec<Input>, then: Then) {
+        let mut then = then;
+        let mut replies = Vec::new();
+        if let Some(was) = self.replays.building.take() {
+            was.cancelled.store(true, Ordering::Relaxed);
+            match (was.then, &mut then) {
+                (Then::Rebuild { offsets_of: before }, Then::Rebuild { offsets_of }) => {
+                    *offsets_of = offsets_of.or(before);
+                    replies = was.replies;
+                }
+                _ => self.answer_replay(
+                    was.replies,
+                    Some(&gave_way(
+                        "Another replay was opened before this one was ready.",
+                    )),
+                ),
+            }
+        }
+        replies.extend(self.replying_to.take());
+        self.replays.builds += 1;
+        let id = self.replays.builds;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.replays.building = Some(Building {
+            id,
+            cancelled: Arc::clone(&cancelled),
+            inputs: inputs.clone(),
+            replies,
+            then,
+        });
+        let work = ReplayWork::new(move || {
+            ReplayWorked(Worked::Built {
+                id,
+                prepared: prepare(inputs, &cancelled).map(|made| made.map(Box::new)),
+            })
+        });
+        if let Some(worked) = self.system.replay_work(work) {
+            self.replay_worked(worked);
+        }
+    }
+
+    /// Stops the replay being made, when one is, and tells its requests `why`.
+    fn stop_building(&mut self, why: &str) {
+        if let Some(was) = self.replays.building.take() {
+            was.cancelled.store(true, Ordering::Relaxed);
+            self.answer_replay(was.replies, Some(&gave_way(why)));
+        }
+    }
+
+    /// The host did work on a log ([`crate::runtime::System::replay_work`]):
+    /// a replay made is put to its use, and whoever asked is answered.
+    pub fn replay_worked(&mut self, worked: ReplayWorked) {
+        match worked.0 {
+            Worked::Built { id, prepared } => {
+                // One that gave way was answered when it did.
+                if self.replays.building.as_ref().is_none_or(|b| b.id != id) {
+                    return;
+                }
+                let Some(building) = self.replays.building.take() else {
+                    return;
+                };
+                let made = match prepared {
+                    Some(Ok(prepared)) => self.use_replay(*prepared, building.then),
+                    Some(Err(why)) => Err(why),
+                    None => Err(gave_way("The replay was stopped before it was ready.")),
+                };
+                self.answer_replay(building.replies, made.as_ref().err());
+            }
+            Worked::Series { reply, result } => {
+                let Some((connection, id)) = reply else {
+                    return;
+                };
+                let result = result.map_or_else(
+                    || {
+                        Err(ApiError::new(
+                            ErrorKind::NotFound,
+                            "The replay was closed before its values were read.",
+                        ))
+                    },
+                    |result| to_value(&result),
+                );
+                let frame = match result {
+                    Ok(result) => {
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                    }
+                    Err(why) => crate::rpc::router::error(&id, &why),
+                };
+                self.send(connection, &frame);
+            }
+        }
+    }
+
+    /// Puts a replay made to its use: opened in the open one's place, or
+    /// the open one built again with its clock where it is.
+    fn use_replay(&mut self, prepared: Prepared, then: Then) -> Result<(), ApiError> {
+        match then {
+            Then::Open { time_us } => {
+                self.close_replay();
+                self.install_replay(prepared, None);
+                if let Some(t) = time_us {
+                    self.seek_replay(t);
+                }
+            }
+            Then::Rebuild { offsets_of } => {
+                let now = self.clock.now_us();
+                let Some(replay) = self.replays.open.as_ref() else {
+                    return Err(ApiError::new(ErrorKind::NotFound, "No replay is open."));
+                };
+                let kept = Kept {
+                    name: replay.name.clone(),
+                    t_us: replay.running(now),
+                    speed: replay.speed,
+                    playing: replay.playing,
+                    generation: replay.generation,
+                    saved: replay.saved.clone(),
+                };
+                // Built again, never closed: a page that heard it close would
+                // give its selection to the live vehicles (UXD-189).
+                self.unload_replay();
+                self.install_replay(prepared, Some(&kept));
+                if let Some(connection) = offsets_of {
+                    self.keep_replay_offsets(connection);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Answers the requests a replay being made was to answer: with the
+    /// replay as it is now, or with why there is none.
+    fn answer_replay(&mut self, replies: Vec<(ConnectionId, Value)>, why: Option<&ApiError>) {
+        for (connection, id) in replies {
+            let state = match why {
+                Some(why) => Err(why.clone()),
+                None => to_value(&self.replay_state_for(connection, true)),
+            };
+            let frame = match state {
+                Ok(state) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": state }),
+                Err(why) => crate::rpc::router::error(&id, &why),
+            };
+            self.send(connection, &frame);
+        }
     }
 
     /// The operation a replay of several flights is: the one holding all
@@ -1505,14 +2121,14 @@ impl Engine {
                 .flight_bytes(&first, Some((from, to)), params.ground)
                 .map(|opened| {
                     let (bytes, source, range, mut hint) = opened;
-                    hint.state_before = state_before;
+                    hint.state_before = Arc::new(state_before);
                     let (bytes, range) = match on_boot_time(&bytes) {
                         Some(rebased) => (rebased, None),
                         None => (bytes, range),
                     };
                     Input {
                         source,
-                        bytes,
+                        bytes: Arc::new(bytes),
                         range,
                         hint,
                         here: true,
@@ -1538,7 +2154,7 @@ impl Engine {
     fn replay_input(&mut self, params: &ReplayOpenParams) -> Result<Input, ApiError> {
         let (bytes, source, range, mut hint) = self.replay_bytes(params)?;
         if let (Some(id), Some((from_us, _))) = (&source.flight_id, range) {
-            hint.state_before = self.state_before(id, from_us);
+            hint.state_before = Arc::new(self.state_before(id, from_us));
         }
         // Nonsense stamps: the vehicle's time since boot instead (R11).
         let (bytes, range) = match on_boot_time(&bytes) {
@@ -1549,7 +2165,7 @@ impl Engine {
         Ok(Input {
             flight_ids: source.flight_id.clone().into_iter().collect(),
             source,
-            bytes,
+            bytes: Arc::new(bytes),
             range,
             hint,
             here,
@@ -1558,83 +2174,31 @@ impl Engine {
         })
     }
 
-    /// Builds the replay from its sources: each on the replay's clock (R17),
-    /// the union of their ranges, the marks pass over them all. `keep`
-    /// carries the clock over an added source or a nudge.
+    /// Makes the replay of logs gone through ([`prepare`]): its range, its
+    /// vehicles named, its marks and its first moment. `keep` carries the
+    /// clock over an added source or a nudge.
     #[allow(clippy::too_many_lines, reason = "one replay from its sources")]
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "taken whole, as the sources are"
-    )]
-    fn start_replay(&mut self, inputs: Vec<Input>, keep: Option<Kept>) -> Result<(), ApiError> {
-        let mut bytes = Vec::new();
-        let mut records = Vec::new();
-        let mut sources = Vec::new();
-        for (index, input) in inputs.iter().enumerate() {
-            let index = u16::try_from(index).unwrap_or(u16::MAX);
-            let own = index_of(&input.bytes);
-            let (Some(first), Some(last)) = (own.first(), own.last()) else {
-                continue;
-            };
-            let (matched, matched_us) = if input.here {
-                (ReplayMatch::SameComputer, 0)
-            } else if input.clock_from_flight {
-                (ReplayMatch::NotMatched, 0)
-            } else if let Some(gps) = gps_offset(&input.bytes, &own) {
-                (ReplayMatch::Gps, gps)
-            } else {
-                (ReplayMatch::NotMatched, 0)
-            };
-            let offset = matched_us.saturating_add(input.nudge_us);
-            let shift = |stamp: u64| -> u64 {
-                u64::try_from((i128::from(stamp) + i128::from(offset)).max(0)).unwrap_or(0)
-            };
-            let base = bytes.len();
-            bytes.extend_from_slice(&input.bytes);
-            let (from, to) = input.range.map_or((first.stamp, last.stamp), |(from, to)| {
-                (
-                    from.max(first.stamp),
-                    to.min(last.stamp).max(from.max(first.stamp)),
-                )
-            });
-            for record in &own {
-                records.push(Record {
-                    stamp: shift(record.stamp),
-                    at: base + record.at,
-                    len: record.len,
-                    source: index,
-                });
-            }
-            let mut source = input.source.clone();
-            source.start_us = shift(from);
-            source.end_us = shift(to);
-            source.matched = matched;
-            source.offset_us = offset;
-            source.nudge_us = input.nudge_us;
-            sources.push(source);
-        }
-        if sources.is_empty() {
-            return Err(ApiError::new(
-                ErrorKind::NotFound,
-                "Nothing UXDuck can play was recorded there.",
-            ));
-        }
-        records.sort_by_key(|r| r.stamp);
-        let start_us = sources.iter().map(|s| s.start_us).min().unwrap_or(0);
-        let end_us = sources.iter().map(|s| s.end_us).max().unwrap_or(start_us);
-        // Before the first record of a source, nothing of it plays.
-        records.retain(|r| {
-            sources
-                .get(usize::from(r.source))
-                .is_some_and(|s| r.stamp >= s.start_us && r.stamp <= s.end_us)
-        });
+    fn install_replay(&mut self, prepared: Prepared, keep: Option<&Kept>) {
+        let Prepared {
+            inputs,
+            sources,
+            bytes,
+            records,
+            start_us,
+            end_us,
+            found,
+            params,
+            missions,
+        } = prepared;
         let clock = if uxduck_mavlink::tlog::sane(start_us) {
             ReplayClock::Wall
         } else {
             ReplayClock::Boot
         };
         let gaps = gaps_between(&sources);
-        let found = pass(&bytes, &records);
+        let links = (0..=u16::try_from(inputs.len().saturating_sub(1)).unwrap_or(u16::MAX))
+            .map(link_of)
+            .collect();
         // The range begins where a vehicle is first heard: before it there
         // is nothing to show.
         let starts = found.starts();
@@ -1645,7 +2209,7 @@ impl Engine {
             .map_or(start_us, |heard| heard.clamp(start_us, end_us));
         // It opens once the vehicles heard together at its start all are, a
         // fleet's first heartbeats a moment apart.
-        let first_moment = keep.as_ref().map_or_else(
+        let first_moment = keep.map_or_else(
             || {
                 let heard = found.opens();
                 let earliest = heard.iter().min().copied().unwrap_or(start_us);
@@ -1659,23 +2223,26 @@ impl Engine {
             },
             |k| k.t_us.clamp(start_us, end_us),
         );
-        let params = parameter_timelines(&inputs, &sources);
-        let missions = mission_timelines(&inputs, &sources);
         let mut replay = Replay {
             source: sources[0].clone(),
             sources,
             inputs: Vec::new(),
             gaps,
             clock,
-            bytes: Vec::new(),
-            records: Vec::new(),
+            bytes,
+            records,
+            links,
+            gone: Arc::new(AtomicBool::new(false)),
+            checkpoints: found.checkpoints,
+            texts: found.texts,
+            resumed: None,
             start_us,
             end_us,
             t_us: first_moment,
-            speed: keep.as_ref().map_or(1.0, |k| k.speed),
+            speed: keep.map_or(1.0, |k| k.speed),
             playing: false,
             anchor: (self.clock.now_us(), first_moment),
-            generation: keep.as_ref().map_or(1, |k| k.generation + 1),
+            generation: keep.map_or(1, |k| k.generation + 1),
             next: 0,
             session: Session::for_replay(Config::default()),
             last_tick: 0,
@@ -1686,8 +2253,8 @@ impl Engine {
             paths: Vec::new(),
             motion: BTreeMap::new(),
             recordings: Vec::new(),
-            saved: keep.as_ref().map(|k| k.saved.clone()).unwrap_or_default(),
-            name: keep.as_ref().and_then(|k| k.name.clone()),
+            saved: keep.map(|k| k.saved.clone()).unwrap_or_default(),
+            name: keep.and_then(|k| k.name.clone()),
             params,
             params_applied: BTreeMap::new(),
             missions,
@@ -1801,8 +2368,6 @@ impl Engine {
             })
             .collect();
         replay.recordings = self.replay_recordings(&replay);
-        replay.bytes = bytes;
-        replay.records = records;
         replay.inputs = inputs;
         self.replays.open = Some(replay);
         // Built again: the new generation first, so a client clears what it
@@ -1810,48 +2375,46 @@ impl Engine {
         if keep.is_some() {
             self.push_replay(false);
         }
-        // The first moment: the vehicles as they were when first heard.
+        // The first moment: the vehicles as they were when first heard, or
+        // where the clock was kept, from the last checkpoint before it.
+        if let Some(replay) = self.replays.open.as_mut() {
+            replay.resume(first_moment, 0);
+        }
         self.advance_replay(first_moment, true);
-        if keep.as_ref().is_some_and(|k| k.playing) {
+        if keep.is_some_and(|k| k.playing) {
             self.play_replay(true);
         }
         self.push_replay(true);
-        Ok(())
     }
 
     /// Adds a source to the replay open now (R17), or nudges one: built
-    /// again on one clock, the clock where it was.
+    /// again on one clock off the engine, the clock where it is by then. A
+    /// change made while another is being made goes on top of it.
+    /// `offsets_of` is who keeps the nudges in its operation.
     fn rebuild_sources(
         &mut self,
+        offsets_of: Option<ConnectionId>,
         change: impl FnOnce(&mut Vec<Input>) -> Result<(), ApiError>,
     ) -> Result<(), ApiError> {
-        let now = self.clock.now_us();
-        let Some(replay) = self.replays.open.as_mut() else {
+        let Some(replay) = self.replays.open.as_ref() else {
             return Err(ApiError::new(ErrorKind::NotFound, "No replay is open."));
         };
-        let mut inputs = std::mem::take(&mut replay.inputs);
-        let kept = Kept {
-            name: replay.name.clone(),
-            t_us: replay.running(now),
-            speed: replay.speed,
-            playing: replay.playing,
-            generation: replay.generation,
-            saved: replay.saved.clone(),
-        };
-        if let Err(why) = change(&mut inputs) {
-            if let Some(replay) = self.replays.open.as_mut() {
-                replay.inputs = inputs;
+        let mut inputs = match &self.replays.building {
+            Some(Building {
+                then: Then::Open { .. },
+                ..
+            }) => {
+                return Err(ApiError::new(
+                    ErrorKind::Busy,
+                    "Another replay is opening. Try again once it is open.",
+                ));
             }
-            return Err(why);
-        }
-        // Built again, never closed: a page that heard it close would
-        // give its selection to the live vehicles (UXD-189).
-        self.unload_replay();
-        let built = self.start_replay(inputs, Some(kept));
-        if built.is_err() {
-            self.push_replay(false);
-        }
-        built
+            Some(building) => building.inputs.clone(),
+            None => replay.inputs.clone(),
+        };
+        change(&mut inputs)?;
+        self.build_replay(inputs, Then::Rebuild { offsets_of });
+        Ok(())
     }
 
     /// The log's bytes, what it is, its range and who it names.
@@ -2424,12 +2987,14 @@ impl Engine {
             return;
         };
         replay.t_us = t;
-        // Fed from the range's start (opened, or rebuilt): the batch is the
-        // whole prefix. A long jump on is held too, but continues it.
-        let whole = replay.next == 0;
-        let effects = replay.feed(t);
+        // Fed from the range's start (opened, or rebuilt), or from a
+        // checkpoint that stands for it: the batch is the whole prefix. A
+        // long jump on is held too, but continues it.
+        let resumed = replay.resumed.take();
+        let whole = replay.next == 0 || resumed.as_ref().is_some_and(|r| r.whole);
+        let effects = replay.feed(t, resumed.is_some());
         self.replays.now_us = Some(t);
-        self.apply_replay(&mut replay, effects, held, whole);
+        self.apply_replay(&mut replay, effects, (held, whole), resumed);
         self.replays.now_us = None;
         // A vehicle whose sources have all ended is gone, as one not yet
         // heard is absent (R17).
@@ -2464,12 +3029,24 @@ impl Engine {
 
     /// The session's effects for replay vehicles: observations last of
     /// each, telemetry merged, messages in order; the rest goes nowhere.
-    fn apply_replay(&mut self, replay: &mut Replay, effects: Vec<Effect>, held: bool, whole: bool) {
-        let mut seen: BTreeMap<Key, Observation> = BTreeMap::new();
-        let mut telemetry: BTreeMap<Key, VehicleTelemetry> = BTreeMap::new();
+    /// `resumed` is what a checkpoint the batch was fed on from holds.
+    fn apply_replay(
+        &mut self,
+        replay: &mut Replay,
+        effects: Vec<Effect>,
+        (held, whole): (bool, bool),
+        resumed: Option<Resumed>,
+    ) {
+        let (mut seen, mut telemetry, mut tuning, said) = match resumed {
+            Some(resumed) => (
+                resumed.seen,
+                resumed.telemetry,
+                resumed.tuning,
+                resumed.texts,
+            ),
+            None => (BTreeMap::new(), BTreeMap::new(), BTreeMap::new(), 0..0),
+        };
         let mut texts = Vec::new();
-        let mut tuning: BTreeMap<Key, Vec<uxduck_core::domain::tuning_response::Sample>> =
-            BTreeMap::new();
         // Who each session vehicle is, first: the session may say a
         // vehicle's first values before the observation naming it, as at
         // the replay's first moment.
@@ -2543,6 +3120,17 @@ impl Engine {
                 if let Some(timeline) = replay.params.get(system).filter(|_| held) {
                     self.replay_tuning_marks(&identity.replay_id, timeline);
                 }
+            }
+        }
+        // What the log's vehicles said before the checkpoint, then since.
+        for said in replay.texts.get(said).unwrap_or_default() {
+            if let Some(identity) = replay.vehicles.get(&said.key) {
+                self.vehicle_message(
+                    &identity.replay_id,
+                    said.component_id,
+                    said.severity,
+                    &said.text,
+                );
             }
         }
         for (system, component_id, severity, text) in texts {
@@ -2816,15 +3404,19 @@ impl Engine {
     }
 
     /// Back to the range's start and on to `t` (R4): a new session, the
-    /// effects held and applied once, the generation raised.
+    /// effects held and applied once, the generation raised. A long log
+    /// starts from its last checkpoint before `t`, which holds what feeding
+    /// from the range's start gives by then.
     fn rebuild_replay(&mut self, t: u64) {
         let Some(replay) = self.replays.open.as_mut() else {
             return;
         };
-        replay.session = Session::for_replay(Config::default());
-        replay.session_ids.clear();
-        replay.next = 0;
-        replay.last_tick = 0;
+        if !replay.resume(t, 0) {
+            replay.session = Session::for_replay(Config::default());
+            replay.session_ids.clear();
+            replay.next = 0;
+            replay.last_tick = 0;
+        }
         replay.generation += 1;
         let ids: Vec<String> = replay
             .vehicles
@@ -2879,8 +3471,12 @@ impl Engine {
         if back {
             self.rebuild_replay(t);
         } else {
-            // A long jump on is held as a rebuild is.
+            // A long jump on is held as a rebuild is, and goes on from the
+            // last checkpoint before `t` when that is further on.
             let held = t.saturating_sub(replay.t_us) > 5_000_000;
+            if held {
+                replay.resume(t, replay.next);
+            }
             self.advance_replay(t, held);
         }
         self.push_replay(false);
@@ -2947,6 +3543,8 @@ impl Engine {
         let Some(replay) = self.replays.open.take() else {
             return false;
         };
+        // Whatever still reads its log off the engine stops.
+        replay.gone.store(true, Ordering::Relaxed);
         let ids: Vec<String> = replay
             .vehicles
             .values()
@@ -3000,61 +3598,6 @@ impl Engine {
                 }),
             None => Ok(replay.focus),
         }
-    }
-
-    /// A replay vehicle's autopilot log fields as logged (R15): `df.` keys,
-    /// on the replay's clock and within its source's range.
-    fn log_series(
-        replay: &Replay,
-        system: Option<Key>,
-        keys: &[String],
-        max: usize,
-    ) -> Vec<FlightSeries> {
-        let index = usize::from(system.map_or(0, |s| s.0));
-        let (Some(log), Some(source)) = (
-            replay.inputs.get(index).and_then(|i| i.hint.log.as_ref()),
-            replay.sources.get(index),
-        ) else {
-            return Vec::new();
-        };
-        let mut logged = if uxduck_mavlink::ulog::is_ulog(log) {
-            uxduck_mavlink::ulog::series(log, keys)
-        } else {
-            uxduck_mavlink::dataflash::series(log, keys)
-        };
-        keys.iter()
-            .filter_map(|key| {
-                let samples: Vec<FlightSample> = logged
-                    .remove(key)?
-                    .into_iter()
-                    .map(|(stamp, value)| FlightSample {
-                        time_us: u64::try_from(
-                            (i128::from(stamp) + i128::from(source.offset_us)).max(0),
-                        )
-                        .unwrap_or(0),
-                        value,
-                    })
-                    .filter(|s| (source.start_us..=source.end_us).contains(&s.time_us))
-                    .collect();
-                if samples.is_empty() {
-                    return None;
-                }
-                let min = samples
-                    .iter()
-                    .min_by(|a, b| a.value.total_cmp(&b.value))
-                    .cloned();
-                let max_sample = samples
-                    .iter()
-                    .max_by(|a, b| a.value.total_cmp(&b.value))
-                    .cloned();
-                Some(FlightSeries {
-                    key: key.clone(),
-                    samples: thin_extremes(samples, max),
-                    min,
-                    max: max_sample,
-                })
-            })
-            .collect()
     }
 
     /// `replay/logFields` (R15): what a replay vehicle's autopilot log
@@ -3148,11 +3691,10 @@ impl Engine {
     }
 
     /// `flight/series` (R13): a flight's or a replay vehicle's values over
-    /// the whole range, from its log, without opening a replay.
-    fn flight_series(
-        &mut self,
-        params: &FlightSeriesParams,
-    ) -> Result<FlightSeriesResult, ApiError> {
+    /// the whole range, from its log, without opening a replay. The log is
+    /// read off the engine where the host can (ADR-0039, long logs), and
+    /// the request being handled is answered once it is.
+    fn flight_series(&mut self, params: &FlightSeriesParams) -> Result<(), ApiError> {
         if params.keys.is_empty() || params.keys.len() > MAX_SERIES {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -3163,56 +3705,63 @@ impl Engine {
             .max_points
             .map_or(1_000, |n| usize::try_from(n).unwrap_or(MAX_POINTS))
             .clamp(1, MAX_POINTS);
-        let (series, start_us, end_us) = if let Some(flight_id) = &params.flight_id {
-            let (bytes, _, range, hint) = self.replay_bytes(&ReplayOpenParams {
-                flight_id: Some(flight_id.clone()),
-                ..ReplayOpenParams::default()
-            })?;
-            let records = index(&bytes);
-            let system = hint.vehicle.as_ref().and_then(|v| v.1).map(|s| (0, s));
-            let (start, end) = range.unwrap_or_default();
-            (
-                series_of(&bytes, &records, system, &params.keys, max),
-                start,
-                end,
-            )
-        } else {
-            let replay = self.replays.open.as_ref().ok_or_else(|| {
-                ApiError::new(
-                    ErrorKind::NotFound,
-                    "give flightId, or open a replay and give one of its vehicles",
-                )
-            })?;
-            let system = Self::replay_vehicle_key(replay, params.vehicle_id.as_ref())?;
-            let (logged, telemetry): (Vec<String>, Vec<String>) = params
-                .keys
-                .iter()
-                .cloned()
-                .partition(|k| k.starts_with("df."));
-            let mut series = Self::log_series(replay, system, &logged, max);
-            if !telemetry.is_empty() {
-                series.extend(series_of(
-                    &replay.bytes,
-                    &replay.records,
-                    system,
-                    &telemetry,
-                    max,
-                ));
-            }
-            (series, replay.start_us, replay.end_us)
-        };
-        let missing_keys = params
-            .keys
-            .iter()
-            .filter(|k| !series.iter().any(|s| s.key == **k))
-            .cloned()
-            .collect();
-        Ok(FlightSeriesResult {
-            start_us,
-            end_us,
-            series,
-            missing_keys,
-        })
+        let keys = params.keys.clone();
+        let read: Box<dyn FnOnce() -> Option<FlightSeriesResult> + Send> =
+            if let Some(flight_id) = &params.flight_id {
+                let (bytes, _, range, hint) = self.replay_bytes(&ReplayOpenParams {
+                    flight_id: Some(flight_id.clone()),
+                    ..ReplayOpenParams::default()
+                })?;
+                let system = hint.vehicle.as_ref().and_then(|v| v.1).map(|s| (0, s));
+                let (start_us, end_us) = range.unwrap_or_default();
+                Box::new(move || {
+                    let records = index(&bytes);
+                    let wanted = AtomicBool::new(false);
+                    let series = series_of(&bytes, &records, system, &keys, max, &wanted)?;
+                    Some(series_result(series, &keys, start_us, end_us))
+                })
+            } else {
+                let replay = self.replays.open.as_ref().ok_or_else(|| {
+                    ApiError::new(
+                        ErrorKind::NotFound,
+                        "give flightId, or open a replay and give one of its vehicles",
+                    )
+                })?;
+                let system = Self::replay_vehicle_key(replay, params.vehicle_id.as_ref())?;
+                // Its source's DataFlash log, for its own fields (R15).
+                let source = usize::from(system.map_or(0, |s| s.0));
+                let log = replay
+                    .inputs
+                    .get(source)
+                    .and_then(|i| i.hint.log.clone())
+                    .zip(replay.sources.get(source).cloned());
+                let (bytes, records) = (Arc::clone(&replay.bytes), Arc::clone(&replay.records));
+                let gone = Arc::clone(&replay.gone);
+                let (start_us, end_us) = (replay.start_us, replay.end_us);
+                Box::new(move || {
+                    let (logged, telemetry): (Vec<String>, Vec<String>) =
+                        keys.iter().cloned().partition(|k| k.starts_with("df."));
+                    let mut series = log.map_or_else(Vec::new, |(log, source)| {
+                        log_series(&log, &source, &logged, max)
+                    });
+                    if !telemetry.is_empty() {
+                        series.extend(series_of(&bytes, &records, system, &telemetry, max, &gone)?);
+                    }
+                    (!gone.load(Ordering::Relaxed))
+                        .then(|| series_result(series, &keys, start_us, end_us))
+                })
+            };
+        let reply = self.replying_to.take();
+        let work = ReplayWork::new(move || {
+            ReplayWorked(Worked::Series {
+                reply,
+                result: read(),
+            })
+        });
+        if let Some(worked) = self.system.replay_work(work) {
+            self.replay_worked(worked);
+        }
+        Ok(())
     }
 
     /// `replay/save` (R11): the flights of an opened log kept for the
@@ -3367,9 +3916,7 @@ impl Engine {
             let offset = replay.sources[usize::from(key.0)].offset_us;
             let mut prefix = Vec::new();
             let mut prefix_bytes = 0;
-            for (stamp, frame) in state_records(input).into_iter().rev() {
-                let stamp =
-                    u64::try_from((i128::from(stamp) + i128::from(offset)).max(0)).unwrap_or(0);
+            for (stamp, frame) in state_records(input, offset).into_iter().rev() {
                 if stamp < beginning.saturating_sub(STATE_BEFORE_US) {
                     break;
                 }
@@ -3603,13 +4150,13 @@ impl Engine {
         self.push_replay(false);
     }
 
-    /// An account log joined on this computer: opened from its file.
+    /// An account log joined on this computer: opened from its file, and
+    /// the request being handled answered once it is open.
     pub(crate) fn account_log_joined(
         &mut self,
-        connection: ConnectionId,
         params: &ReplayOpenParams,
         joined: Result<Value, ApiError>,
-    ) -> Result<Value, ApiError> {
+    ) -> Result<(), ApiError> {
         let joined = joined?;
         let path = joined["path"].as_str().ok_or_else(|| {
             ApiError::new(ErrorKind::Internal, "the account's log was not joined")
@@ -3639,11 +4186,7 @@ impl Engine {
             input.source.vehicle_id = Some(flight.vehicle_id.clone());
             input.flight_ids.push(flight.id.clone());
         }
-        self.open_replay_inputs(vec![input])?;
-        if let Some(t) = params.time_us {
-            self.seek_replay(t);
-        }
-        to_value(&self.replay_state_for(connection, true))
+        self.open_replay_inputs(vec![input], params.time_us)
     }
 
     fn replay_state(&self, with_paths: bool) -> ReplayState {
@@ -3672,8 +4215,9 @@ impl Engine {
 
     /// `replay/startTogether` (R20): each source nudged so its flight
     /// begins when the first source's does. A flight begins at its first
-    /// arming, else at its source's first record.
-    fn start_together(&mut self) -> Result<(), ApiError> {
+    /// arming, else at its source's first record. Whether any was nudged:
+    /// the replay is then built again, and answers once it is.
+    fn start_together(&mut self, connection: ConnectionId) -> Result<bool, ApiError> {
         let Some(replay) = self.replays.open.as_ref() else {
             return Err(ApiError::new(ErrorKind::NotFound, "No replay is open."));
         };
@@ -3702,7 +4246,7 @@ impl Engine {
         };
         let count = u16::try_from(replay.sources.len()).unwrap_or(u16::MAX);
         let Some(target) = begins(0) else {
-            return Ok(());
+            return Ok(false);
         };
         let by: Vec<i64> = (0..count)
             .map(|i| {
@@ -3713,14 +4257,15 @@ impl Engine {
             })
             .collect();
         if by.iter().all(|&d| d == 0) {
-            return Ok(());
+            return Ok(false);
         }
-        self.rebuild_sources(|all| {
+        self.rebuild_sources(Some(connection), |all| {
             for (input, by) in all.iter_mut().zip(by) {
                 input.nudge_us = input.nudge_us.saturating_add(by);
             }
             Ok(())
-        })
+        })?;
+        Ok(true)
     }
 
     /// `replay/rename` (R21): an operation's replay renames the operation,
@@ -3827,7 +4372,9 @@ pub(crate) fn handle(
         ));
     }
     if let ClientRequest::FlightSeries(params) = &request {
-        return to_value(&engine.flight_series(params)?);
+        // Answered once its log is read.
+        engine.flight_series(params)?;
+        return Ok(Value::Null);
     }
     if let ClientRequest::ReplayLogFields(params) = &request {
         return to_value(&engine.replay_log_fields(params)?);
@@ -3883,24 +4430,22 @@ pub(crate) fn handle(
             engine.replays.awaiting.insert(id, (connection, params));
             return Ok(Value::Null);
         }
-        ClientRequest::ReplayOpen(params) => {
-            engine.open_replay_for(connection, &params)?;
-            if let Some(t) = params.time_us {
-                engine.seek_replay(t);
-            }
-        }
+        ClientRequest::ReplayOpen(params) => engine.open_replay_for(connection, &params)?,
         ClientRequest::ReplayState(Empty {}) => {}
-        ClientRequest::ReplayClose(Empty {}) => engine.close_replay(),
+        ClientRequest::ReplayClose(Empty {}) => {
+            engine.stop_building("The replay was closed before it was ready.");
+            engine.close_replay();
+        }
         _ if !opened => return Err(needs_open()),
         ClientRequest::ReplayAdd(params) => {
             let inputs = engine.replay_inputs(&params)?;
-            engine.rebuild_sources(move |all| {
+            engine.rebuild_sources(None, move |all| {
                 all.extend(inputs);
                 Ok(())
             })?;
         }
         ClientRequest::ReplayNudge(params) => {
-            engine.rebuild_sources(|all| {
+            engine.rebuild_sources(Some(connection), |all| {
                 let input = usize::try_from(params.source)
                     .ok()
                     .and_then(|i| all.get_mut(i))
@@ -3908,7 +4453,6 @@ pub(crate) fn handle(
                 input.nudge_us = input.nudge_us.saturating_add(params.by_us);
                 Ok(())
             })?;
-            engine.keep_replay_offsets(connection);
         }
         ClientRequest::ReplayPlay(Empty {}) => engine.play_replay(true),
         ClientRequest::ReplayPause(Empty {}) => engine.play_replay(false),
@@ -3925,8 +4469,9 @@ pub(crate) fn handle(
         }
         ClientRequest::ReplaySeek(params) => engine.seek_replay(params.time_us),
         ClientRequest::ReplayStartTogether(Empty {}) => {
-            engine.start_together()?;
-            engine.keep_replay_offsets(connection);
+            if !engine.start_together(connection)? {
+                engine.keep_replay_offsets(connection);
+            }
         }
         ClientRequest::ReplayRename(params) => engine.rename_replay(
             connection,
@@ -3935,12 +4480,27 @@ pub(crate) fn handle(
         )?,
         _ => return Err(ApiError::new(ErrorKind::Internal, "not a replay method")),
     }
+    // A replay being made answers once it is.
+    if engine.replying_to.is_none() {
+        return Ok(Value::Null);
+    }
     to_value(&engine.replay_state_for(connection, true))
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "a scenario and its fixture"
+)]
 mod tests {
+    use serde_json::json;
+    use uxduck_mavlink::{sim, tlog};
+
     use super::*;
+    use crate::mission_reads::fixtures::{Client, call, connect};
+    use crate::runtime::{Clock, Forget, Ports, Random, SerialPortInfo, System};
 
     #[test]
     fn thinning_keeps_both_ends() {
@@ -3950,5 +4510,335 @@ mod tests {
         let mut few = vec![1, 2, 3];
         thin(&mut few, 5);
         assert_eq!(few, [1, 2, 3]);
+    }
+
+    const T0: u64 = 1_790_000_000_000_000;
+    const S: u64 = 1_000_000;
+    /// How long the long log is.
+    const SECONDS: u64 = 2_700;
+    /// When its second vehicle is first heard.
+    const SECOND_FROM: u64 = 1_500;
+
+    struct Noon;
+
+    impl Clock for Noon {
+        fn now_us(&self) -> u64 {
+            T0 + 86_400 * S
+        }
+    }
+
+    struct Count(u8);
+
+    impl Random for Count {
+        fn fill(&mut self, bytes: &mut [u8]) {
+            for byte in bytes {
+                self.0 = self.0.wrapping_add(37);
+                *byte = self.0;
+            }
+        }
+    }
+
+    /// A host with one log, whatever is opened.
+    struct OneLog(Vec<u8>);
+
+    impl System for OneLog {
+        fn check_udp_bind(&self, _: &str, _: u16) -> Result<(), String> {
+            Ok(())
+        }
+        fn is_local_address(&self, _: &str) -> bool {
+            true
+        }
+        fn serial_ports(&self) -> Vec<SerialPortInfo> {
+            Vec::new()
+        }
+        fn wake_lock(&mut self, _: bool) {}
+        fn replay_read(&mut self, _: &ReplayRead) -> Result<Vec<u8>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Two vehicles' log, long enough for checkpoints. The first is heard
+    /// throughout, with all a replay shows of one: where it is and how it
+    /// lies, its rate controller's samples, what it says, its modes, a
+    /// mission step and a gain that changes. The second is first heard
+    /// `SECOND_FROM` seconds in.
+    fn long_log() -> Vec<u8> {
+        let mut log = Vec::new();
+        let mut sequence = 0u8;
+        let mut put = |at: u64, frame: Vec<u8>| tlog::record(&mut log, at, &frame).unwrap();
+        let mut next = || {
+            sequence = sequence.wrapping_add(1);
+            sequence
+        };
+        for second in 0..SECONDS {
+            let at = T0 + second * S;
+            let armed = (120..SECONDS - 120).contains(&second);
+            let mode = 4 + (second / 700 % 3) as u32;
+            put(at, sim::armed_heartbeat_frame(1, 1, next(), armed, mode));
+            if second == 0 || second == 1_400 {
+                let gain = if second == 0 { 0.135 } else { 0.405 };
+                let frame = sim::param_value_frame(1, 1, next(), "ATC_RAT_RLL_P", gain, 9, 1, 0);
+                put(at + 1, frame);
+            }
+            for fifth in 0..5u64 {
+                let at = at + 10 + fifth * 200_000;
+                let boot_ms = (second * 1_000 + fifth * 200) as u32;
+                let step = (second * 5 + fifth) as i32;
+                let height = 20_000 + (second % 60) as i32 * 500;
+                let frame = sim::global_position_at_frame(
+                    (1, next()),
+                    (515_000_000 + step * 10, -1_000_000 + step * 3),
+                    (100_000 + height, height),
+                    boot_ms,
+                );
+                put(at, frame);
+                let lean = (second % 40) as f32 - 20.0;
+                let frame = sim::attitude_frame((1, next()), (lean, lean / 2.0, 90.0), boot_ms);
+                put(at + 1, frame);
+                let wanted = (step % 17) as f32 / 10.0;
+                put(
+                    at + 2,
+                    sim::pid_tuning_frame((1, next()), 1, wanted, wanted * 0.9),
+                );
+            }
+            if second % 400 == 30 {
+                let severity = if second % 800 == 30 { 4 } else { 6 };
+                let text = format!("Note {second}");
+                put(
+                    at + 500_000,
+                    sim::status_text_frame(1, next(), severity, &text, (0, 0)),
+                );
+            }
+            if second % 900 == 450 {
+                let item = (second / 900 + 1) as u16;
+                put(
+                    at + 600_000,
+                    sim::mission_item_reached_frame(1, next(), item),
+                );
+            }
+            if second >= SECOND_FROM {
+                put(at + 700_000, sim::heartbeat_frame(2, 1, next()));
+                let frame = sim::global_position_at_frame(
+                    (2, next()),
+                    (516_000_000 + second as i32 * 10, -1_100_000),
+                    (130_000, 30_000),
+                    ((second - SECOND_FROM) * 1_000) as u32,
+                );
+                put(at + 700_001, frame);
+            }
+        }
+        log
+    }
+
+    /// What the engine holds of the replay and its vehicles, but for what
+    /// counts moves, changes and messages.
+    fn shown(engine: &mut Engine, ui: &mut Client) -> Value {
+        let ids: Vec<String> = engine
+            .state
+            .vehicles
+            .values()
+            .filter(|v| v.replay)
+            .map(|v| v.id.clone())
+            .collect();
+        let mut replay = serde_json::to_value(engine.replay_state_for(ui.id, true)).unwrap();
+        replay["generation"] = Value::Null;
+        let said: Vec<Value> = ids
+            .iter()
+            .flat_map(|id| {
+                let params =
+                    serde_json::from_value(json!({ "vehicleId": id, "raw": true, "limit": 2000 }))
+                        .unwrap();
+                engine.vehicle_messages(id, &params)
+            })
+            .map(|message| {
+                let mut message = serde_json::to_value(message).unwrap();
+                message["id"] = Value::Null;
+                message
+            })
+            .collect();
+        let parameters: Vec<Value> = ids
+            .iter()
+            .map(|id| call(engine, ui, "param/list", json!({ "vehicleId": id })))
+            .collect();
+        let vehicles: Vec<Value> = engine
+            .state
+            .vehicles
+            .values()
+            .filter(|v| v.replay)
+            .map(|vehicle| {
+                let mut vehicle = serde_json::to_value(vehicle).unwrap();
+                vehicle["version"] = Value::Null;
+                vehicle
+            })
+            .collect();
+        json!({
+            "replay": replay,
+            "vehicles": vehicles,
+            "telemetry": ids.iter().map(|id| engine.telemetry.get(id)).collect::<Vec<_>>(),
+            "said": said,
+            "tuning": format!("{:?}", engine.responses),
+            "parameters": parameters,
+        })
+    }
+
+    /// A log nobody waits for any more is not gone through: the pass and
+    /// a whole-flight reading stop where they are.
+    #[test]
+    fn work_on_a_log_stops_when_it_is_not_wanted() {
+        let log = long_log();
+        let records = index_of(&log);
+        let keys = ["speed.ground_mps".to_owned()];
+        let unwanted = AtomicBool::new(true);
+        assert!(pass(&log, &records, &unwanted).is_none());
+        assert!(series_of(&log, &records, None, &keys, 100, &unwanted).is_none());
+        let wanted = AtomicBool::new(false);
+        assert!(pass(&log, &records, &wanted).is_some());
+        assert!(series_of(&log, &records, None, &keys, 100, &wanted).is_some());
+    }
+
+    /// A value said before its vehicle was heard is one a batch fed from
+    /// the range's start gives that vehicle, and the pass could not: its
+    /// checkpoints go, and such a log's seeks start from the range's start.
+    #[test]
+    fn a_pass_that_could_not_place_a_value_keeps_no_checkpoints() {
+        let scan = || Scan {
+            out: Pass::default(),
+            ids: HashMap::new(),
+            tracks: BTreeMap::new(),
+            exact: true,
+        };
+        let session = Session::for_replay(Config::default());
+        let mut placed = scan();
+        placed.checkpoint(1, T0, &session, T0);
+        assert_eq!(placed.finish().checkpoints.len(), 1);
+        let mut unplaced = scan();
+        unplaced.checkpoint(1, T0, &session, T0);
+        unplaced.take(
+            vec![Effect::Telemetry(VehicleTelemetry {
+                vehicle_id: "never-heard".into(),
+                ..VehicleTelemetry::default()
+            })],
+            T0,
+            1,
+        );
+        assert!(unplaced.finish().checkpoints.is_empty());
+    }
+
+    /// Where two values differ, each with its path.
+    fn differences(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
+        match (a, b) {
+            (Value::Object(a), Value::Object(b)) => {
+                for key in a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))) {
+                    let (a, b) = (a.get(key), b.get(key));
+                    differences(
+                        &format!("{path}.{key}"),
+                        a.unwrap_or(&Value::Null),
+                        b.unwrap_or(&Value::Null),
+                        out,
+                    );
+                }
+            }
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
+                for (index, (a, b)) in a.iter().zip(b).enumerate() {
+                    differences(&format!("{path}[{index}]"), a, b, out);
+                }
+            }
+            _ if a == b => {}
+            _ => out.push(
+                format!("{path}: {a} is not {b}")
+                    .chars()
+                    .take(600)
+                    .collect(),
+            ),
+        }
+    }
+
+    /// R4: a seek that starts from a checkpoint leaves the engine as the
+    /// seek fed from the range's start does, back or on, with a vehicle
+    /// not heard yet, heard since the checkpoint, or heard before it.
+    #[test]
+    fn a_seek_from_a_checkpoint_leaves_what_a_seek_from_the_start_does() {
+        let mut engine = Engine::new(
+            crate::EngineConfig {
+                daemon_version: "0.15.0".into(),
+                capabilities: uxduck_contracts::dto::initialize::DaemonCapabilities::default(),
+                ui_url: "http://127.0.0.1:45000".into(),
+                checkpoint_every: 1_000,
+                models: vec![],
+                agent_provider: "fake".into(),
+                about: crate::HostAbout::default(),
+            },
+            Box::new(Noon),
+            Box::new(Count(0)),
+            Ports::with_persistence(Box::new(Forget)),
+            crate::Loaded::default(),
+        );
+        engine.system = Box::new(OneLog(long_log()));
+        let mut ui = connect(&mut engine, "operator-ui", Some(true));
+        let opened = call(
+            &mut engine,
+            &mut ui,
+            "replay/open",
+            json!({ "path": "/flights/long.tlog" }),
+        );
+        assert!(opened.get("result").is_some(), "{opened}");
+        let replay = engine.replays.open.as_ref().unwrap();
+        let start = replay.start_us;
+        let at: Vec<u64> = replay
+            .checkpoints
+            .iter()
+            .map(|c| (c.at_us - T0) / S)
+            .collect();
+        assert_eq!(at.len(), 2, "two checkpoints: {at:?}");
+        assert!(at[0] < 1_300 && (1_700..2_500).contains(&at[1]), "{at:?}");
+
+        // Before the first checkpoint, past it with one vehicle, past it
+        // with the second heard since, and past the one that holds both.
+        for second in [900, 1_300, 1_700, 2_500] {
+            let t = T0 + second * S;
+            let mut moves = Vec::new();
+            for from_checkpoints in [true, false] {
+                let replay = engine.replays.open.as_mut().unwrap();
+                let kept = if from_checkpoints {
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut replay.checkpoints)
+                };
+                engine.seek_replay(t + 10 * S);
+                engine.seek_replay(t);
+                let back = shown(&mut engine, &mut ui);
+                engine.seek_replay(t + 3 * S);
+                let played_on = shown(&mut engine, &mut ui);
+                engine.seek_replay(start);
+                engine.seek_replay(t);
+                // A jump on lists a vehicle's values as they came since it
+                // began, and from a checkpoint as they came since the
+                // log's start, as a seek back does: the same values.
+                let mut jumped_on = shown(&mut engine, &mut ui);
+                for telemetry in jumped_on["telemetry"].as_array_mut().unwrap() {
+                    let items = telemetry["items"].as_array_mut().unwrap();
+                    items.sort_by_key(|item| item["key"].to_string());
+                }
+                if !from_checkpoints {
+                    engine.replays.open.as_mut().unwrap().checkpoints = kept;
+                }
+                moves.push([back, played_on, jumped_on]);
+            }
+            let [from_checkpoints, from_the_start] = <[_; 2]>::try_from(moves).unwrap();
+            let heard = from_the_start[0]["vehicles"].as_array().unwrap().len();
+            assert_eq!(
+                heard,
+                if second < SECOND_FROM { 1 } else { 2 },
+                "{second} s"
+            );
+            for (how, (checkpointed, whole)) in ["back", "played on", "jumped on"]
+                .iter()
+                .zip(from_checkpoints.iter().zip(&from_the_start))
+            {
+                let mut differ = Vec::new();
+                differences("", checkpointed, whole, &mut differ);
+                assert!(differ.is_empty(), "{how} at {second} s: {differ:#?}");
+            }
+        }
     }
 }

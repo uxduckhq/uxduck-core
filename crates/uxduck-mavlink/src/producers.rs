@@ -722,6 +722,49 @@ impl Producer for Origin {
     }
 }
 
+/// Each output's key and label, written out: they are said for every
+/// `SERVO_OUTPUT_RAW` heard.
+const SERVOS: [(&str, &str); 16] = [
+    ("servo.1", "Servo 1"),
+    ("servo.2", "Servo 2"),
+    ("servo.3", "Servo 3"),
+    ("servo.4", "Servo 4"),
+    ("servo.5", "Servo 5"),
+    ("servo.6", "Servo 6"),
+    ("servo.7", "Servo 7"),
+    ("servo.8", "Servo 8"),
+    ("servo.9", "Servo 9"),
+    ("servo.10", "Servo 10"),
+    ("servo.11", "Servo 11"),
+    ("servo.12", "Servo 12"),
+    ("servo.13", "Servo 13"),
+    ("servo.14", "Servo 14"),
+    ("servo.15", "Servo 15"),
+    ("servo.16", "Servo 16"),
+];
+
+/// Each channel's key and label, as [`SERVOS`].
+const RC_CHANNELS: [(&str, &str); 18] = [
+    ("rc.1", "RC 1"),
+    ("rc.2", "RC 2"),
+    ("rc.3", "RC 3"),
+    ("rc.4", "RC 4"),
+    ("rc.5", "RC 5"),
+    ("rc.6", "RC 6"),
+    ("rc.7", "RC 7"),
+    ("rc.8", "RC 8"),
+    ("rc.9", "RC 9"),
+    ("rc.10", "RC 10"),
+    ("rc.11", "RC 11"),
+    ("rc.12", "RC 12"),
+    ("rc.13", "RC 13"),
+    ("rc.14", "RC 14"),
+    ("rc.15", "RC 15"),
+    ("rc.16", "RC 16"),
+    ("rc.17", "RC 17"),
+    ("rc.18", "RC 18"),
+];
+
 /// `SERVO_OUTPUT_RAW`: the outputs in use, as `servo.1` to `servo.16` in
 /// microseconds, which the 3D view turns into control surfaces, propellers
 /// and a simulated gripper's jaws (S35, S263), and `servo.time_s`, the
@@ -749,19 +792,12 @@ impl Producer for Servos {
             f64::from(*time_us) / 1_000_000.0,
             from,
         );
-        for (index, pulse) in servos
+        for (&(key, label), pulse) in SERVOS
             .iter()
-            .enumerate()
+            .zip(servos)
             .filter(|(_, p)| **p > 0 && **p != u16::MAX)
         {
-            let n = index + 1;
-            out.item(
-                &format!("servo.{n}"),
-                &format!("Servo {n}"),
-                Unit::None,
-                f64::from(*pulse),
-                from,
-            );
+            out.item(key, label, Unit::None, f64::from(*pulse), from);
         }
     }
 }
@@ -820,20 +856,13 @@ impl Producer for RcInputs {
             f64::from(*count),
             from,
         );
-        for (index, pulse) in channels
+        for (&(key, label), pulse) in RC_CHANNELS
             .iter()
-            .enumerate()
+            .zip(channels)
             .take(usize::from(*count))
             .filter(|(_, p)| **p > 0 && **p < u16::MAX)
         {
-            let n = index + 1;
-            out.item(
-                &format!("rc.{n}"),
-                &format!("RC {n}"),
-                Unit::None,
-                f64::from(*pulse),
-                from,
-            );
+            out.item(key, label, Unit::None, f64::from(*pulse), from);
         }
     }
 }
