@@ -131,6 +131,13 @@ impl Producer for Fused {
         if lat == 0 && lon == 0 {
             return; // No estimate yet.
         }
+        out.item(
+            "altitude.amsl_m",
+            "Altitude above sea level",
+            Unit::Meter,
+            f64::from(alt) / 1000.0,
+            (self.id(), component_id, now_us),
+        );
         let (north, east) = (f64::from(vx) / 100.0, f64::from(vy) / 100.0);
         out.positions.push(PositionEstimate {
             source: self.id().into(),
@@ -1545,6 +1552,17 @@ mod tests {
                 &mut out,
             );
             assert_eq!(out.positions.is_empty(), (lat, lon) == (0, 0));
+            let amsl = out.items.iter().find(|i| i.key == "altitude.amsl_m");
+            if (lat, lon) == (0, 0) {
+                assert_eq!(amsl, None, "no estimate, no altitude above sea level");
+            } else {
+                let amsl = amsl.unwrap();
+                assert_eq!(amsl.value, Some(578.0));
+                assert_eq!(amsl.label, "Altitude above sea level");
+                assert_eq!(amsl.unit, Unit::Meter);
+                assert_eq!(amsl.source, "fused");
+                assert_eq!((amsl.component_id, amsl.time_us), (42, 123));
+            }
             let altitude = out
                 .items
                 .iter()

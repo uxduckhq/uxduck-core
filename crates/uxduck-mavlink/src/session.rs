@@ -7,7 +7,9 @@ mod routes;
 
 use uxduck_core::domain::modes::AvailableMode;
 use uxduck_core::domain::parameter::same_value;
-use uxduck_core::domain::telemetry::{Altitude, AltitudeFrame, VehicleTelemetry};
+use uxduck_core::domain::telemetry::{
+    Altitude, AltitudeFrame, TelemetryItem, Unit, VehicleTelemetry,
+};
 
 use crate::decode::{Message, decode, firmware_commit, firmware_version};
 use crate::files::{self, FtpClient};
@@ -105,6 +107,9 @@ fn stream_rates(autopilot: &str) -> impl Iterator<Item = (u32, u32)> + use<> {
 /// A terrain report older than this no longer gives the fused position an
 /// above-ground altitude: the stream stopped, or the data went.
 const TERRAIN_FRESH_US: u64 = 5_000_000;
+
+/// The fused position's altitude above the ground, as an item.
+const ABOVE_TERRAIN: &str = "altitude.above_terrain_m";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -539,6 +544,9 @@ struct Vehicle {
     /// The terrain's height above mean sea level under the vehicle, from
     /// the latest `TERRAIN_REPORT` with data, and when it came.
     terrain: Option<(f64, u64)>,
+    /// It has sent a `TERRAIN_REPORT`, so a fused position without a fresh
+    /// terrain height has an unknown altitude above the ground.
+    terrain_heard: bool,
     /// The modes it lists itself (`AVAILABLE_MODES`), once every one has come.
     modes: Vec<AvailableMode>,
     /// The ones heard so far of a list being sent, by index.
@@ -625,6 +633,7 @@ impl Vehicle {
             position: None,
             heading: None,
             terrain: None,
+            terrain_heard: false,
             modes: Vec::new(),
             modes_heard: BTreeMap::new(),
             modes_seq: None,
@@ -704,6 +713,7 @@ impl Vehicle {
             ..
         } = message
         {
+            self.terrain_heard = true;
             self.terrain = (spacing > 0 && terrain_height.is_finite())
                 .then(|| (f64::from(terrain_height), now_us));
         }
@@ -712,37 +722,58 @@ impl Vehicle {
     /// Gives each fused position produced since the last tick its altitude
     /// above the ground, from its altitude above mean sea level and the
     /// terrain under it, as ArduPilot's own height above terrain is worked
-    /// out, while the terrain report is fresh.
+    /// out, while the terrain report is fresh. The same altitude is the
+    /// item `altitude.above_terrain_m`, so it can be charted and read by
+    /// key. Once the vehicle has sent terrain, a position without a fresh
+    /// terrain height gives the item no value rather than an old one.
     fn add_above_ground(&mut self, now_us: u64) {
-        let Some((terrain_m, at_us)) = self.terrain else {
-            return;
-        };
-        if now_us.saturating_sub(at_us) > TERRAIN_FRESH_US {
+        if !self.terrain_heard {
             return;
         }
-        for position in self
-            .pending
-            .positions
-            .iter_mut()
-            .filter(|p| p.source == "fused")
-        {
-            if position
-                .altitudes
-                .iter()
-                .any(|a| a.frame == AltitudeFrame::AboveGround)
+        let terrain_m = self
+            .terrain
+            .filter(|&(_, at_us)| now_us.saturating_sub(at_us) <= TERRAIN_FRESH_US)
+            .map(|(metres, _)| metres);
+        let Produced { positions, items } = &mut self.pending;
+        for position in positions.iter_mut().filter(|p| p.source == "fused") {
+            let done = items.iter().any(|i| {
+                i.key == ABOVE_TERRAIN
+                    && i.component_id == position.component_id
+                    && i.time_us == position.time_us
+            });
+            if done
+                || position
+                    .altitudes
+                    .iter()
+                    .any(|a| a.frame == AltitudeFrame::AboveGround)
             {
                 continue;
             }
-            if let Some(amsl) = position
+            let Some(amsl) = position
                 .altitudes
                 .iter()
                 .find(|a| a.frame == AltitudeFrame::Amsl)
-            {
+                .map(|a| a.meters)
+            else {
+                continue;
+            };
+            let meters = terrain_m.map(|terrain| amsl - terrain);
+            if let Some(meters) = meters {
                 position.altitudes.push(Altitude {
-                    meters: amsl.meters - terrain_m,
+                    meters,
                     frame: AltitudeFrame::AboveGround,
                 });
             }
+            items.push(TelemetryItem {
+                key: ABOVE_TERRAIN.into(),
+                label: "Altitude above terrain".into(),
+                unit: Unit::Meter,
+                value: meters,
+                text: None,
+                source: position.source.clone(),
+                component_id: position.component_id,
+                time_us: position.time_us,
+            });
         }
     }
 }
@@ -6783,6 +6814,17 @@ mod tests {
                 .and_then(|i| i.value)
                 .is_some_and(|v| (v - 580.0).abs() < 1e-3)
         );
+        // Every frame of the fused position is an item too (FB-191).
+        let altitude = |key: &str| {
+            t.items
+                .iter()
+                .find(|i| i.key == key)
+                .and_then(|i| i.value)
+                .unwrap_or(f64::NAN)
+        };
+        assert!((altitude("altitude.relative_m") - 30.0).abs() < 1e-3);
+        assert!((altitude("altitude.amsl_m") - fused.altitudes[0].meters).abs() < 1e-9);
+        assert!((altitude("altitude.above_terrain_m") - 34.0).abs() < 1e-3);
         let heading = fused.heading_deg.unwrap_or_default();
         assert!((heading - 180.0).abs() < 0.1, "{heading}");
         let item = |key: &str| t.items.iter().find(|i| i.key == key).cloned();
@@ -6820,6 +6862,88 @@ mod tests {
 
     /// Plays sends to the fake and its replies back until both are quiet;
     /// returns everything else that happened.
+    #[test]
+    fn the_altitude_above_terrain_item_has_no_value_without_fresh_terrain() {
+        use mavio::dialects::ardupilotmega::messages::TerrainReport;
+
+        let mut session = Session::new(Config::default());
+        let mut fake = FakeVehicle::new(1, 0xABCD);
+        let first = session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        converse(&mut session, &mut fake, first, 0);
+        let (lat, lon) = (-353_632_610, 1_491_652_300);
+        let position = |session: &mut Session, now_us: u64| {
+            let frame =
+                crate::sim::global_position_at_frame((1, 0), (lat, lon), (614_000, 30_000), 1000);
+            session.ingest("l1", PEER, &frame, now_us);
+        };
+        let terrain = |session: &mut Session, spacing: u16, now_us: u64| {
+            let report = TerrainReport {
+                lat,
+                lon,
+                spacing,
+                terrain_height: 580.0,
+                current_height: 34.0,
+                pending: 0,
+                loaded: 56,
+            };
+            session.ingest("l1", PEER, &crate::sim::frame(1, 1, 0, &report), now_us);
+        };
+        // What one tick says: the altitude above sea level, and the altitude
+        // above terrain as an item and as a frame of the fused position.
+        let read = |session: &mut Session, now_us: u64| {
+            let effects = session.tick(now_us);
+            let t = effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::Telemetry(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let item = |key: &str| t.items.iter().find(|i| i.key == key).cloned();
+            let frame = t
+                .positions
+                .iter()
+                .find(|p| p.source == "fused")
+                .and_then(|p| {
+                    p.altitudes
+                        .iter()
+                        .find(|a| a.frame == AltitudeFrame::AboveGround)
+                })
+                .map(|a| a.meters);
+            (
+                item("altitude.amsl_m").and_then(|i| i.value),
+                item("altitude.above_terrain_m").map(|i| (i.value, i.label, i.unit)),
+                frame,
+            )
+        };
+
+        // A vehicle that never sent terrain has no such item at all.
+        position(&mut session, 10);
+        let (amsl, above, frame) = read(&mut session, 20);
+        assert_eq!(amsl, Some(614.0));
+        assert_eq!((above, frame), (None, None));
+
+        terrain(&mut session, 100, 30);
+        position(&mut session, 40);
+        let (_, above, frame) = read(&mut session, 50);
+        let label = "Altitude above terrain".to_owned();
+        assert_eq!(above, Some((Some(34.0), label.clone(), Unit::Meter)));
+        assert_eq!(frame, Some(34.0));
+
+        // Five seconds on, the terrain is stale: unknown, not the old height.
+        position(&mut session, 5_000_041);
+        let (_, above, frame) = read(&mut session, 5_000_050);
+        assert_eq!(above, Some((None, label.clone(), Unit::Meter)));
+        assert_eq!(frame, None);
+
+        // No terrain data where the vehicle is (spacing 0) is unknown too.
+        terrain(&mut session, 0, 5_000_060);
+        position(&mut session, 5_000_070);
+        let (_, above, frame) = read(&mut session, 5_000_080);
+        assert_eq!(above, Some((None, label, Unit::Meter)));
+        assert_eq!(frame, None);
+    }
+
     fn converse(
         session: &mut Session,
         fake: &mut FakeVehicle,
