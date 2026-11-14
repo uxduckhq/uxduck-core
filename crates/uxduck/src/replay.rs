@@ -319,6 +319,12 @@ fn link_records(
     Ok(out)
 }
 
+/// How much of a log is read at a time: a flight early in a long file is
+/// read to its own end, not the file's (FB-192).
+const CHUNK: u64 = 8 << 20;
+/// The longest record: a stamp and the longest MAVLink frame.
+const MAX_RECORD: usize = 8 + 10 + 255 + 2 + 13;
+
 /// Appends a file's records in the range, from `offset` (resynchronised
 /// when it is not the start). True once a record past the range was seen.
 fn append_range(
@@ -329,26 +335,58 @@ fn append_range(
     out: &mut Vec<u8>,
 ) -> std::io::Result<bool> {
     let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
     file.seek(SeekFrom::Start(offset))?;
-    let mut bytes = Vec::with_capacity(usize::try_from(length - offset.min(length)).unwrap_or(0));
-    file.take(MAX_BYTES).read_to_end(&mut bytes)?;
-    let begin = if offset == 0 {
-        0
-    } else {
-        uxduck_mavlink::tlog::resync(&bytes).unwrap_or(bytes.len())
-    };
-    let base = bytes.as_ptr() as usize;
-    for (stamp, frame) in uxduck_mavlink::tlog::read(&bytes[begin..]) {
-        if stamp > to_us {
-            return Ok(true);
+    append_records(file.take(MAX_BYTES), offset != 0, (from_us, to_us), out)
+}
+
+/// Appends the records in `from_us..=to_us` that `log` holds, read a
+/// chunk at a time and no further than the first record past the range.
+/// `resync` when `log` begins in the middle of a record. Records end at
+/// the first that is not whole, as [`uxduck_mavlink::tlog::records`] do.
+fn append_records(
+    mut log: impl Read,
+    resync: bool,
+    (from_us, to_us): (u64, u64),
+    out: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    let mut bytes = Vec::new();
+    let mut synced = !resync;
+    loop {
+        let read = (&mut log).take(CHUNK).read_to_end(&mut bytes)?;
+        let end = read == 0;
+        if !synced {
+            match uxduck_mavlink::tlog::resync(&bytes) {
+                Some(at) if end || at + 3 * MAX_RECORD <= bytes.len() => {
+                    bytes.drain(..at);
+                    synced = true;
+                }
+                _ if end => return Ok(false),
+                // No place before the last three records' worth can
+                // become one, so the scan resumes there.
+                _ => {
+                    bytes.drain(..bytes.len().saturating_sub(3 * MAX_RECORD));
+                    continue;
+                }
+            }
         }
-        if stamp >= from_us {
+        let base = bytes.as_ptr() as usize;
+        let mut whole = 0;
+        for (stamp, frame) in uxduck_mavlink::tlog::records(&bytes) {
+            if stamp > to_us {
+                return Ok(true);
+            }
             let at = frame.as_ptr() as usize - base - 8;
-            out.extend_from_slice(&bytes[at..at + 8 + frame.len()]);
+            whole = at + 8 + frame.len();
+            if stamp >= from_us {
+                out.extend_from_slice(&bytes[at..whole]);
+            }
         }
+        // What is left is a record cut by the chunk, or not a record.
+        if end || bytes.len() - whole >= MAX_RECORD {
+            return Ok(false);
+        }
+        bytes.drain(..whole);
     }
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -365,6 +403,77 @@ mod tests {
             uxduck_mavlink::tlog::record(&mut log, from_us + i * 1_000_000, &frame).unwrap();
         }
         std::fs::write(dir.join(name), log).unwrap();
+    }
+
+    /// Counts what is read of a log.
+    struct Counted<R>(R, std::rc::Rc<std::cell::Cell<u64>>);
+
+    impl<R: Read> Read for Counted<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.read(buf)?;
+            self.1.set(self.1.get() + n as u64);
+            Ok(n)
+        }
+    }
+
+    /// FB-192: a short flight early in a long link file is read to its own
+    /// end, not the file's, and gives the records a whole read does, also
+    /// from the middle of a record and across chunks.
+    #[test]
+    fn a_short_flight_early_in_a_long_file_is_read_no_further_than_it() {
+        let mut log = Vec::new();
+        let mut i = 0u64;
+        while (log.len() as u64) < 3 * CHUNK {
+            let frame = sim::heartbeat_frame(1, 1, 0);
+            uxduck_mavlink::tlog::record(&mut log, T0 * 1_000_000 + i * 10_000, &frame).unwrap();
+            i += 1;
+        }
+        let (from_us, to_us) = (T0 * 1_000_000 + 100_000_000, T0 * 1_000_000 + 400_000_000);
+        let read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut out = Vec::new();
+        let past = append_records(
+            Counted(&log[3..], std::rc::Rc::clone(&read)),
+            true,
+            (from_us, to_us),
+            &mut out,
+        )
+        .unwrap();
+        assert!(past);
+        assert!(read.get() <= CHUNK, "read {} of {}", read.get(), log.len());
+        let whole: Vec<u8> = uxduck_mavlink::tlog::read(&log)
+            .into_iter()
+            .filter(|(stamp, _)| (from_us..=to_us).contains(stamp))
+            .flat_map(|(stamp, frame)| {
+                let mut record = stamp.to_be_bytes().to_vec();
+                record.extend_from_slice(frame);
+                record
+            })
+            .collect();
+        assert_eq!(out, whole);
+        // A range that ends in the last chunk: the records across chunks.
+        let (from_us, to_us) = (from_us, T0 * 1_000_000 + (i - 10) * 10_000);
+        let mut out = Vec::new();
+        assert!(append_records(&log[..], false, (from_us, to_us), &mut out).unwrap());
+        let count = uxduck_mavlink::tlog::read(&out).len() as u64;
+        assert_eq!(count, i - 10 - 10_000 + 1);
+        // To the end of the file.
+        let mut out = Vec::new();
+        assert!(!append_records(&log[..], false, (from_us, u64::MAX), &mut out).unwrap());
+        assert_eq!(uxduck_mavlink::tlog::read(&out).len() as u64, i - 10_000);
+    }
+
+    /// A log that begins with more than a chunk of bytes that are no
+    /// record is resynchronised past them, and gives every record after.
+    #[test]
+    fn a_log_is_resynchronised_past_more_than_a_chunk_of_noise() {
+        let mut log = vec![0u8; usize::try_from(CHUNK).unwrap() + 1_000];
+        for i in 0..100u64 {
+            let frame = sim::heartbeat_frame(1, 1, 0);
+            uxduck_mavlink::tlog::record(&mut log, T0 * 1_000_000 + i * 1_000, &frame).unwrap();
+        }
+        let mut out = Vec::new();
+        assert!(!append_records(&log[..], true, (0, u64::MAX), &mut out).unwrap());
+        assert_eq!(uxduck_mavlink::tlog::read(&out).len(), 100);
     }
 
     #[test]

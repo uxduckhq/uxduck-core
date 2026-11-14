@@ -289,7 +289,19 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
     let mut px4: BTreeSet<(u8, u8)> = BTreeSet::new();
     for &(at_us, frame) in records {
         // Most of a long log is neither: only these are decoded.
-        if crate::framing::header(frame).is_none_or(|h| !READ.contains(&h.message_id)) {
+        let Some(h) = crate::framing::header(frame).filter(|h| READ.contains(&h.message_id)) else {
+            continue;
+        };
+        // The time since boot, read without decoding the rest.
+        if h.message_id == 30 || h.message_id == 33 {
+            let Some(time_boot_ms) = crate::decode::time_boot_ms(frame) else {
+                continue;
+            };
+            let key = (h.system_id, h.component_id);
+            let last = booted.insert(key, time_boot_ms);
+            if last.is_some_and(|last| time_boot_ms.saturating_add(REBOOT_MS) < last) {
+                boots.entry(key).or_default().push(at_us);
+            }
             continue;
         }
         let Some(decoded) = decode(frame) else {
@@ -299,13 +311,6 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
         match decoded.message {
             Message::Heartbeat { autopilot, .. } if autopilot.eq_ignore_ascii_case("px4") => {
                 px4.insert((system, component));
-            }
-            Message::GlobalPositionInt { time_boot_ms, .. }
-            | Message::Attitude { time_boot_ms, .. } => {
-                let last = booted.insert((system, component), time_boot_ms);
-                if last.is_some_and(|last| time_boot_ms.saturating_add(REBOOT_MS) < last) {
-                    boots.entry((system, component)).or_default().push(at_us);
-                }
             }
             Message::ParamSet {
                 name,
@@ -767,5 +772,36 @@ mod tests {
             (T0, sim::param_request_list_frame(255, 1, 1, 0)),
         ];
         assert!(timelines(&log(&frames)).is_empty());
+    }
+
+    /// FB-192: the time since boot is read from the bytes of a log's most
+    /// frequent messages, positions and attitudes, without decoding them.
+    /// Only the parameters and heartbeats are decoded, and a position whose
+    /// checksum fails still says nothing.
+    #[test]
+    fn the_time_since_boot_is_read_without_decoding_each_position() {
+        let mut frames = vec![(T0, value("P0", 0.0, 1, 0))];
+        for i in 0..1_000u32 {
+            let at = T0 + u64::from(i) * 100_000;
+            let boot_ms = 60_000 + i * 100;
+            frames.push((
+                at,
+                sim::global_position_at_frame((1, 0), (0, 0), (0, 0), boot_ms),
+            ));
+            frames.push((at, sim::attitude_frame((1, 0), (0.0, 0.0, 0.0), boot_ms)));
+        }
+        let mut broken = sim::global_position_at_frame((1, 0), (0, 0), (0, 0), 500);
+        let last = broken.len() - 1;
+        broken[last] ^= 0xFF;
+        frames.push((T0 + 50 * S, broken));
+        frames.push((
+            T0 + 200 * S,
+            sim::global_position_at_frame((1, 0), (0, 0), (0, 0), 1_000),
+        ));
+        frames.sort_by_key(|(at, _)| *at);
+        crate::decode::DECODED.with(|n| n.set(0));
+        let timeline = &timelines(&log(&frames))[&(1, 1)];
+        assert_eq!(timeline.boots, [T0 + 200 * S]);
+        assert_eq!(crate::decode::DECODED.with(std::cell::Cell::get), 1);
     }
 }

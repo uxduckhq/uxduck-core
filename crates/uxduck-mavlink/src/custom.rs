@@ -298,7 +298,7 @@ fn wire(fields: &[CustomField]) -> Vec<&CustomField> {
 }
 
 /// MAVLink's checksum, X.25, over `bytes` from `crc`.
-fn x25(mut crc: u16, bytes: &[u8]) -> u16 {
+pub(crate) fn x25(mut crc: u16, bytes: &[u8]) -> u16 {
     for &byte in bytes {
         let mut tmp = byte ^ crc.to_le_bytes()[0];
         tmp ^= tmp << 4;

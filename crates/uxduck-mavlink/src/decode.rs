@@ -590,11 +590,61 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+// How many frames `decode` was given on this thread, for tests that count
+// a reader's work.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The `time_boot_ms` an `ATTITUDE` or `GLOBAL_POSITION_INT` begins with, as
+/// [`decode`] would give it. A log's readers take the time since boot from
+/// these, its most frequent messages, and decoding the rest of each cost
+/// most of their time (FB-192). A payload in the form decoding checks, a
+/// MAVLink 2 one without trailing zeros or a MAVLink 1 one of 28 bytes, is
+/// read from its bytes once its checksum holds. Any other is decoded. None
+/// for any other message, or a frame decoding refuses.
+#[must_use]
+pub fn time_boot_ms(frame: &[u8]) -> Option<u32> {
+    use mavio::protocol::Dialect;
+    let id = crate::framing::header(frame)?.message_id;
+    if id != 30 && id != 33 {
+        return None;
+    }
+    let payload = crate::framing::payload(frame)?;
+    let v1 = frame[0] == crate::framing::STX_V1;
+    let as_decoded = if v1 {
+        payload.len() == 28
+    } else {
+        payload.len() == payload.iter().rposition(|b| *b != 0).map_or(1, |i| i + 1)
+    };
+    if !as_decoded {
+        return match decode(frame)?.message {
+            Message::Attitude { time_boot_ms, .. }
+            | Message::GlobalPositionInt { time_boot_ms, .. } => Some(time_boot_ms),
+            _ => None,
+        };
+    }
+    let end = if v1 { 6 } else { 10 } + payload.len();
+    let sent = u16::from_le_bytes(frame.get(end..end + 2)?.try_into().ok()?);
+    let extra = Ardupilotmega::message_info(id).ok()?.crc_extra();
+    let body = crate::custom::x25(0xFFFF, &frame[1..end]);
+    if crate::custom::x25(body, &[extra]) != sent {
+        return None;
+    }
+    let mut ms = [0u8; 4];
+    let n = payload.len().min(4);
+    ms[..n].copy_from_slice(&payload[..n]);
+    Some(u32::from_le_bytes(ms))
+}
+
 /// Parses and decodes one frame's bytes. `None` when the bytes are not a
 /// frame, or its checksum does not match a message the dialect knows.
 #[must_use]
 #[allow(clippy::too_many_lines, reason = "one arm per message")]
 pub fn decode(bytes: &[u8]) -> Option<Decoded> {
+    #[cfg(test)]
+    DECODED.with(|n| n.set(n.get() + 1));
     let mut receiver = Receiver::new::<Versionless>(StdIoReader::new(bytes));
     let frame: Frame<Versionless> = receiver.recv().ok()?;
     let (system_id, component_id) = (frame.system_id(), frame.component_id());
@@ -1319,6 +1369,85 @@ fn rc_override(m: &mavio::dialects::ardupilotmega::messages::RcChannelsOverride)
 mod tests {
     use super::*;
     use crate::sim;
+
+    /// FB-192: the time since boot read from a position's or an attitude's
+    /// bytes is the one decoding gives, also from a MAVLink 2 frame that
+    /// drops trailing zeros, a signed one and MAVLink 1. A frame whose
+    /// checksum fails, or of another message, gives none, and so do the
+    /// frames decoding refuses: an untrimmed or empty MAVLink 2 payload and a
+    /// MAVLink 1 payload of the wrong length.
+    #[test]
+    fn the_time_since_boot_read_from_the_bytes_is_the_decoded_one() {
+        let position =
+            sim::global_position_at_frame((1, 0), (515_000_000, -1_000_000), (1, 2), 123_456);
+        let attitude = sim::attitude_frame((1, 0), (10.0, 0.0, 0.0), 654_321);
+        for frame in [&position, &attitude] {
+            let Some(
+                Message::GlobalPositionInt {
+                    time_boot_ms: decoded,
+                    ..
+                }
+                | Message::Attitude {
+                    time_boot_ms: decoded,
+                    ..
+                },
+            ) = decode(frame).map(|d| d.message)
+            else {
+                panic!("not decoded");
+            };
+            assert_eq!(time_boot_ms(frame), Some(decoded));
+        }
+        let short = crate::custom::frame_from((1, 1, 0), 30, &[0x10, 0x27], 39);
+        assert!(decode(&short).is_some());
+        assert_eq!(time_boot_ms(&short), Some(10_000));
+        let payload = crate::framing::payload(&attitude).unwrap_or_default();
+        let mut v1 = vec![crate::framing::STX_V1, 28, 0, 1, 1, 30];
+        v1.extend_from_slice(payload);
+        v1.resize(6 + 28, 0);
+        let crc = crate::custom::x25(crate::custom::x25(0xFFFF, &v1[1..]), &[39]);
+        v1.extend_from_slice(&crc.to_le_bytes());
+        assert!(decode(&v1).is_some());
+        assert_eq!(time_boot_ms(&v1), Some(654_321));
+        let mut broken = position.clone();
+        let last = broken.len() - 1;
+        broken[last] ^= 0xFF;
+        assert!(decode(&broken).is_none());
+        assert_eq!(time_boot_ms(&broken), None);
+        assert_eq!(time_boot_ms(&sim::heartbeat_frame(1, 1, 0)), None);
+        let decoded = |frame: &[u8]| match decode(frame).map(|d| d.message) {
+            Some(
+                Message::GlobalPositionInt { time_boot_ms, .. }
+                | Message::Attitude { time_boot_ms, .. },
+            ) => Some(time_boot_ms),
+            _ => None,
+        };
+        let v2 = |flags: u8, payload: &[u8], signature: &[u8]| {
+            let length = u8::try_from(payload.len()).unwrap_or(u8::MAX);
+            let mut frame = vec![crate::framing::STX_V2, length, flags, 0, 0, 1, 1, 30, 0, 0];
+            frame.extend_from_slice(payload);
+            let crc = crate::custom::x25(crate::custom::x25(0xFFFF, &frame[1..]), &[39]);
+            frame.extend_from_slice(&crc.to_le_bytes());
+            frame.extend_from_slice(signature);
+            frame
+        };
+        let mut untrimmed = payload.to_vec();
+        untrimmed.resize(28, 0);
+        let mut v1_short = vec![crate::framing::STX_V1, 27, 0, 1, 1, 30];
+        v1_short.extend_from_slice(payload);
+        v1_short.resize(6 + 27, 0);
+        let crc = crate::custom::x25(crate::custom::x25(0xFFFF, &v1_short[1..]), &[39]);
+        v1_short.extend_from_slice(&crc.to_le_bytes());
+        let signed = v2(0x01, payload, &[7; 13]);
+        for frame in [
+            &v2(0, &untrimmed, &[]),
+            &v2(0, &[], &[]),
+            &v1_short,
+            &signed,
+        ] {
+            assert_eq!(time_boot_ms(frame), decoded(frame), "{frame:?}");
+        }
+        assert_eq!(time_boot_ms(&signed), Some(654_321));
+    }
 
     #[test]
     fn decodes_a_heartbeat_and_an_autopilot_version() {

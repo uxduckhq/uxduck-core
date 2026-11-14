@@ -11,9 +11,9 @@ use crate::framing::{header, payload};
 const DEADLINE_US: u64 = 30_000_000;
 const REBOOT_MS: u32 = 5_000;
 pub const MESSAGE_IDS: [u32; 11] = [38, 39, 40, 42, 43, 44, 45, 46, 47, 51, 73];
-/// Read beside them: `HEARTBEAT` for who is who, and the time since boot in
-/// `ATTITUDE` and `GLOBAL_POSITION_INT`.
-const BESIDE: [u32; 3] = [0, 30, 33];
+/// Read beside them: `HEARTBEAT` for who is who. The time since boot in
+/// `ATTITUDE` and `GLOBAL_POSITION_INT` is read from their bytes.
+const BESIDE: [u32; 1] = [0];
 
 #[derive(Clone, Debug)]
 pub struct Reading {
@@ -378,6 +378,21 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
             }
             continue;
         }
+        // The time since boot, read without decoding the rest.
+        if h.message_id == 30 || h.message_id == 33 {
+            if let Some(time_boot_ms) = crate::decode::time_boot_ms(frame)
+                && let Some(v) = vehicles
+                    .get_mut(&h.system_id)
+                    .filter(|v| v.component == h.component_id && !v.ambiguous)
+                && v.boot_ms
+                    .replace(time_boot_ms)
+                    .is_some_and(|old| time_boot_ms.saturating_add(REBOOT_MS) < old)
+            {
+                v.observed_id = None;
+                v.invalidate(at, "The vehicle restarted. No complete mission readback is recorded for this boot.");
+            }
+            continue;
+        }
         // Most of a long log is none of the messages read below: only
         // those are decoded.
         let decoded = (MESSAGE_IDS.contains(&h.message_id) || BESIDE.contains(&h.message_id))
@@ -424,24 +439,11 @@ pub fn timelines(records: &[(u64, &[u8])]) -> BTreeMap<(u8, u8), Timeline> {
         if let Some(v) = vehicles
             .get_mut(&h.system_id)
             .filter(|v| v.component == h.component_id && !v.ambiguous)
-            && let Some(d) = &decoded
+            && let Some(Message::MissionCurrent {
+                total, mission_id, ..
+            }) = decoded.as_ref().map(|d| &d.message)
         {
-            match &d.message {
-                Message::GlobalPositionInt { time_boot_ms, .. }
-                | Message::Attitude { time_boot_ms, .. } => {
-                    if v.boot_ms
-                        .replace(*time_boot_ms)
-                        .is_some_and(|old| time_boot_ms.saturating_add(REBOOT_MS) < old)
-                    {
-                        v.observed_id = None;
-                        v.invalidate(at, "The vehicle restarted. No complete mission readback is recorded for this boot.");
-                    }
-                }
-                Message::MissionCurrent {
-                    total, mission_id, ..
-                } => v.current(at, *total, *mission_id),
-                _ => {}
-            }
+            v.current(at, *total, *mission_id);
         }
         let Some((target, kind)) = payload(frame).and_then(|p| route(h.message_id, p)) else {
             continue;
@@ -930,5 +932,38 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// FB-192: the time since boot is read from the bytes of positions and
+    /// attitudes, without decoding them, a frame whose checksum fails is
+    /// ignored, and a restart still leaves no path.
+    #[test]
+    fn the_time_since_boot_is_read_without_decoding_each_position() {
+        let mut records = identities();
+        records.extend(readback(10, 2));
+        for i in 0..1_000u32 {
+            let at = 100 + u64::from(i);
+            let boot_ms = 60_000 + i * 100;
+            records.push((
+                at,
+                sim::global_position_at_frame((1, 0), (0, 0), (0, 0), boot_ms),
+            ));
+            records.push((at, sim::attitude_frame((1, 0), (0.0, 0.0, 0.0), boot_ms)));
+        }
+        let mut broken = sim::attitude_frame((1, 0), (0.0, 0.0, 0.0), 500);
+        let last = broken.len() - 1;
+        broken[last] ^= 0xFF;
+        records.push((1_500, broken));
+        records.push((2_000, sim::attitude_frame((1, 0), (0.0, 0.0, 0.0), 1_000)));
+        records.sort_by_key(|(t, _)| *t);
+        let decodable = records
+            .iter()
+            .filter(|(_, f)| header(f).is_some_and(|h| h.message_id != 30 && h.message_id != 33))
+            .count();
+        crate::decode::DECODED.with(|n| n.set(0));
+        let timeline = parsed(&records);
+        assert!(timeline.at(1_999).unwrap().1.items.is_some());
+        assert!(timeline.at(2_000).unwrap().1.items.is_none());
+        assert!(crate::decode::DECODED.with(std::cell::Cell::get) <= decodable);
     }
 }
