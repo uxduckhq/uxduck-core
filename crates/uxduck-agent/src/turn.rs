@@ -35,7 +35,9 @@ MAVLink vehicles. Help only with drones, MAVLink vehicles and their related UXDu
 state. Be brief. Do not use semicolons in your own prose replies. Use short sentences, commas or conjunctions instead. Preserve code syntax and quoted user, vehicle and tool data. Before advising on a parameter, \
 read it with param_get (find it with param_search): describe it only as its definition does, \
 name the set it comes from (describedBy), and say when that set is approximate or missing, or \
-when a parameter has no definition; never guess what an undescribed parameter does. Before \
+when a parameter has no definition; never guess what an undescribed parameter does. A \
+parameter's default is its firmware's default as the vehicle reports it, never the definition \
+set's. Before \
 diagnosing a vehicle or advising a change, read its recent history (vehicle_history) and cite \
 what bears on it with its date. When the person reports completed maintenance, repairs, \
 motor or propeller replacements, or other physical work, offer to record it in vehicle history. \
@@ -955,6 +957,15 @@ mod tests {
         assert!(
             INSTRUCTIONS.contains("Preserve code syntax and quoted user, vehicle and tool data.")
         );
+    }
+
+    /// FB-217: the agent never credits a parameter's default to the
+    /// definition set, matching what the parameter tools say.
+    #[test]
+    fn the_instructions_say_a_default_is_the_firmwares() {
+        assert!(INSTRUCTIONS.contains(
+            "A parameter's default is its firmware's default as the vehicle reports it, never the definition set's."
+        ));
     }
 
     #[test]
