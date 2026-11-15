@@ -29,6 +29,20 @@ impl PlanVehicleType {
         )
     }
 
+    /// What it is in a few words, as the agent is told: "a VTOL".
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Multicopter => "a multicopter",
+            Self::Plane => "a plane",
+            Self::Vtol => "a VTOL",
+            Self::Rover => "a rover",
+            Self::Boat => "a boat",
+            Self::Submarine => "a submarine",
+            Self::Blimp => "a blimp",
+        }
+    }
+
     /// The frame a new plan of this type starts in (P4).
     #[must_use]
     pub fn default_frame(self) -> PlanFrame {
@@ -68,6 +82,16 @@ impl PlanFrame {
             Self::AboveSeaLevel => 0,
             Self::AboveHome => 3,
             Self::AboveTerrain => 10,
+        }
+    }
+
+    /// What a height in it is measured from: "above terrain".
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::AboveTerrain => "above terrain",
+            Self::AboveHome => "above home",
+            Self::AboveSeaLevel => "above sea level",
         }
     }
 
@@ -476,6 +500,81 @@ pub fn command_has_position(command: u16) -> bool {
             | 5001..=5004 // fence vertices and circles
             | 5100 // rally point
     )
+}
+
+/// A `MAV_CMD` by the name the plan editor's list gives it
+/// (`apps/web/src/features/plans/commands.ts`); `None` for one it has no
+/// name for, such as a dialect's.
+#[must_use]
+pub fn command_label(command: u16) -> Option<&'static str> {
+    Some(match command {
+        16 => "Waypoint",
+        17 => "Loiter",
+        18 => "Loiter turns",
+        19 => "Loiter for a time",
+        20 => "Return to launch",
+        21 => "Land",
+        22 => "Take off",
+        30 => "Continue and change height",
+        31 => "Loiter to height",
+        82 => "Spline waypoint",
+        83 => "Wait for height",
+        84 => "VTOL take off",
+        85 => "VTOL land",
+        92 => "Guided by companion",
+        93 => "Delay",
+        94 => "Place payload",
+        112 => "Delay the next action",
+        114 => "Act near the next waypoint",
+        115 => "Turn to heading",
+        177 => "Repeat from item",
+        178 => "Change speed",
+        179 => "Set home",
+        181 => "Set relay",
+        182 => "Repeat relay",
+        183 => "Set servo",
+        184 => "Repeat servo",
+        188 => "Return path start",
+        189 => "Landing sequence start",
+        191 => "Go around",
+        193 => "Pause or continue",
+        194 => "Drive in reverse",
+        195 => "Look at location",
+        196 => "Look ahead with an offset",
+        197 => "Stop looking",
+        201 => "Look at",
+        202 => "Camera settings",
+        203 => "Camera control",
+        205 => "Point mount",
+        206 => "Camera trigger distance",
+        207 => "Fence on or off",
+        208 => "Parachute",
+        210 => "Inverted flight",
+        211 => "Gripper",
+        212 => "Autotune",
+        213 => "Turn and drive",
+        215 => "Resume distance",
+        216 => "Sprayer",
+        217 => "Script message",
+        218 => "Auxiliary function",
+        222 => "Guided limits",
+        223 => "Engine control",
+        531 => "Zoom camera",
+        532 => "Focus camera",
+        534 => "Camera source",
+        600 => "Jump tag",
+        601 => "Repeat from tag",
+        1000 => "Point gimbal",
+        2000 => "Take photos",
+        2001 => "Stop photos",
+        2500 => "Start video",
+        2501 => "Stop video",
+        3000 => "VTOL transition",
+        42600 => "Winch",
+        42702 => "Script control",
+        42703 => "Hold an attitude",
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

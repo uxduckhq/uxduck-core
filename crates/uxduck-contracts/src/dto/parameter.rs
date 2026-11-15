@@ -80,22 +80,24 @@ pub struct ParamSetParams {
     pub vehicle_id: String,
     pub name: String,
     pub value: f64,
-    /// The value the client last saw; omitted, the write is unconditional.
+    /// The value last seen: the write is refused with `version-conflict`
+    /// if it changed. Left out, the write is unconditional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_value: Option<f64>,
-    /// Confirms a write to a vehicle that is not online (parameter writes
-    /// are `warn` in the offline table).
+    /// Confirms a write to a vehicle that is not online.
+    // Parameter writes are `warn` in the offline table.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm: bool,
     /// Why, up to 200 characters, kept with the change in the vehicle's
-    /// history (S74), such as "higher hills".
+    /// history.
+    // S74.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Sent with the other writes asked for in the same tenth of a second
     /// as one parameter file, when they are eight or more and the vehicle
-    /// is ArduPilot, which takes them that way (S121, ADR-0027 F13):
-    /// quicker over a radio. Confirmed by reading the file back; anything
-    /// not confirmed goes again one by one.
+    /// is ArduPilot: quicker over a radio. Read back to confirm, and any
+    /// not confirmed go again one by one.
+    // S121, ADR-0027 F13.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_file: bool,
 }

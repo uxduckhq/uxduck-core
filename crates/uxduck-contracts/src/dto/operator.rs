@@ -108,107 +108,118 @@ pub enum Basemap {
     Terrain,
 }
 
-/// What a tab shows.
+/// What a tab shows: the focused vehicle's, or the pinned one's, unless it
+/// follows no vehicle.
+// Agents are sent these docs each turn, so they say what a tab is for. How
+// the layout opens each, and the slices that made them, are noted below.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TabKind {
     /// The chat with its input. Closed by default and opened on request as
     /// the dock's left column; the one tab of its kind.
     Chat,
-    /// The home: Get started, one screen at a time, with the globe behind
-    /// it. Opened in the drawer by default, or as a tab on request.
+    /// Get started, one screen at a time, over the globe.
+    // Opened in the drawer by default, or as a tab on request.
     Home,
     /// The vehicles on a flat map.
     Map,
-    /// The vehicles over terrain on a 3D globe: "3D map". Opened beside the
-    /// map by the map's "3D" button, or from "+".
+    /// "3D map": the vehicles over terrain on a 3D globe.
+    // Opened beside the map by the map's "3D" button, or from "+".
     // Layouts stored with a Map in 3D come back with a 3D map tab in its
     // place (kept out of the schema: agents are sent it each turn).
     #[serde(rename = "map-3d")]
     Map3d,
-    /// A close view of the selected vehicle as a live model, without a map.
+    /// A close view of the vehicle as a live model, without a map.
     VehicleView,
-    /// The home view's pixel Earth as a tab of its own: every vehicle with a
-    /// position on a whole, centred globe, the chosen one faced. Pressing a
-    /// vehicle chooses it; pressing a region sends the map there.
+    /// Every vehicle with a position on a whole pixel globe.
+    // The home view's pixel Earth as a tab of its own, centred, the chosen
+    // vehicle faced. Pressing a vehicle chooses it; pressing a region sends
+    // the map there.
     Globe,
-    /// The focused vehicle's readings, as tiles (S65).
-    // Layouts stored with a `vehicle` tab come back with Telemetry and
+    /// Readings, as tiles.
+    // S65. Layouts stored with a `vehicle` tab come back with Telemetry and
     // Cockpit in its place.
     Telemetry,
-    /// Cockpit: everything that acts on the focused vehicle (S65).
+    /// Cockpit: everything that acts on the vehicle.
+    // S65.
     Control,
-    /// The focused vehicle's own messages, every one, searchable (S26).
+    /// The vehicle's own messages, every one, searchable.
+    // S26.
     Messages,
-    /// The focused vehicle's files over MAVLink FTP (S121).
+    /// Files over MAVLink FTP.
+    // S121.
     Files,
     /// Every vehicle and link.
     Vehicles,
-    /// The focused vehicle's parameters.
+    /// The vehicle's parameters.
     Parameters,
-    /// The focused vehicle's mission.
+    /// The vehicle's mission.
     Mission,
     /// Gamepads: claims, targets and mappings.
     Controllers,
-    /// The focused vehicle's flight instruments as Mission Planner draws
-    /// them (S43): "Instruments (classic)".
+    /// "Instruments (classic)": as Mission Planner draws them.
+    // S43.
     Instruments,
-    /// The focused vehicle's modern flight display (S77): "Instruments".
-    /// Speed, altitude and heading as numbers, a quiet horizon, the flight
-    /// path, and a chip for each value outside its threshold.
+    /// "Instruments": speed, altitude and heading as numbers, a horizon,
+    /// the flight path and a chip for each value outside its threshold.
+    // S77.
     FlightDisplay,
-    /// The focused vehicle's history: notes and what UXDuck recorded (S69).
+    /// Notes and what UXDuck recorded.
+    // S69.
     History,
-    /// The focused vehicle's camera (S75): a real vehicle's video (S38), or
-    /// a simulated vehicle's 3D world (S35).
-    // Layouts stored with a `3d` or `video` tab come back with a Camera
-    // tab in its place.
+    /// A real vehicle's video, or a simulated vehicle's 3D world.
+    // S75, S38, S35. Layouts stored with a `3d` or `video` tab come back
+    // with a Camera tab in its place.
     Camera,
     /// What to try first, for someone new: above the chat in the first-run
     /// layout, gone once closed.
     GetStarted,
-    /// The focused vehicle's MAVLink traffic: the latest message of each
-    /// type, both ways, with its rate and fields.
+    /// MAVLink traffic: the latest message of each type, both ways, with
+    /// its rate and fields.
     Inspector,
-    /// Settings as a tab (S87): the Settings page in the dock, from "+" or
-    /// the page's "Open as a tab". Follows no vehicle.
+    /// Follows no vehicle.
+    // S87: the Settings page in the dock, from "+" or the page's "Open as
+    // a tab".
     Settings,
-    /// A plugin's panel as a tab of its own (S101), from "+": which one is
-    /// the tab's `panel`. Follows a vehicle when its panel says so (S105).
+    /// A plugin's panel. Follows a vehicle when its panel says so.
+    // S101, S105: from "+", which panel is the tab's `panel`.
     Plugin,
-    /// One telemetry item, large (S105): which is the tab's `item`. Follows
-    /// the selected vehicle, or the one it is pinned to.
+    /// One telemetry item, large.
+    // S105: which is the tab's `item`.
     Readout,
-    /// Telemetry items over time (S113): which, and over how long, is the
-    /// tab's `chart`. Follows the selected vehicle, or the one it is pinned
-    /// to.
+    /// Telemetry items over time.
+    // S113: which, and over how long, is the tab's `chart`.
     Chart,
-    /// Practice exercises (S100, ADR-0024 X8). Follows the selected
-    /// vehicle, or the one it is pinned to.
+    /// Practice exercises.
+    // S100, ADR-0024 X8.
     Practice,
-    /// The Places page as a tab, from the page's "Open as a tab". Follows
-    /// no vehicle.
+    /// Follows no vehicle.
+    // The Places page as a tab, from the page's "Open as a tab".
     Places,
-    /// The Flights page as a tab. Follows no vehicle.
+    /// Follows no vehicle.
+    // The Flights page as a tab.
     Flights,
-    /// The Missions page as a tab: every mission, not the focused
-    /// vehicle's (`Mission`). Follows no vehicle.
+    /// Every mission, not the vehicle's. Follows no vehicle.
+    // The Missions page as a tab.
     Missions,
-    /// The ground under a plan or a mission, with heights (ADR-0029 P9).
+    /// The ground under a plan or a mission, with heights.
+    // ADR-0029 P9.
     Profile,
     /// A rubber duck, turning: found only by typing "duck" in the command
     /// palette. Follows no vehicle.
     Duck,
-    /// Other aircraft near the vehicles and the sources that report them
-    /// (S168, ADR-0034). It follows no vehicle.
+    /// Other aircraft near the vehicles and their sources. Follows no
+    /// vehicle.
+    // S168, ADR-0034.
     Airspace,
-    /// The focused vehicle's setup (S184, ADR-0037): a row per procedure,
-    /// such as calibrating its compasses.
+    /// A row per procedure, such as calibrating the compasses.
+    // S184, ADR-0037.
     Setup,
-    /// The focused vehicle's checklist with its other preflight checks
-    /// (S193, ADR-0038), as a tab of its own.
+    /// The checklist with the other preflight checks.
+    // S193, ADR-0038.
     Checklist,
-    /// The focused vehicle's tuning: Feel, gains and snapshots (S329).
+    /// Feel, gains and snapshots.
+    // S329.
     Tuning,
 }
 

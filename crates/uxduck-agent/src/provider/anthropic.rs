@@ -6,6 +6,9 @@
 //!   the tools and instructions together, the same for every chat;
 //! - top-level automatic caching moves a second breakpoint to the end of
 //!   each request, so each tool round and turn reads what the last wrote;
+//! - both breakpoints last an hour (`ttl`), so a chat picked up again
+//!   within the hour still reads its cache; the hosted model sets its own
+//!   breakpoints, also for an hour;
 //! - per-chat context arrives as a `role: "system"` message in the
 //!   conversation, never in the system prompt;
 //! - thinking and effort are pinned per model, since changing them between
@@ -18,6 +21,11 @@
 //! Anthropic itself (`fallbacks: "default"`); when that happens partway
 //! through, only the text from before the switch is kept, as Anthropic
 //! asks, and only the tools the model that finished asked for are run.
+//!
+//! An answer that stops at its output limit (`max_tokens`, or the context
+//! window) is reported as cut. Only its whole part is kept: a tool call
+//! whose input did not finish is never run, and thinking without its
+//! signature is left out, as is thinking with nothing after it.
 
 use std::collections::{BTreeMap, HashMap};
 #[cfg(feature = "http")]
@@ -175,8 +183,23 @@ pub fn body(request: &ProviderRequest) -> Value {
     body
 }
 
+/// `body` with both cache breakpoints lasting an hour instead of 5
+/// minutes: a cache write costs twice the input price instead of 1.25
+/// times, and a chat picked up within the hour reads it again.
+#[must_use]
+pub fn hour_cache(mut body: Value) -> Value {
+    let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+    body["system"][0]["cache_control"] = hour.clone();
+    body["cache_control"] = hour;
+    body
+}
+
 /// One response as it streams; give it each event in turn.
 #[derive(Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent usage availability and the stop reason"
+)]
 pub struct Answer {
     id: Option<String>,
     blocks: BTreeMap<usize, Value>,
@@ -184,6 +207,7 @@ pub struct Answer {
     usage: Usage,
     usage_input: bool,
     usage_output: bool,
+    cut: bool,
 }
 
 fn block_index(value: &Value) -> Option<usize> {
@@ -234,10 +258,13 @@ fn started(message: &Value, answer: &mut Answer) {
 
 /// The answer's content to replay. Before the last `fallback` block (a
 /// refusal handed to another model partway through) only text carries
-/// over; the marker itself is dropped, as are empty text blocks.
-fn replayable(blocks: Vec<Value>) -> Vec<Value> {
+/// over; the marker itself is dropped, as are empty text blocks and a tool
+/// call whose input is not whole JSON. From an answer `cut` at its output
+/// limit, thinking without its signature is dropped, and so is thinking
+/// left with nothing after it.
+fn replayable(blocks: Vec<Value>, cut: bool) -> Vec<Value> {
     let boundary = blocks.iter().rposition(|block| block["type"] == "fallback");
-    blocks
+    let mut content: Vec<Value> = blocks
         .into_iter()
         .enumerate()
         .filter(|(at, block)| match boundary {
@@ -245,10 +272,57 @@ fn replayable(blocks: Vec<Value>) -> Vec<Value> {
             _ => true,
         })
         .map(|(_, block)| block)
-        .filter(|block| {
-            block["type"] != "text" || block["text"].as_str().is_some_and(|t| !t.is_empty())
+        .filter(|block| match block["type"].as_str() {
+            Some("text") => block["text"].as_str().is_some_and(|t| !t.is_empty()),
+            Some("tool_use") => block["input"].is_object(),
+            Some("thinking") if cut => block["signature"].as_str().is_some_and(|s| !s.is_empty()),
+            _ => true,
         })
-        .collect()
+        .collect();
+    while cut
+        && content.last().is_some_and(|block| {
+            matches!(
+                block["type"].as_str(),
+                Some("thinking" | "redacted_thinking")
+            )
+        })
+    {
+        content.pop();
+    }
+    content
+}
+
+/// The answer has ended: its tool calls, then the answer to replay. With
+/// no content left to replay, there is no assistant turn to add.
+fn finished(answer: &mut Answer) -> Vec<ProviderEvent> {
+    // A tool call still waiting for the rest of its input was cut.
+    for index in answer.partial.keys() {
+        if let Some(block) = answer.blocks.get_mut(index) {
+            block["input"] = Value::Null;
+        }
+    }
+    let content = replayable(answer.blocks.values().cloned().collect(), answer.cut);
+    let mut out: Vec<ProviderEvent> = content
+        .iter()
+        .filter(|block| block["type"] == "tool_use")
+        .map(|block| ProviderEvent::ToolCall {
+            call_id: block["id"].as_str().unwrap_or_default().to_owned(),
+            name: block["name"].as_str().unwrap_or_default().to_owned(),
+            arguments: block["input"].to_string(),
+        })
+        .collect();
+    out.push(ProviderEvent::Completed {
+        response_id: answer.id.clone().unwrap_or_default(),
+        output: if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![json!({ "role": "assistant", "content": content })]
+        },
+        usage: answer.usage.clone(),
+        usage_known: answer.usage_input && answer.usage_output,
+        cut: answer.cut,
+    });
+    out
 }
 
 /// One streamed event: what to pass on, if anything yet. Tool calls wait
@@ -299,38 +373,28 @@ pub fn event(value: &Value, answer: &mut Answer) -> Result<Vec<ProviderEvent>, P
                 ))
             });
             if let Some((partial, block)) = partial {
-                block["input"] = serde_json::from_str(&partial).unwrap_or_else(|_| json!({}));
+                block["input"] = if partial.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&partial).unwrap_or(Value::Null)
+                };
             }
         }
         "message_delta" => {
             usage_from(&value["usage"], &mut answer.usage);
             answer.usage_input |= value["usage"]["input_tokens"].as_u64().is_some();
             answer.usage_output |= value["usage"]["output_tokens"].as_u64().is_some();
-            if value.pointer("/delta/stop_reason") == Some(&json!("refusal")) {
-                return Err(ProviderError::Refused(
-                    "Claude declined to answer this.".into(),
-                ));
+            match value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                Some("refusal") => {
+                    return Err(ProviderError::Refused(
+                        "Claude declined to answer this.".into(),
+                    ));
+                }
+                Some("max_tokens" | "model_context_window_exceeded") => answer.cut = true,
+                _ => {}
             }
         }
-        "message_stop" => {
-            let content = replayable(answer.blocks.values().cloned().collect());
-            let mut out: Vec<ProviderEvent> = content
-                .iter()
-                .filter(|block| block["type"] == "tool_use")
-                .map(|block| ProviderEvent::ToolCall {
-                    call_id: block["id"].as_str().unwrap_or_default().to_owned(),
-                    name: block["name"].as_str().unwrap_or_default().to_owned(),
-                    arguments: block["input"].to_string(),
-                })
-                .collect();
-            out.push(ProviderEvent::Completed {
-                response_id: answer.id.clone().unwrap_or_default(),
-                output: vec![json!({ "role": "assistant", "content": content })],
-                usage: answer.usage.clone(),
-                usage_known: answer.usage_input && answer.usage_output,
-            });
-            return Ok(out);
-        }
+        "message_stop" => return Ok(finished(answer)),
         "error" => {
             let kind = value.pointer("/error/type").and_then(Value::as_str);
             let message = value
@@ -408,6 +472,9 @@ impl Provider for AnthropicProvider {
         }
         let url = format!("{}/messages", self.api_base);
         let mut body = body(&request);
+        if !self.hosted {
+            body = hour_cache(body);
+        }
         if !self.allow_fallback
             && let Some(fields) = body.as_object_mut()
         {
@@ -606,6 +673,84 @@ mod tests {
                 { "type": "tool_use", "id": "toolu_new", "name": "vehicle_list", "input": {} },
             ])
         );
+    }
+
+    #[test]
+    fn an_answer_cut_at_its_output_limit_keeps_only_its_whole_part() {
+        let mut answer = Answer::default();
+        let events = [
+            json!({ "type": "message_start", "message": { "id": "msg_cut", "usage": { "input_tokens": 9, "output_tokens": 1 } } }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "", "signature": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "sig" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Reading the gains" } }),
+            json!({ "type": "content_block_stop", "index": 1 }),
+            json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "toolu_whole", "name": "vehicle_list", "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "" } }),
+            json!({ "type": "content_block_stop", "index": 2 }),
+            json!({ "type": "content_block_start", "index": 3, "content_block": { "type": "tool_use", "id": "toolu_cut", "name": "param_set", "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 3, "delta": { "type": "input_json_delta", "partial_json": "{\"name\":\"ATC_" } }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" }, "usage": { "output_tokens": 128_000 } }),
+            json!({ "type": "message_stop" }),
+        ];
+        let out: Vec<ProviderEvent> = events
+            .iter()
+            .flat_map(|value| event(value, &mut answer).unwrap())
+            .collect();
+        let calls: Vec<&ProviderEvent> = out
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::ToolCall { .. }))
+            .collect();
+        assert_eq!(
+            calls,
+            [&ProviderEvent::ToolCall {
+                call_id: "toolu_whole".into(),
+                name: "vehicle_list".into(),
+                arguments: "{}".into()
+            }],
+            "the call still being written is never run"
+        );
+        let Some(ProviderEvent::Completed { output, cut, .. }) = out.last() else {
+            panic!("{out:?}");
+        };
+        assert!(cut);
+        assert_eq!(
+            output[0]["content"],
+            json!([
+                { "type": "thinking", "thinking": "", "signature": "sig" },
+                { "type": "text", "text": "Reading the gains" },
+                { "type": "tool_use", "id": "toolu_whole", "name": "vehicle_list", "input": {} },
+            ])
+        );
+
+        for stop in ["max_tokens", "model_context_window_exceeded"] {
+            let mut answer = Answer::default();
+            let events = [
+                json!({ "type": "message_start", "message": { "id": "msg_thinking" } }),
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "", "signature": "" } }),
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "The roll" } }),
+                json!({ "type": "message_delta", "delta": { "stop_reason": stop } }),
+                json!({ "type": "message_stop" }),
+            ];
+            let out: Vec<ProviderEvent> = events
+                .iter()
+                .flat_map(|value| event(value, &mut answer).unwrap())
+                .collect();
+            assert!(
+                matches!(&out[..], [ProviderEvent::Completed { output, cut: true, .. }] if output.is_empty()),
+                "unsigned thinking is left out: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_developers_own_key_caches_for_an_hour() {
+        let body = hour_cache(body(&request("claude-opus-5-5")));
+        let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!(body["system"][0]["cache_control"], hour);
+        assert_eq!(body["cache_control"], hour);
+        assert_eq!(body["system"][0]["text"], "be brief");
     }
 
     #[test]

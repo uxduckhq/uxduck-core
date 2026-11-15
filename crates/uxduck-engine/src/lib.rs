@@ -108,6 +108,7 @@ pub mod transfers;
 pub mod tray;
 mod tuning;
 pub mod vehicle_files;
+mod vehicle_kind;
 mod vehicles;
 mod version;
 pub mod video;
@@ -497,6 +498,9 @@ pub struct Engine {
     next_turn: u64,
     /// Live origin for a saved follow-up. After restart it waits for explicit resume.
     pending_origins: HashMap<String, ConnectionId>,
+    /// What the operator had open when they sent a follow-up still waiting,
+    /// for its turn. Not journaled, like `pending_origins`.
+    pending_views: HashMap<String, uxduck_contracts::dto::thread::ChatView>,
     /// Text streamed into agent messages still in progress. Not journaled;
     /// merged into snapshots so a late subscriber sees what has streamed.
     streaming: HashMap<String, String>,
@@ -655,6 +659,7 @@ impl Engine {
             turn_stats: BTreeMap::new(),
             next_turn: 0,
             pending_origins: HashMap::new(),
+            pending_views: HashMap::new(),
             streaming: HashMap::new(),
             next_connection: 0,
             connections: BTreeMap::new(),

@@ -737,7 +737,7 @@ impl Engine {
     }
 
     /// The modes a vehicle listed itself, if it has.
-    fn listed_modes(&self, vehicle: &Vehicle) -> Option<&[AvailableMode]> {
+    pub(crate) fn listed_modes(&self, vehicle: &Vehicle) -> Option<&[AvailableMode]> {
         std::iter::once(&vehicle.id)
             .chain(vehicle.aliases.iter())
             .find_map(|id| self.available_modes.get(id))
@@ -751,7 +751,7 @@ impl Engine {
 /// quadplane, real or simulated, while `Q_MAV_TYPE` is 0, its default
 /// (`QuadPlane::get_mav_type`; maintainer, 2026-10-13: QLOITER and QLAND
 /// were missing).
-fn mode_airframe<'a>(
+pub(crate) fn mode_airframe<'a>(
     engine: &Engine,
     vehicle: &'a Vehicle,
     family: Option<Family>,

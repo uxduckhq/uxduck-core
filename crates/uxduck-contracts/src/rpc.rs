@@ -430,15 +430,15 @@ pub enum ClientRequest {
     /// empty.
     #[serde(rename = "param/definitions/remove")]
     ParamDefinitionsRemove(IdParams),
-    /// Finds a vehicle's parameters by what they mean ("battery failsafe",
-    /// "return altitude") or by name (`RTL_`), ranked by name, then display
-    /// name, then description; ArduPilot's abbreviations (RTL, FS, BATT)
-    /// match their words. Brief results with current values, paged. Values
-    /// and defaults are the vehicle's, never the definition set's.
-    /// `describedBy` names the descriptions' set: say its version, and when
-    /// it is approximate or missing; if its `held` is not `complete`, say
-    /// so and do as its `note` says. Read one in full with `param/get`
-    /// before advising on it. Needs `read`. Result: `ParamSearchResult`.
+    /// Finds a vehicle's parameters by what they mean or by name, ranked by
+    /// name, then display name, then description. ArduPilot's abbreviations
+    /// (RTL, FS, BATT) match their words. Brief results with current values,
+    /// paged. Values and defaults are the vehicle's, never the definition
+    /// set's. `describedBy` names the descriptions' set: say its version,
+    /// and when it is approximate or missing. If its `held` is not
+    /// `complete`, say so and do as its `note` says. Read one in full with
+    /// `param/get` before advising on it. Needs `read`. Result:
+    /// `ParamSearchResult`.
     #[serde(rename = "param/search")]
     ParamSearch(ParamSearchParams),
     /// Parameters by name, each with its value and its whole definition:
@@ -576,13 +576,11 @@ pub enum ClientRequest {
     #[serde(rename = "flight/log")]
     FlightLog(crate::dto::flight::FlightLogParams),
     /// A vehicle's history, newest first: notes people wrote about what
-    /// they did to it (repairs, changes, tests) and what UXDuck recorded
-    /// (first seen, renamed, firmware changed, snapshots). Filter by kind,
-    /// category, text or time. Read it before diagnosing a vehicle or
+    /// they did to it and what UXDuck recorded (first seen, renamed,
+    /// firmware changed, snapshots). Read it before diagnosing a vehicle or
     /// advising a change, and cite the entry and its date. Read it before
     /// proposing a note too, so notes do not duplicate existing notes or
-    /// automatic events. Needs `read`.
-    /// Result: `VehicleHistoryResult`.
+    /// automatic events. Needs `read`. Result: `VehicleHistoryResult`.
     #[serde(rename = "vehicle/history")]
     VehicleHistory(VehicleHistoryParams),
     /// A vehicle's parameter changes, newest first, with who or what made
@@ -590,10 +588,10 @@ pub enum ClientRequest {
     /// vehicle, or a download. Needs `read`. Result: `ParamHistoryResult`.
     #[serde(rename = "param/history")]
     ParamHistory(ParamHistoryParams),
-    /// Writes a note in a vehicle's history, dated now or earlier, for
-    /// completed physical maintenance or useful context from completed agent
-    /// changes. Read `vehicle_history` first; do not duplicate existing notes
-    /// or automatic events. Parameter writes already record their reason.
+    /// Writes a note in a vehicle's history, for completed physical
+    /// maintenance or useful context from completed agent changes. Read
+    /// `vehicle_history` first; do not duplicate existing notes or
+    /// automatic events. Parameter writes already record their reason.
     /// Batch related work into one concise proposed note and write only
     /// after the person agrees; an explicit request to record it already
     /// counts. Configuration permission alone is not note consent. Do not
@@ -1101,16 +1099,16 @@ pub enum ClientRequest {
     /// Result: `TrafficStatus`.
     #[serde(rename = "traffic/status")]
     TrafficStatus(Empty),
-    /// A vehicle's own messages (S26): every one, oldest first, a run of
-    /// the same message with nothing between folded into one entry with a
-    /// count; or with `raw` each as it came. With `subscribe`,
-    /// `vehicle/message` follows. Needs `read`. Result:
+    /// A vehicle's own messages, oldest first, a run of the same message
+    /// with nothing between folded into one entry with a count. With
+    /// `subscribe`, `vehicle/message` follows. Needs `read`. Result:
     /// `VehicleMessagesResult`.
+    // S26.
     #[serde(rename = "vehicle/messages")]
     VehicleMessages(VehicleMessagesParams),
-    /// Shows a tab in the chat's operator's layout, as "+" does (S43): how
-    /// the agent opens one when asked. Needs `read`: it changes only what
-    /// shows. Result: `LayoutOpenResult`.
+    /// Shows a tab in the chat's operator's layout when asked, as "+" does.
+    /// Needs `read`: it changes only what shows. Result: `LayoutOpenResult`.
+    // S43.
     #[serde(rename = "layout/open")]
     LayoutOpen(LayoutOpenParams),
     /// Finds installed plugins' commands by words, each with its parameter
@@ -1462,23 +1460,19 @@ pub enum ClientRequest {
     /// operator client. Result: `Preflight`.
     #[serde(rename = "preflight/configure")]
     PreflightConfigure(crate::dto::preflight::PreflightConfigureParams),
-    /// Adds, changes, removes or reorders steps of one vehicle's checklist
-    /// (S193, S353, ADR-0038 K8, K11, K16, K17), all or none. A manual
-    /// step is ticked by a person ("Propellers tight"). A
-    /// rule compares one telemetry item or parameter with a value and
-    /// passes once it has held for `holdS` seconds: `{ "kind": "rule",
-    /// "title": "Battery at least 22.2 V", "item": "battery.voltage_v",
-    /// "op": ">=", "value": 22.2, "holdS": 3 }`. Use `battery.cell_v` so
-    /// one rule reads the same on 4S and 6S. A rule with `"confirm": true`
-    /// is ticked by a person too, once it passes ("Battery charged and
-    /// strapped"). Give each step a `group` ("Battery", "Airframe"): the
-    /// list is shown by group, and "Setup", "Link", "Controller", "Plan" or
+    /// Adds, changes, removes or reorders steps of one vehicle's checklist,
+    /// all or none. A manual step is ticked by a person ("Propellers
+    /// tight"). A rule compares a telemetry item or a parameter with
+    /// `value` by `op` and passes once it has held for `holdS` seconds.
+    /// Use `battery.cell_v` so one rule reads the same on 4S and 6S. Give
+    /// each step a `group`: "Setup", "Link", "Controller", "Plan" or
     /// "Cameras" sits with UXDuck's own checks. A step only warns unless
     /// its severity is `block`, which holds the launch until it passes,
-    /// never arming. `"when": "launch"` is for what must be true at
-    /// take-off ("Area clear of people"). Needs `config`; an agent without
-    /// it is asked for by the operator first. Ticking and overriding are a
+    /// never arming. Use `when` `launch` for what must be true at take-off
+    /// ("Area clear of people"). Needs `config`, and an agent without it
+    /// is asked for by the operator first. Ticking and overriding are a
     /// person's. Result: `Preflight`.
+    // S193, S353, ADR-0038 K8, K11, K16, K17.
     #[serde(rename = "checklist/update")]
     ChecklistUpdate(crate::dto::checklist::ChecklistUpdateParams),
     /// Copies steps into one vehicle's checklist (S193, ADR-0038 K7, K11)
@@ -1841,11 +1835,9 @@ pub enum ClientRequest {
     /// Looks for vehicles once and answers with what was found and, for each
     /// thing that is not a vehicle, why (no MAVLink at any speed, in its
     /// bootloader, used by another program, not permitted, silent, or not
-    /// answering). `detect` sends nothing; `nearby` looks at this computer
-    /// and its gateway; `network` searches the local /24 and asks the
-    /// operator first. Explain an empty or negative result with the
-    /// reasons. Needs `read`; `network` needs `config`. Result:
-    /// `FindResult`.
+    /// answering). Explain an empty or negative result with the reasons.
+    /// Needs `read`, and `network` needs `config` and asks the operator
+    /// first. Result: `FindResult`.
     #[serde(rename = "find/vehicles")]
     FindVehicles(FindStartParams),
     /// Recent selected telemetry with timestamps, coverage and full-window

@@ -2,8 +2,8 @@
 
 use serde_json::{Value, json};
 use uxduck_contracts::dto::thread::{
-    AgentConfig, BulkAction, DeleteParams, FollowUpBehavior, Item as ItemDto, ModelEfforts,
-    Thread as ThreadDto, ThreadBulkParams, ThreadBulkResult, ThreadCancelResult,
+    AgentConfig, BulkAction, ChatView, DeleteParams, FollowUpBehavior, Item as ItemDto,
+    ModelEfforts, Thread as ThreadDto, ThreadBulkParams, ThreadBulkResult, ThreadCancelResult,
     ThreadCreateParams, ThreadEditParams, ThreadSendParams, ThreadUpdateParams,
 };
 use uxduck_contracts::dto::trace::Transport;
@@ -557,6 +557,7 @@ fn edit(
         text: params.text,
         attachments: params.attachments,
         spoken: params.spoken,
+        view: params.view,
     };
     send(engine, connection, &message, Some(&replaced))
 }
@@ -588,6 +589,16 @@ pub fn send(
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
             "A message must contain text and fit within 64 KB.",
+        ));
+    }
+    if params.view.as_ref().is_some_and(|view| !view.fits()) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "What is open must name ids of at most {} bytes, items from 1 and at most {} tabs.",
+                ChatView::MAX_ID,
+                ChatView::MAX_TABS
+            ),
         ));
     }
     let mut attachments: Vec<thread::Attachment> =
@@ -676,6 +687,9 @@ pub fn send(
     let item = engine.state.items.get(&item_id).map(ItemDto::from);
 
     if status == ItemStatus::Queued {
+        if let Some(view) = &params.view {
+            engine.pending_views.insert(item_id.clone(), view.clone());
+        }
         engine.pending_origins.insert(item_id, connection);
     } else if status == ItemStatus::Steering {
         engine.pending_origins.insert(item_id.clone(), connection);
@@ -687,7 +701,14 @@ pub fn send(
             engine.state.settings.share_conversations,
         );
     } else {
-        start_item(engine, connection, &found.id, &item_id, for_agent)?;
+        start_item(
+            engine,
+            connection,
+            &found.id,
+            &item_id,
+            for_agent,
+            params.view.clone(),
+        )?;
     }
     to_value(&item)
 }
@@ -698,6 +719,7 @@ pub(super) fn start_item(
     thread_id: &str,
     item_id: &str,
     text: String,
+    view: Option<ChatView>,
 ) -> Result<(), ApiError> {
     engine.next_turn += 1;
     let turn = engine.next_turn;
@@ -758,6 +780,7 @@ pub(super) fn start_item(
         title,
         effort,
         previous_response_id: current.last_response_id,
+        view,
     });
     Ok(())
 }
@@ -993,6 +1016,7 @@ fn cancel_item(
             item.status = ItemStatus::Cancelled;
             item.version += 1;
             engine.pending_origins.remove(item_id);
+            engine.pending_views.remove(item_id);
             engine.commit(connection, Change::ItemUpserted { item });
         }
         ItemStatus::Steering => {

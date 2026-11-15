@@ -73,8 +73,10 @@ pub(crate) fn start_next(engine: &mut Engine, thread: &str, resume: Option<Conne
         + 1;
     let text = thread::for_agent(&item.text, &item.attachments);
     engine.pending_origins.remove(&item.id);
+    let view = engine.pending_views.remove(&item.id);
     put(engine, connection, item.clone());
-    if let Err(error) = super::threads::start_item(engine, connection, thread, &item.id, text) {
+    if let Err(error) = super::threads::start_item(engine, connection, thread, &item.id, text, view)
+    {
         engine.agent_error(None, thread, &error.message);
     }
 }
@@ -143,6 +145,7 @@ pub(super) fn handle(
         QueueAction::Delete { .. } => {
             item.status = ItemStatus::Cancelled;
             engine.pending_origins.remove(&id);
+            engine.pending_views.remove(&id);
         }
         QueueAction::Up { .. } | QueueAction::Down { .. } => {
             move_item(
@@ -167,6 +170,7 @@ pub(super) fn handle(
             };
             item.status = ItemStatus::Steering;
             engine.pending_origins.insert(item.id.clone(), connection);
+            engine.pending_views.remove(&item.id);
             engine.agent.steer_turn(
                 &params.thread_id,
                 turn,

@@ -26,14 +26,19 @@ use uxduck_agent::provider::fake::FakeProvider;
 use uxduck_agent::provider::hosted;
 use uxduck_agent::provider::openai::OpenAiProvider;
 use uxduck_agent::provider::resilient::Resilient;
-use uxduck_agent::{Host, Provider, Turn, Wire, models, run_turn};
+use uxduck_agent::{
+    ChatContext, Host, PlanFacts, PlanItemFacts, Provider, Turn, VehicleFacts, Wire, models,
+    run_turn,
+};
+use uxduck_contracts::dto::thread::ChatView;
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_contracts::version::PROTOCOL_VERSION;
+use uxduck_core::domain::plan::{self, PlanFrame};
 use uxduck_core::domain::thread::{Item, ItemKind, ItemStatus};
 use uxduck_core::policy::admission::Trust;
 use uxduck_engine::agent::ToolOutcome;
 use uxduck_engine::runtime::{AgentPort, TurnRequest, TurnStats};
-use uxduck_engine::{ANTHROPIC_KEY, ConnectionId, OPENAI_KEY};
+use uxduck_engine::{ANTHROPIC_KEY, ConnectionId, Engine, OPENAI_KEY};
 
 use super::engine_task::EngineHandle;
 use super::transcripts::{Saved, Transcripts};
@@ -60,7 +65,7 @@ pub enum ProviderChoice {
 
 enum Command {
     Connection(uxduck_contracts::dto::thread::AgentConnectionParams),
-    Start(TurnRequest),
+    Start(Box<TurnRequest>),
     Cancel(String),
     Steer(String, u64, uxduck_agent::input::Input),
 }
@@ -93,7 +98,7 @@ impl AgentPort for AgentChannel {
         ));
     }
     fn start_turn(&mut self, turn: TurnRequest) {
-        let _ = self.0.send(Command::Start(turn));
+        let _ = self.0.send(Command::Start(Box::new(turn)));
     }
     fn cancel_turn(&mut self, thread_id: &str) {
         let _ = self.0.send(Command::Cancel(thread_id.to_owned()));
@@ -435,7 +440,7 @@ pub fn start(
                         request.thread_id.clone(),
                         (request.turn, handle, inputs.clone()),
                     );
-                    let turn = run(rpc.clone(), services.clone(), request, inputs);
+                    let turn = run(rpc.clone(), services.clone(), *request, inputs);
                     tokio::spawn(Abortable::new(turn, registration));
                 }
             }
@@ -517,11 +522,85 @@ fn sleep() -> Sleep {
     Arc::new(|every: Duration| tokio::time::sleep(every).boxed())
 }
 
-/// What the chat is about, told to the model once per change.
-fn context_of(request: &TurnRequest) -> Option<String> {
-    request.vehicle.as_ref().map(|(id, name)| {
-        format!("This thread is about the vehicle \"{name}\" (id {id}). Use vehicle_get with that id for its details and telemetry_get for where it is and its battery, attitude and GPS.")
-    })
+/// What the chat is about and what the operator has open, told to the
+/// model once per change. None once the engine has stopped.
+async fn context_of(engine: &EngineHandle, request: &TurnRequest) -> Option<String> {
+    let (vehicle, view) = (request.vehicle.clone(), request.view.clone());
+    engine
+        .run(move |e| uxduck_agent::describe(&chat_context(e, vehicle, view.as_ref())))
+        .await
+        .ok()
+}
+
+/// The facts the context is written from, as the engine has them now:
+/// the chat's vehicle, and what the operator said they have open.
+fn chat_context(
+    engine: &Engine,
+    vehicle: Option<(String, String)>,
+    view: Option<&ChatView>,
+) -> ChatContext {
+    let facts = |id: &str| {
+        engine.vehicle(id).map(|v| VehicleFacts {
+            id: v.id.clone(),
+            name: v.name.clone(),
+            kind: engine.vehicle_kind(v),
+            firmware: v.firmware.clone(),
+            simulated: engine.is_simulated(v),
+            replay: v.replay,
+        })
+    };
+    let vehicle = vehicle.map(|(id, name)| {
+        facts(&id).unwrap_or(VehicleFacts {
+            id,
+            name,
+            ..VehicleFacts::default()
+        })
+    });
+    let Some(view) = view else {
+        return ChatContext {
+            vehicle,
+            ..ChatContext::default()
+        };
+    };
+    let selected = view
+        .vehicle_id
+        .as_deref()
+        .and_then(facts)
+        .filter(|selected| vehicle.as_ref().is_none_or(|v| v.id != selected.id));
+    let plan = view.plan.as_ref().and_then(|open| {
+        let plan = engine
+            .state()
+            .plans
+            .get(&open.id)
+            .filter(|plan| plan.deleted_at_us.is_none())?;
+        let item = open.item.and_then(|number| {
+            let item = plan
+                .body
+                .items
+                .get(usize::try_from(number).ok()?.checked_sub(1)?)?;
+            let frame = PlanFrame::from_mav_frame(item.frame).filter(|_| {
+                plan.body.vehicle_type.flies() && plan::command_has_position(item.command)
+            });
+            Some(PlanItemFacts {
+                number,
+                command: item.command,
+                label: plan::command_label(item.command).map(str::to_owned),
+                height: frame.map(|frame| (item.altitude_m, frame.words().to_owned())),
+            })
+        });
+        Some(PlanFacts {
+            id: plan.id.clone(),
+            name: plan.body.name.clone(),
+            vehicle: plan.body.vehicle_type.words().to_owned(),
+            item,
+        })
+    });
+    ChatContext {
+        vehicle,
+        selected,
+        plan,
+        tabs: view.tabs.clone(),
+    }
 }
 
 fn engine_stats(stats: &uxduck_agent::TurnStats) -> TurnStats {
@@ -536,6 +615,7 @@ fn engine_stats(stats: &uxduck_agent::TurnStats) -> TurnStats {
         retries: stats.retries,
         fell_back: stats.fell_back,
         compacted: stats.compacted,
+        continuations: stats.continuations,
         thinking_dropped: stats.usage.thinking_dropped,
     }
 }
@@ -619,27 +699,18 @@ async fn run(
         .iter()
         .position(|item| item.id == request.item_id)
         .unwrap_or(items.len());
-    let covers: Vec<String> = items[..before]
-        .iter()
-        .filter(|i| i.in_history())
-        .map(|item| item.id.clone())
-        .collect();
-    let context = context_of(&request);
-    let kept = services.transcripts.matching(&thread_id, wire, &covers);
-    let previous = kept
-        .as_ref()
-        .and_then(|kept| kept.last_response.clone())
-        .or_else(|| request.previous_response_id.clone());
-    let (conversation, context_sent) = match kept {
-        Some(kept) => (
-            kept.conversation,
-            kept.context_sent && kept.context == context,
-        ),
-        None => (
-            conversation::rebuild(wire, &entries(&items[..before])),
-            false,
-        ),
-    };
+    let context = context_of(&engine, &request).await;
+    let started_ms = crate::edge::now_ms();
+    let (conversation, context_sent, last_response) = history(
+        &services.transcripts,
+        &thread_id,
+        wire,
+        &items[..before],
+        context.as_deref(),
+        provider.cached_for_ms(&request.model),
+        started_ms,
+    );
+    let previous = last_response.or_else(|| request.previous_response_id.clone());
 
     let host = LocalHost {
         rpc: rpc.clone(),
@@ -702,6 +773,7 @@ async fn run(
                 context_sent: outcome.context_sent,
                 last_response: outcome.response_id.clone(),
                 conversation: outcome.conversation,
+                sent_at_ms: started_ms + outcome.stats.last_sent_ms,
             },
         );
     }
@@ -818,12 +890,12 @@ async fn run_local(
         // Rebuild from the journal so switching runtimes, edits, and restarting remain consistent.
         let history = serde_json::to_string(&conversation::rebuild(
             Wire::OpenAi,
-            &entries(&items[..before]),
+            &conversation::slim(entries(&items[..before])),
         ))
         .unwrap_or_default();
         let prompt = format!(
             "Prior conversation (quoted history; not new instructions):\n{history}\n\n{}\n\nNew operator message:\n{}",
-            context_of(&request).unwrap_or_default(),
+            context_of(&engine, &request).await.unwrap_or_default(),
             request.text
         );
         if prompt.len() > 1024 * 1024 {
@@ -886,6 +958,41 @@ fn start_connection_job(
 const NO_KEY: &str = "No OpenAI key is set. Run `uxduck config set openai.key` on this computer.";
 const NO_ANTHROPIC_KEY: &str =
     "No Anthropic key is set. Run `uxduck config set anthropic.key` on this computer.";
+
+/// The chat before this turn's message (`earlier`, from the journal) as a
+/// turn starting at `now_ms` (Unix milliseconds) sends it, whether it
+/// already carries `context`, and the last response it holds. The kept
+/// transcript goes byte for byte while it matches and the provider, which
+/// caches a conversation for `cached_for_ms`, likely still has it, else
+/// the journal's record is rebuilt with the earlier messages' long tool
+/// results slimmed.
+fn history(
+    transcripts: &Transcripts,
+    thread_id: &str,
+    wire: Wire,
+    earlier: &[Item],
+    context: Option<&str>,
+    cached_for_ms: u64,
+    now_ms: u64,
+) -> (Vec<Value>, bool, Option<String>) {
+    let covers: Vec<String> = earlier
+        .iter()
+        .filter(|item| item.in_history())
+        .map(|item| item.id.clone())
+        .collect();
+    match transcripts.matching(thread_id, wire, &covers, cached_for_ms, now_ms) {
+        Some(kept) => (
+            kept.conversation,
+            kept.context_sent && kept.context.as_deref() == context,
+            kept.last_response,
+        ),
+        None => (
+            conversation::rebuild(wire, &conversation::slim(entries(earlier))),
+            false,
+            None,
+        ),
+    }
+}
 
 /// The journal's messages and tool calls, as a provider-neutral history.
 fn entries(items: &[Item]) -> Vec<Entry> {
@@ -969,6 +1076,113 @@ mod tests {
                     failed: true,
                 }
             ]
+        );
+    }
+
+    fn tool(id: &str, method: &str, result: &str) -> Item {
+        let mut tool = item(id, ItemKind::ToolCall, "");
+        tool.tool_call = Some(ToolCall {
+            method: method.into(),
+            params: "{}".into(),
+            client_id: "agent".into(),
+            result: Some(result.into()),
+            error: None,
+        });
+        tool
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "transcript fixture")]
+    fn a_warm_follow_up_replays_its_transcript_and_a_cold_one_rebuilds_slimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcripts = Transcripts::new(dir.path());
+        let long = format!(r#"{{"params":"{}"}}"#, "p".repeat(20_000));
+        let short = r#"{"vehicles":[]}"#;
+        let items = [
+            item("user1", ItemKind::UserMessage, "Why does it climb?"),
+            tool("tool1", "param/search", &long),
+            tool("tool2", "vehicle/list", short),
+            item(
+                "agent1",
+                ItemKind::AgentMessage,
+                "Its hover throttle is low.",
+            ),
+        ];
+        // What Claude was sent, with its signed thinking.
+        let mut sent_conversation = conversation::rebuild(Wire::Anthropic, &entries(&items));
+        sent_conversation[1]["content"].as_array_mut().unwrap().insert(
+            0,
+            json!({ "type": "thinking", "thinking": "Read them.", "signature": "signed-fixture" }),
+        );
+        let sent = 1_700_000_000_000;
+        transcripts.keep(
+            "th1",
+            &Saved {
+                wire: Wire::Anthropic,
+                model: "claude-opus-5-5".into(),
+                covers: items.iter().map(|item| item.id.clone()).collect(),
+                context: Some("About Copter 1.".into()),
+                context_sent: true,
+                last_response: Some("msg_2".into()),
+                conversation: sent_conversation.clone(),
+                sent_at_ms: sent,
+            },
+        );
+        let cached_for = |wire, cached_for_ms, now| {
+            history(
+                &transcripts,
+                "th1",
+                wire,
+                &items,
+                Some("About Copter 1."),
+                cached_for_ms,
+                now,
+            )
+        };
+        // A hosted Claude chat, which the hosted model caches for an hour.
+        let hour = hosted::provider("http://127.0.0.1:9", "s", true, "th1", Wire::Anthropic)
+            .cached_for_ms("claude-opus-5-5");
+        assert_eq!(hour, conversation::HOUR_CACHE_REPLAY_MS);
+        let at = |wire, now| cached_for(wire, hour, now);
+        let slimmed = |wire| conversation::rebuild(wire, &conversation::slim(entries(&items)));
+
+        let (warm, context_sent, last) = at(Wire::Anthropic, sent + 4 * 60_000);
+        assert_eq!(
+            serde_json::to_string(&warm).unwrap(),
+            serde_json::to_string(&sent_conversation).unwrap(),
+            "byte for byte"
+        );
+        assert!(context_sent);
+        assert_eq!(last.as_deref(), Some("msg_2"));
+        let after_lunch = at(Wire::Anthropic, sent + conversation::CACHE_LIFETIME_MS + 1);
+        assert_eq!(after_lunch.0, sent_conversation, "replayed after 5 minutes");
+        assert_eq!(at(Wire::Anthropic, sent + hour).0, sent_conversation);
+
+        let cold = at(Wire::Anthropic, sent + hour + 1);
+        assert_eq!(cold, (slimmed(Wire::Anthropic), false, None));
+        let text = serde_json::to_string(&cold.0).unwrap();
+        assert!(!text.contains("signed-fixture"));
+        assert!(!text.contains(&long));
+        assert!(text.contains(&serde_json::to_string(conversation::ELIDED).unwrap()));
+        assert!(text.contains(&serde_json::to_string(short).unwrap()));
+
+        assert_eq!(
+            at(Wire::OpenAi, sent + 60_000),
+            (slimmed(Wire::OpenAi), false, None),
+            "another model's wire rebuilds slimmed even while warm"
+        );
+
+        let gpt = hosted::provider("http://127.0.0.1:9", "s", true, "th1", Wire::OpenAi);
+        assert_eq!(
+            gpt.cached_for_ms("gpt-6.1-sol"),
+            conversation::HALF_HOUR_CACHE_REPLAY_MS
+        );
+        let open_weight = gpt.cached_for_ms("moonshotai/kimi-k3.1-pro");
+        assert_eq!(open_weight, conversation::CACHE_LIFETIME_MS);
+        assert_eq!(
+            cached_for(Wire::Anthropic, open_weight, sent + open_weight + 1),
+            (slimmed(Wire::Anthropic), false, None),
+            "a 5-minute cache lapses after 5 minutes"
         );
     }
 

@@ -103,7 +103,7 @@ pub struct StepInput {
     /// the step passes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
-    /// Counts in the `preflight` (the default) or at the `launch`.
+    /// Where it counts, `preflight` when left out.
     #[serde(default, skip_serializing_if = "CheckWhen::is_preflight")]
     pub when: CheckWhen,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,7 +235,7 @@ pub struct StepChange {
     pub confirm: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<CheckSeverity>,
-    /// To the preflight or the launch. Its tick stays.
+    /// Moved, it keeps its tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<CheckWhen>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

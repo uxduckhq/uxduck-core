@@ -472,6 +472,7 @@ impl Engine {
             retries: stats.retries,
             fell_back: stats.fell_back,
             compacted: stats.compacted,
+            continuations: stats.continuations,
             thinking_dropped: stats.thinking_dropped,
             spoken: spoken.is_some(),
         });

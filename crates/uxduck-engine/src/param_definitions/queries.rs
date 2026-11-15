@@ -29,9 +29,9 @@ const LIST_AT_ONCE: u32 = 100;
 const DEFAULT_HITS: u32 = 20;
 const MAX_HITS: u32 = 100;
 const MAX_NAMES: usize = 50;
-/// A page of briefs stays under this many characters, well inside what an
-/// agent takes whole (`MAX_TOOL_OUTPUT_CHARS`), and says where the next
-/// begins (FB-104).
+/// A page of briefs stays under this many characters and says where the
+/// next begins (FB-104). The in-app agent asks for pages of at most 50
+/// briefs, which fit whole in what it takes (`MAX_TOOL_OUTPUT_CHARS`).
 const PAGE_CHARS: usize = 16_000;
 
 fn invalid(message: impl Into<String>) -> ApiError {

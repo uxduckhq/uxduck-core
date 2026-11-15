@@ -4952,6 +4952,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "uxduck-contracts",
+ "uxduck-core",
 ]
 
 [[package]]
@@ -4988,6 +4989,7 @@ dependencies = [
  "sha2 0.11.1",
  "syn 2.0.119",
  "thiserror 2.0.21",
+ "uxduck-agent",
  "uxduck-contracts",
  "uxduck-core",
  "uxduck-mavlink",

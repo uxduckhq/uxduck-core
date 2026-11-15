@@ -14,9 +14,8 @@ use crate::dto::telemetry::AltitudeFrame;
 pub enum Command {
     Arm,
     Disarm,
-    /// Arm when disarmed, disarm when armed, as the vehicle last reported:
-    /// sent and receipted as `arm` or `disarm`. For a controller's one
-    /// button or switch.
+    /// Arm when disarmed, disarm when armed, as last reported, for a
+    /// controller's one button. Sent and receipted as `arm` or `disarm`.
     ArmToggle,
     /// An ArduPilot mode by name, such as `LOITER` or `GUIDED`.
     SetMode {
@@ -27,19 +26,16 @@ pub enum Command {
     Land,
     /// Restarts the autopilot; ArduPilot refuses while armed.
     Reboot,
-    /// Goes to a place and holds there, at a height in a frame: GUIDED on
-    /// ArduPilot, Hold on PX4 (`DO_REPOSITION` as a `COMMAND_INT`, so the
-    /// place keeps its precision). Offline: `warn`. `command/list` offers
-    /// it with a position of zeros, for its risk and class; the sender
-    /// fills the place in.
+    /// Goes to a place and holds there: GUIDED on ArduPilot, Hold on PX4.
+    /// Offline: `warn`. `command/list` offers it at zeros: fill the place in.
+    // Sent as `DO_REPOSITION` in a `COMMAND_INT`, so the place keeps its
+    // precision. `command/list` offers it for its risk and class.
     GoTo {
         latitude_deg: f64,
         longitude_deg: f64,
         /// The height, in `altitudeFrame`.
         altitude_m: f64,
-        /// What the height is measured from: `above-home` when left out,
-        /// `amsl`, or `above-ground` (the autopilot's terrain data).
-        /// `ellipsoid` is refused.
+        /// What the height is measured from. `ellipsoid` is refused.
         #[serde(default)]
         altitude_frame: AltitudeFrame,
         /// Circle radius in metres, negative counterclockwise: an `ArduPlane`
@@ -47,7 +43,7 @@ pub enum Command {
         /// default, or a PX4 holds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loiter_radius_m: Option<f64>,
-        /// Submarine heading. Omitted commands retain the existing default.
+        /// For a submarine. Left out, it keeps its default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<GoToHeading>,
     },
@@ -63,8 +59,9 @@ pub enum Command {
     SetEkfOrigin {
         place: PlaceAmsl,
     },
-    /// Any `MAV_CMD` by number with up to seven parameters, as plugins send
-    /// for protocols the core does not name. Offline: `warn`.
+    /// Any other `MAV_CMD` by number, with up to seven parameters. Offline:
+    /// `warn`.
+    // As plugins send for protocols the core does not name.
     Long {
         command: u16,
         params: Vec<f32>,
@@ -80,8 +77,7 @@ pub struct PlaceAmsl {
     pub altitude_amsl_m: f64,
 }
 
-/// How a submarine faces while going to a location. Bearings are degrees
-/// clockwise from true north.
+/// How a submarine faces on the way: `degrees` clockwise from true north.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum GoToHeading {
@@ -116,9 +112,10 @@ pub struct CommandSendParams {
     /// autopilot's checks. Operators only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
-    /// Launches past UXDuck's failing checks that hold the launch
-    /// (ADR-0038 K24): their ids, from `preflight/state`, every one
-    /// named. Operators only. It forces nothing on the vehicle.
+    /// Launches past UXDuck's failing checks that hold the launch: their
+    /// ids from `preflight/state`, every one named. Operators only. It
+    /// forces nothing on the vehicle.
+    // ADR-0038 K24.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub override_preflight: Vec<String>,
 }

@@ -1798,6 +1798,42 @@ export type ChartSpec = {
 };
 
 /**
+ * What the operator has open in the app as they send a message, for the
+ * agent: it describes that moment, so it is never kept.
+ */
+export type ChatView = {
+    /**
+     * The plan open in the mission editor, if one is.
+     */
+    plan?: ChatViewPlan | null;
+    /**
+     * The kinds of the tabs shown in the current layout, the chat aside,
+     * each once. At most 32.
+     */
+    tabs?: Array<TabKind>;
+    /**
+     * The vehicle selected in the app, which may not be the chat's. Up to
+     * 128 bytes.
+     */
+    vehicleId?: string | null;
+};
+
+/**
+ * A plan open in the mission editor.
+ */
+export type ChatViewPlan = {
+    /**
+     * The plan's id. Up to 128 bytes.
+     */
+    id: string;
+    /**
+     * The one item selected, numbered from 1 as the editor's list shows
+     * it. Absent when none, or several, are selected.
+     */
+    item?: number | null;
+};
+
+/**
  * One check in a vehicle's list.
  */
 export type Check = {
@@ -3591,9 +3627,7 @@ export type Command = {
     type: 'reboot';
 } | {
     /**
-     * What the height is measured from: `above-home` when left out,
-     * `amsl`, or `above-ground` (the autopilot's terrain data).
-     * `ellipsoid` is refused.
+     * What the height is measured from. `ellipsoid` is refused.
      */
     altitudeFrame?: AltitudeFrame;
     /**
@@ -3601,7 +3635,7 @@ export type Command = {
      */
     altitudeM: number;
     /**
-     * Submarine heading. Omitted commands retain the existing default.
+     * For a submarine. Left out, it keeps its default.
      */
     heading?: GoToHeading | null;
     latitudeDeg: number;
@@ -3732,9 +3766,9 @@ export type CommandSendParams = {
      */
     force?: boolean;
     /**
-     * Launches past UXDuck's failing checks that hold the launch
-     * (ADR-0038 K24): their ids, from `preflight/state`, every one
-     * named. Operators only. It forces nothing on the vehicle.
+     * Launches past UXDuck's failing checks that hold the launch: their
+     * ids from `preflight/state`, every one named. Operators only. It
+     * forces nothing on the vehicle.
      */
     overridePreflight?: Array<string>;
     vehicleId: string;
@@ -6138,8 +6172,7 @@ export type FindScope = 'detect' | 'nearby' | 'network';
 
 export type FindStartParams = {
     /**
-     * Look at serial devices the known-id table does not know too ("Look
-     * at every serial port").
+     * Look at serial devices the known-id table does not know too.
      */
     allSerial?: boolean;
     scope: FindScope;
@@ -7016,8 +7049,7 @@ export type GamepadAxis = 'left-stick-x' | 'left-stick-y' | 'right-stick-x' | 'r
 export type GamepadButton = 'south' | 'east' | 'north' | 'west' | 'right-trigger' | 'right-trigger-2' | 'select' | 'start' | 'right-thumb' | 'dpad-up' | 'dpad-down' | 'dpad-left' | 'dpad-right' | 'left-trigger' | 'left-trigger-2' | 'mode' | 'left-thumb';
 
 /**
- * How a submarine faces while going to a location. Bearings are degrees
- * clockwise from true north.
+ * How a submarine faces on the way: `degrees` clockwise from true north.
  */
 export type GoToHeading = {
     mode: 'face-destination';
@@ -10101,6 +10133,9 @@ export type ParamSearchParams = {
      * `RTL_`.
      */
     query: string;
+    /**
+     * With none, the only vehicle heard.
+     */
     vehicleId?: string | null;
     /**
      * Search the vehicle's whole definition set, including parameters it
@@ -10181,24 +10216,23 @@ export type ParamSetParams = {
     /**
      * Sent with the other writes asked for in the same tenth of a second
      * as one parameter file, when they are eight or more and the vehicle
-     * is ArduPilot, which takes them that way (S121, ADR-0027 F13):
-     * quicker over a radio. Confirmed by reading the file back; anything
-     * not confirmed goes again one by one.
+     * is ArduPilot: quicker over a radio. Read back to confirm, and any
+     * not confirmed go again one by one.
      */
     byFile?: boolean;
     /**
-     * Confirms a write to a vehicle that is not online (parameter writes
-     * are `warn` in the offline table).
+     * Confirms a write to a vehicle that is not online.
      */
     confirm?: boolean;
     /**
-     * The value the client last saw; omitted, the write is unconditional.
+     * The value last seen: the write is refused with `version-conflict`
+     * if it changed. Left out, the write is unconditional.
      */
     expectedValue?: number | null;
     name: string;
     /**
      * Why, up to 200 characters, kept with the change in the vehicle's
-     * history (S74), such as "higher hills".
+     * history.
      */
     reason?: string | null;
     value: number;
@@ -14380,7 +14414,7 @@ export type StepChange = {
     unit?: string | null;
     value?: number | null;
     /**
-     * To the preflight or the launch. Its tick stays.
+     * Moved, it keeps its tick.
      */
     when?: CheckWhen | null;
 };
@@ -14414,7 +14448,7 @@ export type StepInput = {
     unit?: string | null;
     value?: number | null;
     /**
-     * Counts in the `preflight` (the default) or at the `launch`.
+     * Where it counts, `preflight` when left out.
      */
     when?: CheckWhen;
 };
@@ -14846,7 +14880,8 @@ export type Tab = {
 };
 
 /**
- * What a tab shows.
+ * What a tab shows: the focused vehicle's, or the pinned one's, unless it
+ * follows no vehicle.
  */
 export type TabKind = 'chat' | 'home' | 'map' | 'map-3d' | 'vehicle-view' | 'globe' | 'telemetry' | 'control' | 'messages' | 'files' | 'vehicles' | 'parameters' | 'mission' | 'controllers' | 'instruments' | 'flight-display' | 'history' | 'camera' | 'get-started' | 'inspector' | 'settings' | 'plugin' | 'readout' | 'chart' | 'practice' | 'places' | 'flights' | 'missions' | 'profile' | 'duck' | 'airspace' | 'setup' | 'checklist' | 'tuning';
 
@@ -15494,6 +15529,10 @@ export type ThreadEditParams = {
     spoken?: SpokenTurn | null;
     text: string;
     threadId: string;
+    /**
+     * What the operator has open, as for `ThreadSendParams::view`.
+     */
+    view?: ChatView | null;
 };
 
 /**
@@ -15567,6 +15606,11 @@ export type ThreadSendParams = {
     spoken?: SpokenTurn | null;
     text: string;
     threadId: string;
+    /**
+     * What the operator has open as they send it, told to the agent with
+     * the message. Absent, the agent knows only the chat's vehicle.
+     */
+    view?: ChatView | null;
 };
 
 export type ThreadUpdateParams = {

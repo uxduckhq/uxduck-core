@@ -650,6 +650,9 @@ pub enum DaemonEvent {
         /// The chat was summarised before this turn.
         #[serde(default)]
         compacted: bool,
+        /// Replies that reached the output limit and were asked for again.
+        #[serde(default)]
+        continuations: u32,
         /// Earlier reasoning the provider set aside; more than zero is a bug.
         #[serde(default)]
         thinking_dropped: u32,

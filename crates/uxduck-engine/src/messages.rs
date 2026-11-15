@@ -430,7 +430,8 @@ impl Engine {
     /// Whether a vehicle is one UXDuck simulates, on a simulator link.
     /// A simulation: of UXDuck's own by its link, else as the person said,
     /// else as it said itself (ADR-0039 R14).
-    pub(crate) fn is_simulated(&self, vehicle: &Vehicle) -> bool {
+    #[must_use]
+    pub fn is_simulated(&self, vehicle: &Vehicle) -> bool {
         self.state
             .links
             .get(&vehicle.link_id)

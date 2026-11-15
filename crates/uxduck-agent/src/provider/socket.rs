@@ -23,6 +23,8 @@ pub struct SocketRound {
     usage: Usage,
     usage_known: bool,
     terminal: Option<Value>,
+    /// The last response stopped at its output limit.
+    cut: bool,
     pub ready: bool,
 }
 impl SocketRound {
@@ -38,6 +40,7 @@ impl SocketRound {
             usage: Usage::default(),
             usage_known: true,
             terminal: None,
+            cut: false,
             ready: false,
         }
     }
@@ -105,26 +108,30 @@ impl SocketRound {
                 next["input"] = json!(results);
                 send.push(next);
             }
+            // A steered response ends as complete. One cut at its output
+            // limit keeps only its whole items, and any other incomplete one
+            // is an error.
             "response.completed" | "response.incomplete" => {
-                if event["type"] == "response.incomplete"
-                    && event["response"]["incomplete_details"]["reason"] != "steered"
-                {
-                    return openai::event(event).map(|_| (events, send));
+                let mut terminal = event.clone();
+                if event["response"]["incomplete_details"]["reason"] == "steered" {
+                    terminal["type"] = json!("response.completed");
                 }
-                let mut complete = event.clone();
-                complete["type"] = json!("response.completed");
                 if let Some(ProviderEvent::Completed {
                     output,
                     usage,
                     usage_known,
+                    cut,
                     ..
-                }) = openai::event(&complete)?
+                }) = openai::event(&terminal)?
                 {
+                    let mut response = event["response"].clone();
+                    response["output"] = json!(output);
                     self.output.extend(output);
                     self.usage.add(&usage);
                     self.usage_known &= usage_known;
+                    self.cut = cut;
+                    self.terminal = Some(response);
                 }
-                self.terminal = Some(event["response"].clone());
                 self.ready = self.waiting.is_none();
             }
             // Calls are emitted only after the response and any native steering finish.
@@ -173,6 +180,7 @@ impl SocketRound {
             output: std::mem::take(&mut self.output),
             usage: std::mem::take(&mut self.usage),
             usage_known: self.usage_known && !response.is_null(),
+            cut: self.cut,
         });
         events
     }
@@ -240,6 +248,43 @@ mod tests {
         let result = round.finish();
         assert!(
             matches!(&result[..],[ProviderEvent::Completed{usage,output,..}] if usage.input_tokens==20 && usage.output_tokens==4 && output[0]["content"]=="stay read only")
+        );
+    }
+    #[test]
+    fn a_response_cut_at_its_output_limit_dispatches_only_its_whole_calls() {
+        let mut round = state();
+        let inbox = Inputs::default();
+        round
+            .event(
+                &json!({"type":"response.created","response":{"id":"a"}}),
+                &inbox,
+            )
+            .unwrap();
+        let whole = json!({"type":"function_call","call_id":"whole","name":"vehicle_list","arguments":"{}","status":"completed"});
+        let cut = json!({"type":"function_call","call_id":"cut","name":"param_set","arguments":"{\"na","status":"incomplete"});
+        round
+            .event(
+                &json!({"type":"response.incomplete","response":{"id":"a","output":[whole, cut],
+                    "incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":2}}}),
+                &inbox,
+            )
+            .unwrap();
+        assert!(round.ready);
+        let events = round.finish();
+        assert!(
+            matches!(&events[..], [ProviderEvent::ToolCall { call_id, .. }, ProviderEvent::Completed { output, cut: true, .. }]
+                if call_id == "whole" && output == std::slice::from_ref(&whole)),
+            "{events:?}"
+        );
+        let mut round = state();
+        assert!(
+            round
+                .event(
+                    &json!({"type":"response.incomplete","response":{"id":"b","incomplete_details":{"reason":"content_filter"}}}),
+                    &inbox,
+                )
+                .is_err(),
+            "any other incomplete response is still an error"
         );
     }
     #[test]

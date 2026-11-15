@@ -392,6 +392,7 @@ pub struct ParamSearchParams {
     /// Words, such as "battery failsafe", or a name or its start, such as
     /// `RTL_`.
     pub query: String,
+    /// With none, the only vehicle heard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
     /// Search the vehicle's whole definition set, including parameters it

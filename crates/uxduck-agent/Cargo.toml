@@ -31,6 +31,8 @@ anthropic = ["http"]
 [dev-dependencies]
 axum.workspace = true
 tokio.workspace = true
+# The engine's own comparison of a parameter value given back.
+uxduck-core.workspace = true
 
 [lints]
 workspace = true

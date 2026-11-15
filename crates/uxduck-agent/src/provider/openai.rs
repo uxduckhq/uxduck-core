@@ -4,6 +4,10 @@
 //! request continues the reasoning and shares its prefix with this one.
 //! OpenAI caches repeated prefixes by itself; `prompt_cache_key` keeps one
 //! chat's requests together. Nothing is kept at OpenAI.
+//!
+//! A response that stops at `max_output_tokens` is reported as cut, with
+//! only its whole items (`whole`): a call whose arguments did not finish
+//! is never run. Any other incomplete response is an error.
 
 #[cfg(feature = "http")]
 use std::sync::Arc;
@@ -125,6 +129,34 @@ fn usage(value: &Value) -> Usage {
     }
 }
 
+/// The whole part of a response's `output`: an item it was still writing
+/// when it stopped is left out, but for a message, whose text so far is
+/// kept. So is a call whose arguments are not a JSON object, and reasoning
+/// with nothing after it, which the API takes only with what follows.
+#[must_use]
+pub fn whole(output: &[Value]) -> Vec<Value> {
+    let finished = |item: &Value| item["status"] != "incomplete" && item["status"] != "in_progress";
+    let mut items: Vec<Value> = output
+        .iter()
+        .filter(|item| match item["type"].as_str() {
+            Some("message") => true,
+            Some("function_call") => {
+                finished(item)
+                    && item["arguments"]
+                        .as_str()
+                        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                        .is_some_and(|arguments| arguments.is_object())
+            }
+            _ => finished(item),
+        })
+        .cloned()
+        .collect();
+    while items.last().is_some_and(|item| item["type"] == "reasoning") {
+        items.pop();
+    }
+    items
+}
+
 /// One streamed event, or `None` for the many this does not need.
 ///
 /// # Errors
@@ -144,7 +176,8 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
             .as_str()
             .map(|delta| ProviderEvent::TextDelta(delta.to_owned())),
         "response.output_item.done"
-            if value.pointer("/item/type") == Some(&json!("function_call")) =>
+            if value.pointer("/item/type") == Some(&json!("function_call"))
+                && value.pointer("/item/status") != Some(&json!("incomplete")) =>
         {
             let field = |name: &str| value["item"][name].as_str().unwrap_or_default().to_owned();
             Some(ProviderEvent::ToolCall {
@@ -153,14 +186,21 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
                 arguments: field("arguments"),
             })
         }
-        "response.completed" => {
+        kind @ ("response.completed" | "response.incomplete")
+            if kind == "response.completed"
+                || value.pointer("/response/incomplete_details/reason")
+                    == Some(&json!("max_output_tokens")) =>
+        {
             let response = &value["response"];
+            let output = response["output"].as_array().map_or(&[][..], Vec::as_slice);
+            let cut = kind == "response.incomplete";
             Some(ProviderEvent::Completed {
                 response_id: response["id"].as_str().unwrap_or_default().to_owned(),
-                output: response["output"].as_array().cloned().unwrap_or_default(),
+                output: if cut { whole(output) } else { output.to_vec() },
                 usage: usage(&response["usage"]),
                 usage_known: response["usage"]["input_tokens"].as_u64().is_some()
                     && response["usage"]["output_tokens"].as_u64().is_some(),
+                cut,
             })
         }
         "response.incomplete" => {
@@ -363,6 +403,43 @@ mod tests {
         assert!(event(&failed).unwrap_err().retryable());
         let refused = json!({ "type": "response.failed", "response": { "error": { "code": "invalid_prompt", "message": "no" } } });
         assert_eq!(event(&refused), Err(ProviderError::Refused("no".into())));
+    }
+
+    #[test]
+    fn a_response_cut_at_its_output_limit_keeps_only_its_whole_items() {
+        let cut_call = json!({ "type": "function_call", "call_id": "cut", "name": "param_set",
+            "arguments": "{\"name\":\"ATC_", "status": "incomplete" });
+        assert_eq!(
+            event(&json!({ "type": "response.output_item.done", "item": cut_call })),
+            Ok(None),
+            "a call still being written is never run"
+        );
+        let message = json!({ "type": "message", "role": "assistant", "status": "incomplete",
+            "content": [{ "type": "output_text", "text": "Reading the gains" }] });
+        let whole_call = json!({ "type": "function_call", "call_id": "whole", "name": "vehicle_list",
+            "arguments": "{}", "status": "completed" });
+        let reasoning = json!({ "type": "reasoning", "id": "rs_1", "encrypted_content": "e" });
+        let incomplete = |output: Value, reason: &str| {
+            event(&json!({ "type": "response.incomplete", "response": {
+                "id": "resp_cut", "output": output, "incomplete_details": { "reason": reason },
+                "usage": { "input_tokens": 10, "output_tokens": 128_000 } } }))
+        };
+        let Ok(Some(ProviderEvent::Completed { output, cut, .. })) = incomplete(
+            json!([reasoning, message, whole_call, reasoning, cut_call]),
+            "max_output_tokens",
+        ) else {
+            panic!("a cut response completes");
+        };
+        assert!(cut);
+        assert_eq!(
+            output,
+            [reasoning, message, whole_call],
+            "reasoning with nothing after it is left out"
+        );
+        assert!(matches!(
+            incomplete(json!([]), "content_filter"),
+            Err(ProviderError::Refused(_))
+        ));
     }
 
     #[test]

@@ -247,6 +247,10 @@ impl Provider for Resilient {
         self.inner.max_request_bytes()
     }
 
+    fn cached_for_ms(&self, model: &str) -> u64 {
+        self.inner.cached_for_ms(model)
+    }
+
     fn respond(
         &self,
         request: ProviderRequest,

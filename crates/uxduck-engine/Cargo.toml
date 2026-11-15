@@ -28,6 +28,8 @@ thiserror.workspace = true
 quick-xml.workspace = true
 
 [dev-dependencies]
+# What the in-app agent reads of a result, to keep it within its cap.
+uxduck-agent.workspace = true
 # Signing a terrain manifest in tests (S23).
 minisign.workspace = true
 # Which fields the checkpoint and event log require (stored_fields.rs).

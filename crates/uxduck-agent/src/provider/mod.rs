@@ -100,6 +100,10 @@ pub enum ProviderEvent {
         output: Vec<Value>,
         usage: Usage,
         usage_known: bool,
+        /// It stopped at its output limit. `output` then holds only its
+        /// whole part: a tool call or reasoning it was still writing is
+        /// left out, and never reported as a `ToolCall`.
+        cut: bool,
     },
     /// The request was sent again after a busy answer or a dropped
     /// connection.
@@ -167,6 +171,13 @@ pub trait Provider: Send + Sync {
     /// short of the model's own window.
     fn max_request_bytes(&self) -> Option<usize> {
         None
+    }
+
+    /// How long after a request with `model` this provider likely still
+    /// caches its conversation, so replaying it pays
+    /// (`conversation::cache_warm`).
+    fn cached_for_ms(&self, model: &str) -> u64 {
+        crate::conversation::cached_for_ms(model)
     }
 
     /// Starts a response and streams its events.

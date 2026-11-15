@@ -631,7 +631,13 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "files/upload",
     "files/remove",
     "video/rename",
+    // Writing plugins is rare, and its tools with their guide were 8 KB of
+    // every request. Found with tool_search, an install still waits for an
+    // operator (X12).
+    "plugin/draft",
+    "plugin/test",
     "plugin/drafts",
+    "plugin/install",
     "settings/get",
     "settings/update",
     "operator/list",
@@ -698,6 +704,15 @@ impl Tool {
     }
 }
 
+/// A tool as sent each turn: its description is its method's doc, so its
+/// params' own doc, which mostly says the same again, is left out.
+fn as_sent(mut tool: Tool) -> Tool {
+    if let Some(parameters) = tool.parameters.as_object_mut() {
+        parameters.remove("description");
+    }
+    tool
+}
+
 /// What the model is sent each turn: the tools not deferred, and
 /// `tool_call` to run a deferred one that `tool_search` found. Their words
 /// go without the plan's own references ([`without_references`]).
@@ -706,11 +721,14 @@ pub fn model_tools() -> Vec<Tool> {
     let mut sent: Vec<Tool> = tools()
         .into_iter()
         .filter(|tool| !DEFERRED_METHODS.contains(&tool.method.as_str()))
+        .map(as_sent)
+        .map(for_model)
         .collect();
     if let Some(search) = sent.iter_mut().find(|tool| tool.method == "tool/search") {
         search.description.push_str(
             " Also finds deferred UXDuck tools in uxduckTools: plans, missions, simulations, \
-             terrain, files, parameters, history and link diagnostics. Run them with tool_call.",
+             terrain, files, parameters, history, link diagnostics and plugin writing. Run them \
+             with tool_call.",
         );
     }
     sent.push(Tool {
@@ -733,6 +751,73 @@ pub fn model_tools() -> Vec<Tool> {
         describe_without_references(&mut tool.parameters);
     }
     sent
+}
+
+/// The limit the in-app agent asks for when the model gives none, below
+/// the daemon's own default, which the app and MCP keep: every result
+/// stays in the model's chat. A paged list also has the most it asks for,
+/// so that a page fits whole within `MAX_TOOL_OUTPUT_CHARS` and the model
+/// asks again from `nextOffset` for the rest (FB-104). Each with the
+/// model's description of it.
+const MODEL_LIMITS: &[(&str, u64, Option<u64>, &str)] = &[
+    (
+        "vehicle/messages",
+        30,
+        None,
+        "The newest this many, 30 if left out, at most 2000.",
+    ),
+    (
+        "param/list",
+        50,
+        Some(50),
+        "At most this many, up to 50 (the default).",
+    ),
+    (
+        "param/search",
+        20,
+        Some(50),
+        "At most this many hits (default 20, at most 50).",
+    ),
+];
+
+/// The limit the agent asks for in a call of `method` that asked for
+/// `asked`, when it is not that.
+pub(crate) fn model_limit(method: &str, asked: Option<&Value>) -> Option<u64> {
+    let &(_, limit, most, _) = MODEL_LIMITS
+        .iter()
+        .find(|(limited, ..)| *limited == method)?;
+    match asked {
+        None | Some(Value::Null) => Some(limit),
+        Some(asked) => {
+            let most = most?;
+            asked
+                .as_u64()
+                .is_some_and(|asked| asked > most)
+                .then_some(most)
+        }
+    }
+}
+
+/// A tool as the in-app model is told of it: with the limit the agent asks
+/// for, and what `output` leaves out of its results that the model would
+/// otherwise miss. Kept short: the tools are sent with every request.
+fn for_model(mut tool: Tool) -> Tool {
+    if let Some((.., about)) = MODEL_LIMITS
+        .iter()
+        .find(|(limited, ..)| *limited == tool.method)
+        && let Some(limit) = tool
+            .parameters
+            .pointer_mut("/properties/limit")
+            .and_then(Value::as_object_mut)
+    {
+        limit.insert("description".into(), json!(about));
+    }
+    if tool.method == "command/list" {
+        tool.description.push_str(
+            " Without riskInFlight, it is as risky in flight. Without offlineBehaviour, a safety command is allowed offline and any other warns. A set-mode command without a label reads Set mode and its mode.",
+        );
+    }
+    tool
 }
 
 /// A doc without its references to UXDuck's own plan, such as "(S65)" or
@@ -807,7 +892,8 @@ pub(crate) fn chat_tools(can_file_feedback: bool) -> (Vec<Tool>, Vec<Tool>) {
         sent.extend(
             all.iter()
                 .filter(|tool| tool.method == "feedback/suggest")
-                .cloned(),
+                .cloned()
+                .map(as_sent),
         );
     }
     (all, sent)
@@ -842,7 +928,7 @@ pub fn find_deferred(query: &str, limit: usize) -> Vec<Tool> {
     scored
         .into_iter()
         .take(limit)
-        .map(|(_, tool)| tool)
+        .map(|(_, tool)| for_model(tool))
         .collect()
 }
 
@@ -971,6 +1057,35 @@ mod tests {
                     .any(|tool| tool.name == expected)
             );
         }
+    }
+
+    /// Writing plugins is rare: its tools are found with `tool_search`, not
+    /// sent each turn, and an install still waits for an operator.
+    #[test]
+    fn plugin_writing_tools_are_found_with_tool_search_and_installs_still_asked() {
+        for (query, expected) in [
+            ("write a plugin", "plugin_draft"),
+            ("test a plugin draft", "plugin_test"),
+            ("install the plugin", "plugin_install"),
+        ] {
+            let found = super::find_deferred(query, 5);
+            assert!(
+                found.iter().any(|tool| tool.name == expected),
+                "{query}: {:?}",
+                found.iter().map(|t| &t.name).collect::<Vec<_>>()
+            );
+            assert!(
+                !super::model_tools()
+                    .iter()
+                    .any(|tool| tool.name == expected)
+            );
+        }
+        let instructions = crate::turn::INSTRUCTIONS;
+        assert!(instructions.contains("find the plugin writing tools with tool_search"));
+        assert!(
+            instructions
+                .contains("install it only when asked. An operator always approves an install.")
+        );
     }
 
     #[test]
@@ -1134,8 +1249,71 @@ mod tests {
         )
         .map_or(usize::MAX, |json| json.len());
         assert!(size < 128 * 1024, "{size} bytes of tools");
-        // Sent with every request: kept well under the 65 KB they were.
-        assert!(size < 40 * 1024, "{size} bytes of tools sent each turn");
+        // Sent with every request: 65 KB once, 28 KB since plugin writing
+        // was deferred and the biggest schemas tightened, with 2 KB to spare.
+        assert!(size < 30 * 1024, "{size} bytes of tools sent each turn");
+    }
+
+    #[test]
+    fn the_model_is_told_the_limits_the_agent_asks_for() {
+        let limit = |tool: &Tool| {
+            tool.parameters["properties"]["limit"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let sent = model_tools();
+        let messages = sent
+            .iter()
+            .find(|t| t.method == "vehicle/messages")
+            .unwrap();
+        assert!(
+            limit(messages).contains("30 if left out"),
+            "{}",
+            limit(messages)
+        );
+        let list = find_deferred("param_list", 5)
+            .into_iter()
+            .find(|t| t.method == "param/list")
+            .unwrap();
+        assert!(limit(&list).contains("up to 50"), "{}", limit(&list));
+        let search = sent.iter().find(|t| t.method == "param/search").unwrap();
+        assert!(limit(search).contains("at most 50"), "{}", limit(search));
+        let commands = sent.iter().find(|t| t.method == "command/list").unwrap();
+        assert!(commands.description.contains("Without riskInFlight"));
+        assert!(commands.description.contains("Without offlineBehaviour"));
+        assert!(
+            commands
+                .description
+                .contains("without a label reads Set mode")
+        );
+        // MCP clients keep the daemon's own defaults.
+        let all = tools();
+        let messages = all.iter().find(|t| t.method == "vehicle/messages").unwrap();
+        assert!(
+            limit(messages).contains("200 if left out"),
+            "{}",
+            limit(messages)
+        );
+        assert_eq!(model_limit("vehicle/history", None), None);
+    }
+
+    #[test]
+    fn the_agent_asks_for_fewer_and_a_page_that_fits() {
+        assert_eq!(model_limit("vehicle/messages", None), Some(30));
+        assert_eq!(
+            model_limit("vehicle/messages", Some(&json!(null))),
+            Some(30)
+        );
+        assert_eq!(model_limit("vehicle/messages", Some(&json!(500))), None);
+        assert_eq!(model_limit("param/list", None), Some(50));
+        assert_eq!(model_limit("param/list", Some(&json!(20))), None);
+        assert_eq!(model_limit("param/list", Some(&json!(500))), Some(50));
+        assert_eq!(model_limit("param/search", None), Some(20));
+        assert_eq!(model_limit("param/search", Some(&json!(100))), Some(50));
+        // A limit the daemon would refuse is left for it to refuse.
+        assert_eq!(model_limit("param/list", Some(&json!("all"))), None);
+        assert_eq!(model_limit("telemetry/get", None), None);
     }
 
     /// The plan's own references stay in the docs people read and are taken
@@ -1184,7 +1362,7 @@ mod tests {
             "a slice is still named"
         );
         // MCP and the tools found by search keep the docs as they are written.
-        assert!(words(&tools()).contains("(S43)"));
+        assert!(words(&tools()).contains("(S65)"));
     }
 
     #[test]

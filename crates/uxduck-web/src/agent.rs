@@ -14,11 +14,13 @@ use serde_json::{Value, json};
 use uxduck_agent::conversation::{self, Entry};
 use uxduck_agent::provider::{anthropic, openai};
 use uxduck_agent::{
-    Host, Provider, ProviderError, ProviderEvent, ProviderRequest, Turn, TurnOutcome, Wire,
-    run_turn,
+    ChatContext, Host, PlanFacts, PlanItemFacts, Provider, ProviderError, ProviderEvent,
+    ProviderRequest, Turn, TurnOutcome, VehicleFacts, Wire, run_turn,
 };
+use uxduck_contracts::dto::thread::ChatView;
 use uxduck_contracts::dto::trace::Transport;
 use uxduck_contracts::version::PROTOCOL_VERSION;
+use uxduck_core::domain::plan::{self, PlanFrame};
 use uxduck_core::domain::thread::{Item, ItemKind, ItemStatus};
 use uxduck_core::policy::admission::Trust;
 use uxduck_engine::agent::ToolOutcome;
@@ -296,6 +298,8 @@ struct Running {
     scope: Arc<Scope>,
     abort: AbortHandle,
     title: Option<(String, String)>,
+    /// The context the turn was given, which a kept conversation carries.
+    context: Option<String>,
 }
 struct TitleJob {
     scope: Arc<Scope>,
@@ -319,6 +323,8 @@ struct Saved {
     conversation: Vec<Value>,
     context_sent: bool,
     response: Option<String>,
+    /// When it was last sent to the provider, in Unix milliseconds.
+    sent_at_ms: u64,
 }
 #[derive(Default)]
 pub struct Runtime {
@@ -401,10 +407,24 @@ impl Runtime {
             .filter(|i| i.in_history())
             .map(|i| i.id.clone())
             .collect();
-        let context = request.vehicle.as_ref().map(|(id, name)| format!("This thread is about the vehicle \"{name}\" (id {id}). Use vehicle_get with that id for its details and telemetry_get for where it is and its battery, attitude and GPS."));
+        let context = Some(uxduck_agent::describe(&chat_context(
+            engine,
+            request.vehicle.clone(),
+            request.view.as_ref(),
+        )));
         let wire = Wire::for_model(&request.model);
+        // Replayed only while the hosted model likely still caches it (an
+        // hour for Claude, half an hour for GPT-6), else rebuilt with the
+        // earlier messages' long tool results slimmed.
         let kept = self.saved.remove(&request.thread_id).filter(|s| {
-            s.account == scope.account && s.model == request.model && s.covers == covers
+            s.account == scope.account
+                && s.model == request.model
+                && s.covers == covers
+                && conversation::cache_warm(
+                    conversation::cached_for_ms(&request.model),
+                    s.sent_at_ms,
+                    now / 1000,
+                )
         });
         let (conversation, context_sent, previous) = match kept {
             Some(s) => (
@@ -413,7 +433,7 @@ impl Runtime {
                 s.response,
             ),
             None => (
-                conversation::rebuild(wire, &entries(&items[..before])),
+                conversation::rebuild(wire, &conversation::slim(entries(&items[..before]))),
                 false,
                 None,
             ),
@@ -423,7 +443,7 @@ impl Runtime {
             effort: request.effort.clone(),
             text: request.text,
             conversation,
-            context,
+            context: context.clone(),
             context_sent,
             previous,
             cache_key: Some(format!("web-{}", request.thread_id)),
@@ -453,6 +473,7 @@ impl Runtime {
                 scope,
                 abort,
                 title: request.title.map(|text| (request.item_id, text)),
+                context,
             },
         );
         self.tasks.push(async move {
@@ -816,7 +837,11 @@ impl Runtime {
                 .filter(|i| i.in_history())
                 .map(|i| i.id.clone())
                 .collect();
-            let context = engine.state().threads.get(&scope.thread).and_then(|t| t.vehicle_id.as_ref()).and_then(|id| engine.vehicle(id)).map(|v| format!("This thread is about the vehicle \"{}\" (id {}). Use vehicle_get with that id for its details and telemetry_get for where it is and its battery, attitude and GPS.",v.name,v.id));
+            let context = self
+                .running
+                .get(&scope.thread)
+                .filter(|run| Arc::ptr_eq(&run.scope, scope))
+                .and_then(|run| run.context.clone());
             self.saved.insert(
                 scope.thread.clone(),
                 Saved {
@@ -827,6 +852,7 @@ impl Runtime {
                     conversation: outcome.conversation,
                     context_sent: outcome.context_sent,
                     response: outcome.response_id.clone(),
+                    sent_at_ms: scope.began + outcome.stats.last_sent_ms,
                 },
             );
         }
@@ -940,6 +966,77 @@ impl Runtime {
     }
 }
 
+/// The facts the context is written from, as the engine has them now:
+/// the chat's vehicle, and what the operator said they have open.
+fn chat_context(
+    engine: &Engine,
+    vehicle: Option<(String, String)>,
+    view: Option<&ChatView>,
+) -> ChatContext {
+    let facts = |id: &str| {
+        engine.vehicle(id).map(|v| VehicleFacts {
+            id: v.id.clone(),
+            name: v.name.clone(),
+            kind: engine.vehicle_kind(v),
+            firmware: v.firmware.clone(),
+            simulated: engine.is_simulated(v),
+            replay: v.replay,
+        })
+    };
+    let vehicle = vehicle.map(|(id, name)| {
+        facts(&id).unwrap_or(VehicleFacts {
+            id,
+            name,
+            ..VehicleFacts::default()
+        })
+    });
+    let Some(view) = view else {
+        return ChatContext {
+            vehicle,
+            ..ChatContext::default()
+        };
+    };
+    let selected = view
+        .vehicle_id
+        .as_deref()
+        .and_then(facts)
+        .filter(|selected| vehicle.as_ref().is_none_or(|v| v.id != selected.id));
+    let plan = view.plan.as_ref().and_then(|open| {
+        let plan = engine
+            .state()
+            .plans
+            .get(&open.id)
+            .filter(|plan| plan.deleted_at_us.is_none())?;
+        let item = open.item.and_then(|number| {
+            let item = plan
+                .body
+                .items
+                .get(usize::try_from(number).ok()?.checked_sub(1)?)?;
+            let frame = PlanFrame::from_mav_frame(item.frame).filter(|_| {
+                plan.body.vehicle_type.flies() && plan::command_has_position(item.command)
+            });
+            Some(PlanItemFacts {
+                number,
+                command: item.command,
+                label: plan::command_label(item.command).map(str::to_owned),
+                height: frame.map(|frame| (item.altitude_m, frame.words().to_owned())),
+            })
+        });
+        Some(PlanFacts {
+            id: plan.id.clone(),
+            name: plan.body.name.clone(),
+            vehicle: plan.body.vehicle_type.words().to_owned(),
+            item,
+        })
+    });
+    ChatContext {
+        vehicle,
+        selected,
+        plan,
+        tabs: view.tabs.clone(),
+    }
+}
+
 fn entries(items: &[Item]) -> Vec<Entry> {
     items
         .iter()
@@ -977,6 +1074,7 @@ fn stats(s: &uxduck_agent::TurnStats) -> TurnStats {
         retries: s.retries,
         fell_back: s.fell_back,
         compacted: s.compacted,
+        continuations: s.continuations,
         thinking_dropped: s.usage.thinking_dropped,
     }
 }

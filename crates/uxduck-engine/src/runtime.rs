@@ -94,6 +94,9 @@ pub struct TurnRequest {
     /// Whether the hosted model may keep this chat's turns: the
     /// conversations switch (ADR-0013 P12, S29).
     pub share: bool,
+    /// What the operator had open when they sent the message, if their
+    /// client said. Never journaled: it describes that moment.
+    pub view: Option<uxduck_contracts::dto::thread::ChatView>,
 }
 
 /// What a turn used and how it went, from the agent host, for the
@@ -110,6 +113,7 @@ pub struct TurnStats {
     pub retries: u32,
     pub fell_back: bool,
     pub compacted: bool,
+    pub continuations: u32,
     pub thinking_dropped: u32,
 }
 

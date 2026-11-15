@@ -85,8 +85,8 @@ pub struct Find {
 #[serde(rename_all = "camelCase")]
 pub struct FindStartParams {
     pub scope: FindScope,
-    /// Look at serial devices the known-id table does not know too ("Look
-    /// at every serial port").
+    /// Look at serial devices the known-id table does not know too.
+    // "Look at every serial port".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_serial: bool,
 }

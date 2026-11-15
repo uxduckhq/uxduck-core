@@ -412,6 +412,59 @@ pub struct ThreadSendParams {
     /// model, with the vehicle's readings, to be answered aloud (V5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spoken: Option<SpokenTurn>,
+    /// What the operator has open as they send it, told to the agent with
+    /// the message. Absent, the agent knows only the chat's vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ChatView>,
+}
+
+/// What the operator has open in the app as they send a message, for the
+/// agent: it describes that moment, so it is never kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatView {
+    /// The vehicle selected in the app, which may not be the chat's. Up to
+    /// 128 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// The plan open in the mission editor, if one is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ChatViewPlan>,
+    /// The kinds of the tabs shown in the current layout, the chat aside,
+    /// each once. At most 32.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<super::operator::TabKind>,
+}
+
+/// A plan open in the mission editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatViewPlan {
+    /// The plan's id. Up to 128 bytes.
+    pub id: String,
+    /// The one item selected, numbered from 1 as the editor's list shows
+    /// it. Absent when none, or several, are selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<u32>,
+}
+
+impl ChatView {
+    /// The most bytes in an id it names.
+    pub const MAX_ID: usize = 128;
+    /// The most tabs it lists.
+    pub const MAX_TABS: usize = 32;
+
+    /// Whether it is within its bounds.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        let id = |id: &str| !id.is_empty() && id.len() <= Self::MAX_ID;
+        self.vehicle_id.as_deref().is_none_or(id)
+            && self
+                .plan
+                .as_ref()
+                .is_none_or(|plan| id(&plan.id) && plan.item != Some(0))
+            && self.tabs.len() <= Self::MAX_TABS
+    }
 }
 
 /// What starts the words of a spoken turn as the agent gets them, before
@@ -444,6 +497,9 @@ pub struct ThreadEditParams {
     /// started early and replaced by the whole of what was said (S287).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spoken: Option<SpokenTurn>,
+    /// What the operator has open, as for `ThreadSendParams::view`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ChatView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

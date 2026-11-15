@@ -19,13 +19,18 @@ enum Input {
     ToolOutput { call_id: String, output: String },
 }
 
-/// The items after the model's last output: what this request is about.
-fn latest(conversation: &[Value]) -> Vec<Input> {
+/// The items after the model's last output: what this request added.
+fn added(conversation: &[Value]) -> &[Value] {
     let start = conversation
         .iter()
         .rposition(|item| item["role"] == "assistant" || item["type"] == "function_call")
         .map_or(0, |i| i + 1);
-    conversation[start..]
+    &conversation[start..]
+}
+
+/// The items after the model's last output: what this request is about.
+fn latest(conversation: &[Value]) -> Vec<Input> {
+    added(conversation)
         .iter()
         .filter_map(|item| {
             if item["type"] == "function_call_output" {
@@ -64,6 +69,32 @@ impl Default for FakeProvider {
 }
 
 impl FakeProvider {
+    /// Asked "what were you told": the context that came with the message
+    /// (FB-126), word for word, for development and tests. None came when
+    /// the chat and what is open are as before.
+    fn told(conversation: &[Value]) -> Option<Vec<ProviderEvent>> {
+        let added = added(conversation);
+        let asked = added.iter().any(|item| {
+            item["role"] == "user"
+                && item["content"]
+                    .as_str()
+                    .is_some_and(|text| text.to_lowercase().contains("what were you told"))
+        });
+        if !asked {
+            return None;
+        }
+        let told: Vec<&str> = added
+            .iter()
+            .filter(|item| item["role"] == "developer")
+            .filter_map(|item| item["content"].as_str())
+            .collect();
+        Some(vec![ProviderEvent::TextDelta(if told.is_empty() {
+            "Nothing more was told with this message.".into()
+        } else {
+            format!("Told with this message: {}", told.join(" "))
+        })])
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -963,7 +994,9 @@ impl Provider for FakeProvider {
         request: ProviderRequest,
     ) -> BoxStream<'static, Result<ProviderEvent, ProviderError>> {
         let n = self.responses.fetch_add(1, Ordering::SeqCst) + 1;
-        let events = match Self::answer(&latest(&request.conversation)) {
+        let answer = Self::told(&request.conversation)
+            .map_or_else(|| Self::answer(&latest(&request.conversation)), Ok);
+        let events = match answer {
             Ok(events) => events,
             Err(error) => {
                 return stream::once(async move { Err(ProviderError::Refused(error)) }).boxed();
@@ -1004,6 +1037,7 @@ impl Provider for FakeProvider {
             output,
             usage: Usage::default(),
             usage_known: true,
+            cut: false,
         });
         let sleep = self.sleep.clone();
         stream::iter(chunks)

@@ -7,6 +7,13 @@
 //! replay (another provider, a chat from another computer, a turn that did
 //! not finish) the conversation is rebuilt from what UXDuck keeps of it:
 //! its messages and tool calls, without the model's own reasoning.
+//!
+//! Replaying only pays while the provider still caches the conversation.
+//! Once that has lapsed (`cached_for_ms` after it was last sent: an hour's
+//! cache for Claude, half an hour's for GPT-6 and 5 minutes for other models)
+//! the host rebuilds instead, and a rebuild leaves out the long tool results of
+//! earlier messages (`slim`), which the whole history would otherwise carry
+//! on every request until the chat is summarised.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -85,6 +92,72 @@ fn push_block(messages: &mut Vec<Value>, role: &str, block: Value) {
         return;
     }
     messages.push(json!({ "role": role, "content": [block] }));
+}
+
+/// How long a model before GPT-6, or an open-weight model, likely keeps a
+/// conversation in its prompt cache after it was last sent: a prefix lasts
+/// about 5 minutes from its last use. After that, replaying the
+/// conversation as it was sent saves nothing.
+pub const CACHE_LIFETIME_MS: u64 = 5 * 60 * 1000;
+
+/// How long a GPT-6 chat is replayed: OpenAI keeps a prompt of GPT-5.6 or
+/// later cached for at least 30 minutes from its last use by default
+/// (<https://developers.openai.com/api/docs/guides/prompt-caching>, read
+/// 2026-11-15), on a developer's own key and on the hosted model alike, and
+/// 5 minutes of that are left for the turn's own rounds.
+pub const HALF_HOUR_CACHE_REPLAY_MS: u64 = 25 * 60 * 1000;
+
+/// How long a Claude chat is replayed: on a developer's own key and on the
+/// hosted model alike it is cached for an hour from the start of its last
+/// request (`anthropic`, the API's `modelApp.ts`), and 5 minutes of that
+/// are left for the turn's own rounds.
+pub const HOUR_CACHE_REPLAY_MS: u64 = 55 * 60 * 1000;
+
+/// How long after its last request a conversation with `model` is likely
+/// still cached, on a developer's own key or the hosted model.
+#[must_use]
+pub fn cached_for_ms(model: &str) -> u64 {
+    match Wire::for_model(model) {
+        Wire::Anthropic => HOUR_CACHE_REPLAY_MS,
+        Wire::OpenAi if model.starts_with("gpt-6") => HALF_HOUR_CACHE_REPLAY_MS,
+        Wire::OpenAi => CACHE_LIFETIME_MS,
+    }
+}
+
+/// Whether a conversation last sent at `sent_ms` is likely still in the
+/// cache of a provider that keeps it `cached_for_ms` (`CACHE_LIFETIME_MS`,
+/// `HALF_HOUR_CACHE_REPLAY_MS` or `HOUR_CACHE_REPLAY_MS`) at `now_ms`, all in
+/// milliseconds on the same clock.
+#[must_use]
+pub fn cache_warm(cached_for_ms: u64, sent_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(sent_ms) <= cached_for_ms
+}
+
+/// The longest tool result of an earlier message a rebuild keeps whole, in
+/// characters.
+pub const KEEP_WHOLE_CHARS: usize = 600;
+
+/// Stands in for a long tool result of an earlier message.
+pub const ELIDED: &str = r#"{"elided":"An earlier result, left out to save context. Call the tool again for current values."}"#;
+
+/// Stands in for a long tool error of an earlier message, so a wire without
+/// an error flag still says the call failed.
+pub const ELIDED_ERROR: &str = r#"{"elided":"An earlier error, left out to save context. Call the tool again for current values."}"#;
+
+/// A chat's earlier messages, slimmed for a rebuild: each tool result over
+/// `KEEP_WHOLE_CHARS` becomes a short stub, and the call, its arguments and
+/// whether it failed stay. Give it only messages whose turns have ended: the
+/// current turn's results are added after the rebuild, and stay whole.
+#[must_use]
+pub fn slim(mut entries: Vec<Entry>) -> Vec<Entry> {
+    for entry in &mut entries {
+        if let Entry::Tool { output, failed, .. } = entry
+            && output.chars().count() > KEEP_WHOLE_CHARS
+        {
+            if *failed { ELIDED_ERROR } else { ELIDED }.clone_into(output);
+        }
+    }
+    entries
 }
 
 /// The conversation so far, rebuilt from UXDuck's record of it.
@@ -188,6 +261,20 @@ pub fn context(wire: Wire, model: &str, text: &str) -> Vec<Value> {
             "content": [{ "type": "text", "text": format!("<system-reminder>{text}</system-reminder>") }],
         })],
     }
+}
+
+/// Whether `items` hold the call `call_id`: a Responses API
+/// `function_call`, or a Messages API `tool_use` block.
+#[must_use]
+pub fn has_call(items: &[Value], call_id: &str) -> bool {
+    items.iter().any(|item| {
+        (item["type"] == "function_call" && item["call_id"] == call_id)
+            || item["content"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block["type"] == "tool_use" && block["id"] == call_id)
+            })
+    })
 }
 
 /// The tools' answers, all in one message (the Messages API expects them
@@ -367,6 +454,175 @@ mod tests {
         assert_eq!(anthropic.len(), 1, "one user message");
         assert_eq!(anthropic[0]["content"][1]["is_error"], true);
         assert_eq!(tool_results(Wire::OpenAi, &results).len(), 2);
+    }
+
+    /// Two finished messages, with a long result, a long error and a short
+    /// result.
+    fn earlier_messages() -> Vec<Entry> {
+        let tool = |id: &str, output: String, failed: bool| Entry::Tool {
+            id: id.into(),
+            name: "param_search".into(),
+            arguments: json!({ "query": id }),
+            output,
+            failed,
+        };
+        vec![
+            Entry::User("Why does it climb?".into()),
+            tool(
+                "long",
+                format!(r#"{{"params":"{}"}}"#, "p".repeat(5_000)),
+                false,
+            ),
+            tool("short", r#"{"vehicles":[]}"#.into(), false),
+            Entry::Agent("Its hover throttle is low.".into()),
+            Entry::User("And the failsafe?".into()),
+            tool(
+                "error",
+                format!(r#"{{"error":"{}"}}"#, "e".repeat(700)),
+                true,
+            ),
+            tool("edge", "x".repeat(KEEP_WHOLE_CHARS), false),
+            Entry::Agent("It could not read them.".into()),
+        ]
+    }
+
+    /// Every call answered by its own result, and on the Messages API roles
+    /// that alternate with each result right after its call.
+    fn assert_paired(wire: Wire, items: &[Value]) {
+        match wire {
+            Wire::OpenAi => {
+                let ids = |kind: &str| -> Vec<String> {
+                    items
+                        .iter()
+                        .filter(|item| item["type"] == kind)
+                        .map(|item| item["call_id"].as_str().unwrap().to_owned())
+                        .collect()
+                };
+                assert_eq!(ids("function_call"), ids("function_call_output"));
+            }
+            Wire::Anthropic => {
+                for pair in items.windows(2) {
+                    assert_ne!(pair[0]["role"], pair[1]["role"], "roles alternate");
+                }
+                for (index, item) in items.iter().enumerate() {
+                    let blocks = |item: &Value, kind: &str, field: &str| -> Vec<String> {
+                        item["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|block| block["type"] == kind)
+                            .map(|block| block[field].as_str().unwrap().to_owned())
+                            .collect()
+                    };
+                    let calls = blocks(item, "tool_use", "id");
+                    if !calls.is_empty() {
+                        assert_eq!(
+                            calls,
+                            blocks(&items[index + 1], "tool_result", "tool_use_id")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_slimmed_rebuild_stubs_only_the_long_results_of_earlier_messages() {
+        let entries = slim(earlier_messages());
+        let outputs: Vec<(&str, &str, bool)> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Tool {
+                    id, output, failed, ..
+                } => Some((id.as_str(), output.as_str(), *failed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            outputs[..3],
+            [
+                ("long", ELIDED, false),
+                ("short", r#"{"vehicles":[]}"#, false),
+                ("error", ELIDED_ERROR, true),
+            ]
+        );
+        assert_eq!(
+            outputs[3].1.len(),
+            KEEP_WHOLE_CHARS,
+            "at the limit it stays"
+        );
+        assert!(entries.iter().all(|entry| match entry {
+            Entry::Tool { id, arguments, .. } => arguments == &json!({ "query": id }),
+            _ => true,
+        }));
+        for text in [ELIDED, ELIDED_ERROR] {
+            assert!(serde_json::from_str::<Value>(text).is_ok());
+            assert!(!text.contains(';'));
+        }
+
+        for wire in [Wire::OpenAi, Wire::Anthropic] {
+            let whole = rebuild(wire, &earlier_messages());
+            let slimmed = rebuild(wire, &entries);
+            assert_eq!(whole.len(), slimmed.len(), "{wire:?}");
+            assert_paired(wire, &slimmed);
+            let text = Value::Array(slimmed.clone()).to_string();
+            assert!(!text.contains(&"p".repeat(5_000)), "{wire:?}");
+            assert!(text.contains(r#"{\"vehicles\":[]}"#), "{wire:?}");
+            assert!(
+                Value::Array(slimmed).to_string().len() + 5_000
+                    < Value::Array(whole).to_string().len(),
+                "{wire:?}"
+            );
+        }
+        let messages = rebuild(Wire::Anthropic, &entries);
+        assert_eq!(
+            messages[8]["content"][0],
+            json!({ "type": "tool_result", "tool_use_id": "error", "content": ELIDED_ERROR, "is_error": true })
+        );
+        assert_eq!(
+            messages[7]["content"][0],
+            json!({ "type": "tool_use", "id": "error", "name": "param_search", "input": { "query": "error" } })
+        );
+    }
+
+    #[test]
+    fn the_cache_is_taken_as_warm_for_five_minutes_after_the_last_send() {
+        let sent = 1_700_000_000_000;
+        let warm = |now| cache_warm(CACHE_LIFETIME_MS, sent, now);
+        assert!(warm(sent));
+        assert!(warm(sent + CACHE_LIFETIME_MS));
+        assert!(!warm(sent + CACHE_LIFETIME_MS + 1));
+        assert!(
+            !cache_warm(CACHE_LIFETIME_MS, 0, sent),
+            "never sent, or not known when"
+        );
+        assert!(warm(sent - 1_000), "a clock set back");
+    }
+
+    #[test]
+    fn claude_chats_are_replayed_for_55_minutes_gpt_6_chats_for_25_and_others_for_5() {
+        assert_eq!(cached_for_ms("claude-opus-5-5"), HOUR_CACHE_REPLAY_MS);
+        assert_eq!(HALF_HOUR_CACHE_REPLAY_MS, 25 * 60 * 1000);
+        for gpt in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
+            assert_eq!(cached_for_ms(gpt), HALF_HOUR_CACHE_REPLAY_MS, "{gpt}");
+        }
+        for other in [
+            "gpt-5.4",
+            "moonshotai/kimi-k3.1-pro",
+            "deepseek/deepseek-v4-pro",
+        ] {
+            assert_eq!(cached_for_ms(other), CACHE_LIFETIME_MS, "{other}");
+        }
+    }
+
+    #[test]
+    fn an_hour_cache_is_taken_as_warm_for_55_minutes_after_the_last_send() {
+        let sent = 1_700_000_000_000;
+        let warm = |now| cache_warm(HOUR_CACHE_REPLAY_MS, sent, now);
+        assert_eq!(HOUR_CACHE_REPLAY_MS, 55 * 60 * 1000);
+        assert!(warm(sent + CACHE_LIFETIME_MS + 1));
+        assert!(warm(sent + HOUR_CACHE_REPLAY_MS));
+        assert!(!warm(sent + HOUR_CACHE_REPLAY_MS + 1));
     }
 
     #[test]

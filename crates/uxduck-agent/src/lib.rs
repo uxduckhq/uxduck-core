@@ -5,13 +5,16 @@
 //! until the provider answers without calling a tool. The conversation
 //! comes back whole, for the host to keep and replay (see `conversation`).
 
+pub mod context;
 pub mod conversation;
 pub mod input;
 pub mod models;
+pub mod output;
 pub mod provider;
 pub mod tools;
 pub mod turn;
 
+pub use context::{ChatContext, PlanFacts, PlanItemFacts, VehicleFacts, describe};
 pub use conversation::{Entry, Wire};
 pub use provider::{Provider, ProviderError, ProviderEvent, ProviderRequest, Usage};
 pub use tools::{Tool, tools};
