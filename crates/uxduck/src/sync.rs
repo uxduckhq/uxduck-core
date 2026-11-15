@@ -17,9 +17,12 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Notify;
+use uxduck_core::domain::sync::SyncState;
 use uxduck_core::events::Event;
 use uxduck_engine::Engine;
-use uxduck_engine::sync::{Outgoing, Pulled, SyncChange, SyncPort, outgoing};
+use uxduck_engine::sync::{
+    Outgoing, Pulled, PushAnswer, SyncChange, SyncPort, outgoing, refused_alone,
+};
 
 use crate::adapters::credentials::FileCredentials;
 use crate::daemon::engine_task::EngineHandle;
@@ -178,37 +181,7 @@ impl Task {
         self.publish_plugins(&api, &client, &token).await?;
 
         // Send.
-        let through = self
-            .reader
-            .read_after(state.exported_through)
-            .map_err(|e| Stop::Problem(format!("UXDuck could not read its journal: {e}")))?;
-        // What the person left out stays here, unmarked, so it goes if
-        // they bring it back (2026-10-24).
-        self.reader.forget(|change| !state.syncs(&change.entity));
-        let waiting = self.reader.waiting();
-        let mut sent = 0u64;
-        for batch in batches(&waiting) {
-            let answer = client
-                .post(format!("{api}/v1/sync/push"))
-                .bearer_auth(&token)
-                .json(&json!({
-                    "deviceId": state.device_id,
-                    "deviceName": self.name,
-                    "changes": batch,
-                }))
-                .send()
-                .await
-                .map_err(|_| unreachable())?;
-            refused(&answer)?;
-            sent += batch.len() as u64;
-        }
-        self.reader.sent();
-        if through > state.exported_through && sent > 0 {
-            self.engine
-                .run(move |e| e.sync_exported(through, sent))
-                .await
-                .map_err(|_| Stop::Gone)?;
-        }
+        self.send(&state, &api, &client, &token).await?;
 
         // Take.
         let mut after = state.pulled_through;
@@ -263,6 +236,79 @@ impl Task {
 }
 
 impl Task {
+    /// Sends what is new since the cursor. A change the account would not
+    /// keep for its size stays here and is told to the person, and the rest
+    /// still goes.
+    async fn send(
+        &mut self,
+        state: &SyncState,
+        api: &str,
+        client: &reqwest::Client,
+        token: &str,
+    ) -> Result<(), Stop> {
+        let through = self
+            .reader
+            .read_after(state.exported_through)
+            .map_err(|e| Stop::Problem(format!("UXDuck could not read its journal: {e}")))?;
+        // What the person left out stays here, unmarked, so it goes if
+        // they bring it back (2026-10-24).
+        self.reader.forget(|change| !state.syncs(&change.entity));
+        let waiting = self.reader.waiting();
+        let mut sent = 0u64;
+        // What the account would not keep for its size, to tell the person.
+        let mut too_large = Vec::new();
+        for batch in batches(&waiting) {
+            let answer = client
+                .post(format!("{api}/v1/sync/push"))
+                .bearer_auth(token)
+                .json(&json!({
+                    "deviceId": state.device_id,
+                    "deviceName": self.name,
+                    "changes": batch,
+                }))
+                .send()
+                .await
+                .map_err(|_| unreachable())?;
+            // One change that is a whole push too large: the rest still goes.
+            if answer.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+                && let [alone] = batch
+            {
+                let body = answer.text().await.unwrap_or_default();
+                too_large.push(refused_alone(alone, &body));
+                continue;
+            }
+            refused(&answer)?;
+            let body = answer.text().await.map_err(|_| unreachable())?;
+            let turned_away = PushAnswer::read(&body).refused_of(batch);
+            sent += (batch.len() - turned_away.len()) as u64;
+            too_large.extend(turned_away);
+        }
+        // A change the account refused is not sent again until it changes.
+        self.reader.sent();
+        if !too_large.is_empty() || !state.too_large.is_empty() {
+            let kept: Vec<(String, String)> = waiting
+                .iter()
+                .filter(|change| {
+                    !too_large
+                        .iter()
+                        .any(|one| one.entity == change.entity && one.id == change.id)
+                })
+                .map(|change| (change.entity.clone(), change.id.clone()))
+                .collect();
+            self.engine
+                .run(move |e| e.sync_sizes(&kept, too_large))
+                .await
+                .map_err(|_| Stop::Gone)?;
+        }
+        if through > state.exported_through && sent > 0 {
+            self.engine
+                .run(move |e| e.sync_exported(through, sent))
+                .await
+                .map_err(|_| Stop::Gone)?;
+        }
+        Ok(())
+    }
+
     /// Uploads the bundle of each plugin installed from a folder here that
     /// the account does not have at its current files.
     async fn publish_plugins(

@@ -784,6 +784,9 @@ TitleState::Requested.item_id
 ToolCall.client_id
 ToolCall.method
 ToolCall.params
+TooLarge.bytes
+TooLarge.entity
+TooLarge.id
 TrafficSite.id
 TrafficSite.latitude_e7
 TrafficSite.longitude_e7

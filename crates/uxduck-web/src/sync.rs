@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uxduck_core::events::Event;
 use uxduck_engine::Engine;
-use uxduck_engine::sync::{Outgoing, Pulled, SyncChange, SyncPort, outgoing};
+use uxduck_engine::sync::{
+    Outgoing, Pulled, PushAnswer, SyncChange, SyncPort, outgoing, refused_alone,
+};
 
 use crate::root::OFFLINE;
 
@@ -217,7 +219,10 @@ impl Syncer {
             self.step = Some((expected, step));
             return None;
         }
-        if let Some(problem) = refused(status, error) {
+        // One change that is a whole push too large: the round carries on.
+        let alone_too_large =
+            status == 413 && matches!(&step, Step::Push { sending, .. } if sending.len() == 1);
+        if !alone_too_large && let Some(problem) = refused(status, error) {
             engine.sync_problem(Some(problem));
             return None;
         }
@@ -232,8 +237,28 @@ impl Syncer {
                 mut rest,
                 sent,
             } => {
+                // What the account would not keep for its size, to tell the
+                // person. It is not sent again until it changes.
+                let too_large = match sending.as_slice() {
+                    [alone] if alone_too_large => {
+                        vec![refused_alone(alone, body.unwrap_or_default())]
+                    }
+                    _ => PushAnswer::read(body.unwrap_or_default()).refused_of(&sending),
+                };
                 lock(&self.outbox).taken(&sending);
-                let sent = sent + sending.len() as u64;
+                let sent = sent + (sending.len() - too_large.len()) as u64;
+                if !too_large.is_empty() || !engine.sync_state().too_large.is_empty() {
+                    let kept: Vec<(String, String)> = sending
+                        .iter()
+                        .filter(|change| {
+                            !too_large
+                                .iter()
+                                .any(|one| one.entity == change.entity && one.id == change.id)
+                        })
+                        .map(|change| (change.entity.clone(), change.id.clone()))
+                        .collect();
+                    engine.sync_sizes(&kept, too_large);
+                }
                 if let Some(next) = rest.pop_front() {
                     let device = engine.sync_state().device_id.clone();
                     return Some(self.push(&device, through, next, rest, sent));

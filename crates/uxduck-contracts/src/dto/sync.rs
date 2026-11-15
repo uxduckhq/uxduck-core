@@ -77,11 +77,37 @@ pub struct SyncStatus {
     /// Why the last attempt failed, such as not being signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// What the account would not keep for its size. Each stays on this
+    /// computer until it is smaller. Empty when everything fits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub too_large: Vec<SyncTooLarge>,
     /// Vehicles other computers published to the account.
     pub library: Vec<LibraryVehicle>,
     /// Connections other computers published to the account (C2).
     #[serde(default)]
     pub links: Vec<LibraryLink>,
+}
+
+/// Something whose latest change is larger than the account keeps, so it
+/// is on this computer only until it is smaller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTooLarge {
+    /// `plan`, `operator`, `history` and the rest, as synced.
+    pub entity: String,
+    pub id: String,
+    /// What did not sync, by its name to the person, such as "The plan
+    /// Survey North did not sync".
+    pub title: String,
+    /// Its size, what the account keeps, and what to do, in words.
+    pub detail: String,
+    /// The change's size as the account measured it.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// The largest change the account keeps, when its server said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub max_bytes: Option<u64>,
 }
 
 /// A connection another computer published to the account (C2): how to

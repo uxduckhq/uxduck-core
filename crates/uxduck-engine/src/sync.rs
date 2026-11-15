@@ -10,6 +10,10 @@
 //! `sync:<computer>` and never sent back. Vehicles go to the library; a
 //! computer uses one once it is activated there, or all of them with
 //! `mirror-all`.
+//!
+//! The account keeps one change up to a size its server chooses and says in
+//! its answers. A larger one stays on this computer, and
+//! [`Engine::sync_sizes`] says so to the person until it fits again.
 
 use std::collections::BTreeMap;
 
@@ -19,18 +23,20 @@ use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME;
 use uxduck_contracts::dto::sync::{
     LibraryLink as LibraryLinkDto, LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity,
-    SyncStatus,
+    SyncStatus, SyncTooLarge,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
+use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::operator::Operator;
 use uxduck_core::domain::plan::{Plan, PlanRevision};
-use uxduck_core::domain::sync::{Activation, LibraryLink, LibraryVehicle, SyncState};
+use uxduck_core::domain::sync::{Activation, LibraryLink, LibraryVehicle, SyncState, TooLarge};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change, Event};
 
+use crate::commands::Raise;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
@@ -71,6 +77,153 @@ pub struct Pulled {
     pub device: String,
     #[serde(flatten)]
     pub change: SyncChange,
+}
+
+/// The account server's answer to a push, as much as UXDuck reads of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushAnswer {
+    /// How many changes it would not keep for their size.
+    #[serde(default)]
+    pub refused: u64,
+    /// Which ones, each with its size as the server measured it. None from
+    /// a server that only counts them (before 2026-11-14).
+    #[serde(default)]
+    pub too_large: Option<Vec<RefusedChange>>,
+    /// The largest change the server keeps.
+    #[serde(default)]
+    pub max_change_bytes: Option<u64>,
+}
+
+/// One change the account server would not keep for its size.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedChange {
+    pub entity: String,
+    pub id: String,
+    pub bytes: u64,
+}
+
+impl PushAnswer {
+    /// Reads the body of a push's answer. One that does not read refused
+    /// nothing this UXDuck can name.
+    #[must_use]
+    pub fn read(body: &str) -> Self {
+        serde_json::from_str(body).unwrap_or_default()
+    }
+
+    /// Which of the changes `sent` in the push the account would not keep.
+    /// A server that only counts them refuses by size alone, so they are
+    /// the largest that many, measured here.
+    #[must_use]
+    pub fn refused_of(&self, sent: &[SyncChange]) -> Vec<TooLarge> {
+        if let Some(listed) = &self.too_large {
+            return listed
+                .iter()
+                .filter(|refused| {
+                    sent.iter()
+                        .any(|change| change.entity == refused.entity && change.id == refused.id)
+                })
+                .map(|refused| TooLarge {
+                    entity: refused.entity.clone(),
+                    id: refused.id.clone(),
+                    bytes: refused.bytes,
+                    max_bytes: self.max_change_bytes,
+                })
+                .collect();
+        }
+        let mut largest: Vec<&SyncChange> = sent.iter().collect();
+        largest.sort_by_key(|change| std::cmp::Reverse(size(change)));
+        largest
+            .into_iter()
+            .take(usize::try_from(self.refused).unwrap_or(usize::MAX))
+            .map(|change| refused_here(change, self.max_change_bytes))
+            .collect()
+    }
+}
+
+/// A push of this one change was turned away whole for its size (HTTP
+/// 413), so the change is larger than the account keeps. `body` is the
+/// answer, which names the largest change kept when the server is new
+/// enough to.
+#[must_use]
+pub fn refused_alone(change: &SyncChange, body: &str) -> TooLarge {
+    refused_here(change, PushAnswer::read(body).max_change_bytes)
+}
+
+fn refused_here(change: &SyncChange, max_bytes: Option<u64>) -> TooLarge {
+    TooLarge {
+        entity: change.entity.clone(),
+        id: change.id.clone(),
+        bytes: size(change),
+        max_bytes,
+    }
+}
+
+/// The size of a change as this computer measures it: its JSON's bytes.
+fn size(change: &SyncChange) -> u64 {
+    serde_json::to_vec(&change.change).map_or(0, |json| json.len() as u64)
+}
+
+/// The condition of the notification that says an entity is too large for
+/// the account, cleared when it fits again.
+fn too_large_condition(entity: &str, id: &str) -> String {
+    format!("sync-too-large:{entity}:{id}")
+}
+
+/// "640 KB", "1.3 MB". A change's size is rounded up, so one just over what
+/// the account keeps never reads as equal to it, and what the account keeps
+/// is rounded down.
+fn size_words(bytes: u64, round_up: bool) -> String {
+    const MB: u64 = 1024 * 1024;
+    let over = |unit: u64, of: u64| {
+        if round_up {
+            of.div_ceil(unit)
+        } else {
+            of / unit
+        }
+    };
+    let kb = over(1024, bytes);
+    if kb < 1024 {
+        return format!("{kb} KB");
+    }
+    let tenths = over(MB, bytes.saturating_mul(10));
+    if tenths.is_multiple_of(10) {
+        format!("{} MB", tenths / 10)
+    } else {
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+}
+
+/// What a change too large for the account is told as: the notification's
+/// title and body, and the same words in Settings.
+fn too_large_words(name: &str, refused: &TooLarge) -> (String, String) {
+    let size = size_words(refused.bytes, true);
+    let more_than = refused.max_bytes.map_or_else(
+        || "more than your account keeps".to_owned(),
+        |max| {
+            format!(
+                "more than the {} your account keeps",
+                size_words(max, false)
+            )
+        },
+    );
+    (
+        format!("{name} did not sync"),
+        format!(
+            "At {size}, this change is {more_than}, so it stays on this computer. It syncs once it is smaller."
+        ),
+    )
+}
+
+/// A thing's name after what it is, or what it is when it has none.
+fn named(the: &str, name: &str, unnamed: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        unnamed.to_owned()
+    } else {
+        format!("{the} {name}")
+    }
 }
 
 /// The hex SHA-256 of a change as JSON.
@@ -442,6 +595,173 @@ impl Engine {
         self.commit_as(sync_actor("export"), Change::SyncChanged { sync });
     }
 
+    /// What the account made of the sizes of this computer's changes
+    /// (2026-11-14): `refused` are the ones it would not keep, and `kept`
+    /// the entities it has now. A refused one stays on this computer and is
+    /// listed in [`SyncStatus::too_large`] until the account keeps it, it
+    /// is gone from here or it is no longer the account's to have. It is
+    /// said once in a notification, which follows its name and size and
+    /// clears with it. Dismissed, it is not raised again while the entity
+    /// stays too large.
+    pub fn sync_sizes(&mut self, kept: &[(String, String)], refused: Vec<TooLarge>) {
+        let same = |a: &TooLarge, b: &TooLarge| a.entity == b.entity && a.id == b.id;
+        let before = self.state.sync.too_large.clone();
+        let mut after: Vec<TooLarge> = before
+            .iter()
+            .filter(|was| {
+                !kept
+                    .iter()
+                    .any(|(entity, id)| *entity == was.entity && *id == was.id)
+            })
+            .cloned()
+            .collect();
+        for one in refused {
+            match after.iter_mut().find(|known| same(known, &one)) {
+                Some(known) => *known = one,
+                None => after.push(one),
+            }
+        }
+        after.retain(|one| self.sync_name(&one.entity, &one.id).is_some());
+        if after != before {
+            let mut sync = self.state.sync.clone();
+            sync.too_large.clone_from(&after);
+            sync.version += 1;
+            self.commit_as(sync_actor("export"), Change::SyncChanged { sync });
+        }
+        for was in &before {
+            if !after.iter().any(|now| same(now, was)) {
+                self.resolve(&too_large_condition(&was.entity, &was.id));
+            }
+        }
+        for now in &after {
+            let Some(name) = self.sync_name(&now.entity, &now.id) else {
+                continue;
+            };
+            let (title, body) = too_large_words(&name, now);
+            let condition = too_large_condition(&now.entity, &now.id);
+            let shown = self
+                .state
+                .notifications
+                .values()
+                .find(|n| n.condition.as_deref() == Some(condition.as_str()))
+                .cloned();
+            match shown {
+                Some(mut shown) => {
+                    if shown.title != title || shown.body.as_deref() != Some(body.as_str()) {
+                        shown.title = title;
+                        shown.body = Some(body);
+                        shown.version += 1;
+                        self.commit_as(
+                            crate::plugins::daemon(),
+                            Change::NotificationUpserted {
+                                notification: shown,
+                            },
+                        );
+                    }
+                }
+                None if !before.iter().any(|was| same(was, now)) => self.raise(Raise {
+                    severity: Severity::Warning,
+                    kind: NotificationKind::Persistent,
+                    subject: Subject::System,
+                    title,
+                    body: Some(body),
+                    actions: Vec::new(),
+                    condition: Some(condition),
+                    report: None,
+                }),
+                None => {}
+            }
+        }
+    }
+
+    /// What a synced entity is to the person, such as "Ben's layouts and
+    /// settings" or "The plan Survey North". None when it is gone from
+    /// here, or is no longer the account's to have.
+    fn sync_name(&self, entity: &str, id: &str) -> Option<String> {
+        let state = &self.state;
+        if !state.sync.syncs(entity) {
+            return None;
+        }
+        Some(match entity {
+            "thread" => named("The chat", &state.threads.get(id)?.title, "A chat"),
+            "item" => {
+                let thread = state.threads.get(&state.items.get(id)?.thread_id);
+                named(
+                    "A message in the chat",
+                    thread.map_or("", |thread| thread.title.as_str()),
+                    "A message in a chat",
+                )
+            }
+            "folder" => named("The folder", &state.folders.get(id)?.name, "A folder"),
+            "place" => named("The place", &state.places.get(id)?.name, "A place"),
+            "snapshot" => named("The snapshot", &state.snapshots.get(id)?.name, "A snapshot"),
+            "operator" => format!("{}'s layouts and settings", state.operators.get(id)?.name),
+            "vehicle" => {
+                let vehicle = state
+                    .vehicles
+                    .get(id)
+                    .filter(|v| v.saved && !v.local_only && !v.dismissed)?;
+                named("The vehicle", &vehicle.name, "A vehicle")
+            }
+            "history" => {
+                let entry = state.history.get(id).filter(|entry| !entry.local)?;
+                match state.vehicles.get(&entry.vehicle_id) {
+                    Some(vehicle) => format!("An entry in {}'s history", vehicle.name),
+                    None => "An entry in a vehicle's history".to_owned(),
+                }
+            }
+            "plugin" => format!("The {} plugin", state.published.get(id)?.name),
+            "own-set" => {
+                let set = state.own_sets.get(id).filter(|set| set.url.is_some())?;
+                named(
+                    "The parameter descriptions",
+                    &set.label,
+                    "A set of parameter descriptions",
+                )
+            }
+            "link" => {
+                let link = state.links.get(id).filter(|link| shared_link(link))?;
+                named("The connection", &link.name, "A connection")
+            }
+            "plan" => {
+                let plan = state.plans.get(id).filter(|p| p.vehicle_copy.is_none())?;
+                // In Deleted it still holds all it held, so its deletion is
+                // too large as well, and another computer may have a copy.
+                if plan.deleted_at_us.is_some() {
+                    named("The deleted plan", &plan.body.name, "A deleted plan")
+                } else {
+                    named("The plan", &plan.body.name, "A plan")
+                }
+            }
+            "flight" => {
+                let flight = state.flights.get(id).filter(|flight| flight.keep)?;
+                match &flight.name {
+                    Some(name) => named("The flight", name, "A flight"),
+                    None => named("A flight of", &flight.vehicle_name, "A flight"),
+                }
+            }
+            "operation" => {
+                let operation = state.operations.get(id).filter(|o| o.keep)?;
+                named(
+                    "The operation",
+                    operation.name.as_deref().unwrap_or_default(),
+                    "An operation",
+                )
+            }
+            "dialect" => named(
+                "The MAVLink dialect",
+                &state.dialects.get(id)?.label,
+                "A MAVLink dialect",
+            ),
+            "firmware-profile" => named(
+                "The firmware profile",
+                &state.firmware_profiles.get(id)?.label,
+                "A firmware profile",
+            ),
+            _ => return None,
+        })
+    }
+
     /// Other computers' changes, fetched up to the account's `cursor`.
     /// Each is taken if it wins against the copy here; then the cursor
     /// moves.
@@ -490,6 +810,10 @@ impl Engine {
             sync.device_id = format!("dv{}", &self.random.token()[..16]);
             sync.version += 1;
             self.commit_as(sync_actor("device"), Change::SyncChanged { sync });
+        }
+        // What was too large and has since gone from here is no longer said.
+        if !self.state.sync.too_large.is_empty() {
+            self.sync_sizes(&[], Vec::new());
         }
         self.state.sync.clone()
     }
@@ -1113,6 +1437,22 @@ impl Engine {
             } else {
                 Some("Sync needs UXDuck installed on a computer.".into())
             },
+            too_large: sync
+                .too_large
+                .iter()
+                .filter_map(|one| {
+                    let name = self.sync_name(&one.entity, &one.id)?;
+                    let (title, detail) = too_large_words(&name, one);
+                    Some(SyncTooLarge {
+                        entity: one.entity.clone(),
+                        id: one.id.clone(),
+                        title,
+                        detail,
+                        bytes: one.bytes,
+                        max_bytes: one.max_bytes,
+                    })
+                })
+                .collect(),
             library: self
                 .state
                 .library

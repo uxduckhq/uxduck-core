@@ -14735,6 +14735,40 @@ export type SyncStatus = {
      * What stays off the account; empty syncs everything.
      */
     skipped?: Array<SyncCategory>;
+    /**
+     * What the account would not keep for its size. Each stays on this
+     * computer until it is smaller. Empty when everything fits.
+     */
+    tooLarge?: Array<SyncTooLarge>;
+};
+
+/**
+ * Something whose latest change is larger than the account keeps, so it
+ * is on this computer only until it is smaller.
+ */
+export type SyncTooLarge = {
+    /**
+     * The change's size as the account measured it.
+     */
+    bytes: number;
+    /**
+     * Its size, what the account keeps, and what to do, in words.
+     */
+    detail: string;
+    /**
+     * `plan`, `operator`, `history` and the rest, as synced.
+     */
+    entity: string;
+    id: string;
+    /**
+     * The largest change the account keeps, when its server said.
+     */
+    maxBytes?: number | null;
+    /**
+     * What did not sync, by its name to the person, such as "The plan
+     * Survey North did not sync".
+     */
+    title: string;
 };
 
 /**

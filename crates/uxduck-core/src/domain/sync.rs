@@ -86,8 +86,28 @@ pub struct SyncState {
     /// (ADR-0033): another account signed in here does not receive it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_id: String,
+    /// What the account would not keep for its size (2026-11-14): it stays
+    /// on this computer, said to the person, until it fits again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub too_large: Vec<TooLarge>,
     #[serde(default)]
     pub version: u64,
+}
+
+/// One entity whose latest change the account refused for its size.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TooLarge {
+    /// `plan`, `operator`, `history` and the rest, as synced.
+    pub entity: String,
+    pub id: String,
+    /// The change's size as the account measured it; as this computer
+    /// measured it when the account server did not say.
+    pub bytes: u64,
+    /// The largest change the account keeps, when its server said. Never
+    /// this computer's own copy of the number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
 
 impl Default for SyncState {
@@ -104,6 +124,7 @@ impl Default for SyncState {
             pulled: 0,
             last_synced_at_us: None,
             account_id: String::new(),
+            too_large: Vec::new(),
             version: 0,
         }
     }
