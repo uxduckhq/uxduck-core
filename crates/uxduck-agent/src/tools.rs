@@ -699,7 +699,8 @@ impl Tool {
 }
 
 /// What the model is sent each turn: the tools not deferred, and
-/// `tool_call` to run a deferred one that `tool_search` found.
+/// `tool_call` to run a deferred one that `tool_search` found. Their words
+/// go without the plan's own references ([`without_references`]).
 #[must_use]
 pub fn model_tools() -> Vec<Tool> {
     let mut sent: Vec<Tool> = tools()
@@ -727,7 +728,72 @@ pub fn model_tools() -> Vec<Tool> {
             "required": ["name"]
         }),
     });
+    for tool in &mut sent {
+        tool.description = without_references(&tool.description);
+        describe_without_references(&mut tool.parameters);
+    }
     sent
+}
+
+/// A doc without its references to UXDuck's own plan, such as "(S65)" or
+/// "(S168, ADR-0034 A5)". They name a slice or a decision for the people
+/// who build UXDuck. A model cannot look one up, and it is sent these words
+/// on every turn. Only a pair of brackets holding nothing else goes, with
+/// the space before it.
+fn without_references(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('(') {
+        match rest[open..].find(')').map(|at| open + at) {
+            Some(close) if only_references(&rest[open + 1..close]) => {
+                out.push_str(rest[..open].trim_end());
+                rest = &rest[close + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=open]);
+                rest = &rest[open + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether the words inside a pair of brackets are references and nothing
+/// else: slices ("S65"), decisions ("ADR-0034") and their clauses ("A5"),
+/// with at least one slice or decision among them.
+fn only_references(inside: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let named = |word: &str| {
+        word.strip_prefix("ADR-").is_some_and(digits) || word.strip_prefix('S').is_some_and(digits)
+    };
+    let clause = |word: &str| {
+        let number = word.trim_start_matches(|c: char| c.is_ascii_uppercase());
+        number.len() < word.len() && digits(number)
+    };
+    let words: Vec<&str> = inside
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.iter().any(|word| named(word)) && words.iter().all(|word| named(word) || clause(word))
+}
+
+/// The same for every description in a params schema.
+fn describe_without_references(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                match value {
+                    Value::String(text) if key == "description" => {
+                        *text = without_references(text);
+                    }
+                    _ => describe_without_references(value),
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(describe_without_references),
+        _ => {}
+    }
 }
 
 pub(crate) fn chat_tools(can_file_feedback: bool) -> (Vec<Tool>, Vec<Tool>) {
@@ -1070,6 +1136,55 @@ mod tests {
         assert!(size < 128 * 1024, "{size} bytes of tools");
         // Sent with every request: kept well under the 65 KB they were.
         assert!(size < 40 * 1024, "{size} bytes of tools sent each turn");
+    }
+
+    /// The plan's own references stay in the docs people read and are taken
+    /// out of what the model is sent each turn.
+    #[test]
+    fn the_model_is_sent_no_references_to_the_plan() {
+        assert_eq!(
+            without_references("The focused vehicle's readings, as tiles (S65)."),
+            "The focused vehicle's readings, as tiles."
+        );
+        assert_eq!(
+            without_references(
+                "Practice exercises\n(S100, ADR-0024 X8). Follows a vehicle (S105)."
+            ),
+            "Practice exercises. Follows a vehicle."
+        );
+        assert_eq!(
+            without_references("its checks (S193, S353, ADR-0038 K8, K11, K16, K17), as a tab"),
+            "its checks, as a tab"
+        );
+        // Brackets that hold anything else stay as they are.
+        for kept in [
+            "a `chart` (any number) or a `readout` (one)",
+            "the terrain check (P9) of a plan",
+            "(S65 and its tiles)",
+            "up to 2,000 characters (about 300 words)",
+            "an open bracket (S65",
+        ] {
+            assert_eq!(without_references(kept), kept);
+        }
+        let words = |tools: &[Tool]| {
+            serde_json::to_string(
+                &tools
+                    .iter()
+                    .map(|t| (&t.description, &t.parameters))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_default()
+        };
+        let sent = words(&model_tools());
+        assert!(!sent.contains("ADR-"), "a decision is still named");
+        assert!(
+            !sent
+                .match_indices("(S")
+                .any(|(at, _)| sent[at + 2..].starts_with(|c: char| c.is_ascii_digit())),
+            "a slice is still named"
+        );
+        // MCP and the tools found by search keep the docs as they are written.
+        assert!(words(&tools()).contains("(S43)"));
     }
 
     #[test]
