@@ -983,15 +983,46 @@ fn describe(path: &Path, argument: &str) -> Result<String, String> {
         text
     });
     let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
-    while child.try_wait().ok().flatten().is_none() {
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break status;
+        }
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("{} did not describe itself", path.display()));
         }
         std::thread::sleep(Duration::from_millis(20));
+    };
+    if let Some(why) = refused_by_windows(path, status.code()) {
+        return Err(why);
     }
     Ok(reader.join().unwrap_or_default())
+}
+
+/// Code Integrity's refusals of an unsigned file: Smart App Control or App
+/// Control blocked it (`STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION`), or its
+/// signature could not be verified (`STATUS_INVALID_IMAGE_HASH`).
+const UNTRUSTED_FILE: [u32; 2] = [0xC0E9_0002, 0xC000_0428];
+
+/// Why Windows would not run a program, from its exit code. A program
+/// Windows could not load, such as a build whose `cygwin1.dll` Smart App
+/// Control blocked, ends with an NTSTATUS error code rather than one of its
+/// own. A build that printed nothing that way must not count as found
+/// because the catalogue shipped its frame table beside it.
+fn refused_by_windows(path: &Path, code: Option<i32>) -> Option<String> {
+    let code = code?.cast_unsigned();
+    if code < 0xC000_0000 {
+        return None;
+    }
+    let name = path.display();
+    Some(if UNTRUSTED_FILE.contains(&code) {
+        format!(
+            "Windows blocked {name}, or a file it loads, because it could not confirm who published it. Use a signed simulator, such as the latest one from the simulator catalogue."
+        )
+    } else {
+        format!("Windows could not run {name} (error 0x{code:08X}).")
+    })
 }
 
 fn has_option(usage: &str, option: &str) -> bool {
@@ -2004,6 +2035,26 @@ mod tests {
         text.push_str("Smoothing reset\tat 0\n\n  \n");
         std::fs::write(&log, text).expect("log");
         assert_eq!(last_line(&log).as_deref(), Some("Smoothing reset at 0"));
+    }
+
+    #[test]
+    fn a_build_windows_would_not_load_is_not_found() {
+        let path = Path::new("arduplane.exe");
+        assert_eq!(refused_by_windows(path, None), None);
+        assert_eq!(refused_by_windows(path, Some(0)), None);
+        assert_eq!(refused_by_windows(path, Some(1)), None);
+        assert_eq!(refused_by_windows(path, Some(255)), None);
+        let blocked = refused_by_windows(path, Some(0xC0E9_0002_u32.cast_signed()));
+        assert_eq!(
+            blocked.as_deref(),
+            Some(
+                "Windows blocked arduplane.exe, or a file it loads, because it could not confirm who published it. Use a signed simulator, such as the latest one from the simulator catalogue."
+            )
+        );
+        assert_eq!(
+            refused_by_windows(path, Some(0xC000_0135_u32.cast_signed())).as_deref(),
+            Some("Windows could not run arduplane.exe (error 0xC0000135).")
+        );
     }
 
     #[test]

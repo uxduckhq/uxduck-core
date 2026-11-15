@@ -450,12 +450,14 @@ fn start_engine(
     let (link_channel, link_inbox) = data_plane::channel();
     // SITL builds for simulated vehicles (S17), probed off the engine's thread.
     let simulators = crate::sim::Simulators::new(data_dir);
+    // Prebuilt builds to download (S18): Start flying's at once, others when asked.
+    let catalogue = Catalogue::new(simulators.clone(), tokio::runtime::Handle::current());
+    // Before anything runs one: Windows would refuse an unsigned build.
+    catalogue.remove_unsigned();
     {
         let simulators = simulators.clone();
         std::thread::spawn(move || simulators.probe_all());
     }
-    // Prebuilt builds to download (S18): Start flying's at once, others when asked.
-    let catalogue = Catalogue::new(simulators.clone(), tokio::runtime::Handle::current());
     catalogue.prefetch("arduplane");
     #[cfg(feature = "plugins")]
     let (plugin_port, plugin_feed, plugin_host) = {

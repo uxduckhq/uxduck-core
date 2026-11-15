@@ -191,6 +191,49 @@ pub struct CatalogueFile {
     pub encoding: Option<String>,
 }
 
+/// How much of the start of a Windows program or library
+/// [`authenticode_signed`] reads.
+pub const PE_HEAD: usize = 4096;
+
+/// Whether a file is a Windows program or library, by its name.
+#[must_use]
+pub fn windows_image(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("dll"))
+}
+
+/// Whether a Windows program or library carries an Authenticode signature,
+/// from its first [`PE_HEAD`] bytes: its header names a certificate table.
+/// `None` when they are not the start of one. Smart App Control refuses an
+/// unsigned one with a Bad Image box, so the catalogue lists only signed
+/// Windows builds and the daemon keeps no other (2026-11-10). Windows checks
+/// the signature itself.
+#[must_use]
+pub fn authenticode_signed(head: &[u8]) -> Option<bool> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(head.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(head.get(at..at + 4)?.try_into().ok()?));
+    if head.get(..2)? != b"MZ" {
+        return None;
+    }
+    let pe = usize::try_from(u32_at(0x3C)?)
+        .ok()
+        .filter(|pe| *pe < head.len())?;
+    if head.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let optional = pe + 24;
+    let (count, directories) = match u16_at(optional)? {
+        0x10B => (optional + 92, optional + 96),
+        0x20B => (optional + 108, optional + 112),
+        _ => return None,
+    };
+    if u32_at(count)? <= 4 {
+        return Some(false);
+    }
+    Some(u32_at(directories + 4 * 8 + 4)? > 0)
+}
+
 /// Asks for the catalogue; `refresh` fetches it again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -345,4 +388,57 @@ pub struct SnapshotRenameParams {
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotListResult {
     pub snapshots: Vec<SimSnapshot>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The start of a 64-bit Windows program, with a certificate table of
+    /// `certificates` bytes.
+    fn program(certificates: u32) -> Vec<u8> {
+        let mut head = vec![0; 1024];
+        head[..2].copy_from_slice(b"MZ");
+        head[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        head[0x80..0x84].copy_from_slice(b"PE\0\0");
+        head[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+        head[0x104..0x108].copy_from_slice(&16u32.to_le_bytes());
+        head[0x128..0x12C].copy_from_slice(&0x4000u32.to_le_bytes());
+        head[0x12C..0x130].copy_from_slice(&certificates.to_le_bytes());
+        head
+    }
+
+    #[test]
+    fn a_windows_program_is_signed_when_its_header_names_a_certificate_table() {
+        assert_eq!(authenticode_signed(&program(0x2A00)), Some(true));
+        assert_eq!(authenticode_signed(&program(0)), Some(false));
+
+        let mut thirty_two_bit = program(0);
+        thirty_two_bit[0x98..0x9A].copy_from_slice(&0x10Bu16.to_le_bytes());
+        thirty_two_bit[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes());
+        thirty_two_bit[0x11C..0x120].copy_from_slice(&0x2A00u32.to_le_bytes());
+        assert_eq!(authenticode_signed(&thirty_two_bit), Some(true));
+
+        let mut few_directories = program(0x2A00);
+        few_directories[0x104..0x108].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(authenticode_signed(&few_directories), Some(false));
+
+        assert_eq!(
+            authenticode_signed(b"\x7fELF"),
+            None,
+            "not a Windows program"
+        );
+        assert_eq!(
+            authenticode_signed(&program(0x2A00)[..0x100]),
+            None,
+            "cut short"
+        );
+        let mut far = program(0x2A00);
+        far[0x3C..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(authenticode_signed(&far), None);
+
+        assert!(windows_image("cygwin1.dll"));
+        assert!(windows_image("ArduPlane.EXE"));
+        assert!(!windows_image("defaults/plane.parm"));
+    }
 }

@@ -8,19 +8,21 @@
 //! resumes, and they are what the checksum is of. Deleting a
 //! build removes that folder. The one build Start flying needs downloads
 //! once at start-up when there is none ([`Catalogue::prefetch`]); any other
-//! waits until the simulation page asks.
+//! waits until the simulation page asks. A Windows build that is not signed
+//! is never installed, and one installed before is deleted at start-up
+//! ([`Catalogue::remove_unsigned`]).
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::sim::{
-    CATALOGUE_SCHEMA, CatalogueBuild, CatalogueEntry, CatalogueFile, SimCatalogue,
-    SimCatalogueResult,
+    CATALOGUE_SCHEMA, CatalogueBuild, CatalogueEntry, CatalogueFile, PE_HEAD, SimCatalogue,
+    SimCatalogueResult, authenticode_signed, windows_image,
 };
 
 use super::{BUILD_FILE, PX4, Simulators};
@@ -381,6 +383,14 @@ impl Catalogue {
                 executable(&target)?;
             }
         }
+        if let Some(file) = unsigned_file(&folder) {
+            let _ = std::fs::remove_dir_all(&folder);
+            let _ = std::fs::remove_dir_all(&parts);
+            return Err(format!(
+                "{} is not signed, so Windows would refuse to run it. Choose a newer build.",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
         if build.program == PX4 {
             px4_links(&folder.join(PX4).join("bin"))?;
         }
@@ -504,6 +514,59 @@ impl Catalogue {
         tracing::info!(build = %id, "deleted a simulator build");
         Ok(())
     }
+
+    /// Deletes the installed builds Windows would refuse to run because
+    /// they are not signed, such as one from before UXDuck signed its
+    /// Windows builds. Each scan of the builds ran them, and Smart App
+    /// Control answered each with a Bad Image box (2026-11-10). Called
+    /// before anything runs a build.
+    pub fn remove_unsigned(&self) {
+        let installed = std::fs::read_dir(self.simulators.catalogue_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|folder| folder.join(BUILD_FILE).is_file());
+        for folder in installed {
+            let Some(file) = unsigned_file(&folder) else {
+                continue;
+            };
+            match std::fs::remove_dir_all(&folder) {
+                Ok(()) => tracing::warn!(
+                    build = %folder.display(),
+                    file = %file.display(),
+                    "deleted a simulator build that is not signed, which Windows would refuse"
+                ),
+                Err(error) => tracing::warn!(
+                    build = %folder.display(),
+                    %error,
+                    "cannot delete a simulator build that is not signed"
+                ),
+            }
+        }
+    }
+}
+
+/// The first Windows program or library in a build's folder that is not
+/// signed.
+fn unsigned_file(folder: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(windows_image)
+        })
+        .find(|path| {
+            let mut head = Vec::with_capacity(PE_HEAD);
+            std::fs::File::open(path)
+                .and_then(|file| file.take(PE_HEAD as u64).read_to_end(&mut head))
+                .is_ok()
+                && authenticode_signed(&head) == Some(false)
+        })
 }
 
 /// The most a catalogue file decompresses to: far more than any SITL
@@ -764,6 +827,66 @@ mod tests {
     }
     use super::*;
     use uxduck_contracts::dto::sim::CatalogueFile;
+
+    /// The start of a 64-bit Windows program, with a certificate table of
+    /// `certificates` bytes.
+    fn program(certificates: u32) -> Vec<u8> {
+        let mut head = vec![0; 1024];
+        head[..2].copy_from_slice(b"MZ");
+        head[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        head[0x80..0x84].copy_from_slice(b"PE\0\0");
+        head[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+        head[0x104..0x108].copy_from_slice(&16u32.to_le_bytes());
+        head[0x128..0x12C].copy_from_slice(&0x4000u32.to_le_bytes());
+        head[0x12C..0x130].copy_from_slice(&certificates.to_le_bytes());
+        head
+    }
+
+    #[test]
+    fn a_windows_build_that_is_not_signed_is_deleted_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let catalogue = Catalogue::new(Simulators::new(dir.path()), runtime.handle().clone());
+        let install = |id: &str, files: &[(&str, &[u8])]| {
+            let folder = catalogue.simulators.catalogue_dir().join(id);
+            std::fs::create_dir_all(&folder).unwrap();
+            for (name, bytes) in files {
+                std::fs::write(folder.join(name), bytes).unwrap();
+            }
+            std::fs::write(folder.join(BUILD_FILE), "{}").unwrap();
+            folder
+        };
+        let signed = install(
+            "ardupilot-arduplane-signed-x86_64-windows",
+            &[
+                ("arduplane.exe", &program(0x2A00)),
+                ("cygwin1.dll", &program(0x2A00)),
+                ("notes.dll", b"not a program"),
+            ],
+        );
+        let unsigned = install(
+            "ardupilot-arduplane-unsigned-x86_64-windows",
+            &[
+                ("arduplane.exe", &program(0x2A00)),
+                ("cygwin1.dll", &program(0)),
+            ],
+        );
+        let linux = install(
+            "ardupilot-arduplane-4.7.2-x86_64-linux",
+            &[("arduplane", b"\x7fELF")],
+        );
+        assert_eq!(unsigned_file(&unsigned), Some(unsigned.join("cygwin1.dll")));
+        assert_eq!(unsigned_file(&signed), None);
+        assert_eq!(unsigned_file(&linux), None);
+
+        catalogue.remove_unsigned();
+        assert!(!unsigned.exists(), "the unsigned build is gone");
+        assert!(signed.join(BUILD_FILE).is_file(), "the signed build stays");
+        assert!(linux.join(BUILD_FILE).is_file());
+    }
 
     fn build(name: &str, url: &str) -> CatalogueBuild {
         CatalogueBuild {
