@@ -237,17 +237,20 @@ mod tests {
         assert!(computer.answer(&request).is_empty(), "nothing sent as yet");
         let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let frames = computer.frames([1], 0);
+        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let Some(Message::OnboardComputerStatus(status)) = decode(&frames[1]).map(|d| d.message)
         else {
             panic!("a status");
         };
         let stamped_ms = i64::try_from(status.time_usec / 1000).unwrap();
-        let before_ms = i64::try_from(before.as_millis()).unwrap();
+        let told_ms =
+            |at: std::time::Duration| i64::try_from(at.as_millis()).unwrap() - 712_800_000;
         assert!(
-            (stamped_ms - (before_ms - 712_800_000)).abs() < 1_000,
+            (told_ms(before)..=told_ms(after)).contains(&stamped_ms),
             "its own clock, offset: {stamped_ms}"
         );
         let replies = computer.answer(&request);
+        let answered_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         assert_eq!(replies.len(), 1);
         let reply = decode(&replies[0]).unwrap();
         let Message::Timesync {
@@ -262,7 +265,7 @@ mod tests {
         assert_eq!((reply.system_id, reply.component_id), (1, 192));
         assert_eq!((ts1, target_system, target_component), (42, 255, 190));
         assert!(
-            (tc1 / 1_000_000 - (before_ms - 712_800_000)).abs() < 1_000,
+            (told_ms(after)..=told_ms(answered_at)).contains(&(tc1 / 1_000_000)),
             "{tc1}"
         );
         let sequence = |frame: &[u8]| uxduck_mavlink::framing::header(frame).unwrap().sequence;

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "cd45f915430e9aefe060353ab7f76ea5f006d8c2",
+  "sourceCommit": "d8ac45e1d3610a6bb59fc0b37328461aadc82277",
   "licenseReady": true,
   "files": [
     {
@@ -7681,7 +7681,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/onboard.rs",
-      "sha256": "1ad7bda83987d45ee78d1309ad33636ef96338db0f7179ae4f34d4afca386e11",
+      "sha256": "97abba64bbee386f1bfb70d21ff1a1c8e197e09fcab5b53de82c8ef70045dc44",
       "executable": false
     },
     {
