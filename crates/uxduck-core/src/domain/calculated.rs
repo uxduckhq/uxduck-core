@@ -2,13 +2,13 @@
 //! vehicle's telemetry, and a unit, kept on their operator and synced with
 //! it. The daemon works them out as telemetry items in the `custom` group.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::formula::{CALCULATED_GROUP, Formula};
 use super::telemetry::{Unit, key_says_unit};
 
-/// The most calculated values an operator keeps.
-pub const MAX_CALCULATED: usize = 32;
 /// The longest name, in characters.
 pub const MAX_LABEL_CHARS: usize = 48;
 /// The longest key after `custom.`, in characters.
@@ -41,17 +41,14 @@ pub struct CalculatedItem {
 }
 
 /// Checks and tidies an operator's calculated values: names trimmed, and
-/// each key, name, formula and unit as ADR-0056 says.
+/// each key, name, formula and unit as ADR-0056 says. However many there
+/// are, each is kept.
 ///
 /// # Errors
 ///
 /// The first value that is not, saying which and why.
 pub fn clean_calculated(items: &[CalculatedItem]) -> Result<Vec<CalculatedItem>, String> {
-    if items.len() > MAX_CALCULATED {
-        return Err(format!(
-            "An operator keeps at most {MAX_CALCULATED} calculated values."
-        ));
-    }
+    let mut keys: HashSet<&str> = HashSet::with_capacity(items.len());
     let mut out: Vec<CalculatedItem> = Vec::with_capacity(items.len());
     for item in items {
         let label = item.label.trim();
@@ -74,7 +71,7 @@ pub fn clean_calculated(items: &[CalculatedItem]) -> Result<Vec<CalculatedItem>,
                 "{label}'s key must be custom. and up to {MAX_KEY_CHARS} lowercase letters, digits and _{suffix}."
             ));
         }
-        if out.iter().any(|o| o.key == item.key) {
+        if !keys.insert(&item.key) {
             return Err(format!("Two calculated values are both {}.", item.key));
         }
         Formula::parse(&item.formula).map_err(|e| format!("{label}: {e}"))?;
@@ -162,10 +159,21 @@ mod tests {
                 .unwrap_err()
                 .starts_with("Two calculated values")
         );
-        assert!(
-            clean_calculated(&vec![power(); MAX_CALCULATED + 1])
-                .unwrap_err()
-                .starts_with("An operator keeps at most")
-        );
+    }
+
+    /// 32 was the most until 2026-11-14. Nothing real stood behind it.
+    #[test]
+    fn keeps_every_calculated_value_however_many() {
+        let many: Vec<CalculatedItem> = (0..500)
+            .map(|n| CalculatedItem {
+                key: format!("custom.power_{n}"),
+                label: format!("Power {n}"),
+                ..power()
+            })
+            .collect();
+        let kept = clean_calculated(&many).unwrap();
+        assert_eq!(kept.len(), 500);
+        assert_eq!(kept[499].key, "custom.power_499");
+        assert_eq!(kept[499].label, "Power 499");
     }
 }

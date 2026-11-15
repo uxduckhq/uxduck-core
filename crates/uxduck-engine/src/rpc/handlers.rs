@@ -1071,7 +1071,7 @@ fn operator_create(
 }
 
 /// The Cockpit tab's buttons for every type, each type once and each
-/// action once, by action id.
+/// action once, by action id, however many a type has.
 fn control_actions(
     all: &[uxduck_contracts::dto::operator::ControlActions],
 ) -> Result<Vec<operator::ControlActions>, ApiError> {
@@ -1080,8 +1080,7 @@ fn control_actions(
         ApiError::new(
             ErrorKind::InvalidValue,
             format!(
-                "each vehicle type once, with at most {} actions of up to {} characters, each vehicle: and a-z, 0-9, -, _, : or spaces",
-                operator::MAX_CONTROL_ACTIONS,
+                "each vehicle type once, and each action up to {} characters, vehicle: and a-z, 0-9, -, _, : or spaces",
                 operator::MAX_CONTROL_ACTION_CHARS,
             ),
         )
@@ -1100,20 +1099,26 @@ fn calculated_items(
         items.iter().map(Into::into).collect();
     let items = uxduck_core::domain::calculated::clean_calculated(&items)
         .map_err(|message| ApiError::new(ErrorKind::InvalidValue, message))?;
+    // Every other operator's values by key, read once, so that checking
+    // takes time in step with how many values there are, not its square.
+    let mut others: std::collections::HashMap<&str, Vec<(&Operator, &_)>> =
+        std::collections::HashMap::new();
+    for other in engine.state.operators.values() {
+        if other.id != operator_id {
+            for theirs in &other.calculated_items {
+                others
+                    .entry(theirs.key.as_str())
+                    .or_default()
+                    .push((other, theirs));
+            }
+        }
+    }
     for item in &items {
-        let other = engine
-            .state
-            .operators
-            .values()
-            .filter(|o| o.id != operator_id)
-            .find_map(|o| {
-                o.calculated_items
-                    .iter()
-                    .find(|c| {
-                        c.key == item.key && (c.formula != item.formula || c.unit != item.unit)
-                    })
-                    .map(|_| o)
-            });
+        let other = others.get(item.key.as_str()).and_then(|same| {
+            same.iter()
+                .find(|(_, c)| c.formula != item.formula || c.unit != item.unit)
+                .map(|(o, _)| *o)
+        });
         if let Some(other) = other {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
@@ -1128,21 +1133,43 @@ fn calculated_items(
 }
 
 /// An operator's display document (C1), kept as sent: the app owns its
-/// shape; here only its size and that it is a JSON object.
+/// shape; here only that it is a JSON object. It has no size of its own to
+/// keep to: it holds what the person saved, and what bounds it is what one
+/// request may carry and what the account takes of one synced change, which
+/// is said where a change is too large to sync.
 fn display_document(document: &str) -> Result<String, ApiError> {
-    let object = document.len() <= operator::MAX_DISPLAY_BYTES
-        && serde_json::from_str::<Value>(document).is_ok_and(|v| v.is_object());
-    if object {
+    if serde_json::from_str::<Value>(document).is_ok_and(|v| v.is_object()) {
         Ok(document.to_owned())
     } else {
         Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!(
-                "send the display settings as a JSON object of at most {} KiB",
-                operator::MAX_DISPLAY_BYTES / 1024
-            ),
+            "send the display settings as a JSON object",
         ))
     }
+}
+
+/// A layout's saved layouts, each with a name a person can read in a menu.
+/// A name is checked here, where it is given, so that one too long is
+/// refused with words and its layout is never dropped.
+fn saved_layout_names(layout: &uxduck_contracts::dto::operator::Layout) -> Result<(), ApiError> {
+    for saved in &layout.saved {
+        if operator::clean_layout_name(&saved.name).is_none() {
+            let length = saved.name.trim().chars().count();
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                if length == 0 {
+                    "Name each saved layout.".to_owned()
+                } else {
+                    format!(
+                        "A saved layout's name is at most {} characters, and “{}” is {length}.",
+                        operator::MAX_LAYOUT_NAME_CHARS,
+                        saved.name.trim(),
+                    )
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn operator_update(
@@ -1166,6 +1193,7 @@ fn operator_update(
         operator.altitude_frame = frame.into();
     }
     if let Some(layout) = params.layout.clone() {
+        saved_layout_names(&layout)?;
         let mut layout: operator::Layout = layout.into();
         // A tab moved, closed, added or hidden is the person arranging the
         // dock, which UXDuck then leaves to them (S65); a size or the
@@ -1185,7 +1213,8 @@ fn operator_update(
             |c| c.into_iter().map(|v| (v.vehicle_id, v.layout_id)).collect(),
         );
         (operator.telemetry_layouts, operator.vehicle_telemetry) =
-            uxduck_core::domain::telemetry_layout::cleaned(layouts, chosen);
+            uxduck_core::domain::telemetry_layout::cleaned(layouts, chosen)
+                .map_err(|message| ApiError::new(ErrorKind::InvalidValue, message))?;
     }
     if let Some(items) = &params.calculated_items {
         operator.calculated_items = calculated_items(engine, &operator.id, items)?;
@@ -1208,10 +1237,8 @@ fn operator_update(
             ApiError::new(
                 ErrorKind::InvalidValue,
                 format!(
-                    "at most {} parameter groups, each a unique name of 1 to {} characters and at most {} parameters of 1 to {} characters A-Z, 0-9 or _",
-                    operator::MAX_PARAMETER_GROUPS,
+                    "each parameter group a unique name of 1 to {} characters, and each parameter 1 to {} characters A-Z, 0-9 or _",
                     operator::MAX_GROUP_NAME_CHARS,
-                    operator::MAX_GROUP_PARAMETERS,
                     operator::MAX_PARAMETER_NAME_CHARS,
                 ),
             )
@@ -1222,8 +1249,7 @@ fn operator_update(
             ApiError::new(
                 ErrorKind::InvalidValue,
                 format!(
-                    "at most {} pinned messages, each received: or sent: and 1 to {} characters A-Z, 0-9, _ or #",
-                    operator::MAX_INSPECTOR_PINNED,
+                    "each pinned message received: or sent: and 1 to {} characters A-Z, 0-9, _ or #",
                     operator::MAX_PINNED_MESSAGE_CHARS,
                 ),
             )
@@ -1319,9 +1345,8 @@ fn given_tab(
     }
     match kind {
         _ if items.is_empty() => {}
-        operator::TabKind::Chart if items.len() <= operator::MAX_CHART_SERIES => {}
+        operator::TabKind::Chart => {}
         operator::TabKind::Readout if items.len() == 1 => {}
-        operator::TabKind::Chart => return Err(invalid("a chart draws at most 8 items")),
         operator::TabKind::Readout => return Err(invalid("a readout shows one item")),
         _ => return Err(invalid("items are only for a chart or a readout")),
     }
@@ -1392,25 +1417,22 @@ fn given_tab(
     })
 }
 
-/// At most this many changed shortcuts, each id and key this long.
-const MAX_SHORTCUTS: usize = 500;
+/// The longest action id and key of a changed shortcut, in bytes.
 const MAX_SHORTCUT_TEXT: usize = 64;
 
-/// Shortcuts are the app's to read; the daemon only keeps them small.
+/// Shortcuts are the app's to read; the daemon checks only that each names
+/// an action and a key. However many a person changed, each is kept.
 fn clean_shortcuts(
     shortcuts: &[uxduck_contracts::dto::operator::ShortcutChange],
 ) -> Result<std::collections::BTreeMap<String, Option<String>>, ApiError> {
     let too_long = |text: &str| text.is_empty() || text.len() > MAX_SHORTCUT_TEXT;
-    if shortcuts.len() > MAX_SHORTCUTS
-        || shortcuts
-            .iter()
-            .any(|c| too_long(&c.action) || c.shortcut.as_deref().is_some_and(too_long))
+    if shortcuts
+        .iter()
+        .any(|c| too_long(&c.action) || c.shortcut.as_deref().is_some_and(too_long))
     {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!(
-                "at most {MAX_SHORTCUTS} shortcuts, each id and key 1 to {MAX_SHORTCUT_TEXT} characters"
-            ),
+            format!("each shortcut an action id and a key of 1 to {MAX_SHORTCUT_TEXT} characters"),
         ));
     }
     Ok(shortcuts
@@ -1419,27 +1441,26 @@ fn clean_shortcuts(
         .collect())
 }
 
-/// Kept small and without repeats; the app knows which actions may be skipped.
+/// Without repeats, however many there are; the app knows which actions may
+/// be skipped.
 fn clean_skipped(skipped: &[String]) -> Result<Vec<String>, ApiError> {
-    if skipped.len() > MAX_SHORTCUTS
-        || skipped
-            .iter()
-            .any(|id| id.is_empty() || id.len() > MAX_SHORTCUT_TEXT)
+    if skipped
+        .iter()
+        .any(|id| id.is_empty() || id.len() > MAX_SHORTCUT_TEXT)
     {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
             format!(
-                "at most {MAX_SHORTCUTS} skipped confirmations, each id 1 to {MAX_SHORTCUT_TEXT} characters"
+                "each skipped confirmation an action id of 1 to {MAX_SHORTCUT_TEXT} characters"
             ),
         ));
     }
-    let mut kept: Vec<String> = Vec::new();
-    for id in skipped {
-        if !kept.contains(id) {
-            kept.push(id.clone());
-        }
-    }
-    Ok(kept)
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    Ok(skipped
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .cloned()
+        .collect())
 }
 
 pub(crate) fn notify(

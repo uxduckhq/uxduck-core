@@ -2,7 +2,7 @@
 //! entry names the operator as well as the client, so attribution is right
 //! from the first entity. Layouts join in S6, and become a tree in S63.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -441,7 +441,10 @@ pub struct ChartSpec {
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
     pub item: String,
-    /// One of the eight series colours, 0 to 7.
+    /// Its slot, which says how its line is drawn: the theme has eight
+    /// series colours, so slots 0 to 7 are those as solid lines, 8 to 15
+    /// the same colours dashed, then dotted, then dash and dot. Past 31 the
+    /// looks repeat.
     #[serde(default)]
     pub colour: u8,
     /// Its line is not drawn.
@@ -449,37 +452,31 @@ pub struct ChartSeries {
     pub hidden: bool,
 }
 
-/// The most series a chart keeps, one per colour.
-pub const MAX_CHART_SERIES: usize = 8;
 /// The spans a chart may show, in seconds: what UXDuck keeps is five minutes.
 const CHART_SPANS: [u16; 3] = [30, 60, 300];
 
 impl ChartSpec {
-    /// Drops series with an empty or overlong item, repeats and those past
-    /// eight; gives a colour out of range the first one free; forgets a span
-    /// not offered.
+    /// Drops series with an empty or overlong item and repeats, however many
+    /// are left; gives a series whose slot an earlier one has the first one
+    /// free, so each line is drawn its own way while there are slots (a
+    /// `u8` has 256, and past them a slot repeats); forgets a span not
+    /// offered.
     pub fn tidy(&mut self) {
-        let mut seen: Vec<String> = vec![];
+        let mut seen: HashSet<String> = HashSet::new();
         self.series.retain(|s| {
-            let keep = !s.item.is_empty()
-                && s.item.len() <= MAX_ID_LEN
-                && !seen.contains(&s.item)
-                && seen.len() < MAX_CHART_SERIES;
-            if keep {
-                seen.push(s.item.clone());
-            }
-            keep
+            !s.item.is_empty() && s.item.len() <= MAX_ID_LEN && seen.insert(s.item.clone())
         });
-        let mut used = [false; MAX_CHART_SERIES];
+        let mut used = [false; 256];
         for series in &mut self.series {
-            let colour = usize::from(series.colour);
-            if colour < MAX_CHART_SERIES && !used[colour] {
-                used[colour] = true;
+            let slot = usize::from(series.colour);
+            if !used[slot] {
+                used[slot] = true;
                 continue;
             }
-            let free = used.iter().position(|u| !u).unwrap_or(0);
-            used[free] = true;
-            series.colour = u8::try_from(free).unwrap_or(0);
+            if let Some(free) = used.iter().position(|u| !u) {
+                used[free] = true;
+                series.colour = u8::try_from(free).unwrap_or(series.colour);
+            }
         }
         if self.span_s.is_some_and(|s| !CHART_SPANS.contains(&s)) {
             self.span_s = None;
@@ -652,8 +649,6 @@ impl Tab {
     }
 }
 
-/// The most tabs a layout keeps.
-pub const MAX_TABS: usize = 32;
 /// The longest tab, vehicle or camera id kept, in bytes.
 const MAX_ID_LEN: usize = 64;
 
@@ -740,8 +735,6 @@ pub const LAYOUT_PRESET_VERSION: u32 = 15;
 
 /// The longest saved layout name, in characters.
 pub const MAX_LAYOUT_NAME_CHARS: usize = 40;
-/// The most saved layouts an operator keeps.
-pub const MAX_SAVED_LAYOUTS: usize = 20;
 /// What every split's children's sizes add up to.
 pub const SIZE_TOTAL: u16 = 1000;
 
@@ -1064,11 +1057,12 @@ impl DockNode {
         }
     }
 
-    /// Drops repeated tabs (by id, and any chat after the first), empty
-    /// parts and tabs past `MAX_TABS`, folds a split of one child into it
-    /// and a split into a parent going the same way, and scales sizes so a
-    /// split's add up to `SIZE_TOTAL`. `None` if nothing is left.
-    fn tidy(self, seen: &mut Vec<String>) -> Option<Self> {
+    /// Drops repeated tabs (by id, and any chat after the first) and empty
+    /// parts, folds a split of one child into it and a split into a parent
+    /// going the same way, and scales sizes so a split's add up to
+    /// `SIZE_TOTAL`. However many tabs there are, each is kept. `None` if
+    /// nothing is left.
+    fn tidy(self, seen: &mut HashSet<String>) -> Option<Self> {
         match self {
             Self::Group { tabs, active } => {
                 let mut shown = tabs.get(active).map(|t| t.id.clone());
@@ -1108,13 +1102,12 @@ impl DockNode {
                     ) {
                         continue;
                     }
-                    let chat_again = tab.kind == TabKind::Chat
-                        && seen.iter().any(|id| id == TabKind::Chat.slug());
+                    let chat_again =
+                        tab.kind == TabKind::Chat && seen.contains(TabKind::Chat.slug());
                     if tab.id.is_empty()
                         || tab.id.len() > MAX_ID_LEN
                         || seen.contains(&tab.id)
                         || chat_again
-                        || seen.len() >= MAX_TABS
                     {
                         continue;
                     }
@@ -1124,7 +1117,7 @@ impl DockNode {
                         tab.vehicle_id = None;
                     }
                     tab.drop_bad_ids();
-                    seen.push(tab.id.clone());
+                    seen.insert(tab.id.clone());
                     kept.push(tab);
                 }
                 if kept.is_empty() {
@@ -1173,24 +1166,32 @@ impl DockNode {
     }
 }
 
-/// Sizes in proportion, adding up to `SIZE_TOTAL`, none below one.
+/// Sizes in proportion, adding up to `SIZE_TOTAL`, none below one. A split
+/// of more children than `SIZE_TOTAL` cannot do both: each of its children
+/// gets one, and the sizes add up to their number.
 fn scaled(children: Vec<(u32, DockNode)>) -> Vec<DockChild> {
-    let total: u32 = children.iter().map(|(size, _)| *size).sum::<u32>().max(1);
-    let count = u32::try_from(children.len()).unwrap_or(u32::MAX);
-    let total_size = u32::from(SIZE_TOTAL);
+    let total: u64 = children
+        .iter()
+        .map(|(size, _)| u64::from(*size))
+        .sum::<u64>()
+        .max(1);
+    let count = u64::try_from(children.len()).unwrap_or(u64::MAX);
+    let total_size = u64::from(SIZE_TOTAL);
     let mut left = total_size;
     let last = children.len().saturating_sub(1);
     children
         .into_iter()
         .enumerate()
         .map(|(i, (size, node))| {
-            let rest = count - u32::try_from(i).unwrap_or(0) - 1;
+            let rest = count
+                .saturating_sub(u64::try_from(i).unwrap_or(u64::MAX))
+                .saturating_sub(1);
             let size = if i == last {
-                left
+                left.max(1)
             } else {
-                (size * total_size / total).clamp(1, left - rest)
+                (u64::from(size) * total_size / total).clamp(1, left.saturating_sub(rest).max(1))
             };
-            left -= size;
+            left = left.saturating_sub(size);
             DockChild {
                 size: u16::try_from(size).unwrap_or(SIZE_TOTAL),
                 node,
@@ -1221,7 +1222,7 @@ fn normalised_dock(mut dock: DockNode) -> DockNode {
     if !dock.contains(TabKind::Control) {
         dock.retype_first(TabKind::Controllers, TabKind::Control);
     }
-    let mut seen = Vec::new();
+    let mut seen = HashSet::new();
     dock.tidy(&mut seen)
         .unwrap_or_else(|| Layout::initial().dock)
 }
@@ -1438,8 +1439,11 @@ impl Layout {
         }
     }
 
-    /// Tidies the tree and bounds the saved layouts, so a stored layout
-    /// always renders.
+    /// Tidies the tree and the saved layouts, so a stored layout always
+    /// renders. Every saved layout with a name and an id of its own is
+    /// kept, however many there are and however long its name: a name's
+    /// length is checked where a person gives it (`clean_layout_name`), so
+    /// that one too long is refused with words there and never dropped here.
     #[must_use]
     pub fn normalised(mut self) -> Self {
         // Saved names are user-owned; built-ins follow each shipped revision.
@@ -1466,14 +1470,13 @@ impl Layout {
             }
         }
         self.dock = normalised_dock(self.dock);
-        let mut ids: Vec<String> = Vec::new();
+        let mut ids: HashSet<String> = HashSet::new();
         let mut presets: Vec<LayoutPresetKind> = Vec::new();
-        let mut custom_count = 0;
         self.saved = std::mem::take(&mut self.saved)
             .into_iter()
             .filter_map(|saved| {
-                let name = clean_layout_name(&saved.name)?;
-                if saved.id.is_empty() || ids.contains(&saved.id) {
+                let name = saved.name.trim();
+                if name.is_empty() || saved.id.is_empty() || ids.contains(&saved.id) {
                     return None;
                 }
                 let preset = if let Some(mut preset) = saved.preset {
@@ -1484,16 +1487,12 @@ impl Layout {
                     preset.base = normalised_dock(preset.base);
                     Some(preset)
                 } else {
-                    if custom_count >= MAX_SAVED_LAYOUTS {
-                        return None;
-                    }
-                    custom_count += 1;
                     None
                 };
-                ids.push(saved.id.clone());
+                ids.insert(saved.id.clone());
                 Some(SavedLayout {
+                    name: name.to_owned(),
                     id: saved.id,
-                    name,
                     dock: normalised_dock(saved.dock),
                     preset,
                 })
@@ -1670,66 +1669,57 @@ pub struct ParameterGroup {
     pub parameters: Vec<String>,
 }
 
-/// The most parameter groups an operator keeps.
-pub const MAX_PARAMETER_GROUPS: usize = 100;
 /// The longest parameter group name, in characters.
 pub const MAX_GROUP_NAME_CHARS: usize = 40;
-/// The most parameters in one group.
-pub const MAX_GROUP_PARAMETERS: usize = 200;
 /// The longest parameter name, in characters, as in ArduPilot.
 pub const MAX_PARAMETER_NAME_CHARS: usize = 16;
 
 /// Parameter groups with their names trimmed, sorted by name, and each
-/// parameter once; `None` if any is out of bounds or two share a name.
+/// parameter once, however many groups there are and however many
+/// parameters in each; `None` if a name is empty or too long, a parameter
+/// is not a parameter's name, or two groups share a name.
 #[must_use]
 pub fn clean_parameter_groups(groups: &[ParameterGroup]) -> Option<Vec<ParameterGroup>> {
-    if groups.len() > MAX_PARAMETER_GROUPS {
-        return None;
-    }
     let parameter = |name: &String| {
         (1..=MAX_PARAMETER_NAME_CHARS).contains(&name.len())
             && name
                 .bytes()
                 .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
     };
+    let mut names: HashSet<&str> = HashSet::with_capacity(groups.len());
     let mut kept: Vec<ParameterGroup> = Vec::with_capacity(groups.len());
     for group in groups {
         let name = group.name.trim();
         if name.is_empty()
             || name.chars().count() > MAX_GROUP_NAME_CHARS
-            || group.parameters.len() > MAX_GROUP_PARAMETERS
             || !group.parameters.iter().all(parameter)
-            || kept.iter().any(|k| k.name == name)
+            || !names.insert(name)
         {
             return None;
         }
-        let mut parameters: Vec<String> = Vec::with_capacity(group.parameters.len());
-        for p in &group.parameters {
-            if !parameters.contains(p) {
-                parameters.push(p.clone());
-            }
-        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(group.parameters.len());
         kept.push(ParameterGroup {
             name: name.to_owned(),
-            parameters,
+            parameters: group
+                .parameters
+                .iter()
+                .filter(|p| seen.insert(p.as_str()))
+                .cloned()
+                .collect(),
         });
     }
     kept.sort_by(|a, b| a.name.cmp(&b.name));
     Some(kept)
 }
 
-/// The most messages pinned in the inspector.
-pub const MAX_INSPECTOR_PINNED: usize = 200;
 /// The longest message name in a pin, in characters.
 pub const MAX_PINNED_MESSAGE_CHARS: usize = 64;
 
-/// Pinned inspector messages, each once in the order given; `None` if any
-/// is not `received:` or `sent:` and a message name, or there are too many.
+/// Pinned inspector messages, each once in the order given, however many
+/// there are; `None` if any is not `received:` or `sent:` and a message
+/// name.
 #[must_use]
 pub fn clean_inspector_pinned(pinned: &[String]) -> Option<Vec<String>> {
-    if pinned.len() > MAX_INSPECTOR_PINNED {
-        return None;
-    }
     let valid = |key: &String| {
         let message = key
             .strip_prefix("received:")
@@ -1740,12 +1730,13 @@ pub fn clean_inspector_pinned(pinned: &[String]) -> Option<Vec<String>> {
                     .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_' || b == b'#')
         })
     };
+    let mut seen: HashSet<&str> = HashSet::with_capacity(pinned.len());
     let mut kept: Vec<String> = Vec::with_capacity(pinned.len());
     for key in pinned {
         if !valid(key) {
             return None;
         }
-        if !kept.contains(key) {
+        if seen.insert(key) {
             kept.push(key.clone());
         }
     }
@@ -1776,10 +1767,6 @@ pub struct ControllerMapping {
     pub vehicle_id: Option<String>,
     pub mapping_id: String,
 }
-
-/// The most controller and vehicle pairs an operator keeps a mapping for;
-/// the oldest goes.
-pub const MAX_CONTROLLER_MAPPINGS: usize = 128;
 
 impl Operator {
     /// The mapping this operator chose for a controller on a vehicle, known
@@ -1835,7 +1822,9 @@ impl Operator {
     }
 
     /// Notes the mapping chosen for a controller on a vehicle, or with none
-    /// yet, newest last; `false` if it was already the one.
+    /// yet, newest last; `false` if it was already the one. Every pair of a
+    /// controller and a vehicle keeps its own, however many there are: none
+    /// is dropped to make room for a newer one.
     pub fn choose_mapping(
         &mut self,
         controller_id: &str,
@@ -1860,28 +1849,17 @@ impl Operator {
             vehicle_id: vehicle_id.map(str::to_owned),
             mapping_id: mapping_id.to_owned(),
         });
-        let over = self
-            .controller_mappings
-            .len()
-            .saturating_sub(MAX_CONTROLLER_MAPPINGS);
-        self.controller_mappings.drain(..over);
         true
     }
 }
 
-/// The largest display document an operator carries, in bytes: well
-/// under the account's limit for one synced change.
-pub const MAX_DISPLAY_BYTES: usize = 256 * 1024;
-
-/// The most buttons on the Cockpit tab for one type of vehicle.
-pub const MAX_CONTROL_ACTIONS: usize = 40;
 /// The longest action id on the Cockpit tab, in characters.
 pub const MAX_CONTROL_ACTION_CHARS: usize = 64;
 
-/// Each type once, sorted, with each action once in the order given;
-/// `None` if a type comes twice, an id is not `vehicle:` and lower-case
-/// letters, digits, `-`, `_`, `:` or spaces (PX4's `Precision Land`), or
-/// there are too many.
+/// Each type once, sorted, with each action once in the order given,
+/// however many buttons a type has; `None` if a type comes twice or an id
+/// is not `vehicle:` and lower-case letters, digits, `-`, `_`, `:` or
+/// spaces (PX4's `Precision Land`).
 #[must_use]
 pub fn clean_control_actions(all: &[ControlActions]) -> Option<Vec<ControlActions>> {
     let valid = |id: &String| {
@@ -1897,21 +1875,18 @@ pub fn clean_control_actions(all: &[ControlActions]) -> Option<Vec<ControlAction
     };
     let mut kept: Vec<ControlActions> = Vec::with_capacity(all.len());
     for entry in all {
-        if entry.actions.len() > MAX_CONTROL_ACTIONS
-            || !entry.actions.iter().all(valid)
-            || kept.iter().any(|k| k.class == entry.class)
-        {
+        if !entry.actions.iter().all(valid) || kept.iter().any(|k| k.class == entry.class) {
             return None;
         }
-        let mut actions: Vec<String> = Vec::with_capacity(entry.actions.len());
-        for id in &entry.actions {
-            if !actions.contains(id) {
-                actions.push(id.clone());
-            }
-        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(entry.actions.len());
         kept.push(ControlActions {
             class: entry.class,
-            actions,
+            actions: entry
+                .actions
+                .iter()
+                .filter(|id| seen.insert(id.as_str()))
+                .cloned()
+                .collect(),
         });
     }
     kept.sort_by_key(|k| k.class);
@@ -2218,7 +2193,8 @@ mod tests {
                             {"item": "", "colour": 1},
                             {"item": long, "colour": 1},
                             {"item": "mavlink.VFR_HUD.climb", "colour": 3, "hidden": true},
-                            {"item": "battery.current_a", "colour": 12}
+                            {"item": "battery.current_a", "colour": 12},
+                            {"item": "speed.ground_mps", "colour": 12}
                         ]
                     }},
                     {"id": "t2", "kind": "chart", "chart": {"spanS": 45, "series": []}},
@@ -2239,13 +2215,15 @@ mod tests {
             .iter()
             .map(|s| (s.item.as_str(), s.colour, s.hidden))
             .collect();
-        // A repeated colour and one out of range each take the first free.
+        // A repeated slot takes the first free. Slot 12 is the fifth colour
+        // dashed, and is kept by the first series that has it.
         assert_eq!(
             series,
             vec![
                 ("battery.voltage_v", 3, false),
                 ("mavlink.VFR_HUD.climb", 0, true),
-                ("battery.current_a", 1, false),
+                ("battery.current_a", 12, false),
+                ("speed.ground_mps", 1, false),
             ]
         );
         assert_eq!(tabs[1].chart.as_ref().unwrap().span_s, None);
@@ -2467,8 +2445,10 @@ mod tests {
         );
     }
 
+    /// 20 was the most until 2026-11-14, and the 21st was dropped without a
+    /// word, as was one whose name was over 40 characters.
     #[test]
-    fn saved_layouts_are_bounded() {
+    fn every_saved_layout_is_kept_however_many_and_whatever_its_names_length() {
         let saved = |id: &str, name: &str| SavedLayout {
             id: id.into(),
             name: name.into(),
@@ -2484,10 +2464,126 @@ mod tests {
             ..Layout::initial()
         }
         .normalised();
-        assert_eq!(layout.saved.len(), MAX_SAVED_LAYOUTS);
-        assert_eq!(layout.saved[0].id, "l1");
-        assert_eq!(layout.saved[0].name, "repeated id");
-        assert_eq!(layout.saved[1].id, "l0");
+        // The long name and all thirty ids. Only the one with no name to
+        // show and the second with the id l1 go.
+        assert_eq!(layout.saved.len(), 31);
+        assert_eq!(layout.saved[0].id, "long");
+        assert_eq!(layout.saved[0].name, "x".repeat(41));
+        assert_eq!(layout.saved[1].id, "l1");
+        assert_eq!(layout.saved[1].name, "repeated id");
+        assert_eq!(layout.saved[2].id, "l0");
+        assert_eq!(layout.saved[30].id, "l29");
+        // The name's length is said where a person gives the name.
+        assert_eq!(clean_layout_name(&"x".repeat(41)), None);
+        assert_eq!(clean_layout_name(&"x".repeat(40)), Some("x".repeat(40)));
+    }
+
+    /// 32 was the most until 2026-11-14, and the 33rd was dropped without
+    /// a word.
+    #[test]
+    fn every_tab_is_kept_however_many() {
+        let tabs: Vec<Tab> = (0..100)
+            .map(|n| Tab {
+                id: format!("history-{n}"),
+                ..Tab::of(TabKind::History)
+            })
+            .collect();
+        let layout = Layout {
+            dock: row(vec![
+                child(1, DockNode::group(tabs[..60].to_vec())),
+                child(1, DockNode::group(tabs[60..].to_vec())),
+            ]),
+            ..Layout::initial()
+        }
+        .normalised();
+        let kept: Vec<&str> = layout.dock.tabs().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(kept.len(), 100);
+        assert_eq!(kept[32], "history-32");
+        assert_eq!(kept[99], "history-99");
+    }
+
+    /// With no most tabs, a split may have more children than its sizes
+    /// add up to. It is still tidied, each child with a size.
+    #[test]
+    fn a_split_of_more_parts_than_the_size_total_keeps_them_all() {
+        let children: Vec<DockChild> = (0..1500)
+            .map(|n| {
+                child(
+                    u16::MAX,
+                    DockNode::group(vec![Tab {
+                        id: format!("history-{n}"),
+                        ..Tab::of(TabKind::History)
+                    }]),
+                )
+            })
+            .collect();
+        let layout = Layout {
+            dock: row(children),
+            ..Layout::initial()
+        }
+        .normalised();
+        let DockNode::Split { children, .. } = &layout.dock else {
+            panic!("a split")
+        };
+        assert_eq!(children.len(), 1500);
+        assert!(children.iter().all(|c| c.size >= 1));
+    }
+
+    /// Eight was the most until 2026-11-14, one for each colour.
+    #[test]
+    fn a_chart_keeps_every_series_each_with_a_slot_of_its_own() {
+        let mut chart = ChartSpec {
+            series: (0..20)
+                .map(|n| ChartSeries {
+                    item: format!("mavlink.RC_CHANNELS.chan{n}_raw"),
+                    colour: 0,
+                    hidden: false,
+                })
+                .collect(),
+            span_s: None,
+        };
+        chart.tidy();
+        assert_eq!(chart.series.len(), 20);
+        let slots: Vec<u8> = chart.series.iter().map(|s| s.colour).collect();
+        assert_eq!(slots, (0..20).collect::<Vec<u8>>());
+        // Past every slot a `u8` has, a line shares one. None is dropped.
+        let mut crowded = ChartSpec {
+            series: (0..300)
+                .map(|n| ChartSeries {
+                    item: format!("item.n{n}"),
+                    colour: 0,
+                    hidden: false,
+                })
+                .collect(),
+            span_s: None,
+        };
+        crowded.tidy();
+        assert_eq!(crowded.series.len(), 300);
+        assert_eq!(crowded.series[255].colour, 255);
+    }
+
+    /// 128 pairs were the most until 2026-11-14, and the oldest choice went
+    /// without a word when the 129th was made.
+    #[test]
+    fn every_controller_mapping_is_kept_however_many() {
+        let mut operator = operator_with_no_mappings();
+        for n in 0..200 {
+            assert!(operator.choose_mapping(
+                &format!("unit-{n}"),
+                "Radio",
+                Some("v1"),
+                &format!("mapping-{n}"),
+            ));
+        }
+        assert_eq!(operator.controller_mappings.len(), 200);
+        assert_eq!(
+            operator.vehicle_mapping("unit-0", "Radio", &["v1"]),
+            Some("mapping-0")
+        );
+        assert_eq!(
+            operator.vehicle_mapping("unit-199", "Radio", &["v1"]),
+            Some("mapping-199")
+        );
     }
 
     #[test]
@@ -2703,16 +2799,14 @@ mod tests {
     }
 
     #[test]
-    fn two_presets_do_not_consume_the_custom_layout_limit() {
+    fn both_views_and_every_layout_of_the_persons_own_are_kept() {
         let mut layout = Layout::initial();
-        layout
-            .saved
-            .extend((0..MAX_SAVED_LAYOUTS).map(|n| SavedLayout {
-                id: format!("custom-{n}"),
-                name: format!("Custom {n}"),
-                dock: DockNode::of(&[TabKind::Map]),
-                preset: None,
-            }));
+        layout.saved.extend((0..100).map(|n| SavedLayout {
+            id: format!("custom-{n}"),
+            name: format!("Custom {n}"),
+            dock: DockNode::of(&[TabKind::Map]),
+            preset: None,
+        }));
         layout.saved.push(SavedLayout {
             id: "advanced".into(),
             name: "Advanced".into(),
@@ -2727,8 +2821,9 @@ mod tests {
         duplicate.id = "another-simple".into();
         layout.saved.push(duplicate);
         let tidy = layout.normalised();
-        assert_eq!(tidy.saved.len(), MAX_SAVED_LAYOUTS + 2);
+        assert_eq!(tidy.saved.len(), 102);
         assert_eq!(tidy.saved.iter().filter(|s| s.preset.is_some()).count(), 2);
+        assert!(tidy.saved.iter().any(|s| s.id == "custom-99"));
     }
 
     #[test]
@@ -3183,7 +3278,7 @@ mod tests {
     }
 
     #[test]
-    fn control_actions_are_each_once_sorted_and_bounded() {
+    fn control_actions_are_each_once_and_sorted_however_many() {
         use crate::domain::telemetry_layout::VehicleClass;
         let entry = |class, actions: &[&str]| ControlActions {
             class,
@@ -3229,12 +3324,24 @@ mod tests {
             ]),
             None
         );
-        let many: Vec<String> = (0..41).map(|i| format!("vehicle:mode:m{i}")).collect();
+        // 40 buttons were the most for a type until 2026-11-14.
+        let many: Vec<String> = (0..100).map(|i| format!("vehicle:mode:m{i}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert_eq!(
             clean_control_actions(&[entry(VehicleClass::Copter, &many)]),
-            None
+            Some(vec![entry(VehicleClass::Copter, &many)])
         );
+    }
+
+    fn operator_with_no_mappings() -> Operator {
+        serde_json::from_value(serde_json::json!({
+            "id": "op1",
+            "name": "Ana",
+            "units": "metric",
+            "coordinateFormat": "decimal",
+            "version": 1
+        }))
+        .unwrap()
     }
 
     fn named(name: &str, parameters: &[&str]) -> ParameterGroup {
@@ -3245,7 +3352,7 @@ mod tests {
     }
 
     #[test]
-    fn parameter_groups_are_trimmed_sorted_and_bounded() {
+    fn parameter_groups_are_trimmed_and_sorted_however_many() {
         let cleaned = clean_parameter_groups(&[
             named(
                 " Hover tuning ",
@@ -3268,11 +3375,16 @@ mod tests {
             vec![named("A", &["atc_rat_rll_p"])],
             vec![named("A", &["ATC_RAT_RLL_P_TOO_LONG"])],
             vec![named("A", &[""])],
-            vec![named("A", &vec!["RTL_ALT"; 201])],
-            (0..101).map(|i| named(&i.to_string(), &[])).collect(),
         ] {
             assert_eq!(clean_parameter_groups(&bad), None, "{bad:?}");
         }
+        // 100 groups of 200 parameters were the most until 2026-11-14.
+        let parameters: Vec<String> = (0..300).map(|i| format!("PARAM_{i}")).collect();
+        let parameters: Vec<&str> = parameters.iter().map(String::as_str).collect();
+        let many: Vec<ParameterGroup> = (0..150)
+            .map(|i| named(&format!("Group {i:03}"), &parameters))
+            .collect();
+        assert_eq!(clean_parameter_groups(&many), Some(many));
     }
 
     #[test]
@@ -3304,9 +3416,8 @@ mod tests {
             clean_inspector_pinned(&pins(&[&format!("sent:{}", "A".repeat(65))])),
             None
         );
-        assert_eq!(
-            clean_inspector_pinned(&vec!["sent:PING".to_owned(); 201]),
-            None
-        );
+        // 200 pins were the most until 2026-11-14.
+        let many: Vec<String> = (0..300).map(|i| format!("received:#{i}")).collect();
+        assert_eq!(clean_inspector_pinned(&many), Some(many));
     }
 }

@@ -214,7 +214,7 @@ pub enum TabKind {
 
 /// One tab: what it shows and, when pinned, the vehicle it shows instead of
 /// the selected one. Any number of tabs of a kind, the chat aside: there is
-/// one chat, with the id `chat`. At most 32 tabs.
+/// one chat, with the id `chat`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Tab {
@@ -314,7 +314,7 @@ pub enum MapViewpoint {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSpec {
-    /// Up to eight, each item once; past that they are dropped.
+    /// Any number, each item once.
     #[serde(default)]
     pub series: Vec<ChartSeries>,
     /// Seconds shown: 30, 60 or 300. None, or any other, is a minute.
@@ -329,7 +329,9 @@ pub struct ChartSeries {
     /// A telemetry item as a tile names it, such as `battery.voltage_v` or
     /// `mavlink.VFR_HUD.climb`; up to 64 bytes.
     pub item: String,
-    /// One of the eight series colours, 0 to 7, fixed when it was added.
+    /// Its slot, fixed when it was added: 0 to 7 are the eight series
+    /// colours as solid lines, 8 to 15 the same dashed, then dotted, then
+    /// dash and dot. Past 31 the looks repeat.
     #[serde(default)]
     pub colour: u8,
     /// Its line is not drawn.
@@ -370,7 +372,8 @@ pub struct DockChild {
     pub node: DockNode,
 }
 
-/// A named layout: at most 20 custom layouts plus the two built-in views.
+/// A named layout: any number of custom layouts plus the two built-in
+/// views. A name of 1 to 40 characters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SavedLayout {
     pub id: String,
@@ -476,8 +479,9 @@ pub struct Tile {
     pub rules: Vec<ColourRule>,
 }
 
-/// A telemetry layout (S65): the tiles a Telemetry tab shows. At most 32,
-/// each with at most 64 tiles of at most 8 rules.
+/// A telemetry layout (S65): the tiles a Telemetry tab shows. Any number,
+/// of any number of tiles and rules. A name over 64 characters is refused,
+/// never cut, and a tile's label is kept whole.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryLayout {
@@ -508,7 +512,8 @@ pub struct CalculatedItem {
     pub key: String,
     /// Its name, 1 to 48 characters, such as "Power".
     pub label: String,
-    /// At most 400 characters, reading at least one item.
+    /// At most 400 characters, so that working it out cannot overrun the
+    /// stack, reading at least one item.
     pub formula: String,
     /// The unit the formula's answer is in. One UXDuck knows is shown in
     /// the operator's units. `none` for anything else, with `unitText`.
@@ -531,7 +536,7 @@ pub struct VehicleTelemetryChoice {
 }
 
 /// A group of parameters the operator tunes together, such as Hover tuning
-/// (S74). A name of 1 to 40 characters, unique; at most 200 parameters,
+/// (S74). A name of 1 to 40 characters, unique; any number of parameters,
 /// each 1 to 16 characters of `A-Z`, `0-9` and `_`, in the order added.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -716,25 +721,23 @@ pub struct OperatorUpdateParams {
     /// Every vehicle's chosen layout; replaces the ones saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_telemetry: Option<Vec<VehicleTelemetryChoice>>,
-    /// Every calculated value (ADR-0056); replaces the ones saved. At most
-    /// 32. A key another operator on this computer works out differently
-    /// is refused.
+    /// Every calculated value (ADR-0056); replaces the ones saved. A key
+    /// another operator on this computer works out differently is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calculated_items: Option<Vec<CalculatedItem>>,
-    /// Every parameter group; replaces the ones saved (S74). At most 100.
+    /// Every parameter group; replaces the ones saved (S74).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_groups: Option<Vec<ParameterGroup>>,
-    /// Every pinned inspector message; replaces the ones saved. At most 200,
-    /// each `received:` or `sent:` and a message name.
+    /// Every pinned inspector message; replaces the ones saved. Each
+    /// `received:` or `sent:` and a message name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspector_pinned: Option<Vec<String>>,
     /// Every type's Cockpit tab buttons; replaces the ones saved. Each type
-    /// once, at most 40 actions each, by action id such as
-    /// `vehicle:mode:guided`.
+    /// once, by action id such as `vehicle:mode:guided`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_actions: Option<Vec<ControlActions>>,
     /// The operator's display document; replaces the one saved. A JSON
-    /// object of at most 256 KiB.
+    /// object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     /// The marker that is this operator; `null` makes none.
@@ -803,7 +806,7 @@ pub struct LayoutOpenParams {
     /// Leave it out: the tab then follows the selected vehicle, the chat's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
-    /// What a `chart` (up to 8) or a `readout` (one) shows: `telemetry_get`
+    /// What a `chart` (any number) or a `readout` (one) shows: `telemetry_get`
     /// keys, such as `vibration.x_mps2`. Without them it opens empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<String>,

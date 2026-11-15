@@ -4,7 +4,7 @@
 //! first of: the layout chosen for the vehicle, the operator's own for the
 //! vehicle's type, UXDuck's default for the type (the app's own).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -79,7 +79,7 @@ pub enum RuleColour {
 #[serde(rename_all = "camelCase")]
 pub struct ColourRule {
     pub test: RuleTest,
-    /// Always finite: `cleaned` drops any other.
+    /// Always finite: `cleaned` refuses any other.
     pub value: f64,
     pub colour: RuleColour,
 }
@@ -114,71 +114,89 @@ pub struct TelemetryLayout {
     pub tiles: Vec<Tile>,
 }
 
-/// The most layouts an operator keeps, tiles in one and rules on a tile.
-pub const MAX_LAYOUTS: usize = 32;
-pub const MAX_TILES: usize = 64;
-pub const MAX_RULES: usize = 8;
-const MAX_TEXT: usize = 64;
+/// The longest tile set name, in characters, and the longest id and item
+/// key, in bytes. A tile's label has no longest: the window has never had
+/// one, so a label is kept whole.
+pub const MAX_TEXT: usize = 64;
+/// The most decimals a tile shows.
+pub const MAX_DECIMALS: u8 = 6;
 
-/// Keeps what can be shown: bounded counts, short names, finite numbers, one
-/// operator default per type, and choices only of layouts that exist.
-#[must_use]
+/// Checks and tidies an operator's tile sets: names and labels trimmed, a
+/// blank label gone, and every tile set, tile and colour rule kept, however
+/// many there are and however long a label is. Nothing is cut, clamped or
+/// left out to make a tile set fit: one that cannot be kept as given is
+/// refused, with why. A vehicle's
+/// choice of a tile set that is not among them goes, as it does when its
+/// tile set is deleted.
+///
+/// # Errors
+///
+/// The first thing that cannot be kept, saying which tile set and why.
 pub fn cleaned(
     layouts: Vec<TelemetryLayout>,
     chosen: BTreeMap<String, String>,
-) -> (Vec<TelemetryLayout>, BTreeMap<String, String>) {
-    let mut ids: Vec<String> = Vec::new();
+) -> Result<(Vec<TelemetryLayout>, BTreeMap<String, String>), String> {
+    let mut ids: HashSet<String> = HashSet::with_capacity(layouts.len());
     let mut classes: Vec<VehicleClass> = Vec::new();
-    let layouts: Vec<TelemetryLayout> = layouts
-        .into_iter()
-        .filter_map(|mut layout| {
-            let name = layout
-                .name
-                .trim()
-                .chars()
-                .take(MAX_TEXT)
-                .collect::<String>();
-            if layout.id.is_empty()
-                || layout.id.len() > MAX_TEXT
-                || ids.contains(&layout.id)
-                || name.is_empty()
-            {
-                return None;
+    let mut kept: Vec<TelemetryLayout> = Vec::with_capacity(layouts.len());
+    for mut layout in layouts {
+        let name = layout.name.trim().to_owned();
+        let length = name.chars().count();
+        if name.is_empty() {
+            return Err("Name each tile set.".into());
+        }
+        if length > MAX_TEXT {
+            return Err(format!(
+                "A tile set's name is at most {MAX_TEXT} characters, and “{name}” is {length}."
+            ));
+        }
+        if layout.id.is_empty() || layout.id.len() > MAX_TEXT {
+            return Err(format!("{name}'s id must be 1 to {MAX_TEXT} characters."));
+        }
+        if !ids.insert(layout.id.clone()) {
+            return Err(format!("Two tile sets have the id {}.", layout.id));
+        }
+        if let Some(class) = layout.class {
+            if classes.contains(&class) {
+                return Err(format!(
+                    "{name} is a second tile set for the same type of vehicle. A type has one of its own."
+                ));
             }
-            if let Some(class) = layout.class {
-                if classes.contains(&class) {
-                    layout.class = None;
-                } else {
-                    classes.push(class);
-                }
+            classes.push(class);
+        }
+        layout.name = name;
+        for tile in &mut layout.tiles {
+            if tile.item.is_empty() || tile.item.len() > MAX_TEXT {
+                return Err(format!(
+                    "Each tile in {} shows a telemetry item, by a key of 1 to {MAX_TEXT} characters.",
+                    layout.name
+                ));
             }
-            layout.name = name;
-            layout
-                .tiles
-                .retain(|t| !t.item.is_empty() && t.item.len() <= MAX_TEXT);
-            layout.tiles.truncate(MAX_TILES);
-            for tile in &mut layout.tiles {
-                tile.label = tile
-                    .label
-                    .take()
-                    .map(|l| l.trim().chars().take(MAX_TEXT).collect::<String>())
-                    .filter(|l| !l.is_empty());
-                tile.decimals = tile.decimals.map(|d| d.min(6));
-                tile.rules.retain(|r| r.value.is_finite());
-                tile.rules.truncate(MAX_RULES);
+            tile.label = tile
+                .label
+                .take()
+                .map(|label| label.trim().to_owned())
+                .filter(|label| !label.is_empty());
+            if tile.decimals.is_some_and(|d| d > MAX_DECIMALS) {
+                return Err(format!(
+                    "A tile shows at most {MAX_DECIMALS} decimals, and {} in {} asks for more.",
+                    tile.item, layout.name
+                ));
             }
-            ids.push(layout.id.clone());
-            Some(layout)
-        })
-        .take(MAX_LAYOUTS)
-        .collect();
+            if tile.rules.iter().any(|rule| !rule.value.is_finite()) {
+                return Err(format!(
+                    "A colour rule on {} in {} needs a number to compare with.",
+                    tile.item, layout.name
+                ));
+            }
+        }
+        kept.push(layout);
+    }
     let chosen = chosen
         .into_iter()
-        .filter(|(vehicle, layout)| {
-            vehicle.len() <= MAX_TEXT && layouts.iter().any(|l| &l.id == layout)
-        })
+        .filter(|(vehicle, layout)| vehicle.len() <= MAX_TEXT && ids.contains(layout))
         .collect();
-    (layouts, chosen)
+    Ok((kept, chosen))
 }
 
 /// The layout the Telemetry tab shows for a vehicle: the one chosen for it,
@@ -235,27 +253,111 @@ mod tests {
         assert!(for_vehicle(&layouts, &chosen, "v2", VehicleClass::of("GroundRover")).is_none());
     }
 
-    #[test]
-    fn layouts_are_cleaned_so_they_always_show() {
-        let mut twice = layout("b", Some(VehicleClass::Copter));
-        twice.name = "  ".into();
-        let mut rules = layout("c", Some(VehicleClass::Copter));
-        rules.tiles[0].rules = vec![ColourRule {
+    fn rule(value: f64) -> ColourRule {
+        ColourRule {
             test: RuleTest::Below,
-            value: f64::NAN,
+            value,
             colour: RuleColour::Red,
-        }];
+        }
+    }
+
+    #[test]
+    fn tile_sets_are_tidied_and_a_choice_of_one_that_is_gone_goes() {
+        let mut named = layout("a", Some(VehicleClass::Copter));
+        named.name = "  Survey  ".into();
+        named.tiles[0].label = Some("  Battery  ".into());
+        let mut blank_label = layout("b", None);
+        blank_label.tiles[0].label = Some("   ".into());
         let mut chosen = BTreeMap::new();
         chosen.insert("v1".to_owned(), "gone".to_owned());
-        chosen.insert("v2".to_owned(), "c".to_owned());
-        let (kept, chosen) = cleaned(
-            vec![layout("a", Some(VehicleClass::Copter)), twice, rules],
-            chosen,
+        chosen.insert("v2".to_owned(), "b".to_owned());
+        let (kept, chosen) = cleaned(vec![named, blank_label], chosen).unwrap();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].name, "Survey");
+        assert_eq!(kept[0].tiles[0].label.as_deref(), Some("Battery"));
+        assert_eq!(kept[1].tiles[0].label, None);
+        assert_eq!(chosen.len(), 1, "a choice of a tile set that is gone goes");
+        assert_eq!(chosen["v2"], "b");
+    }
+
+    /// Until 2026-11-14 the 33rd tile set, the 65th tile and the ninth
+    /// colour rule were dropped without a word.
+    #[test]
+    fn every_tile_set_tile_and_rule_is_kept_however_many() {
+        let sets: Vec<TelemetryLayout> = (0..50)
+            .map(|n| {
+                let mut set = layout(&format!("set-{n}"), None);
+                set.tiles = (0..100)
+                    .map(|t| Tile {
+                        item: format!("mavlink.RC_CHANNELS.chan{t}_raw"),
+                        label: None,
+                        decimals: Some(6),
+                        rules: (0..12).map(|r| rule(f64::from(r))).collect(),
+                    })
+                    .collect();
+                set
+            })
+            .collect();
+        let (kept, _) = cleaned(sets.clone(), BTreeMap::new()).unwrap();
+        assert_eq!(kept, sets);
+        assert_eq!(kept.len(), 50);
+        assert_eq!(kept[49].tiles.len(), 100);
+        assert_eq!(kept[49].tiles[99].rules.len(), 12);
+    }
+
+    /// Until 2026-11-14 a name over 64 characters was cut to 64 without a
+    /// word, and each of the rest was dropped or changed.
+    #[test]
+    fn what_cannot_be_kept_as_given_is_refused_with_why() {
+        let refused = |edit: fn(&mut TelemetryLayout)| {
+            let mut set = layout("a", Some(VehicleClass::Copter));
+            set.name = "Survey".into();
+            edit(&mut set);
+            cleaned(vec![set], BTreeMap::new()).unwrap_err()
+        };
+        assert_eq!(
+            refused(|s| s.name = "n".repeat(65)),
+            format!(
+                "A tile set's name is at most 64 characters, and “{}” is 65.",
+                "n".repeat(65)
+            )
         );
-        assert_eq!(kept.len(), 2, "a nameless layout goes");
-        assert_eq!(kept[1].class, None, "one own layout per type");
-        assert!(kept[1].tiles[0].rules.is_empty());
-        assert_eq!(chosen.len(), 1, "a choice of a layout that is gone goes");
+        assert_eq!(refused(|s| s.name = "  ".into()), "Name each tile set.");
+        assert!(refused(|s| s.id = String::new()).starts_with("Survey's id must be"));
+        assert!(refused(|s| s.tiles[0].item = String::new()).starts_with("Each tile in Survey"));
+        assert_eq!(
+            refused(|s| s.tiles[0].decimals = Some(7)),
+            "A tile shows at most 6 decimals, and battery.remaining_pct in Survey asks for more."
+        );
+        assert!(
+            refused(|s| s.tiles[0].rules = vec![rule(f64::NAN)])
+                .starts_with("A colour rule on battery.remaining_pct in Survey")
+        );
+        // A name of exactly 64 characters is kept whole.
+        let mut longest = layout("a", None);
+        longest.name = "n".repeat(64);
+        let (kept, _) = cleaned(vec![longest], BTreeMap::new()).unwrap();
+        assert_eq!(kept[0].name.chars().count(), 64);
+        // A tile's label was cut to 64 characters too. It is kept whole.
+        let mut labelled = layout("a", None);
+        labelled.tiles[0].label = Some("l".repeat(70));
+        let (kept, _) = cleaned(vec![labelled], BTreeMap::new()).unwrap();
+        assert_eq!(kept[0].tiles[0].label, Some("l".repeat(70)));
+
+        let twice = cleaned(vec![layout("a", None), layout("a", None)], BTreeMap::new());
+        assert_eq!(twice.unwrap_err(), "Two tile sets have the id a.");
+        let two_defaults = cleaned(
+            vec![
+                layout("a", Some(VehicleClass::Copter)),
+                layout("b", Some(VehicleClass::Copter)),
+            ],
+            BTreeMap::new(),
+        );
+        assert!(
+            two_defaults
+                .unwrap_err()
+                .starts_with("b is a second tile set for the same type of vehicle.")
+        );
     }
 
     #[test]

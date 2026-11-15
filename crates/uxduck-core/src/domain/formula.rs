@@ -7,7 +7,14 @@
 
 use std::fmt;
 
-/// The longest formula, in characters.
+/// The longest formula, in characters. It stays because a formula is worked
+/// out step inside step: `1 + 1 + 1 + …` is read as one sum inside the
+/// next, as deep as it is long, and each level takes room on the stack when
+/// it is read, worked out and dropped. `MAX_DEPTH` counts brackets, calls and
+/// signs, never this chain, so without a length one request with a formula
+/// of some hundred thousand terms would overrun the stack and stop UXDuck.
+/// The number itself is a choice, not a measured limit. Working a chain out
+/// in a loop would let it go.
 pub const MAX_FORMULA_CHARS: usize = 400;
 /// How deeply brackets, calls and signs may nest.
 const MAX_DEPTH: usize = 32;
@@ -505,7 +512,7 @@ impl Formula {
         if length > MAX_FORMULA_CHARS {
             return Err(error(
                 format!(
-                    "A formula is at most {MAX_FORMULA_CHARS} characters, and this is {length}."
+                    "A formula is at most {MAX_FORMULA_CHARS} characters, and this is {length}. UXDuck works a formula out step inside step, and a longer one could run it out of room."
                 ),
                 None,
             ));

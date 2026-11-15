@@ -1493,7 +1493,8 @@ export type CalculatedItem = {
      */
     decimals?: number | null;
     /**
-     * At most 400 characters, reading at least one item.
+     * At most 400 characters, so that working it out cannot overrun the
+     * stack, reading at least one item.
      */
     formula: string;
     /**
@@ -1766,7 +1767,9 @@ export type ChangeOp = 'remove' | 'upsert';
  */
 export type ChartSeries = {
     /**
-     * One of the eight series colours, 0 to 7, fixed when it was added.
+     * Its slot, fixed when it was added: 0 to 7 are the eight series
+     * colours as solid lines, 8 to 15 the same dashed, then dotted, then
+     * dash and dot. Past 31 the looks repeat.
      */
     colour?: number;
     /**
@@ -1785,7 +1788,7 @@ export type ChartSeries = {
  */
 export type ChartSpec = {
     /**
-     * Up to eight, each item once; past that they are dropped.
+     * Any number, each item once.
      */
     series?: Array<ChartSeries>;
     /**
@@ -7746,7 +7749,7 @@ export type LayoutChange = 'added' | 'removed';
  */
 export type LayoutOpenParams = {
     /**
-     * What a `chart` (up to 8) or a `readout` (one) shows: `telemetry_get`
+     * What a `chart` (any number) or a `readout` (one) shows: `telemetry_get`
      * keys, such as `vibration.x_mps2`. Without them it opens empty.
      */
     items?: Array<string>;
@@ -9434,28 +9437,26 @@ export type OperatorUpdateParams = {
     altitudeFrame?: AltitudeFrame | null;
     basemap?: Basemap | null;
     /**
-     * Every calculated value (ADR-0056); replaces the ones saved. At most
-     * 32. A key another operator on this computer works out differently
-     * is refused.
+     * Every calculated value (ADR-0056); replaces the ones saved. A key
+     * another operator on this computer works out differently is refused.
      */
     calculatedItems?: Array<CalculatedItem> | null;
     /**
      * Every type's Cockpit tab buttons; replaces the ones saved. Each type
-     * once, at most 40 actions each, by action id such as
-     * `vehicle:mode:guided`.
+     * once, by action id such as `vehicle:mode:guided`.
      */
     controlActions?: Array<ControlActions> | null;
     coordinateFormat?: CoordinateFormat | null;
     /**
      * The operator's display document; replaces the one saved. A JSON
-     * object of at most 256 KiB.
+     * object.
      */
     display?: string | null;
     expectedVersion: number;
     id: string;
     /**
-     * Every pinned inspector message; replaces the ones saved. At most 200,
-     * each `received:` or `sent:` and a message name.
+     * Every pinned inspector message; replaces the ones saved. Each
+     * `received:` or `sent:` and a message name.
      */
     inspectorPinned?: Array<string> | null;
     /**
@@ -9468,7 +9469,7 @@ export type OperatorUpdateParams = {
     meMarkerId?: string | null;
     name?: string | null;
     /**
-     * Every parameter group; replaces the ones saved (S74). At most 100.
+     * Every parameter group; replaces the ones saved (S74).
      */
     parameterGroups?: Array<ParameterGroup> | null;
     placeSearch?: boolean | null;
@@ -10296,7 +10297,7 @@ export type Parameter = {
 
 /**
  * A group of parameters the operator tunes together, such as Hover tuning
- * (S74). A name of 1 to 40 characters, unique; at most 200 parameters,
+ * (S74). A name of 1 to 40 characters, unique; any number of parameters,
  * each 1 to 16 characters of `A-Z`, `0-9` and `_`, in the order added.
  */
 export type ParameterGroup = {
@@ -12743,7 +12744,8 @@ export type RunState = 'starting' | 'uploading' | 'flying' | 'finished' | 'ended
 export type RunsIn = 'installed' | 'browser';
 
 /**
- * A named layout: at most 20 custom layouts plus the two built-in views.
+ * A named layout: any number of custom layouts plus the two built-in
+ * views. A name of 1 to 40 characters.
  */
 export type SavedLayout = {
     dock: DockNode;
@@ -14774,7 +14776,7 @@ export type SyncTooLarge = {
 /**
  * One tab: what it shows and, when pinned, the vehicle it shows instead of
  * the selected one. Any number of tabs of a kind, the chat aside: there is
- * one chat, with the id `chat`. At most 32 tabs.
+ * one chat, with the id `chat`.
  */
 export type Tab = {
     /**
@@ -14927,8 +14929,9 @@ export type TelemetryItem = {
 };
 
 /**
- * A telemetry layout (S65): the tiles a Telemetry tab shows. At most 32,
- * each with at most 64 tiles of at most 8 rules.
+ * A telemetry layout (S65): the tiles a Telemetry tab shows. Any number,
+ * of any number of tiles and rules. A name over 64 characters is refused,
+ * never cut, and a tile's label is kept whole.
  */
 export type TelemetryLayout = {
     /**

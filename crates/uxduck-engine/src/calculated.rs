@@ -4,7 +4,7 @@
 //! replays, checklist rules and the agent read them as they read the rest.
 //! Deleted, they leave it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use uxduck_contracts::dto::telemetry::{TelemetryCalculateParams, TelemetryCalculateResult};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -54,7 +54,7 @@ impl Engine {
                 .get(&parameter_id(&vehicle.id, name))
                 .map(|p| p.value)
         };
-        let mut done: Vec<&str> = Vec::new();
+        let mut done: HashSet<&str> = HashSet::new();
         let mut out = Vec::new();
         for item in self
             .state
@@ -62,10 +62,9 @@ impl Engine {
             .values()
             .flat_map(|o| &o.calculated_items)
         {
-            if done.contains(&item.key.as_str()) {
+            if !done.insert(&item.key) {
                 continue;
             }
-            done.push(&item.key);
             let Ok(formula) = Formula::parse(&item.formula) else {
                 continue;
             };
