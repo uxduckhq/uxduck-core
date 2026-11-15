@@ -70,7 +70,7 @@ fn chunks_under(points: &[LatLon]) -> Result<BTreeSet<ChunkKey>, ApiError> {
         ApiError::new(
             ErrorKind::InvalidValue,
             match problem {
-                PolygonProblem::Corners => "an area has at least three corners, and at most 500",
+                PolygonProblem::Corners => "an area has at least three corners",
                 PolygonProblem::OutOfRange => "an area's corners are within ±90° and ±180°",
                 PolygonProblem::AroundTheGlobe => "an area cannot go all the way round the globe",
                 PolygonProblem::TooLarge => {

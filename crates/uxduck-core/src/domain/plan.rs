@@ -320,6 +320,10 @@ pub struct PlanBody {
     pub dialects: Vec<String>,
 }
 
+/// What an item's pattern id takes beside the item: a short text of its
+/// own, such as "survey-1", in the 32 bytes an allocator gives it.
+const ITEM_ID_BYTES: usize = 32;
+
 pub const DEFAULT_NEXT_ALTITUDE_M: f64 = 40.0;
 pub const DEFAULT_MIN_CLEARANCE_M: f64 = 10.0;
 
@@ -339,6 +343,67 @@ impl PlanBody {
             min_clearance_m: DEFAULT_MIN_CLEARANCE_M,
             ..Self::default()
         }
+    }
+
+    /// About the bytes it holds in memory, added up from its lengths and
+    /// never by writing it out: what a kept revision costs
+    /// ([`MAX_REVISIONS_BYTES`]). Every item counts as one a pattern made,
+    /// with its pattern's id beside it, so the sum is a quarter high for
+    /// items placed by hand and needs no walk through them.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        let named = |name: &Option<String>| name.as_ref().map_or(0, String::len);
+        let texts = |texts: &[String]| -> usize {
+            texts
+                .iter()
+                .map(|text| size_of::<String>() + text.len())
+                .sum()
+        };
+        let patterns: usize = self
+            .patterns
+            .iter()
+            .map(|pattern| {
+                size_of::<PlanPattern>()
+                    + pattern.id.len()
+                    + match &pattern.shape {
+                        PatternShape::Survey { area, .. } => size_of_val(area.as_slice()),
+                        PatternShape::Corridor { line, .. } => size_of_val(line.as_slice()),
+                        PatternShape::Orbit { heights_m, .. } => size_of_val(heights_m.as_slice()),
+                        PatternShape::Landing { .. } => 0,
+                    }
+            })
+            .sum();
+        let polygons: usize = self
+            .fence
+            .polygons
+            .iter()
+            .map(|polygon| {
+                size_of::<FencePolygon>()
+                    + size_of_val(polygon.points.as_slice())
+                    + named(&polygon.name)
+            })
+            .sum();
+        let circles: usize = self
+            .fence
+            .circles
+            .iter()
+            .map(|circle| size_of::<FenceCircle>() + named(&circle.name))
+            .sum();
+        let rally: usize = self
+            .rally
+            .iter()
+            .map(|point| size_of::<RallyPoint>() + named(&point.name))
+            .sum();
+        size_of::<Self>()
+            + self.items.len() * (size_of::<PlanItem>() + ITEM_ID_BYTES)
+            + patterns
+            + polygons
+            + circles
+            + rally
+            + self.name.len()
+            + self.notes.len()
+            + texts(&self.labels)
+            + texts(&self.dialects)
     }
 
     /// The points that say where the plan is: positioned items, fence and
@@ -553,17 +618,26 @@ pub struct PlanRevisions {
 /// Revisions kept per plan; the oldest go first.
 pub const MAX_REVISIONS: usize = 200;
 
+/// What a plan's kept revisions hold in memory at most, added up by
+/// [`PlanBody::held_bytes`]. Past it too the oldest go first. A revision is
+/// a whole copy of the plan and nothing counts a plan's items any more, so
+/// 200 of them have no size of their own: for one survey of 57,000 items
+/// they would be 1.7 GB, and a plan's notes and fence add to it without a
+/// count either. This is what the ring held while a plan stopped at 5,000
+/// items: 200 revisions of one are 152 MB counted this way, and the daemon
+/// grew by 145 MB keeping them when measured, 0.73 MB each. So a plan of
+/// that size keeps its 200 as it did, a larger one keeps fewer, and UXDuck
+/// holds no more for a plan than it did before.
+pub const MAX_REVISIONS_BYTES: usize = 160_000_000;
+
 impl PlanRevisions {
     /// Moves the stacks for `revision`, where `current` is the body before
     /// the change. Returns the body it lands on for undo and redo.
     pub fn apply(&mut self, current: &PlanBody, revision: &PlanRevision) -> Option<PlanBody> {
-        match revision {
-            PlanRevision::None => None,
+        let landed = match revision {
+            PlanRevision::None => return None,
             PlanRevision::Edit { previous } => {
                 self.undo.push((**previous).clone());
-                if self.undo.len() > MAX_REVISIONS {
-                    self.undo.remove(0);
-                }
                 self.redo.clear();
                 None
             }
@@ -582,8 +656,60 @@ impl PlanRevisions {
                 self.undo.push(current.clone());
                 Some(next)
             }
-        }
+        };
+        self.keep_within(MAX_REVISIONS, MAX_REVISIONS_BYTES);
+        landed
     }
+
+    /// How many revisions an edit that replaces `previous` leaves to undo:
+    /// what `apply` keeps, counted without making the copy. It is fewer
+    /// than the edits made once the oldest have gone.
+    #[must_use]
+    pub fn undo_after_edit(&self, previous: &PlanBody) -> usize {
+        fitting(
+            std::iter::once(previous).chain(self.undo.iter().rev()),
+            MAX_REVISIONS,
+            MAX_REVISIONS_BYTES,
+        )
+    }
+
+    /// Drops revisions until the two stacks together are within both
+    /// bounds, the oldest first. Undo and redo move revisions between the
+    /// stacks and put the plan as it was in the place of the one landed
+    /// on, so the pair is counted, not each. The oldest are the first of
+    /// `undo`, and after them the last of `redo`, the steps nearest the
+    /// plan as it is. The newest is always kept, however large: the last
+    /// edit to any plan can be undone, and what an undo left can be put
+    /// back.
+    fn keep_within(&mut self, most: usize, most_bytes: usize) {
+        let kept = fitting(
+            self.redo.iter().chain(self.undo.iter().rev()),
+            most,
+            most_bytes,
+        );
+        let undone = kept.saturating_sub(self.redo.len());
+        self.undo.drain(..self.undo.len() - undone);
+        self.redo.truncate(kept);
+    }
+}
+
+/// How many of these revisions, newest first, are within both bounds. The
+/// newest always is.
+fn fitting<'a>(
+    newest_first: impl Iterator<Item = &'a PlanBody>,
+    most: usize,
+    most_bytes: usize,
+) -> usize {
+    let mut held = 0_usize;
+    let mut kept = 0;
+    for body in newest_first.take(most) {
+        held = held.saturating_add(body.held_bytes());
+        if kept > 0 && held > most_bytes {
+            break;
+        }
+        kept += 1;
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -697,5 +823,311 @@ mod tests {
         );
         assert!(revisions.redo.is_empty());
         assert_eq!(revisions.undo.len(), 2);
+    }
+
+    /// A plan of this many waypoints placed by hand, all at one place.
+    fn waypoints(count: usize, name: &str) -> PlanBody {
+        let mut body = PlanBody::new(
+            name.into(),
+            PlanVehicleType::Multicopter,
+            PlanAutopilot::Ardupilot,
+        );
+        body.items = vec![item(16, -35.0, 149.0); count];
+        body
+    }
+
+    /// One edit that replaces `previous`, checked against what it was said to leave.
+    fn edit(revisions: &mut PlanRevisions, previous: PlanBody) {
+        let said = revisions.undo_after_edit(&previous);
+        let current = PlanBody::default();
+        revisions.apply(
+            &current,
+            &PlanRevision::Edit {
+                previous: Box::new(previous),
+            },
+        );
+        assert_eq!(revisions.undo.len(), said);
+    }
+
+    fn held(revisions: &PlanRevisions) -> usize {
+        revisions
+            .undo
+            .iter()
+            .chain(&revisions.redo)
+            .map(PlanBody::held_bytes)
+            .sum()
+    }
+
+    fn names(revisions: &[PlanBody]) -> Vec<&str> {
+        revisions.iter().map(|body| body.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_large_plans_revisions_stay_within_the_bound_and_its_last_edit_is_undone() {
+        // 60,000 items are 9 MB a revision: 200 of them would be 1.8 GB.
+        let fit = MAX_REVISIONS_BYTES / waypoints(60_000, "").held_bytes();
+        assert!((10..30).contains(&fit), "{fit}");
+        let mut revisions = PlanRevisions::default();
+        for change in 0..fit + 8 {
+            edit(&mut revisions, waypoints(60_000, &change.to_string()));
+            assert_eq!(revisions.undo.len(), (change + 1).min(fit));
+            assert!(held(&revisions) <= MAX_REVISIONS_BYTES);
+        }
+        // The oldest went first, and the newest is there to undo.
+        assert_eq!(revisions.undo[0].name, "8");
+        let now = waypoints(60_000, "now");
+        let back = revisions
+            .apply(&now, &PlanRevision::Undo { steps: 1 })
+            .unwrap();
+        assert_eq!(back.name, (fit + 7).to_string());
+        assert_eq!(names(&revisions.redo), ["now"]);
+        assert_eq!(revisions.undo.len(), fit - 1);
+    }
+
+    #[test]
+    fn an_undo_of_many_steps_keeps_undo_and_redo_together_within_the_bound() {
+        let fit = MAX_REVISIONS_BYTES / waypoints(60_000, "").held_bytes();
+        let mut revisions = PlanRevisions::default();
+        for change in 0..fit {
+            edit(&mut revisions, waypoints(60_000, &change.to_string()));
+        }
+        // The plan as it is has twice the items. Undone all the way, it
+        // joins `redo` in the place of the oldest revision, half its size.
+        let now = waypoints(120_000, "now");
+        let back = revisions
+            .apply(&now, &PlanRevision::Undo { steps: u32::MAX })
+            .unwrap();
+        assert_eq!(back.name, "0");
+        assert!(revisions.undo.is_empty());
+        assert!(held(&revisions) <= MAX_REVISIONS_BYTES);
+        // The newest is kept. The step nearest the plan went: of what is
+        // left to redo, it is the oldest.
+        assert_eq!(revisions.redo.len(), fit - 1);
+        assert_eq!(revisions.redo[0].name, "now");
+        assert_eq!(revisions.redo[fit - 2].name, "2");
+        let forward = revisions.apply(&back, &PlanRevision::Redo).unwrap();
+        assert_eq!(forward.name, "2");
+        assert_eq!(names(&revisions.undo), ["0"]);
+        assert!(held(&revisions) <= MAX_REVISIONS_BYTES);
+    }
+
+    #[test]
+    fn a_small_plan_still_keeps_its_last_200_changes() {
+        let mut revisions = PlanRevisions::default();
+        for change in 0..MAX_REVISIONS + 50 {
+            edit(&mut revisions, waypoints(5, &change.to_string()));
+        }
+        assert_eq!(revisions.undo.len(), MAX_REVISIONS);
+        assert_eq!(revisions.undo[0].name, "50");
+        assert_eq!(revisions.undo[MAX_REVISIONS - 1].name, "249");
+    }
+
+    #[test]
+    fn a_plan_of_5000_items_keeps_the_200_changes_it_kept() {
+        // The most items a plan held while they were counted, with a fence
+        // and rally points beside them.
+        let corner = LatLon {
+            latitude_deg: -35.0,
+            longitude_deg: 149.0,
+        };
+        let mut most = waypoints(5_000, "");
+        most.fence.polygons = vec![FencePolygon {
+            inclusion: true,
+            points: vec![corner; 100],
+            name: Some("Field".into()),
+        }];
+        most.rally = vec![
+            RallyPoint {
+                latitude_deg: -35.0,
+                longitude_deg: 149.0,
+                altitude_m: 40.0,
+                name: Some("North gate".into()),
+            };
+            5
+        ];
+        let mut revisions = PlanRevisions::default();
+        for change in 0..MAX_REVISIONS + 10 {
+            let mut previous = most.clone();
+            previous.name = change.to_string();
+            edit(&mut revisions, previous);
+        }
+        assert_eq!(revisions.undo.len(), MAX_REVISIONS);
+        assert_eq!(revisions.undo[0].name, "10");
+        // The bound is that ring's size and little more, not a number of
+        // its own.
+        let held = held(&revisions);
+        assert!(
+            held <= MAX_REVISIONS_BYTES && held > MAX_REVISIONS_BYTES / 10 * 9,
+            "{held}"
+        );
+    }
+
+    #[test]
+    fn one_revision_is_kept_however_large_and_either_bound_drops_the_oldest() {
+        let five = || PlanRevisions {
+            undo: (0..5)
+                .map(|change| waypoints(100, &change.to_string()))
+                .collect(),
+            redo: Vec::new(),
+        };
+        let one = waypoints(100, "0").held_bytes();
+        let mut revisions = five();
+        revisions.keep_within(MAX_REVISIONS, one - 1);
+        assert_eq!(names(&revisions.undo), ["4"]);
+        let mut revisions = five();
+        revisions.keep_within(3, usize::MAX);
+        assert_eq!(names(&revisions.undo), ["2", "3", "4"]);
+        let mut revisions = five();
+        revisions.keep_within(MAX_REVISIONS, 2 * one + 1);
+        assert_eq!(names(&revisions.undo), ["3", "4"]);
+        // With steps to redo, the oldest of all still go first.
+        let mut revisions = five();
+        revisions.redo = vec![waypoints(100, "6"), waypoints(100, "5")];
+        revisions.keep_within(4, usize::MAX);
+        assert_eq!(names(&revisions.undo), ["3", "4"]);
+        assert_eq!(names(&revisions.redo), ["6", "5"]);
+        revisions.keep_within(1, usize::MAX);
+        assert!(revisions.undo.is_empty());
+        assert_eq!(names(&revisions.redo), ["6"]);
+    }
+
+    /// Every allocation of a body, walked through in full.
+    fn asked_for(body: &PlanBody) -> usize {
+        let named = |name: &Option<String>| name.as_ref().map_or(0, String::capacity);
+        let texts = |texts: &Vec<String>| -> usize {
+            texts
+                .iter()
+                .map(|text| size_of::<String>() + text.capacity())
+                .sum()
+        };
+        let items: usize = body
+            .items
+            .iter()
+            .map(|item| size_of::<PlanItem>() + named(&item.pattern))
+            .sum();
+        let patterns: usize = body
+            .patterns
+            .iter()
+            .map(|pattern| {
+                size_of::<PlanPattern>()
+                    + pattern.id.capacity()
+                    + match &pattern.shape {
+                        PatternShape::Survey { area, .. } => area.capacity() * size_of::<LatLon>(),
+                        PatternShape::Corridor { line, .. } => {
+                            line.capacity() * size_of::<LatLon>()
+                        }
+                        PatternShape::Orbit { heights_m, .. } => {
+                            heights_m.capacity() * size_of::<f64>()
+                        }
+                        PatternShape::Landing { .. } => 0,
+                    }
+            })
+            .sum();
+        let polygons: usize = body
+            .fence
+            .polygons
+            .iter()
+            .map(|polygon| {
+                size_of::<FencePolygon>()
+                    + polygon.points.capacity() * size_of::<LatLon>()
+                    + named(&polygon.name)
+            })
+            .sum();
+        let circles: usize = body
+            .fence
+            .circles
+            .iter()
+            .map(|circle| size_of::<FenceCircle>() + named(&circle.name))
+            .sum();
+        let rally: usize = body
+            .rally
+            .iter()
+            .map(|point| size_of::<RallyPoint>() + named(&point.name))
+            .sum();
+        size_of::<PlanBody>()
+            + items
+            + patterns
+            + polygons
+            + circles
+            + rally
+            + body.name.capacity()
+            + body.notes.capacity()
+            + texts(&body.labels)
+            + texts(&body.dialects)
+    }
+
+    /// A survey as it is saved: its items tagged with its id, beside a
+    /// fence, rally points, notes and labels.
+    fn a_saved_survey() -> PlanBody {
+        let corner = LatLon {
+            latitude_deg: -35.0,
+            longitude_deg: 149.0,
+        };
+        let mut survey = waypoints(5_000, "Ridge survey");
+        for item in &mut survey.items {
+            item.pattern = Some("survey-1".into());
+        }
+        survey.patterns = vec![
+            PlanPattern {
+                id: "survey-1".into(),
+                shape: PatternShape::Survey {
+                    area: vec![corner; 40],
+                    spacing_m: 12.5,
+                    angle_deg: 90.0,
+                    turnaround_m: 10.0,
+                    altitude_m: 60.0,
+                    crosshatch: false,
+                    margin_m: 5.0,
+                    start: Some(SurveyStart::Home),
+                    shortest: true,
+                },
+            },
+            PlanPattern {
+                id: "orbit-1".into(),
+                shape: PatternShape::Orbit {
+                    center: corner,
+                    radius_m: 30.0,
+                    turns: 2.0,
+                    heights_m: vec![20.0, 40.0],
+                    counter_clockwise: false,
+                },
+            },
+        ];
+        survey.fence.polygons = vec![FencePolygon {
+            inclusion: false,
+            points: vec![corner; 200],
+            name: Some("Pond".into()),
+        }];
+        survey.fence.circles = vec![FenceCircle {
+            inclusion: true,
+            center: corner,
+            radius_m: 900.0,
+            name: None,
+        }];
+        survey.rally = vec![
+            RallyPoint {
+                latitude_deg: -35.0,
+                longitude_deg: 149.0,
+                altitude_m: 40.0,
+                name: Some("North gate".into()),
+            };
+            3
+        ];
+        survey.notes = "Fly before ten, while the wind is light.".repeat(20);
+        survey.labels = vec!["ridge".into(), "weekly".into()];
+        survey
+    }
+
+    #[test]
+    fn what_a_body_is_counted_as_holding_is_near_what_it_asks_its_allocator_for() {
+        for body in [a_saved_survey(), waypoints(5_000, "By hand")] {
+            // A copy holds what its lengths say and no more, as a kept revision does.
+            let kept = body.clone();
+            let (counted, asked) = (kept.held_bytes(), asked_for(&kept));
+            assert!(
+                counted >= asked && counted <= asked + asked / 2,
+                "counted {counted} for {asked}"
+            );
+        }
     }
 }

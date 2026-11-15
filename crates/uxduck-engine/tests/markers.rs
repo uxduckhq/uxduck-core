@@ -1001,13 +1001,9 @@ fn a_drawn_shape_needs_sensible_points_and_is_drawn_by_hand() {
     let point = |lat: f64, lon: f64| json!({ "latitudeDeg": lat, "longitudeDeg": lon });
     let line = |points: Vec<Value>| json!({ "shape": { "type": "line", "points": points } });
     let area = |points: Vec<Value>| json!({ "shape": { "type": "area", "points": points } });
-    let many: Vec<Value> = (0..501)
-        .map(|i| point(50.0, -1.0 + f64::from(i) * 1e-4))
-        .collect();
     for params in [
         line(vec![point(50.0, -1.0)]),
         line(vec![point(50.0, -1.0), point(50.0, -1.0)]),
-        line(many),
         line(vec![point(50.0, -1.0), point(52.0, -1.0)]),
         line(vec![point(95.0, -1.0), point(50.0, -1.0)]),
         area(vec![point(50.0, -1.0), point(50.0, -0.99)]),
@@ -1056,6 +1052,69 @@ fn a_drawn_shape_needs_sensible_points_and_is_drawn_by_hand() {
             "{update}"
         );
     }
+}
+
+#[test]
+fn a_shape_and_an_outline_keep_every_point_however_many() {
+    let mut engine = engine();
+    let mut window = join(&mut engine, "operator-ui");
+    // A road of 5,001 points, 7 m apart: ten times what a line once held.
+    let road: Vec<Value> = (0..5001)
+        .map(|i| json!({ "latitudeDeg": 50.0, "longitudeDeg": -1.0 + f64::from(i) * 1e-4 }))
+        .collect();
+    let kept = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "shape": { "type": "line", "points": road } }),
+    )["result"]
+        .clone();
+    let points = kept["shape"]["points"].as_array().unwrap();
+    assert_eq!(points.len(), 5001, "every point");
+    for (kept, given) in points.iter().zip(&road) {
+        let east = |p: &Value| p["longitudeDeg"].as_f64().unwrap();
+        assert!((east(kept) - east(given)).abs() < 1e-9, "in order: {kept}");
+    }
+    // A coast of 3,000 corners round a point, and a round tank of 720.
+    let round = |count: u32, radius: f64| -> Vec<[f64; 2]> {
+        (0..count)
+            .map(|i| {
+                let a = f64::from(i) / f64::from(count) * std::f64::consts::TAU;
+                [radius * a.sin(), radius * a.cos()]
+            })
+            .collect()
+    };
+    let coast: Vec<Value> = round(3000, 0.01)
+        .into_iter()
+        .map(|[east, north]| json!({ "latitudeDeg": 50.0 + north, "longitudeDeg": -1.0 + east }))
+        .collect();
+    let kept = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "shape": { "type": "area", "points": coast } }),
+    )["result"]
+        .clone();
+    assert_eq!(kept["shape"]["points"].as_array().unwrap().len(), 3000);
+    let tank = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "latitudeDeg": 0.0, "longitudeDeg": 0.0,
+                "outline": { "type": "corners", "cornersM": round(720, 15.0) } }),
+    )["result"]
+        .clone();
+    assert_eq!(tank["outline"]["cornersM"].as_array().unwrap().len(), 720);
+    assert_eq!(tank["look"], "building");
+    assert_eq!(engine.state().markers.len(), 3);
+    // Still refused for what it is, and told the least: a line of one point.
+    let refused = call(
+        &mut engine,
+        &mut window,
+        "marker/add",
+        json!({ "shape": { "type": "line", "points": [{ "latitudeDeg": 50.0, "longitudeDeg": -1.0 }] } }),
+    );
+    assert_eq!(refused["error"]["message"], "a line has at least 2 points");
 }
 
 #[test]

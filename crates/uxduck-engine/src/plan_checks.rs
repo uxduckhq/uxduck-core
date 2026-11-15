@@ -107,6 +107,54 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
     };
     let number = |i: usize| u32::try_from(i + 1).ok();
 
+    // What one mission carries, counted in 16 bits (`MOST_ITEMS`): more
+    // could not be sent whole. ArduPilot keeps home as item 0 of them.
+    let home = usize::from(body.autopilot == PlanAutopilot::Ardupilot);
+    if body.items.len() + home > crate::plan_patterns::MOST_ITEMS {
+        #[allow(clippy::cast_precision_loss, reason = "counts said in words")]
+        let said = |count: usize| crate::plan_patterns::grouped(count as f64);
+        checks.push(error(
+            "too-many-items",
+            None,
+            format!(
+                "it has {} items: one mission carries {} at most{}, as MAVLink counts them in 16 bits",
+                said(body.items.len()),
+                said(crate::plan_patterns::MOST_ITEMS - home),
+                if home == 1 { " besides home" } else { "" }
+            ),
+        ));
+    }
+
+    // A plan last saved by an earlier UXDuck can hold part of what a
+    // pattern makes: it stopped a survey at 2,000 items and the survey
+    // looked complete. Said, and the upload is the person's to decide.
+    for pattern in &body.patterns {
+        let held = body
+            .items
+            .iter()
+            .filter(|item| item.pattern.as_deref() == Some(pattern.id.as_str()))
+            .count();
+        let Some(makes) = crate::plan_patterns::makes_now(pattern, body, held) else {
+            continue;
+        };
+        #[allow(clippy::cast_precision_loss, reason = "counts said in words")]
+        let said = |count: usize| crate::plan_patterns::grouped(count as f64);
+        let message = match crate::plan_patterns::refusal(pattern, body) {
+            Some(why) => format!(
+                "{} holds {} items made by an earlier UXDuck and cannot be made again as it is set: {why}",
+                pattern.id,
+                said(held)
+            ),
+            None => format!(
+                "{} holds {} items and its settings make {}. An earlier UXDuck stopped a pattern at 2,000 items and flew a spacing under 1 m at 1 m, so it may cover part of its area. Change the plan and its items are made again",
+                pattern.id,
+                said(held),
+                said(makes)
+            ),
+        };
+        checks.push(warning("pattern-part", None, message));
+    }
+
     if body.vehicle_type == PlanVehicleType::Blimp {
         checks.push(warning(
             "blimp-auto",
@@ -622,6 +670,108 @@ mod tests {
         plan.items[0].params = [None; 4];
         plan.autopilot = PlanAutopilot::Px4;
         assert!(codes(&check(&plan, &mut hill)).contains(&"blimp-autopilot"));
+    }
+
+    #[test]
+    fn a_survey_an_earlier_uxduck_cut_short_is_said_until_its_items_are_made_again() {
+        use uxduck_core::domain::plan::{PatternShape, PlanPattern};
+        let at = |lat: f64, lon: f64| LatLon {
+            latitude_deg: lat,
+            longitude_deg: lon,
+        };
+        // A field 3 km across with lanes 2 m apart: 1,502 lanes.
+        let survey = |spacing_m: f64, east: f64| PlanPattern {
+            id: "survey-1".into(),
+            shape: PatternShape::Survey {
+                area: vec![
+                    at(0.001, 0.0),
+                    at(0.001, east),
+                    at(0.002, east),
+                    at(0.002, 0.0),
+                ],
+                spacing_m,
+                angle_deg: 0.0,
+                turnaround_m: 0.0,
+                altitude_m: 90.0,
+                crosshatch: false,
+                margin_m: 0.0,
+                start: None,
+                shortest: false,
+            },
+        };
+        let part = |plan: &PlanBody| {
+            check(plan, &mut hill)
+                .into_iter()
+                .find(|c| c.code == "pattern-part")
+        };
+        let mut plan = body(vec![
+            item(22, 0.0, 0.0, 90.0, 3),
+            item(20, 0.0, 0.0, 0.0, 3),
+        ]);
+        plan.patterns = vec![survey(2.0, 0.027)];
+        crate::plan_patterns::expand(&mut plan);
+        // As it is saved now: every lane, and nothing to say.
+        assert_eq!(plan.items.len(), 2 + 3004);
+        assert_eq!(part(&plan), None);
+        // As an earlier UXDuck saved it: stopped at 2,000 items.
+        let mut cut = plan.clone();
+        cut.items.truncate(2 + 2000);
+        let said = part(&cut).unwrap();
+        assert_eq!(
+            said.severity,
+            Severity::Warning,
+            "the upload is theirs to decide"
+        );
+        assert_eq!(
+            said.message,
+            "survey-1 holds 2,000 items and its settings make 3,004. An earlier UXDuck stopped a pattern at 2,000 items and flew a spacing under 1 m at 1 m, so it may cover part of its area. Change the plan and its items are made again"
+        );
+        // Lanes half a metre apart that it flew a metre apart.
+        let mut close = body(vec![
+            item(22, 0.0, 0.0, 90.0, 3),
+            item(20, 0.0, 0.0, 0.0, 3),
+        ]);
+        close.patterns = vec![survey(0.5, 0.0009)];
+        crate::plan_patterns::expand(&mut close);
+        assert_eq!(part(&close), None);
+        let whole = close.items.len() - 2;
+        close.items.truncate(2 + whole / 2);
+        assert!(part(&close).unwrap().message.starts_with(&format!(
+            "survey-1 holds {} items and its settings make {whole}.",
+            whole / 2
+        )),);
+        // One it would refuse now says why, where it once flew 1 m.
+        close.patterns = vec![survey(0.0, 0.0009)];
+        assert_eq!(
+            part(&close).unwrap().message,
+            format!(
+                "survey-1 holds {} items made by an earlier UXDuck and cannot be made again as it is set: survey-1's spacing is 0 m. Lanes need a spacing above 0 m",
+                whole / 2
+            )
+        );
+    }
+
+    #[test]
+    fn a_plan_of_more_items_than_one_mission_carries_cannot_go_up() {
+        // Take-off, then waypoints 1 m apart, then a return: ArduPilot's
+        // mission has home before them, so 65,534 is the most.
+        let mut items = vec![item(22, 0.0, 0.0, 30.0, 3)];
+        items.extend((0..65_532).map(|i| item(16, 0.0001, f64::from(i) * 1e-5, 30.0, 3)));
+        items.push(item(20, 0.0, 0.0, 0.0, 3));
+        let mut plan = body(items);
+        assert_eq!(plan.items.len(), 65_534);
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
+        plan.items.insert(1, item(16, 0.0001, 0.0, 30.0, 3));
+        let checks = check(&plan, &mut hill);
+        let too_many = checks.iter().find(|c| c.code == "too-many-items").unwrap();
+        assert_eq!(too_many.severity, Severity::Error);
+        assert_eq!(
+            too_many.message,
+            "it has 65,535 items: one mission carries 65,534 at most besides home, as MAVLink counts them in 16 bits"
+        );
+        // PX4 has no home among them.
+        plan.autopilot = PlanAutopilot::Px4;
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
     }
 
     #[test]

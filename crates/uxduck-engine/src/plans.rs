@@ -32,7 +32,6 @@ use crate::{ConnectionId, Engine, upsert};
 const NAME_CHARS: usize = 100;
 /// Files for one import, together.
 const IMPORT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_ITEMS: usize = 5000;
 
 #[allow(clippy::too_many_lines, reason = "one arm per method, each short")]
 pub(crate) fn handle(
@@ -91,10 +90,7 @@ pub(crate) fn handle(
                 return to_value(&PlanDto::from(&plan));
             }
             let previous = std::mem::replace(&mut plan.body, body);
-            plan.undo = plan
-                .undo
-                .saturating_add(1)
-                .min(u32::try_from(uxduck_core::domain::plan::MAX_REVISIONS).unwrap_or(u32::MAX));
+            plan.undo = undo_after_edit(&engine.state, &plan.id, &previous);
             plan.redo = 0;
             touch(engine, connection, &mut plan);
             engine.commit(
@@ -562,22 +558,13 @@ fn valid_body(mut body: PlanBody) -> Result<PlanBody, ApiError> {
         ));
     }
     valid_patterns(&body)?;
-    // A pattern's items are made again from it (P11).
-    crate::plan_patterns::expand(&mut body);
-    // A survey's margin or the exclusion zones can leave it nothing to fly,
-    // or a leg with no way round a zone, so the change is refused.
-    if let Some(refusal) = body
-        .patterns
-        .iter()
-        .find_map(|p| crate::plan_patterns::survey_refusal(p, &body))
-    {
+    // A pattern's items are made again from it (P11): all of them, or none
+    // when it is refused. A spacing that is not above zero, more waypoints
+    // than one mission carries, a margin or exclusion zones that leave a
+    // survey nothing to fly, or a leg with no way round a zone refuse the
+    // change, in words.
+    if let Some(refusal) = crate::plan_patterns::expand(&mut body) {
         return Err(ApiError::new(ErrorKind::InvalidValue, refusal));
-    }
-    if body.items.len() > MAX_ITEMS {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "a plan can have at most 5,000 items",
-        ));
     }
     let on_globe = |lat: f64, lon: f64| {
         lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0
@@ -700,6 +687,17 @@ fn create(
         },
     );
     plan
+}
+
+/// How many changes a plan can undo once an edit replaces `previous`: what
+/// its ring keeps then, which for a very large plan is fewer than its edits
+/// (`MAX_REVISIONS_BYTES`).
+pub(crate) fn undo_after_edit(state: &crate::state::State, id: &str, previous: &PlanBody) -> u32 {
+    let kept = state
+        .plan_revisions
+        .get(id)
+        .map_or(1, |ring| ring.undo_after_edit(previous));
+    u32::try_from(kept).unwrap_or(u32::MAX)
 }
 
 /// Undo or redo: the stacks are moved on a copy first so the plan carries

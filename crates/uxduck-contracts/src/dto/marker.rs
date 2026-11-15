@@ -35,7 +35,7 @@ pub enum MarkerOutline {
     /// `widthM` across its front, `depthM` front to back along its
     /// heading, each 0.5 to 2000 m.
     Rectangle { width_m: f64, depth_m: f64 },
-    /// 3 to 200 corners in order round it, each `[east, north]` metres from
+    /// 3 or more corners in order round it, each `[east, north]` metres from
     /// the point before turning, within 2000 m, the outline not crossing
     /// itself.
     Corners { corners_m: Vec<[f64; 2]> },
@@ -54,9 +54,9 @@ pub enum MarkerOutline {
     rename_all_fields = "camelCase"
 )]
 pub enum MarkerShape {
-    /// 2 to 500 points in order, such as a road or a power line.
+    /// 2 or more points in order, such as a road or a power line.
     Line { points: Vec<LatLon> },
-    /// 3 to 500 corners in order round it, not crossing itself; it closes
+    /// 3 or more corners in order round it, not crossing itself; it closes
     /// by itself.
     Area { points: Vec<LatLon> },
     /// 1 m to 50 km about the marker's point.

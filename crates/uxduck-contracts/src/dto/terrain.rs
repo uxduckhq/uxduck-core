@@ -176,7 +176,7 @@ pub struct TerrainArea {
 impl Eq for TerrainArea {}
 
 /// A polygon: at least three corners in order, the last joined to the
-/// first, at most 500. An edge goes the shorter way between its corners,
+/// first. An edge goes the shorter way between its corners,
 /// so across the antimeridian when that is shorter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

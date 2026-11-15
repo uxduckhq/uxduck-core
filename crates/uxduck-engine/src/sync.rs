@@ -1190,7 +1190,12 @@ impl Engine {
             body: from.body,
             deleted_at_us: None,
             changed_at_us: self.clock.now_us().max(here.changed_at_us + 1),
-            undo: here.undo + u32::from(matches!(revision, PlanRevision::Edit { .. })),
+            undo: match &revision {
+                PlanRevision::Edit { previous } => {
+                    crate::plans::undo_after_edit(&self.state, id, previous)
+                }
+                _ => here.undo,
+            },
             redo: 0,
             version: here.version + 1,
             ..here
@@ -1217,9 +1222,12 @@ impl Engine {
         };
         let plan = Plan {
             uploads: here.map(|p| p.uploads.clone()).unwrap_or_default(),
-            undo: here.map_or(0, |p| {
-                p.undo + u32::from(matches!(revision, PlanRevision::Edit { .. }))
-            }),
+            undo: match &revision {
+                PlanRevision::Edit { previous } => {
+                    crate::plans::undo_after_edit(&self.state, &from.id, previous)
+                }
+                _ => here.map_or(0, |p| p.undo),
+            },
             redo: 0,
             version: here.map_or(1, |p| p.version + 1),
             ..from.clone()

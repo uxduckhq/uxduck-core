@@ -9,9 +9,10 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "lane and point counts are small (at most `MAX_ITEMS`), and widths over spacings are positive"
+    reason = "lane and point counts are checked against `MOST_ITEMS` before any is made, and widths over spacings are positive"
 )]
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use uxduck_core::domain::plan::{
@@ -21,12 +22,16 @@ use uxduck_core::domain::plan::{
 /// The mean Earth radius, as `distance_m` uses.
 const EARTH_M: f64 = 6_371_008.8;
 
-/// No pattern makes more items than this: a survey 1 m apart over a large
-/// field would otherwise make tens of thousands, more than an autopilot holds.
-pub const MAX_ITEMS: usize = 2000;
-
-/// The narrowest spacing between lanes, so a typo of 0 makes no flood of lanes.
-const MIN_SPACING_M: f64 = 1.0;
+/// The most items one mission carries, and so the most one pattern is made
+/// with. MAVLink counts a mission's items in 16 bits (`MISSION_COUNT.count`),
+/// so no autopilot can be sent more, and a slip, such as a spacing of 1 m
+/// over a country, would otherwise make millions and hold UXDuck up while
+/// it made them. A pattern that would make more is refused before any is
+/// made, with the number ([`refusal`]). It is not what an autopilot holds,
+/// which is less and is said when the plan is uploaded: MAVLink has no way
+/// to ask. A pattern is never cut short to fit a count: a survey that
+/// covers part of its area looks complete.
+pub const MOST_ITEMS: usize = 65_535;
 
 const WAYPOINT: u16 = 16;
 const LOITER_TURNS: u16 = 18;
@@ -103,6 +108,36 @@ enum Obstacle {
 struct Keep {
     shape: Obstacle,
     around: Vec<Point>,
+    /// Whether the leg from one of those points to another is blocked,
+    /// once found: 0 not looked at, 1 clear, 2 blocked. It is the same for
+    /// every way round, and a survey has one for each lane a zone cuts, so
+    /// it is found once, not once a lane.
+    legs: RefCell<Vec<u8>>,
+}
+
+impl Keep {
+    fn new(shape: Obstacle, margin_m: f64) -> Self {
+        Self {
+            around: way_round_points(&shape, margin_m),
+            shape,
+            legs: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Whether the leg between two of its points round is blocked, as
+    /// `blocked` finds it the first time it is asked.
+    fn leg_blocked(&self, from: usize, to: usize, blocked: impl FnOnce() -> bool) -> bool {
+        let count = self.around.len();
+        let mut legs = self.legs.borrow_mut();
+        if legs.is_empty() {
+            legs.resize(count * count, 0);
+        }
+        let known = &mut legs[from * count + to];
+        if *known == 0 {
+            *known = if blocked() { 2 } else { 1 };
+        }
+        *known == 2
+    }
 }
 
 fn dot(p: Point, d: Point) -> f64 {
@@ -121,10 +156,69 @@ fn length(points: &[Point]) -> f64 {
     points.windows(2).map(|w| gap(w[0], w[1])).sum()
 }
 
-/// The pieces of a line across (at v) inside a polygon, along it.
-fn inside_on_line(polygon: &[Point], v: f64) -> Vec<(f64, f64)> {
+/// A polygon's edges for lines taken across it in rising order. A line
+/// looks only at the edges it can come within reach of, so it costs what
+/// it meets and not the polygon's corners. Otherwise an outline of
+/// thousands of corners under tens of thousands of lanes costs their
+/// product, once for every angle tried.
+struct Sweep {
+    /// Each edge's first corner, with where across it can first and last
+    /// be met, in the order they are first met.
+    edges: Vec<(f64, f64, usize)>,
+    next: usize,
+    /// The edges the last line could meet, in the polygon's order.
+    near: Vec<(usize, f64)>,
+    met: Vec<usize>,
+}
+
+impl Sweep {
+    /// The edges of a polygon whose points are (along, across), met from
+    /// `reach` away.
+    fn new(polygon: &[Point], reach: f64) -> Self {
+        // Wider than the test each edge is given, so rounding leaves none out.
+        let reach = reach.max(0.0) + 1e-6;
+        let mut edges: Vec<(f64, f64, usize)> = (0..polygon.len())
+            .map(|i| {
+                let a = polygon[i].1;
+                let b = polygon[(i + 1) % polygon.len()].1;
+                (a.min(b) - reach, a.max(b) + reach, i)
+            })
+            .collect();
+        edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self {
+            edges,
+            next: 0,
+            near: Vec::new(),
+            met: Vec::new(),
+        }
+    }
+
+    /// The first corners of the edges a line across at v can meet, in the
+    /// polygon's order. Each v is at or past the one before.
+    fn at(&mut self, v: f64) -> &[usize] {
+        let known = self.near.len();
+        while let Some(&(from, to, i)) = self.edges.get(self.next)
+            && from <= v
+        {
+            self.near.push((i, to));
+            self.next += 1;
+        }
+        let new = self.near.len() > known;
+        self.near.retain(|(_, to)| *to >= v);
+        if new {
+            self.near.sort_unstable_by_key(|(i, _)| *i);
+        }
+        self.met.clear();
+        self.met.extend(self.near.iter().map(|(i, _)| *i));
+        &self.met
+    }
+}
+
+/// The pieces of a line across (at v) inside a polygon, along it, from
+/// the edges it can meet (`Sweep::at`).
+fn inside_on_line(polygon: &[Point], edges: &[usize], v: f64) -> Vec<(f64, f64)> {
     let mut crossings = Vec::new();
-    for i in 0..polygon.len() {
+    for &i in edges {
         let a = polygon[i];
         let b = polygon[(i + 1) % polygon.len()];
         // Half-open, so a corner exactly on the line counts once.
@@ -213,6 +307,37 @@ fn cut(pieces: Vec<Piece>, mut cuts: Vec<(f64, f64)>, edge: bool) -> Vec<Piece> 
     out
 }
 
+/// The unit vectors along a bearing's lanes and across them.
+fn axes(angle_deg: f64) -> (Point, Point) {
+    let bearing = angle_deg.to_radians();
+    (
+        (bearing.sin(), bearing.cos()),
+        (bearing.cos(), -bearing.sin()),
+    )
+}
+
+/// Where an area starts across its lanes, and its width there less the
+/// margin on both sides, never negative. None for fewer than three corners
+/// or a width that is not a number.
+fn span_across(area: &[Point], across: Point, margin: f64) -> Option<(f64, f64)> {
+    let places = || area.iter().map(|p| dot(*p, across));
+    let v_min = places().fold(f64::INFINITY, f64::min);
+    let v_max = places().fold(f64::NEG_INFINITY, f64::max);
+    let width = v_max - v_min - 2.0 * margin;
+    (area.len() >= 3 && width.is_finite()).then_some((v_min, width.max(0.0)))
+}
+
+/// As many lines as cover a width with a lane's width each (the spacing):
+/// at least one. With `snap`, a width a whole number of spacings, give or
+/// take rounding, is that many lines. A float, because a slip in the
+/// spacing asks for more lines than a count holds: it is compared with
+/// `MOST_ITEMS` before it becomes one.
+fn lines_across(width: f64, spacing: f64, snap: bool) -> f64 {
+    (width / spacing - if snap { 1e-6 } else { 0.0 })
+        .ceil()
+        .max(1.0)
+}
+
 /// A survey's scan lines at one angle, before they are put in order.
 struct Lines {
     along: Point,
@@ -225,7 +350,8 @@ impl Lines {
     /// Lines across a polygon at a bearing, `spacing_m` apart and centred
     /// in it, `margin_m` in from its edge, cut where they come within
     /// `margin_m` (at least `MIN_CLEAR_M`) of an obstacle. A concave area or an obstacle gives a line several
-    /// pieces.
+    /// pieces. Every line is made, however many: the caller has counted
+    /// them first (`Survey::waypoints`), with a spacing above zero.
     fn new(
         area: &[Point],
         spacing_m: f64,
@@ -234,24 +360,19 @@ impl Lines {
         keep: &[Keep],
         snap: bool,
     ) -> Self {
-        let spacing = spacing_m.max(MIN_SPACING_M);
+        let spacing = spacing_m;
         let margin = margin_m.max(0.0);
-        let bearing = angle_deg.to_radians();
-        let along = (bearing.sin(), bearing.cos());
-        let across = (bearing.cos(), -bearing.sin());
+        let (along, across) = axes(angle_deg);
         let mut scan = Vec::new();
         let uv = |p: &Point| (dot(*p, along), dot(*p, across));
         let field: Vec<Point> = area.iter().map(uv).collect();
-        let v_min = field.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-        let v_max = field.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-        let width = v_max - v_min - 2.0 * margin;
-        if area.len() < 3 || !width.is_finite() {
+        let Some((v_min, width)) = span_across(area, across, margin) else {
             return Self {
                 along,
                 across,
                 scan,
             };
-        }
+        };
         let obstacles: Vec<Obstacle> = keep
             .iter()
             .map(|k| match &k.shape {
@@ -259,39 +380,45 @@ impl Lines {
                 Obstacle::Circle(centre, radius) => Obstacle::Circle(uv(centre), *radius),
             })
             .collect();
-        let width = width.max(0.0);
-        // As many lanes as cover the width with a lane's width each (the
-        // spacing), centred: at least one. Only as many are made as can be
-        // flown, from the first. With `snap`, a width a whole number of
-        // spacings, give or take rounding, is that many lanes.
-        let lanes = width / spacing - if snap { 1e-6 } else { 0.0 };
-        let count = (lanes.ceil() as usize).max(1);
+        // As many lanes as cover the width, centred in it.
+        let count = lines_across(width, spacing, snap) as usize;
         let first = v_min + margin + (width - (count - 1) as f64 * spacing) / 2.0;
-        let count = count.min(MAX_ITEMS / 2 + 1);
         let clear = margin.max(MIN_CLEAR_M);
-        let near_edges = |polygon: &[Point], v: f64, reach: f64| -> Vec<(f64, f64)> {
-            if reach <= 0.0 {
-                return Vec::new();
-            }
-            (0..polygon.len())
-                .filter_map(|i| {
-                    near_segment_on_line(polygon[i], polygon[(i + 1) % polygon.len()], reach, v)
-                })
-                .collect()
-        };
+        let near_edges =
+            |polygon: &[Point], edges: &[usize], v: f64, reach: f64| -> Vec<(f64, f64)> {
+                if reach <= 0.0 {
+                    return Vec::new();
+                }
+                edges
+                    .iter()
+                    .filter_map(|&i| {
+                        near_segment_on_line(polygon[i], polygon[(i + 1) % polygon.len()], reach, v)
+                    })
+                    .collect()
+            };
+        let mut field_edges = Sweep::new(&field, margin);
+        let mut obstacle_edges: Vec<Sweep> = obstacles
+            .iter()
+            .map(|obstacle| match obstacle {
+                Obstacle::Polygon(points) => Sweep::new(points, clear),
+                Obstacle::Circle(..) => Sweep::new(&[], clear),
+            })
+            .collect();
         for k in 0..count {
             let v = first + k as f64 * spacing;
-            let pieces = inside_on_line(&field, v)
+            let edges = field_edges.at(v);
+            let pieces = inside_on_line(&field, edges, v)
                 .into_iter()
                 .map(|(a, b)| (a, b, true, true))
                 .collect();
-            let pieces = cut(pieces, near_edges(&field, v, margin), true);
+            let pieces = cut(pieces, near_edges(&field, edges, v, margin), true);
             let mut cuts = Vec::new();
-            for obstacle in &obstacles {
+            for (obstacle, edges) in obstacles.iter().zip(&mut obstacle_edges) {
                 match obstacle {
                     Obstacle::Polygon(points) => {
-                        cuts.extend(inside_on_line(points, v));
-                        cuts.extend(near_edges(points, v, clear));
+                        let edges = edges.at(v);
+                        cuts.extend(inside_on_line(points, edges, v));
+                        cuts.extend(near_edges(points, edges, v, clear));
                     }
                     Obstacle::Circle(centre, radius) => {
                         let r = radius + clear;
@@ -342,9 +469,6 @@ impl Lines {
                 out.push(point(from, *v));
                 out.push(point(to, *v));
             }
-            if out.len() > MAX_ITEMS {
-                break;
-            }
         }
         out
     }
@@ -379,6 +503,24 @@ struct Survey<'a> {
 }
 
 impl Survey<'_> {
+    /// How many waypoints its lanes make at an angle, two to a lane and a
+    /// crosshatch's second pass with them, counted from the area's width
+    /// before any is made. An exclusion zone or a concave edge that cuts a
+    /// lane makes more.
+    fn waypoints(&self, angle_deg: f64) -> f64 {
+        let lines = |angle: f64| {
+            span_across(self.area, axes(angle).1, self.margin_m).map_or(0.0, |(_, width)| {
+                lines_across(width, self.spacing_m, self.snap)
+            })
+        };
+        let second = if self.crosshatch {
+            lines(angle_deg + 90.0)
+        } else {
+            0.0
+        };
+        2.0 * (lines(angle_deg) + second)
+    }
+
     /// Its lanes' ends in the order flown at an angle, before any way
     /// round an obstacle.
     fn lanes(&self, angle_deg: f64, keep: &[Keep]) -> Vec<Point> {
@@ -413,29 +555,64 @@ impl Survey<'_> {
     /// flight, of each of the area's edges and every whole degree. Lines
     /// along an edge win a tie in lines: a slant with as many lines can be
     /// shorter only by leaving corners uncovered.
-    fn shortest_angle(&self, keep: &[Keep]) -> f64 {
+    ///
+    /// Each angle's lines are counted from the area's width, and only the
+    /// angles that tie for the fewest are flown to find the shortest, so a
+    /// survey of many lanes is not made once for every angle.
+    ///
+    /// # Errors
+    ///
+    /// The fewest waypoints any angle makes, when every angle makes more
+    /// than `MOST_ITEMS`: no lane is made to find that out.
+    fn shortest_angle(&self, keep: &[Keep]) -> Result<f64, f64> {
         let n = self.area.len();
         let edges = (0..n).map(|i| {
             let (dx, dy) = sub(self.area[(i + 1) % n], self.area[i]);
             (dx.atan2(dy).to_degrees().rem_euclid(180.0), false)
         });
-        edges
+        // Each angle with its lines across and whether it is a slant, in
+        // the order tried: an edge first.
+        let counted: Vec<(f64, (f64, bool))> = edges
             .chain((0..180).map(|degree| (f64::from(degree), true)))
-            .map(|(angle, slant)| {
-                let across = Lines::new(
-                    self.area,
-                    self.spacing_m,
+            .filter_map(|(angle, slant)| {
+                let (_, width) = span_across(self.area, axes(angle).1, self.margin_m)?;
+                Some((
                     angle,
-                    self.margin_m,
-                    keep,
-                    self.snap,
-                );
-                let flown = length(&self.lanes(angle, keep));
-                (angle, (across.scan.len(), slant), flown)
+                    (lines_across(width, self.spacing_m, self.snap), slant),
+                ))
             })
-            .filter(|(_, _, flown)| *flown > 0.0)
-            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
-            .map_or(0.0, |(angle, _, _)| angle)
+            .collect();
+        let by_lines = |a: &(f64, bool), b: &(f64, bool)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        let most = MOST_ITEMS as f64;
+        let mut fits: Vec<&(f64, (f64, bool))> = counted
+            .iter()
+            .filter(|(angle, _)| self.waypoints(*angle) <= most)
+            .collect();
+        if fits.is_empty() && !counted.is_empty() {
+            return Err(counted
+                .iter()
+                .map(|(angle, _)| self.waypoints(*angle))
+                .fold(f64::INFINITY, f64::min));
+        }
+        // A stable sort: the angles that tie stay in the order tried.
+        fits.sort_by(|a, b| by_lines(&a.1, &b.1));
+        let mut at = 0;
+        while at < fits.len() {
+            let tied = fits[at..]
+                .iter()
+                .take_while(|c| by_lines(&c.1, &fits[at].1).is_eq())
+                .count();
+            let shortest = fits[at..at + tied]
+                .iter()
+                .map(|(angle, _)| (*angle, length(&self.lanes(*angle, keep))))
+                .filter(|(_, flown)| *flown > 0.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((angle, _)) = shortest {
+                return Ok(angle);
+            }
+            at += tied;
+        }
+        Ok(0.0)
     }
 }
 
@@ -452,9 +629,6 @@ fn with_ways_round(points: Vec<Point>, keep: &[Keep], margin_m: f64) -> Option<V
             out.extend(way_round(last, p, keep, margin_m)?);
         }
         out.push(p);
-        if out.len() > MAX_ITEMS {
-            break;
-        }
     }
     Some(out)
 }
@@ -474,17 +648,28 @@ fn way_round(a: Point, b: Point, keep: &[Keep], margin_m: f64) -> Option<Vec<Poi
         .collect();
     for candidates in [in_the_way, keep.iter().collect()] {
         let mut nodes = vec![a, b];
-        nodes.extend(candidates.iter().flat_map(|k| k.around.iter().copied()));
-        if let Some(path) = shortest_path(&nodes, &blocked) {
+        // The obstacle each node goes round, and which of its points it is.
+        let mut round: Vec<Option<(&Keep, usize)>> = vec![None, None];
+        for k in candidates {
+            nodes.extend(k.around.iter().copied());
+            round.extend((0..k.around.len()).map(|i| Some((k, i))));
+        }
+        let leg_blocked = |i: usize, j: usize| match (round[i], round[j]) {
+            (Some((k, from)), Some((other, to))) if std::ptr::eq(k, other) => {
+                k.leg_blocked(from, to, || blocked(nodes[i], nodes[j]))
+            }
+            _ => blocked(nodes[i], nodes[j]),
+        };
+        if let Some(path) = shortest_path(&nodes, &leg_blocked) {
             return Some(path);
         }
     }
     None
 }
 
-/// Dijkstra from node 0 to node 1 over the legs not blocked: the nodes
-/// between, in order.
-fn shortest_path(nodes: &[Point], blocked: &dyn Fn(Point, Point) -> bool) -> Option<Vec<Point>> {
+/// Dijkstra from node 0 to node 1 over the legs not blocked, each asked
+/// by its two nodes' places in the list: the nodes between, in order.
+fn shortest_path(nodes: &[Point], blocked: &dyn Fn(usize, usize) -> bool) -> Option<Vec<Point>> {
     let n = nodes.len();
     let mut best = vec![f64::INFINITY; n];
     let mut previous = vec![0; n];
@@ -500,7 +685,7 @@ fn shortest_path(nodes: &[Point], blocked: &dyn Fn(Point, Point) -> bool) -> Opt
         done[here] = true;
         for next in 0..n {
             let through = best[here] + gap(nodes[here], nodes[next]);
-            if !done[next] && through < best[next] && !blocked(nodes[here], nodes[next]) {
+            if !done[next] && through < best[next] && !blocked(here, next) {
                 best[next] = through;
                 previous[next] = here;
             }
@@ -686,10 +871,7 @@ fn obstacles(body: &PlanBody, local: &Local, margin_m: f64) -> Vec<Keep> {
         .map(|c| Obstacle::Circle(local.to(c.center), c.radius_m));
     polygons
         .chain(circles)
-        .map(|shape| Keep {
-            around: way_round_points(&shape, margin_m),
-            shape,
-        })
+        .map(|shape| Keep::new(shape, margin_m))
         .collect()
 }
 
@@ -749,8 +931,15 @@ fn offset_line(line: &[(f64, f64)], offset: f64) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// How many lanes cover a corridor's width at its spacing: at least one.
+/// A float, as `lines_across` is.
+fn corridor_lines(width_m: f64, spacing_m: f64) -> f64 {
+    (width_m.max(0.0) / spacing_m).ceil().max(1.0)
+}
+
 /// Lanes along a line: as many as cover `width_m` at `spacing_m`, centred
-/// on it, flown back and forth, each lengthened at its ends.
+/// on it, flown back and forth, each lengthened at its ends. Every lane is
+/// made: the caller has counted them first, with a spacing above zero.
 fn corridor_lanes(
     line: &[(f64, f64)],
     width_m: f64,
@@ -760,20 +949,16 @@ fn corridor_lanes(
     if line.len() < 2 {
         return Vec::new();
     }
-    let spacing = spacing_m.max(MIN_SPACING_M);
-    let count = ((width_m.max(0.0) / spacing).ceil() as usize).max(1);
+    let count = corridor_lines(width_m, spacing_m) as usize;
     let mut lanes = Vec::new();
     for k in 0..count {
-        let sideways = (k as f64 - (count - 1) as f64 / 2.0) * spacing;
+        let sideways = (k as f64 - (count - 1) as f64 / 2.0) * spacing_m;
         let mut path = offset_line(line, sideways);
         extend(&mut path, turnaround_m);
         if k % 2 == 1 {
             path.reverse();
         }
         lanes.push(path);
-        if lanes.iter().map(Vec::len).sum::<usize>() > MAX_ITEMS {
-            break;
-        }
     }
     lanes
 }
@@ -810,15 +995,23 @@ fn item(command: u16, frame: u8, at: LatLon, altitude_m: f64, id: &str) -> PlanI
     }
 }
 
-/// A survey's route in local metres around its area, and the angle it is
-/// flown at: its own, or the shortest when it asks for that. The lanes
-/// keep out of the plan's exclusion zones and the flight goes round them.
-/// A survey's route in local metres and the angle it is flown at; the
-/// route is none when a leg has no way round an exclusion zone.
-fn survey_route(
-    pattern: &PlanPattern,
-    body: &PlanBody,
-) -> Option<(Local, Option<Vec<Point>>, f64)> {
+/// What a survey's settings come to.
+enum Flight {
+    /// Its route in local metres around its area: every lane.
+    Route(Vec<Point>),
+    /// A leg has no way round an exclusion zone.
+    NoWayRound,
+    /// Its spacing is not above zero, so it has no lanes to count.
+    NoSpacing,
+    /// About this many waypoints, more than `MOST_ITEMS`: none is made.
+    TooMany(f64),
+}
+
+/// What a survey makes around its area, and the angle it is flown at: its
+/// own, or the shortest when it asks for that. The lanes keep out of the
+/// plan's exclusion zones and the flight goes round them. Its waypoints
+/// are counted before any is made.
+fn survey_route(pattern: &PlanPattern, body: &PlanBody) -> Option<(Local, Flight, f64)> {
     let PatternShape::Survey {
         area,
         spacing_m,
@@ -834,6 +1027,9 @@ fn survey_route(
         return None;
     };
     let local = Local::around(area)?;
+    if spacing_m.is_nan() || *spacing_m <= 0.0 {
+        return Some((local, Flight::NoSpacing, *angle_deg));
+    }
     let flat: Vec<Point> = area.iter().map(|&p| local.to(p)).collect();
     let margin = margin_m.max(0.0);
     let clear = margin.max(MIN_CLEAR_M);
@@ -854,15 +1050,30 @@ fn survey_route(
         snap: margin > 0.0 || start.is_some() || *shortest,
     };
     let angle = if *shortest {
-        survey.shortest_angle(&keep)
+        match survey.shortest_angle(&keep) {
+            Ok(angle) => angle,
+            Err(fewest) => return Some((local, Flight::TooMany(fewest), *angle_deg)),
+        }
     } else {
         *angle_deg
     };
-    let route = with_ways_round(survey.lanes(angle, &keep), &keep, clear);
+    let made = survey.waypoints(angle);
+    if made > MOST_ITEMS as f64 {
+        return Some((local, Flight::TooMany(made), *angle_deg));
+    }
+    let route = with_ways_round(survey.lanes(angle, &keep), &keep, clear)
+        .map_or(Flight::NoWayRound, Flight::Route);
     Some((local, route, angle))
 }
 
-/// The items one pattern makes, in the plan's frame.
+/// How many waypoints a corridor's lanes make, counted before any is made:
+/// none for a spacing that is not above zero.
+fn corridor_waypoints(points: usize, width_m: f64, spacing_m: f64) -> Option<f64> {
+    (spacing_m > 0.0).then(|| corridor_lines(width_m, spacing_m) * points as f64)
+}
+
+/// The items one pattern makes, in the plan's frame: all of them, or none
+/// when [`refusal`] says why not. Never some of them.
 #[must_use]
 pub fn items(pattern: &PlanPattern, body: &PlanBody) -> Vec<PlanItem> {
     let id = pattern.id.as_str();
@@ -870,7 +1081,7 @@ pub fn items(pattern: &PlanPattern, body: &PlanBody) -> Vec<PlanItem> {
     let mut out = Vec::new();
     match &pattern.shape {
         PatternShape::Survey { altitude_m, .. } => {
-            let Some((local, Some(route), _)) = survey_route(pattern, body) else {
+            let Some((local, Flight::Route(route), _)) = survey_route(pattern, body) else {
                 return out;
             };
             for point in route {
@@ -887,6 +1098,11 @@ pub fn items(pattern: &PlanPattern, body: &PlanBody) -> Vec<PlanItem> {
             let Some(local) = Local::around(line) else {
                 return out;
             };
+            if corridor_waypoints(line.len(), *width_m, *spacing_m)
+                .is_none_or(|made| made > MOST_ITEMS as f64)
+            {
+                return out;
+            }
             let flat: Vec<(f64, f64)> = line.iter().map(|&p| local.to(p)).collect();
             for lane in corridor_lanes(&flat, *width_m, *spacing_m, *turnaround_m) {
                 for point in lane {
@@ -937,48 +1153,192 @@ pub fn items(pattern: &PlanPattern, body: &PlanBody) -> Vec<PlanItem> {
             out.push(landing);
         }
     }
-    out.truncate(MAX_ITEMS);
     out
 }
 
-/// Why a survey cannot be saved: a leg with no way round an exclusion
-/// zone, or no lane left by its margin or the zones. None for a survey
-/// that makes items, and for one with no margin in a plan without zones,
-/// which is kept as before.
-#[must_use]
-pub fn survey_refusal(pattern: &PlanPattern, body: &PlanBody) -> Option<String> {
-    let PatternShape::Survey { margin_m, .. } = &pattern.shape else {
-        return None;
-    };
-    let zones = body.fence.polygons.iter().any(|p| !p.inclusion)
-        || body.fence.circles.iter().any(|c| !c.inclusion);
-    match survey_route(pattern, body)? {
-        (_, None, _) => Some(format!(
-            "{} has no way round an exclusion zone: a lane, its turn past the edge or a leg between lanes would pass within its margin",
-            pattern.id
-        )),
-        (_, Some(route), _) if route.is_empty() && (zones || *margin_m > 0.0) => Some(format!(
-            "{} has no room for a lane: its margin or the exclusion zones cover its area",
-            pattern.id
-        )),
-        _ => None,
+/// A whole number with its thousands apart, as it is said to a person:
+/// "2,400,000".
+pub(crate) fn grouped(count: f64) -> String {
+    let digits = format!("{count:.0}");
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
     }
+    out
+}
+
+/// Why a pattern cannot be saved, in words for the person who set it. A
+/// number that means nothing: a spacing that is not above zero, or a
+/// margin, a width or turns below it. More items than one mission
+/// carries (`MOST_ITEMS`), counted before any is made and said with the
+/// count. A survey's leg with no way round an exclusion zone, or no lane
+/// left by its margin or the zones. None for a pattern that makes its
+/// items, and for a survey with no margin in a plan without zones that
+/// makes none, which is kept as before.
+#[must_use]
+pub fn refusal(pattern: &PlanPattern, body: &PlanBody) -> Option<String> {
+    let flight = survey_route(pattern, body);
+    said(pattern, body, flight.as_ref().map(|(_, flight, _)| flight))
+}
+
+/// As [`refusal`], of a pattern whose flight is made already when it is a
+/// survey's, so saving a plan makes each survey once.
+fn said(pattern: &PlanPattern, body: &PlanBody, flight: Option<&Flight>) -> Option<String> {
+    let id = &pattern.id;
+    let below_zero = |what: &str, value: f64| {
+        (value < 0.0).then(|| format!("{id}'s {what} is {value}. It cannot be below 0"))
+    };
+    let no_spacing =
+        |spacing_m: f64| format!("{id}'s spacing is {spacing_m} m. Lanes need a spacing above 0 m");
+    let too_many = |made: f64, about: &str, smaller: &str| {
+        let count = if made >= 1e12 {
+            "more than 1,000,000,000,000".to_owned()
+        } else {
+            format!("{about}{}", grouped(made))
+        };
+        format!(
+            "{id} would make {count} items. One mission carries {} at most, as MAVLink counts them in 16 bits. Use a wider spacing or {smaller}",
+            grouped(MOST_ITEMS as f64)
+        )
+    };
+    match &pattern.shape {
+        PatternShape::Survey {
+            margin_m,
+            spacing_m,
+            ..
+        } => {
+            if let Some(refusal) = below_zero("margin", *margin_m) {
+                return Some(refusal);
+            }
+            let zones = body.fence.polygons.iter().any(|p| !p.inclusion)
+                || body.fence.circles.iter().any(|c| !c.inclusion);
+            match flight? {
+                Flight::NoSpacing => Some(no_spacing(*spacing_m)),
+                Flight::TooMany(made) => Some(too_many(*made, "about ", "a smaller area")),
+                Flight::NoWayRound => Some(format!(
+                    "{id} has no way round an exclusion zone: a lane, its turn past the edge or a leg between lanes would pass within its margin"
+                )),
+                Flight::Route(route) if route.is_empty() && (zones || *margin_m > 0.0) => {
+                    Some(format!(
+                        "{id} has no room for a lane: its margin or the exclusion zones cover its area"
+                    ))
+                }
+                Flight::Route(_) => None,
+            }
+        }
+        PatternShape::Corridor {
+            line,
+            width_m,
+            spacing_m,
+            ..
+        } => below_zero("width", *width_m).or_else(|| {
+            match corridor_waypoints(line.len(), *width_m, *spacing_m) {
+                None => Some(no_spacing(*spacing_m)),
+                Some(made) if made > MOST_ITEMS as f64 => {
+                    Some(too_many(made, "", "a narrower corridor"))
+                }
+                Some(_) => None,
+            }
+        }),
+        PatternShape::Orbit { turns, .. } => below_zero("number of turns", *turns),
+        PatternShape::Landing { .. } => None,
+    }
+}
+
+/// An earlier UXDuck stopped a pattern at this many items, and flew a
+/// spacing under `ONCE_LEAST_SPACING_M` at it, without a word.
+const ONCE_CUT_AT: f64 = 2000.0;
+const ONCE_LEAST_SPACING_M: f64 = 1.0;
+
+/// How many items a pattern makes now, when that is not the `held` the
+/// plan has for it. A pattern's items are made again whenever its plan is
+/// saved, so the two differ only in a plan last saved by an earlier
+/// UXDuck, which cut a survey short and looked complete. Only a pattern
+/// that one would have cut or spaced otherwise is made again to count it.
+pub(crate) fn makes_now(pattern: &PlanPattern, body: &PlanBody, held: usize) -> Option<usize> {
+    let asked = match &pattern.shape {
+        PatternShape::Survey {
+            area,
+            spacing_m,
+            angle_deg,
+            margin_m,
+            crosshatch,
+            ..
+        } => {
+            let local = Local::around(area)?;
+            let flat: Vec<Point> = area.iter().map(|&p| local.to(p)).collect();
+            let survey = Survey {
+                area: &flat,
+                spacing_m: *spacing_m,
+                turnaround_m: 0.0,
+                margin_m: margin_m.max(0.0),
+                crosshatch: *crosshatch,
+                start: None,
+                snap: false,
+            };
+            (*spacing_m, survey.waypoints(*angle_deg))
+        }
+        PatternShape::Corridor {
+            line,
+            width_m,
+            spacing_m,
+            ..
+        } => (
+            *spacing_m,
+            corridor_waypoints(line.len(), *width_m, spacing_m.max(ONCE_LEAST_SPACING_M))?,
+        ),
+        PatternShape::Orbit { .. } | PatternShape::Landing { .. } => return None,
+    };
+    // NaN and a spacing of nothing were flown at 1 m too.
+    if asked.0 >= ONCE_LEAST_SPACING_M && asked.1 < ONCE_CUT_AT {
+        return None;
+    }
+    let makes = items(pattern, body).len();
+    (makes != held).then_some(makes)
 }
 
 /// Makes each pattern's items again, in the place of the first item it
 /// made before (at the end for a new pattern); drops items of patterns no
-/// longer in the plan.
-pub fn expand(body: &mut PlanBody) {
+/// longer in the plan. Answers why the first pattern that makes none
+/// cannot be saved ([`refusal`]), when one cannot.
+pub fn expand(body: &mut PlanBody) -> Option<String> {
     if body.patterns.is_empty() && body.items.iter().all(|i| i.pattern.is_none()) {
-        return;
+        return None;
     }
-    // A survey set to the shortest keeps the angle it is flown at.
+    // Each pattern is made once: its items, why it has none, and the angle
+    // a survey is flown at, which one set to the shortest keeps.
+    let frame = body.frame.mav_frame();
+    let mut made: Vec<Option<Vec<PlanItem>>> = Vec::with_capacity(body.patterns.len());
+    let mut refused = None;
     for i in 0..body.patterns.len() {
-        if matches!(
-            body.patterns[i].shape,
-            PatternShape::Survey { shortest: true, .. }
-        ) && let Some((_, _, angle)) = survey_route(&body.patterns[i], body)
-            && let PatternShape::Survey { angle_deg, .. } = &mut body.patterns[i].shape
+        let pattern = &body.patterns[i];
+        let (items, why, angle) = match survey_route(pattern, body) {
+            Some((local, flight, angle)) => {
+                let why = said(pattern, body, Some(&flight));
+                let items = match (flight, &pattern.shape) {
+                    (Flight::Route(route), PatternShape::Survey { altitude_m, .. }) => route
+                        .into_iter()
+                        .map(|point| {
+                            item(WAYPOINT, frame, local.back(point), *altitude_m, &pattern.id)
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (items, why, Some(angle))
+            }
+            None => (items(pattern, body), said(pattern, body, None), None),
+        };
+        refused = refused.or(why);
+        made.push(Some(items));
+        if let Some(angle) = angle
+            && let PatternShape::Survey {
+                shortest: true,
+                angle_deg,
+                ..
+            } = &mut body.patterns[i].shape
         {
             *angle_deg = angle;
         }
@@ -993,17 +1353,18 @@ pub fn expand(body: &mut PlanBody) {
         if placed.contains(id) {
             continue;
         }
-        if let Some(pattern) = body.patterns.iter().find(|p| p.id == id) {
+        if let Some(at) = body.patterns.iter().position(|p| p.id == id) {
             placed.insert(id.to_owned());
-            out.extend(items(pattern, body));
+            out.extend(made[at].take().unwrap_or_default());
         }
     }
-    for pattern in &body.patterns {
+    for (pattern, items) in body.patterns.iter().zip(&mut made) {
         if !placed.contains(&pattern.id) {
-            out.extend(items(pattern, body));
+            out.extend(items.take().unwrap_or_default());
         }
     }
     body.items = out;
+    refused
 }
 
 /// A new pattern's id, unused in the plan: `survey-1`, `orbit-2`.
@@ -1151,15 +1512,419 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_survey_never_makes_more_than_the_limit() {
-        let made = made_by(
-            &survey(field(), 0.0, 0.0, 0.0),
+    /// A square `side_m` on a side, its south-west corner at 35° S, 149° E.
+    fn square(side_m: f64) -> Vec<LatLon> {
+        let local = Local::around(&[at(-35.0, 149.0)]).unwrap();
+        [(0.0, 0.0), (side_m, 0.0), (side_m, side_m), (0.0, side_m)]
+            .into_iter()
+            .map(|corner| local.back(corner))
+            .collect()
+    }
+
+    fn body() -> PlanBody {
+        PlanBody::new(
+            "Field".into(),
             PlanVehicleType::Multicopter,
-            10,
+            PlanAutopilot::Ardupilot,
+        )
+    }
+
+    #[test]
+    fn a_large_survey_covers_the_whole_area() {
+        // 5 km across at 2 m: 2,500 lanes and 5,000 waypoints, where a
+        // survey used to stop at 2,000 and leave three fifths of it out.
+        let area = square(5_000.0);
+        let pattern = survey(area.clone(), 2.0, 0.0, 0.0);
+        let made = items(&pattern, &body());
+        assert_eq!(refusal(&pattern, &body()), None);
+        // North-south lanes from the west edge to the east edge, a
+        // spacing apart all the way: none is left out anywhere.
+        let local = Local::around(&area).unwrap();
+        let easts: Vec<f64> = flat(&made, &local)
+            .chunks(2)
+            .map(|lane| lane[0].0)
+            .collect();
+        let (west, east) = (local.to(area[0]).0, local.to(area[1]).0);
+        assert!(easts.len() >= 2_500, "{}", easts.len());
+        assert_eq!(easts.len(), ((east - west) / 2.0).ceil() as usize);
+        assert_eq!(made.len(), 2 * easts.len());
+        assert!((easts[0] - west).abs() <= 2.0, "{} from {west}", easts[0]);
+        assert!(
+            (easts[easts.len() - 1] - east).abs() <= 2.0,
+            "the last lane is at {} and the east edge at {east}",
+            easts[easts.len() - 1]
         );
-        assert!(made.len() <= MAX_ITEMS);
-        assert!(!made.is_empty());
+        for pair in easts.windows(2) {
+            assert!((pair[1] - pair[0] - 2.0).abs() < 1e-6, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn a_spacing_is_used_as_it_was_typed() {
+        // Half a metre apart is half a metre apart: it used to be flown at
+        // 1 m without a word.
+        let pattern = survey(square(20.0), 0.5, 0.0, 0.0);
+        let made = items(&pattern, &body());
+        // 40 lanes, or 41 by the rounding of the square's own corners.
+        assert!([80, 82].contains(&made.len()), "{}", made.len());
+        let local = Local::around(&square(20.0)).unwrap();
+        let lanes = flat(&made, &local);
+        for pair in lanes.chunks(2).collect::<Vec<_>>().windows(2) {
+            assert!((pair[1][0].0 - pair[0][0].0 - 0.5).abs() < 1e-6, "{pair:?}");
+        }
+        assert_eq!(refusal(&pattern, &body()), None);
+
+        let corridor = PlanPattern {
+            id: "corridor-1".into(),
+            shape: PatternShape::Corridor {
+                line: vec![at(-35.0, 149.0), at(-35.0, 149.002)],
+                width_m: 2.0,
+                spacing_m: 0.25,
+                turnaround_m: 0.0,
+                altitude_m: 30.0,
+            },
+        };
+        assert_eq!(items(&corridor, &body()).len(), 2 * 8);
+    }
+
+    #[test]
+    fn a_spacing_of_nothing_is_refused_in_words_and_makes_no_items() {
+        for spacing in [0.0, -3.0] {
+            let pattern = survey(field(), spacing, 0.0, 0.0);
+            assert!(items(&pattern, &body()).is_empty());
+            assert_eq!(
+                refusal(&pattern, &body()),
+                Some(format!(
+                    "survey-1's spacing is {spacing} m. Lanes need a spacing above 0 m"
+                ))
+            );
+        }
+        let corridor = PlanPattern {
+            id: "corridor-1".into(),
+            shape: PatternShape::Corridor {
+                line: vec![at(-35.0, 149.0), at(-35.0, 149.002)],
+                width_m: 40.0,
+                spacing_m: 0.0,
+                turnaround_m: 0.0,
+                altitude_m: 30.0,
+            },
+        };
+        assert!(items(&corridor, &body()).is_empty());
+        assert_eq!(
+            refusal(&corridor, &body()).as_deref(),
+            Some("corridor-1's spacing is 0 m. Lanes need a spacing above 0 m")
+        );
+    }
+
+    #[test]
+    fn a_survey_of_more_waypoints_than_a_mission_carries_is_refused_before_any_is_made() {
+        // The slip: 1 m apart over 300 km, 600,000 waypoints. It is
+        // counted, said and not made, each of the three ways a survey is
+        // set, and no part of it is kept.
+        for change in [
+            (|_| {}) as fn(&mut PatternShape),
+            |shape| {
+                if let PatternShape::Survey { shortest, .. } = shape {
+                    *shortest = true;
+                }
+            },
+            |shape| {
+                if let PatternShape::Survey {
+                    margin_m, start, ..
+                } = shape
+                {
+                    *margin_m = 5.0;
+                    *start = Some(SurveyStart::NorthWest);
+                }
+            },
+        ] {
+            let pattern = with(survey(square(300_000.0), 1.0, 0.0, 0.0), change);
+            assert!(items(&pattern, &body()).is_empty());
+            let why = refusal(&pattern, &body()).unwrap();
+            assert!(
+                why.starts_with("survey-1 would make about 6")
+                    && why.ends_with(
+                        " items. One mission carries 65,535 at most, as MAVLink counts them in 16 bits. Use a wider spacing or a smaller area"
+                    ),
+                "{why}"
+            );
+        }
+        // A crosshatch counts both passes.
+        let twice = with(survey(square(20_000.0), 1.0, 0.0, 0.0), |shape| {
+            if let PatternShape::Survey { crosshatch, .. } = shape {
+                *crosshatch = true;
+            }
+        });
+        assert!(
+            refusal(&twice, &body()).is_some_and(|why| why.contains("about 80,0")),
+            "{:?}",
+            refusal(&twice, &body())
+        );
+        // Saving the plan leaves the survey's place empty and its angle alone.
+        let mut plan = body();
+        plan.patterns = vec![with(survey(square(300_000.0), 1.0, 12.0, 0.0), |shape| {
+            if let PatternShape::Survey { shortest, .. } = shape {
+                *shortest = true;
+            }
+        })];
+        expand(&mut plan);
+        assert!(plan.items.is_empty());
+        assert!(matches!(
+            plan.patterns[0].shape,
+            PatternShape::Survey { angle_deg, .. } if angle_deg == 12.0
+        ));
+    }
+
+    #[test]
+    fn a_survey_is_whole_right_up_to_what_a_mission_carries() {
+        // The field is about 200.6 m across. At 6.3 mm that is some 31,840
+        // lanes, under 65,535 waypoints: every one is made. At 6 mm it is
+        // some 33,430 lanes, over it: none is.
+        let whole = survey(field(), 0.0063, 0.0, 0.0);
+        let made = items(&whole, &body());
+        assert!(
+            made.len() > 60_000 && made.len() <= MOST_ITEMS,
+            "{}",
+            made.len()
+        );
+        assert_eq!(refusal(&whole, &body()), None);
+        let local = Local::around(&field()).unwrap();
+        let lanes = flat(&made, &local);
+        let east = local.to(field()[1]).0;
+        assert!((lanes[lanes.len() - 1].0 - east).abs() < 0.01);
+
+        let over = survey(field(), 0.006, 0.0, 0.0);
+        assert!(items(&over, &body()).is_empty());
+        assert!(refusal(&over, &body()).is_some_and(|why| why.contains("would make about 66,")));
+    }
+
+    #[test]
+    fn a_wide_corridor_keeps_every_lane() {
+        // 5 km wide at 2 m: 2,500 lanes of two points, where a corridor
+        // used to stop after 1,001.
+        let line = vec![at(-35.0, 149.0), at(-35.0, 149.01)];
+        let corridor = |width_m: f64, spacing_m: f64| PlanPattern {
+            id: "corridor-1".into(),
+            shape: PatternShape::Corridor {
+                line: line.clone(),
+                width_m,
+                spacing_m,
+                turnaround_m: 0.0,
+                altitude_m: 30.0,
+            },
+        };
+        let made = items(&corridor(5_000.0, 2.0), &body());
+        assert_eq!(made.len(), 5_000);
+        // The outermost lanes are 4,998 m apart, either side of the line.
+        let first = at(made[0].latitude_deg, made[0].longitude_deg);
+        let last = &made[made.len() - 1];
+        let across = distance_m(first, at(last.latitude_deg, last.longitude_deg));
+        assert!((across - 4_998.0).abs() < 5.0, "{across}");
+        // More than a mission carries: counted exactly, said, and not made.
+        let slip = corridor(100_000.0, 1.0);
+        assert!(items(&slip, &body()).is_empty());
+        assert_eq!(
+            refusal(&slip, &body()).as_deref(),
+            Some(
+                "corridor-1 would make 200,000 items. One mission carries 65,535 at most, as MAVLink counts them in 16 bits. Use a wider spacing or a narrower corridor"
+            )
+        );
+    }
+
+    #[test]
+    fn a_margin_a_width_and_turns_below_zero_are_refused_in_words() {
+        let margin = with(survey(field(), 20.0, 0.0, 0.0), |shape| {
+            if let PatternShape::Survey { margin_m, .. } = shape {
+                *margin_m = -4.0;
+            }
+        });
+        assert_eq!(
+            refusal(&margin, &body()).as_deref(),
+            Some("survey-1's margin is -4. It cannot be below 0")
+        );
+        let corridor = PlanPattern {
+            id: "corridor-2".into(),
+            shape: PatternShape::Corridor {
+                line: vec![at(-35.0, 149.0), at(-35.0, 149.002)],
+                width_m: -1.0,
+                spacing_m: 20.0,
+                turnaround_m: 0.0,
+                altitude_m: 30.0,
+            },
+        };
+        assert_eq!(
+            refusal(&corridor, &body()).as_deref(),
+            Some("corridor-2's width is -1. It cannot be below 0")
+        );
+        let orbit = PlanPattern {
+            id: "orbit-1".into(),
+            shape: PatternShape::Orbit {
+                center: at(-35.0, 149.0),
+                radius_m: 30.0,
+                turns: -2.0,
+                heights_m: vec![20.0],
+                counter_clockwise: false,
+            },
+        };
+        assert_eq!(
+            refusal(&orbit, &body()).as_deref(),
+            Some("orbit-1's number of turns is -2. It cannot be below 0")
+        );
+    }
+
+    #[test]
+    fn a_way_round_is_the_same_remembered_or_found_afresh() {
+        // A round pond of 60 corners and a shed beside it, and 80 lanes
+        // through them: the legs between the points round an obstacle are
+        // remembered from one lane's way round to the next.
+        let zones = || {
+            let pond: Vec<Point> = (0..60)
+                .map(|i| {
+                    let a = f64::from(i) / 60.0 * std::f64::consts::TAU;
+                    (20.0 * a.cos(), 20.0 * a.sin())
+                })
+                .collect();
+            let shed = vec![(24.0, -6.0), (34.0, -6.0), (34.0, 6.0), (24.0, 6.0)];
+            vec![
+                Keep::new(Obstacle::Polygon(pond), 3.0),
+                Keep::new(Obstacle::Polygon(shed), 3.0),
+                Keep::new(Obstacle::Circle((0.0, 40.0), 5.0), 3.0),
+            ]
+        };
+        let remembered = zones();
+        let mut round = 0;
+        for lane in 0..80 {
+            let v = -30.0 + f64::from(lane) * 0.9;
+            for (a, b) in [((-60.0, v), (60.0, v)), ((v, -60.0), (v + 7.0, 70.0))] {
+                let way = way_round(a, b, &remembered, 3.0);
+                assert_eq!(way, way_round(a, b, &zones(), 3.0), "from {a:?} to {b:?}");
+                round += usize::from(way.is_some_and(|w| !w.is_empty()));
+            }
+        }
+        assert!(round > 60, "{round} legs went round");
+    }
+
+    #[test]
+    fn a_line_meets_the_same_edges_swept_as_looked_at_one_by_one() {
+        // A star of 400 corners: concave, and most of its edges are far
+        // from any one line.
+        let n = 400;
+        let star: Vec<Point> = (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                let r = if i % 2 == 0 { 100.0 } else { 60.0 };
+                (r * a.cos(), r * a.sin())
+            })
+            .collect();
+        let all: Vec<usize> = (0..n).collect();
+        for reach in [0.0, 3.0] {
+            // Lines every 0.37 m, and through and a reach either side of
+            // every corner, where an edge starts or stops being met.
+            let mut lines: Vec<f64> = (0..600).map(|k| -111.0 + f64::from(k) * 0.37).collect();
+            for corner in &star {
+                lines.extend([corner.1 - reach, corner.1, corner.1 + reach]);
+            }
+            lines.sort_by(f64::total_cmp);
+            let mut sweep = Sweep::new(&star, reach);
+            let mut fewest = n;
+            for v in lines {
+                let met = sweep.at(v).to_vec();
+                fewest = fewest.min(met.len());
+                assert_eq!(
+                    inside_on_line(&star, &met, v),
+                    inside_on_line(&star, &all, v),
+                    "inside at {v}"
+                );
+                let near = |edges: &[usize]| -> Vec<(f64, f64)> {
+                    edges
+                        .iter()
+                        .filter_map(|&i| near_segment_on_line(star[i], star[(i + 1) % n], reach, v))
+                        .collect()
+                };
+                assert_eq!(near(&met), near(&all), "near at {v}");
+            }
+            assert!(fewest < n / 10, "a line looks at {fewest} of {n} edges");
+        }
+    }
+
+    /// The angle a survey set to the shortest is flown at, found the plain
+    /// way: every angle's lanes made and measured.
+    fn shortest_by_flying_every_angle(survey: &Survey<'_>, keep: &[Keep]) -> f64 {
+        let n = survey.area.len();
+        let edges = (0..n).map(|i| {
+            let (dx, dy) = sub(survey.area[(i + 1) % n], survey.area[i]);
+            (dx.atan2(dy).to_degrees().rem_euclid(180.0), false)
+        });
+        edges
+            .chain((0..180).map(|degree| (f64::from(degree), true)))
+            .map(|(angle, slant)| {
+                let across = Lines::new(
+                    survey.area,
+                    survey.spacing_m,
+                    angle,
+                    survey.margin_m,
+                    keep,
+                    survey.snap,
+                );
+                let flown = length(&survey.lanes(angle, keep));
+                (angle, (across.scan.len(), slant), flown)
+            })
+            .filter(|(_, _, flown)| *flown > 0.0)
+            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
+            .map_or(0.0, |(angle, _, _)| angle)
+    }
+
+    #[test]
+    fn the_shortest_angle_is_the_one_flying_every_angle_finds() {
+        let (pond, _) = field_with_a_pond(0.0);
+        let local = Local::around(&field()).unwrap();
+        let shapes: [Vec<Point>; 4] = [
+            field().iter().map(|&p| local.to(p)).collect(),
+            // A strip at a slant, a triangle, and an L.
+            vec![
+                (-180.0, -90.0),
+                (170.0, 110.0),
+                (150.0, 145.0),
+                (-200.0, -55.0),
+            ],
+            vec![(0.0, 0.0), (310.0, 40.0), (120.0, 260.0)],
+            vec![
+                (0.0, 0.0),
+                (300.0, 0.0),
+                (300.0, 80.0),
+                (90.0, 80.0),
+                (90.0, 240.0),
+                (0.0, 240.0),
+            ],
+        ];
+        for area in &shapes {
+            for (spacing_m, margin_m, crosshatch, start, zones) in [
+                (20.0, 0.0, false, None, false),
+                (7.0, 6.0, false, Some((0.0, 0.0)), true),
+                (33.0, 0.0, true, None, true),
+                (2.5, 3.0, true, Some((300.0, 240.0)), false),
+            ] {
+                let survey = Survey {
+                    area,
+                    spacing_m,
+                    turnaround_m: 5.0,
+                    margin_m,
+                    crosshatch,
+                    start,
+                    snap: true,
+                };
+                let keep = if zones {
+                    obstacles(&pond, &local, margin_m.max(MIN_CLEAR_M))
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    survey.shortest_angle(&keep),
+                    Ok(shortest_by_flying_every_angle(&survey, &keep)),
+                    "{area:?} at {spacing_m} m"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1353,12 +2118,12 @@ mod tests {
         });
         assert!(items(&turning, &body).is_empty());
         assert!(
-            survey_refusal(&turning, &body)
+            refusal(&turning, &body)
                 .is_some_and(|why| why.contains("no way round an exclusion zone"))
         );
         // Without the turn past the edge the lanes keep clear of it.
         assert!(!items(&pattern, &body).is_empty());
-        assert_eq!(survey_refusal(&pattern, &body), None);
+        assert_eq!(refusal(&pattern, &body), None);
     }
 
     #[test]
@@ -1373,7 +2138,7 @@ mod tests {
             PlanAutopilot::Ardupilot,
         );
         assert!(items(&flat_area, &body).is_empty());
-        assert_eq!(survey_refusal(&flat_area, &body), None);
+        assert_eq!(refusal(&flat_area, &body), None);
     }
 
     #[test]

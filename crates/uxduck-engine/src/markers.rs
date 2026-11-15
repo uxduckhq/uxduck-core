@@ -78,7 +78,6 @@ const NEW_BUILDING: MarkerOutline = MarkerOutline::Rectangle {
     depth_m: 10.0,
 };
 const NEW_BUILDING_HEIGHT_M: f64 = 10.0;
-const MAX_CORNERS: usize = 200;
 
 fn outline(given: MarkerOutline) -> Result<MarkerOutline, ApiError> {
     let within = |m: f64, low: f64, high: f64| m.is_finite() && (low..=high).contains(&m);
@@ -94,8 +93,8 @@ fn outline(given: MarkerOutline) -> Result<MarkerOutline, ApiError> {
             }
         }
         MarkerOutline::Corners { corners_m } => {
-            if !(3..=MAX_CORNERS).contains(&corners_m.len()) {
-                return Err(invalid("a building's outline has 3 to 200 corners"));
+            if corners_m.len() < 3 {
+                return Err(invalid("a building's outline has at least 3 corners"));
             }
             if corners_m.iter().any(|[east, north]| {
                 !within(east.abs(), 0.0, 2000.0) || !within(north.abs(), 0.0, 2000.0)
@@ -145,7 +144,6 @@ fn crosses(ring: &[[f64; 2]]) -> bool {
     })
 }
 
-const MAX_POINTS: usize = 500;
 /// A shape's points are all this close to its first (ADR-0053 D1).
 const SHAPE_WITHIN_M: f64 = 100_000.0;
 const M_PER_DEG: f64 = 111_320.0;
@@ -168,14 +166,15 @@ fn from_east_north(origin: LatLon, [east, north]: [f64; 2]) -> LatLon {
 }
 
 /// A line, an area or a circle as it is kept: a repeated closing corner
-/// dropped, its points on the globe, few enough and close enough together.
+/// dropped, its points on the globe and close enough together. As many
+/// points as it was given: a traced coastline or a road has thousands.
 fn shape(given: MarkerShape) -> Result<MarkerShape, ApiError> {
     let points = |mut points: Vec<LatLon>, fewest: usize, what: &str| {
         if points.len() > fewest && points.first() == points.last() {
             points.pop();
         }
-        if !(fewest..=MAX_POINTS).contains(&points.len()) {
-            return Err(invalid(&format!("{what} has {fewest} to 500 points")));
+        if points.len() < fewest {
+            return Err(invalid(&format!("{what} has at least {fewest} points")));
         }
         for point in &points {
             position(point.latitude_deg, point.longitude_deg)?;

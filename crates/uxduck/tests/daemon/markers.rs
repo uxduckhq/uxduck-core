@@ -280,7 +280,7 @@ fn the_cli_draws_a_line_and_an_area_in_colours_and_a_restart_keeps_them() {
     assert!(ring.contains("circle, 200 m · outline only"), "{ring}");
     let refused = daemon.cli(&["marker", "add", "--line", "50.0,-1.0"]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("a line has 2 to 500 points"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("a line has at least 2 points"));
 
     std::thread::sleep(Duration::from_millis(300));
     let daemon = daemon.kill_and_restart(&["--no-gamepads"]);

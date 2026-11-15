@@ -60,6 +60,9 @@ pub struct PlanItem {
 }
 
 /// A survey, corridor, orbit or landing kept as its shape (ADR-0029 P11).
+/// It makes every item its settings ask for, never part of them. One that
+/// would make more than 65,535, the most MAVLink counts in one mission, is
+/// refused with the count.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanPattern {
@@ -74,6 +77,7 @@ pub enum PatternShape {
     #[serde(rename_all = "camelCase")]
     Survey {
         area: Vec<LatLon>,
+        /// Between lanes: above 0, and used as given.
         spacing_m: f64,
         /// The lanes' bearing, clockwise from north.
         angle_deg: f64,
@@ -98,6 +102,7 @@ pub enum PatternShape {
     Corridor {
         line: Vec<LatLon>,
         width_m: f64,
+        /// Between lanes: above 0, and used as given.
         spacing_m: f64,
         turnaround_m: f64,
         altitude_m: f64,
@@ -314,7 +319,10 @@ pub struct Plan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at_us: Option<u64>,
     pub uploads: Vec<PlanUpload>,
-    /// How many changes can be undone and redone.
+    /// How many changes can be undone and redone: the last 200 at most,
+    /// and fewer of a very large plan. Each is a whole copy of the plan, and
+    /// together they are kept within what 200 changes of a plan of 5,000
+    /// items hold.
     pub undo: u32,
     pub redo: u32,
     #[schemars(schema_with = "crate::safe::integer")]
@@ -506,7 +514,9 @@ pub struct PlanCheck {
     /// `below-ground`, `low-clearance`, `terrain-missing`, `outside-fence`,
     /// `home-outside-fence`, `fence-shape`, `command-unfit`, `no-take-off`,
     /// `no-end`, `no-landing-sequence`, `rally-outside-fence`, `high`,
-    /// `above-ceiling`, `lands-early`, `home-nowhere`.
+    /// `above-ceiling`, `lands-early`, `home-nowhere`, `too-many-items`
+    /// (more than MAVLink counts in one mission), `pattern-part` (a
+    /// pattern holding fewer items than its settings make).
     pub code: String,
     /// The item it is about, numbered from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]

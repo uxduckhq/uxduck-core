@@ -10382,6 +10382,9 @@ export type PatternShape = {
      * flight, and keeps it in `angleDeg`.
      */
     shortest?: boolean;
+    /**
+     * Between lanes: above 0, and used as given.
+     */
     spacingM: number;
     /**
      * Where the first lane starts; as drawn when absent.
@@ -10392,6 +10395,9 @@ export type PatternShape = {
     altitudeM: number;
     kind: 'corridor';
     line: Array<LatLon>;
+    /**
+     * Between lanes: above 0, and used as given.
+     */
     spacingM: number;
     turnaroundM: number;
     widthM: number;
@@ -10611,7 +10617,10 @@ export type Plan = {
     rally: Array<RallyPoint>;
     redo: number;
     /**
-     * How many changes can be undone and redone.
+     * How many changes can be undone and redone: the last 200 at most,
+     * and fewer of a very large plan. Each is a whole copy of the plan, and
+     * together they are kept within what 200 changes of a plan of 5,000
+     * items hold.
      */
     undo: number;
     uploads: Array<PlanUpload>;
@@ -10668,7 +10677,9 @@ export type PlanCheck = {
      * `below-ground`, `low-clearance`, `terrain-missing`, `outside-fence`,
      * `home-outside-fence`, `fence-shape`, `command-unfit`, `no-take-off`,
      * `no-end`, `no-landing-sequence`, `rally-outside-fence`, `high`,
-     * `above-ceiling`, `lands-early`, `home-nowhere`.
+     * `above-ceiling`, `lands-early`, `home-nowhere`, `too-many-items`
+     * (more than MAVLink counts in one mission), `pattern-part` (a
+     * pattern holding fewer items than its settings make).
      */
     code: string;
     /**
@@ -10820,6 +10831,9 @@ export type PlanListResult = {
 
 /**
  * A survey, corridor, orbit or landing kept as its shape (ADR-0029 P11).
+ * It makes every item its settings ask for, never part of them. One that
+ * would make more than 65,535, the most MAVLink counts in one mission, is
+ * refused with the count.
  */
 export type PlanPattern = {
     id: string;
@@ -15276,7 +15290,7 @@ export type TerrainMissing = 'noData' | 'offline' | 'unavailable';
 
 /**
  * A polygon: at least three corners in order, the last joined to the
- * first, at most 500. An edge goes the shorter way between its corners,
+ * first. An edge goes the shorter way between its corners,
  * so across the antimeridian when that is shorter.
  */
 export type TerrainPolygon = {

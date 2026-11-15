@@ -54,6 +54,49 @@ pub struct Reported {
     pub kind: ParamKind,
 }
 
+/// What a mission, a fence (1) or rally points (2) are made of, in words.
+fn part_words(kind: u8, count: usize) -> String {
+    let what = match kind {
+        1 => "fence point",
+        2 => "rally point",
+        _ => "mission item",
+    };
+    #[allow(clippy::cast_precision_loss, reason = "a count said in words")]
+    let counted = crate::plan_patterns::grouped(count as f64);
+    format!("{counted} {what}{}", if count == 1 { "" } else { "s" })
+}
+
+/// Why a mission, a fence or rally points of this many cannot be sent at
+/// all: MAVLink counts what one transfer carries in 16 bits
+/// (`MISSION_COUNT.count`), and a larger count sent as 65,535 would stall
+/// with part of it on the vehicle. None when it can be counted.
+pub(crate) fn too_many(kind: u8, count: usize) -> Option<String> {
+    let most = crate::plan_patterns::MOST_ITEMS;
+    (count > most).then(|| {
+        format!(
+            "it has {}. One transfer carries {} at most, as MAVLink counts them in 16 bits",
+            part_words(kind, count),
+            crate::plan_patterns::grouped(f64::from(u16::MAX)),
+        )
+    })
+}
+
+/// MAVLink's `MAV_MISSION_NO_SPACE`, as `uxduck_mavlink` words it.
+const NO_SPACE: &str = "No space for that many items";
+
+/// Why an upload failed, in words. "No space" is the one thing an autopilot
+/// says of its size: MAVLink has no message to ask how many items it holds,
+/// so the count it refused is said with it.
+fn upload_failure(failure: &Failure, kind: u8, count: usize) -> String {
+    match failure {
+        Failure::Rejected(why) if why == NO_SPACE => format!(
+            "No space for the {} sent. The autopilot holds fewer than that",
+            part_words(kind, count)
+        ),
+        _ => failure.detail(0),
+    }
+}
+
 /// Why a transfer did not go through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
@@ -407,11 +450,14 @@ fn upload_mission(
         .iter()
         .all(|v| v.is_finite())
     });
-    if !finite || items.len() > usize::from(u16::MAX) {
+    if !finite {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
             "every value in a mission must be a number",
         ));
+    }
+    if let Some(why) = too_many(0, items.len()) {
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
     }
     let why = engine.not_writable(&vehicle.link_id).or_else(|| {
         (vehicle.presence != Presence::Online).then(|| {
@@ -1345,7 +1391,7 @@ impl Engine {
                 (WriteStatus::Accepted, None, upload.actor)
             }
             Err(failure) => {
-                let detail = failure.detail(0);
+                let detail = upload_failure(&failure, upload.kind, upload.items.len());
                 // What the vehicle holds after a failed upload is unknown.
                 mission.status = TransferStatus::Failed;
                 mission.detail = Some(format!("upload failed: {detail}"));
@@ -1367,7 +1413,7 @@ impl Engine {
         }
         let result = MissionUploadResult {
             status,
-            detail,
+            detail: detail.clone(),
             mission: MissionDto::from(&mission),
         };
         if let Some((connection, request_id)) = upload.reply {
@@ -1378,7 +1424,7 @@ impl Engine {
             self.send(connection, &frame);
         }
         // A plan's upload goes on to be read back (S127).
-        self.plan_mission_uploaded(order_id, &outcome);
+        self.plan_mission_uploaded(order_id, &outcome, detail);
         if self.is_launch_order(order_id) {
             let accepted = result.status == WriteStatus::Accepted;
             self.launch_order_done(order_id, accepted, result.detail);
@@ -1474,6 +1520,14 @@ impl Engine {
         mut job: PlanJob,
     ) -> Result<(), ApiError> {
         job.placeless = self.placeless_commands(&job.plan_id);
+        // Before any of it goes: the mission, then the fence and rally points.
+        if let Some(why) = too_many(0, job.items.len()).or_else(|| {
+            job.parts
+                .iter()
+                .find_map(|(kind, items)| too_many(*kind, items.len()))
+        }) {
+            return Err(ApiError::new(ErrorKind::InvalidValue, why));
+        }
         let vehicle = self.vehicle(&job.vehicle_id).cloned().ok_or_else(|| {
             ApiError::new(
                 ErrorKind::NotFound,
@@ -1521,7 +1575,12 @@ impl Engine {
     /// The upload of a plan's mission ended: accepted, it is read back
     /// before the answer; otherwise the answer goes now and the mission is
     /// read back anyway, so the tab shows what the vehicle holds.
-    fn plan_mission_uploaded(&mut self, order_id: &str, result: &Result<(), Failure>) {
+    fn plan_mission_uploaded(
+        &mut self,
+        order_id: &str,
+        result: &Result<(), Failure>,
+        failed: Option<String>,
+    ) {
         let Some(mut job) = self.transfers.plan_jobs.remove(order_id) else {
             return;
         };
@@ -1567,7 +1626,7 @@ impl Engine {
                 } else {
                     PlanUploadStatus::Failed
                 };
-                let detail = (!cancelled).then(|| failure.detail(0));
+                let detail = (!cancelled).then(|| failed.unwrap_or_else(|| failure.detail(0)));
                 self.answer_plan_job(job, status, detail, Vec::new());
             }
         }

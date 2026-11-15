@@ -15,7 +15,8 @@ const METRES_PER_DEGREE: f64 = 111_320.0;
 const SAMPLE_M: f64 = 250.0;
 /// A mission's legs are covered this far to either side (T6).
 pub const LEG_BUFFER_M: f64 = 1000.0;
-/// No area or mission asks for more chunks than this (about 6° square).
+/// No area asks for more chunks than this (about 6° square): a larger one
+/// is refused (`chunks_under`), never kept in part.
 pub const MAX_CHUNKS: usize = 2500;
 
 /// A rectangle in degrees, west to east without crossing the antimeridian.
@@ -75,9 +76,6 @@ pub fn chunks_in(bounds: Bounds) -> BTreeSet<ChunkKey> {
     for y in s..=n {
         for x in w..=e {
             keys.insert(chunk(y, x));
-            if keys.len() > MAX_CHUNKS {
-                return keys;
-            }
         }
     }
     keys
@@ -87,13 +85,12 @@ pub fn chunks_in(bounds: Bounds) -> BTreeSet<ChunkKey> {
 const EIGHTHS_AROUND: i32 = 2880;
 /// A polygon's bounding box is looked through only this many chunks.
 const MAX_BOX_CHUNKS: i64 = 160_000;
-/// No area has more corners than this.
-pub const MAX_POINTS: usize = 500;
 
 /// Why a polygon cannot be an area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolygonProblem {
-    /// Fewer than three corners, or more than `MAX_POINTS`.
+    /// Fewer than three corners. There is no most: a traced boundary has
+    /// thousands.
     Corners,
     /// A corner outside ±90° and ±180°, or not a number.
     OutOfRange,
@@ -116,7 +113,7 @@ impl Polygon {
     /// # Errors
     /// When the corners do not make an area on the globe.
     pub fn new(corners: &[(f64, f64)]) -> Result<Self, PolygonProblem> {
-        if corners.len() < 3 || corners.len() > MAX_POINTS {
+        if corners.len() < 3 {
             return Err(PolygonProblem::Corners);
         }
         if corners
@@ -154,18 +151,18 @@ impl Polygon {
             .zip(self.points.iter().copied().cycle().skip(1))
     }
 
-    /// Whether a point, its longitude on the polygon's own unwrapped
-    /// range, is inside (even-odd, so a concave or crossed polygon too).
-    fn contains(&self, lat: f64, lon: f64) -> bool {
-        let mut inside = false;
-        for ((lat0, lon0), (lat1, lon1)) in self.edges() {
-            if (lat0 > lat) != (lat1 > lat)
-                && lon < lon0 + (lat - lat0) / (lat1 - lat0) * (lon1 - lon0)
-            {
-                inside = !inside;
-            }
-        }
-        inside
+    /// The longitudes, on the polygon's own unwrapped range, where its
+    /// edges cross a latitude, west to east. A point on that latitude is
+    /// inside with an odd number of them to its east (even-odd, so a
+    /// concave or crossed polygon too).
+    fn crossings(&self, lat: f64) -> Vec<f64> {
+        let mut crossings: Vec<f64> = self
+            .edges()
+            .filter(|((lat0, _), (lat1, _))| (*lat0 > lat) != (*lat1 > lat))
+            .map(|((lat0, lon0), (lat1, lon1))| lon0 + (lat - lat0) / (lat1 - lat0) * (lon1 - lon0))
+            .collect();
+        crossings.sort_by(f64::total_cmp);
+        crossings
     }
 }
 
@@ -218,19 +215,44 @@ pub fn chunks_under(polygon: &Polygon) -> Result<BTreeSet<ChunkKey>, PolygonProb
         (west / step).floor() as i32..=(east / step).floor() as i32,
     );
     let height = i64::from(rows.end() - rows.start() + 1);
-    if height * i64::from(cols.end() - cols.start() + 1) > MAX_BOX_CHUNKS {
+    let width = i64::from(cols.end() - cols.start() + 1);
+    if height * width > MAX_BOX_CHUNKS {
         return Err(PolygonProblem::TooLarge);
     }
+    let width = usize::try_from(width).unwrap_or(0);
+    // The box's chunks in rows, south to north. No row for an area all at a pole.
+    let at = |y: i32, x: i32| {
+        usize::try_from(y - rows.start()).unwrap_or(0) * width
+            + usize::try_from(x - cols.start()).unwrap_or(0)
+    };
+    let mut crossed = vec![false; usize::try_from(height).unwrap_or(0) * width];
+    // An edge is tried only against the chunks its own box reaches, and one
+    // more each way for rounding. An area then costs its edges' boxes, not
+    // its corners times its whole box: a traced boundary has thousands.
+    for (a, b) in polygon.edges() {
+        #[allow(clippy::cast_possible_truncation, reason = "within ±2880")]
+        let reach = |from: f64, to: f64, within: &std::ops::RangeInclusive<i32>| {
+            ((from.min(to) / step).floor() as i32 - 1).max(*within.start())
+                ..=((from.max(to) / step).floor() as i32 + 1).min(*within.end())
+        };
+        for y in reach(a.0, b.0, &rows) {
+            for x in reach(a.1, b.1, &cols) {
+                let south_west = (f64::from(y) * step, f64::from(x) * step);
+                let north_east = (south_west.0 + step, south_west.1 + step);
+                if crosses_box(a, b, south_west, north_east) {
+                    crossed[at(y, x)] = true;
+                }
+            }
+        }
+    }
     let mut keys = BTreeSet::new();
-    for y in rows {
+    for y in rows.clone() {
+        // Where the area's edges cross the middle of this row's chunks.
+        let crossings = polygon.crossings(f64::from(y) * step + step / 2.0);
         for x in cols.clone() {
-            let south_west = (f64::from(y) * step, f64::from(x) * step);
-            let north_east = (south_west.0 + step, south_west.1 + step);
-            let touches = polygon
-                .edges()
-                .any(|(a, b)| crosses_box(a, b, south_west, north_east))
-                || polygon.contains(south_west.0 + step / 2.0, south_west.1 + step / 2.0);
-            if !touches {
+            let middle = f64::from(x) * step + step / 2.0;
+            let to_its_east = crossings.len() - crossings.partition_point(|c| *c <= middle);
+            if !crossed[at(y, x)] && to_its_east.is_multiple_of(2) {
                 continue;
             }
             let x = (x + EIGHTHS_AROUND / 2).rem_euclid(EIGHTHS_AROUND) - EIGHTHS_AROUND / 2;
@@ -424,6 +446,105 @@ mod tests {
             Polygon::new(&[(80.0, -120.0), (80.0, 0.0), (80.0, 120.0)]),
             Err(PolygonProblem::AroundTheGlobe)
         );
+    }
+
+    /// The chunks an area touches found the plain way: every chunk of its
+    /// box against every edge, and its middle against every edge.
+    fn chunks_one_by_one(polygon: &Polygon) -> BTreeSet<ChunkKey> {
+        let step = 1.0 / f64::from(CHUNKS_PER_SIDE);
+        let lats = || polygon.points().iter().map(|p| p.0);
+        let lons = || polygon.points().iter().map(|p| p.1);
+        #[allow(clippy::cast_possible_truncation, reason = "within ±2880")]
+        let eighth = |degrees: f64| (degrees / step).floor() as i32;
+        let mut keys = BTreeSet::new();
+        for y in eighth(lats().fold(f64::INFINITY, f64::min)).max(-720)
+            ..=eighth(lats().fold(f64::NEG_INFINITY, f64::max)).min(719)
+        {
+            for x in eighth(lons().fold(f64::INFINITY, f64::min))
+                ..=eighth(lons().fold(f64::NEG_INFINITY, f64::max))
+            {
+                let south_west = (f64::from(y) * step, f64::from(x) * step);
+                let north_east = (south_west.0 + step, south_west.1 + step);
+                let (lat, lon) = (south_west.0 + step / 2.0, south_west.1 + step / 2.0);
+                let mut inside = false;
+                for ((lat0, lon0), (lat1, lon1)) in polygon.edges() {
+                    if (lat0 > lat) != (lat1 > lat)
+                        && lon < lon0 + (lat - lat0) / (lat1 - lat0) * (lon1 - lon0)
+                    {
+                        inside = !inside;
+                    }
+                }
+                if inside
+                    || polygon
+                        .edges()
+                        .any(|(a, b)| crosses_box(a, b, south_west, north_east))
+                {
+                    let x =
+                        (x + EIGHTHS_AROUND / 2).rem_euclid(EIGHTHS_AROUND) - EIGHTHS_AROUND / 2;
+                    keys.insert(chunk(y, x));
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn an_area_of_thousands_of_corners_takes_the_chunks_it_touches() {
+        // A coast: 3,000 corners round a point, in and out by a third.
+        let coast = |lat: f64, lon: f64, across: f64, corners: u32| -> Vec<(f64, f64)> {
+            (0..corners)
+                .map(|i| {
+                    let a = f64::from(i) / f64::from(corners) * std::f64::consts::TAU;
+                    let r = across / 2.0 * if i % 7 < 3 { 1.0 } else { 0.66 };
+                    // Past 180° east is west of it.
+                    (
+                        lat + r * a.cos(),
+                        (lon + r * a.sin() + 180.0).rem_euclid(360.0) - 180.0,
+                    )
+                })
+                .collect()
+        };
+        // A strip a twentieth of a degree wide along a diagonal: a box of
+        // 1,600 chunks, of which it touches a few.
+        let strip: Vec<(f64, f64)> = (0..300)
+            .map(|i| f64::from(i) / 299.0 * 4.9)
+            .map(|t| (50.0 + t, -3.0 + t))
+            .chain(
+                (0..300)
+                    .rev()
+                    .map(|i| f64::from(i) / 299.0 * 4.9)
+                    .map(|t| (50.05 + t, -3.0 + t)),
+            )
+            .collect();
+        for corners in [
+            coast(53.0, -4.0, 2.2, 3000),
+            // Across the antimeridian, and with corners on chunks' edges.
+            coast(-17.0, 179.5, 3.0, 1200),
+            vec![(53.0, -5.0), (53.0, -4.0), (54.0, -4.0), (54.0, -5.0)],
+            vec![
+                (53.0, -5.0),
+                (53.0, -4.0),
+                (53.9, -4.0),
+                (53.9, -4.9),
+                (53.1, -4.9),
+                (53.1, -4.1),
+                (53.5, -4.5),
+            ],
+            // Up to a pole.
+            vec![(89.0, 10.0), (90.0, 11.0), (89.0, 12.0)],
+            strip,
+        ] {
+            let polygon = Polygon::new(&corners).unwrap();
+            let keys = chunks_under(&polygon).unwrap();
+            assert!(!keys.is_empty());
+            assert_eq!(
+                names(&keys),
+                names(&chunks_one_by_one(&polygon)),
+                "{} corners from {:?}",
+                corners.len(),
+                corners[0]
+            );
+        }
     }
 
     #[test]
