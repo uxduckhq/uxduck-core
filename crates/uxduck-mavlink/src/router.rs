@@ -12,6 +12,12 @@
 //!   Repetition from that source is ordinary traffic (sequence numbers wrap).
 //!   A copy returning through another source is a loop; repeated loops disable
 //!   the forward involved.
+//! - A vehicle's own router may send each frame down every connection it
+//!   serves. On a connection this computer dialed (a UDP or TCP client, or a
+//!   serial device), a copy of a vehicle's frame is that vehicle again, not a
+//!   loop, and a copy of a frame sent to a vehicle on another connection is
+//!   dropped without blaming a forward. A forward gets each frame once,
+//!   whichever connection brought it first.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -20,8 +26,11 @@ use crate::framing::Header;
 /// How a link takes part in routing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
-    /// Vehicles are heard on it: a listener, serial device or TCP client.
+    /// Vehicles are heard on it, from whoever sends to it: a listener.
     Vehicles,
+    /// Vehicles are heard through the one endpoint this computer dialed: a
+    /// UDP or TCP client, or a serial device.
+    Dialed,
     /// Sends vehicle traffic to another program or daemon.
     Forward {
         /// VIDs whose traffic it carries; empty for every vehicle.
@@ -237,6 +246,25 @@ impl Router {
         let Some(sent) = direct.or_else(|| self.sent.iter().find(matches)) else {
             return routed;
         };
+        let hears =
+            |link: &str| matches!(self.links.get(link), Some(Role::Vehicles | Role::Dialed));
+        if matches!(self.links.get(link_id), Some(Role::Dialed)) {
+            if sent.from.as_ref().is_some_and(|(source, _)| hears(source)) {
+                return routed;
+            }
+            if hears(&sent.to_link) && sent.to_link != link_id {
+                routed.looped = true;
+                routed.matched = Some(LoopMatch {
+                    sent_at_us: sent.at_us,
+                    to_link: sent.to_link.clone(),
+                    from: sent.from.clone(),
+                    forward_link_id: None,
+                    threshold: self.config.threshold,
+                    window_us: self.config.window_us,
+                });
+                return routed;
+            }
+        }
         routed.looped = true;
         // A reply echo may return from a vehicle after a forward sent it
         // there. Disable the forward, never the vehicle connection.
@@ -290,7 +318,17 @@ impl Router {
             sequence: header.sequence,
         };
         match self.links.get(link_id).cloned() {
-            Some(Role::Vehicles) => {
+            Some(Role::Vehicles | Role::Dialed) => {
+                let carried = |to: &str| {
+                    self.sent.iter().any(|sent| {
+                        sent.to_link == to
+                            && sent.fingerprint == fingerprint
+                            && sent.from.as_ref().is_some_and(|(from, from_peer)| {
+                                from != link_id || from_peer != peer
+                            })
+                            && now_us.saturating_sub(sent.at_us) <= self.config.window_us
+                    })
+                };
                 for (id, role) in &self.links {
                     if let Role::Forward {
                         vehicles: filter,
@@ -301,6 +339,7 @@ impl Router {
                         && from_link.as_deref().is_none_or(|from| from == link_id)
                         && (filter.is_empty()
                             || vehicle.is_some_and(|v| filter.iter().any(|f| f == v)))
+                        && !carried(id)
                     {
                         routed.sends.push(Send {
                             link_id: id.clone(),
@@ -320,8 +359,10 @@ impl Router {
                         && from_link
                             .as_deref()
                             .is_none_or(|from| from == target.link_id);
-                    let vehicle_link =
-                        matches!(self.links.get(&target.link_id), Some(Role::Vehicles));
+                    let vehicle_link = matches!(
+                        self.links.get(&target.link_id),
+                        Some(Role::Vehicles | Role::Dialed)
+                    );
                     if allowed && vehicle_link && target.link_id != link_id {
                         routed.sends.push(Send {
                             link_id: target.link_id.clone(),
@@ -737,6 +778,107 @@ mod tests {
 mod redundancy_tests {
     #![allow(clippy::unwrap_used, reason = "known-valid test frames")]
     use super::*;
+    use crate::framing::header;
+    use crate::sim::{gcs_heartbeat_frame, heartbeat_frame};
+
+    /// Buggy's radio and internet connections dial the router on Buggy,
+    /// which sends everything down both. QGC is on a forward, and an
+    /// external relay could still send into a listener.
+    fn buggy() -> Router {
+        let mut router = Router::new(LoopConfig::default());
+        router.set_link("radio", Role::Dialed);
+        router.set_link("internet", Role::Dialed);
+        router.set_link("listener", Role::Vehicles);
+        router.set_link(
+            "qgc",
+            Role::Forward {
+                vehicles: Vec::new(),
+                from_link: None,
+                writable: true,
+            },
+        );
+        router
+    }
+
+    #[test]
+    fn a_vehicles_frame_on_a_second_dialed_connection_is_the_vehicle_and_reaches_a_forward_once() {
+        let mut router = buggy();
+        let mut relayed = Vec::new();
+        for sequence in 0..10u8 {
+            let frame = heartbeat_frame(1, 1, sequence);
+            let header = header(&frame).unwrap();
+            let t = u64::from(sequence) * 100_000;
+            let first = router.route(("radio", "gateway"), &frame, header, Some("buggy"), &[], t);
+            assert_eq!(first.sends.len(), 1, "QGC gets it");
+            let copy = router.route(
+                ("internet", "tailnet"),
+                &frame,
+                header,
+                Some("buggy"),
+                &[],
+                t + 50_000,
+            );
+            assert!(!copy.looped, "Buggy's own copy reaches the session");
+            assert!(copy.sends.is_empty(), "QGC does not get it twice");
+            assert!(copy.disable.is_empty());
+            let relay = router.route(("listener", "relay"), &frame, header, None, &[], t + 60_000);
+            assert!(relay.looped, "a relay into a listener is still a loop");
+            relayed.extend(relay.disable);
+        }
+        assert!(
+            !relayed.is_empty(),
+            "the relay's loop still disables QGC's forward"
+        );
+        assert!(relayed.iter().all(|d| d.forward_link_id == "qgc"));
+    }
+
+    #[test]
+    fn a_ground_stations_frame_copied_back_by_the_vehicles_router_blames_no_forward() {
+        let mut router = buggy();
+        let buggy = [VehicleRoute {
+            vehicle_id: "buggy".into(),
+            link_id: "radio".into(),
+            peer: "gateway".into(),
+        }];
+        let mut disabled = Vec::new();
+        for sequence in 0..10u8 {
+            let frame = gcs_heartbeat_frame(255, 190, sequence);
+            let header = header(&frame).unwrap();
+            let t = u64::from(sequence) * 100_000;
+            let out = router.route(("qgc", "qgc"), &frame, header, None, &buggy, t);
+            assert_eq!(out.sends.len(), 1, "to Buggy on the radio");
+            let back = router.route(
+                ("internet", "tailnet"),
+                &frame,
+                header,
+                None,
+                &[],
+                t + 50_000,
+            );
+            assert!(back.looped, "QGC's own frame is dropped");
+            disabled.extend(back.disable);
+        }
+        assert!(
+            disabled.is_empty(),
+            "the vehicle's router copied it, QGC did not loop"
+        );
+        for sequence in 10..15u8 {
+            let frame = gcs_heartbeat_frame(255, 190, sequence);
+            let header = header(&frame).unwrap();
+            let t = u64::from(sequence) * 100_000;
+            router.route(("qgc", "qgc"), &frame, header, None, &buggy, t);
+            let echo = router.route(("radio", "gateway"), &frame, header, None, &[], t + 50_000);
+            assert!(echo.looped);
+            disabled.extend(echo.disable);
+        }
+        assert_eq!(
+            disabled.len(),
+            1,
+            "an echo on the connection it went out on still is"
+        );
+        assert_eq!(disabled[0].forward_link_id, "qgc");
+    }
+
     #[test]
     fn an_identified_alternate_is_not_a_forwarding_loop_but_an_echo_is() {
         let mut router = Router::default();

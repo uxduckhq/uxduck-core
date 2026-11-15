@@ -1702,8 +1702,9 @@ fn record(link_id: &str, open: &mut Open, frames: &[Vec<u8>], at_us: u64) {
     }
 }
 
-/// A link's part in routing: it hears vehicles, or it carries their
-/// traffic out (and, writable, back).
+/// A link's part in routing: it hears vehicles, from whoever sends to it or
+/// through the one endpoint it dialed, or it carries their traffic out (and,
+/// writable, back).
 fn role(link: &Link) -> Role {
     if link.kind.is_forward() {
         Role::Forward {
@@ -1711,6 +1712,11 @@ fn role(link: &Link) -> Role {
             from_link: link.from_link.clone(),
             writable: link.policy == LinkPolicy::ReadWrite,
         }
+    } else if matches!(
+        link.kind,
+        LinkKind::UdpClient { .. } | LinkKind::TcpClient { .. } | LinkKind::Serial { .. }
+    ) {
+        Role::Dialed
     } else {
         Role::Vehicles
     }
@@ -1978,6 +1984,78 @@ mod tests {
         assert!(
             round_trip < 20.0,
             "timed from its arrival, not 60 ms later: {round_trip} ms"
+        );
+    }
+
+    fn connection(id: &str, kind: &str, port: u16) -> Link {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "kind": { "type": kind, "host": "127.0.0.1", "port": port },
+            "policy": "read-write",
+            "topology": "auto",
+            "status": "configured",
+            "createdAtUs": 0,
+            "version": 1,
+        }))
+        .unwrap()
+    }
+
+    /// Buggy over its radio and over the internet, with QGC on a forward.
+    /// Buggy's router sends every frame down both connections, so each
+    /// frame arrives twice. The second copy is Buggy, not a forwarding
+    /// loop: the forward stays on and the internet becomes Buggy's too.
+    #[tokio::test]
+    async fn a_second_connection_with_a_forward_on_is_not_a_loop() {
+        use crate::adapters::system::SystemClock;
+        use uxduck_engine::runtime::Clock;
+        use uxduck_mavlink::sim::{autopilot_version_frame, heartbeat_frame};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut plane, _commands) = plane(dir.path());
+        let (events, _received) = mpsc::channel(64);
+        let servers: Vec<std::net::UdpSocket> = (0..3)
+            .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let port = |i: usize| servers[i].local_addr().unwrap().port();
+        plane
+            .open(connection("radio", "udp-client", port(0)), &events)
+            .await;
+        plane
+            .open(connection("internet", "udp-client", port(1)), &events)
+            .await;
+        plane
+            .open(connection("qgc", "udp-forward", port(2)), &events)
+            .await;
+        let radio = format!("127.0.0.1:{}", port(0));
+        let internet = format!("127.0.0.1:{}", port(1));
+        let mut frames = vec![
+            heartbeat_frame(1, 1, 0),
+            autopilot_version_frame(1, 1, 1, 0xB0661, 0x0406_0000),
+        ];
+        frames.extend((2..12).map(|sequence| heartbeat_frame(1, 1, sequence)));
+        for frame in &frames {
+            plane
+                .frame("radio", &radio, frame, false, SystemClock.now_us())
+                .await;
+            plane
+                .frame("internet", &internet, frame, false, SystemClock.now_us())
+                .await;
+        }
+
+        assert!(plane.open.contains_key("qgc"), "the forward is still on");
+        let buggy = plane
+            .session
+            .vehicle_at("radio", &radio, 1)
+            .map(str::to_owned);
+        assert!(buggy.is_some());
+        assert_eq!(
+            plane
+                .session
+                .vehicle_at("internet", &internet, 1)
+                .map(str::to_owned),
+            buggy,
+            "the copies are Buggy's second connection"
         );
     }
 

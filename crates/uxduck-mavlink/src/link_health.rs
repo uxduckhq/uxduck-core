@@ -6,7 +6,9 @@
 //!   request ([`Tracker::asked`] gives its `ts1`) where the ground station
 //!   heartbeat goes, and says why it did not where it does not
 //!   ([`Tracker::not_asked`]). A reply counts only when its `ts1` is one of
-//!   UXDuck's own outstanding requests to that address, so replies to
+//!   UXDuck's own outstanding requests to that address, and no two waiting
+//!   requests share a `ts1`, so a reply a vehicle's router copies to a
+//!   second connection never times that connection's round trip. Replies to
 //!   another ground station on the same channel and a PX4's own requests
 //!   (`tc1` 0) are never counted. Only the vehicle's own components count:
 //!   an onboard computer (191 to 194, [`crate::computer::COMPUTER_IDS`])
@@ -119,17 +121,24 @@ impl Tracker {
     }
 
     /// A request is going to `address` now: the `ts1` to send, UXDuck's
-    /// clock in nanoseconds, distinct from those still waiting.
+    /// clock in nanoseconds, distinct from every request still waiting at
+    /// any address. A vehicle's router may copy the reply to each connection
+    /// it serves, and a reply must never time a request that went out on
+    /// another connection.
     pub fn asked(&mut self, address: &Address, now_us: u64) -> i64 {
+        let mut ts1 = i64::try_from(now_us.saturating_mul(1000)).unwrap_or(i64::MAX);
+        while self
+            .addresses
+            .values()
+            .any(|health| health.outstanding.iter().any(|(t, _)| *t == ts1))
+        {
+            ts1 = ts1.saturating_add(1);
+        }
         let health = self.addresses.entry(address.clone()).or_default();
         if health.not_asked.take().is_some() || health.asked_since_us.is_none() {
             health.asked_since_us = Some(now_us);
         }
         health.expire(now_us);
-        let mut ts1 = i64::try_from(now_us.saturating_mul(1000)).unwrap_or(i64::MAX);
-        while health.outstanding.iter().any(|(t, _)| *t == ts1) {
-            ts1 = ts1.saturating_add(1);
-        }
         if health.outstanding.len() >= OUTSTANDING {
             health.outstanding.pop_front();
         }
@@ -406,6 +415,28 @@ mod tests {
             tracker.report(&a, 7_000_000).round_trip_missing,
             Some(RoundTripMissing::NoReply)
         );
+    }
+
+    /// Two connections to one vehicle through its router, which copies the
+    /// vehicle's reply to both: requests asked on each in the same tick are
+    /// told apart, so the reply to one never dates the other's round trip.
+    #[test]
+    fn a_reply_copied_to_another_connection_is_not_its_round_trip() {
+        let mut tracker = Tracker::default();
+        let radio: Address = ("radio".into(), "192.0.2.21:15010".into(), 1);
+        let internet: Address = ("internet".into(), "198.51.100.45:15010".into(), 1);
+        let on_radio = tracker.asked(&radio, 1_000_000);
+        tracker.asked(&internet, 1_000_000);
+        let answer = reply(on_radio, 1, GCS);
+        tracker.heard(&radio, &answer, GCS, 1_020_000);
+        tracker.heard(&internet, &answer, GCS, 1_030_000);
+        assert_eq!(tracker.report(&radio, 1_030_000).round_trip_ms, Some(20.0));
+        let internet = tracker.report(&internet, 1_030_000);
+        assert_eq!(
+            internet.round_trip_ms, None,
+            "its own request is unanswered"
+        );
+        assert_eq!(internet.round_trip_missing, Some(RoundTripMissing::Waiting));
     }
 
     #[test]

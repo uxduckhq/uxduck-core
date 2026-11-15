@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "dde5f3c6f00d1e6676934d2e1c908642d5203a2f",
+  "sourceCommit": "6e1fcd655d439c99761157560f39cb60079f6350",
   "licenseReady": true,
   "files": [
     {
@@ -6916,7 +6916,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/link_health.rs",
-      "sha256": "f7eed4655d45e1cc205c4023f66557901f5849918f2d74b0c87d2d439a53ee6d",
+      "sha256": "8a4bcd2338845a135ce848eb908ef9a344bb6c33e3e843b139d10f94dc279068",
       "executable": false
     },
     {
@@ -6976,7 +6976,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/router.rs",
-      "sha256": "3d8754998839ebdc8d4de2ff384dfd6924275deb2af31d3ecb7aaff2a4f63001",
+      "sha256": "dc78b2fc636c19eff28ef4c76a22c02cec5464f1e4b874a66953585a4ef7776e",
       "executable": false
     },
     {
@@ -7641,7 +7641,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/data_plane.rs",
-      "sha256": "281a2fa8c2232c12882db91d35bd8c3c3ca4804fd34477bd653ccbceb8dcd420",
+      "sha256": "7887336fdb8f804d280f331106b64e0f48392f9d0089d8f2fc598bbfa7d5742a",
       "executable": false
     },
     {
