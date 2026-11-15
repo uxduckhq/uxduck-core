@@ -654,6 +654,19 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "checklist/runs",
     // Found with operator/update's calculated values (ADR-0056 K5).
     "telemetry/calculate",
+    // A job a person asks for by name, and the largest tool left after
+    // plugin writing (maintainer, 2026-11-15: "consider if more should be
+    // behind search"). Found beside its copy, export and runs. The checks
+    // are still read each turn (`preflight/state`).
+    "checklist/update",
+    // Adding or assigning a camera and the practice exercises are asked
+    // for by name too (maintainer, 2026-11-15: "Move them too"). What is
+    // arriving is still read each turn (`video/list`).
+    "video/add",
+    "video/assign",
+    "practice/list",
+    "practice/start",
+    "practice/status",
 ];
 
 /// The tool that runs a deferred one by name.
@@ -727,8 +740,8 @@ pub fn model_tools() -> Vec<Tool> {
     if let Some(search) = sent.iter_mut().find(|tool| tool.method == "tool/search") {
         search.description.push_str(
             " Also finds deferred UXDuck tools in uxduckTools: plans, missions, simulations, \
-             terrain, files, parameters, history, link diagnostics and plugin writing. Run them \
-             with tool_call.",
+             terrain, files, parameters, history, link diagnostics, practice, cameras, \
+             checklists and plugin writing. Run them with tool_call.",
         );
     }
     sent.push(Tool {
@@ -1477,6 +1490,62 @@ mod deferred_tests {
         );
         let history = find_deferred("mission history", 3);
         assert_eq!(history[0].name, "mission_history");
+    }
+
+    /// Jobs a person asks for by name are found when asked for, and their
+    /// words are not sent on every turn (maintainer, 2026-11-15): writing a
+    /// checklist, adding or assigning a camera, and the practice exercises.
+    #[test]
+    fn checklist_camera_and_practice_tools_are_found_when_asked_for() {
+        let sent = model_tools();
+        for (query, expected) in [
+            ("add a step to the checklist", "checklist_update"),
+            ("change the preflight checklist", "checklist_update"),
+            ("add a camera", "video_add"),
+            ("assign the camera to a vehicle", "video_assign"),
+            ("practice exercises", "practice_list"),
+            ("start a practice exercise", "practice_start"),
+            ("practice attempt", "practice_status"),
+        ] {
+            let found: Vec<String> = find_deferred(query, 5)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            assert!(found.contains(&expected.to_owned()), "{query}: {found:?}");
+            assert!(
+                sent.iter().all(|t| t.name != expected),
+                "{expected} is sent"
+            );
+        }
+        // The instructions and the search tool say they are there to find.
+        let instructions = crate::turn::INSTRUCTIONS;
+        assert!(instructions.contains(
+            "practice exercises, adding and assigning cameras, writing a vehicle's checklist and writing plugins"
+        ));
+        assert!(instructions.contains("find the practice tools with tool_search"));
+        assert!(instructions.contains("with the camera tools tool_search finds"));
+        let search = sent.iter().find(|t| t.name == "tool_search").unwrap();
+        assert!(
+            search.description.contains("practice, cameras"),
+            "{}",
+            search.description
+        );
+        assert!(
+            search.description.contains("checklists and plugin writing"),
+            "{}",
+            search.description
+        );
+        // What stays: reading the checks and the cameras, and running an
+        // installed plugin.
+        for kept in [
+            "preflight_state",
+            "video_list",
+            "plugin_call",
+            "tool_search",
+            TOOL_CALL,
+        ] {
+            assert!(sent.iter().any(|t| t.name == kept), "{kept}");
+        }
     }
 
     /// FB-214: asked to move a simulated vehicle home, put it back or reset

@@ -1375,9 +1375,6 @@ pub enum ClientRequest {
     /// What this account shared to improve the agent. Result: `SharedData`.
     #[serde(rename = "account/shared")]
     AccountShared(Empty),
-    /// Makes a watch link for this computer or one vehicle on it (S95,
-    /// ADR-0023): anyone with its address watches, read only, until it ends.
-    /// Needs `config`. Result: `WatchLinkCreateResult`.
     /// The practice exercises (S100, ADR-0024), with whether the vehicle
     /// named can run each and the operator's best result. Needs `read`.
     /// Result: `PracticeListResult`.
@@ -1661,6 +1658,9 @@ pub enum ClientRequest {
     /// (A10). Needs `config`. Result: `VehicleTerrainResult`.
     #[serde(rename = "terrain/putArea")]
     TerrainPutArea(crate::dto::terrain::TerrainPutAreaParams),
+    /// Makes a watch link for this computer or one vehicle on it (S95,
+    /// ADR-0023): anyone with its address watches, read only, until it ends.
+    /// Needs `config`. Result: `WatchLinkCreateResult`.
     #[serde(rename = "watchLink/create")]
     WatchLinkCreate(crate::dto::edge::WatchLinkCreateParams),
     /// This computer's watch links that have not ended, with how many watch

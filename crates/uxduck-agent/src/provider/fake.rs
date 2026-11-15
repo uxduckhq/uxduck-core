@@ -229,7 +229,8 @@ impl FakeProvider {
     /// Asked for the distance from home in the panel (S58): draft a
     /// plugin, test it, and say what it produced; asked to also warn below
     /// 100 m, a new version; asked to install it, list the drafts and
-    /// install the newest, which waits for the operator.
+    /// install the newest, which waits for the operator. The plugin-writing
+    /// tools are found when asked for, so each runs through `tool_call`.
     fn writes(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
         for item in input {
             let Input::ToolOutput { call_id, output } = item else {
@@ -246,8 +247,10 @@ impl FakeProvider {
                     }
                     return Ok(Some(vec![ProviderEvent::ToolCall {
                         call_id: DRAFT_TEST.into(),
-                        name: "plugin_test".into(),
-                        arguments: json!({ "id": answer["id"] }).to_string(),
+                        name: TOOL_CALL_NAME.into(),
+                        arguments:
+                            json!({ "name": "plugin_test", "params": { "id": answer["id"] } })
+                                .to_string(),
                     }]));
                 }
                 DRAFT_TEST => {
@@ -265,8 +268,9 @@ impl FakeProvider {
                     };
                     return Ok(Some(vec![ProviderEvent::ToolCall {
                         call_id: INSTALL.into(),
-                        name: "plugin_install".into(),
-                        arguments: json!({ "path": path }).to_string(),
+                        name: TOOL_CALL_NAME.into(),
+                        arguments: json!({ "name": "plugin_install", "params": { "path": path } })
+                            .to_string(),
                     }]));
                 }
                 INSTALL => {
@@ -292,20 +296,20 @@ impl FakeProvider {
         };
         let draft = |warn: bool| ProviderEvent::ToolCall {
             call_id: DRAFT.into(),
-            name: "plugin_draft".into(),
-            arguments: json!({
+            name: TOOL_CALL_NAME.into(),
+            arguments: json!({ "name": "plugin_draft", "params": {
                 "id": "distance-from-home",
                 "name": "Distance from home",
                 "script": home_script(warn),
                 "subscribe": { "messages": { "names": ["GLOBAL_POSITION_INT"], "cadenceMs": 500 } }
-            })
+            } })
             .to_string(),
         };
         Ok(if asked.contains("install") {
             Some(vec![ProviderEvent::ToolCall {
                 call_id: DRAFTS.into(),
-                name: "plugin_drafts".into(),
-                arguments: "{}".into(),
+                name: TOOL_CALL_NAME.into(),
+                arguments: json!({ "name": "plugin_drafts", "params": {} }).to_string(),
             }])
         } else if asked.contains("warn below") {
             Some(vec![draft(true)])
