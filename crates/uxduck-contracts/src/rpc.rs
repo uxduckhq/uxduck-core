@@ -2104,11 +2104,12 @@ pub enum ClientRequest {
     /// frustration, or something asked for that UXDuck can't do. Sends only
     /// the title and text, anonymously: about UXDuck alone, nothing about
     /// the person, places, vehicles or files. Once per problem, three per
-    /// chat. Result: `FeedbackFiled`.
+    /// chat or MCP connection. Result: `FeedbackFiled`.
     #[serde(rename = "feedback/file")]
     FeedbackFile(FeedbackFileParams),
-    /// Adds what the person said since to a report filed in this chat
-    /// (S294), as a comment on its issue. Result: `FeedbackSendResult`.
+    /// Adds what the person said since to a report filed in this chat or
+    /// over this MCP connection (S294), as a comment on its issue. Result:
+    /// `FeedbackSendResult`.
     #[serde(rename = "feedback/add")]
     FeedbackAdd(FeedbackAddParams),
     /// Reads a formula for a calculated value (ADR-0056) and, given a

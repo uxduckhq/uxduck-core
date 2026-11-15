@@ -55,6 +55,10 @@ const MAX_ATTACHMENTS_B64: usize = 25 * 1024 * 1024 / 3 * 4 + 4 * MAX_ATTACHMENT
 
 /// What the composition root sends: the report, the scrubbed bundle, and
 /// which vehicle's flight data to add from the tlogs.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is a field of the report the API reads"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeedbackOrder {
     pub report_id: String,
@@ -76,6 +80,9 @@ pub struct FeedbackOrder {
     /// Filed by the agent without the person reading it (S294): sent
     /// anonymously, whoever is signed in.
     pub agent_filed: bool,
+    /// Filed by an agent outside UXDuck, such as Claude Code over MCP,
+    /// from its connection instead of a chat.
+    pub over_mcp: bool,
     /// Files the person attached, base64, as the page sent them.
     pub attachments: Vec<FeedbackAttachment>,
     /// The key the page keeps to add to the report later.
@@ -574,6 +581,7 @@ pub(crate) fn handle(
         credit: params.credit,
         from_agent: params.from_agent,
         agent_filed: false,
+        over_mcp: false,
         attachments: params.attachments.clone(),
         follow_up_key: params.follow_up_key.clone(),
         voice_notes: params.voice_notes.clone(),
@@ -589,14 +597,20 @@ pub(crate) fn handle(
 }
 
 /// How many reports the agent may file in one chat, and additions to them.
+/// An agent outside UXDuck has the same for one connection.
 const MAX_FILED: usize = 3;
 const MAX_ADDED: usize = 10;
 
 /// A report the agent files by itself (S294): the title and text only,
 /// scrubbed as a bundle's free text is, sent anonymously with a follow-up key
-/// the root keeps so the agent can add to it from the same chat.
-pub(crate) fn file(engine: &mut Engine, params: &FeedbackFileParams) -> Result<Value, ApiError> {
-    let thread = agent_chat(engine, params.thread_id.as_deref())?;
+/// the root keeps so the agent can add to it from the same chat, or the same
+/// connection for an agent outside UXDuck.
+pub(crate) fn file(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: &FeedbackFileParams,
+) -> Result<Value, ApiError> {
+    let chat = filed_from(engine, connection, params.thread_id.as_deref())?;
     let title = scrub_text(params.title.trim());
     let text = scrub_text(params.text.trim());
     if title.is_empty() || title.chars().count() > MAX_TITLE {
@@ -605,19 +619,32 @@ pub(crate) fn file(engine: &mut Engine, params: &FeedbackFileParams) -> Result<V
     if text.is_empty() || text.chars().count() > MAX_SUGGESTION {
         return Err(invalid("the text must be 1 to 2,000 characters"));
     }
-    let filed = calls_in(engine, &thread, "feedback/file")
-        + engine
-            .agent_filing
-            .values()
-            .filter(|t| **t == thread)
-            .count();
+    let filed = match &chat {
+        Some(thread) => {
+            calls_in(engine, thread, "feedback/file")
+                + engine
+                    .agent_filing
+                    .values()
+                    .filter(|t| t.as_ref() == Some(thread))
+                    .count()
+        }
+        None => outside(engine, connection).map_or(0, |agent| agent.filed.len()),
+    };
     if filed >= MAX_FILED {
         return Err(ApiError::new(
             ErrorKind::Busy,
-            "three reports were filed from this chat already: add to one with feedback/add",
+            if chat.is_some() {
+                "three reports were filed from this chat already: add to one with feedback/add"
+            } else {
+                "three reports were filed over this connection already: add to one with feedback/add"
+            },
         ));
     }
     let report_id = uuid(&engine.random.token());
+    let mcp_client = match &chat {
+        Some(_) => None,
+        None => outside(engine, connection).map(|agent| agent.client.clone()),
+    };
     let order = FeedbackOrder {
         report_id: report_id.clone(),
         kind: params.kind,
@@ -625,13 +652,14 @@ pub(crate) fn file(engine: &mut Engine, params: &FeedbackFileParams) -> Result<V
         reply_email: None,
         reporter_name: None,
         surface: engine.surface(),
-        context: engine.agent_context(),
+        context: engine.agent_context(mcp_client.as_deref()),
         screenshot: None,
         bundle: None,
         flight: None,
         credit: false,
         from_agent: true,
         agent_filed: true,
+        over_mcp: chat.is_none(),
         attachments: Vec::new(),
         follow_up_key: Some(engine.random.token()),
         voice_notes: Vec::new(),
@@ -639,23 +667,43 @@ pub(crate) fn file(engine: &mut Engine, params: &FeedbackFileParams) -> Result<V
     if let Some(waiting) = engine.replying_to.take() {
         engine.awaiting_feedback.insert(report_id.clone(), waiting);
     }
-    engine.agent_filing.insert(report_id, thread);
+    if chat.is_none()
+        && let Some(agent) = outside_mut(engine, connection)
+    {
+        agent.filed.push(report_id.clone());
+    }
+    engine.agent_filing.insert(report_id, chat);
     engine.feedback.send(order);
     Ok(Value::Null)
 }
 
 /// More for a report filed from the same chat (S294): the agent's words,
-/// scrubbed, or files the person added from the chat's card.
+/// scrubbed, or files the person added from the chat's card. An agent
+/// outside UXDuck adds to what its own connection filed.
 pub(crate) fn add(
     engine: &mut Engine,
+    connection: ConnectionId,
     params: &FeedbackAddParams,
     operator: bool,
 ) -> Result<Value, ApiError> {
-    let thread = agent_chat(engine, params.thread_id.as_deref())?;
-    if !filed_in(engine, &thread).contains(&params.report_id) {
+    let chat = filed_from(engine, connection, params.thread_id.as_deref())?;
+    let (known, added) = match &chat {
+        Some(thread) => (
+            filed_in(engine, thread).contains(&params.report_id),
+            calls_in(engine, thread, "feedback/add"),
+        ),
+        None => outside(engine, connection).map_or((false, 0), |agent| {
+            (agent.filed.contains(&params.report_id), agent.added)
+        }),
+    };
+    if !known {
         return Err(ApiError::new(
             ErrorKind::NotFound,
-            "no report with that id was filed from this chat",
+            if chat.is_some() {
+                "no report with that id was filed from this chat"
+            } else {
+                "no report with that id was filed over this connection"
+            },
         ));
     }
     if !operator && !params.attachments.is_empty() {
@@ -682,11 +730,20 @@ pub(crate) fn add(
     {
         return Err(invalid("attach up to 10 files, 25 MB together"));
     }
-    if calls_in(engine, &thread, "feedback/add") >= MAX_ADDED {
+    if added >= MAX_ADDED {
         return Err(ApiError::new(
             ErrorKind::Busy,
-            "enough was added from this chat already",
+            if chat.is_some() {
+                "enough was added from this chat already"
+            } else {
+                "enough was added over this connection already"
+            },
         ));
+    }
+    if chat.is_none()
+        && let Some(agent) = outside_mut(engine, connection)
+    {
+        agent.added += 1;
     }
     let id = uuid(&engine.random.token());
     if let Some(waiting) = engine.replying_to.take() {
@@ -701,8 +758,14 @@ pub(crate) fn add(
     Ok(Value::Null)
 }
 
-/// The chat a report is filed from, where reports go out from here.
-fn agent_chat(engine: &Engine, thread: Option<&str>) -> Result<String, ApiError> {
+/// The chat a report is filed from, where reports go out from here. None
+/// for an agent outside UXDuck, such as an MCP client, which names no chat:
+/// the report is its connection's.
+fn filed_from(
+    engine: &Engine,
+    connection: ConnectionId,
+    thread: Option<&str>,
+) -> Result<Option<String>, ApiError> {
     if !engine.feedback.sends() {
         return Err(ApiError::new(
             ErrorKind::CapabilityDenied,
@@ -710,10 +773,19 @@ fn agent_chat(engine: &Engine, thread: Option<&str>) -> Result<String, ApiError>
              to prepare a draft for the person to review and send. Nothing has been sent.",
         ));
     }
-    thread
-        .filter(|id| engine.state.threads.contains_key(*id))
-        .map(str::to_owned)
-        .ok_or_else(|| invalid("reports are filed from a UXDuck chat"))
+    match thread {
+        None if outside(engine, connection).is_some() => Ok(None),
+        Some(id) if engine.state.threads.contains_key(id) => Ok(Some(id.to_owned())),
+        _ => Err(invalid("reports are filed from a UXDuck chat")),
+    }
+}
+
+fn outside(engine: &Engine, connection: ConnectionId) -> Option<&crate::OutsideAgent> {
+    engine.connections.get(&connection)?.outside.as_ref()
+}
+
+fn outside_mut(engine: &mut Engine, connection: ConnectionId) -> Option<&mut crate::OutsideAgent> {
+    engine.connections.get_mut(&connection)?.outside.as_mut()
 }
 
 /// How many calls of a method a chat holds, whatever became of them.
@@ -835,10 +907,15 @@ impl Engine {
 
     /// "UXDuck 0.4.1 · filed from a chat by the agent · 1 vehicle
     /// (ArduPilot Copter, udp-listen)": nothing about the page or the person.
-    fn agent_context(&self) -> String {
+    /// An agent outside UXDuck is named instead, as "filed over MCP by
+    /// claude-code".
+    fn agent_context(&self, mcp_client: Option<&str>) -> String {
         [
             format!("UXDuck {}", self.config.daemon_version),
-            "filed from a chat by the agent".to_owned(),
+            mcp_client.map_or_else(
+                || "filed from a chat by the agent".to_owned(),
+                |client| format!("filed over MCP by {client}"),
+            ),
             self.vehicles_line(),
         ]
         .join(" · ")

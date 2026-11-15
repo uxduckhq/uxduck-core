@@ -251,6 +251,24 @@ impl Admitted {
     }
 }
 
+/// An agent outside UXDuck while it is connected: a client of kind `agent`
+/// that is not the agent host inside the daemon. `uxduck mcp` connects one
+/// for Claude Code, Codex or Cursor, under the MCP client's own name.
+#[derive(Debug)]
+struct OutsideAgent {
+    /// The name it declared, as a token, for analytics and its reports.
+    client: String,
+    connected_us: u64,
+    /// The method of each tool call not answered yet.
+    calling: HashMap<RequestId, &'static str>,
+    /// Tool calls answered, and how many of them failed.
+    tools: u32,
+    tool_errors: u32,
+    /// Reports it filed with `feedback/file`, and how often it added to them.
+    filed: Vec<String>,
+    added: usize,
+}
+
 #[derive(Debug)]
 struct Connection {
     transport: Transport,
@@ -278,6 +296,8 @@ struct Connection {
     /// The order it was admitted in or last said whether it is seen:
     /// `app/focus` brings forward the page seen last.
     seen: u64,
+    /// Set when it is admitted as an agent outside UXDuck.
+    outside: Option<OutsideAgent>,
 }
 
 impl Connection {
@@ -368,8 +388,9 @@ pub struct Engine {
     feedback: Box<dyn feedback::FeedbackPort>,
     /// Feedback requests answered when the root reports back, by report id.
     awaiting_feedback: BTreeMap<String, (ConnectionId, Value)>,
-    /// Reports the agent is filing, by report id, with their chat (S294).
-    agent_filing: BTreeMap<String, String>,
+    /// Reports the agent is filing, by report id, with their chat (S294),
+    /// or none for an outside agent's.
+    agent_filing: BTreeMap<String, Option<String>>,
     /// Account calls waiting for the root (S27).
     awaiting_account: BTreeMap<String, (ConnectionId, Value)>,
     awaiting_identity: std::collections::BTreeSet<String>,
@@ -728,6 +749,7 @@ impl Engine {
                 visible: false,
                 focused: false,
                 seen: 0,
+                outside: None,
             },
         );
         id
@@ -803,6 +825,7 @@ impl Engine {
         self.tray_watchers.remove(&id);
         self.app_update.watchers.remove(&id);
         self.messages.forget(id);
+        self.mcp_closed(id);
         self.connections.remove(&id);
         self.tracers.remove(&id);
         self.telemetry_subscribers.remove(&id);
@@ -827,6 +850,15 @@ impl Engine {
         {
             if trace::private_method(parsed.method.as_deref()) {
                 connection.private_requests.insert(request_id.clone());
+            }
+            if let Some(outside) = connection.outside.as_mut()
+                && let Some(method) = parsed.method.as_deref().and_then(|method| {
+                    uxduck_contracts::rpc::ClientRequest::METHODS
+                        .iter()
+                        .find(|known| **known == method)
+                })
+            {
+                outside.calling.insert(request_id.clone(), method);
             }
             connection.pending.insert(request_id, now);
         }
@@ -996,6 +1028,9 @@ impl Engine {
             }
             _ => None,
         };
+        if let (Some(request_id), Some(latency)) = (&parsed.id, latency) {
+            self.mcp_answered(id, request_id, frame, latency);
+        }
         self.tap(id, TraceDirection::Out, &parsed, text.len(), latency);
         if let Some(connection) = self.connections.get(&id) {
             // A closed outbox means the connection is going away; the listener

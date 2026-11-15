@@ -329,11 +329,11 @@ pub(crate) fn handle(
         }
         ClientRequest::FeedbackFile(params) => {
             require(Read)?;
-            crate::feedback::file(engine, &params)
+            crate::feedback::file(engine, connection, &params)
         }
         ClientRequest::FeedbackAdd(params) => {
             require(Read)?;
-            crate::feedback::add(engine, &params, operator)
+            crate::feedback::add(engine, connection, &params, operator)
         }
         ClientRequest::JournalImport(params) => {
             crate::import::handle(engine, connection, params, operator)
@@ -1453,6 +1453,9 @@ pub(crate) fn notify(
             if let Some(client) = engine.connections.get_mut(&connection) {
                 client.pending.remove(&params.id);
                 client.private_requests.remove(&params.id);
+                if let Some(outside) = client.outside.as_mut() {
+                    outside.calling.remove(&params.id);
+                }
             }
         }
     }
@@ -1553,6 +1556,8 @@ fn initialize(
     }
     let default = admission::granted(kind.into(), &state.trust);
     let operator = default.len() == uxduck_core::domain::client::Capability::ALL.len();
+    // The agent host inside the daemon is the only internal one.
+    let outside = kind == ClientKind::Agent && state.transport != Transport::Internal;
     let client_id = state.client_id.clone();
     let executable = state.executable.clone();
     // A phone or tablet on the network has the record it paired with (S97).
@@ -1596,6 +1601,9 @@ fn initialize(
             extra: Vec::new(),
             approvals: params.capabilities.approvals,
         });
+    }
+    if outside {
+        engine.mcp_connected(connection, &params.client_info.name);
     }
     engine.window_admitted(kind.into());
     // A reloaded window takes back the controllers it held.

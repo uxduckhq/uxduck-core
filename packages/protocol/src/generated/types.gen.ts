@@ -5498,8 +5498,9 @@ export type Feedback = {
 };
 
 /**
- * More for a report filed from the same chat (S294), as a comment on its
- * issue: what the person said since, or a file they chose to add.
+ * More for a report filed from the same chat or MCP connection (S294), as
+ * a comment on its issue: what the person said since, or a file they chose
+ * to add.
  */
 export type FeedbackAddParams = {
     /**
@@ -5516,7 +5517,7 @@ export type FeedbackAddParams = {
      */
     text?: string;
     /**
-     * The chat; the agent's host fills it in.
+     * The chat; the agent's host fills it in. An MCP client has none.
      */
     threadId?: string | null;
 };
@@ -5565,10 +5566,10 @@ export type FeedbackBundle = {
 };
 
 /**
- * A report the agent files from a chat by itself (S294): what is broken,
- * missing or awkward in UXDuck, in words about UXDuck alone. Only these
- * words are sent, anonymously: no screenshot, chat, technical details,
- * flight data or account go with it.
+ * A report the agent files by itself (S294), from a chat or over MCP: what
+ * is broken, missing or awkward in UXDuck, in words about UXDuck alone.
+ * Only these words are sent, anonymously: no screenshot, chat, technical
+ * details, flight data or account go with it.
  */
 export type FeedbackFileParams = {
     /**
@@ -5580,7 +5581,9 @@ export type FeedbackFileParams = {
      */
     text: string;
     /**
-     * The chat it is filed from; the agent's host fills it in.
+     * The chat it is filed from; the agent's host fills it in. An agent
+     * outside UXDuck, such as an MCP client, has none: the report is its
+     * connection's.
      */
     threadId?: string | null;
     /**

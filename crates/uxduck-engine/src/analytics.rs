@@ -8,7 +8,7 @@ use uxduck_contracts::dto::analytics::{
     CommandOutcome, DaemonEvent, EngagementTask, EngagementUsage, ErrorFrame, LinkType,
     TurnOutcome, is_error_type, is_token,
 };
-use uxduck_contracts::dto::trace::Transport;
+use uxduck_contracts::dto::trace::{RequestId, Transport};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::command::{Command, ReceiptStatus};
@@ -19,6 +19,10 @@ use uxduck_core::events::{Actor, Change};
 
 use crate::runtime::AnalyticsPort;
 use crate::{ConnectionId, Engine};
+
+/// How many of an outside agent's tool calls are sent one by one, so a
+/// script polling over MCP cannot fill the outbox. `mcp_session` counts all.
+const MCP_CALLS_SENT: u32 = 200;
 
 fn performance_valid(sample: &AnalyticsPerformanceParams) -> bool {
     (1..=60_000).contains(&sample.window_ms)
@@ -470,6 +474,83 @@ impl Engine {
             compacted: stats.compacted,
             thinking_dropped: stats.thinking_dropped,
             spoken: spoken.is_some(),
+        });
+    }
+
+    /// An agent outside UXDuck was admitted, as `uxduck mcp` connects one.
+    pub(crate) fn mcp_connected(&mut self, connection: ConnectionId, name: &str) {
+        let client = token_or_other(name);
+        let connected_us = self.clock.now_us();
+        if let Some(state) = self.connections.get_mut(&connection) {
+            state.outside = Some(crate::OutsideAgent {
+                client: client.clone(),
+                connected_us,
+                calling: std::collections::HashMap::new(),
+                tools: 0,
+                tool_errors: 0,
+                filed: Vec::new(),
+                added: 0,
+            });
+        }
+        self.track(DaemonEvent::McpConnected { client });
+    }
+
+    /// An outside agent's tool call was answered: which tool and how it
+    /// went, never its arguments or its result.
+    pub(crate) fn mcp_answered(
+        &mut self,
+        connection: ConnectionId,
+        request: &RequestId,
+        reply: &Value,
+        latency_us: u64,
+    ) {
+        let Some(outside) = self
+            .connections
+            .get_mut(&connection)
+            .and_then(|c| c.outside.as_mut())
+        else {
+            return;
+        };
+        let Some(method) = outside.calling.remove(request) else {
+            return;
+        };
+        let error = reply.get("error").map(|error| {
+            error
+                .pointer("/data/kind")
+                .and_then(Value::as_str)
+                .filter(|kind| is_token(kind))
+                .unwrap_or("other")
+                .to_owned()
+        });
+        outside.tools += 1;
+        outside.tool_errors += u32::from(error.is_some());
+        if outside.tools > MCP_CALLS_SENT {
+            return;
+        }
+        let client = outside.client.clone();
+        self.track(DaemonEvent::McpToolCalled {
+            client,
+            method: method.to_owned(),
+            ok: error.is_none(),
+            error,
+            ms: latency_us / 1000,
+        });
+    }
+
+    /// An outside agent's connection closed.
+    pub(crate) fn mcp_closed(&mut self, connection: ConnectionId) {
+        let Some(outside) = self
+            .connections
+            .get_mut(&connection)
+            .and_then(|c| c.outside.take())
+        else {
+            return;
+        };
+        self.track(DaemonEvent::McpSession {
+            client: outside.client,
+            ms: self.clock.now_us().saturating_sub(outside.connected_us) / 1000,
+            tools: outside.tools,
+            tool_errors: outside.tool_errors,
         });
     }
 

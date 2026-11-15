@@ -671,6 +671,33 @@ pub enum DaemonEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_write_tokens: Option<u64>,
     },
+    /// An agent outside UXDuck connected, as `uxduck mcp` connects Claude
+    /// Code, Codex or Cursor (ADR-0016): the name it gave, as a token.
+    McpConnected {
+        client: String,
+    },
+    /// A tool call from such a connection was answered: which tool and how
+    /// it went, never its arguments or its result. A connection's first 200
+    /// are sent, and `mcp_session` counts them all.
+    McpToolCalled {
+        client: String,
+        /// The API method the tool calls, such as `vehicle/list`.
+        method: String,
+        ok: bool,
+        /// A failed call's error kind, such as `capability-denied`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// From the request to its answer, a person's approval included.
+        ms: u64,
+    },
+    /// Such a connection closed: how long it was open and what it did.
+    McpSession {
+        client: String,
+        ms: u64,
+        /// Tool calls answered, and how many of them failed.
+        tools: u32,
+        tool_errors: u32,
+    },
     ApprovalResolved {
         decision: ApprovalDecision,
     },

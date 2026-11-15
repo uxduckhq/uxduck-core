@@ -97,6 +97,16 @@ uxduck approvals deny <id>
 
 Change tool permissions in **Settings › Agents and tools**. Read access can inspect what is happening without arming, changing modes or writing parameters.
 
+## Reports to the UXDuck team
+
+UXDuck asks a connected agent to report what it finds broken, missing or awkward in UXDuck, without waiting to be asked. The agent calls `feedback_file` with a kind (`problem`, `suggestion` or `idea`), a short title and up to 2,000 characters of text. `feedback_add` adds to a report filed over the same connection. A connection can file three reports and add to them ten times.
+
+Only the title and text are sent, with UXDuck's version, your platform, the MCP client's name and the autopilot, type and link kind of connected vehicles. Paths, network and e-mail addresses and secrets are removed from the text first. No screenshot, telemetry, flight data or account goes with a report, even when you are signed in.
+
+Your MCP client shows the call like any other tool call. With `uxduck mcp --all-tools`, its per-tool rules can deny `feedback_file`.
+
+With **Settings › Privacy › Share usage analytics** on, UXDuck also counts that an MCP client connected, which tools it called, whether each call failed and how long it took. It never counts a tool's arguments or results.
+
 ## Choose a simulation's starting place
 
 Ask: **“Find Queenstown in New Zealand and start a simulated VTOL there.”**

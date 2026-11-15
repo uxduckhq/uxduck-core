@@ -20,7 +20,7 @@ mod catalogue;
 /// The MCP revision this server speaks.
 pub const PROTOCOL: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "UXDuck vehicle tools. Before advice, read vehicle_history and cite dated entries; read param_get and report describedBy; never guess undescribed parameters. Named simulation starts: place_search, place_locate, terrain_at, then sim_start; ask about ambiguous places. Reads are allowed; commands/configuration need capabilities and approvals. Give reasons for parameter writes; history records them. For reported physical work, offer one concise note and ask before vehicle_add_note unless asked to record it. Record completed work only; attribute reports, retain dates, read history to avoid duplicates, never edit/delete notes. Config permission is not note consent. After your changes, offer notes only for useful context absent from automatic history; never interrupt an armed vehicle or unfinished work, or repeat declined offers. For telemetry_window report coverage, missing signals and historyTruncated; for packet/routing/log evidence report coverage and missing provenance. Empty or incomplete results do not prove nothing happened. vehicle_messages is a snapshot; poll for newer messages. Tuning: read tuning_state first; change gains only with param_set; a person flies AutoTune.";
+const INSTRUCTIONS: &str = "UXDuck vehicle tools. Before advice, read vehicle_history and cite dated entries; read param_get and report describedBy; never guess undescribed parameters. Named simulation starts: place_search, place_locate, terrain_at, then sim_start; ask about ambiguous places. Reads are allowed; commands/configuration need capabilities and approvals. Give reasons for parameter writes; history records them. For reported physical work, offer one concise note and ask before vehicle_add_note unless asked to record it. Record completed work only; attribute reports, retain dates, read history to avoid duplicates, never edit/delete notes. Config permission is not note consent. After your changes, offer notes only for useful context absent from automatic history; never interrupt an armed vehicle or unfinished work, or repeat declined offers. For telemetry_window report coverage, missing signals and historyTruncated; for packet/routing/log evidence report coverage and missing provenance. Empty or incomplete results do not prove nothing happened. vehicle_messages is a snapshot; poll for newer messages. Tuning: read tuning_state first; change gains only with param_set; a person flies AutoTune. Report UXDuck bugs, gaps or friction to its team unprompted: feedback_file {kind: problem|suggestion|idea, title, text}, once each, then feedback_add. About UXDuck only, never the person, places, vehicles or files.";
 
 fn reply(id: &Value, result: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -37,7 +37,7 @@ fn failure(id: &Value, code: i64, message: &str) -> Value {
 pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
-    let catalogue = tools();
+    let catalogue = mcp_tools();
     let mut session = Session::default();
     loop {
         let answer = tokio::select! {
@@ -62,6 +62,15 @@ pub async fn run(data_dir: &Path, all_tools: bool) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// The agent tools an MCP client can use. The suggestion card needs
+/// UXDuck's chat to show it, so an MCP client files with `feedback_file`.
+fn mcp_tools() -> Vec<Tool> {
+    tools()
+        .into_iter()
+        .filter(|tool| tool.method != "feedback/suggest")
+        .collect()
 }
 
 async fn daemon_frame(daemon: &mut Option<LocalClient>) -> Result<Option<Value>, CliError> {
@@ -285,13 +294,56 @@ mod tests {
 
     #[test]
     fn startup_instructions_and_text_results_stay_compact_without_losing_data() {
-        assert!(INSTRUCTIONS.len() < 1_200);
+        // 1,200 until the instructions also asked for reports (2026-11-10).
+        assert!(INSTRUCTIONS.len() < 1_420);
         let value = json!({ "coverage": { "truncated": true, "notes": ["missing packets"] }, "position": { "lat": 51.5, "lon": -0.1 }, "message": "line one\nline two" });
         let result = tool_result(value.clone());
         assert_eq!(result["structuredContent"], value);
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, value.to_string());
         assert_eq!(serde_json::from_str::<Value>(text).unwrap(), value);
+    }
+
+    /// An MCP client files reports itself: the instructions give the call
+    /// whole, so it needs no search, and the card only UXDuck's chat can
+    /// show is not offered.
+    #[test]
+    fn an_mcp_client_is_told_to_file_reports_and_given_the_tools_that_send_them() {
+        assert!(
+            INSTRUCTIONS.contains("feedback_file {kind: problem|suggestion|idea, title, text}")
+        );
+        let catalogue = mcp_tools();
+        let file = catalogue
+            .iter()
+            .find(|tool| tool.name == "feedback_file")
+            .unwrap();
+        assert_eq!(
+            file.parameters["properties"]["kind"]["enum"],
+            json!(["problem", "suggestion", "idea"])
+        );
+        assert_eq!(
+            file.parameters["required"],
+            json!(["kind", "title", "text"])
+        );
+        assert!(file.parameters["properties"].get("threadId").is_none());
+        assert!(catalogue.iter().any(|tool| tool.name == "feedback_add"));
+        assert!(!catalogue.iter().any(|tool| tool.name == "feedback_suggest"));
+        assert_eq!(catalogue.len() + 1, tools().len());
+        assert_eq!(
+            catalogue::invocation(
+                &catalogue,
+                json!({
+                    "name": "feedback_file",
+                    "arguments": { "kind": "problem", "title": "t", "text": "x" }
+                })
+            )
+            .unwrap(),
+            (
+                "feedback/file".to_owned(),
+                json!({ "kind": "problem", "title": "t", "text": "x" })
+            )
+        );
+        assert!(catalogue::invocation(&catalogue, json!({ "name": "feedback_suggest" })).is_err());
     }
 
     #[test]

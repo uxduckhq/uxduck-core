@@ -215,10 +215,10 @@ pub struct FeedbackSuggestParams {
     pub text: String,
 }
 
-/// A report the agent files from a chat by itself (S294): what is broken,
-/// missing or awkward in UXDuck, in words about UXDuck alone. Only these
-/// words are sent, anonymously: no screenshot, chat, technical details,
-/// flight data or account go with it.
+/// A report the agent files by itself (S294), from a chat or over MCP: what
+/// is broken, missing or awkward in UXDuck, in words about UXDuck alone.
+/// Only these words are sent, anonymously: no screenshot, chat, technical
+/// details, flight data or account go with it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedbackFileParams {
@@ -228,7 +228,9 @@ pub struct FeedbackFileParams {
     pub title: String,
     /// What happened or what they want, and why; up to 2,000 characters.
     pub text: String,
-    /// The chat it is filed from; the agent's host fills it in.
+    /// The chat it is filed from; the agent's host fills it in. An agent
+    /// outside UXDuck, such as an MCP client, has none: the report is its
+    /// connection's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
 }
@@ -245,8 +247,9 @@ pub struct FeedbackFiled {
     pub issue: Option<String>,
 }
 
-/// More for a report filed from the same chat (S294), as a comment on its
-/// issue: what the person said since, or a file they chose to add.
+/// More for a report filed from the same chat or MCP connection (S294), as
+/// a comment on its issue: what the person said since, or a file they chose
+/// to add.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedbackAddParams {
@@ -255,7 +258,7 @@ pub struct FeedbackAddParams {
     /// Up to 2,000 characters.
     #[serde(default)]
     pub text: String,
-    /// The chat; the agent's host fills it in.
+    /// The chat; the agent's host fills it in. An MCP client has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     /// Files the person added from the chat's card, such as a screenshot.
