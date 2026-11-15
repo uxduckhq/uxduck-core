@@ -14,8 +14,14 @@ use uxduck_engine::runtime::{Clock, LinkLog, ReplayRead, ReplayWork};
 use crate::adapters::system::SystemClock;
 use crate::daemon::engine_task::EngineHandle;
 
-/// The most a replay holds in memory: some ten hours of a busy link.
+/// The most a replay holds, some ten hours of a busy link. The whole of what
+/// a replay plays is in memory, where the engine goes through it and seeks
+/// in it, so a longer log could take the computer's memory and UXDuck with
+/// it. A longer one is refused in [`TOO_LONG`]'s words, never cut short.
 const MAX_BYTES: u64 = 1 << 30;
+/// What a person is told of a flight whose log is over [`MAX_BYTES`].
+const TOO_LONG: &str =
+    "This flight's log is over 1 GB. A replay is held in memory and takes 1 GB at most.";
 /// Read before a flight's start offset for its lead-in: ten seconds of a
 /// busy link with room to spare.
 const LEAD_BYTES: u64 = 8 << 20;
@@ -173,7 +179,7 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             own(link_id, file)?;
             let mut out = Vec::new();
             append_range(&tlogs.join(file), 0, *from_us, *to_us, &mut out)
-                .map_err(|e| format!("Cannot read this flight's log: {e}"))?;
+                .map_err(|e| unread(&e))?;
             if out.is_empty() {
                 return Err("This flight's log is not on this computer any more.".into());
             }
@@ -185,7 +191,10 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
                 .map_err(|e| format!("Cannot read {}: {e}", path.display()))?
                 .len();
             if size > MAX_BYTES {
-                return Err("This file is too large to replay (over 1 GB).".into());
+                return Err(
+                    "This file is over 1 GB. A replay is held in memory and takes 1 GB at most."
+                        .into(),
+                );
             }
             std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))
         }
@@ -196,12 +205,22 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             start,
         } => {
             let bytes = link_records(tlogs, link_id, *from_us, *to_us, start.as_ref())
-                .map_err(|e| format!("Cannot read this flight's log: {e}"))?;
+                .map_err(|e| unread(&e))?;
             if bytes.is_empty() {
                 return Err("This flight's log is not on this computer any more.".into());
             }
             Ok(bytes)
         }
+    }
+}
+
+/// Why a flight's log gave no replay, in words: it is longer than a replay
+/// holds, or it could not be read.
+fn unread(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::FileTooLarge {
+        TOO_LONG.into()
+    } else {
+        format!("Cannot read this flight's log: {error}")
     }
 }
 
@@ -309,9 +328,6 @@ fn link_records(
             })
             .map(|(_, offset)| offset.saturating_sub(LEAD_BYTES));
         let past = append_range(path, hinted.unwrap_or(0), from_us, to_us, &mut out)?;
-        if out.len() as u64 > MAX_BYTES {
-            return Err(std::io::Error::other("the flight's log is over 1 GB"));
-        }
         if past {
             break;
         }
@@ -327,6 +343,13 @@ const MAX_RECORD: usize = 8 + 10 + 255 + 2 + 13;
 
 /// Appends a file's records in the range, from `offset` (resynchronised
 /// when it is not the start). True once a record past the range was seen.
+/// The file is read through to the range however far into it the range
+/// is: until 2026-11-14 only its first 1 GB from `offset` was read, and a
+/// flight further in was cut short there, or not found, without a word.
+///
+/// # Errors
+/// When the file cannot be read, or `out` comes to more than a replay
+/// holds ([`MAX_BYTES`]), as [`std::io::ErrorKind::FileTooLarge`].
 fn append_range(
     path: &Path,
     offset: u64,
@@ -336,18 +359,25 @@ fn append_range(
 ) -> std::io::Result<bool> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
-    append_records(file.take(MAX_BYTES), offset != 0, (from_us, to_us), out)
+    append_records(file, offset != 0, (from_us, to_us), out, MAX_BYTES)
 }
 
 /// Appends the records in `from_us..=to_us` that `log` holds, read a
 /// chunk at a time and no further than the first record past the range.
 /// `resync` when `log` begins in the middle of a record. Records end at
 /// the first that is not whole, as [`uxduck_mavlink::tlog::records`] do.
+/// Only what is appended counts against `most`: what comes before the
+/// range is read past, a chunk at a time.
+///
+/// # Errors
+/// When `log` cannot be read, or `out` comes to more than `most` bytes,
+/// as [`std::io::ErrorKind::FileTooLarge`].
 fn append_records(
     mut log: impl Read,
     resync: bool,
     (from_us, to_us): (u64, u64),
     out: &mut Vec<u8>,
+    most: u64,
 ) -> std::io::Result<bool> {
     let mut bytes = Vec::new();
     let mut synced = !resync;
@@ -379,6 +409,9 @@ fn append_records(
             whole = at + 8 + frame.len();
             if stamp >= from_us {
                 out.extend_from_slice(&bytes[at..whole]);
+                if out.len() as u64 > most {
+                    return Err(std::io::ErrorKind::FileTooLarge.into());
+                }
             }
         }
         // What is left is a record cut by the chunk, or not a record.
@@ -436,6 +469,7 @@ mod tests {
             true,
             (from_us, to_us),
             &mut out,
+            u64::MAX,
         )
         .unwrap();
         assert!(past);
@@ -453,13 +487,50 @@ mod tests {
         // A range that ends in the last chunk: the records across chunks.
         let (from_us, to_us) = (from_us, T0 * 1_000_000 + (i - 10) * 10_000);
         let mut out = Vec::new();
-        assert!(append_records(&log[..], false, (from_us, to_us), &mut out).unwrap());
+        assert!(append_records(&log[..], false, (from_us, to_us), &mut out, u64::MAX).unwrap());
         let count = uxduck_mavlink::tlog::read(&out).len() as u64;
         assert_eq!(count, i - 10 - 10_000 + 1);
         // To the end of the file.
         let mut out = Vec::new();
-        assert!(!append_records(&log[..], false, (from_us, u64::MAX), &mut out).unwrap());
+        assert!(!append_records(&log[..], false, (from_us, u64::MAX), &mut out, u64::MAX).unwrap());
         assert_eq!(uxduck_mavlink::tlog::read(&out).len() as u64, i - 10_000);
+    }
+
+    /// A flight further into its file than a replay holds is read whole:
+    /// only what is kept counts against the most a replay holds. Until
+    /// 2026-11-14 the file's first 1 GB was all that was read, so such a
+    /// flight was cut short or not found, without a word. One that is itself
+    /// longer than a replay holds is refused, never cut.
+    #[test]
+    fn a_flight_far_into_a_long_file_is_read_whole_and_one_too_long_is_refused() {
+        let mut log = Vec::new();
+        for i in 0..10_000u64 {
+            let frame = sim::heartbeat_frame(1, 1, 0);
+            uxduck_mavlink::tlog::record(&mut log, T0 * 1_000_000 + i * 10_000, &frame).unwrap();
+        }
+        let record = log.len() as u64 / 10_000;
+        // The last hundred records, with room for two hundred: the 9,900
+        // before them are fifty times what may be kept.
+        let most = 200 * record;
+        let from_us = T0 * 1_000_000 + 9_900 * 10_000;
+        let mut out = Vec::new();
+        assert!(!append_records(&log[..], false, (from_us, u64::MAX), &mut out, most).unwrap());
+        assert_eq!(uxduck_mavlink::tlog::read(&out).len(), 100);
+        // Three hundred records are more than two hundred: refused, in the
+        // words a person reads.
+        let from_us = T0 * 1_000_000 + 9_700 * 10_000;
+        let mut out = Vec::new();
+        let error = append_records(&log[..], false, (from_us, u64::MAX), &mut out, most)
+            .expect_err("more than a replay holds");
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert_eq!(
+            unread(&error),
+            "This flight's log is over 1 GB. A replay is held in memory and takes 1 GB at most."
+        );
+        assert_eq!(
+            unread(&std::io::Error::other("the disk went away")),
+            "Cannot read this flight's log: the disk went away"
+        );
     }
 
     /// A log that begins with more than a chunk of bytes that are no
@@ -472,7 +543,7 @@ mod tests {
             uxduck_mavlink::tlog::record(&mut log, T0 * 1_000_000 + i * 1_000, &frame).unwrap();
         }
         let mut out = Vec::new();
-        assert!(!append_records(&log[..], true, (0, u64::MAX), &mut out).unwrap());
+        assert!(!append_records(&log[..], true, (0, u64::MAX), &mut out, u64::MAX).unwrap());
         assert_eq!(uxduck_mavlink::tlog::read(&out).len(), 100);
     }
 

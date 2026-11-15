@@ -2,7 +2,8 @@
 //! QGroundControl and Mission Planner keep on this computer, and folders
 //! the person adds, looked through for arm edges when Flights opens and
 //! each minute after, on a thread of their own. Nothing is copied, moved or
-//! written: a flight replays straight from the other app's file.
+//! written: a flight replays straight from the other app's file. A log is
+//! read a record at a time, never whole, so no size of log is left out.
 //!
 //! An added folder is looked into on its own, its top level only, or, with
 //! all subfolders on, through its whole tree (a custom ground
@@ -21,6 +22,8 @@
 //!   Windows installs, `logs` in its program folder.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -40,8 +43,11 @@ const DEPTH: usize = 4;
 const DEEP_EVERY: Duration = Duration::from_mins(10);
 /// The most entries one look reads through a folder with all subfolders on.
 const MAX_ENTRIES: usize = 250_000;
-/// The largest file looked through.
-const MAX_FILE: u64 = 2 << 30;
+/// How much of a log is read from the disk at a time.
+const READ_AT_A_TIME: usize = 256 * 1024;
+/// The longest record: a stamp and the longest MAVLink frame (a v2 header,
+/// 255 bytes of payload, its checksum and a signature).
+const MAX_RECORD: usize = 8 + 10 + 255 + 2 + 13;
 /// `MAV_TYPE_GCS`: a ground station's heartbeat, never a flight.
 const GCS: u8 = 6;
 
@@ -203,9 +209,48 @@ fn walk(folder: &Path, depth: Option<usize>, out: &mut Vec<PathBuf>, budget: &mu
     }
 }
 
+/// Reads the log's next record into `record`: its stamp and how long its
+/// frame is, which follows the stamp's 8 bytes. None where the log ends or
+/// what follows is not a whole record.
+fn next_record(
+    log: &mut impl Read,
+    record: &mut [u8; MAX_RECORD],
+) -> std::io::Result<Option<(u64, usize)>> {
+    // A stamp and the three bytes that say how long its frame is.
+    const HEAD: usize = 8 + 3;
+    let whole = |read: std::io::Result<()>| match read {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    };
+    if !whole(log.read_exact(&mut record[..HEAD]))? {
+        return Ok(None);
+    }
+    let Some(len) = uxduck_mavlink::framing::frame_len(&record[8..HEAD]) else {
+        return Ok(None);
+    };
+    if !whole(log.read_exact(&mut record[HEAD..8 + len]))? {
+        return Ok(None);
+    }
+    let mut stamp = [0u8; 8];
+    stamp.copy_from_slice(&record[..8]);
+    Ok(Some((u64::from_be_bytes(stamp), len)))
+}
+
 /// A tlog's flights: each vehicle's arm to disarm, by its heartbeats.
-#[must_use]
-pub fn flights_in(bytes: &[u8], folder: &str, path: &Path) -> Vec<FoundFlight> {
+///
+/// The log is read a record at a time and none of it is held, so its size
+/// does not matter. Until 2026-11-14 a log was read whole into memory, and
+/// one over 2 GB was skipped without a word to anyone. Records end at the
+/// first that is not whole, as [`uxduck_mavlink::tlog::records`] do.
+///
+/// # Errors
+/// When the log cannot be read. Its end is no error.
+pub fn flights_in(
+    mut log: impl Read,
+    folder: &str,
+    path: &Path,
+) -> std::io::Result<Vec<FoundFlight>> {
     let mut armed: HashMap<u8, (u64, String)> = HashMap::new();
     let mut flights = Vec::new();
     let mut last = 0u64;
@@ -213,7 +258,9 @@ pub fn flights_in(bytes: &[u8], folder: &str, path: &Path) -> Vec<FoundFlight> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    for (stamp, frame) in uxduck_mavlink::tlog::read(bytes) {
+    let mut record = [0u8; MAX_RECORD];
+    while let Some((stamp, len)) = next_record(&mut log, &mut record)? {
+        let frame = &record[8..8 + len];
         last = stamp;
         let (Some(header), Some(payload)) = (
             uxduck_mavlink::framing::header(frame),
@@ -261,7 +308,7 @@ pub fn flights_in(bytes: &[u8], folder: &str, path: &Path) -> Vec<FoundFlight> {
             recording: false,
         });
     }
-    flights
+    Ok(flights)
 }
 
 /// `MAV_TYPE` by name, for the vehicles UXDuck draws.
@@ -440,18 +487,21 @@ impl Found {
                     .get(&path)
                     .filter(|seen| seen.size == size && seen.modified == modified)
                     .cloned();
-                let mut seen = match known {
-                    Some(seen) => seen,
-                    None if size > MAX_FILE => continue,
-                    None => {
-                        let Ok(bytes) = std::fs::read(&path) else {
-                            continue;
-                        };
-                        Seen {
-                            size,
-                            modified,
-                            flights: flights_in(&bytes, &folder, &path),
-                        }
+                let mut seen = if let Some(seen) = known {
+                    seen
+                } else {
+                    // Read through, however long it is. One that cannot be
+                    // read is tried again at the next look.
+                    let Ok(flights) = File::open(&path).and_then(|file| {
+                        let log = BufReader::with_capacity(READ_AT_A_TIME, file);
+                        flights_in(log, &folder, &path)
+                    }) else {
+                        continue;
+                    };
+                    Seen {
+                        size,
+                        modified,
+                        flights,
                     }
                 };
                 for flight in &mut seen.flights {
@@ -544,10 +594,11 @@ mod tests {
     fn a_tlogs_flights_are_each_vehicles_arm_to_disarm() {
         let bytes = log(&[(1, 10, 40), (2, 20, 70)], 60);
         let mut flights = flights_in(
-            &bytes,
+            &bytes[..],
             "qgroundcontrol",
             Path::new("/x/2026-10-28 14-02-17.tlog"),
-        );
+        )
+        .unwrap();
         flights.sort_by_key(|f| f.system_id);
         assert_eq!(flights.len(), 2);
         assert_eq!(flights[0].armed_at_us, T0 + 10_000_000);
@@ -617,6 +668,121 @@ mod tests {
                     deep: None,
                 })
                 .is_err()
+        );
+    }
+
+    /// A log is read a record at a time: it gives the flights reading it
+    /// whole did, also one that ends inside a record, one with bytes that
+    /// are no record after its last, and one read a few bytes at a time.
+    #[test]
+    fn a_log_read_a_record_at_a_time_gives_the_flights_of_one_read_whole() {
+        /// Gives at most seven bytes a read, so every record spans reads.
+        struct Trickle<'a>(&'a [u8]);
+        impl Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.len().min(buf.len()).min(7);
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        /// A disk that stops answering.
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("the disk went away"))
+            }
+        }
+        /// The flights as they were found before: every record at once.
+        fn whole(bytes: &[u8]) -> Vec<(u8, u64, Option<u64>)> {
+            let mut armed: HashMap<u8, u64> = HashMap::new();
+            let mut flights = Vec::new();
+            let mut last = 0;
+            for (stamp, frame) in uxduck_mavlink::tlog::read(bytes) {
+                last = stamp;
+                let header = uxduck_mavlink::framing::header(frame).unwrap();
+                let payload = uxduck_mavlink::framing::payload(frame).unwrap();
+                if header.message_id != 0 || payload[4] == GCS {
+                    continue;
+                }
+                let system = header.system_id;
+                if payload[6] & 0x80 == 0 {
+                    if let Some(from) = armed.remove(&system) {
+                        flights.push((system, from, Some(stamp)));
+                    }
+                } else {
+                    armed.entry(system).or_insert(stamp);
+                }
+            }
+            flights.extend(armed.into_iter().map(|(s, from)| (s, from, Some(last))));
+            flights.sort_unstable();
+            flights
+        }
+        let found = |log: &[u8]| {
+            let mut flights: Vec<(u8, u64, Option<u64>)> =
+                flights_in(Trickle(log), "f", Path::new("/x/a.tlog"))
+                    .unwrap()
+                    .into_iter()
+                    .map(|f| (f.system_id, f.armed_at_us, f.ended_at_us))
+                    .collect();
+            flights.sort_unstable();
+            flights
+        };
+        let bytes = log(&[(1, 10, 40), (2, 20, 70)], 60);
+        assert_eq!(found(&bytes), whole(&bytes));
+        assert_eq!(found(&bytes).len(), 2);
+        // The log ends inside a record: the flights up to it.
+        let cut = &bytes[..bytes.len() - 5];
+        assert_eq!(found(cut), whole(cut));
+        assert_eq!(found(cut).len(), 2);
+        // Bytes that are no record end it, as they do a log read whole.
+        let mut noise = log(&[(1, 10, 40)], 30);
+        noise.extend_from_slice(&[0u8; 64]);
+        noise.extend_from_slice(&log(&[(3, 1, 5)], 10));
+        assert_eq!(found(&noise), whole(&noise));
+        assert_eq!(found(&noise).len(), 1);
+        // A log that cannot be read is an error, never an empty log.
+        assert!(flights_in(Broken, "f", Path::new("/x/a.tlog")).is_err());
+    }
+
+    /// A log over 2 GB was skipped without a word until 2026-11-14. Its
+    /// length is a hole in the file here, not 2 GB written to the disk.
+    #[test]
+    fn a_log_over_2_gb_is_looked_through_like_any_other() {
+        let data = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let long = logs.path().join("three-days.tlog");
+        std::fs::write(&long, log(&[(1, 5, 15), (2, 8, 30)], 20)).unwrap();
+        File::options()
+            .write(true)
+            .open(&long)
+            .unwrap()
+            .set_len((2 << 30) + 4096)
+            .unwrap();
+        assert!(std::fs::metadata(&long).unwrap().len() > 2 << 30);
+        std::fs::write(logs.path().join("short.tlog"), log(&[(3, 5, 15)], 20)).unwrap();
+        let found = Found::new(data.path());
+        let path = logs.path().display().to_string();
+        found
+            .change(&FlightFolderParams {
+                id: path.clone(),
+                on: Some(true),
+                remove: false,
+                deep: None,
+            })
+            .unwrap();
+        let mut flights: Vec<(String, u8)> = settled(&found, &path)
+            .into_iter()
+            .map(|f| (f.file, f.system_id))
+            .collect();
+        flights.sort();
+        assert_eq!(
+            flights,
+            [
+                ("short.tlog".to_owned(), 3),
+                ("three-days.tlog".to_owned(), 1),
+                ("three-days.tlog".to_owned(), 2),
+            ]
         );
     }
 
