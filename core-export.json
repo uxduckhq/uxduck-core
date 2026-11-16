@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "1cd979d7aa498e7b5cc7c900a6eb3d65ce3f1ce7",
+  "sourceCommit": "f7ccaf2be15ef649c33853c51be3db76778fcce7",
   "licenseReady": true,
   "files": [
     {
@@ -8316,7 +8316,7 @@
     },
     {
       "path": "docs/site/confirmations.md",
-      "sha256": "e7b70655ea41bf620325401f6d4d238b41fabef70218c643591c480d4097504c",
+      "sha256": "e7f1d60867bfbf0451fbc8c4f588501c23bd82b10c0719f883086f313c76f52b",
       "executable": false
     },
     {

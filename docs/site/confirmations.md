@@ -30,7 +30,11 @@ The options beside **Go to** say what the vehicle does once it gets there. An Ar
 
 Home is where the vehicle returns to and lands, and where its heights are measured from. On the Cockpit tab, open **Home** and press **Set home**, then click the map: home moves there, on the ground, at the height UXDuck's terrain gives. Press **Esc** or **Stop** when done. **Use vehicle position** moves home to where the vehicle is now, on the ground under it while it is armed, and **Enter coordinates** takes a latitude and longitude, with a height above sea level if you know it.
 
-Under **Advanced**, **Set EKF origin** gives an ArduPilot vehicle without GPS the point its position estimate is measured from, in the same way. ArduPilot takes an EKF origin only while it has none, and a home only once it has an origin, so a vehicle without GPS needs its origin first.
+**Your position** is where you are, set by hand: press **Set your position** and click the map, or enter coordinates. The map's **You** then shows there instead of your device's location, which indoors can be far off. Setting it turns your device's location off, so nothing asks your device while it is set. After **Clear**, **Show your location** asks your device again. It stays in this browser.
+
+Under **Advanced**, **Set EKF origin** gives an ArduPilot vehicle without GPS the point its position estimate is measured from, in the same way, and **Use your position** puts it at your position, on the ground. ArduPilot takes an EKF origin only while it has none, and a home only once it has an origin, so a vehicle without GPS needs its origin first.
+
+A vehicle with an EKF origin but no position of its own is shown at its origin, hollow and named "· EKF origin", and the map's bar says so. It is not where the vehicle is: a Rover or a Plane without GPS reports no position at all, and a Copter reports its origin.
 
 From the command line: `uxduck command set-home --lat -35.3619 --lon 149.1652`, or with no position for where the vehicle is, and `uxduck command set-ekf-origin --lat … --lon …`.
 
