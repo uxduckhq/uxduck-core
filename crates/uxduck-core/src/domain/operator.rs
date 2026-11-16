@@ -1766,6 +1766,14 @@ pub struct ControllerMapping {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_id: Option<String>,
     pub mapping_id: String,
+    /// Set once the controller's id is gone for good (maintainer,
+    /// 2026-11-15): a controller with no serial number has a new id each
+    /// time it is plugged in. Only the computer it was plugged into can
+    /// tell, so only that computer sets this. No lookup reads it: the entry
+    /// is found by its name as before, until
+    /// [`Operator::retire_controller`] drops it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
 }
 
 impl Operator {
@@ -1848,8 +1856,42 @@ impl Operator {
             controller_name: controller_name.to_owned(),
             vehicle_id: vehicle_id.map(str::to_owned),
             mapping_id: mapping_id.to_owned(),
+            retired: false,
         });
         true
+    }
+
+    /// Marks what is kept for a controller whose id is gone for good, then
+    /// drops each retired mapping that has a newer retired one of the same
+    /// name, vehicle and mapping, whichever computer marked it. `false` if
+    /// nothing changed.
+    ///
+    /// No controller is asked about by a retired id again, and a lookup by
+    /// name takes the newest of a name and vehicle, so [`Self::vehicle_mapping`]
+    /// and [`Self::mapping_for`] answer for every other id as they did. The
+    /// newer one has to be retired too, and of the same mapping, because
+    /// resetting a controller removes what is kept for its id and deleting a
+    /// mapping removes what names it: either would otherwise bring back an
+    /// older choice that was dropped here.
+    pub fn retire_controller(&mut self, controller_id: &str) -> bool {
+        let mut changed = false;
+        for mapping in &mut self.controller_mappings {
+            if mapping.controller_id == controller_id && !mapping.retired {
+                mapping.retired = true;
+                changed = true;
+            }
+        }
+        let mut newer = HashSet::new();
+        let mut kept: Vec<bool> = self
+            .controller_mappings
+            .iter()
+            .rev()
+            .map(|m| !m.retired || newer.insert((&m.controller_name, &m.vehicle_id, &m.mapping_id)))
+            .collect();
+        changed |= kept.contains(&false);
+        self.controller_mappings
+            .retain(|_| kept.pop() == Some(true));
+        changed
     }
 }
 
@@ -2584,6 +2626,270 @@ mod tests {
             operator.vehicle_mapping("unit-199", "Radio", &["v1"]),
             Some("mapping-199")
         );
+    }
+
+    /// A controller with no serial number has a new id each time it is
+    /// plugged in, so what was kept for each of them piled up (maintainer,
+    /// 2026-11-15).
+    #[test]
+    fn a_retired_mapping_goes_once_a_newer_retired_one_stands_for_it() {
+        let mut operator = operator_with_no_mappings();
+        operator.choose_mapping("unit-1", "Radio", Some("v1"), "mode-1");
+        operator.choose_mapping("keyboard:1", "Keyboard", Some("v1"), "sim-keyboard");
+        operator.choose_mapping("gp-session-1", "Radio", Some("v1"), "mode-2");
+        assert!(operator.retire_controller("gp-session-1"));
+        assert!(!operator.retire_controller("gp-session-1"), "marked once");
+        assert_eq!(operator.controller_mappings.len(), 3, "the newest stays");
+
+        // The next one plugged in is found by its name, and while it is in
+        // use the one before it stays: resetting it would bring that back.
+        assert_eq!(
+            operator.mapping_for("gp-session-2", "Radio", &["v1"]),
+            Some("mode-2")
+        );
+        operator.choose_mapping("gp-session-2", "Radio", Some("v1"), "mode-2");
+        assert_eq!(operator.controller_mappings.len(), 4);
+        assert!(operator.retire_controller("gp-session-2"));
+        let ids = |operator: &Operator| -> Vec<String> {
+            operator
+                .controller_mappings
+                .iter()
+                .map(|m| m.controller_id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&operator), ["unit-1", "keyboard:1", "gp-session-2"]);
+        assert_eq!(
+            operator.mapping_for("gp-session-3", "Radio", &["v1"]),
+            Some("mode-2")
+        );
+
+        // Another mapping, another vehicle and another name are each kept:
+        // deleting a mapping brings back the choice before it.
+        operator.choose_mapping("gp-session-3", "Radio", Some("v1"), "mode-1");
+        operator.choose_mapping("gp-session-3", "Radio", Some("v2"), "mode-2");
+        operator.choose_mapping("gp-session-3", "Radio", None, "mode-2");
+        operator.choose_mapping("gp-session-4", "Other radio", Some("v1"), "mode-2");
+        assert!(operator.retire_controller("gp-session-3"));
+        assert!(operator.retire_controller("gp-session-4"));
+        assert_eq!(operator.controller_mappings.len(), 7);
+        assert!(
+            operator
+                .controller_mappings
+                .iter()
+                .all(|m| m.retired == m.controller_id.starts_with("gp-session-"))
+        );
+    }
+
+    /// A document from before `retired` reads as it did and is written back
+    /// alike, so a computer that does not know the field still takes it.
+    /// What ended before the field was kept is never marked, so it stays.
+    #[test]
+    fn mappings_from_before_they_were_retired_read_and_stay_as_they_were() {
+        let stored = serde_json::json!({
+            "id": "op1",
+            "name": "Ana",
+            "units": "metric",
+            "coordinateFormat": "decimal",
+            "controllerMappings": [
+                { "controllerId": "gp-session-old-1", "controllerName": "Radio", "vehicleId": "v1", "mappingId": "mode-1" },
+                { "controllerId": "gp-session-old-2", "controllerName": "Radio", "vehicleId": "v1", "mappingId": "mode-1" },
+                { "controllerId": "gp-session-old-3", "controllerName": "Radio", "mappingId": "mode-2" },
+            ],
+            "version": 7
+        });
+        let mut operator: Operator = serde_json::from_value(stored.clone()).unwrap();
+        assert!(operator.controller_mappings.iter().all(|m| !m.retired));
+        let written = serde_json::to_value(&operator).unwrap();
+        assert_eq!(
+            written["controllerMappings"], stored["controllerMappings"],
+            "no new key in what was not retired"
+        );
+
+        operator.choose_mapping("gp-session-new", "Radio", Some("v1"), "mode-1");
+        assert!(operator.retire_controller("gp-session-new"));
+        assert_eq!(operator.controller_mappings.len(), 4);
+        let written = serde_json::to_value(&operator).unwrap();
+        assert_eq!(
+            written["controllerMappings"][3],
+            serde_json::json!({ "controllerId": "gp-session-new", "controllerName": "Radio", "vehicleId": "v1", "mappingId": "mode-1", "retired": true }),
+        );
+        assert_eq!(
+            serde_json::from_value::<Operator>(written).unwrap(),
+            operator
+        );
+    }
+
+    /// Stick mappings decide stick modes, so retiring must never change
+    /// which one a controller takes. Two operators live through the same
+    /// generated history of two computers' controllers being plugged in,
+    /// chosen for, reset, unplugged and restarted, and of mappings being
+    /// deleted. One retires as UXDuck does. The other never does, as before
+    /// 2026-11-15. After every step each lookup answers alike on both, for
+    /// every controller still plugged in and for one never seen.
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one arm for each kind of step")]
+    fn retiring_never_changes_what_a_lookup_answers() {
+        const NAMES: [&str; 3] = ["Radio", "Pad", "Never chosen for"];
+        const VEHICLES: [Option<&str>; 4] = [Some("v1"), Some("v1-before"), Some("v2"), None];
+        const KNOWN_BY: [&[&str]; 5] = [&[], &["v1"], &["v2"], &["v1", "v1-before"], &["v1", "v2"]];
+        const MAPPINGS: [&str; 3] = ["mode-1", "mode-2", "mapping-own"];
+        let mut dropped = 0;
+        for history in 0..300_u64 {
+            let mut seed = history;
+            let mut below = |n: usize| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                usize::try_from(seed >> 33).unwrap_or(0) % n
+            };
+            let mut retiring = operator_with_no_mappings();
+            // What an earlier UXDuck left, and another computer's that this
+            // one cannot tell from a controller still plugged in there.
+            for n in 0..below(4) {
+                retiring.choose_mapping(
+                    &format!("gp-session-before-{n}"),
+                    NAMES[below(2)],
+                    VEHICLES[below(4)],
+                    MAPPINGS[below(3)],
+                );
+            }
+            let mut never = retiring.clone();
+            // Each computer's controllers: one with a serial number, and
+            // those without, by the id of each time they were plugged in.
+            let mut plugged: Vec<(usize, String, &str)> = vec![
+                (0, "unit-1".into(), "Radio"),
+                (1, "keyboard:1".into(), "Keyboard"),
+            ];
+            let mut made = 0;
+            for step in 0..120 {
+                let before = retiring.controller_mappings.len();
+                match below(20) {
+                    0..=3 => {
+                        made += 1;
+                        let computer = below(2);
+                        plugged.push((
+                            computer,
+                            format!("gp-session-{computer}-{made}"),
+                            NAMES[below(2)],
+                        ));
+                    }
+                    // Claimed: it takes theirs, and the window names it.
+                    4..=8 => {
+                        let (_, id, name) = &plugged[below(plugged.len())];
+                        let vehicle = VEHICLES[below(3)];
+                        let theirs = never
+                            .mapping_for(id, name, vehicle.as_slice())
+                            .unwrap_or("mode-2")
+                            .to_owned();
+                        for operator in [&mut retiring, &mut never] {
+                            operator.choose_mapping(id, name, vehicle, &theirs);
+                        }
+                    }
+                    9..=11 => {
+                        let (_, id, name) = &plugged[below(plugged.len())];
+                        let (vehicle, mapping) = (VEHICLES[below(4)], MAPPINGS[below(3)]);
+                        for operator in [&mut retiring, &mut never] {
+                            operator.choose_mapping(id, name, vehicle, mapping);
+                        }
+                    }
+                    // Unplugged: only its own computer retires it.
+                    12..=15 => {
+                        let at = below(plugged.len());
+                        if plugged[at].1.starts_with("gp-session-") {
+                            let (_, id, _) = plugged.remove(at);
+                            retiring.retire_controller(&id);
+                            dropped += before - retiring.controller_mappings.len();
+                        }
+                    }
+                    // A computer restarts: every id it gave is gone.
+                    16 => {
+                        let computer = below(2);
+                        let (gone, stay) = plugged.into_iter().partition(|(at, id, _)| {
+                            *at == computer && id.starts_with("gp-session-")
+                        });
+                        plugged = stay;
+                        for (_, id, _) in gone {
+                            retiring.retire_controller(&id);
+                        }
+                        dropped += before - retiring.controller_mappings.len();
+                    }
+                    // Reset, as `controller/forget` does it.
+                    17 | 18 => {
+                        made += 1;
+                        let (_, id, name) = &plugged[below(plugged.len())];
+                        for operator in [&mut retiring, &mut never] {
+                            operator
+                                .controller_mappings
+                                .retain(|m| &m.controller_id != id);
+                            operator.choose_mapping(id, name, None, &format!("mapping-{made}"));
+                        }
+                    }
+                    // A mapping deleted, as `mapping/remove` does it.
+                    _ => {
+                        let mapping = MAPPINGS[below(3)];
+                        for operator in [&mut retiring, &mut never] {
+                            operator
+                                .controller_mappings
+                                .retain(|m| m.mapping_id != mapping);
+                        }
+                    }
+                }
+                let unseen = (2, "gp-session-next".to_owned(), "Radio");
+                for (_, id, _) in plugged.iter().chain([&unseen]) {
+                    for name in NAMES {
+                        for known_by in KNOWN_BY {
+                            assert_eq!(
+                                retiring.vehicle_mapping(id, name, known_by),
+                                never.vehicle_mapping(id, name, known_by),
+                                "history {history}, step {step}: {id} as {name} on {known_by:?}"
+                            );
+                            assert_eq!(
+                                retiring.mapping_for(id, name, known_by),
+                                never.mapping_for(id, name, known_by),
+                                "history {history}, step {step}: {id} as {name} on {known_by:?}"
+                            );
+                        }
+                    }
+                }
+                // Nothing is retired but what was unplugged, and nothing
+                // unmarked ever goes.
+                let unmarked = |operator: &Operator| -> Vec<ControllerMapping> {
+                    operator
+                        .controller_mappings
+                        .iter()
+                        .filter(|m| !m.retired)
+                        .cloned()
+                        .collect()
+                };
+                let live = |m: &ControllerMapping| {
+                    plugged.iter().any(|(_, id, _)| *id == m.controller_id)
+                        || m.controller_id.starts_with("gp-session-before-")
+                };
+                assert_eq!(
+                    unmarked(&retiring),
+                    never
+                        .controller_mappings
+                        .iter()
+                        .filter(|m| live(m))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    "history {history}, step {step}"
+                );
+                // What is retired stays one for each name, vehicle and
+                // mapping, however often a controller is plugged in.
+                let mut retired: Vec<_> = retiring
+                    .controller_mappings
+                    .iter()
+                    .filter(|m| m.retired)
+                    .map(|m| (&m.controller_name, &m.vehicle_id, &m.mapping_id))
+                    .collect();
+                let all = retired.len();
+                retired.sort();
+                retired.dedup();
+                assert_eq!(retired.len(), all, "history {history}, step {step}");
+            }
+        }
+        assert!(dropped >= 500, "the histories drop little: {dropped}");
     }
 
     #[test]

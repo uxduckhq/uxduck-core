@@ -1907,6 +1907,23 @@ impl Engine {
             return;
         }
         self.resolve(&format!("controller-presence:{id}"));
+        // No controller has this id again, so what each operator kept for it
+        // is marked, and found from now on by its name alone (maintainer,
+        // 2026-11-15). Marked before the record goes: after a crash between
+        // the two, the next start still finds the record and removes it.
+        let kept: Vec<_> = self
+            .state
+            .operators
+            .values()
+            .filter(|o| o.controller_mappings.iter().any(|m| m.controller_id == id))
+            .cloned()
+            .collect();
+        for mut operator in kept {
+            if operator.retire_controller(id) {
+                operator.version += 1;
+                self.commit_as(daemon(), Change::OperatorUpserted { operator });
+            }
+        }
         self.commit_as(daemon(), Change::ControllerRemoved { id: id.to_owned() });
     }
 

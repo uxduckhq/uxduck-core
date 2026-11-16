@@ -274,7 +274,7 @@ fn disconnected_local_sessions_retire_records_and_presence_without_resetting_map
         assert!(orders.take().is_empty());
     }
     let operator = &engine.state().operators[&ana];
-    assert_eq!(operator.controller_mappings.len(), 64);
+    assert_eq!(operator.controller_mappings.len(), 1);
     assert_eq!(
         operator.mapping_for("gp-session-next", "Radio", &["v2"]),
         Some(mapping.id.as_str())
@@ -425,6 +425,282 @@ fn restarts_retire_old_session_records_but_preserve_synced_mapping_refs_and_cali
         assert!(orders.take().is_empty());
         state = restarted.state().clone();
     }
+}
+
+/// A controller with no serial number has a new id each time it is plugged
+/// in, and what the operator kept for every one of them piled up
+/// (maintainer, 2026-11-15). It takes its mapping again each time, and one
+/// entry stays for it. What she keeps for other controllers stays, and so
+/// does what ended before UXDuck marked anything, which it cannot tell from
+/// a controller plugged into her other computer.
+#[test]
+fn a_controller_with_no_serial_number_plugged_in_again_and_again_keeps_one_mapping() {
+    const XBOX: &str = "gp-030000005e0400008e02000000007801";
+    let (mut engine, mut ui, _orders) = setup();
+    let ana = as_ana(&mut engine, &mut ui);
+    let mut state = engine.state().clone();
+    let operator = state.operators.get_mut(&ana).unwrap();
+    for earlier in 0..5 {
+        operator.choose_mapping(
+            &format!("gp-session-earlier-{earlier}"),
+            "Radio",
+            Some("v2"),
+            "mode-1",
+        );
+    }
+    operator.choose_mapping("keyboard:1", "Keyboard", Some("v2"), "sim-keyboard");
+    let (mut engine, mut ui, _orders) = load_state(NoSystem::default(), state);
+    call(
+        &mut engine,
+        &mut ui,
+        "client/setOperator",
+        json!({ "operatorId": ana }),
+    );
+    let choose = |engine: &mut Engine, ui: &mut Client, id: &str, mapping: &str| {
+        let chosen = call(
+            engine,
+            ui,
+            "controller/chooseMapping",
+            json!({ "id": id, "vehicleId": "v2", "mappingId": mapping }),
+        );
+        assert!(chosen.get("error").is_none(), "{chosen}");
+    };
+    engine.controller_connected(XBOX, "Xbox", true);
+    engine.controller_connected("unit-pad", "Pad", true);
+    choose(&mut engine, &mut ui, XBOX, "mode-2");
+    choose(&mut engine, &mut ui, "unit-pad", "mode-2");
+    let before = engine.state().operators[&ana].controller_mappings.clone();
+    assert_eq!(before.len(), 8);
+
+    for plugged in 0..40 {
+        let id = format!("gp-session-run-{plugged}");
+        engine.controller_connected(&id, "Radio", true);
+        engine.controller_neutral(&id, true);
+        // The window names the mapping it shows, which is hers for a radio
+        // of this name: mode 1, from the first time on.
+        let theirs = engine.state().operators[&ana]
+            .mapping_for(&id, "Radio", &["v2"])
+            .map(str::to_owned);
+        assert_eq!(theirs.as_deref(), Some("mode-1"), "plugged in {plugged}");
+        let claimed = call(
+            &mut engine,
+            &mut ui,
+            "controller/claim",
+            json!({ "id": id, "mode": "pinned", "vehicleId": "v2", "mappingId": theirs }),
+        );
+        assert!(claimed.get("result").is_some(), "{claimed}");
+        assert_eq!(engine.state().controllers[&id].mapping_id, "mode-1");
+        call(
+            &mut engine,
+            &mut ui,
+            "controller/release",
+            json!({ "id": id }),
+        );
+        engine.controller_disconnected(&id);
+        assert!(!engine.state().controllers.contains_key(&id));
+
+        let kept = &engine.state().operators[&ana].controller_mappings;
+        assert_eq!(kept[..8], before[..], "plugged in {plugged}");
+        assert_eq!(kept.len(), 9, "plugged in {plugged}: {kept:?}");
+        assert_eq!(
+            (kept[8].controller_id.as_str(), kept[8].retired),
+            (id.as_str(), true)
+        );
+    }
+    // Mode 2 once, and it is hers from then on. The one before it stays:
+    // deleting mode 2 brings mode 1 back, as it did.
+    engine.controller_connected("gp-session-run-40", "Radio", true);
+    choose(&mut engine, &mut ui, "gp-session-run-40", "mode-2");
+    engine.controller_disconnected("gp-session-run-40");
+    let operator = &engine.state().operators[&ana];
+    assert_eq!(operator.controller_mappings.len(), 10);
+    assert_eq!(
+        operator.mapping_for("gp-session-next", "Radio", &["v2"]),
+        Some("mode-2")
+    );
+}
+
+/// Stick mappings decide stick modes, so retiring must never change which
+/// one a controller takes. Over generated histories of radios with no
+/// serial number being plugged in, claimed, chosen for, reset and unplugged,
+/// and of restarts, with another computer's entries in the operator's list,
+/// every lookup answers after an unplug or a restart what it answered
+/// before it: for every controller still here and for the next one plugged
+/// in, by either name and on either vehicle.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one arm for each kind of step")]
+fn unplugging_and_restarting_never_change_which_mapping_a_controller_takes() {
+    const NAMES: [&str; 2] = ["Radio", "Pad"];
+    const VEHICLES: [&str; 2] = ["v1", "v2"];
+    const MAPPINGS: [&str; 2] = ["mode-1", "mode-2"];
+    let (mut retired, mut dropped, mut claims) = (0, 0, 0);
+    for history in 0..48_u64 {
+        let mut seed = history;
+        let mut below = |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap_or(0) % n
+        };
+        let (mut engine, mut ui, _orders) = setup();
+        let ana = as_ana(&mut engine, &mut ui);
+        // Another computer's: two radios plugged in there, as far as this
+        // one can tell, and one that computer retired.
+        let mut state = engine.state().clone();
+        let operator = state.operators.get_mut(&ana).unwrap();
+        operator.choose_mapping("gp-session-hangar-1", "Radio", Some("v1"), "mode-1");
+        operator.choose_mapping("gp-session-hangar-2", "Radio", Some("v1"), "mode-2");
+        operator.choose_mapping("gp-session-hangar-3", "Pad", Some("v2"), "mode-1");
+        operator.retire_controller("gp-session-hangar-3");
+        let theirs = operator.controller_mappings[..2].to_vec();
+        let restart = |state: uxduck_engine::state::State| {
+            let (mut engine, mut ui, orders) = load_state(NoSystem::default(), state);
+            call(
+                &mut engine,
+                &mut ui,
+                "client/setOperator",
+                json!({ "operatorId": ana }),
+            );
+            (engine, ui, orders)
+        };
+        (engine, ui, _) = restart(state);
+        let mut plugged: Vec<(String, &str)> = Vec::new();
+        for step in 0..90 {
+            let before = engine.state().operators[&ana].clone();
+            let mut went = false;
+            match below(20) {
+                0..=4 => {
+                    let id = format!("gp-session-{history}-{step}");
+                    let name = NAMES[below(2)];
+                    engine.controller_connected(&id, name, true);
+                    engine.controller_neutral(&id, true);
+                    plugged.push((id, name));
+                }
+                // Claimed with the mapping the window shows, hers if she
+                // has one, or with one she picks. Refused when another
+                // controller drives the vehicle.
+                5..=9 if !plugged.is_empty() => {
+                    let (id, name) = &plugged[below(plugged.len())];
+                    let vehicle = VEHICLES[below(2)];
+                    let hers = before.mapping_for(id, name, &[vehicle]);
+                    let mapping = match below(3) {
+                        0 => MAPPINGS[below(2)],
+                        _ => hers.unwrap_or("mode-2"),
+                    };
+                    let claimed = call(
+                        &mut engine,
+                        &mut ui,
+                        "controller/claim",
+                        json!({ "id": id, "mode": "pinned", "vehicleId": vehicle, "mappingId": mapping }),
+                    );
+                    claims += usize::from(claimed.get("result").is_some());
+                }
+                10 | 11 if !plugged.is_empty() => {
+                    let (id, _) = &plugged[below(plugged.len())];
+                    call(
+                        &mut engine,
+                        &mut ui,
+                        "controller/release",
+                        json!({ "id": id }),
+                    );
+                }
+                12 | 13 if !plugged.is_empty() => {
+                    let (id, _) = &plugged[below(plugged.len())];
+                    call(
+                        &mut engine,
+                        &mut ui,
+                        "controller/chooseMapping",
+                        json!({ "id": id, "vehicleId": VEHICLES[below(2)], "mappingId": MAPPINGS[below(2)] }),
+                    );
+                }
+                14 if !plugged.is_empty() => {
+                    let (id, _) = &plugged[below(plugged.len())];
+                    call(
+                        &mut engine,
+                        &mut ui,
+                        "controller/forget",
+                        json!({ "id": id }),
+                    );
+                }
+                15..=18 if !plugged.is_empty() => {
+                    let (id, _) = plugged.remove(below(plugged.len()));
+                    engine.controller_disconnected(&id);
+                    went = true;
+                }
+                19 => {
+                    let state =
+                        serde_json::from_str(&serde_json::to_string(engine.state()).unwrap())
+                            .unwrap();
+                    (engine, ui, _) = restart(state);
+                    plugged.clear();
+                    went = true;
+                }
+                _ => {}
+            }
+            let after = &engine.state().operators[&ana];
+            if !went {
+                continue;
+            }
+            assert!(
+                engine
+                    .state()
+                    .controllers
+                    .keys()
+                    .all(|id| !id.starts_with("gp-session-")
+                        || plugged.iter().any(|(here, _)| here == id)),
+                "history {history}, step {step}"
+            );
+            for id in engine
+                .state()
+                .controllers
+                .keys()
+                .map(String::as_str)
+                .chain(["gp-session-next"])
+            {
+                for name in NAMES {
+                    for known_by in [&[][..], &["v1"], &["v2"], &["v1", "v2"]] {
+                        assert_eq!(
+                            after.vehicle_mapping(id, name, known_by),
+                            before.vehicle_mapping(id, name, known_by),
+                            "history {history}, step {step}: {id} as {name} on {known_by:?}"
+                        );
+                        assert_eq!(
+                            after.mapping_for(id, name, known_by),
+                            before.mapping_for(id, name, known_by),
+                            "history {history}, step {step}: {id} as {name} on {known_by:?}"
+                        );
+                    }
+                }
+            }
+            // Nothing unmarked goes, the other computer's least of all.
+            let unmarked = |operator: &uxduck_core::domain::operator::Operator| {
+                operator
+                    .controller_mappings
+                    .iter()
+                    .filter(|m| !m.retired)
+                    .count()
+            };
+            let marked = unmarked(&before) - unmarked(after);
+            retired += marked;
+            dropped += before.controller_mappings.len() - after.controller_mappings.len();
+            assert!(
+                after
+                    .controller_mappings
+                    .iter()
+                    .filter(|m| !m.retired)
+                    .all(|m| before.controller_mappings.contains(m)),
+                "history {history}, step {step}"
+            );
+            assert!(
+                theirs.iter().all(|m| after.controller_mappings.contains(m)),
+                "history {history}, step {step}"
+            );
+        }
+    }
+    assert!(
+        claims >= 400 && retired >= 400 && dropped >= 200,
+        "the histories do little: {claims} claims, {retired} retired, {dropped} dropped"
+    );
 }
 
 /// B1: a second unit of a model connected under the same id raises one
