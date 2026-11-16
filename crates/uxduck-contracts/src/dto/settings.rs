@@ -186,6 +186,14 @@ pub struct Settings {
     /// And this near up or down: 300 m when left out.
     #[serde(default = "traffic_alert_up_m")]
     pub traffic_alert_up_m: u32,
+    /// Telemetry alarms: an armed vehicle with this share of its battery
+    /// left or less raises "Battery low", as it does at the vehicle's own
+    /// low-battery level. 0 is off; 20 when an older daemon left it out.
+    #[serde(default = "battery_low_pct")]
+    pub battery_low_pct: u8,
+    /// And this share or less "Battery critical": 10 when left out.
+    #[serde(default = "battery_critical_pct")]
+    pub battery_critical_pct: u8,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain: the dataset the map reads and vehicles are
@@ -307,6 +315,12 @@ pub struct SettingsUpdateParams {
     /// 30 m to 3 km (S174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_alert_up_m: Option<u32>,
+    /// 0 (off) to 90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_low_pct: Option<u8>,
+    /// 0 (off) to 90, below the low level when both are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_critical_pct: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_controls: Option<TrafficControls>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -589,6 +603,14 @@ const fn traffic_alert_m() -> u32 {
 
 const fn traffic_alert_up_m() -> u32 {
     300
+}
+
+const fn battery_low_pct() -> u8 {
+    20
+}
+
+const fn battery_critical_pct() -> u8 {
+    10
 }
 
 /// Traffic choices are explicit and never depend on arming.

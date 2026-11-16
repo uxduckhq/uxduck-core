@@ -440,6 +440,18 @@ impl Producer for Power {
     }
 }
 
+/// The autopilot's own state from its `HEARTBEAT`, as `MAV_STATE` names it
+/// (`Standby`, `Active`, `Critical`, `Emergency`, …): `Critical` while a
+/// failsafe has acted, for the failsafe alarm (ADR-0005, 2026-11-06).
+pub fn vehicle_state(component_id: u8, system_status: &str, now_us: u64, out: &mut Produced) {
+    out.text(
+        "system.status",
+        "Vehicle state",
+        system_status,
+        ("heartbeat", component_id, now_us),
+    );
+}
+
 /// `VFR_HUD`: speeds, heading, throttle and climb.
 #[derive(Debug)]
 pub struct Hud;

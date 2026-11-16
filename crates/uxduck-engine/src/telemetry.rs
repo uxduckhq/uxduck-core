@@ -89,6 +89,7 @@ impl Engine {
         self.review_vehicle_terrain(&vehicle_id);
         self.track_rules(&vehicle_id);
         self.review_preflight_soon(&vehicle_id);
+        self.review_telemetry_alarms(&vehicle_id);
     }
 
     /// An item the engine itself says of a vehicle, such as why it can't

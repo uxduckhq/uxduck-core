@@ -192,6 +192,8 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         recreate_simulations: settings.recreate_simulations,
         traffic_alert_m: settings.traffic_alert_m,
         traffic_alert_up_m: settings.traffic_alert_up_m,
+        battery_low_pct: settings.battery_low_pct,
+        battery_critical_pct: settings.battery_critical_pct,
         traffic_controls: settings.traffic_controls.clone().into(),
         terrain_dataset: settings.terrain_dataset.into(),
         terrain_areas: settings

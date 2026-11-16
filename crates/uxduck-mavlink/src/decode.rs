@@ -1455,8 +1455,8 @@ mod tests {
             decode(&sim::heartbeat_frame(7, 1, 0)).unwrap_or_else(|| panic!("heartbeat"));
         assert_eq!(heartbeat.system_id, 7);
         assert!(
-            matches!(&heartbeat.message, Message::Heartbeat { mav_type, autopilot, .. }
-            if mav_type == "Quadrotor" && autopilot == "Ardupilotmega")
+            matches!(&heartbeat.message, Message::Heartbeat { mav_type, autopilot, system_status, .. }
+            if mav_type == "Quadrotor" && autopilot == "Ardupilotmega" && system_status == "Standby")
         );
         let version = decode(&sim::autopilot_version_frame(7, 1, 0, 0x1234, 0x0405_01ff))
             .unwrap_or_else(|| panic!("version"));

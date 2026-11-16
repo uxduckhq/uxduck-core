@@ -1216,8 +1216,9 @@ impl Session {
                     autopilot,
                     base_mode,
                     custom_mode,
-                    ..
+                    system_status,
                 } => {
+                    let an_autopilot = autopilot != "Invalid";
                     let beat = Beat {
                         mav_type,
                         autopilot,
@@ -1231,6 +1232,14 @@ impl Session {
                         received_us,
                         processed_us,
                     ));
+                    if an_autopilot && let Some(vehicle) = self.vehicles.get_mut(&key) {
+                        crate::producers::vehicle_state(
+                            decoded.component_id,
+                            &system_status,
+                            received_us,
+                            &mut vehicle.pending,
+                        );
+                    }
                 }
                 Message::AutopilotVersion {
                     uid,
@@ -5354,6 +5363,8 @@ mod tests {
         let mut session = Session::new(Config::default());
         let mut fake = FakeVehicle::new(1, 0xABCD);
         session.ingest("l1", PEER, &fake.heartbeat(), 0);
+        // The heartbeat's own state (`system.status`) goes out first.
+        session.tick(1);
         let vehicle_id = session.vehicle_at("l1", PEER, 1).unwrap().to_owned();
         let (lat, lon) = (-353_000_000, 1_491_000_000);
         let effects = session.terrain_check(&vehicle_id, lat, lon, 10);
@@ -7038,6 +7049,11 @@ mod tests {
         let item = |key: &str| t.items.iter().find(|i| i.key == key).cloned();
         assert_eq!(item("gps.fix").and_then(|i| i.text).as_deref(), Some("3D"));
         assert_eq!(item("gps.satellites").and_then(|i| i.value), Some(14.0));
+        // The autopilot's state from its heartbeat, for the failsafe alarm.
+        assert_eq!(
+            item("system.status").and_then(|i| i.text).as_deref(),
+            Some("Standby")
+        );
         assert!(
             item("battery.voltage_v")
                 .and_then(|i| i.value)

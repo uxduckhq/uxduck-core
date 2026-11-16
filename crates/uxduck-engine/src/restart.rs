@@ -1117,5 +1117,25 @@ fn simulations_and_traffic(
         }
         settings.traffic_alert_up_m = m;
     }
+    let low = params.battery_low_pct.unwrap_or(settings.battery_low_pct);
+    let critical = params
+        .battery_critical_pct
+        .unwrap_or(settings.battery_critical_pct);
+    if params.battery_low_pct.is_some() || params.battery_critical_pct.is_some() {
+        if low > 90 || critical > 90 {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "a battery alarm is at 0 (off) to 90 % left",
+            ));
+        }
+        if low > 0 && critical >= low {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "the critical battery alarm needs less left than the low one",
+            ));
+        }
+        settings.battery_low_pct = low;
+        settings.battery_critical_pct = critical;
+    }
     Ok(())
 }

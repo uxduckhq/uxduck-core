@@ -95,6 +95,7 @@ pub mod state;
 mod supervision;
 pub mod sync;
 mod telemetry;
+mod telemetry_alarms;
 mod telemetry_window;
 pub mod terms;
 pub mod terrain;
@@ -424,6 +425,8 @@ pub struct Engine {
     edge_status: uxduck_contracts::dto::edge::EdgeStatus,
     /// Which vehicles are supervised, and whose heartbeat is withheld (S81).
     supervision: supervision::Supervision,
+    /// Each armed vehicle's telemetry alarms (ADR-0005, 2026-11-06).
+    telemetry_alarms: telemetry_alarms::TelemetryAlarms,
     /// Practice attempts being set up (S100).
     practice: practice::Practice,
     /// A vehicle's files: requests waiting for it, and the copies' port
@@ -624,6 +627,7 @@ impl Engine {
             watch_viewers: Vec::new(),
             edge_status: edge::signed_out(),
             supervision: supervision::Supervision::default(),
+            telemetry_alarms: telemetry_alarms::TelemetryAlarms::default(),
             practice: practice::Practice::default(),
             files: vehicle_files::Files::default(),
             setup: setup::Setups::default(),

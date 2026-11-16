@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "48f0a2d179de0c9aaff1099730a1fa01b10ab705",
+  "sourceCommit": "e40018cf483673ceb91d72bfdc1b9e552041c3fa",
   "licenseReady": true,
   "files": [
     {
@@ -3576,7 +3576,7 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/settings_get.result.json",
-      "sha256": "5dc97df604f7f173bf1b2400098aa28f9304074d85a54383982af9bb7d776aa0",
+      "sha256": "72dfdb521b7077512d1c3f192a0ce58c1c0dfe0a959d3f44aa4e135aff7867fd",
       "executable": false
     },
     {
@@ -3601,7 +3601,7 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/settings_update.result.json",
-      "sha256": "5dc97df604f7f173bf1b2400098aa28f9304074d85a54383982af9bb7d776aa0",
+      "sha256": "72dfdb521b7077512d1c3f192a0ce58c1c0dfe0a959d3f44aa4e135aff7867fd",
       "executable": false
     },
     {
@@ -3916,7 +3916,7 @@
     },
     {
       "path": "crates/uxduck-contracts/fixtures/state_delta.notification.settings.json",
-      "sha256": "ceb0eaffe48ea2e05b3608b2448f7b516424af356c9edad7fddec813465abcb5",
+      "sha256": "86a15669751d1a60ed67746ca3b75f5ce75dc1e7a6f3b9c12490a45e2805270e",
       "executable": false
     },
     {
@@ -5266,7 +5266,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/settings.rs",
-      "sha256": "0f503d85696ed39a3a8d5b1d81f9eae8a0be4981e101380031455bd0c9b13f26",
+      "sha256": "475f7832603cd8c7e81c3054ba2df8b32369f24c138f9ac3e908c333eccd57dd",
       "executable": false
     },
     {
@@ -5526,7 +5526,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/settings.rs",
-      "sha256": "e7ee7b5c2435c33e68f7fccbb28f52d90cdf933dc640568627498767a8549340",
+      "sha256": "992582b2a0ec9f6b7b55b27118fd5ffead920715e6dea19432d668591b91b6b6",
       "executable": false
     },
     {
@@ -5851,7 +5851,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/settings.rs",
-      "sha256": "b0b4dcc584c1fcabe367e6c675602a0e935afe545bc56729f9b37d19d17c3635",
+      "sha256": "2b7c750d83a48c60192b5999b08b4e5e27b942d8260a8eaa2050a6096c3e8fd0",
       "executable": false
     },
     {
@@ -6146,7 +6146,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/lib.rs",
-      "sha256": "0080e5eadeae9a6f367483ac0001719023ba91a98a4df0030c3607d2c5076754",
+      "sha256": "593097e5af13d63328e21bb25dc6022d4bc479f0acf075b1adab20960502e937",
       "executable": false
     },
     {
@@ -6471,7 +6471,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/restart.rs",
-      "sha256": "1c30004b1b92c6c07283d29fb5af176053de5d954d065a7874b870e2997f32aa",
+      "sha256": "1d29354bdc73307d3ac2552fa2cdd8f5c89a769a013a6bb6c5e9a28bcebe94de",
       "executable": false
     },
     {
@@ -6591,7 +6591,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/telemetry.rs",
-      "sha256": "c1b28e51fafdb6ff124adfa6738821054ecf1f27a7943ff892dcf07e76e2c4ee",
+      "sha256": "39854c38c36e09078eac99c4cf0bc1690b8b88acc2927bdfcaa41f8467dfaf11",
+      "executable": false
+    },
+    {
+      "path": "crates/uxduck-engine/src/telemetry_alarms.rs",
+      "sha256": "65c3359dcc75fc0ac2026922aaeb2bffef10971833751522471e9a5ecb7a7fb7",
       "executable": false
     },
     {
@@ -6861,7 +6866,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/decode.rs",
-      "sha256": "43d77af5446bfd85f98631843d086c4b9f22cd024a1d52f6278892cbee89fe86",
+      "sha256": "afa2a26a2061515c0f236db5a1f630f4c96e6f9206a60b85f25dd98533209b50",
       "executable": false
     },
     {
@@ -6986,7 +6991,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/producers.rs",
-      "sha256": "8236d731cfc9781801f32fad30556d7b8d2ff6ae6fa45ea03defa3e0560cc573",
+      "sha256": "22148a7c3e6ba8d07f90e75bca01db996bc7ac8434838ceecd9f4b16e11c13fc",
       "executable": false
     },
     {
@@ -7016,7 +7021,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/session.rs",
-      "sha256": "f6efdfea7a96e3209dfe006a3661c782b19e47e3d94d74eacb23a231d7280001",
+      "sha256": "f7756796ee1330c9524fd2c15c7c8f2b2c8fe82784dc89791bab837287852518",
       "executable": false
     },
     {
@@ -8351,7 +8356,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "c05ea6a07197619514a22cc7a5b108d5e3002d86a3ad7680b7311c65496d2260",
+      "sha256": "5389d71d05d6cb76a91bdf853117d4dd02d2c6a574ed258e612a85db71ddd9f4",
       "executable": false
     },
     {

@@ -270,6 +270,14 @@ pub struct Settings {
     pub traffic_alert_m: u32,
     #[serde(default = "traffic_alert_up_m")]
     pub traffic_alert_up_m: u32,
+    /// Telemetry alarms (ADR-0005, 2026-11-06): an armed vehicle with this
+    /// share of its battery left or less raises "Battery low", as it does
+    /// at the vehicle's own low-battery level; 0 is off.
+    #[serde(default = "battery_low_pct")]
+    pub battery_low_pct: u8,
+    /// And this share or less "Battery critical"; 0 is off.
+    #[serde(default = "battery_critical_pct")]
+    pub battery_critical_pct: u8,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain (S23, ADR-0026 T4): the dataset the map reads
@@ -467,6 +475,8 @@ impl Default for Settings {
             recreate_simulations: false,
             traffic_alert_m: traffic_alert_m(),
             traffic_alert_up_m: traffic_alert_up_m(),
+            battery_low_pct: battery_low_pct(),
+            battery_critical_pct: battery_critical_pct(),
             traffic_controls: TrafficControls::default(),
             terrain_dataset: TerrainDataset::Alos,
             vehicle_terrain_datasets: BTreeMap::new(),
@@ -530,6 +540,16 @@ impl Settings {
             self.connect_to_account = true;
         }
     }
+}
+
+/// 20 % left (ADR-0005, 2026-11-06).
+const fn battery_low_pct() -> u8 {
+    20
+}
+
+/// 10 % left.
+const fn battery_critical_pct() -> u8 {
+    10
 }
 
 /// 2 km across (S174).

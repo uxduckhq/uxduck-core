@@ -13321,6 +13321,16 @@ export type Settings = {
      */
     autoDelete: Array<AutoDelete>;
     /**
+     * And this share or less "Battery critical": 10 when left out.
+     */
+    batteryCriticalPct?: number;
+    /**
+     * Telemetry alarms: an armed vehicle with this share of its battery
+     * left or less raises "Battery low", as it does at the vehicle's own
+     * low-battery level. 0 is off; 20 when an older daemon left it out.
+     */
+    batteryLowPct?: number;
+    /**
      * What happens when the last window closes, as set here or, when never
      * set, on the command line.
      */
@@ -13484,6 +13494,14 @@ export type SettingsUpdateParams = {
      * Replaces the whole list when present.
      */
     autoDelete?: Array<AutoDelete> | null;
+    /**
+     * 0 (off) to 90, below the low level when both are on.
+     */
+    batteryCriticalPct?: number | null;
+    /**
+     * 0 (off) to 90.
+     */
+    batteryLowPct?: number | null;
     closePolicy?: ClosePolicy | null;
     /**
      * Shared preference for all vehicles. Connections not listed follow in creation order.
