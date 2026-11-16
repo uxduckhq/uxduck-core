@@ -437,6 +437,10 @@ async fn take_lock(lock: &std::fs::File) -> bool {
 }
 
 /// The engine with its ports, in its task, and the agent host beside it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one port after another, in the order they start"
+)]
 fn start_engine(
     options: &DaemonOptions,
     ui_url: &str,
@@ -470,6 +474,7 @@ fn start_engine(
     let (plugin_port, plugin_feed): (Box<dyn uxduck_engine::runtime::PluginPort>, _) =
         (Box::new(uxduck_engine::runtime::NoPlugins), None);
     let (replay_work, replay_works) = tokio::sync::mpsc::unbounded_channel();
+    let (offload, offloads) = tokio::sync::mpsc::unbounded_channel();
     let engine = Engine::new(
         EngineConfig {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -507,6 +512,7 @@ fn start_engine(
                 catalogue,
                 crate::desktop_app::DesktopApp::new(data_dir, tokio::runtime::Handle::current()),
                 replay_work,
+                offload,
             )),
             plugins: plugin_port,
         },
@@ -514,6 +520,21 @@ fn start_engine(
     );
     let engine = EngineHandle::spawn(engine);
     tokio::spawn(crate::replay::work(replay_works, engine.clone()));
+    let places_dir = options.data_dir.clone();
+    tokio::spawn(crate::flight_file::work(
+        offloads,
+        std::sync::Arc::new(move || {
+            use uxduck_engine::runtime::Clock as _;
+            crate::flight_file::Places {
+                tlogs: places_dir.join("tlogs"),
+                media: crate::video::hub()
+                    .map_or_else(|| places_dir.join("media"), |hub| hub.dir().to_owned()),
+                written_by: format!("UXDuck {}", env!("CARGO_PKG_VERSION")),
+                now_us: crate::adapters::system::SystemClock.now_us(),
+            }
+        }),
+        engine.clone(),
+    ));
     #[cfg(feature = "plugins")]
     if let Some(host) = plugin_host {
         host.start(engine.clone());

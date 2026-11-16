@@ -1,0 +1,12 @@
+{
+  "folder": "/Volumes/T7/UXDuck Flights",
+  "place": "T7",
+  "files": ["Alpha 2026-10-28 14.02.uxflight", "Alpha 2026-10-28 15.40.uxflight"],
+  "videoBytes": 2576980376,
+  "videos": 2,
+  "freedBytes": 0,
+  "keptVideos": 0,
+  "keptBytes": 0,
+  "freeBytes": 1073741824,
+  "refused": "T7 has 1 GB free, and the video of these flights alone needs 2.4 GB."
+}

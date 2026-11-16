@@ -28,6 +28,9 @@ pub struct Host {
     /// Where work on a replay's log goes to be done off the engine's task
     /// ([`crate::replay::work`]).
     replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
+    /// Where flights to write to a disk go (ADR-0062,
+    /// [`crate::flight_file::work`]).
+    offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
 }
 
 impl Host {
@@ -38,6 +41,7 @@ impl Host {
         catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
         desktop_app: std::sync::Arc<crate::desktop_app::DesktopApp>,
         replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
+        offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
     ) -> Self {
         Self {
             wake: None,
@@ -49,6 +53,7 @@ impl Host {
             card_copying: crate::card_logs::Copying::default(),
             found_flights: crate::found_flights::Found::new(data_dir),
             replay_work,
+            offload,
         }
     }
 }
@@ -107,6 +112,65 @@ fn spawn_hold(mut command: Command) -> std::io::Result<Hold> {
         .stderr(Stdio::null())
         .spawn()
         .map(Hold::Child)
+}
+
+/// Where Move or copy writes for `folder` (ADR-0062): a Log folder as it
+/// is, a disk's `UXDuck Flights` folder, or any other folder, which then
+/// becomes a Log folder. It must be there and writable.
+fn offload_target(
+    found: &crate::found_flights::Found,
+    folder: &str,
+) -> Result<uxduck_engine::runtime::OffloadTarget, String> {
+    use std::path::{Path, PathBuf};
+    let given = Path::new(folder);
+    if folder.trim().is_empty() || !given.is_absolute() {
+        return Err("Choose a folder by its whole path.".into());
+    }
+    let folders = found.folders(None);
+    let added = |path: &Path| {
+        folders
+            .iter()
+            .find(|f| f.added && Path::new(&f.path) == path)
+    };
+    // A disk by where it is mounted, or by the folder `flights/found` names
+    // for it, which may not be made yet.
+    let disk = crate::found_flights::disks(&folders)
+        .into_iter()
+        .find(|d| Path::new(&d.path) == given || Path::new(&d.folder) == given);
+    let (target, deep, on_disk) = match (added(given), disk) {
+        (Some(f), _) => (PathBuf::from(&f.path), f.deep, false),
+        (None, Some(disk)) => (PathBuf::from(&disk.folder), true, true),
+        (None, None) => (given.to_owned(), false, false),
+    };
+    let log_folder = added(&target).is_some();
+    let place = uxduck_contracts::dto::flight::place_of_folder(&target.display().to_string());
+    // A disk's own folder is made when first written, on the disk plugged in.
+    let there = if target.is_dir() {
+        target.clone()
+    } else if let Some(volume) = on_disk.then(|| target.parent()).flatten()
+        && !target.exists()
+    {
+        volume.to_owned()
+    } else if log_folder {
+        return Err(format!(
+            "{place} is not plugged in. Plug it in, or choose another folder."
+        ));
+    } else {
+        return Err(format!(
+            "{} is not a folder on this computer.",
+            target.display()
+        ));
+    };
+    let probe = there.join(format!(".uxduck-write-check-{}", std::process::id()));
+    std::fs::write(&probe, b"")
+        .and_then(|()| std::fs::remove_file(&probe))
+        .map_err(|e| format!("UXDuck cannot write to {}: {e}.", there.display()))?;
+    Ok(uxduck_engine::runtime::OffloadTarget {
+        folder: target.display().to_string(),
+        free_bytes: fs4::available_space(&there).ok(),
+        log_folder,
+        deep,
+    })
 }
 
 /// The wake lock: the system stays awake, the display may sleep.
@@ -201,6 +265,50 @@ impl System for Host {
         what: &uxduck_engine::runtime::ReplayRead,
     ) -> Result<Vec<u8>, String> {
         crate::replay::read(&self.data_dir.join("tlogs"), what)
+    }
+
+    fn replay_available(&self, what: &uxduck_engine::runtime::ReplayRead) -> Option<bool> {
+        match what {
+            uxduck_engine::runtime::ReplayRead::Packed { path, .. } => {
+                Some(std::path::Path::new(path).is_file())
+            }
+            _ => None,
+        }
+    }
+
+    fn file_present(&self, path: &str) -> Option<bool> {
+        Some(std::path::Path::new(path).is_file())
+    }
+
+    fn offload_target(
+        &self,
+        folder: &str,
+    ) -> Result<uxduck_engine::runtime::OffloadTarget, String> {
+        offload_target(&self.found_flights, folder)
+    }
+
+    fn offload(&mut self, job: uxduck_engine::runtime::OffloadJob) -> Result<(), String> {
+        let folder = std::path::Path::new(&job.folder);
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("UXDuck could not make {}: {e}.", folder.display()))?;
+        if let Some(deep) = job.add_folder {
+            self.found_flights
+                .change(&uxduck_contracts::dto::replay::FlightFolderParams {
+                    id: job.folder.clone(),
+                    on: Some(true),
+                    remove: false,
+                    deep: deep.then_some(true),
+                })?;
+        }
+        self.offload
+            .send(job)
+            .map_err(|_| "UXDuck is stopping. Try again once it has started.".to_owned())
+    }
+
+    fn flight_file(&mut self, path: &str) -> Result<uxduck_engine::runtime::FlightFile, String> {
+        let file = std::path::Path::new(path);
+        crate::flight_file::manifest(file)
+            .map_err(|why| format!("UXDuck could not open {}: {why}", file.display()))
     }
 
     fn found_flights(

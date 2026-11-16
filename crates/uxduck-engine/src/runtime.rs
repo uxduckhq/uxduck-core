@@ -431,6 +431,8 @@ pub enum ReplayRead {
     },
     /// A tlog file, whole.
     File { path: String },
+    /// A file in a `.uxflight` (ADR-0062), whole: its `telemetry.tlog`.
+    Packed { path: String, entry: String },
     /// A copy of a vehicle's file made in Files (S121), as
     /// `<vehicle id>/<path on the vehicle>` under the copies' folder.
     VehicleFile { local: String },
@@ -467,6 +469,84 @@ impl std::fmt::Debug for ReplayWorked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ReplayWorked")
     }
+}
+
+/// Flights to write as `.uxflight` files (ADR-0062), for
+/// [`System::offload`]: the host writes, reads back and tells the engine
+/// how each went with [`crate::Engine::offload_progress`],
+/// [`crate::Engine::offload_written`] and [`crate::Engine::offload_done`].
+#[derive(Clone, Debug)]
+pub struct OffloadJob {
+    pub id: u64,
+    /// The folder, writable: made when it is a disk's `UXDuck Flights`.
+    pub folder: String,
+    /// Adds the folder as a Log folder first, with all its subfolders
+    /// (true) or not, as it is not one yet.
+    pub add_folder: Option<bool>,
+    pub flights: Vec<OffloadFlight>,
+}
+
+/// One flight of an [`OffloadJob`].
+#[derive(Clone, Debug)]
+pub struct OffloadFlight {
+    /// As it is kept, for `flight.json`: without its copies.
+    pub flight: uxduck_core::domain::flight::Flight,
+    /// The file's name before `.uxflight`: the host adds " 2", " 3" when
+    /// it is taken.
+    pub stem: String,
+    /// Its telemetry, as its replay plays it. None when this computer has
+    /// none of it.
+    pub telemetry: Option<ReplayRead>,
+    pub videos: Vec<OffloadVideo>,
+}
+
+/// A recording to put in a `.uxflight`.
+#[derive(Clone, Debug)]
+pub struct OffloadVideo {
+    pub recording: uxduck_core::domain::video::VideoRecording,
+    /// Its names in the file: the original and the copy every player plays
+    /// (the same for an MP4).
+    pub entry: String,
+    pub playable: String,
+    pub from: VideoAt,
+}
+
+/// Where a recording's bytes are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VideoAt {
+    /// UXDuck's own, by its file in the media folder.
+    Media { file: String },
+    /// Added from elsewhere (ADR-0039 R8), where it is.
+    Added { path: String },
+    /// In another `.uxflight`.
+    Packed(uxduck_core::domain::video::PackedVideo),
+}
+
+/// Where Move or copy writes (ADR-0062), as the host finds it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OffloadTarget {
+    /// The folder the files go in: an added Log folder, a disk's
+    /// `UXDuck Flights`, or the folder given.
+    pub folder: String,
+    pub free_bytes: Option<u64>,
+    /// It is a Log folder already.
+    pub log_folder: bool,
+    /// A disk's own folder, looked through with all its subfolders once
+    /// added.
+    pub deep: bool,
+}
+
+/// A `.uxflight`'s `flight.json` as the host reads it (ADR-0062).
+#[derive(Clone, Debug)]
+pub struct FlightFile {
+    pub flight: uxduck_core::domain::flight::Flight,
+    /// Each recording, with where it is in the file.
+    pub recordings: Vec<(
+        uxduck_core::domain::video::VideoRecording,
+        uxduck_core::domain::video::PackedVideo,
+    )>,
+    /// The file has a `telemetry.tlog`.
+    pub telemetry: bool,
 }
 
 /// What only the host can answer: binding ports, its own addresses, serial
@@ -526,6 +606,39 @@ pub trait System: Send {
     /// here and returns it, and the engine waits as it always did.
     fn replay_work(&mut self, work: ReplayWork) -> Option<ReplayWorked> {
         Some(work.run())
+    }
+    /// Whether a file is there now, such as a `.uxflight` on a disk that
+    /// may be unplugged (ADR-0062). None when this host cannot tell.
+    fn file_present(&self, path: &str) -> Option<bool> {
+        let _ = path;
+        None
+    }
+    /// Where Move or copy writes for `folder` (ADR-0062): a Log folder, a
+    /// disk (its `UXDuck Flights` folder) or any folder, checked to be
+    /// there and writable.
+    ///
+    /// # Errors
+    /// What a person reads: it is not there, or cannot be written.
+    fn offload_target(&self, folder: &str) -> Result<OffloadTarget, String> {
+        let _ = folder;
+        Err("Moving flights to a disk needs UXDuck Desktop.".into())
+    }
+    /// Writes flights as `.uxflight` files off the engine's task (ADR-0062)
+    /// and tells the engine how each went.
+    ///
+    /// # Errors
+    /// The host cannot write files.
+    fn offload(&mut self, job: OffloadJob) -> Result<(), String> {
+        let _ = job;
+        Err("Moving flights to a disk needs UXDuck Desktop.".into())
+    }
+    /// Reads a `.uxflight`'s `flight.json` (ADR-0062).
+    ///
+    /// # Errors
+    /// What a person reads: it cannot be read or is not a `.uxflight`.
+    fn flight_file(&mut self, path: &str) -> Result<FlightFile, String> {
+        let _ = path;
+        Err("Opening a .uxflight needs UXDuck Desktop.".into())
     }
     /// What a video file says of itself (ADR-0039 R8), and its playable
     /// copy started when it needs one. UXDuck Desktop only.

@@ -619,7 +619,25 @@ pub struct VideoRecording {
     /// How an added video's start was put on the flight's clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<VideoAlignment>,
+    /// Its file is in a flight's `.uxflight` on another disk, not on this
+    /// computer (ADR-0062): Move took it there, or the flight was opened
+    /// from the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packed: Option<PackedVideo>,
     pub version: u64,
+}
+
+/// Where in a `.uxflight` a recording is kept (ADR-0062).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackedVideo {
+    /// The `.uxflight` file.
+    pub path: String,
+    /// The original as recorded, such as `video/<file>.ts`.
+    pub entry: String,
+    /// The copy every player plays, `video/<stem>.mp4`: the original
+    /// itself when it is an MP4.
+    pub playable: String,
 }
 
 impl VideoRecording {

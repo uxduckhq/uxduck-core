@@ -224,6 +224,7 @@ impl Engine {
 
     fn start_recording(&mut self, source: &VideoSource, trigger: RecordingTrigger) {
         let mut recording = VideoRecording {
+            packed: None,
             id: format!("vr{}", &self.random.token()[..16]),
             source_id: source.id.clone(),
             vehicle_id: source.vehicle_id.clone(),
@@ -369,8 +370,9 @@ impl Engine {
             .video_recordings
             .values()
             .filter(|r| r.state != RecordingState::Recording)
-            // A video added from elsewhere stays where it was (S208).
-            .filter(|r| r.alignment.is_none())
+            // A video added from elsewhere stays where it was (S208), and
+            // one on a disk is not in the media folder (ADR-0062).
+            .filter(|r| r.alignment.is_none() && r.packed.is_none())
             .filter(|r| settled(r.ended_at_us.unwrap_or(r.started_at_us)))
             .filter(|r| !present.contains(&r.file()))
             .map(|r| r.id.clone())
@@ -442,6 +444,8 @@ impl Engine {
             .video_recordings
             .values()
             .filter(|r| r.bytes > 0 || r.state == RecordingState::Recording)
+            // On a disk, not on this computer (ADR-0062).
+            .filter(|r| r.packed.is_none())
             .filter(|r| every || of_flight(r))
             .map(|r| {
                 let ended = r.state != RecordingState::Recording;
@@ -689,19 +693,41 @@ impl Engine {
             ));
         }
         let token = format!("vp{}", &self.random.token()[..32]);
+        let recording = recording.clone();
+        let file = recording.file();
+        let at = match (&recording.packed, &recording.alignment) {
+            (Some(packed), _) => {
+                // On a disk (ADR-0062): played from its file while it is
+                // plugged in.
+                if self.system.file_present(&packed.path) == Some(false) {
+                    return Err(ApiError::new(
+                        ErrorKind::NotFound,
+                        format!(
+                            "On {}, which is not plugged in. Plug it in to play this video.",
+                            uxduck_contracts::dto::flight::place_of(&packed.path)
+                        ),
+                    ));
+                }
+                crate::runtime::VideoAt::Packed(packed.clone())
+            }
+            (None, Some(_)) => crate::runtime::VideoAt::Added { path: file.clone() },
+            (None, None) => crate::runtime::VideoAt::Media { file: file.clone() },
+        };
         let Some(port) = self.video.port.as_mut() else {
             return Err(ApiError::new(
                 ErrorKind::InvalidRequest,
                 "video needs UXDuck Desktop",
             ));
         };
-        let file = recording.file();
-        port.allow_playback(&token, &recording.id, &file);
+        port.allow_playback(&token, &recording.id, &at);
         // A video added from elsewhere (S208) is offered as it is played.
-        let kept_as_ts = recording.alignment.is_none()
-            && std::path::Path::new(&file)
+        let kept_as_ts = match &at {
+            crate::runtime::VideoAt::Packed(packed) => packed.entry != packed.playable,
+            crate::runtime::VideoAt::Added { .. } => false,
+            crate::runtime::VideoAt::Media { file } => std::path::Path::new(file)
                 .extension()
-                .is_some_and(|e| e == "ts");
+                .is_some_and(|e| e == "ts"),
+        };
         Ok(VideoPlaybackResult {
             path: format!("/recordings/{}.mp4?token={token}", recording.id),
             original_path: kept_as_ts

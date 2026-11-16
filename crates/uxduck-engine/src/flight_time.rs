@@ -340,6 +340,7 @@ impl Engine {
         // By its link, its own word or the person's (ADR-0039 R14).
         let simulated = self.is_simulated(&vehicle);
         let flight = Flight {
+            copies: Vec::new(),
             id: format!("fl{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
             vehicle_name: vehicle.name.clone(),
@@ -616,6 +617,7 @@ impl Engine {
         dto.replay_available = self
             .flight_replay_read(flight, None)
             .and_then(|read| self.system.replay_available(&read));
+        self.offload_dto(&mut dto);
         dto
     }
 

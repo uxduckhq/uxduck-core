@@ -474,7 +474,15 @@ impl State {
             }
             Change::FlightUpserted { flight } => {
                 if !self.forgotten_flights.contains(&flight.id) {
-                    self.flights.insert(flight.id.clone(), flight.clone());
+                    let mut flight = flight.clone();
+                    // The account's copy has no files on this computer's
+                    // disks (ADR-0062): the ones known here stay.
+                    if flight.copies.is_empty()
+                        && let Some(was) = self.flights.get(&flight.id)
+                    {
+                        flight.copies.clone_from(&was.copies);
+                    }
+                    self.flights.insert(flight.id.clone(), flight);
                 }
             }
             Change::OperationUpserted { operation } => {

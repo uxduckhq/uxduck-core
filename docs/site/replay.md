@@ -60,3 +60,22 @@ A log you opened from a file can be saved with **Save to account** on the bar: i
 ## Log folders
 
 UXDuck Desktop looks in QGroundControl's `Documents/QGroundControl/Telemetry` and Mission Planner's `Documents/Mission Planner/logs` folders. Their flights are listed in the Logbook, behind the menu beside **On this computer**, and replay straight from the file. Nothing is copied. A log the other app is still writing waits until it closes. **Settings › Log folders**, also **Logbook › Open a log… › Log folders…**, turns each folder on or off, and **Also look in…** adds another, such as MAVProxy's. A folder you add is looked into on its own, not its subfolders. Turn on **Subfolders** to look through all of it, such as a disk of logs or a custom ground station's folders. Hidden folders and links are skipped. All of it is looked through, however large, and the folder says how many entries the look has read. A folder or a log that could not be read is listed under its folder, with why, and the Logbook says so beside that folder's flights. A long list shows its first 100 and how many more there are, and **Show more** reads on. A file with a log's name that is not a telemetry log, such as the `.tlog` files a Visual Studio build writes, is listed too. No flights are missing with it, so the Logbook does not count it. QGroundControl's and Mission Planner's own folders are looked through however deep their logs are.
+
+Besides telemetry logs, a Log folder lists ArduPilot `.bin` and PX4 `.ulg` logs, one entry for each file, dated by when the file last changed, and the `.uxflight` files UXDuck writes. Its videos (MP4, MOV and MPEG-TS) are offered by **Add a video…**, nearest the flight's time first. A folder on a disk that is not plugged in is shown as **Not plugged in**, and its flights stay listed, greyed, until you plug the disk in again.
+
+## Flights on an external disk
+
+To keep your computer's own disk from filling up, move flights to an external disk. In the Logbook, choose **Select**, tick the entries and choose **Move or copy to…**, or choose **Move or copy to…** in one entry's **…** menu. Choose where: your Log folders come first, then every external disk plugged in, with its free space, then **Choose a folder…**. A disk gets a **UXDuck Flights** folder, which UXDuck adds to **Settings › Log folders**. Then choose:
+
+- **Move**: the video leaves this computer once it is on the disk. The telemetry log stays here.
+- **Copy**: everything stays on this computer too.
+
+The dialog says how much it writes and frees before anything is written. A disk without room for the video says so in its numbers and is not written to. Move deletes nothing until every file is written and read back, and only video that no other entry uses. A video you added from elsewhere stays where it was.
+
+A moved entry stays in the Logbook marked **On T7**, with T7 being your disk's name. Its replay plays the video from the disk. With the disk unplugged it says **On T7 · not plugged in**, and its Camera tab says to plug it in.
+
+## A flight as one file
+
+Each entry on a disk is one `.uxflight` file. Double-click it to open UXDuck and replay the flight, with its telemetry and video in step, or drop it on UXDuck's window. A flight from another computer is added to your Logbook and plays from the file.
+
+A `.uxflight` is an ordinary zip file, and nothing in it is compressed or locked. Inside are `telemetry.tlog`, which Mission Planner and QGroundControl replay, the camera's own video files with an MP4 copy every player plays, `flight.json` with UXDuck's details of the flight, and a `README.txt` saying the same. Rename it to `.zip` to open it with any program.

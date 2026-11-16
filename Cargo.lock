@@ -4885,6 +4885,7 @@ dependencies = [
  "block2",
  "cc",
  "clap",
+ "crc32fast",
  "directories",
  "dunce",
  "embed-resource",

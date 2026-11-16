@@ -229,7 +229,7 @@ fn too_large_condition(entity: &str, id: &str) -> String {
 /// "640 KB", "1.3 MB", "50 GB". What a change takes is rounded up, so one
 /// just over what the account takes never reads as equal to it, and what
 /// the account takes, holds and allows is rounded down.
-fn size_words(bytes: u64, round_up: bool) -> String {
+pub(crate) fn size_words(bytes: u64, round_up: bool) -> String {
     const MB: u64 = 1024 * 1024;
     let over = |unit: u64, of: u64| {
         if round_up {
@@ -381,6 +381,8 @@ fn shared_flight(
     uxduck_core::domain::flight::Flight {
         recorded_here: false,
         left_account: false,
+        // Paths on this computer's disks (ADR-0062).
+        copies: Vec::new(),
         ..flight.clone()
     }
 }

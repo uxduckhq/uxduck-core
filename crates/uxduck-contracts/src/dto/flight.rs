@@ -106,6 +106,140 @@ pub struct Flight {
     /// Its checklist as it stood when it armed, and every override (S193).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checklist: Option<crate::dto::checklist::ChecklistRecord>,
+    /// Its `.uxflight` files on other disks (ADR-0062), written by
+    /// `flight/offload` or the file it was opened from. This computer's
+    /// alone: never in the account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<FlightCopy>,
+    /// A `flight/offload` under way, or the last one that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload: Option<FlightOffload>,
+}
+
+/// A flight's `.uxflight` file (ADR-0062).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightCopy {
+    pub path: String,
+    /// The disk it is on, by name: `T7` for `/Volumes/T7/…`, a drive
+    /// letter on Windows, else the folder's name.
+    pub place: String,
+    /// The file is there now: false while its disk is not plugged in.
+    /// Omitted when this host cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present: Option<bool>,
+}
+
+/// A `flight/offload` of this flight, while it runs or after it failed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightOffload {
+    /// The folder it is written to.
+    pub to: String,
+    /// The disk, by name.
+    pub place: String,
+    /// Move (its video leaves this computer) rather than Copy.
+    #[serde(rename = "move")]
+    pub moving: bool,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub done_bytes: u64,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub total_bytes: u64,
+    /// Why it failed. Nothing on this computer was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `flight/offload`: writes each flight as a `.uxflight` file into a
+/// folder, such as one on an external disk (ADR-0062).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightOffloadParams {
+    pub ids: Vec<String>,
+    /// A Log folder's path, a disk from `flights/found`'s `disks` (written
+    /// into its `UXDuck Flights` folder), or any folder this computer can
+    /// write. One not yet a Log folder becomes one.
+    pub folder: String,
+    /// Move: once every file is written and read back, the video recordings
+    /// only these flights use are deleted from this computer. The telemetry
+    /// log always stays. Copy (false) deletes nothing.
+    #[serde(rename = "move")]
+    pub moving: bool,
+    /// Writes nothing and says what it would do.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check: bool,
+}
+
+/// What `flight/offload` does or would do.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightOffloadResult {
+    /// The folder the files go in.
+    pub folder: String,
+    /// Its disk, by name.
+    pub place: String,
+    /// The folder becomes a Log folder, as it is not one yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adds_folder: bool,
+    /// The files, one a flight, by name.
+    pub files: Vec<String>,
+    /// The videos' bytes to write, original and playable copy. The
+    /// telemetry is added to this as each flight's log is read.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub video_bytes: u64,
+    /// How many video recordings go in the files.
+    pub videos: u32,
+    /// The video Move deletes from this computer.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub freed_bytes: u64,
+    /// Videos that stay on this computer after a Move, because another
+    /// flight uses them too or they were added from elsewhere.
+    pub kept_videos: u32,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub kept_bytes: u64,
+    /// Free space on the disk, when it can be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub free_bytes: Option<u64>,
+    /// With `check`: why it would be refused, in the numbers measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
+/// The disk a folder is on, by the name a person knows it by (ADR-0062):
+/// `T7` for `/Volumes/T7` on macOS, `/media/<user>/T7` or
+/// `/run/media/<user>/T7` on Linux (or `/media/T7`, `/mnt/T7`), `E:` on
+/// Windows, and the folder's own name anywhere else.
+#[must_use]
+pub fn place_of_folder(folder: &str) -> String {
+    let parts: Vec<&str> = folder
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    if let Some(drive) = parts.first().filter(|p| p.len() == 2 && p.ends_with(':')) {
+        return drive.to_ascii_uppercase();
+    }
+    let named = match parts.as_slice() {
+        ["Volumes" | "mnt", name, ..]
+        | ["run", "media", _, name, ..]
+        | ["media", _, name, ..]
+        | ["media", name] => Some(*name),
+        _ => None,
+    };
+    named
+        .or_else(|| parts.last().copied())
+        .unwrap_or(folder)
+        .to_owned()
+}
+
+/// The disk a file is on, as [`place_of_folder`] names it, the file's
+/// folder standing for anywhere else.
+#[must_use]
+pub fn place_of(path: &str) -> String {
+    let folder = path
+        .rfind(['/', '\\'])
+        .map_or(path, |at| if at == 0 { "/" } else { &path[..at] });
+    place_of_folder(folder)
 }
 
 /// A flight's log sent to the account by itself.
@@ -407,6 +541,36 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 count: p.count,
             }),
             checklist: f.checklist.as_ref().map(Into::into),
+            copies: f
+                .copies
+                .iter()
+                .map(|c| FlightCopy {
+                    path: c.path.clone(),
+                    place: place_of(&c.path),
+                    present: None,
+                })
+                .collect(),
+            offload: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{place_of, place_of_folder};
+
+    #[test]
+    fn a_disk_is_named_as_its_system_names_it() {
+        assert_eq!(place_of("/Volumes/T7/UXDuck Flights/a.uxflight"), "T7");
+        assert_eq!(place_of("/media/ben/T7/a.uxflight"), "T7");
+        assert_eq!(
+            place_of("/run/media/ben/Field SSD/logs/a.uxflight"),
+            "Field SSD"
+        );
+        assert_eq!(place_of("/mnt/backup/a.uxflight"), "backup");
+        assert_eq!(place_of("e:\\Flights\\a.uxflight"), "E:");
+        assert_eq!(place_of("/home/ben/Flights/a.uxflight"), "Flights");
+        assert_eq!(place_of_folder("/Volumes/T7"), "T7");
+        assert_eq!(place_of_folder("/home/ben/Flights"), "Flights");
     }
 }

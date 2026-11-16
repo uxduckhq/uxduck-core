@@ -2632,6 +2632,9 @@ export type ClientRequest = {
     method: 'flight/removal';
     params: FlightRemovalParams;
 } | {
+    method: 'flight/offload';
+    params: FlightOffloadParams;
+} | {
     method: 'flight/end';
     params: FlightEndParams;
 } | {
@@ -6506,6 +6509,12 @@ export type Flight = {
      * offline since.
      */
     contactLostAtUs?: number | null;
+    /**
+     * Its `.uxflight` files on other disks (ADR-0062), written by
+     * `flight/offload` or the file it was opened from. This computer's
+     * alone: never in the account.
+     */
+    copies?: Array<FlightCopy>;
     end: FlightEnd;
     endedAtUs?: number | null;
     id: string;
@@ -6539,6 +6548,10 @@ export type Flight = {
      * after its vehicle.
      */
     name?: string | null;
+    /**
+     * A `flight/offload` under way, or the last one that failed.
+     */
+    offload?: FlightOffload | null;
     operators?: Array<FlightOperator>;
     /**
      * The parameters it armed with (C7), when UXDuck had them.
@@ -6592,6 +6605,41 @@ export type FlightClockOffset = {
      * Added to its time; negative is earlier.
      */
     offsetUs: number;
+};
+
+/**
+ * A flight's `.uxflight` file (ADR-0062).
+ */
+export type FlightCopy = {
+    path: string;
+    /**
+     * The disk it is on, by name: `T7` for `/Volumes/T7/…`, a drive
+     * letter on Windows, else the folder's name.
+     */
+    place: string;
+    /**
+     * The file is there now: false while its disk is not plugged in.
+     * Omitted when this host cannot tell.
+     */
+    present?: boolean | null;
+};
+
+/**
+ * A disk plugged in that UXDuck can write to (ADR-0062): an external
+ * volume, offered by Move or copy even before it is a Log folder.
+ */
+export type FlightDisk = {
+    /**
+     * Where Move or copy writes on it: an added Log folder on it, else its
+     * `UXDuck Flights` folder, made when first written.
+     */
+    folder: string;
+    freeBytes?: number | null;
+    name: string;
+    /**
+     * Where it is mounted, such as `/Volumes/T7` or `E:\`.
+     */
+    path: string;
 };
 
 /**
@@ -6671,6 +6719,12 @@ export type FlightFolder = {
      */
     on: boolean;
     path: string;
+    /**
+     * The disk it is on, by name (ADR-0062): `T7` for `/Volumes/T7/…`.
+     * An added folder that is not there is a disk not plugged in, and the
+     * flights last found in it stay listed.
+     */
+    place?: string;
     /**
      * The walk through its whole tree, for a folder with all subfolders
      * on: the one under way, or else the last. Absent before the first.
@@ -6822,6 +6876,103 @@ export type FlightMission = {
      * The first flight of the run.
      */
     runId: string;
+};
+
+/**
+ * A `flight/offload` of this flight, while it runs or after it failed.
+ */
+export type FlightOffload = {
+    doneBytes: number;
+    /**
+     * Why it failed. Nothing on this computer was deleted.
+     */
+    error?: string | null;
+    /**
+     * Move (its video leaves this computer) rather than Copy.
+     */
+    move: boolean;
+    /**
+     * The disk, by name.
+     */
+    place: string;
+    /**
+     * The folder it is written to.
+     */
+    to: string;
+    totalBytes: number;
+};
+
+/**
+ * `flight/offload`: writes each flight as a `.uxflight` file into a
+ * folder, such as one on an external disk (ADR-0062).
+ */
+export type FlightOffloadParams = {
+    /**
+     * Writes nothing and says what it would do.
+     */
+    check?: boolean;
+    /**
+     * A Log folder's path, a disk from `flights/found`'s `disks` (written
+     * into its `UXDuck Flights` folder), or any folder this computer can
+     * write. One not yet a Log folder becomes one.
+     */
+    folder: string;
+    ids: Array<string>;
+    /**
+     * Move: once every file is written and read back, the video recordings
+     * only these flights use are deleted from this computer. The telemetry
+     * log always stays. Copy (false) deletes nothing.
+     */
+    move: boolean;
+};
+
+/**
+ * What `flight/offload` does or would do.
+ */
+export type FlightOffloadResult = {
+    /**
+     * The folder becomes a Log folder, as it is not one yet.
+     */
+    addsFolder?: boolean;
+    /**
+     * The files, one a flight, by name.
+     */
+    files: Array<string>;
+    /**
+     * The folder the files go in.
+     */
+    folder: string;
+    /**
+     * Free space on the disk, when it can be read.
+     */
+    freeBytes?: number | null;
+    /**
+     * The video Move deletes from this computer.
+     */
+    freedBytes: number;
+    keptBytes: number;
+    /**
+     * Videos that stay on this computer after a Move, because another
+     * flight uses them too or they were added from elsewhere.
+     */
+    keptVideos: number;
+    /**
+     * Its disk, by name.
+     */
+    place: string;
+    /**
+     * With `check`: why it would be refused, in the numbers measured.
+     */
+    refused?: string | null;
+    /**
+     * The videos' bytes to write, original and playable copy. The
+     * telemetry is added to this as each flight's log is read.
+     */
+    videoBytes: number;
+    /**
+     * How many video recordings go in the files.
+     */
+    videos: number;
 };
 
 /**
@@ -7089,6 +7240,16 @@ export type FoundFlight = {
      */
     folder: string;
     /**
+     * A `.bin` or `.ulg` is one entry, timed by the file: `armedAtUs` is
+     * when it was last changed and `endedAtUs` is absent.
+     */
+    kind?: FoundLogKind;
+    /**
+     * Last found in a folder that is not there now: a disk not plugged in
+     * (ADR-0062). Listed, not replayed, until it is back.
+     */
+    missing?: boolean;
+    /**
      * The tlog, to replay with `replay/open`.
      */
     path: string;
@@ -7112,12 +7273,25 @@ export type FoundFlightsParams = {
      * folder gives the start of its list.
      */
     notRead?: NotReadFrom | null;
+    /**
+     * Also the video files found in the folders that are there.
+     */
+    videos?: boolean;
 };
 
 /**
  * Result of `flights/found` and `flights/folder`.
  */
 export type FoundFlightsResult = {
+    /**
+     * External disks plugged in that UXDuck can write to, for Move or copy.
+     */
+    disks?: Array<FlightDisk>;
+    /**
+     * The `.uxflight` files found in the folders that are there (ADR-0062).
+     * Each is in the Logbook (`flight/list`), added by reference.
+     */
+    flightFiles?: Array<string>;
     /**
      * Newest first.
      */
@@ -7127,7 +7301,16 @@ export type FoundFlightsResult = {
      * A look through the folders is under way.
      */
     scanning?: boolean;
+    /**
+     * With `videos`: the videos in the folders that are there, newest first.
+     */
+    videos?: Array<FoundVideo>;
 };
+
+/**
+ * What kind of log a found flight is in.
+ */
+export type FoundLogKind = 'tlog' | 'bin' | 'ulg';
 
 /**
  * One plugin command, with what `plugin_call` needs to run it.
@@ -7155,6 +7338,23 @@ export type FoundVehicle = {
     systemId: number;
     vehicleId?: string | null;
     vehicleType: string;
+};
+
+/**
+ * A video file in a Log folder (ADR-0062), to add to a flight.
+ */
+export type FoundVideo = {
+    bytes: number;
+    file: string;
+    /**
+     * The folder it was found in, by id.
+     */
+    folder: string;
+    /**
+     * When the file was last changed, Unix microseconds.
+     */
+    modifiedUs: number;
+    path: string;
 };
 
 /**
@@ -9816,6 +10016,20 @@ export type OwnSet = {
      */
     vehicleId?: string | null;
     version?: string | null;
+};
+
+/**
+ * Where a recording kept in a `.uxflight` is (ADR-0062).
+ */
+export type PackedVideo = {
+    /**
+     * The `.uxflight` file.
+     */
+    path: string;
+    /**
+     * Its disk, by name.
+     */
+    place: string;
 };
 
 export type PacketEndpoint = {
@@ -18212,6 +18426,11 @@ export type VideoRecording = {
     flightId?: string | null;
     height?: number | null;
     id: string;
+    /**
+     * Kept in a flight's `.uxflight` on another disk rather than on this
+     * computer (ADR-0062), and played from there.
+     */
+    packed?: PackedVideo | null;
     /**
      * It has the camera's sound as a second track (S147).
      */

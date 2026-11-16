@@ -755,8 +755,22 @@ pub struct VideoRecording {
     /// How an added video's start was put on the flight's clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<VideoAlignment>,
+    /// Kept in a flight's `.uxflight` on another disk rather than on this
+    /// computer (ADR-0062), and played from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packed: Option<PackedVideo>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// Where a recording kept in a `.uxflight` is (ADR-0062).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PackedVideo {
+    /// The `.uxflight` file.
+    pub path: String,
+    /// Its disk, by name.
+    pub place: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

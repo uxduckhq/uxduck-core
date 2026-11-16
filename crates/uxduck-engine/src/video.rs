@@ -157,9 +157,10 @@ pub trait VideoPort: Send + std::fmt::Debug {
     fn recover_recording(&mut self, _file: &str) -> Option<(u64, u64)> {
         None
     }
-    /// `/recordings/<id>.mp4?token=` answers with the recording's file for
-    /// an hour.
-    fn allow_playback(&mut self, _token: &str, _recording_id: &str, _file: &str) {}
+    /// `/recordings/<id>.mp4?token=` answers with the recording's bytes
+    /// for an hour, from where they are `at`.
+    fn allow_playback(&mut self, _token: &str, _recording_id: &str, _at: &crate::runtime::VideoAt) {
+    }
     /// Shows the media folder in the file manager, with a recording's file
     /// selected if one is named: the folder.
     ///
@@ -1747,15 +1748,17 @@ impl Engine {
                 .map(|folder| VideoRevealResult { folder });
         }
         let file = match &params.recording_id {
-            Some(id) => Some(
-                self.state
-                    .video_recordings
-                    .get(id)
-                    .ok_or_else(|| {
-                        ApiError::new(ErrorKind::NotFound, format!("no recording {id}"))
-                    })?
-                    .file(),
-            ),
+            Some(id) => {
+                let recording = self.state.video_recordings.get(id).ok_or_else(|| {
+                    ApiError::new(ErrorKind::NotFound, format!("no recording {id}"))
+                })?;
+                Some(
+                    recording
+                        .packed
+                        .as_ref()
+                        .map_or_else(|| recording.file(), |packed| packed.path.clone()),
+                )
+            }
             None => None,
         };
         let port = self.video.port.as_mut().ok_or_else(|| {

@@ -1,0 +1,8 @@
+{
+  "method": "flight/offload",
+  "params": {
+    "ids": ["fl0123456789abcdef"],
+    "folder": "/Volumes/T7",
+    "move": true
+  }
+}

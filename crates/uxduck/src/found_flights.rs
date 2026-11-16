@@ -40,9 +40,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use uxduck_contracts::dto::flight::place_of_folder;
 use uxduck_contracts::dto::replay::{
-    FlightFolder, FlightFolderParams, FolderWalk, FoundFlight, FoundFlightsParams,
-    FoundFlightsResult, NotRead, NotReadFrom,
+    FlightDisk, FlightFolder, FlightFolderParams, FolderWalk, FoundFlight, FoundFlightsParams,
+    FoundFlightsResult, FoundLogKind, FoundVideo, NotRead, NotReadFrom,
 };
 
 /// How often the folders are looked through while Flights asks.
@@ -71,6 +72,31 @@ const NOT_READ_PAGE: usize = 100;
 const MAX_RECORD: usize = 8 + 10 + 255 + 2 + 13;
 /// `MAV_TYPE_GCS`: a ground station's heartbeat, never a flight.
 const GCS: u8 = 6;
+/// The videos a Log folder lists (ADR-0062), to add to a flight.
+const VIDEOS: [&str; 4] = ["mp4", "mov", "m4v", "ts"];
+/// Where Move or copy writes on a disk that is not a Log folder yet.
+pub const DISK_FOLDER: &str = "UXDuck Flights";
+
+/// What a look keeps of a file, by its extension.
+fn kind_of(path: &Path) -> Option<Kind> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "tlog" => Kind::Log(FoundLogKind::Tlog),
+        "bin" => Kind::Log(FoundLogKind::Bin),
+        "ulg" => Kind::Log(FoundLogKind::Ulg),
+        "uxflight" => Kind::Flight,
+        e if VIDEOS.contains(&e) => Kind::Video,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Log(FoundLogKind),
+    /// A `.uxflight`, added to the Logbook by the engine.
+    Flight,
+    Video,
+}
 
 /// The person's choices, kept in `flight-folders.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -113,6 +139,13 @@ struct State {
     looked_at: Option<Instant>,
     scanning: bool,
     files: HashMap<PathBuf, Seen>,
+    /// The `.uxflight` files and videos the last look found, by folder id.
+    flight_files: Vec<(String, PathBuf)>,
+    videos: Vec<FoundVideo>,
+    /// The flights last found in each added folder, by its id, kept while
+    /// it is not there (a disk not plugged in, ADR-0062) and across
+    /// restarts. Read from the disk when first needed.
+    remembered: Option<HashMap<String, Vec<FoundFlight>>>,
     /// Deep folders' walks, by folder id.
     walks: HashMap<String, Walk>,
     /// Walks under way, by folder id: the entries each has read so far.
@@ -217,8 +250,8 @@ fn unread(path: &Path, what: &str, error: &std::io::Error) -> NotRead {
     }
 }
 
-/// Every `.tlog` under a folder: at its top level only, or through its
-/// whole `tree`, hidden folders and links skipped. With them, how many
+/// Every log, `.uxflight` and video under a folder: at its top level
+/// only, or through its whole `tree`, hidden folders and links skipped. With them, how many
 /// entries were read. A folder that cannot be listed goes in `not_read`.
 /// `go_on` hears how many entries have been read every [`TELL_EVERY`] of
 /// them, and ends the walk by answering false.
@@ -268,15 +301,73 @@ fn walk(
                 if tree {
                     folders.push(path);
                 }
-            } else if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("tlog"))
-            {
+            } else if kind_of(&path).is_some() {
                 files.push(path);
             }
         }
     }
     (files, entries)
+}
+
+/// The external disks plugged in that UXDuck can write to (ADR-0062), for
+/// Move or copy, each with where it would write: an added Log folder on
+/// it, else its [`DISK_FOLDER`].
+#[must_use]
+pub fn disks(folders: &[FlightFolder]) -> Vec<FlightDisk> {
+    let mut disks: Vec<FlightDisk> = crate::card_logs::mount_roots()
+        .into_iter()
+        .filter(|volume| external(volume))
+        .map(|volume| {
+            let path = volume.display().to_string();
+            let folder = folders
+                .iter()
+                .filter(|f| f.added && f.exists)
+                .find(|f| Path::new(&f.path).starts_with(&volume))
+                .map_or_else(
+                    || volume.join(DISK_FOLDER).display().to_string(),
+                    |f| f.path.clone(),
+                );
+            FlightDisk {
+                name: place_of_folder(&path),
+                free_bytes: fs4::available_space(&volume).ok(),
+                folder,
+                path,
+            }
+        })
+        .collect();
+    disks.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
+    disks
+}
+
+/// A volume that is a disk of its own, plugged in and writable: not this
+/// computer's own disk, not a link to it (macOS's `/Volumes/Macintosh HD`),
+/// and not mounted read-only.
+#[must_use]
+pub fn external(volume: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(volume) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata("/").is_ok_and(|root| root.dev() == meta.dev()) {
+            return false;
+        }
+        let Ok(stat) = rustix::fs::statvfs(volume) else {
+            return false;
+        };
+        if stat.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
+            return false;
+        }
+        rustix::fs::access(volume, rustix::fs::Access::WRITE_OK).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        !meta.permissions().readonly()
+    }
 }
 
 /// What comes next in a log.
@@ -378,6 +469,8 @@ pub fn flights_in(
                         armed_at_us: from,
                         ended_at_us: Some(stamp),
                         recording: false,
+                        kind: FoundLogKind::Tlog,
+                        missing: false,
                     });
                 }
             }
@@ -395,6 +488,8 @@ pub fn flights_in(
             armed_at_us: from,
             ended_at_us: Some(last),
             recording: false,
+            kind: FoundLogKind::Tlog,
+            missing: false,
         });
     }
     Ok((flights, stopped))
@@ -443,6 +538,40 @@ impl Found {
     fn save(&self, choices: &Choices) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(choices).map_err(|e| e.to_string())?;
         std::fs::write(self.choices_path(), bytes).map_err(|e| e.to_string())
+    }
+
+    /// Where each added folder's last-found flights are kept, beside the
+    /// choices, so a disk unplugged over a restart keeps them (ADR-0062).
+    fn remembered_path(data_dir: &Path) -> PathBuf {
+        data_dir.join("flight-folders-found.json")
+    }
+
+    /// The flights last found in each added folder, read once.
+    fn remembered<'a>(
+        data_dir: &Path,
+        state: &'a mut State,
+    ) -> &'a mut HashMap<String, Vec<FoundFlight>> {
+        state.remembered.get_or_insert_with(|| {
+            std::fs::read(Self::remembered_path(data_dir))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Writes the flights last found in each added folder, when they
+    /// changed. A disk that cannot be written to says so in the log.
+    fn keep_remembered(data_dir: &Path, remembered: &HashMap<String, Vec<FoundFlight>>) {
+        let path = Self::remembered_path(data_dir);
+        let Ok(bytes) = serde_json::to_vec(remembered) else {
+            return;
+        };
+        if std::fs::read(&path).is_ok_and(|was| was == bytes) {
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, bytes) {
+            tracing::warn!(%error, path = %path.display(), "could not keep the flights found in the Log folders");
+        }
     }
 
     /// The folders looked in or not, the known first, each with how many
@@ -507,6 +636,7 @@ impl Found {
                 added: true,
                 deep: choices.deep.contains(added),
                 walk: walk.filter(|_| choices.deep.contains(added)),
+                place: place_of_folder(added),
                 ..FlightFolder::default()
             });
         }
@@ -526,16 +656,51 @@ impl Found {
         if due {
             self.look(folders.clone());
         }
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let on: Vec<&FlightFolder> = folders.iter().filter(|f| f.on).collect();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let on: Vec<&FlightFolder> = folders.iter().filter(|f| f.on && f.exists).collect();
+        let inside = |path: &Path| on.iter().any(|f| path.starts_with(&f.path));
         let mut flights: Vec<FoundFlight> = state
             .files
             .iter()
-            .filter(|(path, _)| on.iter().any(|f| path.starts_with(&f.path)))
+            .filter(|(path, _)| inside(path))
             .flat_map(|(_, seen)| seen.flights.clone())
             .collect();
+        // A disk not plugged in keeps its flights listed (ADR-0062).
+        let remembered = Self::remembered(&self.data_dir, &mut state);
+        for folder in folders.iter().filter(|f| f.on && f.added && !f.exists) {
+            flights.extend(
+                remembered
+                    .get(&folder.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|flight| FoundFlight {
+                        missing: true,
+                        recording: false,
+                        ..flight.clone()
+                    }),
+            );
+        }
         flights.sort_by(|a, b| b.armed_at_us.cmp(&a.armed_at_us).then(a.path.cmp(&b.path)));
+        let mut videos: Vec<FoundVideo> = if params.videos {
+            state
+                .videos
+                .iter()
+                .filter(|v| inside(Path::new(&v.path)))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        videos.sort_by(|a, b| b.modified_us.cmp(&a.modified_us).then(a.path.cmp(&b.path)));
         FoundFlightsResult {
+            flight_files: state
+                .flight_files
+                .iter()
+                .filter(|(_, path)| inside(path))
+                .map(|(_, path)| path.display().to_string())
+                .collect(),
+            disks: disks(&folders),
+            videos,
             folders,
             flights,
             scanning: state.scanning || !state.walking.is_empty(),
@@ -598,6 +763,10 @@ impl Found {
 
     /// Looks through the folders on a thread of its own: only files new
     /// or changed since the last look are read.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per kind of file a folder holds"
+    )]
     fn look(&self, folders: Vec<FlightFolder>) {
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -605,8 +774,11 @@ impl Found {
             state.walked_since = false;
         }
         let state = self.state.clone();
+        let data_dir = self.data_dir.clone();
         std::thread::spawn(move || {
             let mut files = Vec::new();
+            // The folders whose files are known: a deep one once walked.
+            let mut listed: Vec<String> = Vec::new();
             // By folder id: those that may hold flights, and the files
             // that are not logs.
             let mut not_read: HashMap<String, (Vec<NotRead>, Vec<NotRead>)> = HashMap::new();
@@ -617,9 +789,11 @@ impl Found {
                     let state = state.lock().unwrap_or_else(PoisonError::into_inner);
                     state.walks.get(&folder.id).map_or_else(Vec::new, |walk| {
                         unread.extend(walk.not_read.iter().cloned());
+                        listed.push(folder.id.clone());
                         walk.files.clone()
                     })
                 } else {
+                    listed.push(folder.id.clone());
                     // An app's folder through its whole tree, as deep as
                     // its logs are; an added one at its top level only
                     // (maintainer, 2026-10-29).
@@ -628,8 +802,13 @@ impl Found {
                 files.extend(found.into_iter().map(|p| (folder.id.clone(), p)));
             }
             let mut fresh: HashMap<PathBuf, Seen> = HashMap::new();
+            let mut flight_files = Vec::new();
+            let mut videos = Vec::new();
             for (folder, path) in files {
                 let (unread, not_logs) = not_read.entry(folder.clone()).or_default();
+                let Some(kind) = kind_of(&path) else {
+                    continue;
+                };
                 let meta = match std::fs::metadata(&path) {
                     Ok(meta) => meta,
                     Err(error) => {
@@ -642,6 +821,124 @@ impl Found {
                     meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 );
                 let growing = modified.elapsed().is_ok_and(|age| age < GROWING);
+                let modified_us = modified
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+                match kind {
+                    Kind::Log(FoundLogKind::Tlog) => {}
+                    // One entry a file, timed by the file (ADR-0062): its
+                    // own clock is the vehicle's time since boot, or needs
+                    // the whole log read.
+                    Kind::Log(log) => {
+                        let known = state
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .files
+                            .get(&path)
+                            .filter(|seen| seen.size == size && seen.modified == modified)
+                            .cloned();
+                        if let Some(mut seen) = known {
+                            for flight in &mut seen.flights {
+                                flight.recording = growing;
+                            }
+                            fresh.insert(path, seen);
+                            continue;
+                        }
+                        // `.bin` names many files, such as firmware: only one
+                        // that begins as an ArduPilot log or a ULog is listed.
+                        // Another is passed over, as files of other kinds are,
+                        // and kept so it is not opened again.
+                        let mut head = [0u8; 7];
+                        let read = File::open(&path).and_then(|mut file| {
+                            let mut got = 0;
+                            while got < head.len() {
+                                match file.read(&mut head[got..])? {
+                                    0 => break,
+                                    n => got += n,
+                                }
+                            }
+                            Ok(got)
+                        });
+                        let got = match read {
+                            Ok(got) => got,
+                            Err(error) => {
+                                unread.push(self::unread(&path, "read it", &error));
+                                continue;
+                            }
+                        };
+                        let head = &head[..got];
+                        let begins = match log {
+                            FoundLogKind::Bin => uxduck_mavlink::dataflash::is_dataflash(head),
+                            FoundLogKind::Ulg => uxduck_mavlink::ulog::is_ulog(head),
+                            FoundLogKind::Tlog => true,
+                        };
+                        if !begins {
+                            fresh.insert(
+                                path,
+                                Seen {
+                                    size,
+                                    modified,
+                                    flights: Vec::new(),
+                                    stopped: None,
+                                },
+                            );
+                            continue;
+                        }
+                        let file = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let flight = FoundFlight {
+                            folder: folder.clone(),
+                            path: path.display().to_string(),
+                            file,
+                            system_id: 0,
+                            vehicle_type: "Generic".to_owned(),
+                            armed_at_us: modified_us,
+                            ended_at_us: None,
+                            recording: growing,
+                            kind: log,
+                            missing: false,
+                        };
+                        fresh.insert(
+                            path,
+                            Seen {
+                                size,
+                                modified,
+                                flights: vec![flight],
+                                stopped: None,
+                            },
+                        );
+                        continue;
+                    }
+                    Kind::Flight => {
+                        // Its directory and `flight.json` read now, so one that
+                        // cannot be is told here.
+                        if !growing {
+                            match crate::flight_file::manifest(&path) {
+                                Ok(_) => flight_files.push((folder.clone(), path)),
+                                Err(why) => unread.push(NotRead {
+                                    path: path.display().to_string(),
+                                    why: format!("UXDuck could not read it: {why}"),
+                                }),
+                            }
+                        }
+                        continue;
+                    }
+                    Kind::Video => {
+                        videos.push(FoundVideo {
+                            folder: folder.clone(),
+                            file: path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            path: path.display().to_string(),
+                            bytes: size,
+                            modified_us,
+                        });
+                        continue;
+                    }
+                }
                 let known = state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -699,7 +996,30 @@ impl Found {
                 .map(|(folder, (told, not_logs))| (folder, Unread::of(told, not_logs)))
                 .collect();
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            // Each added folder looked through keeps what it holds now, for
+            // when its disk is not plugged in (ADR-0062).
+            let looked: Vec<&FlightFolder> = folders
+                .iter()
+                .filter(|f| f.added && f.on && f.exists && listed.contains(&f.id))
+                .collect();
+            let remembered = Self::remembered(&data_dir, &mut state);
+            for folder in &looked {
+                let held: Vec<FoundFlight> = fresh
+                    .iter()
+                    .filter(|(path, _)| path.starts_with(&folder.path))
+                    .flat_map(|(_, seen)| seen.flights.iter().cloned())
+                    .map(|flight| FoundFlight {
+                        recording: false,
+                        ..flight
+                    })
+                    .collect();
+                remembered.insert(folder.id.clone(), held);
+            }
+            remembered.retain(|id, _| folders.iter().any(|f| f.added && &f.id == id));
+            Self::keep_remembered(&data_dir, remembered);
             state.files = fresh;
+            state.flight_files = flight_files;
+            state.videos = videos;
             state.not_read = not_read;
             state.looked_at = (!state.walked_since).then(Instant::now);
             state.scanning = false;
@@ -1183,6 +1503,7 @@ mod tests {
                         folder: path.clone(),
                         offset,
                     }),
+                    videos: false,
                 })
                 .folders
         };
@@ -1337,5 +1658,78 @@ mod tests {
         assert_eq!(walk.entries, 251 + 251_000 + 1);
         assert!(walk.took_ms.is_some(), "the walk has ended");
         assert_eq!(folder.not_read, []);
+    }
+
+    /// ADR-0062 E9 and E10: an added folder lists ArduPilot and PX4 logs
+    /// as one entry a file and its videos, passes over a `.bin` that is no
+    /// log, and keeps its flights while its disk is not plugged in, over a
+    /// restart, until it is back.
+    #[test]
+    fn an_unplugged_disk_keeps_its_flights_and_its_autopilot_logs_are_found() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let disk = root.path().join("T7");
+        std::fs::create_dir(&disk).unwrap();
+        std::fs::write(disk.join("field.tlog"), log(&[(1, 5, 15)], 20)).unwrap();
+        std::fs::write(
+            disk.join("00000042.BIN"),
+            [0xA3, 0x95, 0x80, 0x80, 89, 0, 0],
+        )
+        .unwrap();
+        std::fs::write(
+            disk.join("log_7.ulg"),
+            b"ULog\x01\x12\x35\x01\0\0\0\0\0\0\0",
+        )
+        .unwrap();
+        std::fs::write(disk.join("firmware.bin"), [0x7f, b'E', b'L', b'F']).unwrap();
+        std::fs::write(disk.join("DJI_0042.MP4"), [0u8; 64]).unwrap();
+        let path = disk.display().to_string();
+        let found = Found::new(data.path());
+        add(&found, &path, None);
+        let mut flights: Vec<(String, FoundLogKind)> = settled(&found, &path)
+            .into_iter()
+            .map(|f| (f.file, f.kind))
+            .collect();
+        flights.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            flights,
+            [
+                ("00000042.BIN".to_owned(), FoundLogKind::Bin),
+                ("field.tlog".to_owned(), FoundLogKind::Tlog),
+                ("log_7.ulg".to_owned(), FoundLogKind::Ulg),
+            ]
+        );
+        assert_eq!(folder(&found, &path).not_read, []);
+        let videos = found.found(&FoundFlightsParams {
+            videos: true,
+            ..FoundFlightsParams::default()
+        });
+        assert_eq!(
+            videos
+                .videos
+                .iter()
+                .map(|v| v.file.as_str())
+                .collect::<Vec<_>>(),
+            ["DJI_0042.MP4"]
+        );
+
+        // Unplugged, and UXDuck started again: still listed, as missing.
+        let away = root.path().join("elsewhere");
+        std::fs::rename(&disk, &away).unwrap();
+        let found = Found::new(data.path());
+        let result = found.found(&FoundFlightsParams::default());
+        let t7 = result.folders.iter().find(|f| f.id == path).unwrap();
+        assert!(!t7.exists);
+        assert_eq!(t7.place, "T7");
+        let missing: Vec<&FoundFlight> =
+            result.flights.iter().filter(|f| f.folder == path).collect();
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        assert!(missing.iter().all(|f| f.missing));
+
+        // Plugged in again: replayable again.
+        std::fs::rename(&away, &disk).unwrap();
+        let back = settled(&Found::new(data.path()), &path);
+        assert_eq!(back.len(), 3);
+        assert!(back.iter().all(|f| !f.missing));
     }
 }

@@ -1,0 +1,9 @@
+{
+  "method": "flight/offload",
+  "params": {
+    "ids": ["fl0123456789abcdef", "fl00000000000000ff"],
+    "folder": "/Volumes/T7/UXDuck Flights",
+    "move": false,
+    "check": true
+  }
+}

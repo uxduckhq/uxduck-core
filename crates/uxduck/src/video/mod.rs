@@ -14,6 +14,7 @@ pub mod playback;
 pub mod recorder;
 pub mod reencode;
 pub mod rtsp;
+pub mod slice;
 pub mod socket;
 
 use std::collections::HashMap;
@@ -295,11 +296,28 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         recorder::recover(self.hub.dir(), file)
     }
 
-    fn allow_playback(&mut self, token: &str, recording_id: &str, file: &str) {
-        self.hub.allow_playback(token, recording_id, file);
+    fn allow_playback(
+        &mut self,
+        token: &str,
+        recording_id: &str,
+        at: &uxduck_engine::runtime::VideoAt,
+    ) {
+        self.hub.allow_playback(token, recording_id, at.clone());
     }
 
     fn reveal(&mut self, file: Option<&str>) -> Result<String, String> {
+        if let Some(elsewhere) = file.map(std::path::Path::new).filter(|p| p.is_absolute()) {
+            if !elsewhere.exists() {
+                return Err(format!(
+                    "{} is not on this computer now. Plug in its disk to show it.",
+                    elsewhere.display()
+                ));
+            }
+            let folder = elsewhere.parent().unwrap_or(elsewhere);
+            crate::adapters::browser::reveal(folder, Some(elsewhere))
+                .map_err(|e| format!("UXDuck can't open the folder: {e}"))?;
+            return Ok(folder.display().to_string());
+        }
         let dir = self.hub.dir();
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let file = file.map(|name| dir.join(name)).filter(|path| path.exists());

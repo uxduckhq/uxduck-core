@@ -56,6 +56,7 @@ mod messages;
 pub mod mission_history;
 mod mission_reads;
 pub mod nmea;
+mod offload;
 mod operations;
 mod own_models;
 pub mod pairing;
@@ -369,6 +370,8 @@ pub struct Engine {
     traffic: traffic::Traffic,
     /// The replay open now (ADR-0039).
     replays: replay::Replays,
+    /// Flights being written to a disk (ADR-0062).
+    offloads: offload::Offloads,
     /// Files being attached to chat messages (S246).
     uploads: attachments::Uploads,
     /// What each vehicle's dialect messages were published from (ADR-0044).
@@ -607,6 +610,7 @@ impl Engine {
             location: location::Location::default(),
             traffic: traffic::Traffic::default(),
             replays: replay::Replays::default(),
+            offloads: offload::Offloads::default(),
             uploads: attachments::Uploads::default(),
             published_dialects: dialects::Published::default(),
             places: places::Places::default(),

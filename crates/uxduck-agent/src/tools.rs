@@ -463,6 +463,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "flight/keep",
     "flight/remove",
     "flight/removal",
+    // Writes and deletes files on a person's disks (ADR-0062).
+    "flight/offload",
     "flight/end",
     "flight/uploadLog",
     "vehicle/editNote",

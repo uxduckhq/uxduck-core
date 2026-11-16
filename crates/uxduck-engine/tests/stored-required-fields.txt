@@ -925,3 +925,9 @@ NoRoom.allowance_bytes
 RefusedCopy.digest
 RefusedCopy.ts_us
 RefusedCopy.version
+
+# A flight's .uxflight copies and a recording packed in one (ADR-0062, 2026-11-16).
+FlightCopy.path
+PackedVideo.entry
+PackedVideo.path
+PackedVideo.playable

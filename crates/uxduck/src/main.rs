@@ -19,6 +19,7 @@ mod errors;
 mod feedback;
 mod find;
 mod firmware;
+mod flight_file;
 mod found_flights;
 mod inspect;
 mod interface;

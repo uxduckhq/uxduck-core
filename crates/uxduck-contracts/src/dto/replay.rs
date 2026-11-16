@@ -353,6 +353,62 @@ pub struct FlightFolder {
     /// on: the one under way, or else the last. Absent before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub walk: Option<FolderWalk>,
+    /// The disk it is on, by name (ADR-0062): `T7` for `/Volumes/T7/…`.
+    /// An added folder that is not there is a disk not plugged in, and the
+    /// flights last found in it stay listed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
+}
+
+/// A disk plugged in that UXDuck can write to (ADR-0062): an external
+/// volume, offered by Move or copy even before it is a Log folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightDisk {
+    /// Where it is mounted, such as `/Volumes/T7` or `E:\`.
+    pub path: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub free_bytes: Option<u64>,
+    /// Where Move or copy writes on it: an added Log folder on it, else its
+    /// `UXDuck Flights` folder, made when first written.
+    pub folder: String,
+}
+
+/// A video file in a Log folder (ADR-0062), to add to a flight.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundVideo {
+    /// The folder it was found in, by id.
+    pub folder: String,
+    pub path: String,
+    pub file: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// When the file was last changed, Unix microseconds.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub modified_us: u64,
+}
+
+/// What kind of log a found flight is in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FoundLogKind {
+    /// A MAVLink telemetry log, a flight for each arm to disarm.
+    #[default]
+    Tlog,
+    /// An ArduPilot DataFlash log from the vehicle's card, one entry a file.
+    Bin,
+    /// A PX4 ULog, one entry a file.
+    Ulg,
+}
+
+impl FoundLogKind {
+    #[must_use]
+    pub fn is_tlog(&self) -> bool {
+        *self == Self::Tlog
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip test")]
@@ -402,6 +458,14 @@ pub struct FoundFlight {
     /// The other app is still writing it: not replayed until it closes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recording: bool,
+    /// A `.bin` or `.ulg` is one entry, timed by the file: `armedAtUs` is
+    /// when it was last changed and `endedAtUs` is absent.
+    #[serde(default, skip_serializing_if = "FoundLogKind::is_tlog")]
+    pub kind: FoundLogKind,
+    /// Last found in a folder that is not there now: a disk not plugged in
+    /// (ADR-0062). Listed, not replayed, until it is back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 /// `flights/found`. Params may be omitted.
@@ -412,6 +476,9 @@ pub struct FoundFlightsParams {
     /// folder gives the start of its list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_read: Option<NotReadFrom>,
+    /// Also the video files found in the folders that are there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub videos: bool,
 }
 
 /// Where to read on in what one folder could not read.
@@ -436,6 +503,16 @@ pub struct FoundFlightsResult {
     /// A look through the folders is under way.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub scanning: bool,
+    /// The `.uxflight` files found in the folders that are there (ADR-0062).
+    /// Each is in the Logbook (`flight/list`), added by reference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flight_files: Vec<String>,
+    /// External disks plugged in that UXDuck can write to, for Move or copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<FlightDisk>,
+    /// With `videos`: the videos in the folders that are there, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub videos: Vec<FoundVideo>,
 }
 
 /// `flights/folder`: a folder looked in or not, added or removed.

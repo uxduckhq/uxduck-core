@@ -900,10 +900,26 @@ async fn recording(
     Query(query): Query<RecordingQuery>,
     request: Request,
 ) -> Response {
-    let Some((id, name)) = state.video.playback(&query.token) else {
+    use uxduck_engine::runtime::VideoAt;
+    let Some((id, at)) = state.video.playback(&query.token) else {
         return (StatusCode::UNAUTHORIZED, "ask for the recording first").into_response();
     };
     let dir = state.video.dir().to_owned();
+    let name = match at {
+        VideoAt::Media { file } => file,
+        VideoAt::Packed(packed) => {
+            if query.from_us.is_some() || query.to_us.is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Clips are cut from recordings on this computer. This one is in a .uxflight file on a disk.",
+                )
+                    .into_response();
+            }
+            let asked = crate::video::slice::asked(&request);
+            return packed_recording(&id, &file, &packed, asked).await;
+        }
+        VideoAt::Added { path } => path,
+    };
     if let (Some(from_us), Some(to_us)) = (query.from_us, query.to_us) {
         return recording_clip(&dir, &id, &name, &file, from_us, to_us).await;
     }
@@ -977,6 +993,60 @@ async fn recording(
         Ok(response) => response.map(Body::new).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// A recording kept in a `.uxflight` (ADR-0062), played from its place in
+/// the file: its copy every player plays as `<id>.mp4`, and an original
+/// kept as MPEG-TS as `<id>.ts`, with Range requests.
+async fn packed_recording(
+    id: &str,
+    file: &str,
+    packed: &uxduck_core::domain::video::PackedVideo,
+    asked: (Option<String>, bool),
+) -> Response {
+    let (wanted, kind) = if file == format!("{id}.mp4") {
+        (&packed.playable, "video/mp4")
+    } else if file == format!("{id}.ts") && packed.entry != packed.playable {
+        (&packed.entry, "video/mp2t")
+    } else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = std::path::PathBuf::from(&packed.path);
+    let place = uxduck_contracts::dto::flight::place_of(&packed.path);
+    let read = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || crate::flight_file::entries(&path)).await
+    };
+    let entries = match read {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("On {place}, which is not plugged in. Plug it in to play this video."),
+            )
+                .into_response();
+        }
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(entry) = crate::flight_file::find(&entries, wanted) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("{} has no {wanted}.", path.display()),
+        )
+            .into_response();
+    };
+    if !entry.whole() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "{wanted} in {} was compressed by another program, so it cannot be played from where it is.",
+                path.display()
+            ),
+        )
+            .into_response();
+    }
+    crate::video::slice::serve(path, entry.data_offset, entry.size, kind, asked).await
 }
 
 /// A photo from the video (S144), with the address `video/photo/show` gave.

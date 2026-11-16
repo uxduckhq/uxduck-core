@@ -583,6 +583,9 @@ fn check(name: &str) {
         ("result", "flight_removal") => {
             round_trip::<uxduck_contracts::dto::flight::FlightRemovalResult>(name, &json);
         }
+        ("result", "flight_offload") => {
+            round_trip::<uxduck_contracts::dto::flight::FlightOffloadResult>(name, &json);
+        }
         ("result", "param_sets") => {
             round_trip::<uxduck_contracts::dto::param_definitions::ParamSetsResult>(name, &json);
         }

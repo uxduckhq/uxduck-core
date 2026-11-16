@@ -42,6 +42,16 @@
       "walk": {
         "entries": 412672
       }
+    },
+    {
+      "id": "/Volumes/T7/UXDuck Flights",
+      "name": "UXDuck Flights",
+      "path": "/Volumes/T7/UXDuck Flights",
+      "on": true,
+      "exists": false,
+      "added": true,
+      "deep": true,
+      "place": "T7"
     }
   ],
   "flights": [
@@ -62,7 +72,26 @@
       "vehicleType": "FixedWing",
       "armedAtUs": 1789990000000000,
       "recording": true
+    },
+    {
+      "folder": "/Volumes/T7/UXDuck Flights",
+      "path": "/Volumes/T7/UXDuck Flights/logs/00000042.BIN",
+      "file": "00000042.BIN",
+      "systemId": 1,
+      "vehicleType": "Quadrotor",
+      "armedAtUs": 1789980000000000,
+      "kind": "bin",
+      "missing": true
     }
   ],
-  "scanning": true
+  "scanning": true,
+  "flightFiles": ["/Users/pilot/mavproxy/Alpha 2026-10-28 14.02.uxflight"],
+  "disks": [
+    {
+      "path": "/Volumes/T7",
+      "name": "T7",
+      "freeBytes": 871878361088,
+      "folder": "/Volumes/T7/UXDuck Flights"
+    }
+  ]
 }

@@ -205,8 +205,8 @@ struct Inner {
     open: HashMap<String, (String, Arc<Watcher>)>,
     /// Recordings by id: their source, and their writer's end (S40).
     recorders: HashMap<String, (String, std::sync::mpsc::Sender<Item>)>,
-    /// Playback tokens: the recording and its file, and when given.
-    playback: HashMap<String, (String, String, Instant)>,
+    /// Playback tokens: the recording, where its bytes are, and when given.
+    playback: HashMap<String, (String, uxduck_engine::runtime::VideoAt, Instant)>,
     /// Photo tokens (S144): the photo's id and file, and when given.
     photos: HashMap<String, (String, String, Instant)>,
     /// Sources re-encoded for browsers now, and those whose re-encode
@@ -306,24 +306,29 @@ impl Hub {
         self.lock().recorders.remove(recording_id);
     }
 
-    pub fn allow_playback(&self, token: &str, recording_id: &str, file: &str) {
+    pub fn allow_playback(
+        &self,
+        token: &str,
+        recording_id: &str,
+        bytes: uxduck_engine::runtime::VideoAt,
+    ) {
         let mut inner = self.lock();
         let now = Instant::now();
         inner
             .playback
             .retain(|_, (_, _, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
-        inner.playback.insert(
-            token.to_owned(),
-            (recording_id.to_owned(), file.to_owned(), now),
-        );
+        inner
+            .playback
+            .insert(token.to_owned(), (recording_id.to_owned(), bytes, now));
     }
 
     /// The recording a playback token is for, while it lasts: its id and
-    /// its file in the media folder.
-    pub fn playback(&self, token: &str) -> Option<(String, String)> {
+    /// where its bytes are, in the media folder, where it was added from,
+    /// or in a `.uxflight` (ADR-0062).
+    pub fn playback(&self, token: &str) -> Option<(String, uxduck_engine::runtime::VideoAt)> {
         let inner = self.lock();
-        let (id, file, at) = inner.playback.get(token)?;
-        (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), file.clone()))
+        let (id, bytes, at) = inner.playback.get(token)?;
+        (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), bytes.clone()))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {

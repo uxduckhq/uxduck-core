@@ -17,9 +17,9 @@ pub fn dir(data_dir: &Path) -> PathBuf {
     data_dir.join("logs-from-cards")
 }
 
-/// The places a card is mounted on this platform.
+/// The places a card or a disk is mounted on this platform, each volume.
 #[allow(clippy::vec_init_then_push, reason = "each platform adds its own")]
-fn mount_roots() -> Vec<PathBuf> {
+pub(crate) fn mount_roots() -> Vec<PathBuf> {
     #[allow(unused_mut, reason = "each platform adds its own")]
     let mut roots: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "macos")]

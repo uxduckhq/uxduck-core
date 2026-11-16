@@ -131,6 +131,20 @@ impl Engine {
         if let Some(id) = &params.attachment {
             self.attached_file(Some(connection), id)?;
         }
+        // A flight's own file (ADR-0062): its flight, in the Logbook by
+        // reference, replayed as one.
+        if let Some(path) = params.path.as_deref().filter(|p| {
+            std::path::Path::new(p)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("uxflight"))
+        }) {
+            let flight_id = self.adopt_flight_file(path)?;
+            return self.open_replay(&uxduck_contracts::dto::replay::ReplayOpenParams {
+                flight_id: Some(flight_id),
+                path: None,
+                ..params.clone()
+            });
+        }
         self.open_replay(params)
     }
 

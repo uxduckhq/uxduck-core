@@ -2094,7 +2094,13 @@ impl Engine {
             let Some(flight) = self.state.flights.get(id) else {
                 continue;
             };
-            let Some(link) = flight.link_id.clone() else {
+            // A flight without a log here plays from its `.uxflight`
+            // (ADR-0062), on its own.
+            let Some(link) = flight
+                .link_id
+                .clone()
+                .or_else(|| (!flight.copies.is_empty()).then(|| format!("file:{id}")))
+            else {
                 continue;
             };
             let (from, to) = self.flight_span(flight, params.ground);
@@ -2581,12 +2587,36 @@ impl Engine {
             flight.armed_at_us.saturating_sub(LEAD_US),
             ended.saturating_add(LEAD_US),
         ));
+        // Without a log here, its `.uxflight` (ADR-0062).
+        let Some(link_id) = flight.link_id.clone() else {
+            return flight.copies.first().map(|copy| ReplayRead::Packed {
+                path: self
+                    .present_copy(flight)
+                    .unwrap_or_else(|| copy.path.clone()),
+                entry: crate::offload::TELEMETRY.to_owned(),
+            });
+        };
         Some(ReplayRead::Link {
-            link_id: flight.link_id.clone()?,
+            link_id,
             from_us,
             to_us,
             start: flight.tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
         })
+    }
+
+    /// The part of its log a flight's replay plays by default: from 10 s
+    /// before arming to 10 s after it ended (R3).
+    pub(crate) fn armed_span(&self, flight: &uxduck_core::domain::flight::Flight) -> (u64, u64) {
+        self.flight_span(flight, false)
+    }
+
+    /// The flights the open replay plays.
+    pub(crate) fn replay_flight_ids(&self) -> BTreeSet<String> {
+        self.replays
+            .open
+            .as_ref()
+            .map(|r| r.inputs.iter().flat_map(|i| i.flight_ids.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// The recordings deleting the flights `ids` frees (S348): each file of
@@ -2671,6 +2701,8 @@ impl Engine {
             .video_recordings
             .values()
             .filter(|r| r.state != RecordingState::Recording && r.alignment.is_none())
+            // Already on a disk, not on this computer (ADR-0062).
+            .filter(|r| r.packed.is_none())
             .filter(|r| {
                 let reaching: Vec<bool> = here
                     .iter()
@@ -2749,13 +2781,10 @@ impl Engine {
             .get(id)
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no flight {id}")))?;
-        let Some(link_id) = flight.link_id.clone() else {
-            return Err(ApiError::new(
-                ErrorKind::NotFound,
-                "This flight's log is not on this computer.",
-            ));
-        };
         let (from_us, to_us) = range.unwrap_or_else(|| self.flight_span(&flight, ground));
+        let Some(link_id) = flight.link_id.clone() else {
+            return self.packed_flight_bytes(&flight, (from_us, to_us));
+        };
         // On the ground, its log is the file it is in, from its start: read
         // it whole rather than from just before the flight.
         let read = match &flight.tlog {
@@ -2772,10 +2801,14 @@ impl Engine {
                 start: tlog.as_ref().map(|t| (t.file.clone(), t.offset)),
             },
         };
-        let bytes = self
-            .system
-            .replay_read(&read)
-            .map_err(|why| ApiError::new(ErrorKind::NotFound, why))?;
+        let bytes = match self.system.replay_read(&read) {
+            Ok(bytes) => bytes,
+            // Its log here is gone: its `.uxflight` has it (ADR-0062).
+            Err(_) if self.present_copy(&flight).is_some() => {
+                return self.packed_flight_bytes(&flight, (from_us, to_us));
+            }
+            Err(why) => return Err(ApiError::new(ErrorKind::NotFound, why)),
+        };
         let system = self
             .state
             .vehicles
@@ -2789,6 +2822,60 @@ impl Engine {
                 flight.vehicle_name.clone(),
             )),
             link_id: Some(link_id),
+            ..Hint::default()
+        };
+        let source = ReplaySource {
+            kind: ReplaySourceKind::Flight,
+            name: flight.vehicle_name.clone(),
+            flight_id: Some(flight.id.clone()),
+            vehicle_id: Some(flight.vehicle_id.clone()),
+            ..ReplaySource::default()
+        };
+        Ok((bytes, source, Some((from_us, to_us)), hint))
+    }
+
+    /// A flight's telemetry from its `.uxflight` (ADR-0062): the part its
+    /// file holds, cut to its replay when it was written, and to `range`.
+    fn packed_flight_bytes(
+        &mut self,
+        flight: &uxduck_core::domain::flight::Flight,
+        (from_us, to_us): (u64, u64),
+    ) -> Result<Opened, ApiError> {
+        let Some(path) = self.present_copy(flight) else {
+            let words = flight.copies.first().map_or_else(
+                || "This flight's log is not on this computer.".to_owned(),
+                |copy| {
+                    format!(
+                        "This flight is on {}, which is not plugged in. Plug it in to replay it.",
+                        uxduck_contracts::dto::flight::place_of(&copy.path)
+                    )
+                },
+            );
+            return Err(ApiError::new(ErrorKind::NotFound, words));
+        };
+        let whole = self
+            .system
+            .replay_read(&ReplayRead::Packed {
+                path,
+                entry: crate::offload::TELEMETRY.to_owned(),
+            })
+            .map_err(|why| ApiError::new(ErrorKind::NotFound, why))?;
+        let mut bytes = Vec::with_capacity(whole.len());
+        for (stamp, frame) in uxduck_mavlink::tlog::read(&whole) {
+            if (from_us..=to_us).contains(&stamp) {
+                bytes.extend_from_slice(&stamp.to_be_bytes());
+                bytes.extend_from_slice(frame);
+            }
+        }
+        let hint = Hint {
+            vehicle: Some((
+                flight.vehicle_id.clone(),
+                self.state
+                    .vehicles
+                    .get(&flight.vehicle_id)
+                    .map(|v| v.system_id),
+                flight.vehicle_name.clone(),
+            )),
             ..Hint::default()
         };
         let source = ReplaySource {
@@ -3871,6 +3958,7 @@ impl Engine {
             let vehicle = self.state.vehicles.get(&identity.replay_id);
             let id = format!("fl{}", &self.random.token()[..16]);
             let flight = uxduck_core::domain::flight::Flight {
+                copies: Vec::new(),
                 id: id.clone(),
                 vehicle_id: identity.original_id.clone(),
                 vehicle_name: identity.name.clone(),
@@ -4055,6 +4143,7 @@ impl Engine {
         let name =
             attached.unwrap_or_else(|| path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned());
         let recording = VideoRecording {
+            packed: None,
             id: format!("vr{}", &self.random.token()[..16]),
             // A camera named after the file: each added video its own.
             source_id: format!("file:{name}"),

@@ -433,6 +433,8 @@ pub(crate) fn handle(
                 .system
                 .found_flights(&params)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            // A disk plugged in shows its flights in the Logbook (ADR-0062).
+            engine.adopt_found_flight_files(&found.flight_files);
             to_value(&found)
         }
         ClientRequest::FlightsFolder(params) => {
@@ -596,6 +598,15 @@ pub(crate) fn handle(
                 ));
             }
             to_value(&engine.flight_removal(&params.ids)?)
+        }
+        ClientRequest::FlightOffload(params) => {
+            if !granted.contains(&Config) {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    Config.denied_message(),
+                ));
+            }
+            to_value(&engine.offload_flights(&params)?)
         }
         ClientRequest::FlightKeep(params) => {
             if !granted.contains(&Config) {

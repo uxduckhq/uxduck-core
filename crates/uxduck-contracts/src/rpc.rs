@@ -566,6 +566,15 @@ pub enum ClientRequest {
     /// computer (S348). Needs `read`. Result: `FlightRemovalResult`.
     #[serde(rename = "flight/removal")]
     FlightRemoval(crate::dto::flight::FlightRemovalParams),
+    /// Writes flights as `.uxflight` files into a folder, such as one on an
+    /// external disk (ADR-0062): Move or Copy, asked each time. Move deletes
+    /// the video only these flights use once every file is written and read
+    /// back. The telemetry log always stays. With `check` it writes nothing
+    /// and says what it would do. Otherwise it starts and answers at once,
+    /// and `flight/list` shows each flight's `offload`. Needs `config`.
+    /// Result: `FlightOffloadResult`.
+    #[serde(rename = "flight/offload")]
+    FlightOffload(crate::dto::flight::FlightOffloadParams),
     /// Ends an open flight whose vehicle UXDuck cannot hear, at when it was
     /// last heard (C8). A flight never ends by itself when the link drops.
     /// Needs `config`. Result: `Flight`.
@@ -2130,7 +2139,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 390] = [
+    pub const METHODS: [&'static str; 391] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2216,6 +2225,7 @@ impl ClientRequest {
         "flight/keep",
         "flight/remove",
         "flight/removal",
+        "flight/offload",
         "flight/end",
         "flight/rename",
         "flight/uploadLog",

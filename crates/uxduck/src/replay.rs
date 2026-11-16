@@ -198,6 +198,21 @@ pub fn read(tlogs: &Path, what: &ReplayRead) -> Result<Vec<u8>, String> {
             }
             std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))
         }
+        ReplayRead::Packed { path, entry } => {
+            let file = Path::new(path);
+            let entries = crate::flight_file::entries(file)
+                .map_err(|e| format!("Cannot read {}: {e}", file.display()))?;
+            let found = crate::flight_file::find(&entries, entry)
+                .ok_or_else(|| format!("{} has no {entry}.", file.display()))?;
+            if found.size > MAX_BYTES {
+                return Err(TOO_LONG.into());
+            }
+            let mut out = Vec::with_capacity(usize::try_from(found.size).unwrap_or(0));
+            crate::flight_file::reader(file, found)
+                .and_then(|mut r| r.read_to_end(&mut out))
+                .map_err(|e| format!("Cannot read {}: {e}", file.display()))?;
+            Ok(out)
+        }
         ReplayRead::Link {
             link_id,
             from_us,

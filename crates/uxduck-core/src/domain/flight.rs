@@ -181,5 +181,17 @@ pub struct Flight {
     /// (S193, ADR-0038 K14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checklist: Option<crate::domain::checklist::ChecklistRecord>,
+    /// Its `.uxflight` files on other disks (ADR-0062): written by Move or
+    /// copy, or the file it was opened from. Paths on this computer, so
+    /// never sent to the account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<FlightCopy>,
     pub version: u64,
+}
+
+/// A flight's `.uxflight` file (ADR-0062).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightCopy {
+    pub path: String,
 }

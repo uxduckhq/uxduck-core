@@ -223,6 +223,10 @@ impl From<&core::VideoRecording> for dto::VideoRecording {
                 by: a.by.into(),
                 own_start_us: a.own_start_us,
             }),
+            packed: v.packed.as_ref().map(|p| dto::PackedVideo {
+                path: p.path.clone(),
+                place: crate::dto::flight::place_of(&p.path),
+            }),
             trigger: match v.trigger {
                 core::RecordingTrigger::ByHand => dto::RecordingTrigger::ByHand,
                 core::RecordingTrigger::Armed => dto::RecordingTrigger::Armed,

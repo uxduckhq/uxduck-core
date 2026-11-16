@@ -23,6 +23,8 @@ clap.workspace = true
 axum.workspace = true
 directories.workspace = true
 flate2.workspace = true
+# A flight as one file (ADR-0062): each file's checksum in the zip.
+crc32fast.workspace = true
 # Flights kept in the account (S82): tlog chunks compressed before upload.
 zstd.workspace = true
 # Interface archives (S109).
