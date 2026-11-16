@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "4c58f42dc4e0604607e57af46f2d00f8a08746a6",
+  "sourceCommit": "8181bd8c0286e67a7f31fbc163b3bf426adb4da6",
   "licenseReady": true,
   "files": [
     {
@@ -8296,7 +8296,7 @@
     },
     {
       "path": "docs/site/replay.md",
-      "sha256": "d51d2bfa5a43a5d418e90a8b1baaa93910970e8c03ade9655ee2912087a10196",
+      "sha256": "2a337e7e9149bd7d4a64ab086f492a537aa37393dc1762b7e3affae16e8fb1da",
       "executable": false
     },
     {

@@ -33,7 +33,9 @@ The bar at the foot plays and pauses, sets the speed (¼× to 16×; `--speed` in
 
 A flight plays from 10 seconds before it armed to 10 seconds after it disarmed. Turn off **Armed only** on the bar to play the time before and after it too, from the end of the flight before (or the log's start) to where the next flight's lead-in begins. The choice is kept on this computer, so the Logbook opens flights the same way until you turn it back on.
 
-Keys: Space plays and pauses (restarts at the end), ← and → move 5 seconds (J and L 10, Shift 30), `,` and `.` step a frame, Shift+< and Shift+> change the speed, Home and End go to the ends. While a map has the focus the arrows pan it instead. **Live** closes the replay.
+Keys: Space plays and pauses (restarts at the end), ← and → move 5 seconds (J and L 10, Shift 30), `,` and `.` step a frame, Shift+< and Shift+> change the speed, Home and End go to the ends. While a map has the focus the arrows pan it instead.
+
+**Live** pauses the replay and shows a live vehicle, keeping your place. **Stop replay** ends it: at the right end of the bar, or the ■ on the replay's row in the Fleet. A replay of several vehicles stops as one, so they all leave the Fleet together. For a few seconds after, **Undo** in the sidebar brings it back paused where it was.
 
 ## Parameters in a replay
 
