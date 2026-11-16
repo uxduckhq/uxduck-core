@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "2c967a01db1ad0a2e2ed730bb8f6eed630772bc0",
+  "sourceCommit": "ceeb1a8f682d8d2ba6e8a2a7368d61bed069aa16",
   "licenseReady": true,
   "files": [
     {
@@ -7916,7 +7916,7 @@
     },
     {
       "path": "crates/uxduck/src/found_flights.rs",
-      "sha256": "341494a21b89359928095f4db50e54e3d04391975b75c429a7b510e625bc8197",
+      "sha256": "5fc77dd443305157fffc1dd4dc1ba711ff67924e553086dbdedd13cd0dea6f90",
       "executable": false
     },
     {

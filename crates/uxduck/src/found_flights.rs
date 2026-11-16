@@ -1720,7 +1720,15 @@ mod tests {
         let result = found.found(&FoundFlightsParams::default());
         let t7 = result.folders.iter().find(|f| f.id == path).unwrap();
         assert!(!t7.exists);
-        assert_eq!(t7.place, "T7");
+        // A folder is known by its disk (place_of_folder): by its drive on
+        // Windows, where this folder is on the temporary directory's, and by
+        // its own name everywhere else.
+        let place = if cfg!(windows) {
+            path[..2].to_ascii_uppercase()
+        } else {
+            "T7".to_owned()
+        };
+        assert_eq!(t7.place, place);
         let missing: Vec<&FoundFlight> =
             result.flights.iter().filter(|f| f.folder == path).collect();
         assert_eq!(missing.len(), 3, "{missing:?}");
