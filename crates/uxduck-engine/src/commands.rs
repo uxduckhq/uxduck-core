@@ -44,6 +44,14 @@ pub enum Outcome {
     NotSent(String),
 }
 
+/// A condition a person dismissed while it still held: how severe it was,
+/// and when.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Dismissed {
+    pub severity: Severity,
+    pub at_us: u64,
+}
+
 /// What to raise.
 pub(crate) struct Raise {
     pub severity: Severity,
@@ -1139,6 +1147,17 @@ fn set_state(
         ));
     };
     if notification.state != state {
+        // Dismissed, a condition that still holds stays quiet: the next
+        // update of the same terrain fault or nearby aircraft is not news.
+        if state == NotificationState::Resolved
+            && let Some(condition) = &notification.condition
+        {
+            let dismissed = Dismissed {
+                severity: notification.severity,
+                at_us: engine.clock.now_us(),
+            };
+            engine.dismissed.insert(condition.clone(), dismissed);
+        }
         notification.state = state;
         notification.version += 1;
         engine.commit(connection, Change::NotificationUpserted { notification });
@@ -1377,8 +1396,12 @@ impl Engine {
         });
     }
 
-    /// Raises a notification, unless one with the same condition is active.
+    /// Raises a notification, unless one with the same condition is active
+    /// or a person dismissed it while it still holds.
     pub(crate) fn raise(&mut self, raise: Raise) {
+        if self.quieted(&raise) {
+            return;
+        }
         if let Some(condition) = &raise.condition
             && self
                 .state
@@ -1405,8 +1428,28 @@ impl Engine {
         self.commit_as(daemon(), Change::NotificationUpserted { notification });
     }
 
+    /// Whether a person dismissed this condition while it still held and it
+    /// has not come back worse. Worse, it is said again.
+    pub(crate) fn quieted(&mut self, raise: &Raise) -> bool {
+        let Some(condition) = &raise.condition else {
+            return false;
+        };
+        let Some(dismissed) = self.dismissed.get(condition) else {
+            return false;
+        };
+        if crate::messages::severity_rank(raise.severity)
+            <= crate::messages::severity_rank(dismissed.severity)
+        {
+            return true;
+        }
+        self.dismissed.remove(condition);
+        false
+    }
+
     /// Resolves the notifications bound to a condition that has cleared.
+    /// Once cleared, a dismissed condition is said again when it comes back.
     pub(crate) fn resolve(&mut self, condition: &str) {
+        self.dismissed.remove(condition);
         let bound: Vec<Notification> = self
             .state
             .notifications

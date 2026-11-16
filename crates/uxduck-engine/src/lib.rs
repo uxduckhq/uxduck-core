@@ -483,6 +483,11 @@ pub struct Engine {
     idle_simulations: idle_simulations::IdleSimulations,
     /// Vehicles' own messages (S26).
     messages: messages::Messages,
+    /// Conditions a person dismissed while they still held, by condition:
+    /// raising one again stays quiet until it clears or comes back worse
+    /// (maintainer, 2026-11-15). Kept in memory, so after a restart a
+    /// condition that still holds is said once more.
+    dismissed: BTreeMap<String, commands::Dismissed>,
     /// Which simulated vehicles have flown, for the notice when one is
     /// back on the ground.
     flights: grounded::Flights,
@@ -657,6 +662,7 @@ impl Engine {
             tray_screenshots: tray::Screenshots::default(),
             idle_simulations: idle_simulations::IdleSimulations::default(),
             messages: messages::Messages::default(),
+            dismissed: BTreeMap::new(),
             flights: grounded::Flights::default(),
             flight_times: flight_time::FlightTimes::default(),
             flight_usage: flight_usage::FlightUsage::default(),

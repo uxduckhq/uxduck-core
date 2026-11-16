@@ -127,7 +127,7 @@ fn severity_of(level: u8) -> Severity {
     }
 }
 
-fn severity_rank(severity: Severity) -> u8 {
+pub(crate) fn severity_rank(severity: Severity) -> u8 {
     match severity {
         Severity::Info => 0,
         Severity::Warning => 1,
@@ -405,6 +405,9 @@ impl Engine {
                 );
             }
         }
+        // Said again after a quiet spell, it is news again, even after a
+        // person dismissed it last time.
+        self.dismissed.remove(&condition);
         let mut actions = self.setup_actions(&vehicle.id, [text]);
         actions.push(show_in_messages(&vehicle.id, message_id));
         self.raise_or_update(Raise {
@@ -585,8 +588,13 @@ impl Engine {
             .notifications
             .values()
             .any(|n| n.condition.as_deref() == Some(condition.as_str()));
-        if !shown && !self.asked_to_arm(vehicle_id, now) {
+        // Dismissed, it comes back when someone asks it to arm again.
+        let dismissed_at = self.dismissed.get(&condition).map_or(0, |d| d.at_us);
+        if !shown && !self.asked_to_arm(vehicle_id, now, dismissed_at) {
             return;
+        }
+        if dismissed_at > 0 {
+            self.dismissed.remove(&condition);
         }
         let mut actions = self.setup_actions(vehicle_id, reasons.iter().map(String::as_str));
         actions.push(show_in_messages(vehicle_id, message_id));
@@ -625,12 +633,14 @@ impl Engine {
         self.prearm_notice(vehicle_id, &name, last);
     }
 
-    /// Whether someone asked the vehicle to arm, or to take off, lately:
-    /// a person, the agent or a script, not a simulation's own start.
-    fn asked_to_arm(&self, vehicle_id: &str, now: u64) -> bool {
+    /// Whether someone asked the vehicle to arm, or to take off, lately and
+    /// after `after_us`: a person, the agent or a script, not a simulation's
+    /// own start.
+    fn asked_to_arm(&self, vehicle_id: &str, now: u64, after_us: u64) -> bool {
         self.state.receipts.values().any(|r| {
             r.vehicle_id == vehicle_id
                 && now.saturating_sub(r.created_at_us) < ARM_ASKED_US
+                && r.created_at_us > after_us
                 && ![crate::launch::ACTOR, crate::practice::ACTOR].contains(&r.client_id.as_str())
                 && match &r.command {
                     Command::Arm => true,
@@ -683,6 +693,9 @@ impl Engine {
     /// Raises a notification, or changes the active one bound to the same
     /// condition in place.
     pub(crate) fn raise_or_update(&mut self, raise: Raise) {
+        if self.quieted(&raise) {
+            return;
+        }
         let existing = raise.condition.as_ref().and_then(|condition| {
             self.state
                 .notifications
