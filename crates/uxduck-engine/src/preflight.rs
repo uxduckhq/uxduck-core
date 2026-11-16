@@ -263,12 +263,7 @@ fn set_check(
     }
     settings.set(check, setting);
     if let Some(group) = &params.group {
-        let group = group
-            .as_deref()
-            .map(group_name)
-            .transpose()
-            .map_err(invalid)?;
-        settings.set_group(check, group.flatten());
+        settings.set_group(check, group.as_deref().and_then(group_name));
     }
     Ok(())
 }
@@ -282,10 +277,8 @@ fn arrange(
     order: Option<Vec<String>>,
 ) -> Result<(), ApiError> {
     if let Some(GroupRename { from, to }) = rename {
-        let from = group_name(&from).map_err(invalid)?.unwrap_or_default();
-        let to = group_name(&to)
-            .map_err(invalid)?
-            .ok_or_else(|| invalid("a group needs a name"))?;
+        let from = group_name(&from).unwrap_or_default();
+        let to = group_name(&to).ok_or_else(|| invalid("a group needs a name"))?;
         let shown = settings.groups_shown(steps);
         if !shown.iter().any(|name| same_group(name, &from)) {
             return Err(no_group(&from));
@@ -307,7 +300,7 @@ fn arrange(
         let shown = settings.groups_shown(steps);
         let mut placed = Vec::with_capacity(names.len());
         for name in &names {
-            let name = group_name(name).map_err(invalid)?.unwrap_or_default();
+            let name = group_name(name).unwrap_or_default();
             let group = shown
                 .iter()
                 .find(|group| same_group(group, &name))

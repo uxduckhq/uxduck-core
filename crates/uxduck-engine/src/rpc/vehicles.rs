@@ -1,6 +1,8 @@
 //! Links and vehicles: add, change, turn off and remove links; list, get,
 //! save and dismiss vehicles (ADR-0004).
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::RunsIn;
 use uxduck_contracts::dto::link::{
@@ -1089,16 +1091,14 @@ fn save_vehicle(
     to_value(&result)
 }
 
-/// The longest label, in characters, and the most on one vehicle (S106).
-const MAX_LABEL_CHARS: usize = 40;
-const MAX_LABELS: usize = 20;
-
 /// `vehicle/label`: labels on and off several vehicles (S106). A label
 /// matches in any case; a new one takes the spelling already in use on
 /// another vehicle, unless this call takes that spelling off, which is how
 /// "survey" becomes "Survey". Every vehicle is checked before any changes,
-/// so a bad id or a full vehicle changes nothing. Not in the history: a
-/// label is the person's organisation, not something that happened to it.
+/// so a bad id or an empty label changes nothing. A vehicle carries any
+/// number of labels, and a label is a name of any length. Not in the
+/// history: a label is the person's organisation, not something that
+/// happened to it.
 fn label_vehicles(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -1106,16 +1106,16 @@ fn label_vehicles(
 ) -> Result<Value, ApiError> {
     let clean = |label: &String| {
         let label = label.trim();
-        if label.is_empty() || label.chars().count() > MAX_LABEL_CHARS {
+        if label.is_empty() {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
-                format!("a label has 1 to {MAX_LABEL_CHARS} characters"),
+                "a label cannot be empty",
             ));
         }
         Ok(label.to_owned())
     };
     let add = add.iter().map(clean).collect::<Result<Vec<_>, _>>()?;
-    let remove: Vec<String> = remove.iter().map(|l| l.trim().to_lowercase()).collect();
+    let remove: HashSet<String> = remove.iter().map(|l| l.trim().to_lowercase()).collect();
     let mut targets = Vec::new();
     for id in &ids {
         let vehicle = found(engine, id)?;
@@ -1126,47 +1126,43 @@ fn label_vehicles(
             targets.push(vehicle.clone());
         }
     }
-    // The spelling in use elsewhere, unless this call takes it off.
-    let add: Vec<String> = add
+    // The spelling in use elsewhere, unless this call takes it off. Each
+    // label is looked up by its lower case, so thousands cost no more each
+    // than one does.
+    let mut in_use: HashMap<String, &String> = HashMap::new();
+    if !add.is_empty() {
+        for label in engine.state.vehicles.values().flat_map(|v| &v.labels) {
+            in_use.entry(label.to_lowercase()).or_insert(label);
+        }
+    }
+    let add: Vec<(String, String)> = add
         .into_iter()
         .map(|label| {
             let key = label.to_lowercase();
-            if remove.contains(&key) {
-                return label;
-            }
-            engine
-                .state
-                .vehicles
-                .values()
-                .flat_map(|v| &v.labels)
-                .find(|l| l.to_lowercase() == key)
-                .cloned()
-                .unwrap_or(label)
+            let spelling = match in_use.get(&key) {
+                Some(used) if !remove.contains(&key) => (*used).clone(),
+                _ => label,
+            };
+            (key, spelling)
         })
         .collect();
     let mut changed = Vec::new();
     for mut vehicle in targets {
-        let mut labels: Vec<String> = vehicle
-            .labels
-            .iter()
-            .filter(|l| !remove.contains(&l.to_lowercase()))
-            .cloned()
-            .collect();
-        for label in &add {
-            if !labels
-                .iter()
-                .any(|l| l.to_lowercase() == label.to_lowercase())
-            {
+        let mut have = HashSet::new();
+        let mut labels = Vec::new();
+        for label in &vehicle.labels {
+            let key = label.to_lowercase();
+            if !remove.contains(&key) {
+                have.insert(key);
                 labels.push(label.clone());
             }
         }
-        labels.sort_by_key(|l| l.to_lowercase());
-        if labels.len() > MAX_LABELS {
-            return Err(ApiError::new(
-                ErrorKind::InvalidValue,
-                format!("{} would have more than {MAX_LABELS} labels", vehicle.name),
-            ));
+        for (key, label) in &add {
+            if have.insert(key.clone()) {
+                labels.push(label.clone());
+            }
         }
+        labels.sort_by_cached_key(|l| l.to_lowercase());
         if labels != vehicle.labels {
             vehicle.labels = labels;
             changed.push(vehicle);

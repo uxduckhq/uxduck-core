@@ -320,8 +320,17 @@ impl Engine {
                 "It already has a computer forwarding its flight controller",
             ));
         }
-        let component_id = companion::free_component_id(&vehicle.companions)
-            .ok_or_else(|| invalid("A vehicle has at most four companion computers"))?;
+        // Four, because MAVLink has four onboard computer ids
+        // (`companion::COMPONENT_IDS`) and each computer reports under one.
+        let component_id =
+            companion::free_component_id(&vehicle.companions).ok_or_else(|| {
+                invalid(format!(
+                    "{} has four companion computers, and MAVLink has four ids for onboard computers ({} to {}), one for each. Remove one to add another.",
+                    vehicle.name,
+                    companion::COMPONENT_IDS.start(),
+                    companion::COMPONENT_IDS.end()
+                ))
+            })?;
         let key = params
             .private_key
             .map(|k| k.trim().to_owned())

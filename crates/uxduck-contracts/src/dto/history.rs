@@ -255,9 +255,11 @@ pub struct VehicleHistoryParams {
     /// Deleted notes too, marked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_deleted: bool,
-    /// At most this many (default 20, at most 200).
+    /// At most this many (default 20). One answer holds 200 at most:
+    /// `total` says how many match, and `offset` reaches the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Leaves out this many of the newest, to read on from an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
 }

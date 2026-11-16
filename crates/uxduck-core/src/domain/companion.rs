@@ -6,7 +6,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The onboard computer ids MAVLink keeps (191 to 194).
+/// The onboard computer ids MAVLink keeps: `MAV_COMP_ID_ONBOARD_COMPUTER`
+/// to `MAV_COMP_ID_ONBOARD_COMPUTER4`, 191 to 194. Each of a vehicle's
+/// computers reports under one of them (ADR-0049), so a vehicle has four
+/// at most. The number is MAVLink's and not UXDuck's: a fifth computer
+/// would have no id to report under, and two under one id would read as
+/// one computer.
 pub const COMPONENT_IDS: std::ops::RangeInclusive<u8> = 191..=194;
 
 /// What it runs once set up: `uxduck forward --onboard` on the one wired to

@@ -1302,6 +1302,199 @@ fn the_vehicle_can_hold_the_battery_rule_itself() {
     );
 }
 
+/// Until 2026-11-15 a checklist stopped at 100 steps, with no reason
+/// written for the number: the editor, a copy from another vehicle, a
+/// checklist file and a pasted list were each refused past it.
+#[test]
+fn a_checklist_keeps_every_step_a_person_gives_it() {
+    let mut b = bench();
+    let count = |reply: &Value| reply["checklist"]["steps"].as_array().unwrap().len();
+
+    // Written in the editor, past the old 100, then one more.
+    let add: Vec<Value> = (1..=150)
+        .map(|n| json!({ "kind": "manual", "title": format!("Written {n}") }))
+        .collect();
+    let written = b.ok("checklist/update", json!({ "vehicleId": "v", "add": add }));
+    assert_eq!(count(&written), 150);
+    let written = b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": "Written 151" }] }),
+    );
+    assert_eq!(count(&written), 151);
+    let checks = written["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["source"] == "checklist")
+        .count();
+    assert_eq!(checks, 151, "each step is a check of the preflight");
+
+    // A checklist file of 1,000 steps is copied in whole.
+    let steps: Vec<Value> = (1..=1000)
+        .map(|n| json!({ "kind": "manual", "title": format!("Filed {n}"), "severity": "warn" }))
+        .collect();
+    b.observe("w", 2, false);
+    let filed = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "w", "file": { "format": "uxduck.checklist/1", "steps": steps } }),
+    );
+    assert_eq!(count(&filed), 1000);
+    assert_eq!(filed["checklist"]["steps"][999]["title"], "Filed 1000");
+
+    // So is a pasted list, after the steps already there.
+    let pasted = (1..=1000)
+        .map(|n| format!("- [ ] Pasted {n}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let pasted = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "v", "markdown": pasted }),
+    );
+    assert_eq!(count(&pasted), 1151);
+    assert_eq!(pasted["checklist"]["steps"][1150]["title"], "Pasted 1000");
+
+    // And another vehicle's.
+    b.observe("x", 3, false);
+    let copied = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "x", "fromVehicleId": "v" }),
+    );
+    assert_eq!(count(&copied), 1151);
+
+    // The last step is ticked, and arming records every one.
+    b.tick("Pasted 1000", true);
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    b.seen(true);
+    let records = b.armed_records();
+    let HistoryEvent::Armed { text, record, .. } = &records[0] else {
+        unreachable!()
+    };
+    assert_eq!(record.steps.len(), 1151);
+    assert_eq!(record.steps[1150].status, CheckStatus::Pass);
+    assert_eq!(text, "Armed with its checklist: 1 of 1151 steps passed");
+}
+
+/// Until 2026-11-15 a step's title stopped at 200 characters and a group's
+/// name at 60, and a pasted heading over 60 was dropped as a group without
+/// a word. Both are words a person writes: they are kept whole, in the
+/// list, in a copy, in a renamed group and in the record on arming.
+#[test]
+fn a_steps_title_and_a_groups_name_are_kept_whole() {
+    let mut b = bench();
+    let title = format!("Check {}", "every bolt on the frame, ".repeat(40).trim());
+    let group = format!(
+        "Airframe {}",
+        "and everything fixed to it ".repeat(10).trim()
+    );
+    assert!(title.chars().count() > 900 && group.chars().count() > 250);
+    let added = b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": title, "group": group }] }),
+    );
+    assert_eq!(added["checklist"]["steps"][0]["title"], title.as_str());
+    assert_eq!(added["checklist"]["steps"][0]["group"], group.as_str());
+
+    // A pasted heading of any length is the group of the steps under it.
+    let heading = "Before the first flight of the day at a new site ".repeat(4);
+    let heading = heading.trim();
+    let pasted = b.ok(
+        "checklist/copy",
+        json!({ "vehicleId": "v", "markdown": format!("# {heading}\n- [ ] Walk the field\n") }),
+    );
+    assert_eq!(pasted["checklist"]["steps"][1]["group"], heading);
+
+    // A group is renamed to a name of any length, and its steps follow.
+    let renamed = format!("Frame {}", "and all of its fixings ".repeat(20).trim());
+    let after = b.ok(
+        "preflight/configure",
+        json!({ "vehicleId": "v", "renameGroup": { "from": group, "to": renamed } }),
+    );
+    assert_eq!(after["checklist"]["steps"][0]["group"], renamed.as_str());
+    assert!(
+        after["groups"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(renamed)),
+        "{}",
+        after["groups"]
+    );
+
+    // The record on arming says the title whole.
+    assert_eq!(b.arm()["result"]["status"], "accepted");
+    b.seen(true);
+    let HistoryEvent::Armed { record, .. } = &b.armed_records()[0] else {
+        unreachable!()
+    };
+    assert_eq!(record.steps[0].title, title);
+    assert_eq!(record.steps[0].group.as_deref(), Some(renamed.as_str()));
+}
+
+/// Until 2026-11-15 a rule's hold stopped at 600 seconds, with no reason
+/// written for the number. A hold is any number of seconds that is not
+/// below zero, and the words say the number that was typed.
+#[test]
+fn a_rule_is_held_for_as_long_as_a_person_asks() {
+    let mut b = bench();
+    b.ok(
+        "checklist/update",
+        json!({
+            "vehicleId": "v",
+            "add": [{
+                "kind": "rule", "title": BATTERY, "item": "battery.voltage_v",
+                "op": ">=", "value": 22.2, "holdS": 900, "severity": "block"
+            }]
+        }),
+    );
+    assert_eq!(b.step("v", BATTERY)["holdS"], 900.0);
+
+    // It waits its whole 900 s, the vehicle reporting all the while.
+    for _ in 0..179 {
+        b.volts(22.6);
+        b.time.advance(5 * S);
+    }
+    b.volts(22.6);
+    let waiting = b.step_check(BATTERY);
+    assert_eq!(waiting["status"], "waiting", "895 s in: {waiting}");
+    assert_eq!(
+        waiting["detail"],
+        "Battery is at least 22.2 V. It passes once that holds 900 s."
+    );
+    b.time.advance(5 * S);
+    b.volts(22.6);
+    let held = b.step_check(BATTERY);
+    assert_eq!(held["status"], "pass", "{held}");
+    assert_eq!(held["detail"], "Battery is at least 22.2 V, held 900 s.");
+
+    // Changed in place to a number of seconds a 32-bit float cannot hold:
+    // the step and its words keep the number typed.
+    let id = b.step_id(BATTERY);
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "holdS": 16_777_217 }] }),
+    );
+    assert_eq!(b.step("v", BATTERY)["holdS"], 16_777_217.0);
+    b.volts(22.6);
+    assert_eq!(
+        b.step_check(BATTERY)["detail"],
+        "Battery is at least 22.2 V. It passes once that holds 16777217 s."
+    );
+
+    // Below zero is not a time to hold, and the refusal says so.
+    let below = b.call(
+        "checklist/update",
+        json!({ "vehicleId": "v", "change": [{ "id": id, "holdS": -1 }] }),
+    );
+    assert_eq!(
+        below["error"]["message"],
+        format!("“{BATTERY}”: hold for 0 seconds or more")
+    );
+    assert_eq!(
+        b.step("v", BATTERY)["holdS"],
+        16_777_217.0,
+        "kept as it was"
+    );
+}
+
 #[test]
 fn reordering_and_removing_steps() {
     let mut b = bench();
@@ -1615,16 +1808,21 @@ fn checks_sit_under_their_concepts() {
         "Controller"
     );
     assert!(b.step_check(PROPS)["group"].is_null());
-    let long = b.call(
+    // A group's name is of any length: until 2026-11-15 it stopped at 60
+    // characters.
+    let long = b.ok(
         "checklist/update",
         json!({ "vehicleId": "v", "add": [{ "kind": "manual", "title": "X", "group": "g".repeat(61) }] }),
     );
-    assert!(
-        long["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("at most 60 characters"),
-        "{long}"
+    let kept = long["checklist"]["steps"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(kept["group"], "g".repeat(61));
+    b.ok(
+        "checklist/update",
+        json!({ "vehicleId": "v", "remove": [kept["id"]] }),
     );
 
     // A pasted list's headings are its groups. A file and a copy keep
@@ -1746,14 +1944,11 @@ fn a_person_arranges_the_groups() {
     );
     let nameless = configure(&mut b, json!({ "group": "Radio" }));
     assert_eq!(nameless["error"]["data"]["kind"], "invalid-value");
+    // A group's name is of any length: until 2026-11-15 it stopped at 60
+    // characters. Its own group is put back after.
     let long = configure(&mut b, json!({ "check": "link", "group": "g".repeat(61) }));
-    assert!(
-        long["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("at most 60 characters"),
-        "{long}"
-    );
+    assert_eq!(group_of(&long["result"], "uxduck:link"), "g".repeat(61));
+    configure(&mut b, json!({ "check": "link", "group": null }));
 
     // The order a person puts them in, capitals aside. A group left out
     // follows as it first appears.

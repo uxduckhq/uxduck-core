@@ -299,6 +299,59 @@ fn computers_are_added_with_free_ids_and_their_keys_are_kept_apart() {
     assert!(!keys.has(&key_name), "its key is forgotten with it");
 }
 
+/// A vehicle has four companion computers at most, and the number is
+/// MAVLink's: it keeps four ids for onboard computers (191 to 194), and
+/// each computer reports as one of them (ADR-0049 O3). The refusal says so.
+#[test]
+fn a_fifth_computer_is_refused_and_told_why() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let mut second = Value::Null;
+    for (n, id) in (191..=194).enumerate() {
+        let vehicle = ok(
+            &mut engine,
+            &mut ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": format!("pi-{}.local", n + 1) }),
+        );
+        assert_eq!(vehicle["companions"][n]["componentId"], id);
+        if id == 192 {
+            second = vehicle["companions"][n]["id"].clone();
+        }
+    }
+    let name = engine.state().vehicles["v"].name.clone();
+    assert_eq!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": "pi-5.local" })
+        ),
+        format!(
+            "{name} has four companion computers, and MAVLink has four ids for onboard computers (191 to 194), one for each. Remove one to add another."
+        )
+    );
+    assert_eq!(engine.state().vehicles["v"].companions.len(), 4);
+
+    // One removed, the next computer takes the id it leaves.
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/remove",
+        json!({ "vehicleId": "v", "computerId": second }),
+    );
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "pi-5.local" }),
+    );
+    assert_eq!(vehicle["companions"][3]["host"], "pi-5.local");
+    assert_eq!(vehicle["companions"][3]["componentId"], 192);
+}
+
 #[test]
 fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     let keys = Keys::default();

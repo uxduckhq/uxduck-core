@@ -19,6 +19,8 @@
 //! the steps are the run's, and a finished run's preflight steps take no
 //! tick.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::Value;
 use uxduck_contracts::dto::checklist::{
     ChecklistCopyParams, ChecklistFile as FileDto, ChecklistTickParams, ChecklistUpdateParams,
@@ -28,8 +30,8 @@ use uxduck_contracts::dto::preflight::{Preflight as PreflightDto, PreflightParam
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::checklist::{
-    Checklist, ChecklistFile, ChecklistRecord, FILE_FORMAT, MAX_STEPS, Op, RecordStep, Rule, Run,
-    Step, StepDef, StepKind, Tick, steps_from_markdown,
+    Checklist, ChecklistFile, ChecklistRecord, FILE_FORMAT, Op, RecordStep, Rule, Run, Step,
+    StepDef, StepKind, Tick, steps_from_markdown,
 };
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::ReceiptStatus;
@@ -273,43 +275,54 @@ fn update(
     if before.finished() {
         return Err(finished_list(&vehicle));
     }
-    let mut steps = before.steps.clone();
+    // Each step is found by its id through a map, never by looking along
+    // the list: a list has any number of steps, and a change may name
+    // every one of them.
+    let no_step = |id: &str| ApiError::new(ErrorKind::NotFound, format!("no step {id}"));
+    let mut steps: Vec<Option<Step>> = before.steps.iter().cloned().map(Some).collect();
+    let mut at: HashMap<String, usize> = before
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(at, step)| (step.id.clone(), at))
+        .collect();
     for id in &params.remove {
-        let at = steps
-            .iter()
-            .position(|s| &s.id == id)
-            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no step {id}")))?;
-        steps.remove(at);
+        let gone = at.remove(id).ok_or_else(|| no_step(id))?;
+        steps[gone] = None;
     }
     for change in params.change {
-        let at = steps
-            .iter()
-            .position(|s| s.id == change.id)
-            .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no step {}", change.id)))?;
-        steps[at] = changed(&steps[at], change)?;
+        let slot = at
+            .get(&change.id)
+            .and_then(|at| steps[*at].as_mut())
+            .ok_or_else(|| no_step(&change.id))?;
+        *slot = changed(slot, change)?;
     }
     for input in params.add {
         let def = step_def(input)?;
-        let id = engine.new_step_id(&steps);
-        steps.push(new_step(id, def));
+        let id = loop {
+            let id = engine.new_step_id();
+            if !at.contains_key(&id) {
+                break id;
+            }
+        };
+        at.insert(id.clone(), steps.len());
+        steps.push(Some(new_step(id, def)));
     }
-    if let Some(order) = params.order {
-        let mut placed: Vec<Step> = Vec::with_capacity(steps.len());
-        for id in &order {
-            let at = steps
-                .iter()
-                .position(|s| &s.id == id)
-                .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no step {id}")))?;
-            placed.push(steps.remove(at));
+    let steps: Vec<Step> = match params.order {
+        Some(order) => {
+            let mut placed: Vec<Step> = Vec::with_capacity(steps.len());
+            for id in &order {
+                let step = at
+                    .get(id)
+                    .and_then(|at| steps[*at].take())
+                    .ok_or_else(|| no_step(id))?;
+                placed.push(step);
+            }
+            placed.extend(steps.into_iter().flatten());
+            placed
         }
-        placed.append(&mut steps);
-        steps = placed;
-    }
-    if steps.len() > MAX_STEPS {
-        return Err(invalid(format!(
-            "a checklist holds at most {MAX_STEPS} steps"
-        )));
-    }
+        None => steps.into_iter().flatten().collect(),
+    };
     let copied_from = before.copied_from.clone();
     engine.keep_checklist(connection, &vehicle, &before, steps, copied_from)
 }
@@ -422,15 +435,15 @@ fn copy(
     } else {
         before.steps.clone()
     };
+    let mut taken: HashSet<String> = steps.iter().map(|s| s.id.clone()).collect();
     for def in defs {
-        let id = engine.new_step_id(&steps);
+        let id = loop {
+            let id = engine.new_step_id();
+            if taken.insert(id.clone()) {
+                break id;
+            }
+        };
         steps.push(new_step(id, def));
-    }
-    if steps.len() > MAX_STEPS {
-        return Err(invalid(format!(
-            "that makes {} steps. A checklist holds at most {MAX_STEPS}",
-            steps.len()
-        )));
     }
     engine.keep_checklist(connection, &vehicle, &before, steps, Some(from))
 }
@@ -500,13 +513,10 @@ impl Engine {
             .unwrap_or_else(|| Checklist::empty(vehicle_id))
     }
 
-    fn new_step_id(&mut self, steps: &[Step]) -> String {
-        loop {
-            let id = format!("st{}", &self.random.token()[..10]);
-            if !steps.iter().any(|s| s.id == id) {
-                return id;
-            }
-        }
+    /// An id for a new step. Its caller sees that no step of the list has
+    /// it yet, through a set and not by looking along the list.
+    fn new_step_id(&mut self) -> String {
+        format!("st{}", &self.random.token()[..10])
     }
 
     pub(crate) fn new_run_id(&mut self) -> String {
@@ -642,10 +652,18 @@ impl Engine {
             .held_since
             .entry(vehicle.id.clone())
             .or_default();
-        since.retain(|id, _| holding.iter().any(|(h, on)| h == id && *on));
-        for (id, on) in holding {
-            if on {
-                since.entry(id).or_insert(now);
+        // This runs on every telemetry update, so each step is looked up
+        // in a set: with thousands of held rules, looking along the list
+        // for each one took longer than the time between two updates.
+        let on: HashSet<&str> = holding
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        since.retain(|id, _| on.contains(id.as_str()));
+        for (id, on) in &holding {
+            if *on && !since.contains_key(id) {
+                since.insert(id.clone(), now);
             }
         }
     }
@@ -733,7 +751,7 @@ impl Engine {
             .get(&vehicle.id)
             .and_then(|s| s.get(step_id))
             .map_or(0, |since| self.clock.now_us().saturating_sub(*since));
-        let seconds = uxduck_core::domain::parameter::show_value(hold);
+        let seconds = hold.to_string();
         #[allow(
             clippy::cast_precision_loss,
             reason = "microseconds held, far below 2^52"
@@ -947,6 +965,11 @@ impl Engine {
         checklist: &Checklist,
         checks: &[Check],
     ) -> Vec<RecordStep> {
+        // By id through a map: this runs as the vehicle arms, and looking
+        // along the checks for each step held the daemon for a second at
+        // 5,000 steps.
+        let status: HashMap<&str, CheckStatus> =
+            checks.iter().map(|c| (c.id.as_str(), c.status)).collect();
         checklist
             .steps
             .iter()
@@ -957,10 +980,10 @@ impl Engine {
                 confirm: step.confirm,
                 severity: step.severity,
                 when: step.when,
-                status: checks
-                    .iter()
-                    .find(|c| c.id == step.check_id())
-                    .map_or(CheckStatus::Unknown, |c| c.status),
+                status: status
+                    .get(step.check_id().as_str())
+                    .copied()
+                    .unwrap_or(CheckStatus::Unknown),
                 tick: step.tick.clone(),
                 rule: step.rule.clone(),
                 value: step

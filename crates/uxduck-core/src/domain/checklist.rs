@@ -32,14 +32,6 @@ use crate::domain::preflight::{
 
 /// The checklist file's format and version (K7).
 pub const FILE_FORMAT: &str = "uxduck.checklist/1";
-/// The most steps one vehicle's checklist holds.
-pub const MAX_STEPS: usize = 100;
-/// The longest step title, in characters.
-pub const MAX_TITLE: usize = 200;
-/// The longest group name, in characters.
-pub const MAX_GROUP: usize = 60;
-/// The longest a rule waits for its value to hold, in seconds.
-pub const MAX_HOLD_S: f64 = 600.0;
 
 /// How a rule compares (K8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,18 +439,12 @@ fn invalid(message: impl Into<String>) -> Invalid {
 }
 
 /// A group's name as it is kept: single spaces, and none at its ends.
-/// None when nothing is left of it.
-///
-/// # Errors
-/// A name longer than `MAX_GROUP` characters.
-pub fn group_name(name: &str) -> Result<Option<String>, Invalid> {
+/// None when nothing is left of it. A name is of any length: it is a
+/// person's words, and where it is shown the layout shortens it.
+#[must_use]
+pub fn group_name(name: &str) -> Option<String> {
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    if name.chars().count() > MAX_GROUP {
-        return Err(invalid(format!(
-            "a group's name is at most {MAX_GROUP} characters"
-        )));
-    }
-    Ok((!name.is_empty()).then_some(name))
+    (!name.is_empty()).then_some(name)
 }
 
 /// Whether two names are one group in the list: capitals do not count.
@@ -502,7 +488,8 @@ impl StepDef {
     }
 
     /// The step tidied (title and group trimmed, a rule's unit from its
-    /// key when not given, no tick asked of a manual step twice).
+    /// key when not given, no tick asked of a manual step twice). A title
+    /// and a group's name are of any length.
     ///
     /// # Errors
     /// Why it cannot be kept, in words.
@@ -510,12 +497,6 @@ impl StepDef {
         let title = self.title.split_whitespace().collect::<Vec<_>>().join(" ");
         if title.is_empty() {
             return Err(invalid("a step needs a title"));
-        }
-        if title.chars().count() > MAX_TITLE {
-            return Err(invalid(format!(
-                "“{}…” is longer than {MAX_TITLE} characters",
-                title.chars().take(40).collect::<String>()
-            )));
         }
         let rule = match (self.kind, self.rule) {
             (StepKind::Manual, None) => None,
@@ -531,11 +512,7 @@ impl StepDef {
             }
             (StepKind::Rule, Some(rule)) => Some(checked_rule(&title, rule)?),
         };
-        let group = match self.group.as_deref().map(group_name) {
-            Some(Ok(group)) => group,
-            Some(Err(long)) => return Err(invalid(format!("“{title}”: {long}"))),
-            None => None,
-        };
+        let group = self.group.as_deref().and_then(group_name);
         Ok(Self {
             kind: self.kind,
             title,
@@ -584,11 +561,9 @@ fn checked_rule(title: &str, rule: Rule) -> Result<Rule, Invalid> {
         return Err(invalid(format!("“{title}”: the value must be a number")));
     }
     if let Some(hold) = rule.hold_s
-        && !(hold.is_finite() && (0.0..=MAX_HOLD_S).contains(&hold))
+        && !(hold.is_finite() && hold >= 0.0)
     {
-        return Err(invalid(format!(
-            "“{title}”: hold for 0 to {MAX_HOLD_S} seconds"
-        )));
+        return Err(invalid(format!("“{title}”: hold for 0 seconds or more")));
     }
     let unit = rule
         .unit
@@ -611,8 +586,7 @@ impl ChecklistFile {
     /// refused by name.
     ///
     /// # Errors
-    /// A format other than this one's, too many steps, or a step that
-    /// cannot be kept.
+    /// A format other than this one's, or a step that cannot be kept.
     pub fn checked(self) -> Result<Self, Invalid> {
         if self.format != FILE_FORMAT {
             return Err(invalid(if self.format.starts_with("uxduck.checklist/") {
@@ -623,12 +597,6 @@ impl ChecklistFile {
             } else {
                 format!("not a checklist file: its format is not {FILE_FORMAT}")
             }));
-        }
-        if self.steps.len() > MAX_STEPS {
-            return Err(invalid(format!(
-                "the file has {} steps. A checklist holds at most {MAX_STEPS}",
-                self.steps.len()
-            )));
         }
         let steps = self
             .steps
@@ -645,11 +613,11 @@ impl ChecklistFile {
 
 /// A pasted Markdown or Notion checklist as manual steps (K11): each list
 /// item, to-do or plain line is a step, ticked or not (ticks are never
-/// copied); a heading is the group of the steps under it (K16), unless it
-/// is too long to be one; rules and blank lines are left out.
+/// copied); a heading is the group of the steps under it (K16), whatever
+/// its length; rules and blank lines are left out.
 ///
 /// # Errors
-/// No step in the text, or a line too long to be one.
+/// No step in the text.
 pub fn steps_from_markdown(text: &str) -> Result<Vec<StepDef>, Invalid> {
     let mut steps = Vec::new();
     let mut group: Option<String> = None;
@@ -661,8 +629,7 @@ pub fn steps_from_markdown(text: &str) -> Result<Vec<StepDef>, Invalid> {
                 .trim()
                 .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
                 .trim();
-            group =
-                (!name.is_empty() && name.chars().count() <= MAX_GROUP).then(|| name.to_owned());
+            group = (!name.is_empty()).then(|| name.to_owned());
             continue;
         }
         if rest.is_empty()
@@ -926,9 +893,6 @@ mod tests {
             param.checked().unwrap().rule.unwrap().param.as_deref(),
             Some("ARMING_CHECK")
         );
-        let mut held = rule("battery.voltage_v", Op::Ge, 1.0);
-        held.rule.as_mut().unwrap().hold_s = Some(601.0);
-        assert!(held.checked().is_err());
         assert!(StepDef::manual("  ").checked().is_err());
         assert_eq!(
             StepDef::manual("  Propellers   tight ")
@@ -940,6 +904,46 @@ mod tests {
         let mut manual = StepDef::manual("Props");
         manual.rule = rule("battery.voltage_v", Op::Ge, 1.0).rule;
         assert!(manual.checked().is_err());
+    }
+
+    /// Until 2026-11-15 a hold over 600 seconds was refused, with no reason
+    /// written for the number. Nothing needs one: the time held is counted
+    /// in microseconds and compared as a number.
+    #[test]
+    fn a_rule_holds_for_any_time_that_is_not_below_zero() {
+        let held = |seconds: f64| {
+            let mut step = rule("battery.voltage_v", Op::Ge, 1.0);
+            step.rule.as_mut().unwrap().hold_s = Some(seconds);
+            step.checked()
+        };
+        for seconds in [0.5, 600.0, 601.0, 86_400.0, 16_777_217.0, 1e300] {
+            let rule = held(seconds).unwrap().rule.unwrap();
+            assert_eq!(rule.hold_s, Some(seconds));
+            assert_eq!(rule.hold(), Some(seconds));
+        }
+        assert_eq!(held(0.0).unwrap().rule.unwrap().hold_s, None, "no hold");
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                held(seconds).unwrap_err().0,
+                "“Battery”: hold for 0 seconds or more"
+            );
+        }
+    }
+
+    /// Until 2026-11-15 a checklist file of more than 100 steps was
+    /// refused, with no reason written for the number.
+    #[test]
+    fn a_checklist_file_keeps_every_step_written_in_it() {
+        let file = ChecklistFile {
+            format: FILE_FORMAT.into(),
+            name: None,
+            steps: (1..=5000)
+                .map(|n| StepDef::manual(format!("Step {n}")))
+                .collect(),
+        };
+        let checked = file.checked().unwrap();
+        assert_eq!(checked.steps.len(), 5000);
+        assert_eq!(checked.steps[4999].title, "Step 5000");
     }
 
     #[test]
@@ -956,9 +960,18 @@ mod tests {
         let manual = manual.checked().unwrap();
         assert_eq!(manual.group, None);
         assert!(!manual.confirm, "a manual step is ticked anyway");
-        let mut long = StepDef::manual("Props");
-        long.group = Some("g".repeat(MAX_GROUP + 1));
-        assert!(long.checked().unwrap_err().0.contains("group"));
+        // Until 2026-11-15 a title stopped at 200 characters and a group's
+        // name at 60. Both are words a person writes, of any length.
+        let mut long = StepDef::manual("t".repeat(5_000));
+        long.group = Some("g".repeat(5_000));
+        let long = long.checked().unwrap();
+        assert_eq!(long.title, "t".repeat(5_000));
+        assert_eq!(long.group, Some("g".repeat(5_000)));
+        assert_eq!(
+            group_name(&"g ".repeat(500)),
+            Some("g ".repeat(500).trim().to_owned())
+        );
+        assert_eq!(group_name("  "), None);
     }
 
     #[test]
@@ -995,7 +1008,9 @@ mod tests {
 
     #[test]
     fn markdown_headings_become_groups() {
-        let long = "x".repeat(MAX_GROUP + 1);
+        // Until 2026-11-15 a heading over 60 characters was not a group,
+        // and the steps under it had none, without a word.
+        let long = "x".repeat(61);
         let steps = steps_from_markdown(&format!(
             "Loose step\n## **Battery** ##\n- [ ] Strapped\n- Charged\n### Controller\n1. Sticks free\n# {long}\n- Under a long heading\n"
         ))
@@ -1011,7 +1026,7 @@ mod tests {
                 ("Strapped", Some("Battery")),
                 ("Charged", Some("Battery")),
                 ("Sticks free", Some("Controller")),
-                ("Under a long heading", None)
+                ("Under a long heading", Some(long.as_str()))
             ]
         );
     }

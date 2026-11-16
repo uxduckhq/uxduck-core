@@ -23,8 +23,13 @@ pub enum VehicleCommand {
         /// `note` or `event`.
         #[arg(long)]
         kind: Option<String>,
+        /// How many to show. One answer holds 200 at most, and
+        /// `--offset` reaches the rest.
         #[arg(long, default_value_t = 20)]
         limit: u32,
+        /// Leaves out this many of the newest, to read on from there.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
         /// The answer as JSON, for scripts.
         #[arg(long)]
         json: bool,
@@ -33,6 +38,8 @@ pub enum VehicleCommand {
     Note {
         /// Its name or id.
         vehicle: String,
+        /// The note's words, of any length. `-` reads them from standard
+        /// input, for a note longer than a command line takes.
         text: String,
         /// When it happened: `today`, `yesterday` or `2026-09-28`.
         #[arg(long)]
@@ -81,6 +88,7 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
             text,
             kind,
             limit,
+            offset,
             json: as_json,
         } => {
             let vehicle_id = match vehicle {
@@ -92,6 +100,7 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
                 "text": text,
                 "kind": kind,
                 "limit": limit,
+                "offset": offset,
             }));
             let result = client.call("vehicle/history", params).await?;
             if as_json {
@@ -100,7 +109,7 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
                     serde_json::to_string_pretty(&result).unwrap_or_default()
                 );
             } else {
-                print_history(&result);
+                print!("{}", history_text(&result, u64::from(offset)));
             }
             Ok(())
         }
@@ -112,6 +121,14 @@ pub async fn run(data_dir: &Path, command: VehicleCommand) -> Result<(), CliErro
             tags,
         } => {
             let vehicle_id = resolve(&mut client, &vehicle).await?;
+            let text = if text == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                    .map_err(|e| CliError::Usage(format!("couldn't read the note: {e}")))?;
+                text
+            } else {
+                text
+            };
             let now = now_us();
             let happened = when.as_deref().map(|w| parse_when(w, now)).transpose()?;
             let params = super::strip_nulls(json!({
@@ -229,14 +246,30 @@ pub(crate) async fn resolve(client: &mut LocalClient, wanted: &str) -> Result<St
         .ok_or_else(|| CliError::Usage(format!("no vehicle called {wanted}")))
 }
 
-fn print_history(result: &Value) {
+/// A page of a vehicle's history in lines. One answer holds 200 entries
+/// at most, so past the first page it says which entries these are, and
+/// after the last line how many are left and the `--offset` that shows
+/// them.
+fn history_text(result: &Value, offset: u64) -> String {
+    use std::fmt::Write as _;
     let name = result["vehicleName"].as_str().unwrap_or("The vehicle");
     let entries = result["entries"].as_array().cloned().unwrap_or_default();
+    let total = result["total"].as_u64().unwrap_or_default();
     if entries.is_empty() {
-        println!("{name} has no history yet.");
-        return;
+        return if total == 0 {
+            format!("{name} has no history yet.\n")
+        } else {
+            format!(
+                "{name}'s history has {total} entries to show, and --offset {offset} leaves out every one.\n"
+            )
+        };
     }
-    println!("History of {name}:");
+    let next = offset + entries.len() as u64;
+    let mut text = if offset == 0 {
+        format!("History of {name}:\n")
+    } else {
+        format!("History of {name}, {} to {next} of {total}:\n", offset + 1)
+    };
     for entry in &entries {
         let when = date(entry["happenedAtUs"].as_i64().unwrap_or_default());
         let kind = &entry["kind"];
@@ -256,12 +289,12 @@ fn print_history(result: &Value) {
         } else {
             event_text(&kind["event"])
         };
-        println!("  {when}  {line}");
+        let _ = writeln!(text, "  {when}  {line}");
     }
-    let total = result["total"].as_u64().unwrap_or_default();
-    if total > entries.len() as u64 {
-        println!("  … {} more (--limit)", total - entries.len() as u64);
+    if total > next {
+        let _ = writeln!(text, "  … {} more (--offset {next})", total - next);
     }
+    text
 }
 
 /// An event as the History tab says it, in the daemon's own words; one
@@ -360,5 +393,33 @@ mod tests {
         );
         assert!(parse_when("28/09/2026", now).is_err());
         assert!(parse_when("2026-13-01", now).is_err());
+    }
+
+    /// One answer holds 200 entries at most. Past them the last line said
+    /// "(--limit)", which reaches no more of them: `--offset` does.
+    #[test]
+    fn a_page_of_history_says_where_the_rest_is() {
+        let entry = json!({
+            "happenedAtUs": 0,
+            "kind": { "type": "note", "text": "Checked" },
+            "author": { "clientName": "uxduck-cli" }
+        });
+        let page = |shown: usize, total: u64| json!({ "vehicleName": "Alpha", "entries": vec![entry.clone(); shown], "total": total });
+        let first = history_text(&page(200, 250), 0);
+        assert!(first.starts_with("History of Alpha:\n"), "{first}");
+        assert!(first.ends_with("  … 50 more (--offset 200)\n"), "{first}");
+        assert_eq!(first.lines().count(), 202);
+        let rest = history_text(&page(50, 250), 200);
+        assert!(
+            rest.starts_with("History of Alpha, 201 to 250 of 250:\n"),
+            "{rest}"
+        );
+        assert!(!rest.contains("more"), "{rest}");
+        assert_eq!(
+            history_text(&page(0, 250), 300),
+            "Alpha's history has 250 entries to show, and --offset 300 leaves out every one.\n"
+        );
+        assert_eq!(history_text(&page(0, 0), 0), "Alpha has no history yet.\n");
+        assert_eq!(history_text(&page(3, 3), 0).lines().count(), 4);
     }
 }

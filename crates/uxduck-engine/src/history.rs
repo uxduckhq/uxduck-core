@@ -21,10 +21,10 @@ use uxduck_core::events::{Actor, Change};
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine, upsert};
 
-/// A note's words: enough for a repair, not a report.
-const MAX_TEXT: usize = 2000;
-const MAX_TAGS: usize = 10;
 const DEFAULT_ENTRIES: u32 = 20;
+/// One page of `vehicle/history`. It is a page size and not a limit on the
+/// history: `total` says how many entries match, and `offset` reaches
+/// every one of them.
 const MAX_ENTRIES: u32 = 200;
 /// Changes of one parameter this close to the last are one sitting (H3)
 /// and fold into one entry, so a value that flaps and a person trying
@@ -333,7 +333,7 @@ impl Engine {
             kind: EntryKind::Note {
                 text: checked_text(&params.text)?,
                 category: params.category.map(Into::into),
-                tags: checked_tags(params.tags)?,
+                tags: tidy_tags(params.tags),
                 earlier: Vec::new(),
             },
             happened_at_us,
@@ -410,7 +410,7 @@ impl Engine {
             *category = Some(new.into());
         }
         if let Some(new) = params.tags {
-            *tags = checked_tags(new)?;
+            *tags = tidy_tags(new);
         }
         if params.happened_at_us.is_some() {
             entry.happened_at_us = checked_time(params.happened_at_us, now)?;
@@ -601,25 +601,19 @@ fn checked_text(text: &str) -> Result<String, ApiError> {
     if text.is_empty() {
         return Err(invalid("a note needs some words"));
     }
-    if text.chars().count() > MAX_TEXT {
-        return Err(invalid(format!("a note has at most {MAX_TEXT} characters")));
-    }
     Ok(text.to_owned())
 }
 
-fn checked_tags(tags: Vec<String>) -> Result<Vec<String>, ApiError> {
+/// A note's tags as they are kept: lower case, none empty. Any number of
+/// them, each a name of any length.
+fn tidy_tags(tags: Vec<String>) -> Vec<String> {
     let mut clean: Vec<String> = tags
         .into_iter()
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty())
         .collect();
     clean.dedup();
-    if clean.len() > MAX_TAGS || clean.iter().any(|t| t.chars().count() > 32) {
-        return Err(invalid(format!(
-            "at most {MAX_TAGS} tags of up to 32 characters"
-        )));
-    }
-    Ok(clean)
+    clean
 }
 
 /// When it happened: now, or earlier; never later than now (H1).

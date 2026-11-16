@@ -213,6 +213,9 @@ pub fn own_settings(settings: &p::PreflightSettings) -> Vec<dto::OwnCheckSetting
 
 impl From<&p::Preflight> for dto::Preflight {
     fn from(v: &p::Preflight) -> Self {
+        // A set: every step is asked, and a list has any number of them.
+        let flown_since: std::collections::HashSet<&str> =
+            v.flown_since.iter().map(String::as_str).collect();
         Self {
             vehicle_id: v.vehicle_id.clone(),
             checks: v.checks.iter().map(Into::into).collect(),
@@ -227,7 +230,7 @@ impl From<&p::Preflight> for dto::Preflight {
                     .checklist
                     .iter()
                     .flat_map(|c| c.steps.iter())
-                    .map(|s| super::checklist::step(s, v.flown_since.contains(&s.id)))
+                    .map(|s| super::checklist::step(s, flown_since.contains(s.id.as_str())))
                     .collect(),
                 copied_from: v.checklist.as_ref().and_then(|c| c.copied_from.clone()),
                 offers: v.offers.iter().map(Into::into).collect(),

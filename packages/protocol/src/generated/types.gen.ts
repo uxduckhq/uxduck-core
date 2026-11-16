@@ -17042,9 +17042,13 @@ export type VehicleHistoryParams = {
      */
     kind?: string | null;
     /**
-     * At most this many (default 20, at most 200).
+     * At most this many (default 20). One answer holds 200 at most:
+     * `total` says how many match, and `offset` reaches the rest.
      */
     limit?: number | null;
+    /**
+     * Leaves out this many of the newest, to read on from an answer.
+     */
     offset?: number | null;
     /**
      * Only what happened since this time.

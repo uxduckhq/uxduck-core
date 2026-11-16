@@ -38,7 +38,8 @@ pub enum ChecklistAction {
         /// `battery.cell_v >= 3.8` or `ARMING_CHECK == 1`.
         #[arg(long, value_name = "RULE")]
         rule: Option<String>,
-        /// Seconds the rule's value must hold before it passes.
+        /// Seconds the rule's value must hold before it passes: any
+        /// time, 0 or more.
         #[arg(long, requires = "rule", value_name = "SECONDS")]
         hold: Option<f64>,
         /// Hold the launch (a take-off, or a mission's start) until the
@@ -333,6 +334,12 @@ fn new_step(
         step["param"] = json!(reads);
     }
     if let Some(hold) = hold {
+        // JSON carries no infinity: it would go as no hold at all.
+        if !(hold.is_finite() && hold >= 0.0) {
+            return Err(CliError::Usage(format!(
+                "--hold takes 0 seconds or more, not {hold}"
+            )));
+        }
         step["holdS"] = json!(hold);
     }
     Ok(step)
@@ -719,6 +726,22 @@ mod tests {
         assert_eq!(step["severity"], "block", "set to hold the launch");
         assert_eq!(step["item"], "battery.voltage_v");
         assert_eq!(step["holdS"], 3.0);
+    }
+
+    /// A hold has no upper end. One that JSON cannot carry went as no hold
+    /// at all, without a word: `--hold inf` added a rule that passes at
+    /// once.
+    #[test]
+    fn a_hold_is_any_time_and_one_that_cannot_be_kept_is_refused() {
+        let rule = Some("battery.voltage_v >= 22.2");
+        let day = new_step("Battery", rule, Some(86_400.0), true).unwrap();
+        assert_eq!(day["holdS"], 86_400.0);
+        for hold in [f64::INFINITY, f64::NAN, -1.0] {
+            let Err(CliError::Usage(why)) = new_step("Battery", rule, Some(hold), true) else {
+                panic!("--hold {hold} was taken");
+            };
+            assert_eq!(why, format!("--hold takes 0 seconds or more, not {hold}"));
+        }
     }
 
     #[test]
