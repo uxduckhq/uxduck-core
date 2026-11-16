@@ -64,6 +64,18 @@ impl From<dto::VehicleColour> for core::VehicleColour {
     }
 }
 
+impl From<core::RouteHold> for dto::RouteHold {
+    fn from(h: core::RouteHold) -> Self {
+        match h {
+            core::RouteHold::Armed => Self::Armed,
+            core::RouteHold::Command => Self::Command,
+            core::RouteHold::Parameters => Self::Parameters,
+            core::RouteHold::Plan => Self::Plan,
+            core::RouteHold::Files => Self::Files,
+        }
+    }
+}
+
 impl From<core::Presence> for dto::Presence {
     fn from(value: core::Presence) -> Self {
         match value {
@@ -104,6 +116,9 @@ impl From<&core::Vehicle> for dto::Vehicle {
                 command_available: c.command_available,
                 reason: c.reason.clone(),
                 epoch: c.epoch,
+                holds: c.holds.iter().map(|h| (*h).into()).collect(),
+                chosen: c.chosen.clone(),
+                returns_to: c.returns_to.clone(),
             }),
             waiting_links: v
                 .added_links

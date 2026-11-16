@@ -220,6 +220,7 @@ fn check(name: &str) {
             | "vehicle_simulated"
             | "vehicle_hide"
             | "vehicle_forgetConnection"
+            | "vehicle_useConnection"
             | "vehicle_gripper"
             | "computer_add"
             | "computer_check"

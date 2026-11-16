@@ -367,6 +367,16 @@ pub struct VehicleForgetConnectionParams {
     pub link_id: String,
 }
 
+/// `vehicle/useConnection`: one vehicle onto one of its connections now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleUseConnectionParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// The connection, by its link id.
+    pub link_id: String,
+}
+
 /// Discovered connections only. Configuring a link is never vehicle evidence.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -376,6 +386,33 @@ pub struct VehicleConnections {
     pub reason: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub epoch: u64,
+    /// What the connection in use is doing that keeps UXDuck from going
+    /// back to one higher in the order by itself, while another connection
+    /// could take over. `vehicle/useConnection` goes ahead anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<RouteHold>,
+    /// The link a person switched the vehicle to with
+    /// `vehicle/useConnection`, kept until it stops answering, they switch
+    /// again or the order changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    /// A link higher in the order that has answered steadily for 10
+    /// seconds, which UXDuck moves to once nothing in `holds` is left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns_to: Option<String>,
+}
+
+/// Why UXDuck stays on the connection in use rather than go back to one
+/// higher in the order: the vehicle is armed, or switching would end a
+/// command waiting for its answer, a parameter, plan or file transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteHold {
+    Armed,
+    Command,
+    Parameters,
+    Plan,
+    Files,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

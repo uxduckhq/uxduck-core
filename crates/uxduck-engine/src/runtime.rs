@@ -240,6 +240,10 @@ pub trait LinkPort: Send {
     fn connection_order(&mut self, order: &[String]) {
         let _ = order;
     }
+    /// A person's switch of one vehicle to its route on one link (S261).
+    fn use_connection(&mut self, vehicle_id: &str, link_id: &str) {
+        let _ = (vehicle_id, link_id);
+    }
     fn gcs_system_id(&mut self, id: u8) {
         let _ = id;
     }

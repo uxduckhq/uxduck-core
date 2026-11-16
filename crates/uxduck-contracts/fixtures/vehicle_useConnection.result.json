@@ -1,0 +1,60 @@
+{
+  "id": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "name": "Buggy",
+  "aliases": [],
+  "linkId": "internet",
+  "peer": "100.76.177.45:15010",
+  "systemId": 1,
+  "componentIds": [1],
+  "autopilot": "Ardupilotmega",
+  "vehicleType": "GroundRover",
+  "uid": "000000001234abcd",
+  "firmware": "4.5.1",
+  "presence": "online",
+  "lastHeartbeatUs": 1790668800123456,
+  "armed": true,
+  "saved": true,
+  "dismissed": false,
+  "version": 9,
+  "connections": {
+    "routes": [
+      {
+        "linkId": "radio",
+        "peer": "192.168.50.21:15010",
+        "systemId": 1,
+        "priority": 1,
+        "reachable": true,
+        "writable": true,
+        "selected": false,
+        "telemetry": false,
+        "lastHeartbeatUs": 1790668800123456,
+        "roundTripUs": 41000,
+        "lossPerMille": 0,
+        "lastReceiveAgeMs": 120,
+        "reason": "Answering, waiting for the vehicle to disarm",
+        "remembered": true
+      },
+      {
+        "linkId": "internet",
+        "peer": "100.76.177.45:15010",
+        "systemId": 1,
+        "priority": 2,
+        "reachable": true,
+        "writable": true,
+        "selected": true,
+        "telemetry": true,
+        "lastHeartbeatUs": 1790668800120000,
+        "roundTripUs": 182000,
+        "lossPerMille": 4,
+        "lastReceiveAgeMs": 300,
+        "reason": "In use",
+        "remembered": true
+      }
+    ],
+    "commandAvailable": true,
+    "reason": "Commands go through internet",
+    "epoch": 3,
+    "holds": ["armed"],
+    "returnsTo": "radio"
+  }
+}

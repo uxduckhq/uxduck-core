@@ -381,6 +381,31 @@ pub struct VehicleConnections {
     pub command_available: bool,
     pub reason: String,
     pub epoch: u64,
+    /// What the connection in use is doing that keeps UXDuck from going
+    /// back to one higher in the order by itself. A person's switch goes
+    /// ahead anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<RouteHold>,
+    /// The connection a person switched the vehicle to, kept until it stops
+    /// answering, they switch again or the order changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    /// A connection higher in the order that has answered steadily for 10
+    /// seconds, which UXDuck moves to once nothing holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns_to: Option<String>,
+}
+
+/// Why UXDuck stays on the connection in use rather than go back to one
+/// higher in the order: switching would end what it is doing there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteHold {
+    Armed,
+    Command,
+    Parameters,
+    Plan,
+    Files,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -125,6 +125,10 @@ pub enum Action {
     /// Calls `terrain/putArea` for the vehicle: puts its areas on it, as
     /// asked first over a radio or on a real vehicle (ADR-0051 A7).
     PutTerrainAreas { vehicle_id: String },
+    /// Calls `vehicle/useConnection`: switches the vehicle to this
+    /// connection now (S261), offered while it is armed and one higher in
+    /// the order answers steadily again.
+    UseConnection { vehicle_id: String, link_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

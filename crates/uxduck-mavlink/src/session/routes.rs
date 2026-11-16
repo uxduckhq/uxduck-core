@@ -4,7 +4,7 @@ use super::{
 };
 use std::collections::BTreeSet;
 use uxduck_core::domain::link::{Link, LinkPolicy};
-use uxduck_core::domain::vehicle::{VehicleConnections, VehicleRoute};
+use uxduck_core::domain::vehicle::{RouteHold, VehicleConnections, VehicleRoute};
 
 type Address = (String, String, u8);
 const RECOVERED_US: u64 = 10_000_000;
@@ -28,6 +28,8 @@ pub(super) struct Routing {
     /// Per-vehicle timestamps, never sequence numbers from different channels.
     telemetry_boot: BTreeMap<(String, u32), u32>,
     switched_at: BTreeMap<String, u64>,
+    /// A person's switch, by vehicle: kept while that route answers.
+    chosen: BTreeMap<String, Address>,
 }
 
 impl Session {
@@ -55,8 +57,37 @@ impl Session {
             .collect()
     }
 
+    /// A new order ends every person's switch, so the order decides again.
     pub fn set_connection_order(&mut self, order: Vec<String>) {
+        if self.routing.order != order {
+            self.routing.chosen.clear();
+        }
         self.routing.order = order;
+    }
+
+    /// A person's switch (S261): the vehicle moves to its route on this
+    /// connection at once, armed, with a controller held or with work in
+    /// flight, which ends as it does when a connection fails. It stays there
+    /// until that route stops answering, they switch again or the order
+    /// changes. A route that cannot carry commands now is not switched to.
+    pub fn use_route(&mut self, vehicle_id: &str, link_id: &str, now_us: u64) -> Vec<Effect> {
+        let Some((key, id)) = self
+            .vehicles
+            .iter()
+            .filter(|(key, v)| {
+                key.0 == link_id
+                    && (v.observation.id == vehicle_id
+                        || v.observation.aliases.iter().any(|a| a == vehicle_id))
+                    && self.reachable(key, now_us)
+                    && self.writable(key)
+            })
+            .max_by_key(|(_, v)| v.observation.last_heartbeat_us)
+            .map(|(key, v)| (key.clone(), v.observation.id.clone()))
+        else {
+            return Vec::new();
+        };
+        self.routing.chosen.insert(id, key);
+        self.reconcile(Vec::new(), now_us)
     }
 
     pub fn configure_link(&mut self, link: &Link) {
@@ -306,27 +337,41 @@ impl Session {
             let current_usable = previous
                 .as_ref()
                 .is_some_and(|key| self.reachable(key, now_us) && self.writable(key));
-            let selected = if current_usable && best != previous {
-                // Returning to preference waits for stable health and an idle,
-                // disarmed vehicle. Failure always permits immediate handover.
-                let stable = best.as_ref().is_some_and(|key| {
-                    self.routing
-                        .healthy_since
-                        .get(key)
-                        .is_some_and(|at| now_us.saturating_sub(*at) >= RECOVERED_US)
-                });
-                let busy = previous.as_ref().is_some_and(|key| self.route_busy(key));
-                let armed = previous
-                    .as_ref()
-                    .and_then(|key| self.vehicles.get(key))
-                    .is_some_and(|v| v.observation.armed);
-                if stable && !busy && !armed {
-                    best
+            let chosen = self
+                .routing
+                .chosen
+                .get(&id)
+                .filter(|key| {
+                    keys.contains(key) && self.reachable(key, now_us) && self.writable(key)
+                })
+                .cloned();
+            if chosen.is_none() {
+                self.routing.chosen.remove(&id);
+            }
+            let stable = best.as_ref().is_some_and(|key| {
+                self.routing
+                    .healthy_since
+                    .get(key)
+                    .is_some_and(|at| now_us.saturating_sub(*at) >= RECOVERED_US)
+            });
+            let selected = if chosen.is_some() {
+                chosen.clone()
+            } else if current_usable && best != previous {
+                // Returning to preference waits for stable health, nothing in
+                // flight on the old route and a disarmed vehicle. A held
+                // controller carries on over the new route, so it never holds
+                // the return. Failure always permits immediate handover.
+                if stable
+                    && previous
+                        .as_ref()
+                        .is_some_and(|key| self.holds(key).is_empty())
+                {
+                    best.clone()
                 } else {
                     previous.clone()
                 }
             } else {
-                best
+                best.clone()
             };
             if selected != previous {
                 if let (Some(old), Some(new)) = (&previous, &selected)
@@ -350,6 +395,9 @@ impl Session {
                 }
                 *self.routing.epochs.entry(id.clone()).or_default() += 1;
                 let reason = match (&previous, &selected) {
+                    (_, Some(new)) if chosen.as_ref() == Some(new) => {
+                        format!("Using {} because it was switched to by hand", new.0)
+                    }
                     (Some(old), Some(new)) => format!(
                         "Using {} because {}",
                         new.0,
@@ -470,6 +518,27 @@ impl Session {
                     })
                     .collect(),
                 command_available: selected.is_some(),
+                // Only while another route could take over, so a vehicle on
+                // one route publishes nothing more as its work starts and ends.
+                holds: selected
+                    .as_ref()
+                    .filter(|_| {
+                        keys.iter()
+                            .filter(|key| self.reachable(key, now_us) && self.writable(key))
+                            .count()
+                            > 1
+                    })
+                    .map(|key| self.holds(key))
+                    .unwrap_or_default(),
+                returns_to: best
+                    .filter(|key| {
+                        stable
+                            && chosen.is_none()
+                            && selected.is_some()
+                            && selected.as_ref() != Some(key)
+                    })
+                    .map(|key| key.0),
+                chosen: chosen.map(|key| key.0),
                 reason: self
                     .routing
                     .reasons
@@ -503,18 +572,32 @@ impl Session {
         effects
     }
 
-    fn route_busy(&self, key: &Address) -> bool {
-        self.commands.iter().any(|p| p.key == *key)
-            || self.vehicles.get(key).is_some_and(|v| {
-                v.params.is_some()
-                    || v.ftp.busy()
-                    || !v.batch.is_empty()
-                    || !v.writes.is_empty()
-                    || v.mission_upload.is_some()
-                    || v.mission_download.is_some()
-                    || v.manual_sent.is_some()
-                    || v.rc_overridden.iter().any(|b| *b)
-            })
+    /// What a route is doing that a switch would end, and an armed vehicle,
+    /// each of which keeps the vehicle on it rather than go back up the order.
+    fn holds(&self, key: &Address) -> Vec<RouteHold> {
+        let mut holds = BTreeSet::new();
+        if self.commands.iter().any(|p| p.key == *key) {
+            holds.insert(RouteHold::Command);
+        }
+        if let Some(v) = self.vehicles.get(key) {
+            if v.observation.armed {
+                holds.insert(RouteHold::Armed);
+            }
+            if v.params.is_some()
+                || v.ftp.reading_parameters()
+                || !v.batch.is_empty()
+                || !v.writes.is_empty()
+            {
+                holds.insert(RouteHold::Parameters);
+            }
+            if v.mission_upload.is_some() || v.mission_download.is_some() {
+                holds.insert(RouteHold::Plan);
+            }
+            if v.ftp.busy() && !v.ftp.reading_parameters() {
+                holds.insert(RouteHold::Files);
+            }
+        }
+        holds.into_iter().collect()
     }
 
     pub(super) fn interrupt_route(&mut self, key: &Address) -> Vec<Effect> {
@@ -717,6 +800,157 @@ mod tests {
                 .command_available
         );
         assert!(s.send_to(&id, |_, _| vec![1]).is_empty());
+    }
+
+    #[test]
+    fn a_held_controller_returns_to_preference_once_disarmed_and_keeps_driving_there() {
+        let mut s = Session::default();
+        s.set_connection_order(vec!["a".into(), "b".into()]);
+        for id in ["a", "b"] {
+            s.configure_link(&link(id, true));
+        }
+        let mut fake = FakeVehicle::new(1, 100);
+        let id = discover(&mut s, &mut fake, "a", 1);
+        discover(&mut s, &mut fake, "b", 1);
+        s.transport_lost("a", 2);
+        s.transport_restored("a");
+        assert_eq!(selected(&s, &id).as_deref(), Some("b"));
+        let drive = |s: &mut Session| {
+            s.pilot_control_with_method(
+                &id,
+                [0, 0, 500, 0],
+                &[],
+                uxduck_core::domain::settings::PilotInputMethod::ManualControl,
+                0,
+            )
+        };
+        fake.armed = true;
+        for second in 1..=12 {
+            for l in ["b", "a"] {
+                s.ingest(l, "peer", &fake.heartbeat(), second * 1_000_000);
+            }
+            assert!(!drive(&mut s).is_empty());
+        }
+        assert_eq!(selected(&s, &id).as_deref(), Some("b"), "never while armed");
+        fake.armed = false;
+        for l in ["b", "a"] {
+            s.ingest(l, "peer", &fake.heartbeat(), 13_000_000);
+        }
+        assert_eq!(selected(&s, &id).as_deref(), Some("a"));
+        let sent = drive(&mut s);
+        let links: Vec<_> = sent
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Send { link_id, .. } => Some(link_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, ["a"]);
+    }
+
+    #[test]
+    fn an_armed_vehicle_says_what_holds_it_and_which_connection_waits_for_it() {
+        let mut s = Session::default();
+        s.set_connection_order(vec!["a".into(), "b".into()]);
+        for id in ["a", "b"] {
+            s.configure_link(&link(id, true));
+        }
+        let mut fake = FakeVehicle::new(1, 100);
+        let id = discover(&mut s, &mut fake, "a", 1);
+        discover(&mut s, &mut fake, "b", 1);
+        s.transport_lost("a", 2);
+        s.transport_restored("a");
+        fake.armed = true;
+        let view = |s: &Session| s.routing.published[&id].connections.clone().unwrap();
+        for second in 1..=5 {
+            for l in ["b", "a"] {
+                s.ingest(l, "peer", &fake.heartbeat(), second * 1_000_000);
+            }
+        }
+        assert_eq!(view(&s).holds, [RouteHold::Armed]);
+        assert_eq!(view(&s).returns_to, None, "not steady for 10 seconds yet");
+        for second in 6..=12 {
+            for l in ["b", "a"] {
+                s.ingest(l, "peer", &fake.heartbeat(), second * 1_000_000);
+            }
+        }
+        assert_eq!(selected(&s, &id).as_deref(), Some("b"));
+        assert_eq!(view(&s).returns_to.as_deref(), Some("a"));
+        s.download_parameters(&id, 12_000_001);
+        s.tick(12_000_002);
+        assert_eq!(view(&s).holds, [RouteHold::Armed, RouteHold::Parameters]);
+    }
+
+    #[test]
+    fn a_person_switches_at_once_armed_and_busy_and_stays_until_it_stops_answering() {
+        let mut s = Session::default();
+        s.set_connection_order(vec!["a".into(), "b".into()]);
+        for id in ["a", "b"] {
+            s.configure_link(&link(id, true));
+        }
+        let mut fake = FakeVehicle::new(1, 100);
+        let id = discover(&mut s, &mut fake, "a", 1);
+        discover(&mut s, &mut fake, "b", 1);
+        fake.armed = true;
+        for l in ["a", "b"] {
+            s.ingest(l, "peer", &fake.heartbeat(), 1_000_000);
+        }
+        s.download_parameters(&id, 1_000_001);
+        assert_eq!(selected(&s, &id).as_deref(), Some("a"));
+        let ended = s.use_route(&id, "b", 1_000_002);
+        assert_eq!(selected(&s, &id).as_deref(), Some("b"));
+        assert!(
+            ended
+                .iter()
+                .any(|e| matches!(e, Effect::Parameters { result: Err(_), .. })),
+            "the download on the old route ends visibly"
+        );
+        let view = |s: &Session| s.routing.published[&id].connections.clone().unwrap();
+        assert_eq!(view(&s).chosen.as_deref(), Some("b"));
+        assert!(view(&s).reason.contains("switched to by hand"));
+        fake.armed = false;
+        for second in 2..=14 {
+            for l in ["a", "b"] {
+                s.ingest(l, "peer", &fake.heartbeat(), second * 1_000_000);
+            }
+        }
+        assert_eq!(
+            selected(&s, &id).as_deref(),
+            Some("b"),
+            "kept while it answers"
+        );
+        assert_eq!(view(&s).returns_to, None, "nothing to return to while kept");
+        s.set_connection_order(vec!["a".into(), "b".into()]);
+        assert_eq!(
+            selected(&s, &id).as_deref(),
+            Some("b"),
+            "the same order keeps it"
+        );
+        s.transport_lost("b", 14_000_001);
+        assert_eq!(selected(&s, &id).as_deref(), Some("a"));
+        assert_eq!(view(&s).chosen, None);
+    }
+
+    #[test]
+    fn a_new_order_ends_a_switch_and_the_order_decides_again() {
+        let mut s = Session::default();
+        s.set_connection_order(vec!["a".into(), "b".into()]);
+        for id in ["a", "b", "c"] {
+            s.configure_link(&link(id, true));
+        }
+        let mut fake = FakeVehicle::new(1, 100);
+        let id = discover(&mut s, &mut fake, "a", 1);
+        discover(&mut s, &mut fake, "b", 1);
+        s.use_route(&id, "b", 2);
+        assert!(s.use_route(&id, "c", 3).is_empty(), "never heard on c");
+        assert_eq!(selected(&s, &id).as_deref(), Some("b"));
+        s.set_connection_order(vec!["a".into(), "c".into(), "b".into()]);
+        for second in 1..=12 {
+            for l in ["a", "b"] {
+                s.ingest(l, "peer", &fake.heartbeat(), second * 1_000_000);
+            }
+        }
+        assert_eq!(selected(&s, &id).as_deref(), Some("a"));
     }
 
     #[test]

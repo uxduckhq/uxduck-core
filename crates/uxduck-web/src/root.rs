@@ -243,6 +243,7 @@ enum Call {
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
     ConnectionOrder(Vec<String>),
+    UseConnection(String, String),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
     Journal(Write),
@@ -315,6 +316,12 @@ impl LinkPort for Links {
     }
     fn connection_order(&mut self, order: &[String]) {
         push(&self.0, Call::ConnectionOrder(order.to_vec()));
+    }
+    fn use_connection(&mut self, vehicle_id: &str, link_id: &str) {
+        push(
+            &self.0,
+            Call::UseConnection(vehicle_id.to_owned(), link_id.to_owned()),
+        );
     }
     fn gcs_system_id(&mut self, id: u8) {
         push(&self.0, Call::GcsSystemId(id));
@@ -1612,6 +1619,10 @@ impl Browser {
             }
             Call::GcsSystemId(id) => self.session.set_gcs_system_id(id),
             Call::ConnectionOrder(order) => self.session.set_connection_order(order),
+            Call::UseConnection(vehicle_id, link_id) => {
+                let effects = self.session.use_route(&vehicle_id, &link_id, now);
+                self.apply(effects, outputs);
+            }
             Call::Pause(link_id, paused) => {
                 if self.streams.contains_key(&link_id) {
                     self.session.pause(&link_id, paused, now);

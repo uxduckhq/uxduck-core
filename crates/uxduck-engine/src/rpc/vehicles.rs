@@ -148,6 +148,10 @@ pub fn handle(
             require(Capability::Config)?;
             forget_connection(engine, connection, &params)
         }
+        ClientRequest::VehicleUseConnection(params) => {
+            require(Capability::Control)?;
+            use_connection(engine, &params)
+        }
         ClientRequest::LinkAdd(params) => {
             require(Capability::Config)?;
             add_link(engine, connection, params)
@@ -319,6 +323,55 @@ fn forget_connection(
     let dto = VehicleDto::from(&vehicle);
     engine.commit(connection, Change::VehicleUpserted { vehicle });
     to_value(&dto)
+}
+
+/// `vehicle/useConnection`: a person's switch of a vehicle to one of its
+/// connections now (S261). The data plane moves it at once, armed or busy,
+/// and keeps it there until that connection stops answering. One that
+/// cannot carry commands to the vehicle now is refused, saying why.
+fn use_connection(
+    engine: &mut Engine,
+    params: &uxduck_contracts::dto::vehicle::VehicleUseConnectionParams,
+) -> Result<Value, ApiError> {
+    let vehicle = found(engine, &params.id)?.clone();
+    let link_id = params.link_id.as_str();
+    let name = engine
+        .state
+        .links
+        .get(link_id)
+        .map_or_else(|| link_id.to_owned(), |link| link.name.clone());
+    let routes: Vec<_> = vehicle
+        .connections
+        .iter()
+        .flat_map(|c| &c.routes)
+        .filter(|route| route.link_id == link_id && !route.remembered)
+        .collect();
+    if routes.is_empty() {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!(
+                "{name} has not heard {} since UXDuck started, so it cannot be switched to.",
+                vehicle.name
+            ),
+        ));
+    }
+    if !routes.iter().any(|route| route.reachable) {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!("{name} is not answering {} now.", vehicle.name),
+        ));
+    }
+    if !routes.iter().any(|route| route.reachable && route.writable) {
+        return Err(ApiError::new(
+            ErrorKind::Busy,
+            format!(
+                "{name} only receives from {}, so it cannot carry its commands.",
+                vehicle.name
+            ),
+        ));
+    }
+    engine.links.use_connection(&vehicle.id, link_id);
+    to_value(&VehicleDto::from(&vehicle))
 }
 
 /// Checks and creates a link, and opens it.

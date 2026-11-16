@@ -22,6 +22,8 @@ Action::ResolveApproval.remember
 Action::RestartSimulation.link_id
 Action::ResumeSimulation.link_id
 Action::TakeBack.vehicle_id
+Action::UseConnection.link_id
+Action::UseConnection.vehicle_id
 Action::UseTerrainDataset.dataset
 Action::UseTerrainDataset.vehicle_id
 ActionBinding.action

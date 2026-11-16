@@ -335,6 +335,10 @@ export type Action = {
 } | {
     type: 'put-terrain-areas';
     vehicleId: string;
+} | {
+    linkId: string;
+    type: 'use-connection';
+    vehicleId: string;
 };
 
 /**
@@ -2483,6 +2487,9 @@ export type ClientRequest = {
 } | {
     method: 'vehicle/forgetConnection';
     params: VehicleForgetConnectionParams;
+} | {
+    method: 'vehicle/useConnection';
+    params: VehicleUseConnectionParams;
 } | {
     method: 'link/add';
     params: LinkAddParams;
@@ -12914,6 +12921,13 @@ export type Risk = 'none' | 'confirm' | 'dangerous';
  */
 export type RoundTripMissing = 'waiting' | 'no-reply' | 'read-only' | 'unsupervised' | 'paused' | 'not-sent';
 
+/**
+ * Why UXDuck stays on the connection in use rather than go back to one
+ * higher in the order: the vehicle is armed, or switching would end a
+ * command waiting for its answer, a parameter, plan or file transfer.
+ */
+export type RouteHold = 'armed' | 'command' | 'parameters' | 'plan' | 'files';
+
 export type RouterDecision = 'forwarded' | 'dropped-loop';
 
 export type RouterEvent = {
@@ -17142,9 +17156,26 @@ export type VehicleColourParams = {
  * Discovered connections only. Configuring a link is never vehicle evidence.
  */
 export type VehicleConnections = {
+    /**
+     * The link a person switched the vehicle to with
+     * `vehicle/useConnection`, kept until it stops answering, they switch
+     * again or the order changes.
+     */
+    chosen?: string | null;
     commandAvailable: boolean;
     epoch: number;
+    /**
+     * What the connection in use is doing that keeps UXDuck from going
+     * back to one higher in the order by itself, while another connection
+     * could take over. `vehicle/useConnection` goes ahead anyway.
+     */
+    holds?: Array<RouteHold>;
     reason: string;
+    /**
+     * A link higher in the order that has answered steadily for 10
+     * seconds, which UXDuck moves to once nothing in `holds` is left.
+     */
+    returnsTo?: string | null;
     routes: Array<VehicleRoute>;
 };
 
@@ -17755,6 +17786,20 @@ export type VehicleTrafficParams = {
 export type VehicleTrail = {
     points: Array<TrailPoint>;
     vehicleId: string;
+};
+
+/**
+ * `vehicle/useConnection`: one vehicle onto one of its connections now.
+ */
+export type VehicleUseConnectionParams = {
+    /**
+     * The vehicle, by id or an earlier alias.
+     */
+    id: string;
+    /**
+     * The connection, by its link id.
+     */
+    linkId: string;
 };
 
 /**

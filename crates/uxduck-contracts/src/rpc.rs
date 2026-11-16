@@ -310,6 +310,14 @@ pub enum ClientRequest {
     /// UXDuck. Needs `config`. Result: `Vehicle`.
     #[serde(rename = "vehicle/forgetConnection")]
     VehicleForgetConnection(crate::dto::vehicle::VehicleForgetConnectionParams),
+    /// Switches a vehicle to one of its connections now (S261), armed,
+    /// with a controller held or with work in flight, which ends as it does
+    /// when a connection fails. It stays on it until that connection stops
+    /// answering, it is switched again or the connection order changes.
+    /// Refused with `busy` when the connection cannot carry commands to it
+    /// now. Needs `control`. Result: `Vehicle`, before the switch.
+    #[serde(rename = "vehicle/useConnection")]
+    VehicleUseConnection(crate::dto::vehicle::VehicleUseConnectionParams),
     /// Adds a link and opens it, for a vehicle with `forVehicle`. Needs
     /// `config`. Result: `Link`.
     #[serde(rename = "link/add")]
@@ -2122,7 +2130,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 389] = [
+    pub const METHODS: [&'static str; 390] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2172,6 +2180,7 @@ impl ClientRequest {
         "vehicle/dismiss",
         "vehicle/hide",
         "vehicle/forgetConnection",
+        "vehicle/useConnection",
         "link/add",
         "link/remove",
         "telemetry/subscribe",

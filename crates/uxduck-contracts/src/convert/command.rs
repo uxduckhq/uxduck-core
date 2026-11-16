@@ -274,6 +274,13 @@ fn action(action: n::Action) -> Option<nd::Action> {
             row: row.into(),
         },
         n::Action::PutTerrainAreas { vehicle_id } => nd::Action::PutTerrainAreas { vehicle_id },
+        n::Action::UseConnection {
+            vehicle_id,
+            link_id,
+        } => nd::Action::UseConnection {
+            vehicle_id,
+            link_id,
+        },
     })
 }
 

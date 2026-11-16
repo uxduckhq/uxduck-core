@@ -142,6 +142,12 @@ pub enum Action {
     PutTerrainAreas {
         vehicle_id: String,
     },
+    /// `vehicle/useConnection`: switches a vehicle to a connection now
+    /// (S261), as asked while it is armed.
+    UseConnection {
+        vehicle_id: String,
+        link_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

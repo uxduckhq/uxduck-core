@@ -5,12 +5,16 @@
 use std::collections::BTreeSet;
 
 use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
-use uxduck_core::domain::notification::NotificationState;
+use uxduck_core::domain::notification::{
+    Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
+};
 use uxduck_core::domain::vehicle::{
-    Observation, Presence, Vehicle, VehicleColour, VehicleRoute, callsign, simulation_name,
+    Observation, Presence, RouteHold, Vehicle, VehicleColour, VehicleRoute, callsign,
+    simulation_name,
 };
 use uxduck_core::events::{Actor, Change};
 
+use crate::commands::Raise;
 use crate::{Engine, NO_CONNECTION};
 
 /// The condition an older UXDuck gave a real vehicle's ground-testing
@@ -291,6 +295,69 @@ impl Engine {
         }
     }
 
+    /// Armed, UXDuck never goes back up the connection order by itself
+    /// (S261), so while one higher in the order answers steadily again it
+    /// asks once, with Switch now. Disarmed, it goes back by itself, and the
+    /// notice is answered.
+    fn connection_return_notice(&mut self, vehicle: &Vehicle) {
+        let prefix = format!("connection-return:{}:", vehicle.id);
+        let returns = vehicle
+            .connections
+            .as_ref()
+            .filter(|c| {
+                c.holds.contains(&RouteHold::Armed) && vehicle.presence != Presence::Offline
+            })
+            .and_then(|c| c.returns_to.clone());
+        let wanted = returns.as_ref().map(|link| format!("{prefix}{link}"));
+        let raised: Vec<String> = self
+            .state
+            .notifications
+            .values()
+            .filter_map(|n| n.condition.clone())
+            .filter(|c| c.starts_with(&prefix) && Some(c) != wanted.as_ref())
+            .collect();
+        for condition in raised {
+            self.resolve(&condition);
+        }
+        let (Some(link_id), Some(condition)) = (returns, wanted) else {
+            return;
+        };
+        let name = |id: &str| {
+            self.state
+                .links
+                .get(id)
+                .map_or_else(|| id.to_owned(), |link| link.name.clone())
+        };
+        let link = name(&link_id);
+        let current = vehicle
+            .connections
+            .iter()
+            .flat_map(|c| &c.routes)
+            .find(|route| route.selected)
+            .map_or_else(|| "its connection".to_owned(), |route| name(&route.link_id));
+        self.raise(Raise {
+            severity: Severity::Info,
+            kind: NotificationKind::Persistent,
+            subject: Subject::Vehicle {
+                id: vehicle.id.clone(),
+            },
+            title: format!("{link} is answering again"),
+            body: Some(format!(
+                "Switch {} to {link}? UXDuck stays on {current} while {} is armed.",
+                vehicle.name, vehicle.name
+            )),
+            actions: vec![NotificationAction {
+                label: "Switch now".into(),
+                action: Action::UseConnection {
+                    vehicle_id: vehicle.id.clone(),
+                    link_id,
+                },
+            }],
+            condition: Some(condition),
+            report: None,
+        });
+    }
+
     /// The record of a vehicle heard for the first time: named and coloured
     /// as nobody chose.
     fn first_heard(&self, seen: &Observation) -> Vehicle {
@@ -436,6 +503,7 @@ impl Engine {
             self.flight_presence(&after.id);
         }
         self.video_vehicle_changed(before, after);
+        self.connection_return_notice(after);
         self.refresh_wake_lock();
         self.drive_launch_of_vehicle(&after.id);
         self.drive_plan_run_of_vehicle(&after.id);

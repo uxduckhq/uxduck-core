@@ -44,6 +44,7 @@ enum Command {
     /// The system id UXDuck sends as, from its settings.
     GcsSystemId(u8),
     ConnectionOrder(Vec<String>),
+    UseConnection(String, String),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
     /// A link's host looked up off this task; `lookup` says it is the
@@ -99,6 +100,12 @@ impl LinkPort for LinkChannel {
     }
     fn connection_order(&mut self, order: &[String]) {
         let _ = self.0.send(Command::ConnectionOrder(order.to_vec()));
+    }
+    fn use_connection(&mut self, vehicle_id: &str, link_id: &str) {
+        let _ = self.0.send(Command::UseConnection(
+            vehicle_id.to_owned(),
+            link_id.to_owned(),
+        ));
     }
     fn ground_heartbeat(&mut self, vehicle_id: &str, on: bool) {
         let _ = self
@@ -356,6 +363,10 @@ pub fn start(
                     Some(Command::ConnectionOrder(order)) => {
                         plane.session.set_connection_order(order);
                         let effects = plane.session.tick(SystemClock.now_us());
+                        plane.apply(effects).await;
+                    }
+                    Some(Command::UseConnection(vehicle_id, link_id)) => {
+                        let effects = plane.session.use_route(&vehicle_id, &link_id, SystemClock.now_us());
                         plane.apply(effects).await;
                     }
                     Some(Command::GcsSystemId(id)) => {
