@@ -171,7 +171,7 @@ With sync on, a plugin you install follows you to your other computers. There it
 
 ## Panels and the map
 
-Panels in the Cockpit tab are built from `text`, `value`, `gauge`, `chart`, `table`, `display`, `button` and `time-input` widgets. Each may have `help`, shown behind an info button, and a `muted` or `warning` tone. A table's rows are an item's text, as the SDK's `table` writes them. A `display` is one item, large; a `button` may carry `params` for its command. A `time-input` is a time of day with **Set**: its command gets `{ "at": … }`, the next time the person's clock reads it, in seconds since 1970.
+Panels in the Cockpit tab are built from `text`, `value`, `gauge`, `chart`, `table`, `display`, `button` and `time-input` widgets. Each may have `help`, shown behind an info button, and a `muted` or `warning` tone. A table's rows are an item's text, as the SDK's `table` writes them. A `display` is one item, large. With `fractions: true` it shows fractions of a second once the person turns them on in Settings, hundredths while it counts and milliseconds while it is still, so send a still value exactly, not rounded. A `button` may carry `params` for its command. A `time-input` is a time of day with **Set**: its command gets `{ "at": … }`, the next time the person's clock reads it, in seconds since 1970.
 
 A panel with `"tab": true` is a tab of its own instead. A plugin's tab panels share one tab, with a switch between them, opened from **+** › **Plugins** under the plugin's name. It follows no vehicle.
 

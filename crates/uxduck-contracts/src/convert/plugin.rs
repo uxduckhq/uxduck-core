@@ -227,6 +227,7 @@ mod tests {
             { "type": "gauge", "item": "battery.remaining_pct", "label": "Battery", "min": 0.0, "max": 100.0, "warnBelow": 20.0, "tone": "muted" },
             { "type": "chart", "item": "home.distance_m", "label": "Distance", "windowS": 120 },
             { "type": "table", "item": "home.marks", "label": "Marks", "columns": ["Time", "Label"], "tone": "warning" },
+            { "type": "display", "item": "stopwatch.elapsed_s", "label": "Elapsed", "fractions": true },
             { "type": "button", "label": "Mark", "command": "mark" },
             { "type": "time-input", "label": "Alarm", "command": "alarm-set", "help": "Rings then." }
         ]))

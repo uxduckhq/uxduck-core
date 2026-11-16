@@ -1026,14 +1026,28 @@ impl Engine {
         self.push_layer(&plugin.id);
     }
 
-    /// A plugin's own items as `plugin/items` lists them.
+    /// A plugin's own items as `plugin/items` lists them. A counting one is
+    /// moved on at its rate to now, since the plugin last sent it as long as
+    /// a minute ago and a window counts on from when it arrives. A count down
+    /// stops at nought, as the app's does.
     fn own_items(&self, id: &str) -> PluginItems {
+        let now = self.clock.now_us();
+        let counted_on = |item: &uxduck_contracts::dto::telemetry::TelemetryItem| {
+            let mut item = item.clone();
+            if let (Some(rate), Some(value)) = (item.rate_per_s, item.value) {
+                let since = std::time::Duration::from_micros(now.saturating_sub(item.time_us));
+                let moved = value + rate * since.as_secs_f64();
+                item.value = Some(if rate < 0.0 { moved.max(0.0) } else { moved });
+                item.time_us = now;
+            }
+            item
+        };
         PluginItems {
             plugin_id: id.to_owned(),
             items: self
                 .plugin_own_items
                 .get(id)
-                .map(|items| items.values().cloned().collect())
+                .map(|items| items.values().map(counted_on).collect())
                 .unwrap_or_default(),
         }
     }

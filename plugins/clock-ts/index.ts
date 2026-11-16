@@ -44,13 +44,13 @@ const RESYNC_MS = MINUTE_MS;
 
 const two = (n: number) => String(n).padStart(2, "0");
 
-/** `1:23.4`: a lap, to the tenth. */
+/** `1:23.45`: a lap, to the hundredth. */
 function lapOf(ms: number): string {
-  const tenths = Math.floor(ms / 100);
-  const s = Math.floor(tenths / 10);
+  const hundredths = Math.floor(ms / 10);
+  const s = Math.floor(hundredths / 100);
   const m = Math.floor(s / 60);
   const h = Math.floor(m / 60);
-  const rest = `${two(s % 60)}.${tenths % 10}`;
+  const rest = `${two(s % 60)}.${two(hundredths % 100)}`;
   return h > 0 ? `${h}:${two(m % 60)}:${rest}` : `${m}:${rest}`;
 }
 
@@ -144,6 +144,7 @@ export function describe(): Description {
             type: "display",
             item: "clock.now_at",
             label: "Time",
+            fractions: true,
             help: "The time where you are, with the date, your time zone and UTC (as flight logs, NOTAMs and ATC use it) under it.",
           },
         ],
@@ -153,7 +154,7 @@ export function describe(): Description {
         title: "Stopwatch",
         tab: true,
         widgets: [
-          { type: "display", item: "stopwatch.elapsed_s", label: "Elapsed" },
+          { type: "display", item: "stopwatch.elapsed_s", label: "Elapsed", fractions: true },
           { type: "value", item: "stopwatch.state", label: "Status", tone: "muted" },
           { type: "button", label: "Start", command: "stopwatch-start" },
           { type: "button", label: "Stop", command: "stopwatch-stop" },

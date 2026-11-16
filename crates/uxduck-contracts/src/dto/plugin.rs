@@ -430,6 +430,11 @@ pub enum Widget {
     Display {
         item: String,
         label: String,
+        /// Fractions of a second may show, when the person turns them on:
+        /// hundredths while it counts, milliseconds while it is still. The
+        /// value shows as sent, so send a still one exactly, not rounded.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fractions: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<Tone>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

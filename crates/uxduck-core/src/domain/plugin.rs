@@ -74,6 +74,8 @@ pub enum Widget {
     Display {
         item: String,
         label: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fractions: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<Tone>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

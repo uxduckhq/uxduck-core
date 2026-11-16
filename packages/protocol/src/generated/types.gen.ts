@@ -18636,6 +18636,12 @@ export type Widget = {
     tone?: Tone | null;
     type: 'table';
 } | {
+    /**
+     * Fractions of a second may show, when the person turns them on:
+     * hundredths while it counts, milliseconds while it is still. The
+     * value shows as sent, so send a still one exactly, not rounded.
+     */
+    fractions?: boolean;
     help?: string | null;
     item: string;
     label: string;

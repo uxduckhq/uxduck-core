@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "e40018cf483673ceb91d72bfdc1b9e552041c3fa",
+  "sourceCommit": "8edc525146ec4027c2bf73e8c498dc25cd5e4ff0",
   "licenseReady": true,
   "files": [
     {
@@ -126,7 +126,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/plugin-guide.md",
-      "sha256": "87ef59e1e60aced18bb57558e7b1e3cef2937007f6f8d5338fda850eacdcc102",
+      "sha256": "d8fd7fdf29a5cb9a29aecdd38baf39cbcb254870e7ddca8c8f752ae1a6e701d9",
       "executable": false
     },
     {
@@ -5251,7 +5251,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/convert/plugin.rs",
-      "sha256": "8ec1c8ebdc1e60e40393fcb0cdc51d291cea509a02ae4c3ab0872ccffa569bd8",
+      "sha256": "a63ab87394d4b2452d0b5d344db10ae8bcd9c9f2c77d3379fc728e1bdcfac7f6",
       "executable": false
     },
     {
@@ -5496,7 +5496,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/plugin.rs",
-      "sha256": "557ca4fe1d9532f4eca8c54ef2739cbd89ef400de708d7b983d89f2081404be2",
+      "sha256": "eba93fb32cd95a25265ce4c50618b74474da29dd8e78b5cd715b72ed7dc33d35",
       "executable": false
     },
     {
@@ -5836,7 +5836,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/plugin.rs",
-      "sha256": "7e704f68a0ea3f2d96e1b280d6f1282dc1bfcb3be789bb5d8e8bfb03d575cdbf",
+      "sha256": "a3020f9d0a7456ec007615266c67354718d486577e5c4f3cc77730508263c3af",
       "executable": false
     },
     {
@@ -6286,7 +6286,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/plugins.rs",
-      "sha256": "1e1432328cf5d0a811198698e2a6a20a118f63ebac185dc2505e7e21ccfd1ba9",
+      "sha256": "3397755539c08daef8c5bb522bb2e89f0c91a94dd5bc0afcb0e3aa35fd7c420e",
       "executable": false
     },
     {
@@ -8341,7 +8341,7 @@
     },
     {
       "path": "docs/site/write-a-plugin.md",
-      "sha256": "ffdac887aaecc714b4e210452d5eb88331f90afd014048e077eb997f79e881b0",
+      "sha256": "c9cfd5958dc4a402d07a94e5b37856c2952a5ff8dc605cf41ae2b5cc87ae921a",
       "executable": false
     },
     {
@@ -8356,7 +8356,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "5389d71d05d6cb76a91bdf853117d4dd02d2c6a574ed258e612a85db71ddd9f4",
+      "sha256": "174c2c55e6d7f763da817bb1604760278eaddca624ec4ccd34cf79cf91e7fbe7",
       "executable": false
     },
     {
@@ -8456,12 +8456,12 @@
     },
     {
       "path": "plugins/clock-ts/index.ts",
-      "sha256": "5a1229e69a7a3b15a1fdb609b5bfc56b3acf73fe0f1790e2147728eeaac4f6e7",
+      "sha256": "93882d8113d0f0adf661c64b035be1c0fa0a96847cfce6ebde50338547ba56d1",
       "executable": false
     },
     {
       "path": "plugins/clock-ts/plugin.json",
-      "sha256": "c369632200f48613200cef994a490120ca692d5e5958a626dcea8c1c9b788e37",
+      "sha256": "eecc57826ba97d2e406a779c57b1e9d724b08a3ca24ca1d8f47df8c9fb0ae9de",
       "executable": false
     },
     {
