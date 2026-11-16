@@ -58,6 +58,11 @@ pub struct CompanionCheck {
     /// Its clock as the check read it (S356); absent when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<CompanionClock>,
+    /// The onboard computer id its running `uxduck companion` or
+    /// `uxduck forward --onboard` was given with `--computer-id` (S372),
+    /// kept from the last check that read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports_as: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<CompanionNetwork>,
     /// What its `MediaMTX` serves, as last read (ADR-0060).
@@ -157,6 +162,37 @@ pub fn free_component_id(computers: &[CompanionComputer]) -> Option<u8> {
     COMPONENT_IDS
         .into_iter()
         .find(|id| computers.iter().all(|c| c.component_id != *id))
+}
+
+/// The computer `computer_id` takes the id its check found its UXDuck
+/// sends as (S372), because its readings arrive under that id whatever
+/// order the computers were added in. Another computer given that id when
+/// it was added moves to the first free one. One whose own check found it
+/// sends as that id too keeps it, as both do on the wire, and their cards
+/// say so.
+pub fn take_reported_id(computers: &mut [CompanionComputer], computer_id: &str) {
+    let reported = |c: &CompanionComputer| c.check.as_ref().and_then(|check| check.reports_as);
+    let Some(at) = computers.iter().position(|c| c.id == computer_id) else {
+        return;
+    };
+    let Some(id) = reported(&computers[at]) else {
+        return;
+    };
+    if computers[at].component_id == id {
+        return;
+    }
+    computers[at].component_id = id;
+    for other in 0..computers.len() {
+        if other == at
+            || computers[other].component_id != id
+            || reported(&computers[other]) == Some(id)
+        {
+            continue;
+        }
+        if let Some(free) = free_component_id(computers) {
+            computers[other].component_id = free;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -79,6 +79,10 @@ rustix = { version = "1.1", features = ["fs", "process"] }
 # the input node behind. The version the tray uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "6", default-features = false, features = ["default-rt", "proxy"] }
+# An onboard computer's clock, read (adjtimex) and set (clock_settime) from
+# the ground station's when nothing keeps it (S373).
+libc = "0.2"
+rustix = { version = "1.1", features = ["fs", "process", "time"] }
 
 # Every input of a joystick and its value when it connects (macOS): gilrs
 # reports an input only once it changes. The crates and versions gilrs uses.

@@ -124,8 +124,10 @@ fn own_key(credentials: &mut FileCredentials) -> Result<OwnKey, String> {
 /// What the computer is asked: its system, architecture and UXDuck, then
 /// its clock (S356), whether the kernel says it is synchronised and network
 /// time is on (`timedatectl`, where there is one) and which time service
-/// runs (`systemctl`, where there is one).
-const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v"; echo "clock=$(date +%s%N 2>/dev/null)"; if command -v timedatectl >/dev/null 2>&1; then timedatectl show -p NTP -p NTPSynchronized 2>/dev/null; fi; if command -v systemctl >/dev/null 2>&1; then for s in systemd-timesyncd chrony chronyd ntpsec ntp ntpd openntpd; do if systemctl is-active --quiet "$s" 2>/dev/null; then echo "timeservice=$s"; fi; done; fi"#;
+/// runs (`systemctl`, where there is one), then the arguments of each
+/// process naming UXDuck (S372), split by the unit separator, for the id its
+/// readings go out as.
+const SCRIPT: &str = r#"if [ -r /etc/os-release ]; then . /etc/os-release; fi; echo "os=${PRETTY_NAME:-$(uname -sr)}"; echo "arch=$(uname -m)"; v=$(uxduck --version 2>/dev/null || "$HOME/.local/bin/uxduck" --version 2>/dev/null); echo "uxduck=$v"; echo "clock=$(date +%s%N 2>/dev/null)"; if command -v timedatectl >/dev/null 2>&1; then timedatectl show -p NTP -p NTPSynchronized 2>/dev/null; fi; if command -v systemctl >/dev/null 2>&1; then for s in systemd-timesyncd chrony chronyd ntpsec ntp ntpd openntpd; do if systemctl is-active --quiet "$s" 2>/dev/null; then echo "timeservice=$s"; fi; done; fi; for f in /proc/[0-9]*/cmdline; do a=$(tr '\000' '\037' < "$f" 2>/dev/null) || continue; case "$a" in *uxduck*) echo "process=$a";; esac; done"#;
 
 /// One `ssh`'s output, and when it started and ended on this computer's
 /// wall clock, in nanoseconds since 1970, which bound when the computer read
@@ -728,7 +730,51 @@ fn answer(computer: &CompanionComputer, sign_in: SignIn<'_>, ran: &Ran) -> Resul
         uxduck: field("uxduck").map(|v| v.strip_prefix("uxduck ").unwrap_or(&v).to_owned()),
         host_key: Some(host_key),
         clock,
+        reports_as: reported_id(&stdout),
     })
+}
+
+/// The onboard computer id the computer's `uxduck companion` or
+/// `uxduck forward --onboard` was started with (S372), from the check's
+/// `process=` lines. None when neither runs, when one runs without
+/// `--computer-id` (it chooses its own) or when two were given different
+/// ids, because then the ids alone cannot say which readings are its.
+fn reported_id(stdout: &str) -> Option<u8> {
+    let ids: std::collections::BTreeSet<Option<u8>> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("process="))
+        .filter_map(|line| {
+            let args: Vec<&str> = line.split('\u{1f}').filter(|a| !a.is_empty()).collect();
+            let program = Path::new(args.first()?).file_name()?;
+            if program != "uxduck" {
+                return None;
+            }
+            let reports = match args[1..]
+                .iter()
+                .find(|a| matches!(**a, "companion" | "forward"))
+            {
+                Some(&"companion") => true,
+                Some(_) => args.contains(&"--onboard"),
+                None => false,
+            };
+            if !reports {
+                return None;
+            }
+            let given = args
+                .windows(2)
+                .find_map(|pair| (pair[0] == "--computer-id").then_some(pair[1]))
+                .or_else(|| args.iter().find_map(|a| a.strip_prefix("--computer-id=")));
+            Some(
+                given
+                    .and_then(|id| id.parse::<u8>().ok())
+                    .filter(|id| uxduck_core::domain::companion::COMPONENT_IDS.contains(id)),
+            )
+        })
+        .collect();
+    match ids.into_iter().collect::<Vec<_>>()[..] {
+        [Some(id)] => Some(id),
+        _ => None,
+    }
 }
 
 /// The computer's clock, `date +%s%N` as it printed it, against this
@@ -1084,6 +1130,7 @@ mod tests {
             host_key: found.host_key,
             problem: None,
             clock: None,
+            reports_as: None,
             network: None,
             cameras: None,
         });
@@ -1126,6 +1173,7 @@ mod tests {
             host_key: found.host_key,
             problem: None,
             clock: None,
+            reports_as: None,
             network: None,
             cameras: None,
         });
@@ -1191,6 +1239,7 @@ mod tests {
             host_key: Some(pinned.clone()),
             problem: None,
             clock: None,
+            reports_as: None,
             network: None,
             cameras: None,
         });
@@ -1230,6 +1279,7 @@ mod tests {
             host_key: Some(pinned.clone()),
             problem: None,
             clock: None,
+            reports_as: None,
             network: None,
             cameras: None,
         });
@@ -1318,6 +1368,7 @@ mod tests {
             host_key: found.host_key,
             problem: None,
             clock: None,
+            reports_as: None,
             network: None,
             cameras: None,
         });
@@ -1427,6 +1478,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!((found.os.as_deref(), found.clock), (Some("x"), None));
+    }
+
+    #[test]
+    fn a_check_reads_the_id_its_uxduck_sends_as() {
+        let process = |args: &[&str]| format!("process={}\u{1f}", args.join("\u{1f}"));
+        let companion = process(&[
+            "/usr/local/bin/uxduck",
+            "companion",
+            "--to",
+            "udp:192.168.50.21:15010",
+            "--system-id",
+            "1",
+            "--computer-id",
+            "191",
+        ]);
+        let this_check = process(&["bash", "-c", "uxduck --version; uxduck companion"]);
+        let daemon = process(&[
+            "/opt/uxduck/0.17.0/uxduck",
+            "daemon",
+            "--data-dir",
+            "/var/lib/uxduck",
+        ]);
+        assert_eq!(
+            reported_id(&format!("os=Debian\n{this_check}\n{companion}\n{daemon}\n")),
+            Some(191),
+            "Buggy's camera Pi, pinned to 191 when it was set up by hand"
+        );
+        let forward = process(&[
+            "uxduck",
+            "forward",
+            "serial:/dev/ttyAMA0",
+            "--onboard",
+            "--computer-id=193",
+        ]);
+        assert_eq!(reported_id(&forward), Some(193));
+        let relay = process(&[
+            "uxduck",
+            "forward",
+            "serial:/dev/ttyAMA0",
+            "--computer-id=193",
+        ]);
+        assert_eq!(reported_id(&relay), None, "a forward that does not report");
+        let choosing = process(&["uxduck", "forward", "udp:0.0.0.0:14550", "--onboard"]);
+        assert_eq!(reported_id(&choosing), None, "it chooses its own id");
+        assert_eq!(
+            reported_id(&format!("{companion}\n{forward}")),
+            None,
+            "two ids for one computer"
+        );
+        assert_eq!(reported_id(&format!("{companion}\n{companion}")), Some(191));
+        let out_of_range = process(&["uxduck", "companion", "--computer-id", "1"]);
+        assert_eq!(reported_id(&out_of_range), None);
+        assert_eq!(reported_id("os=Debian\nuxduck=0.16.0\n"), None);
     }
 
     #[test]

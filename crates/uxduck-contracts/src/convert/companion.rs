@@ -54,6 +54,7 @@ impl From<&c::CompanionComputer> for dto::CompanionComputer {
                     ntp: clock.ntp,
                     service: clock.service.clone(),
                 }),
+                reports_as: check.reports_as,
                 network: check.network.as_ref().map(|n| dto::CompanionNetwork {
                     wifi: n
                         .wifi

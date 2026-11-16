@@ -403,6 +403,109 @@ fn a_computer_is_renamed_and_keeps_its_address() {
     assert_eq!(engine.state().vehicles["v"].companions[0].name, "Camera Pi");
 }
 
+/// Buggy (2026-11-15): the gateway was added first and given 191, but the
+/// camera Pi's own `uxduck companion` was pinned to 191 when it was set up
+/// by hand, so the camera Pi's clock showed on the gateway's card.
+#[test]
+fn a_computer_takes_the_id_its_uxduck_sends_as() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let ssh = Ssh::default();
+    engine.set_companions(Box::new(ssh.clone()));
+    let add = |engine: &mut Engine, ui: &mut Client, host: &str| {
+        let vehicle = ok(
+            engine,
+            ui,
+            "computer/add",
+            json!({ "vehicleId": "v", "host": host }),
+        );
+        let added = vehicle["companions"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        added["id"].as_str().unwrap().to_owned()
+    };
+    let gateway = add(&mut engine, &mut ui, "192.168.50.21");
+    let camera = add(&mut engine, &mut ui, "192.168.50.20");
+    let ids = |engine: &Engine| {
+        engine.state().vehicles["v"]
+            .companions
+            .iter()
+            .map(|c| (c.host.clone(), c.component_id))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&engine),
+        [("192.168.50.21".into(), 191), ("192.168.50.20".into(), 192)]
+    );
+    let found = |reports_as| Found {
+        os: Some("Debian GNU/Linux 13 (trixie)".into()),
+        arch: Some("aarch64".into()),
+        uxduck: Some("0.16.0".into()),
+        host_key: Some("SHA256:pinned".into()),
+        clock: None,
+        reports_as,
+        network: None,
+        cameras: None,
+    };
+    let check = |engine: &mut Engine, ui: &mut Client, computer: &str, reports_as| {
+        ok(
+            engine,
+            ui,
+            "computer/check",
+            json!({ "vehicleId": "v", "computerId": computer }),
+        );
+        engine.companion_checked(CheckAnswer {
+            vehicle_id: "v".into(),
+            computer_id: computer.to_owned(),
+            result: Ok(found(reports_as)),
+        });
+    };
+
+    check(&mut engine, &mut ui, &gateway, None);
+    assert_eq!(
+        ids(&engine)[0].1,
+        191,
+        "no UXDuck reporting on it: its id stays"
+    );
+    check(&mut engine, &mut ui, &camera, Some(191));
+    assert_eq!(
+        ids(&engine),
+        [("192.168.50.21".into(), 192), ("192.168.50.20".into(), 191)],
+        "the camera Pi takes the id it sends as, and the gateway moves aside"
+    );
+    let saved = &engine.state().vehicles["v"].companions[1];
+    assert_eq!(saved.check.as_ref().unwrap().reports_as, Some(191));
+
+    ok(
+        &mut engine,
+        &mut ui,
+        "computer/check",
+        json!({ "vehicleId": "v", "computerId": camera }),
+    );
+    engine.companion_checked(CheckAnswer {
+        vehicle_id: "v".into(),
+        computer_id: camera.clone(),
+        result: Err("ssh: connect to host 192.168.50.20 port 22: No route to host".into()),
+    });
+    assert_eq!(
+        ids(&engine)[1].1,
+        191,
+        "a failed check keeps what it learned"
+    );
+
+    check(&mut engine, &mut ui, &gateway, Some(191));
+    assert_eq!(
+        ids(&engine),
+        [("192.168.50.21".into(), 191), ("192.168.50.20".into(), 191)],
+        "both send as 191, so both keep it and their cards say so"
+    );
+}
+
 #[test]
 fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     let keys = Keys::default();
@@ -449,6 +552,7 @@ fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
                 ntp: Some(true),
                 service: Some("systemd-timesyncd".into()),
             }),
+            reports_as: None,
         }),
     });
     let check = engine.state().vehicles["v"].companions[0]

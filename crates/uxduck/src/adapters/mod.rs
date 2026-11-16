@@ -8,5 +8,6 @@ pub mod host;
 pub mod login_item;
 pub mod storage;
 pub mod system;
+pub mod system_clock;
 
 pub mod process_usage;

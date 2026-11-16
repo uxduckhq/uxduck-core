@@ -3897,6 +3897,12 @@ export type CompanionCheck = {
      * Why it failed, for people.
      */
     problem?: string | null;
+    /**
+     * The onboard computer id its running `uxduck companion` or
+     * `uxduck forward --onboard` was given (S372). The computer takes it
+     * as its `componentId`.
+     */
+    reportsAs?: number | null;
     state: CheckState;
     /**
      * `uxduck --version`; absent when it has none.

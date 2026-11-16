@@ -83,6 +83,8 @@ pub struct Found {
     pub host_key: Option<String>,
     /// Its clock against this computer's (S356), when it could be read.
     pub clock: Option<CompanionClock>,
+    /// The id its running UXDuck sends its readings as (S372).
+    pub reports_as: Option<u8>,
     pub network: Option<companion::CompanionNetwork>,
     pub cameras: Option<CompanionCameras>,
 }
@@ -629,6 +631,7 @@ impl Engine {
             host_key: last.as_ref().and_then(|c| c.host_key.clone()),
             problem: None,
             clock: None,
+            reports_as: last.as_ref().and_then(|c| c.reports_as),
             network: last.as_ref().and_then(|c| c.network.clone()),
             cameras: last.and_then(|c| c.cameras),
         });
@@ -663,6 +666,7 @@ impl Engine {
             return;
         };
         let pinned = computer.check.as_ref().and_then(|c| c.host_key.clone());
+        let reports_as = computer.check.as_ref().and_then(|c| c.reports_as);
         let (network, cameras) = computer
             .check
             .as_ref()
@@ -686,6 +690,7 @@ impl Engine {
                 host_key: found.host_key.or(pinned),
                 problem: None,
                 clock: found.clock,
+                reports_as: found.reports_as.or(reports_as),
             },
             Err(problem) => CompanionCheck {
                 state: CheckState::Failed,
@@ -696,6 +701,7 @@ impl Engine {
                 host_key: pinned,
                 problem: Some(problem),
                 clock: None,
+                reports_as,
                 network,
                 cameras,
             },
@@ -712,6 +718,7 @@ impl Engine {
                 );
             }
         }
+        companion::take_reported_id(&mut vehicle.companions, &answer.computer_id);
         self.save_companions(None, vehicle);
         self.review_recordings();
         if let Some(order) = waiting {

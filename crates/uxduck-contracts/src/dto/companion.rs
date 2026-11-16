@@ -48,6 +48,11 @@ pub struct CompanionCheck {
     /// Its clock as the check read it (S356); absent when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<CompanionClock>,
+    /// The onboard computer id its running `uxduck companion` or
+    /// `uxduck forward --onboard` was given (S372). The computer takes it
+    /// as its `componentId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports_as: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<CompanionNetwork>,
     /// What its `MediaMTX` serves, as last read (ADR-0060).

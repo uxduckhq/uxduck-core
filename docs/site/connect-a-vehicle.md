@@ -70,7 +70,11 @@ uxduck companion --to udp:192.168.1.20:15010 --computer-id 192
 
 Each computer on a vehicle needs its own number from 191 to 194. The forwarding Pi takes 191 unless you give it `--computer-id`; give each companion the next one. Add `--system-id` when the vehicle's system id is not 1.
 
+When a computer is added on the vehicle's page, its check reads the number its `uxduck companion` or `uxduck forward --onboard` was given. Its card then shows the readings sent under that number, whatever order the computers were added in.
+
 Each computer's **Clock** shows how far its clock is from this computer's, such as "8 days 6 h behind this computer", and how UXDuck measured it. UXDuck asks each computer for its time over MAVLink, and the answer is good to within half the time the question took there and back, usually under a millisecond on a LAN. A computer that does not answer, such as one running an older UXDuck, is read from the time on its status messages. That is said to be one way, because the delay on the way is not known.
+
+A computer whose clock nothing keeps, such as a Raspberry Pi with no clock battery and no time server it can reach, starts from the last time it saved each time it is switched on. It falls behind by every hour it was off. UXDuck on it then asks this computer for its time the same way and sets its own clock to it. After that it corrects the drift once a minute by running its clock a little faster or slower, so the clock never jumps back. This computer answers while UXDuck sends the vehicle its heartbeat, so while a UXDuck window is open or someone is in control remotely. Setting the clock needs the `CAP_SYS_TIME` capability: when UXDuck runs as a systemd service under its own user, add `AmbientCapabilities=CAP_SYS_TIME` to the service's `[Service]` section. A clock that systemd-timesyncd, chrony or another time service keeps is never changed.
 
 ## Change or turn off a link
 

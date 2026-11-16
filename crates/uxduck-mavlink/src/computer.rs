@@ -137,6 +137,33 @@ pub fn timesync_reply(
     ))
 }
 
+/// An onboard computer asking the ground station's clock (S373), to set
+/// its own when nothing else keeps it: a `TIMESYNC` request (`tc1` 0) from
+/// an onboard computer id, addressed to the ground station `gcs` and its
+/// component or component 0. Its `ts1` and who asked, for the reply, which
+/// carries the ground station's wall clock in `tc1`. None for anything
+/// else, so an autopilot asking is never answered with it.
+#[must_use]
+pub fn asks_ground(request: &[u8], gcs: u8) -> Option<(i64, (u8, u8))> {
+    if crate::framing::header(request)?.message_id != crate::link_health::TIMESYNC {
+        return None;
+    }
+    let decoded = crate::decode::decode(request)?;
+    let crate::decode::Message::Timesync {
+        tc1: 0,
+        ts1,
+        target_system,
+        target_component,
+    } = decoded.message
+    else {
+        return None;
+    };
+    (COMPUTER_IDS.contains(&decoded.component_id)
+        && target_system == gcs
+        && (target_component == 0 || target_component == crate::GCS_COMPONENT_ID))
+        .then_some((ts1, (decoded.system_id, decoded.component_id)))
+}
+
 /// `ONBOARD_COMPUTER_STATUS` from `component_id`; its `type` is the
 /// computer's place among the onboard ids (0 for the first).
 #[must_use]
@@ -256,6 +283,39 @@ mod tests {
         );
         let own = crate::sim::timesync_frame((1, 192, 0), (0, 42), (1, 0));
         assert!(timesync_reply(&own, (1, 192), 0, 1).is_none(), "not itself");
+    }
+
+    #[test]
+    fn the_ground_station_answers_only_an_onboard_computer_asking_it() {
+        let ask = |from: (u8, u8), tc1, target| {
+            crate::sim::timesync_frame((from.0, from.1, 0), (tc1, 42), target)
+        };
+        assert_eq!(
+            asks_ground(&ask((1, 191), 0, (255, 190)), 255),
+            Some((42, (1, 191)))
+        );
+        assert_eq!(
+            asks_ground(&ask((1, 194), 0, (255, 0)), 255),
+            Some((42, (1, 194)))
+        );
+        assert!(
+            asks_ground(&ask((1, 1), 0, (255, 190)), 255).is_none(),
+            "an autopilot asking"
+        );
+        assert!(
+            asks_ground(&ask((1, 191), 0, (254, 190)), 255).is_none(),
+            "another ground station"
+        );
+        assert!(
+            asks_ground(&ask((1, 191), 0, (255, 1)), 255).is_none(),
+            "another component"
+        );
+        assert!(
+            asks_ground(&ask((1, 191), 7, (255, 190)), 255).is_none(),
+            "a reply is not a request"
+        );
+        let heartbeat = heartbeat_frame((1, 191, 0));
+        assert!(asks_ground(&heartbeat, 255).is_none());
     }
 
     #[test]

@@ -1201,6 +1201,10 @@ impl Plane {
 
     /// One whole frame: loop check, then the session (unless it came from a
     /// forward), then routing.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each frame's steps, in the order they run"
+    )]
     async fn frame(&mut self, link_id: &str, peer: &str, frame: &[u8], forward: bool, at_us: u64) {
         let Some(header) = header(frame) else {
             return;
@@ -1264,7 +1268,8 @@ impl Plane {
             vehicle
         };
         if !forward && uxduck_mavlink::computer::COMPUTER_IDS.contains(&header.component_id) {
-            self.computer_heard(link_id, peer, frame, header, vehicle.as_deref(), at_us);
+            self.computer_heard(link_id, peer, frame, header, vehicle.as_deref(), at_us)
+                .await;
         }
         if let Some(vehicle_id) = &vehicle
             && let Some(payload) = uxduck_mavlink::framing::payload(frame)
@@ -1328,11 +1333,54 @@ impl Plane {
         .await;
     }
 
+    /// An onboard computer of a known vehicle asking this computer's clock
+    /// (S373), to set its own when nothing else keeps it: answered with this
+    /// computer's wall clock at the address it asked from, as UXDuck asks
+    /// its clock there (S356).
+    async fn answer_computer_clock(
+        &mut self,
+        link_id: &str,
+        peer: &str,
+        frame: &[u8],
+        vehicle: Option<&str>,
+    ) {
+        let gcs = self.gcs.load(Ordering::Relaxed);
+        let Some((ts1, asker)) = uxduck_mavlink::computer::asks_ground(frame, gcs) else {
+            return;
+        };
+        let Some(vehicle_id) = vehicle
+            .or_else(|| self.session.vehicle_of(link_id, peer, asker.0, asker.1))
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let link = self.open.get(link_id).map(|o| (o.writable, o.forward));
+        if not_pinged(
+            link,
+            self.withheld.contains(&vehicle_id),
+            self.session.is_paused(link_id),
+        )
+        .is_some()
+        {
+            return;
+        }
+        let address = (link_id.to_owned(), peer.to_owned(), asker.0);
+        let effects = self.session.send_address(&address, |_, sequence| {
+            uxduck_mavlink::sim::timesync_frame(
+                (gcs, uxduck_mavlink::GCS_COMPONENT_ID, sequence),
+                (wall_ns(), ts1),
+                asker,
+            )
+        });
+        self.apply(effects).await;
+    }
+
     /// A frame from an onboard computer of a vehicle (S356): its clock's
     /// `TIMESYNC` reply or status time stamp, as of when it arrived, and,
     /// when it sends from an address of its own, that address, to ask it
-    /// there, timed from when it arrived.
-    fn computer_heard(
+    /// there, timed from when it arrived. Its request for this computer's
+    /// clock is answered first (S373).
+    async fn computer_heard(
         &mut self,
         link_id: &str,
         peer: &str,
@@ -1341,6 +1389,8 @@ impl Plane {
         vehicle: Option<&str>,
         at_us: u64,
     ) {
+        self.answer_computer_clock(link_id, peer, frame, vehicle)
+            .await;
         let now_us = self.now_mono_us();
         let owner = if let Some(vehicle_id) = vehicle {
             vehicle_id.to_owned()
