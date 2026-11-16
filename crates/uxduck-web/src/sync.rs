@@ -28,7 +28,9 @@ pub const DEVICE_NAME: &str = "UXDuck Web";
 pub const SETTLE_US: u64 = 300_000;
 /// How often other computers' changes are fetched.
 pub const EVERY_US: u64 = 30_000_000;
-/// Changes per push, and the most bytes of them, as the daemon sends.
+/// Changes per push, and about the most bytes of them, as the daemon sends
+/// and for its reason: a larger change goes by itself, and the account
+/// server says whether it takes it.
 const BATCH: usize = 200;
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
 
@@ -113,6 +115,8 @@ enum Step {
         sending: Vec<SyncChange>,
         rest: VecDeque<Vec<SyncChange>>,
         sent: u64,
+        /// These were refused before and are sent again, once a round.
+        again: bool,
     },
     Pull {
         after: u64,
@@ -197,9 +201,14 @@ impl Syncer {
         let mut rest: VecDeque<Vec<SyncChange>> = batches(waiting).into();
         let Some(sending) = rest.pop_front() else {
             engine.sync_scanned(through);
+            // Something waits for room in the account: a push of nothing
+            // asks what the account holds now.
+            if state.waits_for_room() {
+                return Some(self.push(&state.device_id, through, Vec::new(), rest, 0, false));
+            }
             return Some(self.pull(engine, state.pulled_through));
         };
-        Some(self.push(&state.device_id, through, sending, rest, 0))
+        Some(self.push(&state.device_id, through, sending, rest, 0, false))
     }
 
     /// The worker's answer to a request: the next request of the round, if
@@ -236,14 +245,17 @@ impl Syncer {
                 sending,
                 mut rest,
                 sent,
+                again,
             } => {
                 // What the account would not keep for its size, to tell the
-                // person. It is not sent again until it changes.
+                // person. It is not sent again until it changes, or until
+                // the account can take it.
+                let answer = PushAnswer::read(body.unwrap_or_default());
                 let too_large = match sending.as_slice() {
                     [alone] if alone_too_large => {
                         vec![refused_alone(alone, body.unwrap_or_default())]
                     }
-                    _ => PushAnswer::read(body.unwrap_or_default()).refused_of(&sending),
+                    _ => answer.refused_of(&sending),
                 };
                 lock(&self.outbox).taken(&sending);
                 let sent = sent + (sending.len() - too_large.len()) as u64;
@@ -259,11 +271,19 @@ impl Syncer {
                         .collect();
                     engine.sync_sizes(&kept, too_large);
                 }
+                let device = engine.sync_state().device_id.clone();
                 if let Some(next) = rest.pop_front() {
-                    let device = engine.sync_state().device_id.clone();
-                    return Some(self.push(&device, through, next, rest, sent));
+                    return Some(self.push(&device, through, next, rest, sent, again));
                 }
-                engine.sync_exported(through, sent);
+                if !again {
+                    engine.sync_exported(through, sent);
+                    // What the account refused before and may take now.
+                    let mut rest: VecDeque<Vec<SyncChange>> =
+                        batches(engine.sync_again(&answer)).into();
+                    if let Some(next) = rest.pop_front() {
+                        return Some(self.push(&device, through, next, rest, 0, true));
+                    }
+                }
                 let after = engine.sync_state().pulled_through;
                 Some(self.pull(engine, after))
             }
@@ -293,6 +313,7 @@ impl Syncer {
         sending: Vec<SyncChange>,
         rest: VecDeque<Vec<SyncChange>>,
         sent: u64,
+        again: bool,
     ) -> Request {
         let body = json!({
             "deviceId": device,
@@ -309,6 +330,7 @@ impl Syncer {
                 sending,
                 rest,
                 sent,
+                again,
             },
         )
     }

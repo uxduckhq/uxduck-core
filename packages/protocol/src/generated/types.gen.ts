@@ -14888,6 +14888,26 @@ export type SyncContent = 'summaries' | 'logs' | 'video';
 export type SyncEntity = 'vehicle' | 'link';
 
 /**
+ * Why the account had no room for a change, in its server's numbers.
+ */
+export type SyncNoRoom = {
+    /**
+     * What the account held then.
+     */
+    accountBytes: number;
+    /**
+     * What keeping the change would add to the account: its copy among
+     * the kept versions, and as the entity's copy what it is larger by
+     * than the one it replaces.
+     */
+    addsBytes: number;
+    /**
+     * What the account's plan allows.
+     */
+    allowanceBytes: number;
+};
+
+/**
  * Why the account refused an upload (ADR-0046 B5).
  */
 export type SyncRefusal = 'storage-full' | 'plan';
@@ -14947,14 +14967,16 @@ export type SyncStatus = {
     skipped?: Array<SyncCategory>;
     /**
      * What the account would not keep for its size. Each stays on this
-     * computer until it is smaller. Empty when everything fits.
+     * computer until it is smaller or the account has room for it. Empty
+     * when everything fits.
      */
     tooLarge?: Array<SyncTooLarge>;
 };
 
 /**
- * Something whose latest change is larger than the account keeps, so it
- * is on this computer only until it is smaller.
+ * Something whose latest change the account would not keep for its size,
+ * so it is on this computer only: larger than the account takes at once,
+ * or more than the account has room for.
  */
 export type SyncTooLarge = {
     /**
@@ -14962,7 +14984,8 @@ export type SyncTooLarge = {
      */
     bytes: number;
     /**
-     * Its size, what the account keeps, and what to do, in words.
+     * Its size, what the account takes or has room for, and what to do,
+     * in words.
      */
     detail: string;
     /**
@@ -14971,9 +14994,14 @@ export type SyncTooLarge = {
     entity: string;
     id: string;
     /**
-     * The largest change the account keeps, when its server said.
+     * The largest change the account takes at once, when its server said.
      */
     maxBytes?: number | null;
+    /**
+     * Set when the account had no room for it. It is then not too large
+     * to take, and syncs once the account has room.
+     */
+    noRoom?: SyncNoRoom | null;
     /**
      * What did not sync, by its name to the person, such as "The plan
      * Survey North did not sync".

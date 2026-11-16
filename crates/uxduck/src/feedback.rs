@@ -54,8 +54,10 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// An upload is given up, and the report kept, when none of the rest of it
 /// goes out for this long, or when it takes longer in all than a minute for
 /// the answer and its body at `SLOWEST_UPLOAD` bytes a second.
-const STALLED: Duration = Duration::from_mins(1);
+pub(crate) const STALLED: Duration = Duration::from_mins(1);
 const SLOWEST_UPLOAD: usize = 32 * 1024;
+/// What a report's upload is counted as among the daemon's wakes.
+const UPLOAD_WAKE: &str = "feedback: upload progress";
 
 /// How many follow-up keys of reports the agent filed are kept (S294): a
 /// file on this computer that would otherwise grow with every report an
@@ -383,7 +385,7 @@ impl Sender {
             .body(streamed(body, Arc::clone(&handed)));
         let response = tokio::select! {
             response = request.send() => response.map_err(|_| unreachable())?,
-            () = watch(&handed, total, STALLED, |_| {}) => return Err(unreachable()),
+            () = watch(&handed, total, STALLED, UPLOAD_WAKE, |_| {}) => return Err(unreachable()),
         };
         let status = response.status();
         let answer: Value = response.json().await.unwrap_or(Value::Null);
@@ -612,7 +614,7 @@ impl Sender {
         };
         let response = tokio::select! {
             response = request.send() => response,
-            () = watch(&handed, total, STALLED, tell) => {
+            () = watch(&handed, total, STALLED, UPLOAD_WAKE, tell) => {
                 tracing::debug!("feedback: none of the report went out for a minute; kept");
                 return Sent::Later;
             }
@@ -688,8 +690,8 @@ impl Sender {
 }
 
 /// A body sent in pieces, counting in `handed` how much of it has been
-/// handed to the network.
-fn streamed(body: Vec<u8>, handed: Arc<AtomicUsize>) -> reqwest::Body {
+/// handed to the network. A sync push goes out this way too.
+pub(crate) fn streamed(body: Vec<u8>, handed: Arc<AtomicUsize>) -> reqwest::Body {
     let total = body.len();
     let pieces = (0..total).step_by(UPLOAD_CHUNK).map(move |start| {
         let end = (start + UPLOAD_CHUNK).min(total);
@@ -703,12 +705,19 @@ fn streamed(body: Vec<u8>, handed: Arc<AtomicUsize>) -> reqwest::Body {
 /// as the network takes the body in bursts. Returns once none of the rest
 /// has gone out for `stalled`. After the last piece it never returns: the
 /// network may still hold megabytes of the body, and the request's own
-/// timeout waits for the answer.
-async fn watch(handed: &AtomicUsize, total: usize, stalled: Duration, mut tell: impl FnMut(usize)) {
+/// timeout waits for the answer. `wake` names the upload where wakes are
+/// counted.
+pub(crate) async fn watch(
+    handed: &AtomicUsize,
+    total: usize,
+    stalled: Duration,
+    wake: &'static str,
+    mut tell: impl FnMut(usize),
+) {
     let (mut told, mut moved) = (0, Instant::now());
     loop {
         tokio::time::sleep(PROGRESS_EVERY).await;
-        crate::wakes::count("feedback: upload progress");
+        crate::wakes::count(wake);
         let sent = handed.load(Ordering::Relaxed);
         if sent != told {
             (told, moved) = (sent, Instant::now());
@@ -724,7 +733,7 @@ async fn watch(handed: &AtomicUsize, total: usize, stalled: Duration, mut tell: 
 }
 
 /// The longest a request may take in all, as `STALLED` says.
-fn upload_timeout(bytes: usize) -> Duration {
+pub(crate) fn upload_timeout(bytes: usize) -> Duration {
     STALLED + Duration::from_secs((bytes / SLOWEST_UPLOAD) as u64)
 }
 
@@ -1097,7 +1106,7 @@ mod tests {
             }
         };
         tokio::join!(
-            watch(&handed, 1000, stalled, |sent| told.push(sent)),
+            watch(&handed, 1000, stalled, UPLOAD_WAKE, |sent| told.push(sent)),
             moving
         );
         assert!(
@@ -1110,7 +1119,7 @@ mod tests {
         handed.store(1000, Ordering::Relaxed);
         let waited = tokio::time::timeout(
             Duration::from_secs(2),
-            watch(&handed, 1000, stalled, |_| {}),
+            watch(&handed, 1000, stalled, UPLOAD_WAKE, |_| {}),
         )
         .await;
         assert!(

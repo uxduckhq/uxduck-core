@@ -11,9 +11,11 @@
 //! computer uses one once it is activated there, or all of them with
 //! `mirror-all`.
 //!
-//! The account keeps one change up to a size its server chooses and says in
-//! its answers. A larger one stays on this computer, and
-//! [`Engine::sync_sizes`] says so to the person until it fits again.
+//! The account takes one change up to a size its server chooses and says in
+//! its answers, and holds as much as its allowance has room for, which its
+//! answers say too. A change it refuses for either stays on this computer,
+//! and [`Engine::sync_sizes`] says so to the person until it fits.
+//! [`Engine::sync_again`] sends it again once the account can take it.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +25,7 @@ use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME;
 use uxduck_contracts::dto::sync::{
     LibraryLink as LibraryLinkDto, LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity,
-    SyncStatus, SyncTooLarge,
+    SyncNoRoom, SyncStatus, SyncTooLarge,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -32,7 +34,9 @@ use uxduck_core::domain::link::{Link, LinkKind, LinkStatus};
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::operator::Operator;
 use uxduck_core::domain::plan::{Plan, PlanRevision};
-use uxduck_core::domain::sync::{Activation, LibraryLink, LibraryVehicle, SyncState, TooLarge};
+use uxduck_core::domain::sync::{
+    Activation, LibraryLink, LibraryVehicle, NoRoom, RefusedCopy, SyncState, TooLarge,
+};
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
 use uxduck_core::events::{Actor, Change, Event};
 
@@ -86,22 +90,44 @@ pub struct PushAnswer {
     /// How many changes it would not keep for their size.
     #[serde(default)]
     pub refused: u64,
-    /// Which ones, each with its size as the server measured it. None from
-    /// a server that only counts them (before 2026-11-14).
+    /// Which ones were larger than it takes at once, each with its size as
+    /// the server measured it. None from a server that only counts them
+    /// (before 2026-11-14).
     #[serde(default)]
     pub too_large: Option<Vec<RefusedChange>>,
-    /// The largest change the server keeps.
+    /// The largest change the server takes at once.
     #[serde(default)]
     pub max_change_bytes: Option<u64>,
+    /// Which ones the account had no room for (from 2026-11-15).
+    #[serde(default)]
+    pub no_room: Vec<NoRoomChange>,
+    /// What the account holds after this push, and what its plan allows
+    /// (from 2026-11-15).
+    #[serde(default)]
+    pub account_bytes: Option<u64>,
+    #[serde(default)]
+    pub allowance_bytes: Option<u64>,
 }
 
-/// One change the account server would not keep for its size.
+/// One change the account server would not take for its size.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusedChange {
     pub entity: String,
     pub id: String,
     pub bytes: u64,
+}
+
+/// One change the account had no room for.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoRoomChange {
+    pub entity: String,
+    pub id: String,
+    /// Its size as the account's database measures it.
+    pub bytes: u64,
+    /// What keeping it would add to the account.
+    pub adds_bytes: u64,
 }
 
 impl PushAnswer {
@@ -112,40 +138,59 @@ impl PushAnswer {
         serde_json::from_str(body).unwrap_or_default()
     }
 
-    /// Which of the changes `sent` in the push the account would not keep.
-    /// A server that only counts them refuses by size alone, so they are
-    /// the largest that many, measured here.
+    /// Which of the changes `sent` in the push the account would not keep:
+    /// those larger than it takes at once, and those it had no room for. A
+    /// server that only counts them refuses by size alone, so they are the
+    /// largest that many, measured here.
     #[must_use]
     pub fn refused_of(&self, sent: &[SyncChange]) -> Vec<TooLarge> {
-        if let Some(listed) = &self.too_large {
-            return listed
-                .iter()
-                .filter(|refused| {
-                    sent.iter()
-                        .any(|change| change.entity == refused.entity && change.id == refused.id)
-                })
-                .map(|refused| TooLarge {
-                    entity: refused.entity.clone(),
-                    id: refused.id.clone(),
-                    bytes: refused.bytes,
-                    max_bytes: self.max_change_bytes,
-                })
+        let Some(listed) = &self.too_large else {
+            let mut largest: Vec<&SyncChange> = sent.iter().collect();
+            largest.sort_by_key(|change| std::cmp::Reverse(size(change)));
+            return largest
+                .into_iter()
+                .take(usize::try_from(self.refused).unwrap_or(usize::MAX))
+                .map(|change| refused_here(change, self.max_change_bytes))
                 .collect();
-        }
-        let mut largest: Vec<&SyncChange> = sent.iter().collect();
-        largest.sort_by_key(|change| std::cmp::Reverse(size(change)));
-        largest
-            .into_iter()
-            .take(usize::try_from(self.refused).unwrap_or(usize::MAX))
-            .map(|change| refused_here(change, self.max_change_bytes))
-            .collect()
+        };
+        let copy = |entity: &str, id: &str| {
+            sent.iter()
+                .find(|change| change.entity == entity && change.id == id)
+                .map(copy_of)
+        };
+        let room = self.account_bytes.zip(self.allowance_bytes);
+        let too_large = listed.iter().filter_map(|refused| {
+            Some(TooLarge {
+                entity: refused.entity.clone(),
+                id: refused.id.clone(),
+                bytes: refused.bytes,
+                max_bytes: self.max_change_bytes,
+                no_room: None,
+                copy: Some(copy(&refused.entity, &refused.id)?),
+            })
+        });
+        let no_room = self.no_room.iter().filter_map(|refused| {
+            Some(TooLarge {
+                entity: refused.entity.clone(),
+                id: refused.id.clone(),
+                bytes: refused.bytes,
+                max_bytes: None,
+                no_room: room.map(|(account_bytes, allowance_bytes)| NoRoom {
+                    adds_bytes: refused.adds_bytes,
+                    account_bytes,
+                    allowance_bytes,
+                }),
+                copy: Some(copy(&refused.entity, &refused.id)?),
+            })
+        });
+        too_large.chain(no_room).collect()
     }
 }
 
 /// A push of this one change was turned away whole for its size (HTTP
-/// 413), so the change is larger than the account keeps. `body` is the
-/// answer, which names the largest change kept when the server is new
-/// enough to.
+/// 413), so the change is larger than the account takes at once. `body`
+/// is the answer, which names the largest change taken when the server is
+/// new enough to.
 #[must_use]
 pub fn refused_alone(change: &SyncChange, body: &str) -> TooLarge {
     refused_here(change, PushAnswer::read(body).max_change_bytes)
@@ -157,6 +202,16 @@ fn refused_here(change: &SyncChange, max_bytes: Option<u64>) -> TooLarge {
         id: change.id.clone(),
         bytes: size(change),
         max_bytes,
+        no_room: None,
+        copy: Some(copy_of(change)),
+    }
+}
+
+fn copy_of(change: &SyncChange) -> RefusedCopy {
+    RefusedCopy {
+        version: change.version,
+        digest: change.digest.clone(),
+        ts_us: change.ts_us,
     }
 }
 
@@ -171,9 +226,9 @@ fn too_large_condition(entity: &str, id: &str) -> String {
     format!("sync-too-large:{entity}:{id}")
 }
 
-/// "640 KB", "1.3 MB". A change's size is rounded up, so one just over what
-/// the account keeps never reads as equal to it, and what the account keeps
-/// is rounded down.
+/// "640 KB", "1.3 MB", "50 GB". What a change takes is rounded up, so one
+/// just over what the account takes never reads as equal to it, and what
+/// the account takes, holds and allows is rounded down.
 fn size_words(bytes: u64, round_up: bool) -> String {
     const MB: u64 = 1024 * 1024;
     let over = |unit: u64, of: u64| {
@@ -187,33 +242,46 @@ fn size_words(bytes: u64, round_up: bool) -> String {
     if kb < 1024 {
         return format!("{kb} KB");
     }
-    let tenths = over(MB, bytes.saturating_mul(10));
-    if tenths.is_multiple_of(10) {
-        format!("{} MB", tenths / 10)
+    let (unit, name) = if over(MB, bytes) < 1024 {
+        (MB, "MB")
     } else {
-        format!("{}.{} MB", tenths / 10, tenths % 10)
+        (1024 * MB, "GB")
+    };
+    let tenths = over(unit, bytes.saturating_mul(10));
+    if tenths.is_multiple_of(10) {
+        format!("{} {name}", tenths / 10)
+    } else {
+        format!("{}.{} {name}", tenths / 10, tenths % 10)
     }
 }
 
-/// What a change too large for the account is told as: the notification's
-/// title and body, and the same words in Settings.
+/// What a change the account would not keep is told as: the notification's
+/// title and body, and the same words in Settings. Every number in them is
+/// the account server's.
 fn too_large_words(name: &str, refused: &TooLarge) -> (String, String) {
-    let size = size_words(refused.bytes, true);
-    let more_than = refused.max_bytes.map_or_else(
-        || "more than your account keeps".to_owned(),
-        |max| {
-            format!(
-                "more than the {} your account keeps",
-                size_words(max, false)
-            )
-        },
-    );
-    (
-        format!("{name} did not sync"),
+    let body = if let Some(room) = &refused.no_room {
+        format!(
+            "This change takes {} to keep, more than the room left in your account, which holds {} of the {} it allows, so it stays on this computer. It syncs once your account has room.",
+            size_words(room.adds_bytes, true),
+            size_words(room.account_bytes, false),
+            size_words(room.allowance_bytes, false),
+        )
+    } else {
+        let size = size_words(refused.bytes, true);
+        let more_than = refused.max_bytes.map_or_else(
+            || "more than your account takes at once".to_owned(),
+            |max| {
+                format!(
+                    "more than the {} your account takes at once",
+                    size_words(max, false)
+                )
+            },
+        );
         format!(
             "At {size}, this change is {more_than}, so it stays on this computer. It syncs once it is smaller."
-        ),
-    )
+        )
+    };
+    (format!("{name} did not sync"), body)
 }
 
 /// A thing's name after what it is, or what it is when it has none.
@@ -596,13 +664,14 @@ impl Engine {
     }
 
     /// What the account made of the sizes of this computer's changes
-    /// (2026-11-14): `refused` are the ones it would not keep, and `kept`
-    /// the entities it has now. A refused one stays on this computer and is
-    /// listed in [`SyncStatus::too_large`] until the account keeps it, it
-    /// is gone from here or it is no longer the account's to have. It is
-    /// said once in a notification, which follows its name and size and
-    /// clears with it. Dismissed, it is not raised again while the entity
-    /// stays too large.
+    /// (2026-11-14): `refused` are the ones it would not keep, for being
+    /// larger than it takes at once or more than it has room for, and
+    /// `kept` the entities it has now. A refused one stays on this computer
+    /// and is listed in [`SyncStatus::too_large`] until the account keeps
+    /// it, it is gone from here or it is no longer the account's to have.
+    /// It is said once in a notification, which follows its name and
+    /// numbers and clears with it. Dismissed, it is not raised again while
+    /// the entity stays refused.
     pub fn sync_sizes(&mut self, kept: &[(String, String)], refused: Vec<TooLarge>) {
         let same = |a: &TooLarge, b: &TooLarge| a.entity == b.entity && a.id == b.id;
         let before = self.state.sync.too_large.clone();
@@ -672,6 +741,74 @@ impl Engine {
                 None => {}
             }
         }
+    }
+
+    /// The refused changes the account may take now, to send again as they
+    /// were (2026-11-15). `answer` is the account server's latest answer to
+    /// a push. One that was too large goes again when the server takes
+    /// larger changes than when it refused, this one's size among them. One
+    /// the account had no room for goes again when the account has room for
+    /// what keeping it adds. Only the copy that was refused is sent again,
+    /// while it is still the copy here: a newer one goes by itself.
+    #[must_use]
+    pub fn sync_again(&self, answer: &PushAnswer) -> Vec<SyncChange> {
+        self.state
+            .sync
+            .too_large
+            .iter()
+            .filter(|one| match &one.no_room {
+                Some(room) => answer
+                    .account_bytes
+                    .zip(answer.allowance_bytes)
+                    .is_some_and(|(held, allowed)| allowed.saturating_sub(held) >= room.adds_bytes),
+                None => answer.max_change_bytes.is_some_and(|max| {
+                    one.bytes <= max && one.max_bytes.is_none_or(|was| max > was)
+                }),
+            })
+            .filter_map(|one| self.refused_copy(one))
+            .collect()
+    }
+
+    /// The change a refused entity was sent as, if it is still the copy
+    /// here and the account's to have.
+    fn refused_copy(&self, refused: &TooLarge) -> Option<SyncChange> {
+        let (entity, id) = (refused.entity.as_str(), refused.id.as_str());
+        self.sync_name(entity, id)?;
+        let state = &self.state;
+        let (own_version, change) = match entity {
+            "vehicle" => (
+                None,
+                Change::VehicleUpserted {
+                    vehicle: profile(state.vehicles.get(id)?),
+                },
+            ),
+            "link" => (
+                None,
+                Change::LinkUpserted {
+                    link: recipe(state.links.get(id)?),
+                },
+            ),
+            _ => {
+                let (version, change) = self.copy(entity, id)?;
+                (Some(version), change)
+            }
+        };
+        let digest = digest(&change);
+        let (version, ts_us) = match &refused.copy {
+            Some(copy) if copy.digest == digest => (copy.version, copy.ts_us),
+            Some(_) => return None,
+            // Listed before UXDuck kept which copy was refused: sent as it
+            // is here now, when it carries its own version.
+            None => (own_version?, self.clock.now_us()),
+        };
+        Some(SyncChange {
+            entity: entity.to_owned(),
+            id: id.to_owned(),
+            version,
+            digest,
+            ts_us,
+            change,
+        })
     }
 
     /// What a synced entity is to the person, such as "Ben's layouts and
@@ -1009,8 +1146,16 @@ impl Engine {
 
     /// The version and digest of the copy here.
     fn current(&self, entity: &str, id: &str) -> Option<(u64, String)> {
+        let (version, change) = self.copy(entity, id)?;
+        Some((version, digest(&change)))
+    }
+
+    /// The copy here of an entity that carries its own version, as the
+    /// account has it. A vehicle and a connection do not: their version is
+    /// when they last changed here.
+    fn copy(&self, entity: &str, id: &str) -> Option<(u64, Change)> {
         let state = &self.state;
-        let (version, change) = match entity {
+        Some(match entity {
             "thread" => state
                 .threads
                 .get(id)
@@ -1089,8 +1234,7 @@ impl Engine {
                 .filter(|s| s.url.is_some())
                 .map(|s| (s.updated_at_us(), Change::OwnSetUpserted { set: s.clone() }))?,
             _ => return None,
-        };
-        Some((version, digest(&change)))
+        })
     }
 
     /// A vehicle from the account: into the library if newer, and onto the
@@ -1458,6 +1602,11 @@ impl Engine {
                         detail,
                         bytes: one.bytes,
                         max_bytes: one.max_bytes,
+                        no_room: one.no_room.as_ref().map(|room| SyncNoRoom {
+                            adds_bytes: room.adds_bytes,
+                            account_bytes: room.account_bytes,
+                            allowance_bytes: room.allowance_bytes,
+                        }),
                     })
                 })
                 .collect(),

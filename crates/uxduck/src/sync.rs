@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -27,9 +28,18 @@ use uxduck_engine::sync::{
 use crate::adapters::credentials::FileCredentials;
 use crate::daemon::engine_task::EngineHandle;
 
-/// Changes per push, and the most bytes of them.
+/// Changes per push, and about the most bytes of them. One change larger
+/// than that goes in a push by itself, whatever its size, and the account
+/// server says whether it takes it. The 2 MB is not what the server takes
+/// at once, which it names in its answers (`maxChangeBytes`): it is what
+/// every account server since the first has taken in one push, so a push
+/// of many small changes is never turned away whole by an older one.
 const BATCH: usize = 200;
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
+/// A pull is given up when nothing of its answer arrives for this long. It
+/// has no limit in all: a page of large changes takes as long as the
+/// network needs.
+const PULL_STALLED: Duration = Duration::from_mins(1);
 /// How long after a change the task sends it, so a burst goes together.
 const SETTLE: Duration = Duration::from_millis(300);
 
@@ -52,6 +62,7 @@ pub fn start(data_dir: &Path, credentials: FileCredentials, engine: EngineHandle
     let task = Task {
         api: crate::feedback::api_url(),
         client: crate::online::client(Duration::from_secs(60)),
+        pulls: crate::online::reading_client(PULL_STALLED),
         credentials,
         engine,
         reader: LogReader::new(data_dir.join("events.ndjson")),
@@ -105,6 +116,8 @@ pub(crate) fn computer_name() -> String {
 struct Task {
     api: Option<String>,
     client: Option<reqwest::Client>,
+    /// For pulls, whose answers may be large (see [`PULL_STALLED`]).
+    pulls: Option<reqwest::Client>,
     credentials: FileCredentials,
     engine: EngineHandle,
     reader: LogReader,
@@ -167,7 +180,9 @@ impl Task {
         if !state.enabled {
             return Ok(());
         }
-        let (Some(api), Some(client)) = (self.api.clone(), self.client.clone()) else {
+        let (Some(api), Some(client), Some(pulls)) =
+            (self.api.clone(), self.client.clone(), self.pulls.clone())
+        else {
             return Err(Stop::Problem("This UXDuck has no account server.".into()));
         };
         let token = self
@@ -186,7 +201,7 @@ impl Task {
         // Take.
         let mut after = state.pulled_through;
         loop {
-            let answer = client
+            let answer = pulls
                 .get(format!("{api}/v1/sync/pull"))
                 .query(&[
                     ("device", state.device_id.as_str()),
@@ -238,7 +253,7 @@ impl Task {
 impl Task {
     /// Sends what is new since the cursor. A change the account would not
     /// keep for its size stays here and is told to the person, and the rest
-    /// still goes.
+    /// still goes. What it refused before and may take now goes again.
     async fn send(
         &mut self,
         state: &SyncState,
@@ -254,59 +269,131 @@ impl Task {
         // they bring it back (2026-10-24).
         self.reader.forget(|change| !state.syncs(&change.entity));
         let waiting = self.reader.waiting();
-        let mut sent = 0u64;
-        // What the account would not keep for its size, to tell the person.
-        let mut too_large = Vec::new();
-        for batch in batches(&waiting) {
-            let answer = client
-                .post(format!("{api}/v1/sync/push"))
-                .bearer_auth(token)
-                .json(&json!({
-                    "deviceId": state.device_id,
-                    "deviceName": self.name,
-                    "changes": batch,
-                }))
-                .send()
-                .await
-                .map_err(|_| unreachable())?;
-            // One change that is a whole push too large: the rest still goes.
-            if answer.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE
-                && let [alone] = batch
-            {
-                let body = answer.text().await.unwrap_or_default();
-                too_large.push(refused_alone(alone, &body));
-                continue;
-            }
-            refused(&answer)?;
-            let body = answer.text().await.map_err(|_| unreachable())?;
-            let turned_away = PushAnswer::read(&body).refused_of(batch);
-            sent += (batch.len() - turned_away.len()) as u64;
-            too_large.extend(turned_away);
-        }
-        // A change the account refused is not sent again until it changes.
+        let (sent, answer) = self
+            .push(
+                state,
+                api,
+                client,
+                token,
+                &waiting,
+                !state.too_large.is_empty(),
+            )
+            .await?;
+        // A change the account refused is not sent again until it changes,
+        // or until the account can take it.
         self.reader.sent();
-        if !too_large.is_empty() || !state.too_large.is_empty() {
-            let kept: Vec<(String, String)> = waiting
-                .iter()
-                .filter(|change| {
-                    !too_large
-                        .iter()
-                        .any(|one| one.entity == change.entity && one.id == change.id)
-                })
-                .map(|change| (change.entity.clone(), change.id.clone()))
-                .collect();
-            self.engine
-                .run(move |e| e.sync_sizes(&kept, too_large))
-                .await
-                .map_err(|_| Stop::Gone)?;
-        }
         if through > state.exported_through && sent > 0 {
             self.engine
                 .run(move |e| e.sync_exported(through, sent))
                 .await
                 .map_err(|_| Stop::Gone)?;
         }
+        let answer = match answer {
+            Some(answer) => answer,
+            // Nothing went, and something waits for room in the account: a
+            // push of nothing asks what the account holds now.
+            None if state.waits_for_room() => {
+                let answer = client
+                    .post(format!("{api}/v1/sync/push"))
+                    .bearer_auth(token)
+                    .json(&json!({
+                        "deviceId": state.device_id,
+                        "deviceName": self.name,
+                        "changes": [],
+                    }))
+                    .send()
+                    .await
+                    .map_err(|_| unreachable())?;
+                refused(&answer)?;
+                PushAnswer::read(&answer.text().await.map_err(|_| unreachable())?)
+            }
+            None => return Ok(()),
+        };
+        let again = self
+            .engine
+            .run(move |e| e.sync_again(&answer))
+            .await
+            .map_err(|_| Stop::Gone)?;
+        self.push(state, api, client, token, &again, true).await?;
         Ok(())
+    }
+
+    /// Pushes `changes` and tells the engine what the account made of
+    /// their sizes: how many it took, and its last answer.
+    async fn push(
+        &mut self,
+        state: &SyncState,
+        api: &str,
+        client: &reqwest::Client,
+        token: &str,
+        changes: &[SyncChange],
+        listed: bool,
+    ) -> Result<(u64, Option<PushAnswer>), Stop> {
+        let mut sent = 0u64;
+        let mut last = None;
+        // What the account would not keep for its size, to tell the person.
+        let mut refused_for_size = Vec::new();
+        for batch in batches(changes) {
+            let body = serde_json::to_vec(&json!({
+                "deviceId": state.device_id,
+                "deviceName": self.name,
+                "changes": batch,
+            }))
+            .map_err(|e| Stop::Problem(format!("UXDuck could not write a change: {e}")))?;
+            // A push takes as long as its size needs on a slow network, and
+            // is given up when none of the rest of it goes out for a minute.
+            let total = body.len();
+            let handed = Arc::new(AtomicUsize::new(0));
+            let request = client
+                .post(format!("{api}/v1/sync/push"))
+                .bearer_auth(token)
+                .timeout(crate::feedback::upload_timeout(total))
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::CONTENT_LENGTH, total)
+                .body(crate::feedback::streamed(body, Arc::clone(&handed)));
+            let answer = tokio::select! {
+                answer = request.send() => answer.map_err(|_| unreachable())?,
+                () = crate::feedback::watch(
+                    &handed,
+                    total,
+                    crate::feedback::STALLED,
+                    "sync: push progress",
+                    |_| {},
+                ) => return Err(unreachable()),
+            };
+            // One change that is a whole push too large: the rest still goes.
+            if answer.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+                && let [alone] = batch
+            {
+                let body = answer.text().await.unwrap_or_default();
+                refused_for_size.push(refused_alone(alone, &body));
+                last = Some(PushAnswer::read(&body));
+                continue;
+            }
+            refused(&answer)?;
+            let body = answer.text().await.map_err(|_| unreachable())?;
+            let answer = PushAnswer::read(&body);
+            let turned_away = answer.refused_of(batch);
+            sent += (batch.len() - turned_away.len()) as u64;
+            refused_for_size.extend(turned_away);
+            last = Some(answer);
+        }
+        if !refused_for_size.is_empty() || (listed && !changes.is_empty()) {
+            let kept: Vec<(String, String)> = changes
+                .iter()
+                .filter(|change| {
+                    !refused_for_size
+                        .iter()
+                        .any(|one| one.entity == change.entity && one.id == change.id)
+                })
+                .map(|change| (change.entity.clone(), change.id.clone()))
+                .collect();
+            self.engine
+                .run(move |e| e.sync_sizes(&kept, refused_for_size))
+                .await
+                .map_err(|_| Stop::Gone)?;
+        }
+        Ok((sent, last))
     }
 
     /// Uploads the bundle of each plugin installed from a folder here that

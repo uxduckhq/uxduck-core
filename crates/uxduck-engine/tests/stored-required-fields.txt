@@ -915,3 +915,9 @@ Run.started
 RunRecord.id
 RunRecord.started
 RunRecord.steps
+NoRoom.account_bytes
+NoRoom.adds_bytes
+NoRoom.allowance_bytes
+RefusedCopy.digest
+RefusedCopy.ts_us
+RefusedCopy.version

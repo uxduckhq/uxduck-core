@@ -23,6 +23,20 @@ pub fn client(timeout: Duration) -> Option<reqwest::Client> {
         .ok()
 }
 
+/// A client for the API whose answers may be large: a request has no limit
+/// in all, and is given up when nothing of its answer arrives for
+/// `stalled`, the wait to connect and for its first byte included.
+#[must_use]
+pub fn reading_client(stalled: Duration) -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(stalled)
+        .read_timeout(stalled)
+        .user_agent(concat!("uxduck/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()
+}
+
 /// Why the API answered with a redirect, in words for the person; `None`
 /// when it did not.
 #[must_use]

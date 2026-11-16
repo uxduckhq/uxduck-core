@@ -78,7 +78,8 @@ pub struct SyncStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
     /// What the account would not keep for its size. Each stays on this
-    /// computer until it is smaller. Empty when everything fits.
+    /// computer until it is smaller or the account has room for it. Empty
+    /// when everything fits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub too_large: Vec<SyncTooLarge>,
     /// Vehicles other computers published to the account.
@@ -88,8 +89,9 @@ pub struct SyncStatus {
     pub links: Vec<LibraryLink>,
 }
 
-/// Something whose latest change is larger than the account keeps, so it
-/// is on this computer only until it is smaller.
+/// Something whose latest change the account would not keep for its size,
+/// so it is on this computer only: larger than the account takes at once,
+/// or more than the account has room for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncTooLarge {
@@ -99,15 +101,37 @@ pub struct SyncTooLarge {
     /// What did not sync, by its name to the person, such as "The plan
     /// Survey North did not sync".
     pub title: String,
-    /// Its size, what the account keeps, and what to do, in words.
+    /// Its size, what the account takes or has room for, and what to do,
+    /// in words.
     pub detail: String,
     /// The change's size as the account measured it.
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
-    /// The largest change the account keeps, when its server said.
+    /// The largest change the account takes at once, when its server said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub max_bytes: Option<u64>,
+    /// Set when the account had no room for it. It is then not too large
+    /// to take, and syncs once the account has room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_room: Option<SyncNoRoom>,
+}
+
+/// Why the account had no room for a change, in its server's numbers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncNoRoom {
+    /// What keeping the change would add to the account: its copy among
+    /// the kept versions, and as the entity's copy what it is larger by
+    /// than the one it replaces.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub adds_bytes: u64,
+    /// What the account held then.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub account_bytes: u64,
+    /// What the account's plan allows.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub allowance_bytes: u64,
 }
 
 /// A connection another computer published to the account (C2): how to

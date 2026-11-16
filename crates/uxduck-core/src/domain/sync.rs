@@ -86,15 +86,17 @@ pub struct SyncState {
     /// (ADR-0033): another account signed in here does not receive it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_id: String,
-    /// What the account would not keep for its size (2026-11-14): it stays
-    /// on this computer, said to the person, until it fits again.
+    /// What the account would not keep for its size (2026-11-14): larger
+    /// than it takes at once, or more than it has room for (2026-11-15). It
+    /// stays on this computer, said to the person, until it fits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub too_large: Vec<TooLarge>,
     #[serde(default)]
     pub version: u64,
 }
 
-/// One entity whose latest change the account refused for its size.
+/// One entity whose latest change the account refused for its size: it is
+/// larger than the account takes at once, or the account has no room for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TooLarge {
@@ -104,10 +106,42 @@ pub struct TooLarge {
     /// The change's size as the account measured it; as this computer
     /// measured it when the account server did not say.
     pub bytes: u64,
-    /// The largest change the account keeps, when its server said. Never
-    /// this computer's own copy of the number.
+    /// The largest change the account takes at once, when its server said.
+    /// Never this computer's own copy of the number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
+    /// Set when the account had no room for it (2026-11-15): the change is
+    /// not too large to take, the account's allowance is used up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_room: Option<NoRoom>,
+    /// Which copy was refused, so that copy is sent again once the account
+    /// can take it. None for one listed before 2026-11-15.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<RefusedCopy>,
+}
+
+/// Why the account had no room for a change, in its server's numbers. Never
+/// this computer's own copy of any of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoRoom {
+    /// What keeping the change would add to the account: its copy among
+    /// the kept versions, and as the entity's copy what it is larger by
+    /// than the one it replaces.
+    pub adds_bytes: u64,
+    /// What the account held then.
+    pub account_bytes: u64,
+    /// What the account's plan allows.
+    pub allowance_bytes: u64,
+}
+
+/// The copy of an entity the account refused, as it was sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedCopy {
+    pub version: u64,
+    pub digest: String,
+    pub ts_us: u64,
 }
 
 impl Default for SyncState {
@@ -135,6 +169,14 @@ impl SyncState {
     #[must_use]
     pub fn syncs(&self, entity: &str) -> bool {
         SyncCategory::of(entity).is_none_or(|category| !self.skipped.contains(&category))
+    }
+
+    /// Whether something stays here for want of room in the account. Room
+    /// appears there without anything changing here, so a computer that
+    /// has nothing to send asks the account what it holds.
+    #[must_use]
+    pub fn waits_for_room(&self) -> bool {
+        self.too_large.iter().any(|one| one.no_room.is_some())
     }
 }
 
