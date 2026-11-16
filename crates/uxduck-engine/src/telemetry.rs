@@ -53,6 +53,13 @@ impl Engine {
             .items
             .iter()
             .any(|i| i.key == "speed.air_mps" || i.key == "airspeed.ratio");
+        // The autopilot's word on its batteries (UXD-253).
+        let batteries: Vec<_> = update
+            .items
+            .iter()
+            .filter(|i| i.key.ends_with(".charge_state") || i.key == "battery.healthy")
+            .cloned()
+            .collect();
         let frame = rpc::router::notification(&ServerNotification::TelemetryUpdate(
             TelemetryDto::from(&update),
         ));
@@ -72,6 +79,9 @@ impl Engine {
         if replay {
             return;
         }
+        // Every update, so a battery fault's hold ends on time between its
+        // frames (UXD-253).
+        self.review_batteries(&vehicle_id, &batteries);
         self.drive_launch_of_vehicle(&vehicle_id);
         self.drive_plan_run_of_vehicle(&vehicle_id);
         self.review_prearm(&vehicle_id);

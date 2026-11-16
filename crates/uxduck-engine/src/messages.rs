@@ -17,7 +17,10 @@
 //!   the reasons now, updated in place, cleared when the vehicle arms, its
 //!   pre-arm checks pass, or the reasons stop repeating;
 //! - a simulated vehicle's messages notify no one, but its pre-arm reasons
-//!   once its simulation start is over.
+//!   once its simulation start is over;
+//! - and `ArduPilot`'s battery failsafe, "Battery 1 is low …", trips the
+//!   battery alarm, one with what its charge state and the vehicle's own
+//!   levels say (`battery_alerts`), a simulated vehicle's too.
 //!
 //! The log is not journaled: the tlog keeps every frame, and the log starts
 //! again with the daemon. Its raw view keeps every message as it came.
@@ -295,6 +298,11 @@ impl Engine {
         // Why a calibration from a heading just failed (S185); a setup
         // procedure's own prompts and results show on its row (S186).
         if self.setup_said(&vehicle.id, text) {
+            return;
+        }
+        // `ArduPilot`'s "Battery 1 is low …" trips the battery alarm
+        // (UXD-253), never a notice of its own.
+        if self.battery_message(&vehicle.id, text) {
             return;
         }
         if self.kept_in_the_log(&vehicle, text, prearm.is_some()) {

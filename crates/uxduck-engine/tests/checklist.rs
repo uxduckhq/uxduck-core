@@ -1302,6 +1302,152 @@ fn the_vehicle_can_hold_the_battery_rule_itself() {
     );
 }
 
+/// UXD-253: an `ArduPilot` vehicle with a battery monitor but neither
+/// `BATT_LOW_VOLT` nor `BATT_LOW_MAH` set never warns of a low battery.
+/// The preflight says so and offers `BATT_LOW_VOLT` by its cell count,
+/// written only once a person asks. Unknown cells offer no number.
+#[test]
+fn a_vehicle_that_never_warns_of_a_low_battery_is_said_in_the_preflight() {
+    let mut b = bench();
+    let warning = |b: &mut Bench| {
+        b.checks()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "uxduck:battery-warning")
+            .cloned()
+    };
+    assert!(
+        warning(&mut b).is_none(),
+        "no row before its parameters are read"
+    );
+    // A download is the whole list.
+    let rover = |low_volt: f64, low_mah: f64, monitor: f64, cells: f64| {
+        [
+            ("BATT_MONITOR", monitor),
+            ("BATT_LOW_VOLT", low_volt),
+            ("BATT_LOW_MAH", low_mah),
+            ("BATT_FS_LOW_ACT", 0.0),
+            ("OSD_CELL_COUNT", cells),
+        ]
+    };
+    b.params(&rover(0.0, 0.0, 4.0, 0.0));
+    // Its cells unknown: said, and no number made up.
+    let unknown = warning(&mut b).expect("the row");
+    assert_eq!(unknown["status"], "fail");
+    assert_eq!(unknown["title"], "Low battery warning");
+    assert_eq!(unknown["group"], "Battery");
+    assert!(unknown["fix"].is_null(), "{unknown}");
+    assert_eq!(
+        unknown["detail"],
+        "Alpha never warns of a low battery. BATT_LOW_VOLT and BATT_LOW_MAH are both 0, so it says nothing as its battery runs down and never acts on it. UXDuck doesn't know how many cells its battery has, so it suggests no value: set BATT_LOW_VOLT to about 3.5 V a cell, 10.5 V for 3S. BATT_FS_LOW_ACT, 0 now, says what it does then, and UXDuck leaves it as it is."
+    );
+    assert!(!unknown["detail"].as_str().unwrap().contains(';'));
+
+    // A 3S pack by its cell count: 10.5 V.
+    b.params(&rover(0.0, 0.0, 4.0, 3.0));
+    let three = warning(&mut b).expect("the row");
+    assert_eq!(
+        three["fix"],
+        json!({ "type": "parameter", "name": "BATT_LOW_VOLT", "value": 10.5 })
+    );
+    assert!(
+        three["detail"]
+            .as_str()
+            .unwrap()
+            .contains("About 3.5 V a cell is 10.5 V for its 3 cells."),
+        "{three}"
+    );
+    // The cells the vehicle reports come first: 6S is 21 V.
+    let mut cells: Vec<TelemetryItem> = (1..=6)
+        .map(|n| b.item(&format!("battery.cell_{n}_v"), Unit::Volt, 4.1))
+        .collect();
+    cells.push(b.item("battery.cells", Unit::Count, 6.0));
+    b.telemetry(cells);
+    assert_eq!(warning(&mut b).unwrap()["fix"]["value"], 21.0);
+    assert!(
+        b.wire.transfers().is_empty(),
+        "nothing written until a person asks"
+    );
+
+    // Set: it warns, and the row passes.
+    b.params(&rover(21.0, 0.0, 4.0, 3.0));
+    let set = warning(&mut b).unwrap();
+    assert_eq!(set["status"], "pass");
+    assert_eq!(set["detail"], "Alpha warns of a low battery at 21 V.");
+    b.params(&rover(0.0, 600.0, 4.0, 3.0));
+    assert_eq!(warning(&mut b).unwrap()["status"], "pass");
+    // No battery monitor: no row.
+    b.params(&rover(0.0, 0.0, 0.0, 3.0));
+    assert!(warning(&mut b).is_none());
+}
+
+/// The low battery offer counts only cells it can be sure of (UXD-253):
+/// a 12S pack's cells 11 and 12 come in `voltages_ext`, ten cells from a
+/// `MAVLink` 1 frame might be more, and a pack sent as its total (in
+/// 65534 mV pieces above 65.5 V) has no cells to count.
+#[test]
+fn the_low_battery_offer_counts_only_cells_it_can_be_sure_of() {
+    let mut b = bench();
+    let offer = |b: &mut Bench| {
+        b.checks()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "uxduck:battery-warning")
+            .map(|c| c["fix"].clone())
+            .expect("the row")
+    };
+    let unknown = |b: &Bench, key: &str| {
+        let mut item = b.item(key, Unit::Count, 0.0);
+        item.value = None;
+        item
+    };
+    let rover = |cells: f64| {
+        [
+            ("BATT_MONITOR", 4.0),
+            ("BATT_LOW_VOLT", 0.0),
+            ("BATT_LOW_MAH", 0.0),
+            ("BATT_FS_LOW_ACT", 0.0),
+            ("OSD_CELL_COUNT", cells),
+        ]
+    };
+    b.params(&rover(0.0));
+
+    // 12S, all twelve reported: 42 V.
+    let mut cells: Vec<TelemetryItem> = (1..=12)
+        .map(|n| b.item(&format!("battery.cell_{n}_v"), Unit::Volt, 4.1))
+        .collect();
+    cells.push(b.item("battery.cells", Unit::Count, 12.0));
+    b.telemetry(cells);
+    assert_eq!(offer(&mut b)["value"], 42.0);
+
+    // Ten cells that might be more: no number from them.
+    let mut ten: Vec<TelemetryItem> = (1..=10)
+        .map(|n| b.item(&format!("battery.cell_{n}_v"), Unit::Volt, 4.1))
+        .collect();
+    ten.extend((11..=12).map(|n| unknown(&b, &format!("battery.cell_{n}_v"))));
+    ten.push(unknown(&b, "battery.cells"));
+    b.telemetry(ten);
+    assert!(
+        offer(&mut b).is_null(),
+        "not 35 V for a pack that may be 12S"
+    );
+    // Its cell count parameter still says.
+    b.params(&rover(12.0));
+    assert_eq!(offer(&mut b)["value"], 42.0);
+
+    // A 70 V pack sent as its total: no cells, so the parameter or nothing.
+    b.params(&rover(0.0));
+    let mut total: Vec<TelemetryItem> = (1..=14)
+        .map(|n| unknown(&b, &format!("battery.cell_{n}_v")))
+        .collect();
+    total.push(unknown(&b, "battery.cells"));
+    total.push(b.item("battery.voltage_v", Unit::Volt, 70.0));
+    b.telemetry(total);
+    assert!(offer(&mut b).is_null());
+}
+
 /// Until 2026-11-15 a checklist stopped at 100 steps, with no reason
 /// written for the number: the editor, a copy from another vehicle, a
 /// checklist file and a pasted list were each refused past it.

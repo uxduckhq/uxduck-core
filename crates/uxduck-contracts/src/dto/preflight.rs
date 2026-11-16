@@ -66,7 +66,7 @@ pub enum CheckStatus {
 }
 
 /// Where a check's fix is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
@@ -95,6 +95,9 @@ pub enum CheckFix {
     Plugin { plugin_id: String },
     /// Setting home to where the vehicle is now.
     Home,
+    /// Setting one of the vehicle's parameters to a value with
+    /// `param/set`, once a person asks. UXDuck never writes it by itself.
+    Parameter { name: String, value: f64 },
 }
 
 /// UXDuck's own checks.
@@ -135,6 +138,13 @@ pub enum OwnCheck {
     /// It never expires: `checklist.run` says when it was finished and
     /// whether the vehicle restarted since.
     PreflightFinished,
+    /// An `ArduPilot` vehicle with a battery monitor (`BATT_MONITOR` not 0)
+    /// warns of a low battery: `BATT_LOW_VOLT` or `BATT_LOW_MAH` is set.
+    /// Without either it never says its battery is low nor acts on
+    /// `BATT_FS_LOW_ACT`. Fails offering `BATT_LOW_VOLT` at 3.5 V a cell
+    /// when the cell count is known. No row for other vehicles, nor
+    /// before the parameters are read.
+    BatteryWarning,
 }
 
 /// One check in a vehicle's list.

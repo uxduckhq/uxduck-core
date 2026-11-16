@@ -81,7 +81,7 @@ pub enum CheckStatus {
 }
 
 /// Where the fix for a check is, for the interface to lead there.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
@@ -110,6 +110,10 @@ pub enum CheckFix {
     Plugin { plugin_id: String },
     /// Home, set to where the vehicle is now (K27).
     Home,
+    /// One of the vehicle's parameters set to a value, through the normal
+    /// parameter write once a person asks for it (UXD-253): never written
+    /// by itself.
+    Parameter { name: String, value: f64 },
 }
 
 /// UXDuck's own checks (K6): what the firmware cannot know.
@@ -144,6 +148,11 @@ pub enum OwnCheck {
     /// under way. Read at the launch only, and off until a person turns
     /// it on. It never expires by itself.
     Finished,
+    /// An `ArduPilot` vehicle with a battery monitor warns of a low
+    /// battery (UXD-253): `BATT_LOW_VOLT` or `BATT_LOW_MAH` is set, without
+    /// which it never says its battery is low nor acts on
+    /// `BATT_FS_LOW_ACT`. No row for other vehicles.
+    BatteryWarning,
 }
 
 /// A check's threshold: what it means and its range.
@@ -159,7 +168,7 @@ pub struct Threshold {
 
 impl OwnCheck {
     /// In the list's order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Setup,
         Self::Restart,
         Self::Link,
@@ -170,6 +179,7 @@ impl OwnCheck {
         Self::Recording,
         Self::Home,
         Self::Finished,
+        Self::BatteryWarning,
     ];
 
     /// Its key on the wire: "plan".
@@ -186,6 +196,7 @@ impl OwnCheck {
             Self::Recording => "recording",
             Self::Home => "home",
             Self::Finished => "preflight-finished",
+            Self::BatteryWarning => "battery-warning",
         }
     }
 
@@ -215,6 +226,7 @@ impl OwnCheck {
             Self::Recording => "Cameras ready to record",
             Self::Home => "Home is where the vehicle is",
             Self::Finished => "Preflight finished",
+            Self::BatteryWarning => "Low battery warning",
         }
     }
 
@@ -231,6 +243,7 @@ impl OwnCheck {
             Self::Recording => "Cameras",
             Self::Home => "Home",
             Self::Finished => "Preflight",
+            Self::BatteryWarning => "Battery",
         }
     }
 

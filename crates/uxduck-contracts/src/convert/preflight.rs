@@ -99,6 +99,10 @@ impl From<&p::CheckFix> for dto::CheckFix {
                 plugin_id: plugin_id.clone(),
             },
             p::CheckFix::Home => Self::Home,
+            p::CheckFix::Parameter { name, value } => Self::Parameter {
+                name: name.clone(),
+                value: *value,
+            },
         }
     }
 }
@@ -116,6 +120,7 @@ impl From<p::OwnCheck> for dto::OwnCheck {
             p::OwnCheck::Recording => Self::Recording,
             p::OwnCheck::Home => Self::Home,
             p::OwnCheck::Finished => Self::PreflightFinished,
+            p::OwnCheck::BatteryWarning => Self::BatteryWarning,
         }
     }
 }
@@ -133,6 +138,7 @@ impl From<dto::OwnCheck> for p::OwnCheck {
             dto::OwnCheck::Recording => Self::Recording,
             dto::OwnCheck::Home => Self::Home,
             dto::OwnCheck::PreflightFinished => Self::Finished,
+            dto::OwnCheck::BatteryWarning => Self::BatteryWarning,
         }
     }
 }

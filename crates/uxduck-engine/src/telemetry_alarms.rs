@@ -25,6 +25,11 @@ const GPS_3D_FIX: f64 = 3.0;
 const FEW_SATELLITES: f64 = 6.0;
 const POOR_HDOP: f64 = 2.0;
 const SECOND: u64 = 1_000_000;
+/// How long a low battery holds before its alarm, so a sag under load does
+/// not raise it. `SYS_STATUS`'s battery bit holds as long before its own
+/// notice (UXD-253), so `ArduPilot`'s failsafe message, which clears the
+/// bit, comes first.
+pub(crate) const BATTERY_HOLD_US: u64 = 3 * SECOND;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -67,7 +72,7 @@ impl Kind {
         match self {
             Self::GpsLost | Self::PositionBad => (2 * SECOND, Some(3 * SECOND)),
             Self::GpsWeak => (5 * SECOND, Some(5 * SECOND)),
-            Self::BatteryLow | Self::BatteryCritical => (3 * SECOND, None),
+            Self::BatteryLow | Self::BatteryCritical => (BATTERY_HOLD_US, None),
             Self::Failsafe => (SECOND, Some(3 * SECOND)),
             Self::Fence => (0, Some(2 * SECOND)),
         }
@@ -130,6 +135,8 @@ impl Engine {
                     self.resolve(&kind.condition(&vehicle.id));
                 }
             }
+            self.forget_battery_failsafe(&vehicle.id);
+            self.say_battery_alerts(&vehicle.id);
             return;
         }
         let now = self.clock.now_us();
@@ -140,6 +147,36 @@ impl Engine {
         for (kind, reading) in readings {
             self.drive_alarm(&vehicle, kind, reading, now);
         }
+        self.say_battery_alerts(&vehicle.id);
+    }
+
+    /// The vehicle's battery alarm while it is raised: true when critical
+    /// (UXD-253).
+    pub(crate) fn battery_alarm(&self, vehicle_id: &str) -> Option<bool> {
+        let raised = |kind| {
+            self.telemetry_alarms
+                .watches
+                .get(&(vehicle_id.to_owned(), kind))
+                .is_some_and(|watch| watch.raised)
+        };
+        if raised(Kind::BatteryCritical) {
+            Some(true)
+        } else if raised(Kind::BatteryLow) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the battery is at or below a low level now, before the
+    /// alarm's hold (UXD-253).
+    pub(crate) fn battery_below_its_levels(&self, vehicle_id: &str) -> bool {
+        self.vehicle(vehicle_id).is_some_and(|vehicle| {
+            matches!(
+                self.battery_reading(vehicle, Kind::BatteryLow, self.clock.now_us()),
+                Reading::Bad(_)
+            )
+        })
     }
 
     fn drive_alarm(&mut self, vehicle: &Vehicle, kind: Kind, reading: Reading, now: u64) {
@@ -327,7 +364,9 @@ impl Engine {
 
     /// The battery against the vehicle's own levels (ArduPilot's
     /// `BATT_LOW_VOLT` and `BATT_CRT_VOLT`, PX4's `BAT_LOW_THR` and
-    /// `BAT_CRIT_THR`) and the operator's shares left, whichever comes first.
+    /// `BAT_CRIT_THR`), the operator's shares left, and the autopilot's own
+    /// word on any of its batteries (UXD-253, `battery_alerts`), whichever
+    /// comes first.
     fn battery_reading(&self, vehicle: &Vehicle, kind: Kind, now: u64) -> Reading {
         let param = |name: &str| {
             self.state
@@ -369,7 +408,16 @@ impl Engine {
                 advice(kind)
             ));
         }
-        if (remaining.is_some() && level_pct.is_some()) || (volts.is_some() && level_v.is_some()) {
+        // The autopilot's own word on its batteries (UXD-253).
+        if let Some(body) =
+            self.autopilot_battery_trip(&vehicle.id, kind == Kind::BatteryCritical, now)
+        {
+            return Reading::Bad(format!("{body} {}", advice(kind)));
+        }
+        if (remaining.is_some() && level_pct.is_some())
+            || (volts.is_some() && level_v.is_some())
+            || self.autopilot_states_charge(&vehicle.id, now)
+        {
             Reading::Good
         } else {
             Reading::Unknown

@@ -29,6 +29,7 @@ use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{Controller, centred_throttle};
 use uxduck_core::domain::modes::Family;
+use uxduck_core::domain::parameter::parameter_id;
 use uxduck_core::domain::plan::{LatLon, distance_m};
 use uxduck_core::domain::preflight::{
     Check, CheckFix, CheckRef, CheckSeverity, CheckSource, CheckStatus, ChosenPlan, InputPath,
@@ -506,6 +507,10 @@ impl Engine {
                 OwnCheck::Recording => self.recording_check(vehicle),
                 OwnCheck::Home => self.home_check(vehicle),
                 OwnCheck::Finished => self.finished_check(vehicle),
+                OwnCheck::BatteryWarning => match self.battery_warning_check(vehicle) {
+                    Some(outcome) => outcome,
+                    None => continue,
+                },
             };
             checks.push(Check {
                 id: check.id(),
@@ -1314,6 +1319,81 @@ impl Engine {
                 None,
             ),
         }
+    }
+
+    /// "Low battery warning" (UXD-253): `ArduPilot` says "Battery 1 is
+    /// low", and acts on `BATT_FS_LOW_ACT`, only once `BATT_LOW_VOLT` or
+    /// `BATT_LOW_MAH` is set, and both are 0 but on Copter and Heli. It
+    /// offers `BATT_LOW_VOLT` at 3.5 V a cell, a usual low point for a
+    /// lithium polymer pack under load, when UXDuck knows the cell count:
+    /// from the cells the vehicle reports one by one, else its cell count
+    /// parameters.
+    /// Without one it says so and offers no number. None, so no row, for a
+    /// vehicle other than `ArduPilot`, one with no battery monitor, and one
+    /// whose parameters are not read yet.
+    fn battery_warning_check(&self, vehicle: &Vehicle) -> Option<Outcome> {
+        if vehicle.autopilot != "Ardupilotmega" {
+            return None;
+        }
+        let param = |name: &str| {
+            self.state
+                .parameters
+                .get(&parameter_id(&vehicle.id, name))
+                .map(|p| p.value)
+        };
+        if param("BATT_MONITOR")? == 0.0 {
+            return None;
+        }
+        let (low_volt, low_mah) = (param("BATT_LOW_VOLT")?, param("BATT_LOW_MAH")?);
+        let name = &vehicle.name;
+        if low_volt > 0.0 || low_mah > 0.0 {
+            let at = match (low_volt > 0.0, low_mah > 0.0) {
+                (true, true) => format!("{low_volt} V or {low_mah} mAh left"),
+                (true, false) => format!("{low_volt} V"),
+                _ => format!("{low_mah} mAh left"),
+            };
+            return Some(pass(format!("{name} warns of a low battery at {at}.")));
+        }
+        // How many cells it reports one by one, when the producers can be
+        // sure (`battery.cells`): not a pack sent as its total, nor ten
+        // cells from a frame that cannot say whether more follow.
+        let reported = self
+            .telemetry(&vehicle.id)
+            .and_then(|t| t.items.iter().find(|i| i.key == "battery.cells"))
+            .and_then(|i| i.value)
+            .filter(|n| *n > 1.0);
+        let cells = reported.or_else(|| {
+            crate::checklist::CELL_COUNT_PARAMS
+                .iter()
+                .filter_map(|name| param(name))
+                .find(|n| *n >= 1.0 && *n <= 24.0)
+                .map(f64::round)
+        });
+        let action = param("BATT_FS_LOW_ACT").map_or_else(
+            || " BATT_FS_LOW_ACT says what it does then, and UXDuck leaves it as it is.".to_owned(),
+            |action| format!(" BATT_FS_LOW_ACT, {action} now, says what it does then, and UXDuck leaves it as it is."),
+        );
+        let never = format!(
+            "{name} never warns of a low battery. BATT_LOW_VOLT and BATT_LOW_MAH are both 0, so it says nothing as its battery runs down and never acts on it."
+        );
+        let Some(cells) = cells else {
+            return Some(not(
+                CheckStatus::Fail,
+                format!(
+                    "{never} UXDuck doesn't know how many cells its battery has, so it suggests no value: set BATT_LOW_VOLT to about 3.5 V a cell, 10.5 V for 3S.{action}"
+                ),
+                None,
+            ));
+        };
+        let value = (cells * 3.5 * 10.0).round() / 10.0;
+        Some(not(
+            CheckStatus::Fail,
+            format!("{never} About 3.5 V a cell is {value} V for its {cells} cells.{action}"),
+            Some(CheckFix::Parameter {
+                name: "BATT_LOW_VOLT".into(),
+                value,
+            }),
+        ))
     }
 
     /// The cameras that record while it is armed (ADR-0017 V16).

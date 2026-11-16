@@ -52,7 +52,7 @@ const FRESH_US: u64 = 10_000_000;
 const SENT_WITHIN_US: u64 = 15_000_000;
 /// Parameters that say how many cells the battery has, the first set
 /// above 0 counting: PX4's, then ArduPilot's on-screen display's.
-const CELL_COUNT_PARAMS: [&str; 4] = [
+pub(crate) const CELL_COUNT_PARAMS: [&str; 4] = [
     "BAT1_N_CELLS",
     "BAT_N_CELLS",
     "OSD_CELL_COUNT",

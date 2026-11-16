@@ -133,6 +133,11 @@ pub enum Message {
         /// (`MAV_SYS_STATUS_SENSOR_RC_RECEIVER` present), and whether it is
         /// healthy.
         rc_receiver: Option<bool>,
+        /// Whether the autopilot monitors a battery
+        /// (`MAV_SYS_STATUS_SENSOR_BATTERY` present and enabled), and whether
+        /// it is healthy. `ArduPilot` clears it once a battery is unhealthy
+        /// or in its low or critical failsafe (UXD-253).
+        battery: Option<bool>,
     },
     VfrHud {
         /// Metres per second.
@@ -236,12 +241,20 @@ pub enum Message {
         clipping: [u32; 3],
     },
     /// `BATTERY_STATUS` (S72): mAh used (-1 unknown), cells in mV
-    /// (`u16::MAX` unused) and centi-degrees (`i16::MAX` unknown).
+    /// (`u16::MAX` unused) and centi-degrees (`i16::MAX` unknown), and the
+    /// autopilot's own level for it (UXD-253): `MAV_BATTERY_CHARGE_STATE`
+    /// (0 undefined, as a frame without its extension fields says) and
+    /// `MAV_BATTERY_FAULT` bits. Cells 11 to 14 (0 unused) from its
+    /// `voltages_ext`, none from a `MAVLink` 1 frame, which cannot carry
+    /// them.
     BatteryStatus {
         id: u8,
         consumed_mah: i32,
         cells_mv: [u16; 10],
+        cells_ext_mv: Option<[u16; 4]>,
         temperature_cdeg: i16,
+        charge_state: u8,
+        faults: u32,
     },
     /// `DISTANCE_SENSOR` (S72): centimetres, and `MAV_SENSOR_ORIENTATION`
     /// (25 is down).
@@ -687,7 +700,7 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
         Ardupilotmega::MissionAck(m) => Some((m.target_system, m.target_component)),
         _ => None,
     });
-    let message = match packet {
+    let mut message = match packet {
         Ok(Ardupilotmega::Heartbeat(m)) => Message::Heartbeat {
             mav_type: format!("{:?}", m.type_),
             autopilot: format!("{:?}", m.autopilot),
@@ -813,6 +826,11 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
                 m.onboard_control_sensors_present.bits(),
                 m.onboard_control_sensors_health.bits(),
             ),
+            battery: battery(
+                m.onboard_control_sensors_present.bits(),
+                m.onboard_control_sensors_enabled.bits(),
+                m.onboard_control_sensors_health.bits(),
+            ),
         },
         Ok(Ardupilotmega::Timesync(m)) => Message::Timesync {
             tc1: m.tc1,
@@ -841,6 +859,13 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
         }
         Err(_) => Message::Other { message_id },
     };
+    // A `MAVLink` 1 frame has no extension fields: its cells past the
+    // tenth are not known, rather than none (UXD-253).
+    if frame.version() == mavio::protocol::MavLinkVersion::V1
+        && let Message::BatteryStatus { cells_ext_mv, .. } = &mut message
+    {
+        *cells_ext_mv = None;
+    }
     Some(Decoded {
         system_id,
         component_id,
@@ -959,7 +984,10 @@ fn health(message: &Ardupilotmega) -> Option<Message> {
             id: m.id,
             consumed_mah: m.current_consumed,
             cells_mv: m.voltages,
+            cells_ext_mv: Some(m.voltages_ext),
             temperature_cdeg: m.temperature,
+            charge_state: m.charge_state as u8,
+            faults: u32::from(m.fault_bitmask.bits()),
         },
         Ardupilotmega::DistanceSensor(m) => Message::DistanceSensor {
             distance_cm: m.current_distance,
@@ -1311,6 +1339,15 @@ fn rc_receiver(present: u32, health: u32) -> Option<bool> {
     (present & RC_RECEIVER != 0).then_some(health & RC_RECEIVER != 0)
 }
 
+/// `MAV_SYS_STATUS_SENSOR_BATTERY`: `ArduPilot` sets it present always,
+/// enabled once it has a battery monitor, and healthy while every battery
+/// is healthy and none is in its failsafe.
+const BATTERY: u32 = 0x200_0000;
+
+fn battery(present: u32, enabled: u32, health: u32) -> Option<bool> {
+    (present & enabled & BATTERY != 0).then_some(health & BATTERY != 0)
+}
+
 /// `RC_CHANNELS` (S187).
 const fn rc_channels(m: &mavio::dialects::ardupilotmega::messages::RcChannels) -> Message {
     Message::RcChannels {
@@ -1561,6 +1598,121 @@ mod tests {
                 "{expected:?}"
             );
         }
+    }
+
+    /// `SYS_STATUS`'s battery bit (UXD-253): said only for a monitor that
+    /// is present and enabled, and then whether it is healthy.
+    #[test]
+    fn sys_status_says_whether_the_battery_is_healthy() {
+        use mavio::dialects::ardupilotmega::enums::MavSysStatusSensor;
+        use mavio::dialects::ardupilotmega::messages::SysStatus;
+        let battery = MavSysStatusSensor::from_bits_truncate(0x200_0000);
+        let none = MavSysStatusSensor::empty();
+        for (present, enabled, health, expected) in [
+            (none, none, none, None),
+            // ArduPilot's with no monitor: present, not enabled.
+            (battery, none, battery, None),
+            (none, battery, battery, None),
+            (battery, battery, battery, Some(true)),
+            (battery, battery, none, Some(false)),
+        ] {
+            let frame = frame_of(
+                1,
+                0,
+                &SysStatus {
+                    onboard_control_sensors_present: present,
+                    onboard_control_sensors_enabled: enabled,
+                    onboard_control_sensors_health: health,
+                    ..SysStatus::default()
+                },
+            );
+            assert!(
+                matches!(
+                    decode(&frame).map(|d| d.message),
+                    Some(Message::SysStatus { battery, .. }) if battery == expected
+                ),
+                "{expected:?}"
+            );
+        }
+    }
+
+    /// `BATTERY_STATUS`'s charge state and faults (UXD-253). Left at its
+    /// default the state is undefined, as a frame without its extension
+    /// fields says.
+    #[test]
+    fn battery_status_says_its_charge_state_and_faults() {
+        use mavio::dialects::ardupilotmega::enums::{MavBatteryChargeState, MavBatteryFault};
+        use mavio::dialects::ardupilotmega::messages::BatteryStatus;
+        let frame = frame_of(
+            1,
+            0,
+            &BatteryStatus {
+                id: 1,
+                current_consumed: 1234,
+                charge_state: MavBatteryChargeState::Critical,
+                fault_bitmask: MavBatteryFault::from_bits_truncate(1 | 8),
+                ..BatteryStatus::default()
+            },
+        );
+        assert!(matches!(
+            decode(&frame).map(|d| d.message),
+            Some(Message::BatteryStatus {
+                id: 1,
+                consumed_mah: 1234,
+                charge_state: 3,
+                faults: 9,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode(&frame_of(1, 0, &BatteryStatus::default())).map(|d| d.message),
+            Some(Message::BatteryStatus {
+                charge_state: 0,
+                faults: 0,
+                ..
+            })
+        ));
+    }
+
+    /// Cells 11 to 14 come from `voltages_ext` (UXD-253), and a `MAVLink` 1
+    /// frame, which has no extension fields, cannot say them.
+    #[test]
+    fn battery_status_says_cells_past_the_tenth_only_when_it_can() {
+        use mavio::dialects::ardupilotmega::messages::BatteryStatus;
+        use mavio::protocol::V1;
+        let status = BatteryStatus {
+            voltages: [4200; 10],
+            voltages_ext: [4150, 4100, 0, 0],
+            ..BatteryStatus::default()
+        };
+        assert!(matches!(
+            decode(&frame_of(1, 0, &status)).map(|d| d.message),
+            Some(Message::BatteryStatus {
+                cells_ext_mv: Some([4150, 4100, 0, 0]),
+                ..
+            })
+        ));
+        let Ok(builder) = Frame::builder()
+            .version(V1)
+            .system_id(1)
+            .component_id(1)
+            .sequence(0)
+            .message(&status)
+        else {
+            panic!("a MAVLink 1 frame");
+        };
+        let frame: Frame<Versionless> = builder.build().into_versionless();
+        let mut bytes = vec![0u8; frame.size()];
+        let written = frame.serialize(&mut bytes).unwrap_or(0);
+        bytes.truncate(written);
+        assert!(matches!(
+            decode(&bytes).map(|d| d.message),
+            Some(Message::BatteryStatus {
+                cells_mv: [4200, ..],
+                cells_ext_mv: None,
+                ..
+            })
+        ));
     }
 
     /// A frame of any message, as `sim::frame` builds one.

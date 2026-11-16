@@ -401,12 +401,25 @@ impl Producer for Power {
             current_battery,
             battery_remaining,
             prearm,
+            battery,
             ..
         } = message
         else {
             return;
         };
         let from = (self.id(), component_id, now_us);
+        // 1 while the autopilot says its battery is healthy, 0 once it does
+        // not, and unknown without a monitor (UXD-253).
+        out.items.push(TelemetryItem {
+            key: "battery.healthy".into(),
+            label: "Battery healthy".into(),
+            unit: Unit::None,
+            value: battery.map(|healthy| if healthy { 1.0 } else { 0.0 }),
+            text: None,
+            source: self.id().into(),
+            component_id,
+            time_us: now_us,
+        });
         // 1 when the pre-arm checks pass: what the simulation start waits
         // for before it arms (S33).
         if let Some(ready) = prearm {
@@ -991,10 +1004,13 @@ impl Producer for Health {
             &Message::Vibration { axes, clipping } => vibration(axes, clipping, from, out),
             &Message::BatteryStatus {
                 id,
-                consumed_mah,
-                cells_mv,
-                temperature_cdeg,
-            } => battery(id, consumed_mah, &cells_mv, temperature_cdeg, from, out),
+                charge_state,
+                faults,
+                ..
+            } => {
+                battery(message, from, out);
+                battery_level(id, charge_state, faults, from, out);
+            }
             &Message::DistanceSensor {
                 distance_cm,
                 min_distance_cm,
@@ -1387,18 +1403,27 @@ fn computer(
 }
 
 /// Battery used, cells and temperature; a second battery's keys say which.
-fn battery(
-    id: u8,
-    consumed_mah: i32,
-    cells_mv: &[u16; 10],
-    temperature_cdeg: i16,
-    from: (&str, u8, u64),
-    out: &mut Produced,
-) {
+/// `<group>.cells` is how many cells it reports one by one (UXD-253), none
+/// for a pack sent as its total (ArduPilot without cell monitoring puts it
+/// in the first cell, in 65534 mV pieces above 65.5 V) and none for ten
+/// cells from a frame that cannot say whether more follow.
+fn battery(message: &Message, from: (&str, u8, u64), out: &mut Produced) {
+    let &Message::BatteryStatus {
+        id,
+        consumed_mah,
+        ref cells_mv,
+        cells_ext_mv,
+        temperature_cdeg,
+        ..
+    } = message
+    else {
+        return;
+    };
     let (group, name) = if id == 0 {
         ("battery".to_owned(), "Battery".to_owned())
     } else {
-        (format!("battery_{}", id + 1), format!("Battery {}", id + 1))
+        let n = u16::from(id) + 1;
+        (format!("battery_{n}"), format!("Battery {n}"))
     };
     if consumed_mah >= 0 {
         out.item(
@@ -1409,13 +1434,26 @@ fn battery(
             from,
         );
     }
-    let cells: Vec<u16> = cells_mv
+    let mut cells: Vec<u16> = cells_mv
         .iter()
         .copied()
         .take_while(|mv| *mv != u16::MAX)
         .collect();
-    if cells.len() == 1 || cells.first() == Some(&(u16::MAX - 1)) {
-        let (source, component_id, time_us) = from;
+    let total = cells.len() == 1 || cells.first() == Some(&(u16::MAX - 1));
+    let more_unknown = cells.len() == cells_mv.len() && cells_ext_mv.is_none();
+    if cells.len() == cells_mv.len()
+        && let Some(ext) = cells_ext_mv
+    {
+        cells.extend(
+            ext.iter()
+                .copied()
+                .take_while(|mv| *mv != 0 && *mv != u16::MAX),
+        );
+    }
+    #[allow(clippy::cast_precision_loss, reason = "at most 14 cells")]
+    let counted = (!total && !more_unknown && cells.len() > 1).then_some(cells.len() as f64);
+    let (source, component_id, time_us) = from;
+    if total {
         for n in 1..=14 {
             out.items.push(TelemetryItem {
                 key: format!("{group}.cell_{n}_v"),
@@ -1440,6 +1478,16 @@ fn battery(
             );
         }
     }
+    out.items.push(TelemetryItem {
+        key: format!("{group}.cells"),
+        label: format!("{name} cells"),
+        unit: Unit::Count,
+        value: counted,
+        text: None,
+        source: source.into(),
+        component_id,
+        time_us,
+    });
     if temperature_cdeg != i16::MAX {
         out.item(
             &format!("{group}.temperature_degc"),
@@ -1449,6 +1497,74 @@ fn battery(
             from,
         );
     }
+}
+
+/// `MAV_BATTERY_CHARGE_STATE` 1 to 7 in words: 0 is undefined.
+const CHARGE_STATES: [&str; 7] = [
+    "OK",
+    "Low",
+    "Critical",
+    "Emergency",
+    "Failed",
+    "Unhealthy",
+    "Charging",
+];
+
+/// `MAV_BATTERY_FAULT`'s bits from the lowest, in words.
+const BATTERY_FAULTS: [&str; 9] = [
+    "Deep discharge",
+    "Voltage spikes",
+    "Cell failed",
+    "Over current",
+    "Over temperature",
+    "Under temperature",
+    "Incompatible voltage",
+    "Incompatible firmware",
+    "Incompatible cells",
+];
+
+/// The autopilot's own level for a battery (UXD-253): its
+/// `MAV_BATTERY_CHARGE_STATE` as the number and in words, and its
+/// `MAV_BATTERY_FAULT` bits, named. Nothing while the state is undefined,
+/// as it is from a frame without its extension fields and from a component
+/// other than the autopilot (`Session`).
+fn battery_level(id: u8, charge_state: u8, faults: u32, from: (&str, u8, u64), out: &mut Produced) {
+    let Some(words) = CHARGE_STATES.get(usize::from(charge_state).wrapping_sub(1)) else {
+        return;
+    };
+    let (group, name) = if id == 0 {
+        ("battery".to_owned(), "Battery".to_owned())
+    } else {
+        let n = u16::from(id) + 1;
+        (format!("battery_{n}"), format!("Battery {n}"))
+    };
+    let (source, component_id, time_us) = from;
+    out.items.push(TelemetryItem {
+        key: format!("{group}.charge_state"),
+        label: format!("{name} charge state"),
+        unit: Unit::None,
+        value: Some(f64::from(charge_state)),
+        text: Some((*words).to_owned()),
+        source: source.into(),
+        component_id,
+        time_us,
+    });
+    let named: Vec<&str> = BATTERY_FAULTS
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| faults & (1 << bit) != 0)
+        .map(|(_, words)| *words)
+        .collect();
+    out.items.push(TelemetryItem {
+        key: format!("{group}.faults"),
+        label: format!("{name} faults"),
+        unit: Unit::None,
+        value: Some(f64::from(faults)),
+        text: (!named.is_empty()).then(|| named.join(", ")),
+        source: source.into(),
+        component_id,
+        time_us,
+    });
 }
 
 /// `EKF_STATUS_FLAGS` as one state, the worst first.
@@ -1602,7 +1718,10 @@ mod tests {
                     id: 0,
                     consumed_mah: 0,
                     cells_mv,
+                    cells_ext_mv: Some([0; 4]),
                     temperature_cdeg: i16::MAX,
+                    charge_state: 0,
+                    faults: 0,
                 },
                 0,
                 &mut out,
@@ -1620,7 +1739,10 @@ mod tests {
                     id: 0,
                     consumed_mah: 123,
                     cells_mv,
+                    cells_ext_mv: Some([0; 4]),
                     temperature_cdeg: 2550,
+                    charge_state: 0,
+                    faults: 0,
                 },
                 123,
                 &mut out,
@@ -1828,6 +1950,7 @@ mod tests {
                 battery_remaining,
                 prearm: None,
                 rc_receiver: None,
+                battery: None,
             })
         };
         let volts = |items: Vec<(String, f64)>| {
@@ -2093,6 +2216,7 @@ mod tests {
                     battery_remaining: -1,
                     prearm: None,
                     rc_receiver,
+                    battery: None,
                 },
                 42,
                 &mut out,
@@ -2320,18 +2444,29 @@ mod tests {
             id: 0,
             consumed_mah: 1234,
             cells_mv: cells,
+            cells_ext_mv: Some([0; 4]),
             temperature_cdeg: i16::MAX,
+            charge_state: 0,
+            faults: 0,
         });
         assert_eq!(battery[0], ("battery.consumed_mah".to_owned(), 1234.0));
         assert_eq!(battery[1], ("battery.cell_1_v".to_owned(), 4.1));
-        assert_eq!(battery.len(), 4, "three cells, no temperature");
+        assert_eq!(
+            battery.len(),
+            5,
+            "three cells, their count (UXD-253), no temperature"
+        );
+        assert_eq!(battery[4], ("battery.cells".to_owned(), 3.0));
         let mut total = [u16::MAX; 10];
         total[0] = 12_600;
         let second = produced(&Message::BatteryStatus {
             id: 1,
             consumed_mah: -1,
             cells_mv: total,
+            cells_ext_mv: Some([0; 4]),
             temperature_cdeg: 2550,
+            charge_state: 0,
+            faults: 0,
         });
         assert!(second.contains(&("battery_2.temperature_degc".to_owned(), 25.5)));
         assert!(
@@ -2345,6 +2480,158 @@ mod tests {
             .collect();
         assert_eq!(cells.len(), 14);
         assert!(cells.iter().all(|(_, value)| value.is_nan()));
+    }
+
+    /// Battery id 255, the last `BATTERY_STATUS` can name, is Battery 256:
+    /// its number is worked out wider than a byte (UXD-253).
+    #[test]
+    fn the_last_battery_id_is_battery_256() {
+        let mut cells = [u16::MAX; 10];
+        cells[..2].copy_from_slice(&[4100, 4100]);
+        let items = produced(&Message::BatteryStatus {
+            id: 255,
+            consumed_mah: 10,
+            cells_mv: cells,
+            cells_ext_mv: Some([0; 4]),
+            temperature_cdeg: i16::MAX,
+            charge_state: 2,
+            faults: 0,
+        });
+        let keys: Vec<&str> = items.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"battery_256.consumed_mah"), "{keys:?}");
+        assert!(keys.contains(&"battery_256.cell_2_v"), "{keys:?}");
+        assert!(keys.contains(&"battery_256.charge_state"), "{keys:?}");
+    }
+
+    /// The cells a battery reports one by one, counted as `<group>.cells`
+    /// (UXD-253): cells 11 to 14 from `voltages_ext`, none for ten cells
+    /// from a `MAVLink` 1 frame that cannot say whether more follow, and
+    /// none for a pack sent as its total, as ArduPilot sends one above
+    /// 65.5 V in 65534 mV pieces.
+    #[test]
+    fn a_batterys_cells_are_counted_only_when_sure() {
+        let status = |cells_mv: [u16; 10], cells_ext_mv: Option<[u16; 4]>| {
+            produced(&Message::BatteryStatus {
+                id: 0,
+                consumed_mah: -1,
+                cells_mv,
+                cells_ext_mv,
+                temperature_cdeg: i16::MAX,
+                charge_state: 0,
+                faults: 0,
+            })
+        };
+        let value = |items: &[(String, f64)], key: &str| {
+            items.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
+        };
+        let twelve = status([4200; 10], Some([4150, 4100, 0, 0]));
+        assert_eq!(value(&twelve, "battery.cells"), Some(12.0));
+        assert_eq!(value(&twelve, "battery.cell_11_v"), Some(4.15));
+        assert_eq!(value(&twelve, "battery.cell_12_v"), Some(4.1));
+        assert_eq!(value(&twelve, "battery.cell_13_v"), None);
+        let ten = status([4200; 10], Some([0; 4]));
+        assert_eq!(value(&ten, "battery.cells"), Some(10.0));
+        let maybe_more = status([4200; 10], None);
+        assert!(value(&maybe_more, "battery.cells").is_some_and(f64::is_nan));
+        assert_eq!(value(&maybe_more, "battery.cell_10_v"), Some(4.2));
+        let mut total = [u16::MAX; 10];
+        total[..2].copy_from_slice(&[65534, 4466]);
+        let high = status(total, Some([0; 4]));
+        assert!(value(&high, "battery.cells").is_some_and(f64::is_nan));
+        assert!(
+            high.iter()
+                .filter(|(k, _)| k.starts_with("battery.cell_"))
+                .all(|(_, v)| v.is_nan()),
+            "{high:?}"
+        );
+    }
+
+    /// The autopilot's level for each battery (UXD-253): the charge state
+    /// in words with its number, and the faults named. Undefined says
+    /// nothing.
+    #[test]
+    fn a_batterys_charge_state_and_faults_are_said() {
+        let mut cells = [u16::MAX; 10];
+        cells[0] = 10_800;
+        let status = |id, charge_state, faults| {
+            let mut out = Produced::default();
+            Health.consume(
+                1,
+                &Message::BatteryStatus {
+                    id,
+                    consumed_mah: 1234,
+                    cells_mv: cells,
+                    cells_ext_mv: Some([0; 4]),
+                    temperature_cdeg: i16::MAX,
+                    charge_state,
+                    faults,
+                },
+                7,
+                &mut out,
+            );
+            out.items
+                .into_iter()
+                .filter(|i| i.key.ends_with(".charge_state") || i.key.ends_with(".faults"))
+                .map(|i| (i.key, i.value, i.text))
+                .collect::<Vec<_>>()
+        };
+        assert!(status(0, 0, 0).is_empty(), "undefined");
+        assert_eq!(
+            status(0, 2, 0),
+            [
+                ("battery.charge_state".into(), Some(2.0), Some("Low".into())),
+                ("battery.faults".into(), Some(0.0), None),
+            ]
+        );
+        assert_eq!(
+            status(1, 3, 1 | 16),
+            [
+                (
+                    "battery_2.charge_state".into(),
+                    Some(3.0),
+                    Some("Critical".into())
+                ),
+                (
+                    "battery_2.faults".into(),
+                    Some(17.0),
+                    Some("Deep discharge, Over temperature".into())
+                ),
+            ]
+        );
+        assert_eq!(status(0, 6, 0)[0].2.as_deref(), Some("Unhealthy"));
+        assert!(
+            status(0, 8, 0).is_empty(),
+            "a state newer than MAVLink's list"
+        );
+    }
+
+    /// `SYS_STATUS`'s battery bit (UXD-253): 1 healthy, 0 not, unknown
+    /// without a monitor.
+    #[test]
+    fn the_battery_health_bit_is_said() {
+        let healthy = |battery| {
+            let mut out = Produced::default();
+            Power.consume(
+                1,
+                &Message::SysStatus {
+                    voltage_battery: 12_000,
+                    current_battery: -1,
+                    battery_remaining: -1,
+                    prearm: None,
+                    rc_receiver: None,
+                    battery,
+                },
+                0,
+                &mut out,
+            );
+            out.items
+                .into_iter()
+                .find(|i| i.key == "battery.healthy")
+                .map(|i| i.value)
+        };
+        assert_eq!(healthy(Some(true)), Some(Some(1.0)));
+        assert_eq!(healthy(Some(false)), Some(Some(0.0)));
+        assert_eq!(healthy(None), Some(None));
     }
 
     #[test]
@@ -2378,7 +2665,10 @@ mod tests {
                 id: 2,
                 consumed_mah: 1,
                 cells_mv: cells,
+                cells_ext_mv: Some([0; 4]),
                 temperature_cdeg: 1,
+                charge_state: 0,
+                faults: 0,
             },
             Message::Rangefinder { distance: 1.0 },
             Message::Wind {

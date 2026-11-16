@@ -1903,6 +1903,10 @@ export type CheckFix = {
     type: 'plugin';
 } | {
     type: 'home';
+} | {
+    name: string;
+    type: 'parameter';
+    value: number;
 };
 
 /**
@@ -9710,7 +9714,7 @@ export type OperatorUpdateParams = {
 /**
  * UXDuck's own checks.
  */
-export type OwnCheck = 'setup' | 'restart' | 'link' | 'rc-receiver' | 'controller' | 'plan' | 'terrain' | 'recording' | 'home' | 'preflight-finished';
+export type OwnCheck = 'setup' | 'restart' | 'link' | 'rc-receiver' | 'controller' | 'plan' | 'terrain' | 'recording' | 'home' | 'preflight-finished' | 'battery-warning';
 
 /**
  * One of UXDuck's own checks as set for the vehicle.

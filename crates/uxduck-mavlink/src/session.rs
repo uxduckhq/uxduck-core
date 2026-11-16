@@ -1232,7 +1232,7 @@ impl Session {
                         received_us,
                         processed_us,
                     ));
-                    if an_autopilot && let Some(vehicle) = self.vehicles.get_mut(&key) {
+                    if an_autopilot && let Some(vehicle) = self.vehicles.get_mut(key) {
                         crate::producers::vehicle_state(
                             decoded.component_id,
                             &system_status,
@@ -1469,6 +1469,10 @@ impl Session {
                     if let Some(vehicle) = self.vehicles.get_mut(key) {
                         vehicle.note_terrain(&message, received_us);
                         vehicle.tuning.take(&message, received_us);
+                        let message = autopilots_battery_level(
+                            message,
+                            decoded.component_id == vehicle.autopilot_component,
+                        );
                         let produced = vehicle.pending.items.len();
                         for producer in &self.producers {
                             producer.consume(
@@ -4418,6 +4422,33 @@ const fn autopilots_own(message: &Message) -> bool {
     )
 }
 
+/// A battery's level is its autopilot's to say (UXD-222, UXD-253). Another
+/// component's `BATTERY_STATUS`, such as a smart battery's bridge or an
+/// onboard computer's, keeps its readings but not its charge state or
+/// faults, which would otherwise raise or clear the vehicle's battery
+/// alert. The MAVLink inspector still reads every frame.
+fn autopilots_battery_level(message: Message, from_autopilot: bool) -> Message {
+    match message {
+        Message::BatteryStatus {
+            id,
+            consumed_mah,
+            cells_mv,
+            cells_ext_mv,
+            temperature_cdeg,
+            ..
+        } if !from_autopilot => Message::BatteryStatus {
+            id,
+            consumed_mah,
+            cells_mv,
+            cells_ext_mv,
+            temperature_cdeg,
+            charge_state: 0,
+            faults: 0,
+        },
+        message => message,
+    }
+}
+
 /// What a heartbeat says about the vehicle.
 struct Beat {
     mav_type: String,
@@ -6941,6 +6972,61 @@ mod tests {
                 "receiver RSSI must not impersonate a telemetry modem"
             );
         }
+    }
+
+    /// A battery's level comes from the vehicle's autopilot alone (UXD-222,
+    /// UXD-253): a smart battery's bridge at another component id still
+    /// reports its readings, but its charge state and faults are not the
+    /// vehicle's.
+    #[test]
+    fn a_batterys_level_comes_from_the_autopilot_alone() {
+        use mavio::dialects::ardupilotmega::enums::{MavBatteryChargeState, MavBatteryFault};
+        use mavio::dialects::ardupilotmega::messages::BatteryStatus;
+
+        let mut session = Session::new(Config::default());
+        session.ingest("l1", PEER, &heartbeat_frame(1, 1, 0), 0);
+        let status = |charge_state| BatteryStatus {
+            current_consumed: 1234,
+            charge_state,
+            fault_bitmask: MavBatteryFault::from_bits_truncate(16),
+            ..BatteryStatus::default()
+        };
+        let items = |session: &mut Session, component, charge_state, at| {
+            let frame = crate::sim::frame(1, component, 0, &status(charge_state));
+            session.ingest("l1", PEER, &frame, at);
+            session
+                .tick(at)
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Telemetry(telemetry) => Some(telemetry.items),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let bridge = items(&mut session, 180, MavBatteryChargeState::Critical, 100);
+        assert!(
+            bridge
+                .iter()
+                .any(|i| i.key == "battery.consumed_mah" && i.value == Some(1234.0)),
+            "its readings still count: {bridge:?}"
+        );
+        assert!(
+            !bridge
+                .iter()
+                .any(|i| i.key == "battery.charge_state" || i.key == "battery.faults"),
+            "not its level: {bridge:?}"
+        );
+        let autopilot = items(&mut session, 1, MavBatteryChargeState::Low, 200);
+        let state = autopilot
+            .iter()
+            .find(|i| i.key == "battery.charge_state")
+            .expect("the autopilot's level");
+        assert_eq!(
+            (state.value, state.text.as_deref()),
+            (Some(2.0), Some("Low"))
+        );
+        assert!(autopilot.iter().any(|i| i.key == "battery.faults"
+            && i.text.as_deref() == Some("Over temperature")));
     }
 
     #[test]

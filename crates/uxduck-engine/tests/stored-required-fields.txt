@@ -200,6 +200,8 @@ Check::ParameterAtLeast.value
 Check::RallyWithin.feature
 Check::Within.feature
 Check::WrongAnswers.count
+CheckFix::Parameter.name
+CheckFix::Parameter.value
 CheckFix::Plan.plan_id
 CheckFix::Plugin.plugin_id
 CheckFix::Setup.row

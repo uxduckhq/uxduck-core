@@ -804,7 +804,8 @@ fn a_fresh_vehicle_lists_its_own_checks_first_and_every_uxduck_check_on() {
             ("terrain", "warn"),
             ("recording", "warn"),
             ("home", "warn"),
-            ("preflight-finished", "warn")
+            ("preflight-finished", "warn"),
+            ("battery-warning", "warn")
         ]
     );
     // "Preflight finished" is the one a person turns on (K29): until then it
