@@ -61,15 +61,27 @@ pub fn bind(port: u16) -> Result<UdpSocket, String> {
 }
 
 /// Runs the listener on its own thread until `stop` is set.
-pub fn spawn(socket: UdpSocket, hub: Arc<Hub>, engine: EngineHandle, stop: Arc<AtomicBool>) {
+///
+/// # Errors
+/// A message for people when the computer starts no more threads, in its
+/// own words. Each port has a thread, and how many a program may have is
+/// the computer's to say, so there is no fixed number of ports.
+pub fn spawn(
+    socket: UdpSocket,
+    hub: Arc<Hub>,
+    engine: EngineHandle,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
     let port = socket.local_addr().map_or(0, |a| a.port());
     let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("video-udp".into())
-        .spawn(move || run(&socket, port, &hub, &engine, &stop));
-    if let Err(error) = spawned {
-        tracing::error!(%error, "the video listener could not start");
-    }
+        .spawn(move || run(&socket, port, &hub, &engine, &stop))
+        .map(|_| ())
+        .map_err(|error| {
+            tracing::error!(%error, port, "the video listener could not start");
+            format!("UXDuck can't listen on UDP port {port}: {error}")
+        })
 }
 
 fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &AtomicBool) {

@@ -218,8 +218,8 @@ pub struct Item {
 }
 
 /// Something handed to the agent with a message, from an info popover's
-/// "Ask the agent" (ADR-0020 H2). At most 8 on a message; the title, key,
-/// value, unit and plugin up to 120 bytes each, the help up to 2000.
+/// "Ask the agent" (ADR-0020 H2). However many on a message; the title,
+/// key, value, unit and plugin up to 120 bytes each, the help up to 2000.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {

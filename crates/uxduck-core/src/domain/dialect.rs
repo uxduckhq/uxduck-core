@@ -2,18 +2,16 @@
 //! kept as the messages that are new or differ from UXDuck's built-in
 //! ArduPilot dialect, with the enums their fields name. Each vehicle uses the
 //! dialects matching its firmware's commit, or those a person chose for it
-//! (F1 to F3, F13). Small enough to journal and sync.
+//! (F1 to F3, F13).
+//!
+//! A dialect has no fixed number of messages, enums, entries or commands
+//! (maintainer, 2026-11-15). What bounds one is the XML it is read from,
+//! which the engine reads at most 8 MB of at once, and what the account
+//! takes of one synced change, which is said where a dialect is too large
+//! to sync. ArduPilot's and PX4's whole sets keep 11 and 30 messages
+//! (2026-11).
 
 use serde::{Deserialize, Serialize};
-
-/// The most messages one dialect keeps.
-pub const MAX_MESSAGES: usize = 256;
-/// The most enums one dialect keeps.
-pub const MAX_ENUMS: usize = 64;
-/// The most entries one enum keeps.
-pub const MAX_ENTRIES: usize = 1024;
-/// The most commands one dialect keeps.
-pub const MAX_COMMANDS: usize = 256;
 
 /// A dialect a person added.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

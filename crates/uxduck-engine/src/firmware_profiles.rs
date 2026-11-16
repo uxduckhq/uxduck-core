@@ -23,13 +23,19 @@ use crate::commands::Raise;
 use crate::param_definitions::DefinitionsOrder;
 use crate::rpc::handlers::to_value;
 
-/// The most profiles people may add.
-const MAX_PROFILES: usize = 16;
-/// The most dialect files one profile names.
-const MAX_DIALECT_FILES: usize = 8;
-/// The most bytes of XML one profile's dialects hold together.
-const MAX_DIALECT_BYTES: usize = 8 << 20;
 const SCHEMA: &str = "firmware/1";
+
+/// The longest label read from a fork's profile, in characters. The file
+/// comes from outside UXDuck and its label names the profile, its parameter
+/// set, its dialect and their notices, so it is bounded here and refused
+/// with its length, never cut. A name a person types has no fixed length.
+const MAX_LABEL: usize = 64;
+
+/// The longest address fetched, in characters: a profile's own and those it
+/// names, which come from outside UXDuck. An address goes whole in a
+/// request's first line, which servers bound at a few thousand bytes. The
+/// sitemap protocol's 2,048 is the length the web agrees to take.
+const MAX_URL: usize = 2048;
 
 /// A profile being read, and why it last failed. Not journaled.
 #[derive(Debug, Default)]
@@ -91,19 +97,24 @@ fn condition(id: &str) -> String {
 
 /// Where UXDuck fetches from: `https://`, or a server on this computer.
 fn fetchable(url: &str) -> bool {
-    url.len() <= 2048
-        && (url.starts_with("https://")
-            || url.starts_with("http://127.0.0.1")
-            || url.starts_with("http://localhost"))
+    url.starts_with("https://")
+        || url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
 }
 
-/// A name a person gives a profile, trimmed; none when it is empty.
-fn profile_name(name: &str) -> Result<Option<String>, ApiError> {
+/// Why an address is too long to fetch, with its length, or None.
+fn too_long_to_fetch(url: &str) -> Option<String> {
+    let length = url.chars().count();
+    (length > MAX_URL).then(|| {
+        format!("the address is {length} characters, more than the {MAX_URL} UXDuck fetches")
+    })
+}
+
+/// A name a person gives a profile, trimmed and kept whole, however long
+/// (2026-11-15); none when it is empty.
+fn profile_name(name: &str) -> Option<String> {
     let name = name.trim();
-    if name.chars().count() > 64 {
-        return Err(invalid("a name has at most 64 characters"));
-    }
-    Ok((!name.is_empty()).then(|| name.to_owned()))
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// `reference` read relative to the profile at `base`.
@@ -133,6 +144,9 @@ fn resolve(base: &str, reference: &str) -> Result<String, String> {
         }
         format!("{scheme}://{host}/{}", path.join("/"))
     };
+    if let Some(why) = too_long_to_fetch(&resolved) {
+        return Err(why);
+    }
     if fetchable(&resolved) {
         Ok(resolved)
     } else {
@@ -157,8 +171,15 @@ fn read(text: &str, base: &str) -> Result<Read, String> {
         ));
     }
     let label = file.label.trim().to_owned();
-    if label.is_empty() || label.chars().count() > 64 {
-        return Err("a profile's label has 1 to 64 characters".into());
+    let length = label.chars().count();
+    if length == 0 {
+        return Err("the profile has no label".into());
+    }
+    if length > MAX_LABEL {
+        return Err(format!(
+            "the profile's label is {length} characters, more than the {MAX_LABEL} UXDuck reads \
+             of a label from a fork's file"
+        ));
     }
     let firmware = Firmware::parse(file.firmware.trim()).ok_or_else(|| {
         format!(
@@ -180,11 +201,8 @@ fn read(text: &str, base: &str) -> Result<Read, String> {
     if file.parameters.is_none() && file.dialects.is_empty() {
         return Err("the profile names no parameters and no dialects".into());
     }
-    if file.dialects.len() > MAX_DIALECT_FILES {
-        return Err(format!(
-            "a profile names at most {MAX_DIALECT_FILES} dialect files"
-        ));
-    }
+    // However many dialect files it names (2026-11-15): they are fetched
+    // one at a time and bounded by their size together as they arrive.
     Ok(Read {
         label,
         firmware,
@@ -227,18 +245,16 @@ impl Engine {
 
     fn add_profile(&mut self, url: &str, name: Option<&str>) -> Result<FirmwareProfile, ApiError> {
         let url = url.trim();
+        if let Some(why) = too_long_to_fetch(url) {
+            return Err(invalid(why));
+        }
         if !fetchable(url) {
             return Err(invalid("a firmware profile's URL starts with https://"));
         }
-        let name = name.map(profile_name).transpose()?.flatten();
+        let name = name.and_then(profile_name);
         let name = name.as_deref();
         if self.state.firmware_profiles.values().any(|p| p.url == url) {
             return Err(invalid("this firmware profile is already added"));
-        }
-        if self.state.firmware_profiles.len() >= MAX_PROFILES {
-            return Err(invalid(format!(
-                "UXDuck keeps at most {MAX_PROFILES} firmware profiles. Remove one first"
-            )));
         }
         let now = self.clock.now_us();
         let profile = FirmwareProfile {
@@ -282,7 +298,7 @@ impl Engine {
             .ok_or_else(|| {
                 ApiError::new(ErrorKind::NotFound, format!("no firmware profile {id}"))
             })?;
-        let name = profile_name(name)?.ok_or_else(|| invalid("a firmware profile needs a name"))?;
+        let name = profile_name(name).ok_or_else(|| invalid("a firmware profile needs a name"))?;
         if let Some(mut own) = profile
             .own_set_id
             .as_ref()
@@ -407,14 +423,16 @@ impl Engine {
         } else {
             run.generation += 1;
             let generation = run.generation;
+            // The first file. Each next one is asked for when the one before
+            // arrives, so a profile naming many holds one fetch at a time.
             ask = read
                 .dialects
-                .iter()
-                .enumerate()
-                .map(|(index, url)| DefinitionsOrder::FetchProfile {
-                    id: format!("{id}#{generation}#{index}"),
+                .first()
+                .map(|url| DefinitionsOrder::FetchProfile {
+                    id: format!("{id}#{generation}#0"),
                     url: url.clone(),
                 })
+                .into_iter()
                 .collect();
             run.reading = Some(Reading {
                 generation,
@@ -507,7 +525,27 @@ impl Engine {
             return;
         };
         *slot = Some(result);
-        if reading.texts.iter().any(Option::is_none) {
+        // The files come from the fork's server: no more is fetched, or
+        // kept in memory, once they are too large together or one failed.
+        let bytes: usize = reading
+            .texts
+            .iter()
+            .flatten()
+            .map(|text| text.as_ref().map_or(0, String::len))
+            .sum();
+        let stop = crate::dialects::too_much_xml(bytes).is_some()
+            || reading.texts.iter().flatten().any(Result::is_err);
+        let next = reading
+            .texts
+            .iter()
+            .position(Option::is_none)
+            .filter(|_| !stop);
+        if let Some(next) = next {
+            let order = DefinitionsOrder::FetchProfile {
+                id: format!("{profile_id}#{generation}#{next}"),
+                url: reading.read.dialects[next].clone(),
+            };
+            self.ask_definitions(order);
             return;
         }
         let Some(reading) = run.reading.take() else {
@@ -530,14 +568,22 @@ impl Engine {
         reading: Reading,
     ) -> Result<(), String> {
         let mut files: Vec<(String, String)> = Vec::new();
+        // Those not fetched come after the one that failed or was too much.
         for (url, text) in reading.read.dialects.iter().zip(reading.texts) {
-            let text = text
-                .unwrap_or_else(|| Err("not fetched".into()))
-                .map_err(|why| format!("{}: {why}", file_name(url)))?;
+            let Some(text) = text else {
+                break;
+            };
+            let text = text.map_err(|why| format!("{}: {why}", file_name(url)))?;
             files.push((file_name(url), text));
         }
-        if files.iter().map(|(_, text)| text.len()).sum::<usize>() > MAX_DIALECT_BYTES {
-            return Err("the dialect files are larger than 8 MB together".into());
+        let bytes = files.iter().map(|(_, text)| text.len()).sum();
+        if let Some(why) = crate::dialects::too_much_xml(bytes) {
+            let left = reading.read.dialects.len() - files.len();
+            return Err(if left == 0 {
+                why
+            } else {
+                format!("{why}. {left} more of its files were not fetched")
+            });
         }
         let pairs: Vec<(&str, &str)> = files
             .iter()

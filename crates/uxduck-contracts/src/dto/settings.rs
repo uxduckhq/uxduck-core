@@ -251,7 +251,7 @@ pub struct SettingsUpdateParams {
     pub share_conversations: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_flight_data: Option<bool>,
-    /// Replaces the whole list when present; at most eight.
+    /// Replaces the whole list when present. However many ports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_ports: Option<Vec<u16>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

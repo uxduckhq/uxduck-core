@@ -369,6 +369,8 @@ pub struct Engine {
     replays: replay::Replays,
     /// Files being attached to chat messages (S246).
     uploads: attachments::Uploads,
+    /// What each vehicle's dialect messages were published from (ADR-0044).
+    published_dialects: dialects::Published,
     places: places::Places,
     companions: companions::Companions,
     marker_live: markers::Live,
@@ -594,6 +596,7 @@ impl Engine {
             traffic: traffic::Traffic::default(),
             replays: replay::Replays::default(),
             uploads: attachments::Uploads::default(),
+            published_dialects: dialects::Published::default(),
             places: places::Places::default(),
             companions: companions::Companions::default(),
             marker_live: markers::Live::default(),

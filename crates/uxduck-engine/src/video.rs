@@ -43,6 +43,8 @@ pub const SAME_SOURCE_US: u64 = 30_000_000;
 const JOURNAL_COUNTERS_US: u64 = 30_000_000;
 /// The condition of the warning that UXDuck cannot listen for video.
 const LISTEN_CONDITION: &str = "video-listen";
+/// While a UDP port added by hand is not listened on.
+const PORTS_CONDITION: &str = "video-ports";
 
 /// Where watches go: the daemon's `/video` hub.
 pub trait VideoPort: Send + std::fmt::Debug {
@@ -184,9 +186,6 @@ pub trait VideoPort: Send + std::fmt::Debug {
         Err("Photos need UXDuck Desktop.".into())
     }
 }
-
-/// The most UDP ports added by hand.
-pub const MAX_VIDEO_PORTS: usize = 8;
 
 /// What `video/add` was given.
 /// An RTSP address with `#track=N`, or without one for the first track,
@@ -348,16 +347,13 @@ fn is_waiting(source: &VideoSource) -> bool {
         && source.file.is_none()
 }
 
-/// A name typed by hand: trimmed, empty for none, at most 80 characters.
-fn hand_name(name: Option<&str>) -> Result<Option<String>, ApiError> {
-    let name = name.map(str::trim).filter(|n| !n.is_empty());
-    if name.is_some_and(|n| n.chars().count() > 80) {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "a camera's name is at most 80 characters",
-        ));
-    }
-    Ok(name.map(str::to_owned))
+/// A name typed by hand: trimmed, empty for none, and kept whole however
+/// long (maintainer, 2026-11-15). Where it does not fit, the window shortens
+/// it on screen.
+fn hand_name(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
 }
 
 fn not_found(id: &str) -> ApiError {
@@ -525,11 +521,21 @@ impl Engine {
         let Some(port) = self.video.port.as_mut() else {
             return;
         };
-        for p in before.iter().filter(|p| !after.contains(p)) {
+        // Looked up in sets, so a long list takes time in proportion to it.
+        let was: std::collections::HashSet<u16> = before.iter().copied().collect();
+        let now: std::collections::HashSet<u16> = after.iter().copied().collect();
+        for p in before.iter().filter(|p| !now.contains(p)) {
             port.unlisten(*p);
             self.video.extra_errors.remove(p);
         }
-        for p in after.iter().filter(|p| !before.contains(p)) {
+        // A port that could not be opened is tried again whenever the list
+        // changes: taking others away may have made room for it.
+        let wanted: Vec<u16> = after
+            .iter()
+            .filter(|p| !was.contains(p) || self.video.extra_errors.contains_key(p))
+            .copied()
+            .collect();
+        for p in &wanted {
             match port.listen(*p) {
                 Ok(()) => {
                     self.video.extra_errors.remove(p);
@@ -538,6 +544,30 @@ impl Engine {
                     self.video.extra_errors.insert(*p, error);
                 }
             }
+        }
+        // Said while a port added by hand is not listened on, as the port
+        // UXDuck listens on anyway is, and gone once they all are. The
+        // first one's reason is given: a busy port names who holds it, and
+        // a computer with no more sockets to give names its own number.
+        match self.video.extra_errors.values().next().cloned() {
+            Some(first) => {
+                let ports = self.video.extra_errors.len();
+                self.raise(Raise {
+                    severity: Severity::Warning,
+                    kind: NotificationKind::Transient,
+                    subject: Subject::System,
+                    title: if ports == 1 {
+                        "UXDuck is not listening on a UDP port you added".into()
+                    } else {
+                        format!("UXDuck is not listening on {ports} UDP ports you added")
+                    },
+                    body: Some(first),
+                    actions: Vec::new(),
+                    condition: Some(PORTS_CONDITION.into()),
+                    report: None,
+                });
+            }
+            None => self.resolve(PORTS_CONDITION),
         }
     }
 
@@ -1620,12 +1650,6 @@ impl Engine {
             .cloned()
             .ok_or_else(|| not_found(&params.source_id))?;
         let name = params.name.trim();
-        if name.chars().count() > 80 {
-            return Err(ApiError::new(
-                ErrorKind::InvalidValue,
-                "a camera's name is at most 80 characters",
-            ));
-        }
         source.named_by_hand = !name.is_empty();
         source.name = if name.is_empty() {
             default_name(&source)
@@ -1872,18 +1896,8 @@ impl Engine {
             }
             source
         } else {
-            if self
-                .state
-                .video_sources
-                .values()
-                .filter(|s| s.file.is_some())
-                .count()
-                >= 8
-            {
-                return Err(invalid(
-                    "UXDuck supports at most eight recorded-video cameras.".to_owned(),
-                ));
-            }
+            // However many (maintainer, 2026-11-15): one costs nothing until
+            // it is watched or recorded.
             // The same source shape and lifecycle as a manually added camera.
             VideoSource {
                 recording_requested: false,
@@ -1996,19 +2010,8 @@ impl Engine {
         {
             return Ok(same.clone());
         }
-        if previous.is_none()
-            && self
-                .state
-                .video_sources
-                .values()
-                .filter(|s| s.capture.is_some())
-                .count()
-                >= 8
-        {
-            return Err(invalid(
-                "UXDuck supports at most eight configured local cameras.",
-            ));
-        }
+        // However many the computer has (maintainer, 2026-11-15): one costs
+        // nothing until it is watched or recorded.
         let now = self.clock.now_us();
         let mut source = previous.unwrap_or_else(|| VideoSource {
             recording_requested: false,
@@ -2143,13 +2146,9 @@ impl Engine {
         let mut settings = self.state.settings.clone();
         // The port UXDuck listens on anyway needs no adding, but a
         // camera on it can still be named before it sends.
+        // However many (maintainer, 2026-11-15): each is a socket, and one
+        // the computer cannot open is said in its own words below.
         if self.video.listening != Some(port) && !settings.video_ports.contains(&port) {
-            if settings.video_ports.len() >= MAX_VIDEO_PORTS {
-                return Err(ApiError::new(
-                    ErrorKind::InvalidValue,
-                    format!("UXDuck listens on at most {MAX_VIDEO_PORTS} ports added by hand"),
-                ));
-            }
             let before = settings.video_ports.clone();
             settings.video_ports.push(port);
             settings.version += 1;
@@ -2165,7 +2164,7 @@ impl Engine {
 
     fn video_add(&mut self, params: &VideoAddParams) -> Result<VideoAddResult, ApiError> {
         let url = params.url.as_str();
-        let name = hand_name(params.name.as_deref())?;
+        let name = hand_name(params.name.as_deref());
         if let Some(vehicle_id) = &params.vehicle_id
             && !self.state.vehicles.contains_key(vehicle_id)
         {

@@ -231,11 +231,18 @@ pub struct AttachedFile {
     pub bytes: u64,
 }
 
-/// At most this many attachments on a message.
-pub const MAX_ATTACHMENTS: usize = 8;
-const MAX_SHORT: usize = 120;
-const MAX_HELP: usize = 2000;
-/// The longest attached file's name, in bytes.
+// A message has no fixed number of attachments (maintainer, 2026-11-15).
+// What bounds them is the request the model takes, which the chat says when
+// a turn does not fit it.
+
+/// The longest title, key, value, unit or plugin of an attachment, in
+/// bytes. They come from the window and from plugins, not from what a
+/// person types, and go to the model with every turn of the chat.
+pub const MAX_SHORT: usize = 120;
+/// The longest help of an attachment, in bytes, for the same reason.
+pub const MAX_HELP: usize = 2000;
+/// The longest attached file's name, in bytes: what common file systems
+/// take of one.
 pub const MAX_FILE_NAME: usize = 255;
 
 impl Attachment {

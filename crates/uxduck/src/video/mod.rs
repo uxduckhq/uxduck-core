@@ -24,6 +24,49 @@ use uxduck_contracts::dto::video::VideoSocket;
 
 use crate::daemon::engine_task::EngineHandle;
 
+/// How many of the files and sockets the computer lets one program hold open
+/// are left alone when a UDP port added by hand asks for one more. There is
+/// no fixed number of ports (maintainer, 2026-11-15) and each holds a socket
+/// open, so a long list could take every one the computer allows, and then
+/// UXDuck opens nothing else. Measured on 2026-11-15 with 300 ports where a
+/// program may hold 256, which is what a macOS shell gives: 234 opened, one
+/// was left, and the next start ended with "cannot use the data directory:
+/// Too many open files". UXDuck holds about 22 open with nothing connected.
+/// Its links, pages, cameras, recordings and logs each take more as they
+/// come, so about three times that stays for them.
+const OPEN_FILES_KEPT: usize = 64;
+
+/// How many files and sockets this program holds open, and how many the
+/// computer lets it. Nothing where the computer names no such number, as on
+/// Windows, or does not say.
+#[cfg(unix)]
+fn open_files() -> Option<(usize, usize)> {
+    let most = rustix::process::getrlimit(rustix::process::Resource::Nofile).current?;
+    // Linux and macOS list them here. The listing itself holds one open.
+    let open = std::fs::read_dir("/dev/fd").ok()?.count().saturating_sub(1);
+    Some((open, usize::try_from(most).unwrap_or(usize::MAX)))
+}
+
+#[cfg(not(unix))]
+fn open_files() -> Option<(usize, usize)> {
+    None
+}
+
+/// Whether one more port added by hand may be opened. The port stays in the
+/// list either way. One not opened says why, with the computer's own number
+/// and how many are open now.
+fn room_for_a_port(port: u16, open: usize, most: usize) -> Result<(), String> {
+    if most.saturating_sub(open) > OPEN_FILES_KEPT {
+        return Ok(());
+    }
+    Err(format!(
+        "UXDuck is not listening on UDP port {port}. This computer lets a program hold {most} \
+         files and sockets open at once, and UXDuck holds {open}. It leaves the last \
+         {OPEN_FILES_KEPT} for its vehicles, pages and files. Remove ports you don't use, or \
+         raise the computer's open-file limit"
+    ))
+}
+
 /// The engine's end: listeners and RTSP cameras added by hand, and the hub.
 #[derive(Debug)]
 pub struct VideoHost {
@@ -61,9 +104,12 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         if self.listeners.contains_key(&port) {
             return Ok(());
         }
+        if let Some((open, most)) = open_files() {
+            room_for_a_port(port, open, most)?;
+        }
         let socket = listener::bind(port)?;
         let stop = Arc::new(AtomicBool::new(false));
-        listener::spawn(socket, self.hub.clone(), self.engine.clone(), stop.clone());
+        listener::spawn(socket, self.hub.clone(), self.engine.clone(), stop.clone())?;
         self.listeners.insert(port, stop);
         tracing::info!(port, "listening for video on a port added by hand");
         Ok(())
@@ -371,12 +417,15 @@ pub async fn start(
         engine.clone(),
     );
     if let Some(port) = port {
-        let (listening, error) = match listener::bind(port) {
-            Ok(socket) => {
-                let bound = socket.local_addr().map_or(port, |a| a.port());
-                // The main port lives as long as the daemon.
-                let stop = Arc::new(AtomicBool::new(false));
-                listener::spawn(socket, hub.clone(), engine.clone(), stop);
+        let started = listener::bind(port).and_then(|socket| {
+            let bound = socket.local_addr().map_or(port, |a| a.port());
+            // The main port lives as long as the daemon.
+            let stop = Arc::new(AtomicBool::new(false));
+            listener::spawn(socket, hub.clone(), engine.clone(), stop)?;
+            Ok(bound)
+        });
+        let (listening, error) = match started {
+            Ok(bound) => {
                 tracing::info!(port = bound, "listening for video");
                 (Some(bound), None)
             }
@@ -411,6 +460,39 @@ impl Drop for VideoHost {
 
 #[cfg(test)]
 mod tests {
+    /// A port added by hand is opened while the computer has room for it
+    /// and for UXDuck's own work, and one that is not says the computer's
+    /// number and how many are open.
+    #[test]
+    fn a_port_is_not_opened_into_the_last_files_the_computer_allows() {
+        assert_eq!(super::room_for_a_port(5700, 22, 256), Ok(()));
+        assert_eq!(super::room_for_a_port(5700, 191, 256), Ok(()));
+        assert_eq!(
+            super::room_for_a_port(5870, 192, 256).unwrap_err(),
+            "UXDuck is not listening on UDP port 5870. This computer lets a program hold 256 \
+             files and sockets open at once, and UXDuck holds 192. It leaves the last 64 for \
+             its vehicles, pages and files. Remove ports you don't use, or raise the \
+             computer's open-file limit"
+        );
+        assert!(super::room_for_a_port(5700, 300, 256).is_err());
+        assert_eq!(super::room_for_a_port(5700, 4_000, 524_288), Ok(()));
+    }
+
+    /// The count is of this program's own files: at least its three
+    /// standard ones, and never more than the computer allows.
+    #[cfg(unix)]
+    #[test]
+    fn the_open_files_are_counted_within_what_the_computer_allows() {
+        let (open, most) = super::open_files().expect("a limit and a count");
+        assert!(open >= 3, "{open}");
+        assert!(open <= most, "{open} of {most}");
+        let held = std::fs::File::open("/dev/null").expect("a file");
+        let (more, _) = super::open_files().expect("a count");
+        // Other tests open and close files at the same time, so only that it is counted at all.
+        assert!(more >= 4, "{more}");
+        drop(held);
+    }
+
     #[test]
     fn a_photo_never_replaces_another() {
         let dir = tempfile::tempdir().expect("temp dir");

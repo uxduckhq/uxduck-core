@@ -437,9 +437,12 @@ fn gcs_system_id_changed(engine: &mut Engine, before: u8, after: u8) {
     }
 }
 
-/// Video ports as asked for, without repeats: none 0, and not too many.
+/// Video ports as asked for, without repeats and none 0. However many
+/// (maintainer, 2026-11-15): there are 65,535 ports, and one the computer
+/// cannot open is said in its own words where the ports are listed.
 fn video_ports(ports: Vec<u16>) -> Result<Vec<u16>, ApiError> {
     let mut unique: Vec<u16> = Vec::new();
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for port in ports {
         if port == 0 {
             return Err(ApiError::new(
@@ -447,15 +450,9 @@ fn video_ports(ports: Vec<u16>) -> Result<Vec<u16>, ApiError> {
                 "a video port cannot be 0",
             ));
         }
-        if !unique.contains(&port) {
+        if seen.insert(port) {
             unique.push(port);
         }
-    }
-    if unique.len() > crate::video::MAX_VIDEO_PORTS {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            format!("at most {} video ports", crate::video::MAX_VIDEO_PORTS),
-        ));
     }
     Ok(unique)
 }

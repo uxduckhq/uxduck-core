@@ -562,6 +562,48 @@ fn edit(
     send(engine, connection, &message, Some(&replaced))
 }
 
+/// The longest message, in bytes: a quarter of the 256 KB the hosted model
+/// takes in one request, which also carries UXDuck's instructions, its tools
+/// and the chat so far. A longer one is refused with its measured size, and
+/// the window keeps the text. Whether it should follow the model in use
+/// instead is asked in the review entry of 2026-11-15.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Refuses a message with no text, or one too long, saying how long it is.
+pub(super) fn message_fits(text: &str) -> Result<(), ApiError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "A message must contain text.",
+        ));
+    }
+    if text.len() > MAX_MESSAGE_BYTES {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "This message is {} KB. A message is at most {} KB, so that it and the chat \
+                 before it fit what the model takes in one request. Attach longer text as a file.",
+                text.len().div_ceil(1024),
+                MAX_MESSAGE_BYTES / 1024
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// What is said when an attachment does not fit. There is no fixed number
+/// of them (maintainer, 2026-11-15).
+pub(super) fn attachments_do_not_fit() -> String {
+    format!(
+        "Each attachment needs a title. Its title, key, value, unit and plugin are at most {} \
+         bytes each, its help {} and a file's name {}.",
+        thread::MAX_SHORT,
+        thread::MAX_HELP,
+        thread::MAX_FILE_NAME
+    )
+}
+
 /// Adds the user's message and hands the turn to the agent host; in place
 /// of an earlier message of theirs when one is `replaced`.
 #[allow(
@@ -585,12 +627,7 @@ pub fn send(
         ));
     }
     let text = params.text.trim().to_owned();
-    if text.is_empty() || text.len() > 64 * 1024 {
-        return Err(ApiError::new(
-            ErrorKind::InvalidValue,
-            "A message must contain text and fit within 64 KB.",
-        ));
-    }
+    message_fits(&text)?;
     if params.view.as_ref().is_some_and(|view| !view.fits()) {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
@@ -603,15 +640,10 @@ pub fn send(
     }
     let mut attachments: Vec<thread::Attachment> =
         params.attachments.iter().map(Into::into).collect();
-    if attachments.len() > thread::MAX_ATTACHMENTS
-        || !attachments.iter().all(thread::Attachment::fits)
-    {
+    if !attachments.iter().all(thread::Attachment::fits) {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            format!(
-                "at most {} attachments, each with a title and short fields",
-                thread::MAX_ATTACHMENTS
-            ),
+            attachments_do_not_fit(),
         ));
     }
     if replaced.is_none()

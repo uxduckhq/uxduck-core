@@ -14,13 +14,13 @@
 //! ([`crate::decode`]) are unchanged: they read the built-in definitions
 //! only (F5).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use serde_json::{Map, Value};
 use uxduck_core::domain::dialect::{
     CommandParam, CustomCommand, CustomEnum, CustomField, CustomMessage, Dialect, EnumEntry,
-    FieldKind, MAX_COMMANDS, MAX_ENTRIES, MAX_ENUMS, MAX_MESSAGES, MessageChange,
+    FieldKind, MessageChange,
 };
 
 use mavio::dialects::ardupilotmega::enums::MavCmd;
@@ -42,14 +42,14 @@ pub struct Read {
 /// messages that are new or differ from the built-in dialect, with the
 /// enums those messages' fields name, and the `MAV_CMD` entries whose
 /// numbers it does not have (F14). `<include>` is not followed: give the
-/// included files too.
+/// included files too. However many messages, enums, entries and commands
+/// the files hold are kept (maintainer, 2026-11-15): the time this takes
+/// grows with the files' size and no faster, and the caller bounds that.
 ///
 /// # Errors
 /// XML that does not parse; a message without a valid id, name or fields,
-/// or too large for a frame; an id or a name given twice; more than
-/// [`MAX_MESSAGES`] kept, more than [`MAX_ENUMS`] enums or more than
-/// [`MAX_COMMANDS`] commands; or nothing that differs from the built-in
-/// dialect.
+/// or too large for a frame; a name longer than [`MAX_NAME`]; an id or a
+/// name given twice; or nothing that differs from the built-in dialect.
 pub fn read(files: &[(&str, &str)]) -> Result<Read, String> {
     if files.is_empty() {
         return Err("give at least one dialect file".into());
@@ -88,12 +88,13 @@ pub fn read(files: &[(&str, &str)]) -> Result<Read, String> {
                     entries: Vec::new(),
                 });
             kept.bitmask |= found.bitmask;
-            for entry in found.entries {
-                kept.entries
-                    .retain(|e| e.value != entry.value && e.name != entry.name);
-                kept.entries.push(entry);
-            }
+            kept.entries.extend(found.entries);
         }
+    }
+    // An enum given in several files or several times: the last entry wins
+    // a value or a name.
+    for found in enums.values_mut() {
+        found.entries = last_wins(std::mem::take(&mut found.entries), true);
     }
     let total = messages.len();
     let mut kept: Vec<CustomMessage> = messages
@@ -103,14 +104,8 @@ pub fn read(files: &[(&str, &str)]) -> Result<Read, String> {
             Some(message)
         })
         .collect();
-    if kept.len() > MAX_MESSAGES {
-        return Err(format!(
-            "{} messages are new or changed, more than the {MAX_MESSAGES} a dialect may keep",
-            kept.len()
-        ));
-    }
     kept.sort_by_key(|m| m.id);
-    let commands = new_commands(commands)?;
+    let commands = new_commands(commands);
     if kept.is_empty() && commands.is_empty() {
         return Err(if total == 0 {
             "the files have no messages and no commands UXDuck does not know".into()
@@ -128,20 +123,7 @@ pub fn read(files: &[(&str, &str)]) -> Result<Read, String> {
         .into_values()
         .filter(|e| enum_names.contains(e.name.as_str()) && !e.entries.is_empty())
         .collect();
-    if needed.len() > MAX_ENUMS {
-        return Err(format!(
-            "the messages name {} enums, more than the {MAX_ENUMS} a dialect may keep",
-            needed.len()
-        ));
-    }
     for found in &mut needed {
-        if found.entries.len() > MAX_ENTRIES {
-            return Err(format!(
-                "{} has {} entries, more than {MAX_ENTRIES}",
-                found.name,
-                found.entries.len()
-            ));
-        }
         found.entries.sort_by_key(|e| e.value);
     }
     let unchanged = u32::try_from(total - kept.len()).unwrap_or(u32::MAX);
@@ -165,9 +147,10 @@ pub fn may_be_placeless(value: u16) -> bool {
     MavCmd::try_from(value).is_err() || PLACELESS_USER_COMMANDS.contains(&value)
 }
 
-/// The commands the built-in dialect does not have, by number.
-fn new_commands(found: BTreeMap<u16, CustomCommand>) -> Result<Vec<CustomCommand>, String> {
-    let commands: Vec<CustomCommand> = found
+/// The commands the built-in dialect does not have, by number. A command's
+/// number is 16 bits, so there are at most 65,536.
+fn new_commands(found: BTreeMap<u16, CustomCommand>) -> Vec<CustomCommand> {
+    found
         .into_values()
         .filter(|c| !built_in_command(c))
         .map(|mut c| {
@@ -176,14 +159,25 @@ fn new_commands(found: BTreeMap<u16, CustomCommand>) -> Result<Vec<CustomCommand
             }
             c
         })
-        .collect();
-    if commands.len() > MAX_COMMANDS {
-        return Err(format!(
-            "{} commands are new, more than the {MAX_COMMANDS} a dialect may keep",
-            commands.len()
-        ));
+        .collect()
+}
+
+/// An enum's entries without those a later one replaces: one of the same
+/// value, or of the same name when `names` is set. In one pass, so an enum
+/// of any size takes time in proportion to it.
+fn last_wins(entries: Vec<EnumEntry>, names: bool) -> Vec<EnumEntry> {
+    let mut values_after: HashSet<u64> = HashSet::new();
+    let mut names_after: HashSet<String> = HashSet::new();
+    let mut kept: Vec<EnumEntry> = Vec::with_capacity(entries.len());
+    for entry in entries.into_iter().rev() {
+        let value_is_new = values_after.insert(entry.value);
+        let name_is_new = !names || names_after.insert(entry.name.clone());
+        if value_is_new && name_is_new {
+            kept.push(entry);
+        }
     }
-    Ok(commands)
+    kept.reverse();
+    kept
 }
 
 /// Whether the built-in dialect has this command, by number and name: a
@@ -377,11 +371,23 @@ impl Messages {
     #[must_use]
     pub fn of<'a>(dialects: impl IntoIterator<Item = &'a Dialect>) -> Self {
         let mut out = Self::default();
+        // Each kept message's id by its name, so the older message of a
+        // name is found without looking through them all.
+        let mut ids: HashMap<&'a str, u32> = HashMap::new();
         for dialect in dialects {
             for message in &dialect.messages {
-                out.by_id.retain(|_, (m, _)| m.name != message.name);
-                out.by_id
-                    .insert(message.id, (message.clone(), dialect.label.clone()));
+                if let Some(older) = ids.insert(message.name.as_str(), message.id)
+                    && older != message.id
+                {
+                    out.by_id.remove(&older);
+                }
+                if let Some((older, _)) = out
+                    .by_id
+                    .insert(message.id, (message.clone(), dialect.label.clone()))
+                    && older.name != message.name
+                {
+                    ids.remove(older.name.as_str());
+                }
             }
             for found in &dialect.enums {
                 out.enums.insert(found.name.clone(), found.clone());
@@ -438,17 +444,60 @@ impl Messages {
 }
 
 static BOUND: LazyLock<RwLock<HashMap<String, Arc<Messages>>>> = LazyLock::new(RwLock::default);
-/// Each dialect's message ids and their checksums' seeds, by dialect id.
-type Checksums = HashMap<String, Vec<(u32, u8)>>;
+
+/// The checksum seeds the added dialects bring. A frame is checked against
+/// its own id's seeds alone, at most 256 of them, however many dialects and
+/// messages there are.
+#[derive(Default)]
+struct Checksums {
+    /// Each dialect's message ids and their seeds, by dialect id.
+    by_dialect: HashMap<String, Vec<(u32, u8)>>,
+    /// For each message id, its seeds and how many dialects give each.
+    seeds: HashMap<u32, HashMap<u8, usize>>,
+}
+
+impl Checksums {
+    fn forget(&mut self, dialect_id: &str) {
+        for (id, extra) in self.by_dialect.remove(dialect_id).unwrap_or_default() {
+            let Some(seeds) = self.seeds.get_mut(&id) else {
+                continue;
+            };
+            if let Some(count) = seeds.get_mut(&extra) {
+                *count -= 1;
+                if *count == 0 {
+                    seeds.remove(&extra);
+                }
+            }
+            if seeds.is_empty() {
+                self.seeds.remove(&id);
+            }
+        }
+    }
+}
+
 static CHECKSUMS: LazyLock<RwLock<Checksums>> = LazyLock::new(RwLock::default);
+
+/// A test that publishes checksums holds this while it does. The table is
+/// the process's, so one test's dialect would answer another test's frame.
+#[cfg(test)]
+pub(crate) fn checksums_in_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The engine says which messages describe a vehicle; empty ones unbind it.
 pub fn publish(vehicle_id: &str, messages: Messages) {
+    publish_shared(vehicle_id, Arc::new(messages));
+}
+
+/// As [`publish`], with messages other vehicles may share: the vehicles the
+/// same dialects describe hold one copy between them.
+pub fn publish_shared(vehicle_id: &str, messages: Arc<Messages>) {
     let mut bound = BOUND.write().unwrap_or_else(PoisonError::into_inner);
     if messages.is_empty() {
         bound.remove(vehicle_id);
     } else {
-        bound.insert(vehicle_id.to_owned(), Arc::new(messages));
+        bound.insert(vehicle_id.to_owned(), messages);
     }
 }
 
@@ -463,21 +512,28 @@ pub fn for_vehicle(vehicle_ids: &[String]) -> Option<Arc<Messages>> {
 /// is bound to: a vehicle's commit is not known before its first frames.
 pub fn publish_checksums(dialect: &Dialect) {
     let mut sums = CHECKSUMS.write().unwrap_or_else(PoisonError::into_inner);
-    sums.insert(
-        dialect.id.clone(),
-        dialect
-            .messages
-            .iter()
-            .map(|m| (m.id, m.crc_extra))
-            .collect(),
-    );
+    sums.forget(&dialect.id);
+    let own: Vec<(u32, u8)> = dialect
+        .messages
+        .iter()
+        .map(|m| (m.id, m.crc_extra))
+        .collect();
+    for (id, extra) in &own {
+        *sums
+            .seeds
+            .entry(*id)
+            .or_default()
+            .entry(*extra)
+            .or_default() += 1;
+    }
+    sums.by_dialect.insert(dialect.id.clone(), own);
 }
 
 pub fn forget_checksums(dialect_id: &str) {
     CHECKSUMS
         .write()
         .unwrap_or_else(PoisonError::into_inner)
-        .remove(dialect_id);
+        .forget(dialect_id);
 }
 
 /// Whether whole-frame bytes hold a checksum that some added dialect's
@@ -497,13 +553,11 @@ pub fn checksum_matches(bytes: &[u8]) -> bool {
     };
     let sent = u16::from_le_bytes([sent[0], sent[1]]);
     let sums = CHECKSUMS.read().unwrap_or_else(PoisonError::into_inner);
-    if sums.is_empty() {
+    let Some(seeds) = sums.seeds.get(&id) else {
         return false;
-    }
+    };
     let body = x25(0xFFFF, &bytes[1..end]);
-    sums.values()
-        .flatten()
-        .any(|(of, extra)| *of == id && x25(body, &[*extra]) == sent)
+    seeds.keys().any(|extra| x25(body, &[*extra]) == sent)
 }
 
 /// A MAVLink 2 frame from system 1, component 1, of a payload up to 255
@@ -551,12 +605,12 @@ struct Parsed {
     commands: Vec<CustomCommand>,
 }
 
-/// Longest description kept, in characters.
-const DESCRIPTION: usize = 400;
-
+/// A description with its white space collapsed, kept whole (maintainer,
+/// 2026-11-15): MAVLink's own files have some of 5,003 characters, and one
+/// cut at 400 ended mid-sentence without saying so.
 fn description(text: &str) -> Option<String> {
     let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!words.is_empty()).then(|| words.chars().take(DESCRIPTION).collect())
+    (!words.is_empty()).then_some(words)
 }
 
 fn attribute(tag: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
@@ -579,9 +633,28 @@ fn entry_value(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
+/// The longest name read from a dialect file: a message's, a field's, an
+/// enum's or an entry's. The file comes from outside UXDuck, and a name
+/// goes with every frame the inspector lists and every command a plan
+/// offers, so it is bounded here. The longest in MAVLink's and ArduPilot's
+/// own files is 63 characters (2026-11). A longer one is refused in words
+/// and never cut.
+pub const MAX_NAME: usize = 64;
+
+/// Why a name is too long to read, or None when it is not.
+fn too_long(whose: &str, name: &str) -> Option<String> {
+    let length = name.chars().count();
+    (length > MAX_NAME).then(|| {
+        let start: String = name.chars().take(MAX_NAME).collect();
+        format!(
+            "{whose} name is {length} characters, more than the {MAX_NAME} UXDuck reads of a \
+             name in a dialect file. It starts {start}"
+        )
+    })
+}
+
 fn valid_name(name: &str, upper: bool) -> bool {
     !name.is_empty()
-        && name.len() <= 64
         && name.bytes().all(|b| {
             b.is_ascii_digit()
                 || b == b'_'
@@ -640,6 +713,9 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                 match tag.name().as_ref() {
                     "message" => {
                         let name = attribute(tag, "name").unwrap_or_default();
+                        if let Some(why) = too_long("a message's", &name) {
+                            return Err(why);
+                        }
                         let id = attribute(tag, "id")
                             .and_then(|id| id.parse::<u32>().ok())
                             .filter(|id| *id < 1 << 24)
@@ -666,7 +742,15 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                         let Some(open) = message.as_mut() else {
                             continue;
                         };
+                        // MAVLink's generators take at most 64 fields. Said
+                        // at the first too many, so the rest are not read.
+                        if open.fields.len() == 64 {
+                            return Err(format!("{}: a message has 1 to 64 fields", open.name));
+                        }
                         let name = attribute(tag, "name").unwrap_or_default();
+                        if let Some(why) = too_long(&format!("{}: a field's", open.name), &name) {
+                            return Err(why);
+                        }
                         if !valid_name(&name, false) {
                             return Err(format!(
                                 "{}: a field's name {name:?} is not valid",
@@ -705,6 +789,9 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                     }
                     "enum" if message.is_none() => {
                         let name = attribute(tag, "name").unwrap_or_default();
+                        if let Some(why) = too_long("an enum's", &name) {
+                            return Err(why);
+                        }
                         if !valid_name(&name, false) {
                             return Err(format!("an enum's name {name:?} is not valid"));
                         }
@@ -727,6 +814,11 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                             continue;
                         };
                         let name = attribute(tag, "name").unwrap_or_default();
+                        // Refused in words: skipped, a too long name's value
+                        // would show as a bare number with nothing said.
+                        if let Some(why) = too_long(&format!("{}: an entry's", open.name), &name) {
+                            return Err(why);
+                        }
                         let value = attribute(tag, "value").and_then(|v| entry_value(&v));
                         let (true, Some(value)) = (valid_name(&name, false), value) else {
                             continue;
@@ -748,7 +840,6 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                                 command = Some(opened);
                             }
                         }
-                        open.entries.retain(|e| e.value != value);
                         open.entries.push(EnumEntry { value, name });
                     }
                     "param" => {
@@ -816,7 +907,7 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                 }
                 "message" => {
                     if let Some(mut done) = message.take() {
-                        if done.fields.is_empty() || done.fields.len() > 64 {
+                        if done.fields.is_empty() {
                             return Err(format!("{}: a message has 1 to 64 fields", done.name));
                         }
                         let size: usize = done.fields.iter().map(CustomField::size).sum();
@@ -832,7 +923,9 @@ fn parse(xml: &str) -> Result<Parsed, String> {
                 }
                 "enum" => {
                     in_commands = false;
-                    if let Some(done) = found.take() {
+                    if let Some(mut done) = found.take() {
+                        // The last entry of a value is the one kept.
+                        done.entries = last_wins(done.entries, false);
                         out.enums.push(done);
                     }
                 }
@@ -1203,6 +1296,7 @@ mod tests {
 
     #[test]
     fn a_changed_messages_checksum_is_accepted_once_published() {
+        let _turn = checksums_in_turn();
         let mut acme = dialect(read(&[("acme.xml", ACME)]).unwrap(), "Acme");
         acme.id = "checksum-test".into();
         let changed = acme
@@ -1223,5 +1317,217 @@ mod tests {
 
     fn mavlink2(id: u32, payload: &[u8], extra: u8) -> Vec<u8> {
         frame(id, payload, extra)
+    }
+
+    /// A dialect file with this many new messages, each naming its own enum,
+    /// one enum of `entries` entries, and this many new commands.
+    fn large(messages: u32, entries: u32, commands: u32, description: &str) -> String {
+        use std::fmt::Write as _;
+        let mut xml = String::from("<mavlink><enums>");
+        for n in 0..messages {
+            let _ = write!(
+                xml,
+                "<enum name=\"ACME_KIND_{n}\"><entry value=\"1\" name=\"ACME_KIND_{n}_ON\"/></enum>"
+            );
+        }
+        xml.push_str("<enum name=\"ACME_WIDE\">");
+        for n in 0..entries {
+            let _ = write!(xml, "<entry value=\"{n}\" name=\"ACME_WIDE_{n}\"/>");
+        }
+        xml.push_str("</enum><enum name=\"MAV_CMD\">");
+        for n in 0..commands {
+            let _ = write!(
+                xml,
+                "<entry value=\"{}\" name=\"MAV_CMD_ACME_{n}\"/>",
+                40_000 + n
+            );
+        }
+        xml.push_str("</enum></enums><messages>");
+        for n in 0..messages {
+            let _ = write!(
+                xml,
+                "<message id=\"{}\" name=\"ACME_MESSAGE_{n}\"><description>{description}</description>\
+                 <field type=\"uint8_t\" name=\"kind\" enum=\"ACME_KIND_{n}\"/>\
+                 <field type=\"uint32_t\" name=\"wide\" enum=\"ACME_WIDE\"/></message>",
+                50_000 + n
+            );
+        }
+        xml.push_str("</messages></mavlink>");
+        xml
+    }
+
+    /// No fixed number of messages, enums, entries or commands (maintainer,
+    /// 2026-11-15): each was refused past 256, 64, 1,024 and 256.
+    #[test]
+    fn a_dialect_keeps_however_many_messages_enums_entries_and_commands_its_files_hold() {
+        let _turn = checksums_in_turn();
+        let xml = large(300, 1_100, 300, "Acme");
+        let read = read(&[("acme.xml", &xml)]).unwrap();
+        assert_eq!(read.messages.len(), 300);
+        assert_eq!(read.enums.len(), 301);
+        let wide = read.enums.iter().find(|e| e.name == "ACME_WIDE").unwrap();
+        assert_eq!(wide.entries.len(), 1_100);
+        assert_eq!(read.commands.len(), 300);
+
+        // And they decode: the last message, and a frame of it is accepted.
+        let mut acme = dialect(read, "Acme");
+        acme.id = "large-test".into();
+        let messages = Messages::of([&acme]);
+        // The wide field comes first on the wire: 1,099, then kind 1.
+        let payload = [75, 4, 0, 0, 1];
+        let decoded = messages.decode(50_299, &payload).unwrap();
+        assert_eq!(decoded.name, "ACME_MESSAGE_299");
+        assert_eq!(decoded.labels["kind"], "ACME_KIND_299_ON");
+        assert_eq!(decoded.labels["wide"], "ACME_WIDE_1099");
+        let extra = messages.get(50_299).unwrap().crc_extra;
+        let frame = mavlink2(50_299, &payload, extra);
+        publish_checksums(&acme);
+        assert!(checksum_matches(&frame));
+        forget_checksums("large-test");
+        assert!(!checksum_matches(&frame));
+    }
+
+    /// MAVLink's own files have descriptions of 5,003 characters. One was
+    /// cut at 400 without a word.
+    #[test]
+    fn a_description_is_kept_whole() {
+        let long = "Sets the survey grid and says how each leg is flown. ".repeat(40);
+        let long = long.trim();
+        assert!(long.chars().count() > 2_000);
+        let xml = large(1, 1, 1, long);
+        let read = read(&[("acme.xml", &xml)]).unwrap();
+        assert_eq!(read.messages[0].description.as_deref(), Some(long));
+    }
+
+    /// A name is at most 64 characters, said with how long it is. An entry's
+    /// was skipped without a word, and a message's was called badly spelt.
+    #[test]
+    fn a_name_longer_than_a_dialect_file_may_have_is_refused_with_its_length() {
+        use std::fmt::Write as _;
+        let name = format!("ACME_{}", "LONG_".repeat(12));
+        assert_eq!(name.len(), 65);
+        let said = "name is 65 characters, more than the 64 UXDuck reads of a name";
+        let message = format!(
+            "<mavlink><messages><message id=\"50000\" name=\"{name}\">\
+             <field type=\"uint8_t\" name=\"a\"/></message></messages></mavlink>"
+        );
+        let error = read(&[("m.xml", &message)]).unwrap_err();
+        assert!(error.contains(said), "{error}");
+        let entry = format!(
+            "<mavlink><enums><enum name=\"ACME_KIND\"><entry value=\"1\" name=\"{name}\"/></enum></enums>\
+             <messages><message id=\"50000\" name=\"ACME\">\
+             <field type=\"uint8_t\" name=\"a\" enum=\"ACME_KIND\"/></message></messages></mavlink>"
+        );
+        let error = read(&[("e.xml", &entry)]).unwrap_err();
+        assert!(error.contains(said), "{error}");
+        assert!(error.contains("ACME_KIND: an entry's"), "{error}");
+        // 64 is read, as MAVLink's longest, 63, is.
+        let fits = message.replace(&name, &name[..64]);
+        assert_eq!(
+            read(&[("m.xml", &fits)]).unwrap().messages[0].name.len(),
+            64
+        );
+        // More fields than MAVLink's generators take are refused at the first.
+        let fields = (0..65).fold(String::new(), |mut all, n| {
+            let _ = write!(all, "<field type=\"uint8_t\" name=\"f{n}\"/>");
+            all
+        });
+        let many = format!(
+            "<mavlink><messages><message id=\"50000\" name=\"ACME\">{fields}</message></messages></mavlink>"
+        );
+        let error = read(&[("f.xml", &many)]).unwrap_err();
+        assert!(error.contains("1 to 64 fields"), "{error}");
+    }
+
+    /// The entry given last wins its value in one enum, and its value or its
+    /// name across files, as when each was looked for among all the others.
+    #[test]
+    fn the_last_entry_wins_a_value_or_a_name_as_before() {
+        let entry = |value: u64, name: &str| EnumEntry {
+            value,
+            name: name.to_owned(),
+        };
+        let mut state = 7_u64;
+        let mut next = |under: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % under
+        };
+        let entries: Vec<EnumEntry> = (0..2_000)
+            .map(|_| entry(next(300), &format!("N{}", next(300))))
+            .collect();
+        for names in [false, true] {
+            let mut slow: Vec<EnumEntry> = Vec::new();
+            for found in &entries {
+                slow.retain(|e| e.value != found.value && (!names || e.name != found.name));
+                slow.push(found.clone());
+            }
+            assert_eq!(last_wins(entries.clone(), names), slow, "names: {names}");
+        }
+        let xml = "<mavlink><enums><enum name=\"ACME_KIND\">\
+            <entry value=\"1\" name=\"ACME_KIND_OLD\"/><entry value=\"1\" name=\"ACME_KIND_NEW\"/>\
+            </enum></enums><messages><message id=\"50000\" name=\"ACME\">\
+            <field type=\"uint8_t\" name=\"a\" enum=\"ACME_KIND\"/></message></messages></mavlink>";
+        let kept = read(&[("a.xml", xml)]).unwrap();
+        assert_eq!(kept.enums[0].entries, [entry(1, "ACME_KIND_NEW")]);
+    }
+
+    /// Many dialects taking names and ids from each other give the same
+    /// messages as when every message was looked for among all the others.
+    #[test]
+    fn the_newest_dialect_wins_among_thousands_of_messages_as_before() {
+        let mut state = 11_u64;
+        let mut next = |under: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % under
+        };
+        let template = read(&[("acme.xml", ACME)]).unwrap().messages[0].clone();
+        let dialects: Vec<Dialect> = (0..40)
+            .map(|d| {
+                let mut one = dialect(read(&[("acme.xml", ACME)]).unwrap(), &format!("D{d}"));
+                one.messages = (0..100)
+                    .map(|_| CustomMessage {
+                        id: 50_000 + u32::try_from(next(700)).unwrap(),
+                        name: format!("ACME_{}", next(700)),
+                        ..template.clone()
+                    })
+                    .collect();
+                one
+            })
+            .collect();
+        let mut slow: HashMap<u32, (CustomMessage, String)> = HashMap::new();
+        for one in &dialects {
+            for message in &one.messages {
+                slow.retain(|_, (m, _)| m.name != message.name);
+                slow.insert(message.id, (message.clone(), one.label.clone()));
+            }
+        }
+        assert_eq!(Messages::of(&dialects).by_id, slow);
+    }
+
+    /// Two dialects may give the same seed for an id: it is accepted until
+    /// the last of them is removed, and a dialect added again loses the
+    /// seeds it no longer has.
+    #[test]
+    fn a_seed_stays_while_any_dialect_gives_it() {
+        let _turn = checksums_in_turn();
+        let mut one = dialect(read(&[("acme.xml", ACME)]).unwrap(), "One");
+        one.id = "seed-one".into();
+        let mut two = one.clone();
+        two.id = "seed-two".into();
+        let changed = one.messages.iter().find(|m| m.id == 43_001).unwrap();
+        let payload = vec![1_u8; changed.fields.iter().map(CustomField::size).sum()];
+        let frame = mavlink2(43_001, &payload, changed.crc_extra);
+        publish_checksums(&one);
+        publish_checksums(&two);
+        forget_checksums("seed-one");
+        assert!(checksum_matches(&frame), "the other still gives it");
+        two.messages.retain(|m| m.id != 43_001);
+        publish_checksums(&two);
+        assert!(!checksum_matches(&frame), "added again without it");
+        forget_checksums("seed-two");
     }
 }

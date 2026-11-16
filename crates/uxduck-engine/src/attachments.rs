@@ -23,9 +23,6 @@ use crate::{ConnectionId, Engine};
 /// The most `attachment/read` returns at once.
 const READ_MAX: usize = 64 * 1024;
 
-/// At most this many uploads open on one connection.
-const OPEN_MAX: usize = thread::MAX_ATTACHMENTS;
-
 /// Uploads begun and not yet sent with a message.
 #[derive(Debug, Default)]
 pub(crate) struct Uploads {
@@ -312,18 +309,8 @@ fn begin(
             "A file attached to a message is at most 8 GB.",
         ));
     }
-    let open = engine
-        .uploads
-        .open
-        .values()
-        .filter(|u| u.connection == connection)
-        .count();
-    if open >= OPEN_MAX {
-        return Err(ApiError::new(
-            ErrorKind::Busy,
-            format!("At most {OPEN_MAX} files at once. Send or remove one first."),
-        ));
-    }
+    // However many files are open at once (maintainer, 2026-11-15): one costs
+    // its bytes on disk, and a full disk is said in the computer's own words.
     let id = format!("at{}", &engine.random.token()[..16]);
     // An empty file is whole as it begins.
     engine

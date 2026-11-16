@@ -543,3 +543,136 @@ fn a_dialect_is_bound_again_when_the_journal_is_replayed() {
         "{listed}"
     );
 }
+
+/// A dialect file of one message nothing else has.
+fn one_message(n: u32) -> String {
+    format!(
+        "<mavlink><messages><message id=\"{}\" name=\"ACME_PART_{n}\">\
+         <field type=\"uint8_t\" name=\"a\"/></message></messages></mavlink>",
+        51_000 + n
+    )
+}
+
+/// No fixed number of dialects or of commits one matches, and a name a
+/// person types is kept whole (maintainer, 2026-11-15): the 65th dialect,
+/// the 33rd commit and a name past 64 characters were refused.
+#[test]
+fn dialects_their_commits_and_their_names_have_no_fixed_size() {
+    let (mut engine, mut ui) = engine();
+    for n in 0..100_u32 {
+        let added = call(
+            &mut engine,
+            &mut ui,
+            "mavlink/dialects/add",
+            json!({
+                "files": [{ "name": format!("part{n}.xml"), "text": one_message(n) }],
+                "everyVehicle": true
+            }),
+        );
+        assert!(added["error"].is_null(), "{n}: {added}");
+    }
+    assert_eq!(engine.state().dialects.len(), 100);
+    heard(&mut engine, "many", None);
+    assert_eq!(
+        inspected("many", 51_099, &[1])["name"],
+        "ACME_PART_99",
+        "the hundredth decodes"
+    );
+
+    let commits: Vec<String> = (0..200_u32)
+        .map(|n| format!("{:08x}", 0xabc0_0000 + n))
+        .collect();
+    let long = "Acme survey quad, long range build ".repeat(10);
+    let long = long.trim();
+    let added = add(
+        &mut engine,
+        &mut ui,
+        json!({ "commits": commits, "label": long }),
+    );
+    assert_eq!(added["result"]["label"], long, "{added}");
+    assert_eq!(added["result"]["commits"].as_array().unwrap().len(), 200);
+    let id = added["result"]["id"].as_str().unwrap().to_owned();
+    let mut more = commits.clone();
+    more.push("ABC00000".into());
+    more.push("0123abcd".into());
+    let bound = call(
+        &mut engine,
+        &mut ui,
+        "mavlink/dialects/bind",
+        json!({ "id": id, "commits": more }),
+    );
+    assert_eq!(
+        bound["result"]["commits"].as_array().unwrap().len(),
+        201,
+        "one given twice is kept once: {bound}"
+    );
+    heard(&mut engine, "last", Some("abc000c7"));
+    assert_eq!(
+        inspected("last", 43_001, &acme_status())["name"],
+        "ACME_STATUS",
+        "the 200th commit's vehicle uses it"
+    );
+}
+
+/// What stays bounded is said with its measured size: more than 8 MB of
+/// XML at once.
+#[test]
+fn files_too_large_together_are_refused_with_their_size() {
+    let (mut engine, mut ui) = engine();
+    let padded = format!("{}<!--{}-->", one_message(0), "x".repeat(9 << 20));
+    let refused = call(
+        &mut engine,
+        &mut ui,
+        "mavlink/dialects/add",
+        json!({ "files": [{ "name": "big.xml", "text": padded }], "everyVehicle": true }),
+    );
+    assert_eq!(
+        refused["error"]["message"],
+        "the files are 9.1 MB together, more than the 8 MB of dialect XML UXDuck reads at once. \
+         ArduPilot's whole set is under 1 MB"
+    );
+    assert!(engine.state().dialects.is_empty());
+}
+
+/// Vehicles the same dialects describe share one copy of their messages,
+/// and a vehicle heard again is not given another: a dialect has no fixed
+/// number of messages, so its size is paid once and not once a vehicle.
+#[test]
+fn vehicles_of_the_same_dialects_share_their_messages() {
+    use std::sync::Arc;
+    use uxduck_mavlink::custom::for_vehicle;
+    let (mut engine, mut ui) = engine();
+    let added = add(&mut engine, &mut ui, json!({ "commits": ["5ba1e0aa"] }));
+    let id = added["result"]["id"].as_str().unwrap().to_owned();
+    heard(&mut engine, "share-a", Some("5ba1e0aa"));
+    heard(&mut engine, "share-b", Some("5ba1e0aa"));
+    let of = |vehicle: &str| for_vehicle(&[vehicle.to_owned()]);
+    let first = of("share-a").unwrap();
+    assert!(Arc::ptr_eq(&first, &of("share-b").unwrap()));
+    heard(&mut engine, "share-a", Some("5ba1e0aa"));
+    assert!(
+        Arc::ptr_eq(&first, &of("share-a").unwrap()),
+        "not built again"
+    );
+
+    // Bound to another commit, neither has it. Bound back, both have the
+    // dialect as it is now.
+    let bind = |engine: &mut Engine, ui: &mut Client, commit: &str| {
+        let bound = call(
+            engine,
+            ui,
+            "mavlink/dialects/bind",
+            json!({ "id": id, "commits": [commit] }),
+        );
+        assert!(bound["error"].is_null(), "{bound}");
+    };
+    bind(&mut engine, &mut ui, "0ddba11a");
+    assert!(of("share-a").is_none() && of("share-b").is_none());
+    bind(&mut engine, &mut ui, "5ba1e0aa");
+    let again = of("share-a").unwrap();
+    assert!(Arc::ptr_eq(&again, &of("share-b").unwrap()));
+    assert_eq!(
+        inspected("share-b", 43_001, &acme_status())["name"],
+        "ACME_STATUS"
+    );
+}

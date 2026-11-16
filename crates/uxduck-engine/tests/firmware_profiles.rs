@@ -430,14 +430,6 @@ fn a_profile_without_a_commit_may_only_add_messages() {
 fn a_named_profile_keeps_its_name_over_its_own_label_and_can_be_renamed() {
     let asked = Asked::default();
     let (mut engine, mut ui) = engine(Some(&asked));
-    let long = call(
-        &mut engine,
-        &mut ui,
-        "firmware/add",
-        json!({ "url": URL, "name": "x".repeat(65) }),
-    );
-    assert_eq!(long["error"]["data"]["kind"], "invalid-value", "{long}");
-
     let added = call(
         &mut engine,
         &mut ui,
@@ -517,4 +509,141 @@ fn without_a_way_to_fetch_a_profile_is_refused() {
         "{refused}"
     );
     assert!(engine.state().firmware_profiles.is_empty());
+}
+
+/// A dialect file of one message nothing else has.
+fn one_message(n: u32) -> String {
+    format!(
+        "<mavlink><messages><message id=\"{}\" name=\"ACME_PART_{n}\">\
+         <field type=\"uint8_t\" name=\"a\"/></message></messages></mavlink>",
+        51_000 + n
+    )
+}
+
+/// No fixed number of profiles, and a name a person types is kept whole
+/// (maintainer, 2026-11-15): the 17th was refused, and a name past 64.
+#[test]
+fn profiles_have_no_fixed_number_and_a_typed_name_no_fixed_length() {
+    let asked = Asked::default();
+    let (mut engine, mut ui) = engine(Some(&asked));
+    for n in 100..140 {
+        let added = call(
+            &mut engine,
+            &mut ui,
+            "firmware/add",
+            json!({ "url": format!("https://ci.acme.example/builds/r{n}/profile.json") }),
+        );
+        assert!(added["error"].is_null(), "{n}: {added}");
+    }
+    assert_eq!(engine.state().firmware_profiles.len(), 40);
+    assert_eq!(asked.take().len(), 40, "each is fetched");
+
+    let long = "Acme survey quad, long range build ".repeat(10);
+    let long = long.trim();
+    let named = call(
+        &mut engine,
+        &mut ui,
+        "firmware/add",
+        json!({ "url": URL, "name": long }),
+    );
+    assert_eq!(named["result"]["label"], long, "{named}");
+    let id = named["result"]["id"].as_str().unwrap().to_owned();
+    let longer = format!("{long} with the new gimbal");
+    let renamed = call(
+        &mut engine,
+        &mut ui,
+        "firmware/rename",
+        json!({ "id": id, "name": longer }),
+    );
+    assert_eq!(renamed["result"]["label"], longer, "{renamed}");
+
+    // An address too long to fetch is said to be that, with its length.
+    let far = format!("https://ci.acme.example/{}", "a".repeat(2_100));
+    let refused = call(&mut engine, &mut ui, "firmware/add", json!({ "url": far }));
+    assert_eq!(
+        refused["error"]["message"],
+        "the address is 2124 characters, more than the 2048 UXDuck fetches"
+    );
+}
+
+/// A profile names however many dialect files (2026-11-15): past 8 it was
+/// refused, and ArduPilot's own set is 9. They are fetched one at a time.
+#[test]
+fn a_profile_names_however_many_dialect_files_fetched_one_at_a_time() {
+    let asked = Asked::default();
+    let (mut engine, mut ui) = engine(Some(&asked));
+    let added = call(&mut engine, &mut ui, "firmware/add", json!({ "url": URL }));
+    let id = added["result"]["id"].as_str().unwrap().to_owned();
+    asked.take();
+    let names: Vec<String> = (0..12).map(|n| format!("part{n}.xml")).collect();
+    let text = json!({
+        "uxduck": "firmware/1", "label": "Acme parts", "firmware": "ArduCopter",
+        "commit": COMMIT, "dialects": names
+    })
+    .to_string();
+    fetched(&mut engine, &id, Ok(&text));
+    for n in 0..12_u32 {
+        let orders = asked.take();
+        let wanted = format!("{id}#1#{n}");
+        assert!(
+            matches!(&orders[..], [DefinitionsOrder::FetchProfile { id: one, url }]
+                if *one == wanted && url.ends_with(&format!("/part{n}.xml"))),
+            "{n}: {orders:?}"
+        );
+        assert!(engine.state().dialects.is_empty(), "not before the last");
+        fetched(&mut engine, &wanted, Ok(&one_message(n)));
+    }
+    assert!(asked.take().is_empty());
+    let dialect = engine.state().dialects.values().next().unwrap();
+    assert_eq!(dialect.messages.len(), 12);
+    assert_eq!(dialect.files.len(), 12);
+    let listed = call(&mut engine, &mut ui, "firmware/list", json!({}));
+    assert!(
+        listed["result"]["profiles"][0].get("problem").is_none(),
+        "{listed}"
+    );
+}
+
+/// What stays bounded is said with its measured size: a fork's files of more
+/// than 8 MB together, with the rest not fetched, and a label from a fork's
+/// file of more than 64 characters.
+#[test]
+fn files_too_large_together_and_a_label_too_long_are_refused_with_their_size() {
+    let asked = Asked::default();
+    let (mut engine, mut ui) = engine(Some(&asked));
+    let added = call(&mut engine, &mut ui, "firmware/add", json!({ "url": URL }));
+    let id = added["result"]["id"].as_str().unwrap().to_owned();
+    let text = json!({
+        "uxduck": "firmware/1", "label": "Acme big", "firmware": "ArduCopter",
+        "commit": COMMIT, "dialects": ["a.xml", "b.xml", "c.xml", "d.xml"]
+    })
+    .to_string();
+    fetched(&mut engine, &id, Ok(&text));
+    asked.take();
+    let padded = |n: u32, bytes: usize| format!("{}<!--{}-->", one_message(n), "x".repeat(bytes));
+    fetched(&mut engine, &format!("{id}#1#0"), Ok(&padded(0, 5 << 20)));
+    assert_eq!(asked.take().len(), 1, "the second is asked for");
+    fetched(&mut engine, &format!("{id}#1#1"), Ok(&padded(1, 4 << 20)));
+    assert!(asked.take().is_empty(), "the third and fourth are not");
+    assert!(engine.state().dialects.is_empty());
+    let listed = call(&mut engine, &mut ui, "firmware/list", json!({}));
+    assert_eq!(
+        listed["result"]["profiles"][0]["problem"],
+        "the files are 9.1 MB together, more than the 8 MB of dialect XML UXDuck reads at once. \
+         ArduPilot's whole set is under 1 MB. 2 more of its files were not fetched"
+    );
+
+    let label = "Acme-".repeat(13);
+    assert_eq!(label.chars().count(), 65);
+    let text = json!({
+        "uxduck": "firmware/1", "label": label, "firmware": "ArduCopter", "dialects": ["a.xml"]
+    })
+    .to_string();
+    fetched(&mut engine, &id, Ok(&text));
+    let listed = call(&mut engine, &mut ui, "firmware/list", json!({}));
+    assert_eq!(
+        listed["result"]["profiles"][0]["problem"],
+        "the profile's label is 65 characters, more than the 64 UXDuck reads of a label from a \
+         fork's file"
+    );
 }

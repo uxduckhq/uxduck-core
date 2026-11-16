@@ -234,7 +234,14 @@ fn read_own(dir: &Path, id: &str) -> Result<DefinitionSet, String> {
     gunzip_set(&bytes)
 }
 
+/// How many fetches run at once. The rest wait their turn, so refreshing
+/// however many firmware profiles and sets a person keeps opens this many
+/// sockets and not one each. A pool's size, not a limit on what is kept.
+static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
 async fn get(url: &str) -> Result<Vec<u8>, String> {
+    // Never closed, so a turn always comes.
+    let _turn = FETCHES.acquire().await;
     let client = crate::sim::catalogue::client()?;
     let response = client
         .get(url)

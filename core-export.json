@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "298769ee9e590b60885c578bf08921cc96b7d094",
+  "sourceCommit": "fe4f44e9ebe800a264f4c7023a557940658cc98d",
   "licenseReady": true,
   "files": [
     {
@@ -5516,7 +5516,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/settings.rs",
-      "sha256": "905773502bf97b140ed36b38bc140f1587078dd4fe2f51a902725345dbd436c3",
+      "sha256": "e7ee7b5c2435c33e68f7fccbb28f52d90cdf933dc640568627498767a8549340",
       "executable": false
     },
     {
@@ -5561,7 +5561,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/thread.rs",
-      "sha256": "c8d9ef035cdee2d32d932c0268f007f9eb42aac06f5dedca1d1beb003610e763",
+      "sha256": "b9bf15a70f3bd4e2a3ced0d1e516a2e4f4d5d449e27e6dd01cd399282486554a",
       "executable": false
     },
     {
@@ -5716,7 +5716,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/dialect.rs",
-      "sha256": "270384e628d8dc5c483a92716b08c707c92693e8bd912ce4fd8dfba22f25d74b",
+      "sha256": "2ccc2afa633a034ad8774699a09854e11a2bb149e433d73b5263b82f6c457c5a",
       "executable": false
     },
     {
@@ -5871,7 +5871,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/thread.rs",
-      "sha256": "1161cf2476cce1de739c9bdd21909d595e359105b52f18eaaf9fcfa1e01c5844",
+      "sha256": "dd74bd3c8097fa1a4ab12e264512b043a33a5fb0510482ad50d422c03a97da22",
       "executable": false
     },
     {
@@ -5986,7 +5986,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/attachments.rs",
-      "sha256": "1c352b9cdb2a29a59a52f941fa8b5fbd2ea140f208537c36bd0cabbfc501de87",
+      "sha256": "e4d69f8474843a006b7d8b55726d900df39bf44a99e1ac291858099a9de7f0a4",
       "executable": false
     },
     {
@@ -6041,7 +6041,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/dialects.rs",
-      "sha256": "17a12396a1ffb693e73ce2516a206a090c8ee808f0f6d483c63e4dfc22c35dbc",
+      "sha256": "bbc47252998efda13f2e9c81972c3d13dc7e8895157093d142d8259616175e4e",
       "executable": false
     },
     {
@@ -6071,7 +6071,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/firmware_profiles.rs",
-      "sha256": "f2fea59a9d59d042956e748875dd896409b3df4695ce0c620ca0a23e176bff20",
+      "sha256": "13233b9d72bb67188195b8c65316ae7b9865738514bb0cf9228116d2bdaa1727",
       "executable": false
     },
     {
@@ -6136,7 +6136,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/lib.rs",
-      "sha256": "fad0714f20a2d26a7e14fa3afda32a5d07a9ca15ce33014c739e54b328245db2",
+      "sha256": "0080e5eadeae9a6f367483ac0001719023ba91a98a4df0030c3607d2c5076754",
       "executable": false
     },
     {
@@ -6461,7 +6461,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/restart.rs",
-      "sha256": "c7dce7bfb2723f366b834111257de529be1855b05e5c53ecff02f9bd671f6a84",
+      "sha256": "1c30004b1b92c6c07283d29fb5af176053de5d954d065a7874b870e2997f32aa",
       "executable": false
     },
     {
@@ -6486,12 +6486,12 @@
     },
     {
       "path": "crates/uxduck-engine/src/rpc/thread_queue.rs",
-      "sha256": "1e86868c3a2f15cc72f6d7d0c8e0df20a8725d9e348e3b506347e6fb31383ed2",
+      "sha256": "bbeb684b0425230e6ba2c457f2a0a247c0b2510ff49cae20f554d47b09252608",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/src/rpc/threads.rs",
-      "sha256": "28bcde90c4f58eb29f9ed7d8d165087d7ab72f81255bebf63a8693235bff987d",
+      "sha256": "2ea695644e904de6db9e3990f164d326dabb2eecdb00399781b7eb60cafc50df",
       "executable": false
     },
     {
@@ -6666,7 +6666,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/video.rs",
-      "sha256": "2b5541958785182a487cdcc8e8a55d3bf2fdb8e83e8f80da3fdab26a114de92f",
+      "sha256": "7619dd12294a49be53810db66a7068914c0cd101e62d4091676b89dfc835aa15",
       "executable": false
     },
     {
@@ -6696,12 +6696,12 @@
     },
     {
       "path": "crates/uxduck-engine/tests/dialects.rs",
-      "sha256": "a1e7f3427b0226a42562fb248619c77a22ba8e9929f1b93da165eb7d341f0426",
+      "sha256": "ab99f184b7b395abe296305110401adf48d09b7fb42d2f70befeeaf73ebdfc93",
       "executable": false
     },
     {
       "path": "crates/uxduck-engine/tests/firmware_profiles.rs",
-      "sha256": "a75370c406341488d2ae75b78a94fa05b7d05c2ef1b2f0a8dcbeb68577a23220",
+      "sha256": "4aec61575a4b7b5d873df9bd5e388343ad5e8032246ae93cf2fd7d2555b4fd7f",
       "executable": false
     },
     {
@@ -6841,7 +6841,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/custom.rs",
-      "sha256": "0fa3b78d17d5562da8d4dcb82aaccabd25f86508624935a8dc1b5a72f8679be3",
+      "sha256": "009d8583118021ca8c26ec7ab6e76f0c4788165c88736192ea60bd12e0e67822",
       "executable": false
     },
     {
@@ -7016,7 +7016,7 @@
     },
     {
       "path": "crates/uxduck-mavlink/src/sim.rs",
-      "sha256": "4b379b50a411f341f17c88c6631e67d3003e77ae703ce37c28376671736d8cd6",
+      "sha256": "1f507a5119b9a286449786b770ca0869f2cf79f443604c9351ef1f068bd79b28",
       "executable": false
     },
     {
@@ -7891,7 +7891,7 @@
     },
     {
       "path": "crates/uxduck/src/params.rs",
-      "sha256": "78d0910e6f2364a06965c710beccd24aae43a88f14778cd1b67ed75b2a6333e5",
+      "sha256": "e0a8b9f0e522749491b00f898ca9f3872b845f2fcb3139a3f746ebc2c7489d92",
       "executable": false
     },
     {
@@ -8126,12 +8126,12 @@
     },
     {
       "path": "crates/uxduck/src/video/listener.rs",
-      "sha256": "0bc8895065cd93887adacb471c0c155f181c12704c928d029fc4eb34f80c23d8",
+      "sha256": "0de9ff74fff15a6353b713cbfd7dbb1a4b52bef3e5e8548da010aa9f821acaf9",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/video/mod.rs",
-      "sha256": "fbe9170ba7cf2fb0156646f2a03de0b99d4d8157e6a8080211fd1abe11b0fdbc",
+      "sha256": "9c9a2616d72082a2bf5840aea9fe84f9d046967144179e23a8fd8549e996b572",
       "executable": false
     },
     {
@@ -8341,7 +8341,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "8cbc30748656f9a6f7260a356c2e4fbe4e9c054749f58af7ed94101a492966c7",
+      "sha256": "6553b9265f1c4a4286c08b7ead71e6fac2ca9c3c3231f921226d8ad834b14161",
       "executable": false
     },
     {

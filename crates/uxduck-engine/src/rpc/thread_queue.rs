@@ -209,14 +209,11 @@ fn edit_item(
     attachments: &[uxduck_contracts::dto::thread::Attachment],
 ) -> Result<(), ApiError> {
     item.attachments = attachments.iter().map(Into::into).collect();
-    if text.trim().is_empty()
-        || text.len() > 64 * 1024
-        || item.attachments.len() > thread::MAX_ATTACHMENTS
-        || !item.attachments.iter().all(thread::Attachment::fits)
-    {
+    super::threads::message_fits(text)?;
+    if !item.attachments.iter().all(thread::Attachment::fits) {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            "A nonempty message and at most eight valid attachments are required.",
+            super::threads::attachments_do_not_fit(),
         ));
     }
     text.trim().clone_into(&mut item.text);

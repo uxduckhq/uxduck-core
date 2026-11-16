@@ -5,6 +5,8 @@
 //! for the hosts' inspectors, `mavlink/history`, plugins and the
 //! reassembler.
 
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 use uxduck_contracts::dto::dialect::{
     self as dto, DialectAddParams, DialectBindParams, DialectsListResult, DialectsUseParams,
@@ -19,12 +21,49 @@ use uxduck_mavlink::custom;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
-/// The most dialects people may add.
-const MAX_DIALECTS: usize = 64;
-/// The most bytes of XML read at once.
-const MAX_BYTES: usize = 8 << 20;
-/// The most commits one dialect matches.
-const MAX_COMMITS: usize = 32;
+/// The most dialect XML read at once, in bytes: the files of one
+/// `mavlink/dialects/add`, or those a firmware profile names. The files
+/// come from a fork's repository, not from UXDuck, and what is kept of them
+/// is journaled whole, sent whole to each window that lists dialects, and
+/// built into the messages of the vehicles it describes, all on the
+/// engine's own thread. 8 MB of the smallest messages keeps 107,592 of them
+/// in a record of 10.9 MB, read in 0.2 s and built in 45 ms (measured
+/// 2026-11-15, release build, Linux, 4 processors). ArduPilot's whole
+/// set is 0.8 MB and keeps 11 messages, PX4's 0.8 MB and 30. More is refused
+/// with its measured size.
+///
+/// It is the one bound on a dialect. How many dialects there are, how many
+/// commits one matches and how many messages, enums, entries and commands
+/// one keeps have no fixed number (maintainer, 2026-11-15).
+pub(crate) const MAX_XML_BYTES: usize = 8 << 20;
+
+/// Why this much dialect XML is not read, with its measured size, or None
+/// when it is.
+pub(crate) fn too_much_xml(bytes: usize) -> Option<String> {
+    (bytes > MAX_XML_BYTES).then(|| {
+        // Rounded up, so a size just over never reads as 8.0 MB.
+        let tenths = bytes.saturating_mul(10).div_ceil(1 << 20);
+        format!(
+            "the files are {}.{} MB together, more than the {} MB of dialect XML UXDuck reads \
+             at once. ArduPilot's whole set is under 1 MB",
+            tenths / 10,
+            tenths % 10,
+            MAX_XML_BYTES >> 20
+        )
+    })
+}
+
+/// A vehicle's dialects' ids and versions, in the order they apply.
+type MadeFrom = Vec<(String, u64)>;
+
+/// What each vehicle's messages were last published from, and the messages.
+/// A dialect has no fixed number of messages, so a large one is built once
+/// for the vehicles it describes and not once for each, nor again each time
+/// a vehicle changes. A dialect's version moves whenever it does.
+#[derive(Debug, Default)]
+pub(crate) struct Published(
+    std::sync::Mutex<std::collections::HashMap<String, (MadeFrom, Arc<custom::Messages>)>>,
+);
 
 fn actor() -> Actor {
     Actor {
@@ -107,35 +146,74 @@ impl Engine {
         }
     }
 
-    /// Tells the decoders which messages describe this vehicle.
+    /// Tells the decoders which messages describe this vehicle. Nothing is
+    /// built when its dialects are those it was last published with, and the
+    /// vehicles the same dialects describe share one copy of the messages.
     fn publish_vehicle_dialects(&self, vehicle_id: &str) {
-        custom::publish(
-            vehicle_id,
-            custom::Messages::of(self.vehicle_dialects(vehicle_id)),
-        );
+        let dialects = self.vehicle_dialects(vehicle_id);
+        let made_from: MadeFrom = dialects
+            .iter()
+            .map(|d| (d.id.clone(), d.updated_at_us))
+            .collect();
+        let mut published = self
+            .published_dialects
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if published
+            .get(vehicle_id)
+            .is_some_and(|(from, _)| *from == made_from)
+        {
+            return;
+        }
+        let messages = published
+            .values()
+            .find(|(from, _)| *from == made_from)
+            .map_or_else(
+                || Arc::new(custom::Messages::of(dialects)),
+                |(_, messages)| messages.clone(),
+            );
+        custom::publish_shared(vehicle_id, messages.clone());
+        published.insert(vehicle_id.to_owned(), (made_from, messages));
     }
 
     /// Every vehicle's messages and every dialect's checksums, as the
-    /// state has them: at start, and after a dialect changed.
+    /// state has them, at start.
     pub(crate) fn publish_dialects(&self) {
         for dialect in self.state.dialects.values() {
             custom::publish_checksums(dialect);
         }
+        self.publish_vehicles_dialects();
+    }
+
+    fn publish_vehicles_dialects(&self) {
         for id in self.state.vehicles.keys() {
             self.publish_vehicle_dialects(id);
         }
     }
 
-    /// After a change was applied: what it means for the decoders.
+    /// After a change was applied: what it means for the decoders. Only the
+    /// dialect that changed is published again, so adding one costs the same
+    /// however many there are.
     pub(crate) fn dialects_after(&self, change: &Change) {
         match change {
-            Change::DialectUpserted { .. } => self.publish_dialects(),
+            Change::DialectUpserted { dialect } => {
+                custom::publish_checksums(dialect);
+                self.publish_vehicles_dialects();
+            }
             Change::DialectRemoved { id } => {
                 custom::forget_checksums(id);
-                self.publish_dialects();
+                self.publish_vehicles_dialects();
             }
             Change::VehicleUpserted { vehicle } => self.publish_vehicle_dialects(&vehicle.id),
-            Change::VehicleRemoved { id } => custom::publish(id, custom::Messages::default()),
+            Change::VehicleRemoved { id } => {
+                self.published_dialects
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(id);
+                custom::publish(id, custom::Messages::default());
+            }
             _ => {}
         }
     }
@@ -179,7 +257,9 @@ impl Engine {
             }
             return Ok(Vec::new());
         }
+        // However many commits: a fork's every build may be named.
         let mut kept: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for commit in commits {
             let c = commit.trim().to_ascii_lowercase();
             if c.is_empty() {
@@ -190,14 +270,9 @@ impl Engine {
                     "{c} is not a commit: a commit is 7 to 40 hex characters"
                 )));
             }
-            if !kept.contains(&c) {
+            if seen.insert(c.clone()) {
                 kept.push(c);
             }
-        }
-        if kept.len() > MAX_COMMITS {
-            return Err(invalid(format!(
-                "a dialect matches at most {MAX_COMMITS} commits"
-            )));
         }
         Ok(kept)
     }
@@ -303,8 +378,8 @@ impl Engine {
             ));
         }
         let bytes: usize = params.files.iter().map(|f| f.text.len()).sum();
-        if bytes > MAX_BYTES {
-            return Err(invalid("the files are larger than 8 MB together"));
+        if let Some(why) = too_much_xml(bytes) {
+            return Err(invalid(why));
         }
         let files: Vec<(&str, &str)> = params
             .files
@@ -326,9 +401,7 @@ impl Engine {
                 },
                 str::to_owned,
             );
-        if label.chars().count() > 64 {
-            return Err(invalid("a label has at most 64 characters"));
-        }
+        // A name a person types is kept whole, however long (2026-11-15).
         let files: Vec<String> = params.files.iter().map(|f| f.name.clone()).collect();
         let older = self
             .state
@@ -336,11 +409,6 @@ impl Engine {
             .values()
             .find(|d| add_again(d) && d.label == label && d.files == files)
             .cloned();
-        if older.is_none() && self.state.dialects.len() >= MAX_DIALECTS {
-            return Err(invalid(format!(
-                "UXDuck keeps at most {MAX_DIALECTS} dialects. Remove one first"
-            )));
-        }
         let now = self.clock.now_us();
         let mut dialect = Dialect {
             id: older.as_ref().map_or_else(

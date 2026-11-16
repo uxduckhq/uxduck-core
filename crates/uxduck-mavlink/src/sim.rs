@@ -3865,6 +3865,7 @@ mod fork_tests {
     /// and the fork's dialect decodes both.
     #[test]
     fn a_forks_messages_read_by_uxduck_and_decoded_by_the_dialect() {
+        let _turn = crate::custom::checksums_in_turn();
         let mut vehicle = FakeVehicle::new(1, 1);
         vehicle.fork_messages = true;
         vehicle.streams_on_request = false;
