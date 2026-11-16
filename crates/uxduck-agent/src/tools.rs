@@ -252,6 +252,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     // forgetting it are the person's.
     "computer/add",
     "computer/remove",
+    // Its name is the person's, beside the computer's other settings.
+    "computer/rename",
     "computer/check",
     "computer/cameras",
     "computer/network",

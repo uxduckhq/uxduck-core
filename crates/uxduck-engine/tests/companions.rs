@@ -353,6 +353,57 @@ fn a_fifth_computer_is_refused_and_told_why() {
 }
 
 #[test]
+fn a_computer_is_renamed_and_keeps_its_address() {
+    let keys = Keys::default();
+    let mut engine = engine(State::default(), &keys);
+    let mut ui = connect(&mut engine);
+    heard(&mut engine);
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/add",
+        json!({ "vehicleId": "v", "host": "192.168.50.20", "user": "pi" }),
+    );
+    let id = vehicle["companions"][0]["id"].clone();
+
+    let vehicle = ok(
+        &mut engine,
+        &mut ui,
+        "computer/rename",
+        json!({ "vehicleId": "v", "computerId": id, "name": "  Camera Pi " }),
+    );
+    let computer = &vehicle["companions"][0];
+    assert_eq!(computer["name"], "Camera Pi");
+    assert_eq!(computer["host"], "192.168.50.20");
+    assert_eq!(computer["user"], "pi");
+    assert_eq!(
+        engine.state().vehicles["v"].companions[0].name,
+        "Camera Pi",
+        "the name is kept"
+    );
+
+    assert_eq!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/rename",
+            json!({ "vehicleId": "v", "computerId": id, "name": "   " })
+        ),
+        "Give the computer a name."
+    );
+    assert!(
+        refused(
+            &mut engine,
+            &mut ui,
+            "computer/rename",
+            json!({ "vehicleId": "v", "computerId": "cc000000000000", "name": "Pi" })
+        )
+        .contains("not found")
+    );
+    assert_eq!(engine.state().vehicles["v"].companions[0].name, "Camera Pi");
+}
+
+#[test]
 fn a_check_reports_what_the_computer_runs_and_keeps_its_pinned_key() {
     let keys = Keys::default();
     let mut engine = engine(State::default(), &keys);

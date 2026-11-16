@@ -225,7 +225,8 @@ fn check(name: &str) {
             | "computer_check"
             | "computer_connectivity"
             | "computer_network"
-            | "computer_remove",
+            | "computer_remove"
+            | "computer_rename",
         ) => {
             round_trip::<Vehicle>(name, &json);
         }

@@ -151,6 +151,16 @@ pub struct ComputerParams {
     pub computer_id: String,
 }
 
+/// `computer/rename`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRenameParams {
+    pub vehicle_id: String,
+    pub computer_id: String,
+    /// Its new name, trimmed. An empty one is refused.
+    pub name: String,
+}
+
 /// A saved network, without its credentials.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

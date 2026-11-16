@@ -8,7 +8,8 @@
 
 use serde_json::Value;
 use uxduck_contracts::dto::companion::{
-    ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams, WifiSecurity,
+    ComputerAddParams, ComputerCheckParams, ComputerNetworkParams, ComputerParams,
+    ComputerRenameParams, WifiSecurity,
 };
 use uxduck_contracts::dto::companion_cameras::ComputerCamerasParams;
 use uxduck_contracts::dto::vehicle::Vehicle as VehicleDto;
@@ -365,6 +366,32 @@ impl Engine {
                 .map_err(|why| ApiError::new(ErrorKind::Internal, why))?;
         }
         vehicle.companions.push(computer);
+        to_value(&self.save_companions(Some(connection), vehicle))
+    }
+
+    /// `computer/rename`: the name is the person's own, so it changes
+    /// nothing on the computer and can change while a check runs.
+    pub(crate) fn rename_computer(
+        &mut self,
+        connection: ConnectionId,
+        ComputerRenameParams {
+            vehicle_id,
+            computer_id,
+            name,
+        }: ComputerRenameParams,
+    ) -> Result<Value, ApiError> {
+        let mut vehicle = self.companion_vehicle(&vehicle_id)?;
+        let Some(computer) = vehicle.companions.iter_mut().find(|c| c.id == computer_id) else {
+            return Err(ApiError::new(
+                ErrorKind::NotFound,
+                format!("computer {computer_id} not found"),
+            ));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(invalid("Give the computer a name."));
+        }
+        name.clone_into(&mut computer.name);
         to_value(&self.save_companions(Some(connection), vehicle))
     }
 

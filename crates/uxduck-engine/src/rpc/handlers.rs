@@ -167,6 +167,10 @@ pub(crate) fn handle(
             require(Config)?;
             engine.remove_computer(connection, params)
         }
+        ClientRequest::ComputerRename(params) => {
+            require(Config)?;
+            engine.rename_computer(connection, params)
+        }
         ClientRequest::ComputerConnectivity(params) => {
             require(Config)?;
             engine.configure_connectivity(connection, &params)

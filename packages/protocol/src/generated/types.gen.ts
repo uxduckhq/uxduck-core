@@ -2453,6 +2453,9 @@ export type ClientRequest = {
     method: 'computer/remove';
     params: ComputerParams;
 } | {
+    method: 'computer/rename';
+    params: ComputerRenameParams;
+} | {
     method: 'computer/check';
     params: ComputerCheckParams;
 } | {
@@ -4133,6 +4136,18 @@ export type ComputerNetworkParams = {
  */
 export type ComputerParams = {
     computerId: string;
+    vehicleId: string;
+};
+
+/**
+ * `computer/rename`.
+ */
+export type ComputerRenameParams = {
+    computerId: string;
+    /**
+     * Its new name, trimmed. An empty one is refused.
+     */
+    name: string;
     vehicleId: string;
 };
 

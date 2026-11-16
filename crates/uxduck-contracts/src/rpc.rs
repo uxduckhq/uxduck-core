@@ -266,6 +266,10 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `Vehicle`.
     #[serde(rename = "computer/remove")]
     ComputerRemove(crate::dto::companion::ComputerParams),
+    /// Renames a companion computer. The name is the person's own and
+    /// changes nothing on the computer. Needs `config`. Result: `Vehicle`.
+    #[serde(rename = "computer/rename")]
+    ComputerRename(crate::dto::companion::ComputerRenameParams),
     /// Signs in to a companion computer over SSH and reads its system,
     /// architecture and UXDuck version; the answer arrives on the vehicle
     /// as the computer's `check`. With a password, it is used once to add
@@ -2118,7 +2122,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 388] = [
+    pub const METHODS: [&'static str; 389] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2159,6 +2163,7 @@ impl ClientRequest {
         "gripper/status",
         "computer/add",
         "computer/remove",
+        "computer/rename",
         "computer/check",
         "computer/cameras",
         "computer/network",
