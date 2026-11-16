@@ -321,10 +321,65 @@ pub struct FlightFolder {
     /// keep them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deep: bool,
-    /// The last look through its whole tree stopped at the most entries a
-    /// look reads (250,000): a smaller folder is needed.
+    /// Only from UXDuck 0.17 and earlier, whose look through a whole tree
+    /// stopped at 250,000 entries and set this. A tree is read whole now,
+    /// however large (see `walk`), and this is never set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cut: bool,
+    /// What the last look could not read in this folder, each with why: a
+    /// folder that could not be listed, a log that could not be opened or
+    /// read, a log that stops being records before its end, a file named
+    /// as a log that is not one. One page of them, from `notReadOffset`:
+    /// `notReadTotal` says how many there are, and `flights/found` with
+    /// `notRead` reads on. Those that may hold flights come first, then
+    /// the files that are not logs, each by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_read: Vec<NotRead>,
+    /// How many the last look could not read in this folder, in all.
+    #[serde(default, skip_serializing_if = "none")]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub not_read_total: u64,
+    /// How many of them come before `notRead`. Absent at the start.
+    #[serde(default, skip_serializing_if = "none")]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub not_read_offset: u64,
+    /// How many of `notReadTotal` are files named as a log that do not
+    /// begin with a record, such as a build tool's `.tlog`. No flights are
+    /// missing with these, so the Logbook's note does not count them.
+    #[serde(default, skip_serializing_if = "none")]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub not_logs: u64,
+    /// The walk through its whole tree, for a folder with all subfolders
+    /// on: the one under way, or else the last. Absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walk: Option<FolderWalk>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip test")]
+fn none(count: &u64) -> bool {
+    *count == 0
+}
+
+/// A folder or a log that a look could not read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotRead {
+    pub path: String,
+    /// Why, in words for the person, with the system's own for an error.
+    pub why: String,
+}
+
+/// A walk through a folder's whole tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderWalk {
+    /// Files and folders read: so far while it is under way, else in all.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub entries: u64,
+    /// How long it took, in milliseconds. Absent while it is under way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub took_ms: Option<u64>,
 }
 
 /// A flight found in another app's tlog.
@@ -347,6 +402,28 @@ pub struct FoundFlight {
     /// The other app is still writing it: not replayed until it closes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recording: bool,
+}
+
+/// `flights/found`. Params may be omitted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundFlightsParams {
+    /// Reads on through what one folder could not read. Without it every
+    /// folder gives the start of its list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_read: Option<NotReadFrom>,
+}
+
+/// Where to read on in what one folder could not read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotReadFrom {
+    /// The folder's id from `flights/found`.
+    pub folder: String,
+    /// How many to pass over: `notReadOffset` and the length of
+    /// `notRead` in the answer before.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub offset: u64,
 }
 
 /// Result of `flights/found` and `flights/folder`.
@@ -372,8 +449,8 @@ pub struct FlightFolderParams {
     /// Removes a folder the person added.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove: bool,
-    /// Looks through all of an added folder's subfolders (true), or four
-    /// levels as the apps' folders are (false).
+    /// Looks through all of an added folder's subfolders (true), or its top
+    /// level only (false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep: Option<bool>,
 }

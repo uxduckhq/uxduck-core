@@ -1667,8 +1667,7 @@ fn greet(sender: links::Sender, gcs: Arc<AtomicU8>) {
 }
 
 /// Appends frames received or sent to the link's tlog, opening it on the
-/// first frame, and
-/// indexes them for `mavlink/history` once flushed.
+/// first frame, and says where the latest begins once flushed.
 fn record(link_id: &str, open: &mut Open, frames: &[Vec<u8>], at_us: u64) {
     if frames.is_empty() {
         return;
@@ -1681,7 +1680,7 @@ fn record(link_id: &str, open: &mut Open, frames: &[Vec<u8>], at_us: u64) {
             .ok();
     }
     if let Some(log) = open.tlog.as_mut() {
-        let mut written = Vec::with_capacity(frames.len());
+        let mut latest = None;
         for frame in frames {
             let ok = uxduck_mavlink::tlog::record(log, at_us, frame).is_ok();
             if let Some(end) = open.tlog_end.as_mut() {
@@ -1689,15 +1688,17 @@ fn record(link_id: &str, open: &mut Open, frames: &[Vec<u8>], at_us: u64) {
                     open.tlog_end = None;
                     continue;
                 }
-                if let Some(header) = header(frame) {
-                    written.push((header, *end));
+                if header(frame).is_some() {
+                    latest = Some(*end);
                 }
                 *end += 8 + frame.len() as u64;
             }
         }
-        // Indexed only once on disk, so a page never reads past it.
-        if log.flush().is_ok() && !written.is_empty() {
-            crate::tlog_index::indexed(link_id, &written);
+        // Said only once on disk, so a flight never starts past it.
+        if log.flush().is_ok()
+            && let Some(latest) = latest
+        {
+            crate::tlog_index::written(link_id, latest);
         }
     }
 }

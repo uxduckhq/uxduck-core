@@ -422,11 +422,11 @@ pub(crate) fn handle(
         | ClientRequest::SyncRestore(_)) => {
             crate::sync::handle(engine, connection, request, &granted)
         }
-        ClientRequest::FlightsFound(_) => {
+        ClientRequest::FlightsFound(params) => {
             require(Read)?;
             let found = engine
                 .system
-                .found_flights()
+                .found_flights(&params)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
             to_value(&found)
         }

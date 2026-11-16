@@ -205,8 +205,9 @@ impl System for Host {
 
     fn found_flights(
         &mut self,
+        params: &uxduck_contracts::dto::replay::FoundFlightsParams,
     ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
-        Ok(self.found_flights.found())
+        Ok(self.found_flights.found(params))
     }
 
     fn flight_folder(

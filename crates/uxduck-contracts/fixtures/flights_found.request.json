@@ -1,4 +1,9 @@
 {
   "method": "flights/found",
-  "params": {}
+  "params": {
+    "notRead": {
+      "folder": "/Users/pilot/mavproxy",
+      "offset": 100
+    }
+  }
 }

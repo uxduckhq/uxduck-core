@@ -1,207 +1,80 @@
-//! Where each message is in the links' tlogs, for `mavlink/history`'s
-//! received messages: per file, the offsets of its records by system id and
-//! message id, so a page is a few small reads at known places rather than a
-//! scan.
+//! What the links' tlogs hold, read back: for `mavlink/history`'s received
+//! messages ([`page`]), for a report's flight data and for a detailed
+//! diagnostic query ([`packet_page`]).
 //!
-//! The data plane indexes its current file of each link as it writes it
-//! ([`open`], [`indexed`]), which costs a push per frame. Earlier files, from
-//! previous runs or before the link last reopened, are indexed the first
-//! time a page reaches them: one sequential read of the file's last
-//! [`SCAN_BYTES`] (about a quarter of a second for 256 MB from the disk
-//! cache, a few seconds from a slow disk), held in the engine's call, then
-//! kept among the last [`CACHED_FILES`] read.
+//! A log is read backwards from its end, a part at a time ([`Backward`]),
+//! so the newest comes first and none of a log is held between calls. A page
+//! of one message type reads back until it has what was asked for, through
+//! this run's file and every earlier one of the link, however long they are.
+//! One call reads [`LOOK_BYTES`] at most, because it runs in the engine's
+//! call, and answers with what it has and a cursor that goes on from there.
 //!
-//! Memory: at most [`MAX_OFFSETS`] offsets of 4 bytes per file (16 MB, some
-//! eleven hours of a vehicle sending 100 messages a second), for each open
-//! link's file and the cached ones. Past that a file's oldest offsets go,
-//! about a quarter at a time, and its pages end sooner: older ones continue
-//! with the file before it. Offsets past 4 GiB from where indexing started
-//! are not kept.
+//! Until 2026-11-15 this module kept every record's offset by system and
+//! message id, and cut in four places without a word to anyone: a file's
+//! oldest offsets went past 4,194,304 of them, a message type past the
+//! 4,096th of a file was not indexed, only the last 256 MB of an earlier
+//! file was, and nothing past 4 GiB of a file. Stepping back in the
+//! Inspector then jumped over part of a flight or stopped short. It keeps
+//! no index now, so there is nothing to cap.
 //!
 //! A cursor is `t<seconds>.<offset>`: the file's start time from its name
-//! (`<link id>-<unix seconds>.tlog`) and the offset of the last record the
-//! page held. It stays valid while the files exist: once its file is gone,
-//! the pages continue with older files.
+//! (`<link id>-<unix seconds>.tlog`) and the offset of the record the
+//! next page reads back from. It stays valid while the files exist: once its
+//! file is gone, the pages continue with older files.
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
-use uxduck_mavlink::framing::{self, Header};
+use uxduck_mavlink::framing;
 
-/// Offsets kept per file.
-const MAX_OFFSETS: usize = 4 << 20;
-/// Message types (system id and message id) indexed per file; frames of
-/// others past this are not.
-const MAX_KEYS: usize = 4096;
-/// Earlier files' indexes kept; the one read least recently goes first.
-const CACHED_FILES: usize = 4;
-/// How much of an earlier file's end is indexed.
-const SCAN_BYTES: u64 = 256 << 20;
+/// How much of a log is read at a time, going back.
+const PART: u64 = 1 << 20;
+/// How much of the logs one page reads before it answers. Not a limit on
+/// what is read back: the answer's cursor goes on from where it stopped. A
+/// page is read in the engine's call, which this keeps short: a page that
+/// read all of this and found nothing took 150 to 170 ms in a debug build,
+/// from the disk cache (measured 2026-11-15 on a 1.2 GiB log, 4 cores).
+const LOOK_BYTES: u64 = 32 << 20;
 /// The longest a MAVLink frame can be: a v2 header, 255 bytes of payload,
-/// its checksum and a signature.
+/// its checksum and a signature. The protocol fixes it.
 const MAX_FRAME: usize = 10 + 255 + 2 + 13;
+/// The longest record: a stamp and the longest frame.
+const MAX_RECORD: usize = 8 + MAX_FRAME;
 
-/// A message type from one system.
-type Key = (u8, u32);
+/// Each open link's current file, and where its latest record begins.
+static CURRENT: LazyLock<Mutex<HashMap<String, (PathBuf, u64)>>> = LazyLock::new(Mutex::default);
 
-/// One file's records by type, each list in file order.
-#[derive(Debug)]
-pub struct Index {
-    /// Where offsets count from: the start of the file, or for an earlier
-    /// file longer than [`SCAN_BYTES`], the first record indexed.
-    base: u64,
-    offsets: HashMap<Key, Vec<u32>>,
-    total: usize,
-    /// Offsets below it were dropped.
-    floor: u32,
-    cap: usize,
+fn current() -> std::sync::MutexGuard<'static, HashMap<String, (PathBuf, u64)>> {
+    CURRENT.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-impl Index {
-    fn new(base: u64, cap: usize) -> Self {
-        Self {
-            base,
-            offsets: HashMap::new(),
-            total: 0,
-            floor: 0,
-            cap,
-        }
-    }
-
-    /// The record at `offset` in the file holds a frame of `key`. Records
-    /// come in file order.
-    fn add(&mut self, key: Key, offset: u64) {
-        let Some(at) = offset
-            .checked_sub(self.base)
-            .and_then(|at| u32::try_from(at).ok())
-        else {
-            return;
-        };
-        if self.offsets.len() >= MAX_KEYS && !self.offsets.contains_key(&key) {
-            return;
-        }
-        self.offsets.entry(key).or_default().push(at);
-        self.total += 1;
-        if self.total > self.cap {
-            self.trim(at);
-        }
-    }
-
-    /// Drops the oldest offsets until a quarter of the cap is free: each
-    /// round raises the floor halfway to the newest.
-    fn trim(&mut self, newest: u32) {
-        while self.total > self.cap / 4 * 3 && self.floor < newest {
-            self.floor += (newest - self.floor).div_ceil(2);
-            let floor = self.floor;
-            let mut total = 0;
-            self.offsets.retain(|_, list| {
-                let cut = list.partition_point(|&at| at < floor);
-                list.drain(..cut);
-                total += list.len();
-                !list.is_empty()
-            });
-            self.total = total;
-        }
-    }
-
-    /// Up to `n` records of `key` before `before`, newest first, and
-    /// whether more come before the last of them.
-    fn before(&self, key: Key, before: u64, n: usize) -> (Vec<u64>, bool) {
-        let Some(list) = self.offsets.get(&key) else {
-            return (Vec::new(), false);
-        };
-        let bound = before.saturating_sub(self.base);
-        let end = list.partition_point(|&at| u64::from(at) < bound);
-        let start = end.saturating_sub(n);
-        let found = list[start..end]
-            .iter()
-            .rev()
-            .map(|&at| self.base + u64::from(at))
-            .collect();
-        (found, start > 0)
-    }
-}
-
-#[derive(Debug, Default)]
-struct Registry {
-    /// Each open link's current file, indexed as it is written.
-    current: HashMap<String, (PathBuf, Index)>,
-    /// Where each open link's latest record begins in its current file.
-    latest: HashMap<String, u64>,
-    /// Earlier files' indexes, the one read most recently last.
-    earlier: Vec<(PathBuf, Arc<Index>)>,
-}
-
-impl Registry {
-    fn keep(&mut self, path: PathBuf, index: Arc<Index>) {
-        self.earlier.retain(|(kept, _)| *kept != path);
-        if self.earlier.len() >= CACHED_FILES {
-            self.earlier.remove(0);
-        }
-        self.earlier.push((path, index));
-    }
-
-    fn earlier(&mut self, path: &Path) -> Option<Arc<Index>> {
-        let at = self.earlier.iter().position(|(kept, _)| kept == path)?;
-        let entry = self.earlier.remove(at);
-        let index = entry.1.clone();
-        self.earlier.push(entry);
-        Some(index)
-    }
-}
-
-static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Mutex::default);
-
-fn registry() -> std::sync::MutexGuard<'static, Registry> {
-    REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A link's new current file, empty: the one before it, if any, is kept
-/// among the earlier files, whole.
+/// A link's new current file, empty.
 pub fn open(link_id: &str, path: &Path) {
-    let mut registry = registry();
-    if let Some((old, index)) = registry.current.remove(link_id) {
-        registry.keep(old, Arc::new(index));
-    }
-    registry.current.insert(
-        link_id.to_owned(),
-        (path.to_owned(), Index::new(0, MAX_OFFSETS)),
-    );
-    registry.latest.remove(link_id);
+    current().insert(link_id.to_owned(), (path.to_owned(), 0));
 }
 
 /// The file a link writes now, by name, and where its latest record
 /// begins: where a flight beginning now starts in it (ADR-0039 R10).
 pub fn position(link_id: &str) -> Option<(String, u64)> {
-    let registry = registry();
-    let (path, _) = registry.current.get(link_id)?;
+    let current = current();
+    let (path, latest) = current.get(link_id)?;
     let name = path.file_name()?.to_string_lossy().into_owned();
-    Some((name, registry.latest.get(link_id).copied().unwrap_or(0)))
+    Some((name, *latest))
 }
 
-/// The link closed: its file joins the earlier ones.
+/// The link closed.
 pub fn close(link_id: &str) {
-    let mut registry = registry();
-    registry.latest.remove(link_id);
-    if let Some((old, index)) = registry.current.remove(link_id) {
-        registry.keep(old, Arc::new(index));
-    }
+    current().remove(link_id);
 }
 
-/// Records written to the link's current file and flushed: each frame's
-/// header and the offset of its record.
-pub fn indexed(link_id: &str, records: &[(Header, u64)]) {
-    let mut registry = registry();
-    if let Some((_, offset)) = records.last() {
-        registry.latest.insert(link_id.to_owned(), *offset);
-    }
-    if let Some((_, index)) = registry.current.get_mut(link_id) {
-        for (header, offset) in records {
-            index.add((header.system_id, header.message_id), *offset);
-        }
+/// Records were written to the link's current file and flushed: where the
+/// latest of them begins.
+pub fn written(link_id: &str, latest: u64) {
+    if let Some((_, at)) = current().get_mut(link_id) {
+        *at = latest;
     }
 }
 
@@ -214,24 +87,29 @@ pub struct Found {
     pub payload: Vec<u8>,
 }
 
-/// A `before` this module did not write.
+/// Why a page could not be read.
 #[derive(Debug, PartialEq, Eq)]
-pub struct BadCursor;
+pub enum PageError {
+    /// A `before` this module did not write.
+    BadCursor,
+    /// A log that could not be read, in words for the person stepping back.
+    Unreadable(String),
+}
 
 fn cursor(seconds: u64, offset: u64) -> String {
     format!("t{seconds}.{offset}")
 }
 
-fn parse_cursor(text: &str) -> Result<(u64, u64), BadCursor> {
+fn parse_cursor(text: &str) -> Result<(u64, u64), PageError> {
     let digits = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
     let (seconds, offset) = text
         .strip_prefix('t')
         .and_then(|rest| rest.split_once('.'))
         .filter(|(s, o)| digits(s) && digits(o))
-        .ok_or(BadCursor)?;
+        .ok_or(PageError::BadCursor)?;
     Ok((
-        seconds.parse().map_err(|_| BadCursor)?,
-        offset.parse().map_err(|_| BadCursor)?,
+        seconds.parse().map_err(|_| PageError::BadCursor)?,
+        offset.parse().map_err(|_| PageError::BadCursor)?,
     ))
 }
 
@@ -258,12 +136,138 @@ fn files(dir: &Path, link_id: &str) -> Vec<(u64, PathBuf)> {
     files
 }
 
+/// The link's tlogs in `dir`, newest first.
+pub(crate) fn logs(dir: &Path, link_id: &str) -> Vec<PathBuf> {
+    files(dir, link_id)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// A tlog read backwards, a part at a time, so a reader that wants the end
+/// of a log holds [`PART`] of it however long it is.
+pub(crate) struct Backward {
+    file: File,
+    /// What is before this offset is still to read. Always where a record
+    /// begins, or the file's end.
+    end: u64,
+    /// `end` is the file's end, where the last record may not be whole:
+    /// a file still being written, or one a crash cut short.
+    tail: bool,
+    buf: Vec<u8>,
+}
+
+impl Backward {
+    /// The log at `path`, from its end, or from the record at `before`.
+    ///
+    /// # Errors
+    /// When the file cannot be opened.
+    pub(crate) fn open(path: &Path, before: Option<u64>) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        let (end, tail) = match before {
+            Some(at) if at < len => (at, false),
+            _ => (len, true),
+        };
+        Ok(Self {
+            file,
+            end,
+            tail,
+            buf: Vec::new(),
+        })
+    }
+
+    /// The part before the last one given: where it begins in the file,
+    /// and its whole records in file order. None at the file's start.
+    ///
+    /// # Errors
+    /// When the file cannot be read, or what is there is not records that
+    /// end where the part does: a damaged log, or a cursor that points
+    /// into the middle of a record.
+    pub(crate) fn part(&mut self) -> std::io::Result<Option<(u64, &[u8])>> {
+        if self.end == 0 {
+            return Ok(None);
+        }
+        let from = self.end.saturating_sub(PART);
+        let len = usize::try_from(self.end - from).unwrap_or(usize::MAX);
+        self.buf.resize(len, 0);
+        self.file.seek(SeekFrom::Start(from))?;
+        self.file.read_exact(&mut self.buf)?;
+        let Some((skip, stop)) = whole(&self.buf, from == 0, self.tail) else {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("no MAVLink record ends at byte {}", self.end),
+            ));
+        };
+        self.end = from + skip as u64;
+        self.tail = false;
+        Ok(Some((self.end, &self.buf[skip..stop])))
+    }
+}
+
+/// The record at `at`, if a whole one starts there: its stamp and its
+/// length with the stamp.
+fn record_at(bytes: &[u8], at: usize) -> Option<(u64, usize)> {
+    let start = at.checked_add(8)?;
+    let stamp = u64::from_be_bytes(bytes.get(at..start)?.try_into().ok()?);
+    let len = framing::frame_len(bytes.get(start..)?)?;
+    (start + len <= bytes.len()).then_some((stamp, 8 + len))
+}
+
+/// Where whole records run from and to in bytes read from the middle of a
+/// tlog that end where a record ends: the first offset from which records
+/// follow each other exactly to the end. At the file's start that is 0. At
+/// its `tail` the last record may be cut short, and the records stop
+/// before it. None when the bytes are not that.
+///
+/// A record's stamp is eight bytes of anything, so bytes inside the record
+/// that the part begins in can read as a record that leads on to the true
+/// ones. One is taken only when its stamp is within an hour of the next
+/// record's, which four bytes of a payload match by chance once in some
+/// thousand million.
+fn whole(bytes: &[u8], file_start: bool, tail: bool) -> Option<(usize, usize)> {
+    const HOUR_US: u64 = 3_600_000_000;
+    let lands = |mut at: usize| loop {
+        match record_at(bytes, at) {
+            Some((_, len)) => at += len,
+            None if at == bytes.len() => return Some(at),
+            // The rest is the start of one record: its stamp and frame
+            // header, or all of it but its end.
+            None if tail
+                && bytes
+                    .get(at + 8..)
+                    .is_none_or(|rest| framing::frame_len(rest).is_some() || rest.len() < 3) =>
+            {
+                return Some(at);
+            }
+            None => return None,
+        }
+    };
+    if file_start {
+        return lands(0).map(|stop| (0, stop));
+    }
+    (0..=bytes.len().min(MAX_RECORD)).find_map(|at| {
+        let (stamp, len) = record_at(bytes, at)?;
+        if let Some((next, _)) = record_at(bytes, at + len)
+            && stamp.abs_diff(next) > HOUR_US
+        {
+            return None;
+        }
+        lands(at).map(|stop| (at, stop))
+    })
+}
+
 /// Up to `limit` messages of `message_id` from `system_id`, newest first,
 /// from the link's tlogs in `dir`, before `before` (a previous page's
 /// cursor), and the cursor for the page after them.
 ///
+/// A page that has read [`LOOK_BYTES`] answers with what it has, which may
+/// be nothing, and a cursor: the next page goes on from there. No cursor
+/// means the link's logs hold nothing earlier.
+///
 /// # Errors
-/// When `before` is not a cursor this module wrote.
+/// When `before` is not a cursor this module wrote, or a log cannot be
+/// read.
 pub fn page(
     dir: &Path,
     link_id: &str,
@@ -271,128 +275,62 @@ pub fn page(
     message_id: u32,
     before: Option<&str>,
     limit: usize,
-) -> Result<(Vec<Found>, Option<String>), BadCursor> {
+) -> Result<(Vec<Found>, Option<String>), PageError> {
     let before = before.map(parse_cursor).transpose()?;
-    let key = (system_id, message_id);
     let files = files(dir, link_id);
     let mut found = Vec::new();
+    let mut left = LOOK_BYTES;
     for (n, (seconds, path)) in files.iter().enumerate() {
-        let mut bound = match before {
+        let bound = match before {
             Some((from, _)) if *seconds > from => continue,
-            Some((from, offset)) if *seconds == from => offset,
-            _ => u64::MAX,
+            Some((from, offset)) if *seconds == from => Some(offset),
+            _ => None,
         };
-        let Ok(mut file) = File::open(path) else {
-            continue;
+        let unreadable = |error: std::io::Error| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            PageError::Unreadable(format!("UXDuck could not read its log {name}: {error}"))
         };
-        loop {
-            let (offsets, more) = offsets(path, key, bound, limit - found.len());
-            for offset in offsets {
-                bound = offset;
-                if let Some(record) = read(&mut file, offset, key) {
-                    found.push(record);
-                    if found.len() == limit {
-                        let older = (more || n + 1 < files.len()).then(|| cursor(*seconds, offset));
-                        return Ok((found, older));
-                    }
+        let mut log = match Backward::open(path, bound) {
+            Ok(log) => log,
+            // Removed since the folder was listed: the pages go on.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(unreadable(error)),
+        };
+        let older_files = n + 1 < files.len();
+        while let Some((start, bytes)) = log.part().map_err(unreadable)? {
+            left = left.saturating_sub(bytes.len() as u64);
+            let mut offset = start;
+            let mut part = Vec::new();
+            for (at_us, frame) in uxduck_mavlink::tlog::records(bytes) {
+                let at = offset;
+                offset += 8 + frame.len() as u64;
+                let Some(header) = framing::header(frame) else {
+                    continue;
+                };
+                if (header.system_id, header.message_id) == (system_id, message_id)
+                    && let Some(payload) = framing::payload(frame)
+                {
+                    part.push((at, at_us, header.component_id, payload));
                 }
             }
-            if !more {
-                break;
+            for (at, at_us, component_id, payload) in part.into_iter().rev() {
+                found.push(Found {
+                    at_us,
+                    system_id,
+                    component_id,
+                    payload: payload.to_vec(),
+                });
+                if found.len() == limit {
+                    let older = (at > 0 || older_files).then(|| cursor(*seconds, at));
+                    return Ok((found, older));
+                }
+            }
+            if left == 0 && (start > 0 || older_files) {
+                return Ok((found, Some(cursor(*seconds, start))));
             }
         }
     }
     Ok((found, None))
-}
-
-/// Up to `n` offsets of `key` in the file at `path` before `before`, newest
-/// first, from the current file's index, a cached one, or one made now.
-fn offsets(path: &Path, key: Key, before: u64, n: usize) -> (Vec<u64>, bool) {
-    let index = {
-        let mut registry = registry();
-        if let Some((_, index)) = registry.current.values().find(|(p, _)| p == path) {
-            return index.before(key, before, n);
-        }
-        registry.earlier(path)
-    };
-    let index = index.unwrap_or_else(|| {
-        // Read outside the lock, so the data plane keeps writing.
-        let index = Arc::new(scan(path, SCAN_BYTES).unwrap_or_else(|_| Index::new(0, MAX_OFFSETS)));
-        registry().keep(path.to_owned(), index.clone());
-        index
-    });
-    index.before(key, before, n)
-}
-
-/// The record at `offset`, if it holds a frame of `key`.
-fn read(file: &mut File, offset: u64, key: Key) -> Option<Found> {
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut record = [0u8; 8 + MAX_FRAME];
-    file.read_exact(&mut record[..8 + 3]).ok()?;
-    let len = framing::frame_len(&record[8..])?;
-    file.read_exact(&mut record[8 + 3..8 + len]).ok()?;
-    let frame = &record[8..8 + len];
-    let header = framing::header(frame)?;
-    if (header.system_id, header.message_id) != key {
-        return None;
-    }
-    let mut stamp = [0u8; 8];
-    stamp.copy_from_slice(&record[..8]);
-    Some(Found {
-        at_us: u64::from_be_bytes(stamp),
-        system_id: header.system_id,
-        component_id: header.component_id,
-        payload: framing::payload(frame)?.to_vec(),
-    })
-}
-
-/// Indexes an earlier file, or its last `tail` bytes: there the first whole
-/// record is found by three in a row reading as records.
-fn scan(path: &Path, tail: u64) -> std::io::Result<Index> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
-    let mut start = len.saturating_sub(tail);
-    if start > 0 {
-        let mut window = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(start))?;
-        let got = read_up_to(&mut file, &mut window)?;
-        let Some(at) = (0..got).find(|&at| records_at(&window[..got], at, 3)) else {
-            return Ok(Index::new(0, MAX_OFFSETS));
-        };
-        start += at as u64;
-    }
-    file.seek(SeekFrom::Start(start))?;
-    let mut reader = BufReader::with_capacity(256 * 1024, file);
-    let mut index = Index::new(start, MAX_OFFSETS);
-    let mut record = [0u8; 8 + MAX_FRAME];
-    let mut offset = start;
-    loop {
-        if reader.read_exact(&mut record[..8 + 3]).is_err() {
-            break;
-        }
-        let Some(len) = framing::frame_len(&record[8..]) else {
-            break;
-        };
-        if reader.read_exact(&mut record[8 + 3..8 + len]).is_err() {
-            break;
-        }
-        if let Some(header) = framing::header(&record[8..8 + len]) {
-            index.add((header.system_id, header.message_id), offset);
-        }
-        offset += 8 + len as u64;
-    }
-    Ok(index)
-}
-
-fn read_up_to(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut got = 0;
-    while got < buf.len() {
-        match file.read(&mut buf[got..])? {
-            0 => break,
-            n => got += n,
-        }
-    }
-    Ok(got)
 }
 
 /// Whether `count` whole records start at `at`, each a frame after a time
@@ -419,257 +357,6 @@ fn records_at(bytes: &[u8], mut at: usize, count: usize) -> bool {
         at += 8 + len;
     }
     true
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests")]
-
-    use super::*;
-    use uxduck_mavlink::sim;
-
-    fn key_of(frame: &[u8]) -> Key {
-        let header = framing::header(frame).unwrap();
-        (header.system_id, header.message_id)
-    }
-
-    #[test]
-    fn pages_come_newest_first_from_known_offsets() {
-        let mut index = Index::new(0, MAX_OFFSETS);
-        for n in 0..10u64 {
-            index.add((1, 0), n * 20);
-            index.add((1, 33), n * 20 + 10);
-        }
-        assert_eq!(
-            index.before((1, 0), u64::MAX, 3),
-            (vec![180, 160, 140], true)
-        );
-        assert_eq!(index.before((1, 0), 140, 3), (vec![120, 100, 80], true));
-        assert_eq!(index.before((1, 0), 40, 3), (vec![20, 0], false));
-        assert_eq!(index.before((2, 0), u64::MAX, 3), (vec![], false));
-    }
-
-    #[test]
-    fn the_oldest_offsets_go_past_the_cap() {
-        let mut index = Index::new(0, 100);
-        for n in 0..1000u64 {
-            index.add((1, u32::try_from(n % 3).unwrap()), n * 10);
-            assert!(index.total <= 100);
-        }
-        // The newest are all kept.
-        let (newest, _) = index.before((1, 0), u64::MAX, 10);
-        assert_eq!(newest[0], 9990);
-        assert_eq!(newest[9], 9720);
-        let kept: usize = index.offsets.values().map(Vec::len).sum();
-        assert_eq!(kept, index.total);
-    }
-
-    #[test]
-    fn too_many_types_are_not_indexed() {
-        let mut index = Index::new(0, MAX_OFFSETS);
-        for id in 0..u32::try_from(MAX_KEYS).unwrap() + 10 {
-            index.add((1, id), u64::from(id));
-        }
-        assert_eq!(index.offsets.len(), MAX_KEYS);
-    }
-
-    #[test]
-    fn cursors_round_trip_and_others_are_refused() {
-        assert_eq!(
-            parse_cursor(&cursor(1_790_000_000, 81_920)),
-            Ok((1_790_000_000, 81_920))
-        );
-        for bad in ["", "t", "t1", "t.1", "t1.", "m12", "t1.2.3", "t-1.2"] {
-            assert_eq!(parse_cursor(bad), Err(BadCursor), "{bad}");
-        }
-    }
-
-    #[test]
-    fn an_earlier_file_is_scanned_whole_or_from_a_record_found_in_its_tail() {
-        let a = sim::heartbeat_frame(1, 1, 0);
-        let b = sim::autopilot_version_frame(1, 1, 1, 42, 0);
-        let mut log = Vec::new();
-        let mut offsets = Vec::new();
-        for n in 0..40u64 {
-            let frame = if n % 2 == 0 { &a } else { &b };
-            offsets.push(log.len() as u64);
-            uxduck_mavlink::tlog::record(&mut log, 1_000_000 + n, frame).unwrap();
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lk-1.tlog");
-        std::fs::write(&path, &log).unwrap();
-
-        let whole = scan(&path, SCAN_BYTES).unwrap();
-        assert_eq!(whole.total, 40);
-        let (newest, more) = whole.before(key_of(&a), u64::MAX, 2);
-        assert_eq!((newest, more), (vec![offsets[38], offsets[36]], true));
-
-        // Its last part only, starting mid-record: the first whole record
-        // after that is found.
-        let tail = log.len() as u64 - offsets[30] + 5;
-        let part = scan(&path, tail).unwrap();
-        assert_eq!(part.base, offsets[30]);
-        assert_eq!(part.total, 10);
-        let (oldest, more) = part.before(key_of(&b), offsets[32], 5);
-        assert_eq!((oldest, more), (vec![offsets[31]], false));
-
-        let mut file = File::open(&path).unwrap();
-        let found = read(&mut file, offsets[2], key_of(&a)).unwrap();
-        assert_eq!(found.at_us, 1_000_002);
-        assert_eq!(found.payload, framing::payload(&a).unwrap());
-        assert_eq!(
-            read(&mut file, offsets[2], key_of(&b)),
-            None,
-            "not its type"
-        );
-    }
-
-    #[test]
-    fn detailed_pages_keep_wire_bytes_filter_ranges_and_report_partial_tails() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut log = Vec::new();
-        let mut expected = Vec::new();
-        for n in 0..6u8 {
-            let ours = sim::heartbeat_frame(1, 1, n);
-            let others = sim::heartbeat_frame(2, 1, n);
-            let version = sim::autopilot_version_frame(1, 1, n, 42, 0);
-            for frame in [&ours, &others, &version] {
-                uxduck_mavlink::tlog::record(&mut log, 100_000_000 + u64::from(n), frame).unwrap();
-            }
-            expected.push(ours);
-        }
-        log.extend_from_slice(&[0, 1, 2]);
-        std::fs::write(dir.path().join("detail-100.tlog"), log).unwrap();
-        let range = (100_000_001, 100_000_004);
-        let first = packet_page(
-            dir.path(),
-            "detail",
-            (Some(1), None),
-            Some(0),
-            range,
-            None,
-            2,
-        )
-        .unwrap();
-        assert_eq!(
-            first.records.iter().map(|r| r.at_us).collect::<Vec<_>>(),
-            [100_000_004, 100_000_003]
-        );
-        assert_eq!(first.records[0].frame, expected[4]);
-        assert!(first.truncated);
-        assert!(
-            first
-                .notes
-                .iter()
-                .any(|n| n.contains("partial or malformed"))
-        );
-        let second = packet_page(
-            dir.path(),
-            "detail",
-            (Some(1), None),
-            Some(0),
-            range,
-            first.older.as_deref(),
-            2,
-        )
-        .unwrap();
-        assert_eq!(
-            second.records.iter().map(|r| r.at_us).collect::<Vec<_>>(),
-            [100_000_002, 100_000_001]
-        );
-        assert!(second.older.is_none());
-        let all = packet_page(dir.path(), "detail", (None, None), None, range, None, 20).unwrap();
-        assert_eq!(all.records.len(), 12);
-    }
-
-    /// ADR-0050 L1: a link's tlog holds what UXDuck sent beside what it
-    /// heard, and a page of received packets leaves UXDuck's own out.
-    #[test]
-    fn a_page_of_received_packets_leaves_out_what_uxduck_sent() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut log = Vec::new();
-        for n in 0..4u8 {
-            let heard = sim::heartbeat_frame(1, 1, n);
-            let sent = sim::gcs_heartbeat_frame(255, 190, n);
-            let other = sim::gcs_heartbeat_frame(254, 190, n);
-            for frame in [&heard, &sent, &other] {
-                uxduck_mavlink::tlog::record(&mut log, 100_000_000 + u64::from(n), frame).unwrap();
-            }
-        }
-        std::fs::write(dir.path().join("both-100.tlog"), log).unwrap();
-        let range = (0, u64::MAX);
-        let everything = packet_page(dir.path(), "both", (None, None), None, range, None, 20);
-        assert_eq!(everything.unwrap().records.len(), 12);
-        let received = packet_page(
-            dir.path(),
-            "both",
-            (None, Some((255, 190))),
-            None,
-            range,
-            None,
-            20,
-        )
-        .unwrap();
-        let from: Vec<u8> = received
-            .records
-            .iter()
-            .map(|r| framing::header(&r.frame).unwrap().system_id)
-            .collect();
-        assert_eq!(from.len(), 8, "{from:?}");
-        assert!(!from.contains(&255), "{from:?}");
-    }
-
-    #[test]
-    fn pages_continue_into_earlier_files_and_leave_other_systems_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let ours = |n: u8| sim::heartbeat_frame(1, 1, n);
-        let theirs = sim::heartbeat_frame(2, 1, 0);
-        // An earlier run: 3 of ours. Not current, so read the first time a
-        // page reaches it.
-        let mut earlier = Vec::new();
-        for n in 0..3u8 {
-            uxduck_mavlink::tlog::record(&mut earlier, 100 + u64::from(n), &ours(n)).unwrap();
-        }
-        std::fs::write(dir.path().join("lk-page-100.tlog"), &earlier).unwrap();
-        // Another link's file, and something else, are not read.
-        std::fs::write(dir.path().join("lk-page-x-200.tlog"), &earlier).unwrap();
-        std::fs::write(dir.path().join("lk-page-200.txt"), b"").unwrap();
-        // This run's file: indexed as written.
-        let path = dir.path().join("lk-page-200.tlog");
-        open("lk-page", &path);
-        let mut current = Vec::new();
-        let mut records = Vec::new();
-        for n in 0..4u8 {
-            for frame in [ours(n), theirs.clone()] {
-                records.push((framing::header(&frame).unwrap(), current.len() as u64));
-                uxduck_mavlink::tlog::record(&mut current, 200 + u64::from(n), &frame).unwrap();
-            }
-        }
-        std::fs::write(&path, &current).unwrap();
-        indexed("lk-page", &records);
-
-        let at = |found: &[Found]| found.iter().map(|f| f.at_us).collect::<Vec<_>>();
-        let (first, older) = page(dir.path(), "lk-page", 1, 0, None, 3).unwrap();
-        assert_eq!(at(&first), [203, 202, 201]);
-        let (second, older) = page(dir.path(), "lk-page", 1, 0, older.as_deref(), 3).unwrap();
-        assert_eq!(at(&second), [200, 102, 101]);
-        let (third, older) = page(dir.path(), "lk-page", 1, 0, older.as_deref(), 3).unwrap();
-        assert_eq!(at(&third), [100]);
-        assert_eq!(older, None);
-        // The other system's, apart.
-        let (theirs, _) = page(dir.path(), "lk-page", 2, 0, None, 10).unwrap();
-        assert_eq!(at(&theirs), [203, 202, 201, 200]);
-        assert!(theirs.iter().all(|f| f.system_id == 2));
-        assert_eq!(
-            page(dir.path(), "lk-page", 1, 0, Some("m3"), 3).unwrap_err(),
-            BadCursor
-        );
-        // Closed, the file's index is kept with the earlier ones.
-        close("lk-page");
-        let (all, older) = page(dir.path(), "lk-page", 1, 0, None, 10).unwrap();
-        assert_eq!(at(&all), [203, 202, 201, 200, 102, 101, 100]);
-        assert_eq!(older, None);
-    }
 }
 
 /// A bounded detailed query, read with the same MAVLink/tlog decoder as replay.
@@ -800,4 +487,421 @@ pub fn packet_page(
             .push("The bounded tlog scan may not cover the whole requested interval.".into());
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use std::io::{BufWriter, Write};
+
+    use super::*;
+    use uxduck_mavlink::sim;
+
+    /// A MAVLink 2 frame of `message` from `system`, its payload `fill` over
+    /// and over. Its checksum is not one: nothing here checks it.
+    fn frame(system: u8, message: u32, payload: usize, fill: u8) -> Vec<u8> {
+        let id = message.to_le_bytes();
+        let mut frame = vec![
+            0xFD,
+            u8::try_from(payload).unwrap(),
+            0,
+            0,
+            0,
+            system,
+            1,
+            id[0],
+            id[1],
+            id[2],
+        ];
+        frame.resize(10 + payload + 2, fill);
+        frame
+    }
+
+    /// Every page of one message type, newest first, until the logs hold
+    /// nothing earlier, and how many pages it took.
+    fn all_pages(dir: &Path, link: &str, system: u8, message: u32) -> (Vec<Found>, usize) {
+        let (mut all, mut pages, mut before) = (Vec::new(), 0, None::<String>);
+        loop {
+            let (found, older) = page(dir, link, system, message, before.as_deref(), 50).unwrap();
+            pages += 1;
+            all.extend(found);
+            match older {
+                Some(older) => before = Some(older),
+                None => return (all, pages),
+            }
+        }
+    }
+
+    #[test]
+    fn cursors_round_trip_and_others_are_refused() {
+        assert_eq!(
+            parse_cursor(&cursor(1_790_000_000, 81_920)),
+            Ok((1_790_000_000, 81_920))
+        );
+        for bad in ["", "t", "t1", "t.1", "t1.", "m12", "t1.2.3", "t-1.2"] {
+            assert_eq!(parse_cursor(bad), Err(PageError::BadCursor), "{bad}");
+        }
+    }
+
+    /// Read backwards a part at a time, a log gives the records it gives
+    /// read from its start, each at its own offset: also with a last
+    /// record that is not whole, and with payloads that hold records of
+    /// their own, as a log sent over MAVLink FTP does.
+    #[test]
+    fn a_log_read_backwards_gives_every_record_at_its_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lk-1.tlog");
+        let mut log = Vec::new();
+        let mut inner = Vec::new();
+        for n in 0..6u64 {
+            uxduck_mavlink::tlog::record(&mut inner, 1_000 + n, &sim::heartbeat_frame(9, 1, 0))
+                .unwrap();
+        }
+        let mut n = 0u64;
+        while log.len() < usize::try_from(3 * PART).unwrap() + 12_345 {
+            let frame = match n % 4 {
+                0 => sim::heartbeat_frame(1, 1, 0),
+                1 => frame(1, 33, 28, 0xFD),
+                2 => {
+                    let mut carrier = frame(1, 110, 0, 0);
+                    carrier[1] = u8::try_from(inner.len()).unwrap();
+                    carrier.truncate(10);
+                    carrier.extend_from_slice(&inner);
+                    carrier.extend_from_slice(&[0, 0]);
+                    carrier
+                }
+                _ => frame(2, 30, 251, 0xFE),
+            };
+            uxduck_mavlink::tlog::record(&mut log, 1_790_000_000_000_000 + n, &frame).unwrap();
+            n += 1;
+        }
+        let whole_records = log.len();
+        // A crash, or a write under way: the last record is cut short.
+        log.extend_from_slice(&1_790_000_000_999_999u64.to_be_bytes());
+        log.extend_from_slice(&[0xFD, 200, 0, 0, 0]);
+        std::fs::write(&path, &log).unwrap();
+
+        let mut expected = Vec::new();
+        let mut at = 0u64;
+        for (stamp, frame) in uxduck_mavlink::tlog::records(&log) {
+            expected.push((at, stamp, frame.to_vec()));
+            at += 8 + frame.len() as u64;
+        }
+        assert_eq!(usize::try_from(at).unwrap(), whole_records);
+
+        let mut back = Backward::open(&path, None).unwrap();
+        let mut read = Vec::new();
+        let mut parts = 0;
+        while let Some((start, bytes)) = back.part().unwrap() {
+            parts += 1;
+            let mut at = start;
+            let mut part = Vec::new();
+            for (stamp, frame) in uxduck_mavlink::tlog::records(bytes) {
+                part.push((at, stamp, frame.to_vec()));
+                at += 8 + frame.len() as u64;
+            }
+            part.extend(read);
+            read = part;
+        }
+        assert!(parts >= 4, "{parts} parts");
+        assert_eq!(read.len(), expected.len());
+        assert!(read == expected, "the same records at the same offsets");
+
+        // From a record on: only what is before it.
+        let (offset, _, _) = expected[expected.len() / 2];
+        let mut back = Backward::open(&path, Some(offset)).unwrap();
+        let (start, bytes) = back.part().unwrap().unwrap();
+        let last = uxduck_mavlink::tlog::records(bytes).last().unwrap();
+        assert_eq!(last.0, expected[expected.len() / 2 - 1].1);
+        assert!(start < offset);
+    }
+
+    /// Until 2026-11-15 a message type past the 4,096th of a log was not
+    /// indexed, and stepping back through it said nothing earlier was kept.
+    #[test]
+    fn every_message_type_of_a_log_is_read_back_however_many_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Vec::new();
+        let mut at_us = 1_790_000_000_000_000u64;
+        // 6,000 types: 20 systems, 300 messages each, three times over.
+        for round in 0..3u8 {
+            for system in 1..=20u8 {
+                for message in 0..300u32 {
+                    at_us += 1;
+                    uxduck_mavlink::tlog::record(
+                        &mut log,
+                        at_us,
+                        &frame(system, 1000 + message, 4, round),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        std::fs::write(dir.path().join("lk-100.tlog"), &log).unwrap();
+        let (last, pages) = all_pages(dir.path(), "lk", 20, 1299);
+        assert_eq!(pages, 1);
+        assert_eq!(
+            last.iter().map(|f| f.payload[0]).collect::<Vec<_>>(),
+            [2, 1, 0],
+            "the 6,000th type's three messages, newest first"
+        );
+        let (first, _) = all_pages(dir.path(), "lk", 1, 1000);
+        assert_eq!(first.len(), 3);
+    }
+
+    /// Until 2026-11-15 a log's oldest offsets went once it held more than
+    /// 4,194,304 records, and stepping back jumped over them to the log
+    /// before, or stopped.
+    #[test]
+    fn a_log_of_more_records_than_were_once_indexed_is_read_back_to_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = BufWriter::new(File::create(dir.path().join("lk-200.tlog")).unwrap());
+        let filler = frame(1, 30, 0, 0);
+        let rare = |n: u8| frame(1, 253, 1, n);
+        let t0 = 1_790_000_000_000_000u64;
+        let records = 4_400_000u64;
+        // Two of the rare message where the log starts, one at its end.
+        for n in 0..records {
+            let frame = match n {
+                0 => rare(1),
+                1 => rare(2),
+                n if n == records - 1 => rare(3),
+                _ => filler.clone(),
+            };
+            uxduck_mavlink::tlog::record(&mut log, t0 + n, &frame).unwrap();
+        }
+        log.flush().unwrap();
+        // The log before it: the pages go on into it.
+        let mut earlier = Vec::new();
+        uxduck_mavlink::tlog::record(&mut earlier, t0 - 10, &rare(0)).unwrap();
+        std::fs::write(dir.path().join("lk-100.tlog"), &earlier).unwrap();
+
+        let (found, pages) = all_pages(dir.path(), "lk", 1, 253);
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| (f.at_us - (t0 - 10), f.payload[0]))
+                .collect::<Vec<_>>(),
+            [(records + 9, 3), (11, 2), (10, 1), (0, 0)],
+            "every one of them, newest first, none jumped over"
+        );
+        // 88 MB, 32 MB a page: a page that found nothing new still said
+        // where the next goes on from.
+        assert!(pages >= 3, "{pages} pages");
+    }
+
+    /// Until 2026-11-15 only the last 256 MB of an earlier log was indexed:
+    /// what a flight held before that was not there to step back to.
+    #[test]
+    fn an_earlier_log_longer_than_256_mb_is_read_back_to_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = BufWriter::new(File::create(dir.path().join("lk-100.tlog")).unwrap());
+        let filler = frame(1, 30, 255, 7);
+        let t0 = 1_790_000_000_000_000u64;
+        uxduck_mavlink::tlog::record(&mut log, t0, &frame(1, 253, 1, 42)).unwrap();
+        let mut written = 0usize;
+        let mut n = 0u64;
+        while written < (256 << 20) + (4 << 20) {
+            n += 1;
+            uxduck_mavlink::tlog::record(&mut log, t0 + n, &filler).unwrap();
+            written += 8 + filler.len();
+        }
+        log.flush().unwrap();
+        // A later run's log, so the long one is an earlier file.
+        let mut later = Vec::new();
+        uxduck_mavlink::tlog::record(&mut later, t0 + n + 1, &filler).unwrap();
+        std::fs::write(dir.path().join("lk-200.tlog"), &later).unwrap();
+
+        let (found, pages) = all_pages(dir.path(), "lk", 1, 253);
+        assert_eq!(found.len(), 1, "the message 260 MB before the log's end");
+        assert_eq!((found[0].at_us, found[0].payload[0]), (t0, 42));
+        assert!(pages >= 8, "{pages} pages of 32 MB");
+    }
+
+    /// A log that is not records all the way is said, by name, where a
+    /// page once went on to the log before it without a word.
+    #[test]
+    fn a_damaged_log_and_a_cursor_into_a_record_are_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Vec::new();
+        for n in 0..10u64 {
+            uxduck_mavlink::tlog::record(&mut log, 100 + n, &sim::heartbeat_frame(1, 1, 0))
+                .unwrap();
+        }
+        let good = log.len();
+        log.extend_from_slice(&[0x55; 64]);
+        uxduck_mavlink::tlog::record(&mut log, 200, &sim::heartbeat_frame(1, 1, 0)).unwrap();
+        std::fs::write(dir.path().join("lk-100.tlog"), &log).unwrap();
+        let damaged = page(dir.path(), "lk", 1, 0, None, 50).unwrap_err();
+        let PageError::Unreadable(why) = damaged else {
+            panic!("{damaged:?}");
+        };
+        assert!(
+            why.starts_with("UXDuck could not read its log lk-100.tlog: "),
+            "{why}"
+        );
+        // Not where a record begins.
+        let inside = cursor(100, good as u64 - 5);
+        assert!(matches!(
+            page(dir.path(), "lk", 1, 0, Some(&inside), 50),
+            Err(PageError::Unreadable(_))
+        ));
+        // Where one does: the ten before the damage.
+        let (found, older) =
+            page(dir.path(), "lk", 1, 0, Some(&cursor(100, good as u64)), 50).unwrap();
+        assert_eq!((found.len(), older), (10, None));
+    }
+
+    #[test]
+    fn detailed_pages_keep_wire_bytes_filter_ranges_and_report_partial_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Vec::new();
+        let mut expected = Vec::new();
+        for n in 0..6u8 {
+            let ours = sim::heartbeat_frame(1, 1, n);
+            let others = sim::heartbeat_frame(2, 1, n);
+            let version = sim::autopilot_version_frame(1, 1, n, 42, 0);
+            for frame in [&ours, &others, &version] {
+                uxduck_mavlink::tlog::record(&mut log, 100_000_000 + u64::from(n), frame).unwrap();
+            }
+            expected.push(ours);
+        }
+        log.extend_from_slice(&[0, 1, 2]);
+        std::fs::write(dir.path().join("detail-100.tlog"), log).unwrap();
+        let range = (100_000_001, 100_000_004);
+        let first = packet_page(
+            dir.path(),
+            "detail",
+            (Some(1), None),
+            Some(0),
+            range,
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            first.records.iter().map(|r| r.at_us).collect::<Vec<_>>(),
+            [100_000_004, 100_000_003]
+        );
+        assert_eq!(first.records[0].frame, expected[4]);
+        assert!(first.truncated);
+        assert!(
+            first
+                .notes
+                .iter()
+                .any(|n| n.contains("partial or malformed"))
+        );
+        let second = packet_page(
+            dir.path(),
+            "detail",
+            (Some(1), None),
+            Some(0),
+            range,
+            first.older.as_deref(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            second.records.iter().map(|r| r.at_us).collect::<Vec<_>>(),
+            [100_000_002, 100_000_001]
+        );
+        assert!(second.older.is_none());
+        let all = packet_page(dir.path(), "detail", (None, None), None, range, None, 20).unwrap();
+        assert_eq!(all.records.len(), 12);
+    }
+
+    /// ADR-0050 L1: a link's tlog holds what UXDuck sent beside what it
+    /// heard, and a page of received packets leaves UXDuck's own out.
+    #[test]
+    fn a_page_of_received_packets_leaves_out_what_uxduck_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Vec::new();
+        for n in 0..4u8 {
+            let heard = sim::heartbeat_frame(1, 1, n);
+            let sent = sim::gcs_heartbeat_frame(255, 190, n);
+            let other = sim::gcs_heartbeat_frame(254, 190, n);
+            for frame in [&heard, &sent, &other] {
+                uxduck_mavlink::tlog::record(&mut log, 100_000_000 + u64::from(n), frame).unwrap();
+            }
+        }
+        std::fs::write(dir.path().join("both-100.tlog"), log).unwrap();
+        let range = (0, u64::MAX);
+        let everything = packet_page(dir.path(), "both", (None, None), None, range, None, 20);
+        assert_eq!(everything.unwrap().records.len(), 12);
+        let received = packet_page(
+            dir.path(),
+            "both",
+            (None, Some((255, 190))),
+            None,
+            range,
+            None,
+            20,
+        )
+        .unwrap();
+        let from: Vec<u8> = received
+            .records
+            .iter()
+            .map(|r| framing::header(&r.frame).unwrap().system_id)
+            .collect();
+        assert_eq!(from.len(), 8, "{from:?}");
+        assert!(!from.contains(&255), "{from:?}");
+    }
+
+    #[test]
+    fn pages_continue_into_earlier_files_and_leave_other_systems_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = |n: u8| sim::heartbeat_frame(1, 1, n);
+        let theirs = sim::heartbeat_frame(2, 1, 0);
+        // An earlier run: 3 of ours. Not current, so read the first time a
+        // page reaches it.
+        let mut earlier = Vec::new();
+        for n in 0..3u8 {
+            uxduck_mavlink::tlog::record(&mut earlier, 100 + u64::from(n), &ours(n)).unwrap();
+        }
+        std::fs::write(dir.path().join("lk-page-100.tlog"), &earlier).unwrap();
+        // Another link's file, and something else, are not read.
+        std::fs::write(dir.path().join("lk-page-x-200.tlog"), &earlier).unwrap();
+        std::fs::write(dir.path().join("lk-page-200.txt"), b"").unwrap();
+        // This run's file, still open.
+        let path = dir.path().join("lk-page-200.tlog");
+        open("lk-page", &path);
+        let mut current = Vec::new();
+        let mut latest = 0;
+        for n in 0..4u8 {
+            for frame in [ours(n), theirs.clone()] {
+                latest = current.len() as u64;
+                uxduck_mavlink::tlog::record(&mut current, 200 + u64::from(n), &frame).unwrap();
+            }
+        }
+        std::fs::write(&path, &current).unwrap();
+        written("lk-page", latest);
+        assert_eq!(
+            position("lk-page"),
+            Some(("lk-page-200.tlog".to_owned(), latest))
+        );
+
+        let at = |found: &[Found]| found.iter().map(|f| f.at_us).collect::<Vec<_>>();
+        let (first, older) = page(dir.path(), "lk-page", 1, 0, None, 3).unwrap();
+        assert_eq!(at(&first), [203, 202, 201]);
+        let (second, older) = page(dir.path(), "lk-page", 1, 0, older.as_deref(), 3).unwrap();
+        assert_eq!(at(&second), [200, 102, 101]);
+        let (third, older) = page(dir.path(), "lk-page", 1, 0, older.as_deref(), 3).unwrap();
+        assert_eq!(at(&third), [100]);
+        assert_eq!(older, None);
+        // The other system's, apart.
+        let (theirs, _) = page(dir.path(), "lk-page", 2, 0, None, 10).unwrap();
+        assert_eq!(at(&theirs), [203, 202, 201, 200]);
+        assert!(theirs.iter().all(|f| f.system_id == 2));
+        assert_eq!(
+            page(dir.path(), "lk-page", 1, 0, Some("m3"), 3).unwrap_err(),
+            PageError::BadCursor
+        );
+        // Closed, the file is read back as before.
+        close("lk-page");
+        assert_eq!(position("lk-page"), None);
+        let (all, older) = page(dir.path(), "lk-page", 1, 0, None, 10).unwrap();
+        assert_eq!(at(&all), [203, 202, 201, 200, 102, 101, 100]);
+        assert_eq!(older, None);
+    }
 }

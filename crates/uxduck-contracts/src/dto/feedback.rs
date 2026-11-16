@@ -141,7 +141,9 @@ pub struct FeedbackSendParams {
     pub screenshot: Option<String>,
     /// The diagnostics bundle (on unless the person turned it off).
     pub include_details: bool,
-    /// The last five minutes of this vehicle's raw tlog.
+    /// The last five minutes of this vehicle's raw tlog: the newest of them
+    /// when they are more than UXDuck's servers take, with what did not go
+    /// in the result's `left_out`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flight_data_vehicle_id: Option<String>,
     /// This chat's messages, when opened from it and ticked.
@@ -307,6 +309,68 @@ pub struct FeedbackSendResult {
     /// network for now, not because they could not be reached.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub limited: bool,
+    /// What UXDuck left out of the report to fit what its servers take,
+    /// for the person who sent it. Absent when all of it went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_out: Option<FeedbackLeftOut>,
+}
+
+/// What UXDuck left out of a report, always the oldest of a part, because
+/// its servers take no more of that part. Told to the person who sent the
+/// report (`FeedbackSendResult`) and kept in the bundle for whoever reads
+/// it (`FeedbackBundle`). A part absent here went whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackLeftOut {
+    /// The bundle's oldest trace frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<LeftOut>,
+    /// The bundle's oldest log lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<LeftOut>,
+    /// The bundle's oldest chat items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<LeftOut>,
+    /// The bundle's oldest page errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors: Option<LeftOut>,
+    /// The bundle's oldest notifications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<LeftOut>,
+    /// The oldest frames of the flight data, `flight.tlog`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight: Option<LeftOut>,
+    /// Why the flight data the person asked for did not go at all, in
+    /// words for them: UXDuck's logs held none of the vehicle's last five
+    /// minutes, or one of them could not be read. The rest of the report
+    /// went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_flight: Option<String>,
+}
+
+/// The oldest of one part of a report, left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeftOut {
+    /// How many: frames, lines, items, errors or notifications.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub count: u64,
+    /// Their size in bytes.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// When the oldest and the newest of them were, in microseconds since
+    /// the Unix epoch. Absent for log lines and chat items, which carry
+    /// their times in their text or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub from_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub to_us: Option<u64>,
+    /// The most UXDuck's servers take, in bytes, of what this is part of:
+    /// the bundle, or the flight data.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub limit_bytes: u64,
 }
 
 /// How much of a report UXDuck has sent to its servers so far
@@ -408,6 +472,11 @@ pub struct FeedbackBundle {
     /// Only when "Include this chat" was ticked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<Vec<BundleChatItem>>,
+    /// What UXDuck left out of this report to fit what its servers take:
+    /// how much of each part, and from when to when. Absent when all of it
+    /// went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_out: Option<FeedbackLeftOut>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

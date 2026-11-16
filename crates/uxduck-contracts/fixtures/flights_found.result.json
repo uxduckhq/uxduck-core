@@ -21,7 +21,27 @@
       "on": true,
       "exists": true,
       "added": true,
-      "deep": true
+      "deep": true,
+      "notRead": [
+        {
+          "path": "/Users/pilot/mavproxy/2025/locked",
+          "why": "UXDuck could not list it: Permission denied (os error 13)."
+        },
+        {
+          "path": "/Users/pilot/mavproxy/field day.tlog",
+          "why": "It stops being a telemetry log at byte 4096 of 9000. Flights after that are not listed."
+        },
+        {
+          "path": "/Users/pilot/mavproxy/build/Debug/link.write.1.tlog",
+          "why": "It is not a telemetry log. It does not begin with a record."
+        }
+      ],
+      "notReadTotal": 103,
+      "notReadOffset": 100,
+      "notLogs": 1,
+      "walk": {
+        "entries": 412672
+      }
     }
   ],
   "flights": [

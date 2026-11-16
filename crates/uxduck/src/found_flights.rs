@@ -8,9 +8,20 @@
 //! An added folder is looked into on its own, its top level only, or, with
 //! all subfolders on, through its whole tree (a custom ground
 //! station's folders, a disk of logs; maintainer, 2026-10-29): hidden
-//! folders and links skipped, at most `MAX_ENTRIES` a look, after which the
-//! look stops and the folder says so, and walked every ten minutes rather
-//! than every one.
+//! folders and links skipped, on a thread of its own, and walked every ten
+//! minutes rather than every one. All of the tree is read, however large:
+//! the folder says how many entries a walk has read so far, and how many
+//! it read in how long. Until 2026-11-15 a walk stopped at 250,000 entries.
+//! An app's own folder is looked through its whole tree each minute. Until
+//! 2026-11-15 a log more than four folders down was passed over.
+//!
+//! What a look cannot read is kept with its folder and told in
+//! `flights/found`, each with why: a folder that cannot be listed, a log
+//! that cannot be opened or read, a log that stops being records before
+//! its end, and a file named as a log that is not one. Until 2026-11-15
+//! each was passed over without a word. An answer carries how many there
+//! are and one page of them ([`NOT_READ_PAGE`]), and the rest is read on
+//! from an offset, since a disk decides how many there are.
 //!
 //! The folders, checked against each app's own source:
 //! - QGroundControl: its save path, by default `Documents/QGroundControl`,
@@ -30,21 +41,31 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use uxduck_contracts::dto::replay::{
-    FlightFolder, FlightFolderParams, FoundFlight, FoundFlightsResult,
+    FlightFolder, FlightFolderParams, FolderWalk, FoundFlight, FoundFlightsParams,
+    FoundFlightsResult, NotRead, NotReadFrom,
 };
 
 /// How often the folders are looked through while Flights asks.
 const LOOK_EVERY: Duration = Duration::from_mins(1);
 /// A file written this recently is still being recorded.
 const GROWING: Duration = Duration::from_secs(10);
-/// How deep a folder is looked into: Mission Planner's type and system.
-const DEPTH: usize = 4;
-/// A folder with all subfolders on is walked this often: a disk takes a while.
+/// A folder with all subfolders on is walked this often after its last walk
+/// ended: a disk takes a while, and its logs replay from where they are, so
+/// one found ten minutes late is not missed.
 const DEEP_EVERY: Duration = Duration::from_mins(10);
-/// The most entries one look reads through a folder with all subfolders on.
-const MAX_ENTRIES: usize = 250_000;
+/// A walk says how far it has got each time it has read this many entries.
+const TELL_EVERY: u64 = 1024;
 /// How much of a log is read from the disk at a time.
 const READ_AT_A_TIME: usize = 256 * 1024;
+/// How many of what a folder could not read one answer carries. A disk
+/// UXDuck does not control decides how many there are: a Visual Studio
+/// build writes `.tlog` files of its own into every build folder, so a
+/// folder of source trees holds thousands that are not telemetry logs.
+/// The window asks every two seconds while a look runs, the Logbook each
+/// minute after, and Settings draws every one it is given: 5,000 took
+/// Chrome 2.0 s (2026-11-15). So an answer holds a page, with how many
+/// there are, and the rest is read on from an offset. None is left out.
+const NOT_READ_PAGE: usize = 100;
 /// The longest record: a stamp and the longest MAVLink frame (a v2 header,
 /// 255 bytes of payload, its checksum and a signature).
 const MAX_RECORD: usize = 8 + 10 + 255 + 2 + 13;
@@ -72,14 +93,19 @@ struct Seen {
     size: u64,
     modified: SystemTime,
     flights: Vec<FoundFlight>,
+    /// The byte where it stops being records, when that is before its end.
+    stopped: Option<u64>,
 }
 
-/// A deep folder's last walk: its files, and whether it stopped short.
+/// A deep folder's last walk: when it ended, its files, how many entries
+/// it read in how long, and the folders it could not list.
 #[derive(Clone, Debug)]
 struct Walk {
     at: Instant,
     files: Vec<PathBuf>,
-    cut: bool,
+    entries: u64,
+    took: Duration,
+    not_read: Vec<NotRead>,
 }
 
 #[derive(Debug, Default)]
@@ -89,12 +115,38 @@ struct State {
     files: HashMap<PathBuf, Seen>,
     /// Deep folders' walks, by folder id.
     walks: HashMap<String, Walk>,
+    /// Walks under way, by folder id: the entries each has read so far.
+    walking: HashMap<String, u64>,
+    /// A walk ended while a look was under way: the look's files are not
+    /// that walk's, so the next ask looks again.
+    walked_since: bool,
+    /// What the last look could not read, by folder id.
+    not_read: HashMap<String, Unread>,
 }
 
-/// What a walk may still read; `cut` once it read all it may.
-struct Budget {
-    left: usize,
-    cut: bool,
+/// What a look could not read in one folder.
+#[derive(Debug, Default)]
+struct Unread {
+    /// Those that may hold flights, then the files that are not logs, each
+    /// by path: the order a person looks for one in, with what matters to
+    /// the Logbook first.
+    told: Vec<NotRead>,
+    /// How many at the end of `told` are files named as a log that do not
+    /// begin with a record.
+    not_logs: u64,
+}
+
+impl Unread {
+    fn of(mut told: Vec<NotRead>, mut not_logs: Vec<NotRead>) -> Self {
+        told.sort_by(|a, b| a.path.cmp(&b.path));
+        not_logs.sort_by(|a, b| a.path.cmp(&b.path));
+        let count = not_logs.len() as u64;
+        told.append(&mut not_logs);
+        Self {
+            told,
+            not_logs: count,
+        }
+    }
 }
 
 /// The folders, what was found in them, and the look under way.
@@ -157,65 +209,90 @@ pub fn known_folders() -> Vec<(String, String, PathBuf)> {
     folders
 }
 
-/// Every `.tlog` under a folder, a few levels deep.
-fn tlogs_in(folder: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    let mut budget = Budget {
-        left: usize::MAX,
-        cut: false,
-    };
-    walk(folder, Some(depth), out, &mut budget);
-}
-
-/// Every `.tlog` through a folder's whole tree, hidden folders and links
-/// skipped, up to the budget. Whether the walk stopped short.
-fn tlogs_under(folder: &Path, out: &mut Vec<PathBuf>) -> bool {
-    let mut budget = Budget {
-        left: MAX_ENTRIES,
-        cut: false,
-    };
-    walk(folder, None, out, &mut budget);
-    budget.cut
-}
-
-fn walk(folder: &Path, depth: Option<usize>, out: &mut Vec<PathBuf>, budget: &mut Budget) {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if budget.left == 0 {
-            budget.cut = true;
-            return;
-        }
-        budget.left -= 1;
-        let path = entry.path();
-        // Nothing hidden (a disk's `.Trashes`), nothing through a link.
-        let hidden = entry.file_name().to_string_lossy().starts_with('.');
-        let link = entry.file_type().is_ok_and(|t| t.is_symlink());
-        if hidden || link {
-            continue;
-        }
-        if path.is_dir() {
-            match depth {
-                Some(0) => {}
-                Some(left) => walk(&path, Some(left - 1), out, budget),
-                None => walk(&path, None, out, budget),
-            }
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("tlog"))
-        {
-            out.push(path);
-        }
+/// Something a look could not read, with the system's words for why.
+fn unread(path: &Path, what: &str, error: &std::io::Error) -> NotRead {
+    NotRead {
+        path: path.display().to_string(),
+        why: format!("UXDuck could not {what}: {error}."),
     }
 }
 
-/// Reads the log's next record into `record`: its stamp and how long its
-/// frame is, which follows the stamp's 8 bytes. None where the log ends or
-/// what follows is not a whole record.
-fn next_record(
-    log: &mut impl Read,
-    record: &mut [u8; MAX_RECORD],
-) -> std::io::Result<Option<(u64, usize)>> {
+/// Every `.tlog` under a folder: at its top level only, or through its
+/// whole `tree`, hidden folders and links skipped. With them, how many
+/// entries were read. A folder that cannot be listed goes in `not_read`.
+/// `go_on` hears how many entries have been read every [`TELL_EVERY`] of
+/// them, and ends the walk by answering false.
+fn walk(
+    folder: &Path,
+    tree: bool,
+    not_read: &mut Vec<NotRead>,
+    mut go_on: impl FnMut(u64) -> bool,
+) -> (Vec<PathBuf>, u64) {
+    let mut files = Vec::new();
+    let mut entries = 0u64;
+    let mut folders = vec![folder.to_owned()];
+    while let Some(folder) = folders.pop() {
+        let listed = match std::fs::read_dir(&folder) {
+            Ok(listed) => listed,
+            Err(error) => {
+                not_read.push(unread(&folder, "list it", &error));
+                continue;
+            }
+        };
+        for entry in listed {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    // The rest of this folder is not listed.
+                    not_read.push(unread(&folder, "list all of it", &error));
+                    break;
+                }
+            };
+            entries += 1;
+            if entries.is_multiple_of(TELL_EVERY) && !go_on(entries) {
+                return (files, entries);
+            }
+            let path = entry.path();
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    not_read.push(unread(&path, "tell what it is", &error));
+                    continue;
+                }
+            };
+            // Nothing hidden (a disk's `.Trashes`), nothing through a link.
+            if kind.is_symlink() || entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if kind.is_dir() {
+                if tree {
+                    folders.push(path);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("tlog"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    (files, entries)
+}
+
+/// What comes next in a log.
+enum Next {
+    /// A record: its stamp and how long its frame is, which follows the
+    /// stamp's 8 bytes.
+    Record(u64, usize),
+    /// The log's end, also inside a record: one still being written, or
+    /// one a crash cut short.
+    End,
+    /// Bytes that begin no MAVLink frame.
+    NotARecord,
+}
+
+/// Reads the log's next record into `record`.
+fn next_record(log: &mut impl Read, record: &mut [u8; MAX_RECORD]) -> std::io::Result<Next> {
     // A stamp and the three bytes that say how long its frame is.
     const HEAD: usize = 8 + 3;
     let whole = |read: std::io::Result<()>| match read {
@@ -224,17 +301,17 @@ fn next_record(
         Err(e) => Err(e),
     };
     if !whole(log.read_exact(&mut record[..HEAD]))? {
-        return Ok(None);
+        return Ok(Next::End);
     }
     let Some(len) = uxduck_mavlink::framing::frame_len(&record[8..HEAD]) else {
-        return Ok(None);
+        return Ok(Next::NotARecord);
     };
     if !whole(log.read_exact(&mut record[HEAD..8 + len]))? {
-        return Ok(None);
+        return Ok(Next::End);
     }
     let mut stamp = [0u8; 8];
     stamp.copy_from_slice(&record[..8]);
-    Ok(Some((u64::from_be_bytes(stamp), len)))
+    Ok(Next::Record(u64::from_be_bytes(stamp), len))
 }
 
 /// A tlog's flights: each vehicle's arm to disarm, by its heartbeats.
@@ -244,13 +321,18 @@ fn next_record(
 /// one over 2 GB was skipped without a word to anyone. Records end at the
 /// first that is not whole, as [`uxduck_mavlink::tlog::records`] do.
 ///
+/// With the flights, the byte where the log stops being records when that
+/// is not its end: a replay stops there too, and flights after it are not
+/// found, which the caller says. A log that ends inside a record is one
+/// still being written or cut short by a crash, and nothing to say.
+///
 /// # Errors
 /// When the log cannot be read. Its end is no error.
 pub fn flights_in(
     mut log: impl Read,
     folder: &str,
     path: &Path,
-) -> std::io::Result<Vec<FoundFlight>> {
+) -> std::io::Result<(Vec<FoundFlight>, Option<u64>)> {
     let mut armed: HashMap<u8, (u64, String)> = HashMap::new();
     let mut flights = Vec::new();
     let mut last = 0u64;
@@ -259,7 +341,14 @@ pub fn flights_in(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut record = [0u8; MAX_RECORD];
-    while let Some((stamp, len)) = next_record(&mut log, &mut record)? {
+    let mut at = 0u64;
+    let stopped = loop {
+        let (stamp, len) = match next_record(&mut log, &mut record)? {
+            Next::Record(stamp, len) => (stamp, len),
+            Next::End => break None,
+            Next::NotARecord => break Some(at),
+        };
+        at += 8 + len as u64;
         let frame = &record[8..8 + len];
         last = stamp;
         let (Some(header), Some(payload)) = (
@@ -294,7 +383,7 @@ pub fn flights_in(
             }
             _ => {}
         }
-    }
+    };
     // Still armed where the log ends.
     for (system, (from, kind)) in armed {
         flights.push(FoundFlight {
@@ -308,7 +397,7 @@ pub fn flights_in(
             recording: false,
         });
     }
-    Ok(flights)
+    Ok((flights, stopped))
 }
 
 /// `MAV_TYPE` by name, for the vehicles UXDuck draws.
@@ -356,10 +445,30 @@ impl Found {
         std::fs::write(self.choices_path(), bytes).map_err(|e| e.to_string())
     }
 
-    /// The folders looked in or not, the known first.
+    /// The folders looked in or not, the known first, each with how many
+    /// the last look could not read in it and a page of them: from the
+    /// start, or `from` an offset for the folder that names.
     #[must_use]
-    pub fn folders(&self) -> Vec<FlightFolder> {
+    pub fn folders(&self, from: Option<&NotReadFrom>) -> Vec<FlightFolder> {
         let choices = self.choices();
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let told = |folder: &mut FlightFolder| {
+            let Some(unread) = state.not_read.get(&folder.id) else {
+                return;
+            };
+            let offset = from
+                .filter(|from| from.folder == folder.id)
+                .map_or(0, |from| usize::try_from(from.offset).unwrap_or(usize::MAX))
+                .min(unread.told.len());
+            folder.not_read = unread.told[offset..]
+                .iter()
+                .take(NOT_READ_PAGE)
+                .cloned()
+                .collect();
+            folder.not_read_total = unread.told.len() as u64;
+            folder.not_read_offset = offset as u64;
+            folder.not_logs = unread.not_logs;
+        };
         let mut folders: Vec<FlightFolder> = known_folders()
             .into_iter()
             .map(|(id, name, path)| FlightFolder {
@@ -368,18 +477,25 @@ impl Found {
                 path: path.display().to_string(),
                 id,
                 name,
-                added: false,
-                deep: false,
-                cut: false,
+                ..FlightFolder::default()
             })
             .collect();
-        let walks = &self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .walks;
         for added in &choices.added {
             let path = PathBuf::from(added);
+            // A walk under way first: its last one is being replaced.
+            let walk = state
+                .walking
+                .get(added)
+                .map(|&entries| FolderWalk {
+                    entries,
+                    took_ms: None,
+                })
+                .or_else(|| {
+                    state.walks.get(added).map(|walk| FolderWalk {
+                        entries: walk.entries,
+                        took_ms: Some(u64::try_from(walk.took.as_millis()).unwrap_or(u64::MAX)),
+                    })
+                });
             folders.push(FlightFolder {
                 id: added.clone(),
                 name: path
@@ -390,17 +506,19 @@ impl Found {
                 path: added.clone(),
                 added: true,
                 deep: choices.deep.contains(added),
-                cut: walks.get(added).is_some_and(|w| w.cut),
+                walk: walk.filter(|_| choices.deep.contains(added)),
+                ..FlightFolder::default()
             });
         }
+        folders.iter_mut().for_each(told);
         folders
     }
 
     /// What was found, newest first; a look starts when the last is a
     /// minute old.
     #[must_use]
-    pub fn found(&self) -> FoundFlightsResult {
-        let folders = self.folders();
+    pub fn found(&self, params: &FoundFlightsParams) -> FoundFlightsResult {
+        let folders = self.folders(params.not_read.as_ref());
         let due = {
             let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             !state.scanning && state.looked_at.is_none_or(|at| at.elapsed() >= LOOK_EVERY)
@@ -420,60 +538,104 @@ impl Found {
         FoundFlightsResult {
             folders,
             flights,
-            scanning: state.scanning,
+            scanning: state.scanning || !state.walking.is_empty(),
         }
+    }
+
+    /// Starts a walk through a folder's whole tree on a thread of its own,
+    /// unless one is under way or its last ended less than [`DEEP_EVERY`]
+    /// ago. A walk may take minutes, and the other folders are not kept
+    /// waiting for it: a look reads the files its last walk found.
+    fn walk_when_due(state: &Arc<Mutex<State>>, folder: &FlightFolder) {
+        {
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            let fresh = state
+                .walks
+                .get(&folder.id)
+                .is_some_and(|walk| walk.at.elapsed() < DEEP_EVERY);
+            if fresh || state.walking.contains_key(&folder.id) {
+                return;
+            }
+            state.walking.insert(folder.id.clone(), 0);
+        }
+        let (state, id, path) = (
+            state.clone(),
+            folder.id.clone(),
+            PathBuf::from(&folder.path),
+        );
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut not_read = Vec::new();
+            let (files, entries) = walk(&path, true, &mut not_read, |entries| {
+                // Ended when the folder is removed or changed meanwhile.
+                state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .walking
+                    .get_mut(&id)
+                    .map(|so_far| *so_far = entries)
+                    .is_some()
+            });
+            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.walking.remove(&id).is_none() {
+                return;
+            }
+            state.walks.insert(
+                id,
+                Walk {
+                    at: Instant::now(),
+                    files,
+                    entries,
+                    took: started.elapsed(),
+                    not_read,
+                },
+            );
+            // The next ask looks through what it found.
+            state.looked_at = None;
+            state.walked_since = true;
+        });
     }
 
     /// Looks through the folders on a thread of its own: only files new
     /// or changed since the last look are read.
     fn look(&self, folders: Vec<FlightFolder>) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .scanning = true;
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.scanning = true;
+            state.walked_since = false;
+        }
         let state = self.state.clone();
         std::thread::spawn(move || {
             let mut files = Vec::new();
+            // By folder id: those that may hold flights, and the files
+            // that are not logs.
+            let mut not_read: HashMap<String, (Vec<NotRead>, Vec<NotRead>)> = HashMap::new();
             for folder in folders.iter().filter(|f| f.on && f.exists) {
-                let mut found = Vec::new();
-                if folder.deep {
-                    // A whole tree is walked every ten minutes, not every one.
-                    let fresh = state
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .walks
-                        .get(&folder.id)
-                        .filter(|w| w.at.elapsed() < DEEP_EVERY)
-                        .cloned();
-                    if let Some(walk) = fresh {
-                        found = walk.files;
-                    } else {
-                        let cut = tlogs_under(Path::new(&folder.path), &mut found);
-                        state
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .walks
-                            .insert(
-                                folder.id.clone(),
-                                Walk {
-                                    at: Instant::now(),
-                                    files: found.clone(),
-                                    cut,
-                                },
-                            );
-                    }
+                let unread = &mut not_read.entry(folder.id.clone()).or_default().0;
+                let found = if folder.deep {
+                    Self::walk_when_due(&state, folder);
+                    let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    state.walks.get(&folder.id).map_or_else(Vec::new, |walk| {
+                        unread.extend(walk.not_read.iter().cloned());
+                        walk.files.clone()
+                    })
                 } else {
-                    // The apps' folders as the apps keep them; an added one
-                    // at its top level only (maintainer, 2026-10-29).
-                    let depth = if folder.added { 0 } else { DEPTH };
-                    tlogs_in(Path::new(&folder.path), depth, &mut found);
-                }
+                    // An app's folder through its whole tree, as deep as
+                    // its logs are; an added one at its top level only
+                    // (maintainer, 2026-10-29).
+                    walk(Path::new(&folder.path), !folder.added, unread, |_| true).0
+                };
                 files.extend(found.into_iter().map(|p| (folder.id.clone(), p)));
             }
             let mut fresh: HashMap<PathBuf, Seen> = HashMap::new();
             for (folder, path) in files {
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
+                let (unread, not_logs) = not_read.entry(folder.clone()).or_default();
+                let meta = match std::fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        unread.push(self::unread(&path, "open it", &error));
+                        continue;
+                    }
                 };
                 let (size, modified) = (
                     meta.len(),
@@ -491,27 +653,55 @@ impl Found {
                     seen
                 } else {
                     // Read through, however long it is. One that cannot be
-                    // read is tried again at the next look.
-                    let Ok(flights) = File::open(&path).and_then(|file| {
+                    // read is said, and tried again at the next look.
+                    let read = File::open(&path).and_then(|file| {
                         let log = BufReader::with_capacity(READ_AT_A_TIME, file);
                         flights_in(log, &folder, &path)
-                    }) else {
-                        continue;
-                    };
-                    Seen {
-                        size,
-                        modified,
-                        flights,
+                    });
+                    match read {
+                        Ok((flights, stopped)) => Seen {
+                            size,
+                            modified,
+                            flights,
+                            stopped,
+                        },
+                        Err(error) => {
+                            unread.push(self::unread(&path, "read it", &error));
+                            continue;
+                        }
                     }
                 };
+                match seen.stopped {
+                    // Nothing of a log, such as a build tool's `.tlog`:
+                    // told, and apart from those that may hold flights. A
+                    // log whose first bytes are damaged is among them.
+                    Some(0) => not_logs.push(NotRead {
+                        path: path.display().to_string(),
+                        why: "It is not a telemetry log. It does not begin with a record."
+                            .to_owned(),
+                    }),
+                    Some(at) => unread.push(NotRead {
+                        path: path.display().to_string(),
+                        why: format!(
+                            "It stops being a telemetry log at byte {at} of {size}. Flights after that are not listed."
+                        ),
+                    }),
+                    None => {}
+                }
                 for flight in &mut seen.flights {
                     flight.recording = growing;
                 }
                 fresh.insert(path, seen);
             }
+            // In the order a person looks for one, not the walk's.
+            let not_read = not_read
+                .into_iter()
+                .map(|(folder, (told, not_logs))| (folder, Unread::of(told, not_logs)))
+                .collect();
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
             state.files = fresh;
-            state.looked_at = Some(Instant::now());
+            state.not_read = not_read;
+            state.looked_at = (!state.walked_since).then(Instant::now);
             state.scanning = false;
         });
     }
@@ -561,10 +751,12 @@ impl Found {
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.looked_at = None;
-            // Its tree is walked afresh, now or never again.
+            // Its tree is walked afresh, now or never again, and a walk of
+            // it under way ends.
             state.walks.remove(&params.id);
+            state.walking.remove(&params.id);
         }
-        Ok(self.found())
+        Ok(self.found(&FoundFlightsParams::default()))
     }
 }
 
@@ -593,12 +785,13 @@ mod tests {
     #[test]
     fn a_tlogs_flights_are_each_vehicles_arm_to_disarm() {
         let bytes = log(&[(1, 10, 40), (2, 20, 70)], 60);
-        let mut flights = flights_in(
+        let (mut flights, stopped) = flights_in(
             &bytes[..],
             "qgroundcontrol",
             Path::new("/x/2026-10-28 14-02-17.tlog"),
         )
         .unwrap();
+        assert_eq!(stopped, None);
         flights.sort_by_key(|f| f.system_id);
         assert_eq!(flights.len(), 2);
         assert_eq!(flights[0].armed_at_us, T0 + 10_000_000);
@@ -634,7 +827,7 @@ mod tests {
         // may hold flights too: only the added folder's are counted.
         let mut flights = Vec::new();
         for _ in 0..500 {
-            let result = found.found();
+            let result = found.found(&FoundFlightsParams::default());
             flights = result
                 .flights
                 .into_iter()
@@ -722,6 +915,7 @@ mod tests {
             let mut flights: Vec<(u8, u64, Option<u64>)> =
                 flights_in(Trickle(log), "f", Path::new("/x/a.tlog"))
                     .unwrap()
+                    .0
                     .into_iter()
                     .map(|f| (f.system_id, f.armed_at_us, f.ended_at_us))
                     .collect();
@@ -789,7 +983,7 @@ mod tests {
     /// Waits for a look to finish and gives the added folder's flights.
     fn settled(found: &Found, folder: &str) -> Vec<FoundFlight> {
         for _ in 0..500 {
-            let result = found.found();
+            let result = found.found(&FoundFlightsParams::default());
             let looked = found
                 .state
                 .lock()
@@ -840,11 +1034,18 @@ mod tests {
         let mut whole: Vec<String> = settled(&found, &path).into_iter().map(|f| f.file).collect();
         whole.sort();
         assert_eq!(whole, ["deep.tlog", "near.tlog", "top.tlog"]);
-        assert!(found.found().folders.iter().any(|f| f.id == path && !f.cut));
+        assert!(
+            found
+                .found(&FoundFlightsParams::default())
+                .folders
+                .iter()
+                .any(|f| f.id == path && !f.cut)
+        );
         // Off again: back to the top.
         found.change(&added(Some(false))).unwrap();
         assert_eq!(settled(&found, &path).len(), 1);
-        // The apps' own folders are never walked whole.
+        // The apps' own folders have no such switch: they are always
+        // looked through as the apps keep them, however deep.
         assert!(
             found
                 .change(&FlightFolderParams {
@@ -855,5 +1056,286 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    /// The added folder as `flights/found` gives it.
+    fn folder(found: &Found, id: &str) -> FlightFolder {
+        found
+            .found(&FoundFlightsParams::default())
+            .folders
+            .into_iter()
+            .find(|f| f.id == id)
+            .unwrap()
+    }
+
+    fn add(found: &Found, path: &str, deep: Option<bool>) {
+        found
+            .change(&FlightFolderParams {
+                id: path.to_owned(),
+                on: Some(true),
+                remove: false,
+                deep,
+            })
+            .unwrap();
+    }
+
+    /// A log that stops being records before its end gives the flights up
+    /// to there, and the folder says where it stopped. Until 2026-11-15
+    /// nothing said that the rest of the log was not looked through.
+    #[test]
+    fn a_log_that_stops_being_records_is_told_with_its_folder_and_keeps_its_earlier_flights() {
+        let data = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let mut damaged = log(&[(1, 5, 15)], 20);
+        let at = damaged.len();
+        damaged.extend_from_slice(&[0u8; 64]);
+        damaged.extend_from_slice(&log(&[(3, 1, 5)], 10));
+        std::fs::write(logs.path().join("damaged.tlog"), &damaged).unwrap();
+        std::fs::write(logs.path().join("whole.tlog"), log(&[(2, 5, 15)], 20)).unwrap();
+        // One that ends inside a record is still being written, or was cut
+        // short by a crash: nothing to say.
+        let short = log(&[(4, 5, 15)], 20);
+        std::fs::write(logs.path().join("short.tlog"), &short[..short.len() - 5]).unwrap();
+        // A file with the name of a log and none of one.
+        std::fs::write(logs.path().join("notes.tlog"), b"not a telemetry log").unwrap();
+        let found = Found::new(data.path());
+        let path = logs.path().display().to_string();
+        add(&found, &path, None);
+        let mut systems: Vec<u8> = settled(&found, &path).iter().map(|f| f.system_id).collect();
+        systems.sort_unstable();
+        assert_eq!(
+            systems,
+            [1, 2, 4],
+            "the flight after the damage is not found"
+        );
+        // The one that may hold flights, then the one that is no log.
+        let told = [
+            NotRead {
+                path: logs.path().join("damaged.tlog").display().to_string(),
+                why: format!(
+                    "It stops being a telemetry log at byte {at} of {}. Flights after that are not listed.",
+                    damaged.len()
+                ),
+            },
+            NotRead {
+                path: logs.path().join("notes.tlog").display().to_string(),
+                why: "It is not a telemetry log. It does not begin with a record.".to_owned(),
+            },
+        ];
+        let folder_told = folder(&found, &path);
+        assert_eq!(folder_told.not_read, told);
+        assert_eq!((folder_told.not_read_total, folder_told.not_logs), (2, 1));
+        // The next look reads none of them again, and still says it.
+        found
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .looked_at = None;
+        assert_eq!(settled(&found, &path).len(), 3);
+        assert_eq!(folder(&found, &path).not_read, told);
+        // Mended, and the other gone: nothing to say.
+        std::fs::write(logs.path().join("damaged.tlog"), log(&[(1, 5, 15)], 20)).unwrap();
+        std::fs::remove_file(logs.path().join("notes.tlog")).unwrap();
+        found
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .looked_at = None;
+        settled(&found, &path);
+        assert_eq!(folder(&found, &path).not_read, []);
+    }
+
+    /// A folder says how many a look could not read and gives a page of
+    /// them, and the next page goes on where the one before stopped. A
+    /// disk decides how many there are (a build tool writes `.tlog` files
+    /// of its own), so no answer carries them all and none is left out.
+    /// Those that may hold flights come first, and the files that are not
+    /// logs are counted apart, for the Logbook's note.
+    #[test]
+    fn what_a_folder_could_not_read_is_told_a_page_at_a_time_with_how_many_there_are() {
+        let data = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        // A page and a half of a build tool's files, named as logs.
+        let builds = NOT_READ_PAGE + NOT_READ_PAGE / 2;
+        let build = |n: usize| logs.path().join(format!("{n:04}.tlog"));
+        for n in 0..builds {
+            std::fs::write(build(n), b"^C:\\SRC\\MAIN.CPP").unwrap();
+        }
+        let mut damaged = log(&[(1, 5, 15)], 20);
+        damaged.extend_from_slice(&[0u8; 64]);
+        std::fs::write(logs.path().join("damaged.tlog"), &damaged).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("notes.tlog"), b"not a telemetry log").unwrap();
+        let found = Found::new(data.path());
+        let (path, other) = (
+            logs.path().display().to_string(),
+            other.path().display().to_string(),
+        );
+        add(&found, &other, None);
+        settled(&found, &other);
+        add(&found, &path, None);
+        assert_eq!(settled(&found, &path).len(), 1);
+        let total = builds as u64 + 1;
+        let from = |offset: u64| {
+            found
+                .found(&FoundFlightsParams {
+                    not_read: Some(NotReadFrom {
+                        folder: path.clone(),
+                        offset,
+                    }),
+                })
+                .folders
+        };
+        let of = |folders: &[FlightFolder], id: &str| {
+            let folder = folders.iter().find(|f| f.id == id).unwrap();
+            (
+                folder.not_read.len(),
+                folder.not_read_offset,
+                folder.not_read_total,
+                folder.not_logs,
+            )
+        };
+
+        let first = folder(&found, &path);
+        assert_eq!(
+            of(std::slice::from_ref(&first), &path),
+            (NOT_READ_PAGE, 0, total, builds as u64)
+        );
+        let page = NOT_READ_PAGE as u64;
+        let second = from(page);
+        assert_eq!(
+            of(&second, &path),
+            (builds + 1 - NOT_READ_PAGE, page, total, builds as u64)
+        );
+        // Another folder is given from its start, whatever is asked of this.
+        assert_eq!(of(&second, &other), (1, 0, 1, 1));
+        // The two pages are every one of them once: the log that may hold
+        // flights first, though the build files' names come before its
+        // own, then the build files by path.
+        let second = second.into_iter().find(|f| f.id == path).unwrap();
+        let told: Vec<&str> = first
+            .not_read
+            .iter()
+            .chain(&second.not_read)
+            .map(|told| told.path.as_str())
+            .collect();
+        let mut all = vec![logs.path().join("damaged.tlog").display().to_string()];
+        all.extend((0..builds).map(|n| build(n).display().to_string()));
+        assert_eq!(told, all);
+        // Past the end there is nothing more, and still how many there are.
+        assert_eq!(of(&from(total), &path), (0, total, total, builds as u64));
+        assert_eq!(of(&from(u64::MAX), &path), (0, total, total, builds as u64));
+    }
+
+    /// A folder that cannot be listed is told with the tree it is in, and
+    /// the rest of the tree is looked through. Until 2026-11-15 it was
+    /// passed over without a word.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_listed_is_told_with_why() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::tempdir().unwrap();
+        let disk = tempfile::tempdir().unwrap();
+        let locked = disk.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("unseen.tlog"), log(&[(1, 5, 15)], 20)).unwrap();
+        std::fs::create_dir_all(disk.path().join("open")).unwrap();
+        std::fs::write(disk.path().join("open/seen.tlog"), log(&[(2, 5, 15)], 20)).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root lists any folder: nothing to tell there.
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let found = Found::new(data.path());
+        let path = disk.path().display().to_string();
+        add(&found, &path, Some(true));
+        let flights = settled(&found, &path);
+        let told = folder(&found, &path).not_read;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(flights.len(), 1, "{flights:?}");
+        assert_eq!(flights[0].file, "seen.tlog");
+        assert_eq!(
+            told,
+            [NotRead {
+                path: locked.display().to_string(),
+                why: "UXDuck could not list it: Permission denied (os error 13).".to_owned(),
+            }]
+        );
+    }
+
+    /// A tree is walked to its bottom, as an app's own folder is. Until
+    /// 2026-11-15 an app's folder was looked into four folders down, and a
+    /// log below that was passed over without a word.
+    #[test]
+    fn a_tree_is_walked_to_its_bottom_and_says_how_far_it_has_got() {
+        let disk = tempfile::tempdir().unwrap();
+        let deep = disk.path().join("a/b/c/d/e/f/g/h");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("deep.tlog"), []).unwrap();
+        std::fs::write(disk.path().join("top.tlog"), []).unwrap();
+        std::fs::create_dir_all(disk.path().join(".hidden")).unwrap();
+        std::fs::write(disk.path().join(".hidden/unseen.tlog"), []).unwrap();
+        let names = |files: Vec<PathBuf>| {
+            let mut names: Vec<String> = files
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let mut not_read = Vec::new();
+        let (files, entries) = walk(disk.path(), true, &mut not_read, |_| true);
+        assert_eq!(names(files), ["deep.tlog", "top.tlog"]);
+        assert_eq!(entries, 11, "eight folders, two logs and the hidden folder");
+        let (top, entries) = walk(disk.path(), false, &mut not_read, |_| true);
+        assert_eq!(names(top), ["top.tlog"]);
+        assert_eq!(entries, 3);
+        assert_eq!(not_read, []);
+
+        // A walk says how many entries it has read as it goes, and ends
+        // when it is told to: the folder was removed meanwhile.
+        let many = disk.path().join("many");
+        std::fs::create_dir_all(&many).unwrap();
+        for n in 0..4_000 {
+            std::fs::write(many.join(format!("{n}.bin")), []).unwrap();
+        }
+        let mut heard = Vec::new();
+        let (_, entries) = walk(&many, true, &mut not_read, |entries| {
+            heard.push(entries);
+            entries < 3 * TELL_EVERY
+        });
+        assert_eq!(heard, [1024, 2048, 3072]);
+        assert_eq!(entries, 3072);
+    }
+
+    /// A tree of more entries than a walk once read is walked whole, and
+    /// its folder says how many it read. Until 2026-11-15 a walk stopped
+    /// at 250,000 entries. Kept to Linux, where making a quarter of a
+    /// million files takes a few seconds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tree_of_more_entries_than_a_walk_once_read_is_walked_whole() {
+        let data = tempfile::tempdir().unwrap();
+        let disk = tempfile::tempdir().unwrap();
+        for folder in 0..251 {
+            let dir = disk.path().join(format!("{folder:03}"));
+            std::fs::create_dir(&dir).unwrap();
+            for file in 0..1_000 {
+                File::create(dir.join(format!("{file}.bin"))).unwrap();
+            }
+        }
+        std::fs::write(disk.path().join("last.tlog"), log(&[(1, 5, 15)], 20)).unwrap();
+        let found = Found::new(data.path());
+        let path = disk.path().display().to_string();
+        add(&found, &path, Some(true));
+        let flights = settled(&found, &path);
+        let folder = folder(&found, &path);
+        assert!(!folder.cut, "the walk did not stop short");
+        assert_eq!(flights.len(), 1, "{flights:?}");
+        let walk = folder.walk.unwrap();
+        assert_eq!(walk.entries, 251 + 251_000 + 1);
+        assert!(walk.took_ms.is_some(), "the walk has ended");
+        assert_eq!(folder.not_read, []);
     }
 }

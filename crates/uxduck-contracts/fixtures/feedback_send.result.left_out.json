@@ -1,0 +1,25 @@
+{
+  "status": "filed",
+  "issue": "FB-218",
+  "leftOut": {
+    "trace": {
+      "count": 412,
+      "bytes": 4300000,
+      "fromUs": 1790000000000000,
+      "toUs": 1790000054000000,
+      "limitBytes": 5242880
+    },
+    "log": {
+      "count": 20,
+      "bytes": 2400,
+      "limitBytes": 5242880
+    },
+    "flight": {
+      "count": 23738,
+      "bytes": 6527950,
+      "fromUs": 1789999760000000,
+      "toUs": 1789999814000000,
+      "limitBytes": 20971520
+    }
+  }
+}

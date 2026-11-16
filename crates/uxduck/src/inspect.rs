@@ -80,7 +80,12 @@ pub fn history(
         InspectDirection::Received => {
             let (found, older) =
                 crate::tlog_index::page(tlogs, link_id, system_id, params.id, before, limit)
-                    .map_err(|_| bad())?;
+                    .map_err(|error| match error {
+                        crate::tlog_index::PageError::BadCursor => bad(),
+                        crate::tlog_index::PageError::Unreadable(why) => {
+                            ApiError::new(ErrorKind::Internal, why)
+                        }
+                    })?;
             let fallback = fallback();
             let own = uxduck_mavlink::custom::for_vehicle(vehicle_ids);
             Ok(MavlinkHistoryResult {

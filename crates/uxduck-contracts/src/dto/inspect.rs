@@ -198,8 +198,8 @@ pub struct MavlinkHistoryResult {
     /// Newest first; the first may be the one the inspector shows live.
     pub messages: Vec<PastMessage>,
     /// Pass as `before` for the next page; none when nothing older is
-    /// kept. From tlogs it can lead to an empty last page, when only
-    /// earlier files are left and none of them holds the message.
+    /// kept. From tlogs a page may hold fewer than asked for, or none,
+    /// and still have this: a long log is read back a part at a time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub older: Option<String>,
     /// True when read from the vehicle's tlogs (what it sent, in the

@@ -131,5 +131,14 @@
   ],
   "errors": [],
   "log": ["INFO uxduck::daemon: listening"],
-  "chat": [{ "kind": "user-message", "text": "why did it do that?" }]
+  "chat": [{ "kind": "user-message", "text": "why did it do that?" }],
+  "leftOut": {
+    "trace": {
+      "count": 412,
+      "bytes": 4300000,
+      "fromUs": 1790000000000000,
+      "toUs": 1790000054000000,
+      "limitBytes": 5242880
+    }
+  }
 }

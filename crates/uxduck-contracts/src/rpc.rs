@@ -1977,10 +1977,12 @@ pub enum ClientRequest {
     /// Flights found in the tlogs other ground stations keep on this
     /// computer (ADR-0039 R18): QGroundControl's and Mission Planner's
     /// folders and any added, each flight with its file to replay with
-    /// `replay/open`. Nothing is copied or written. UXDuck Desktop only.
-    /// Needs `read`. Result: `FoundFlightsResult`.
+    /// `replay/open`. Each folder says what could not be read in it, a
+    /// page at a time with how many there are. Nothing is copied or
+    /// written. UXDuck Desktop only. Needs `read`. Result:
+    /// `FoundFlightsResult`.
     #[serde(rename = "flights/found")]
-    FlightsFound(Empty),
+    FlightsFound(crate::dto::replay::FoundFlightsParams),
     /// Looks in a folder for flights or stops, or adds or removes one of
     /// the person's. Needs `config`. Result: `FoundFlightsResult`.
     #[serde(rename = "flights/folder")]

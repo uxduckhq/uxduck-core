@@ -609,12 +609,15 @@ pub trait System: Send {
     }
     /// Flights in other ground stations' tlogs on this computer (S215),
     /// as last looked for; a look starts when the last is a minute old.
+    /// Each folder says what could not be read in it, a page at a time.
     ///
     /// # Errors
     /// Why not, in words: no such folders here.
     fn found_flights(
         &mut self,
+        params: &uxduck_contracts::dto::replay::FoundFlightsParams,
     ) -> Result<uxduck_contracts::dto::replay::FoundFlightsResult, String> {
+        let _ = params;
         Err("Flights from other apps are found by UXDuck Desktop.".into())
     }
     /// A folder looked in or not, added or removed (S215).

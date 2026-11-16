@@ -14,8 +14,8 @@ use uxduck_contracts::dto::analytics::Surface;
 use uxduck_contracts::dto::feedback::{
     BUNDLE_SCHEMA, BundleChatItem, BundleDaemon, BundleLink, BundleNotification, BundleReport,
     BundleVehicle, FeedbackAddParams, FeedbackAttachment, FeedbackBundle, FeedbackFileParams,
-    FeedbackFiled, FeedbackKind, FeedbackProgress, FeedbackSendParams, FeedbackSendResult,
-    FeedbackSuggestParams, FeedbackVoiceNote, SuggestionCard,
+    FeedbackFiled, FeedbackKind, FeedbackLeftOut, FeedbackProgress, FeedbackSendParams,
+    FeedbackSendResult, FeedbackSuggestParams, FeedbackVoiceNote, LeftOut, SuggestionCard,
 };
 use uxduck_contracts::dto::trace::TraceFrame;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -28,19 +28,27 @@ use uxduck_core::domain::thread::ItemKind;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
-/// How long a client's frames are kept for its report, and at most how many.
+/// How long a client's frames are kept for its report, and at most how many:
+/// a ring in memory for every connection, so that a report can say what its
+/// window did just before. The form says "the last two minutes".
 pub(crate) const RECENT_US: u64 = 120_000_000;
 pub(crate) const RECENT_FRAMES: usize = 200;
-/// Longer strings in a kept frame are cut, such as a screenshot being sent.
+/// Longer strings in a kept frame are cut and end in "…", such as a
+/// screenshot being sent: the ring holds what a window did, not its files.
 const KEPT_STRING: usize = 512;
 /// A kept frame still larger than this keeps only its outline: a window's
 /// first state snapshot can be tens of megabytes of parameters.
 const KEPT_FRAME: usize = 16 * 1024;
 /// In an outline, an object with more entries than this is counted.
 const OUTLINE_ENTRIES: usize = 50;
-/// The most a bundle may be. The API takes 5 MB, and a smaller one goes out
-/// sooner over a field connection.
-pub const MAX_BUNDLE: usize = 2 * 1024 * 1024;
+/// The most UXDuck's servers take of a bundle (`LIMITS.bundle` in
+/// `apps/api/src/features/feedback/report.ts`): they refuse the whole report
+/// for a larger one, the person's words with it, so a bundle is fitted to
+/// this and says what was left out. Until 2026-11-15 a bundle was fitted to
+/// 2 MB, a number of UXDuck's own, and said nothing.
+pub const MAX_BUNDLE: usize = 5 * 1024 * 1024;
+/// Room a fitted bundle keeps for its record of what was left out.
+const LEFT_OUT_ROOM: usize = 2048;
 const MAX_TEXT: usize = 5000;
 /// A 3 MB image in base64.
 const MAX_SCREENSHOT_B64: usize = 4 * 1024 * 1024 + 4;
@@ -192,22 +200,78 @@ fn json_len(value: &Value) -> usize {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
-/// Fits a whole bundle within [`MAX_BUNDLE`]: the oldest trace frames go
-/// first, then the oldest log lines, then the chat's oldest items, so the
-/// report is never refused for its details.
-pub fn fit(bundle: &mut Value) {
+/// A bundle's lists that give way when it is over [`MAX_BUNDLE`], in the
+/// order they do: where each is, whether its newest comes first, and the
+/// field that holds an item's time.
+const FITTED: [(&str, bool, &str); 5] = [
+    ("/trace", false, "tsUs"),
+    ("/log", false, ""),
+    ("/chat", false, ""),
+    ("/errors", false, "atUs"),
+    ("/daemon/notifications", true, "createdAtUs"),
+];
+
+/// Fits a whole bundle within [`MAX_BUNDLE`], so the report is never
+/// refused for its details: the oldest trace frames go first, then the
+/// oldest log lines, the chat's oldest items, the oldest page errors and
+/// the oldest notifications. The newest of each stays, being nearest the
+/// problem.
+///
+/// What went is written in the bundle's `leftOut`, how much of each and
+/// from when to when, beside what `left_out` already holds: what the
+/// composition root left out of the flight data. It is also the answer,
+/// for the person sending the report: all of it `None` when nothing was
+/// left out.
+pub fn fit(bundle: &mut Value, mut left_out: FeedbackLeftOut) -> FeedbackLeftOut {
     let mut size = json_len(bundle);
-    for part in ["trace", "log", "chat"] {
-        let Some(items) = bundle.get_mut(part).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let mut gone = 0;
-        while size > MAX_BUNDLE && gone < items.len() {
-            size = size.saturating_sub(json_len(&items[gone]) + 1);
-            gone += 1;
+    if size > MAX_BUNDLE {
+        for (part, newest_first, stamp) in FITTED {
+            let Some(items) = bundle.pointer_mut(part).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let (mut gone, mut bytes) = (0, 0);
+            while size > MAX_BUNDLE - LEFT_OUT_ROOM && gone < items.len() {
+                let oldest = if newest_first {
+                    items.len() - 1 - gone
+                } else {
+                    gone
+                };
+                let len = json_len(&items[oldest]) + 1;
+                size = size.saturating_sub(len);
+                bytes += len;
+                gone += 1;
+            }
+            if gone == 0 {
+                continue;
+            }
+            let went: Vec<Value> = if newest_first {
+                items.split_off(items.len() - gone)
+            } else {
+                items.drain(..gone).collect()
+            };
+            let stamps = || went.iter().filter_map(|item| item.get(stamp)?.as_u64());
+            let record = Some(LeftOut {
+                count: gone as u64,
+                bytes: bytes as u64,
+                from_us: stamps().min(),
+                to_us: stamps().max(),
+                limit_bytes: MAX_BUNDLE as u64,
+            });
+            match part {
+                "/trace" => left_out.trace = record,
+                "/log" => left_out.log = record,
+                "/chat" => left_out.chat = record,
+                "/errors" => left_out.errors = record,
+                _ => left_out.notifications = record,
+            }
         }
-        items.drain(..gone);
     }
+    if left_out != FeedbackLeftOut::default()
+        && let Ok(record) = serde_json::to_value(&left_out)
+    {
+        bundle["leftOut"] = record;
+    }
+    left_out
 }
 
 /// Field names whose values are secrets.
@@ -922,13 +986,16 @@ impl Engine {
     }
 
     /// "1 vehicle (ArduPilot Copter, udp-listen)": their autopilots, types
-    /// and links, up to three.
+    /// and links. The line is one of an issue's first, so three are named
+    /// and the rest counted, as "5 vehicles (…, and 2 more)". The bundle
+    /// has every one.
     fn vehicles_line(&self) -> String {
-        let vehicles: Vec<String> = self
+        const NAMED: usize = 3;
+        let mut vehicles: Vec<String> = self
             .state
             .vehicles
             .values()
-            .take(3)
+            .take(NAMED)
             .map(|v| {
                 let link = self
                     .state
@@ -941,7 +1008,12 @@ impl Engine {
         match self.state.vehicles.len() {
             0 => "no vehicle".to_owned(),
             1 => format!("1 vehicle ({})", vehicles.join(", ")),
-            n => format!("{n} vehicles ({})", vehicles.join(", ")),
+            n => {
+                if n > NAMED {
+                    vehicles.push(format!("and {} more", n - NAMED));
+                }
+                format!("{n} vehicles ({})", vehicles.join(", "))
+            }
         }
     }
 
@@ -999,8 +1071,10 @@ impl Engine {
                 created_at_us: n.created_at_us,
             })
             .collect();
+        // Every one, newest first. Until 2026-11-15 only the newest 20
+        // went, and nothing said so. `fit` leaves the oldest out when the
+        // bundle is over what the servers take, and says how many.
         notifications.sort_by_key(|n| std::cmp::Reverse(n.created_at_us));
-        notifications.truncate(20);
         let settings = serde_json::to_value(self.settings_dto(&self.state.settings))
             .unwrap_or(Value::Object(Map::new()));
         let trace = self
@@ -1054,9 +1128,13 @@ impl Engine {
                 settings,
             }),
             trace,
-            errors: params.errors.iter().take(20).cloned().collect(),
+            // As the page sent them: it keeps its last 20, oldest first.
+            // Until 2026-11-15 the first 20 of a longer list went, which
+            // are the oldest, and nothing said so.
+            errors: params.errors.clone(),
             log: Vec::new(),
             chat,
+            left_out: None,
         }
     }
 
@@ -1064,8 +1142,15 @@ impl Engine {
     /// 1 vehicle (ArduPilot Copter, udp-listen) · not signed in · map open".
     /// The root puts the platform first.
     fn context(&self, params: &FeedbackSendParams) -> String {
-        // The page's own words: kept short, they are not checked.
-        let short = |s: &str| s.chars().take(40).collect::<String>();
+        // The page's own words, which nothing checks: one longer than 40
+        // characters is cut for this line, and ends in "…" to say so.
+        let short = |s: &str| {
+            if s.chars().count() > 40 {
+                format!("{}…", s.chars().take(39).collect::<String>())
+            } else {
+                s.to_owned()
+            }
+        };
         let ui = &params.ui;
         let surface = match (params.surface, &ui.shell, &ui.browser) {
             (Surface::Desktop, Some(shell), _) => {
@@ -1095,7 +1180,10 @@ impl Engine {
 }
 
 /// The context line in 250 characters, with what is open last: listed while
-/// it fits, else counted, so the vehicles are never what is cut off.
+/// it fits, else counted, so the vehicles are never what is cut off. The
+/// servers take 300 of a line that the root puts the platform before
+/// (`context` in `apps/api/src/features/feedback/report.ts`). A line still
+/// longer ends in "…": the bundle has all of it.
 fn fitted(parts: &[String], panes: &[String]) -> String {
     const MAX: usize = 250;
     let mut line = parts.join(" · ");
@@ -1108,7 +1196,10 @@ fn fitted(parts: &[String], panes: &[String]) -> String {
         };
         line.push_str(&tail);
     }
-    line.chars().take(MAX).collect()
+    if line.chars().count() > MAX {
+        line = format!("{}…", line.chars().take(MAX - 1).collect::<String>());
+    }
+    line
 }
 
 #[cfg(test)]
@@ -1307,45 +1398,139 @@ mod tests {
         assert_eq!(recent[1].payload["attachments"][0]["name"], "a.pdf");
     }
 
+    /// A bundle over what the servers take keeps the newest of each part,
+    /// and says in itself and in its answer what was left out. Until
+    /// 2026-11-15 it was cut to 2 MB and said nothing.
     #[test]
-    fn a_bundle_is_fitted_within_its_budget_oldest_first() {
-        let frames: Vec<Value> = (0..400)
-            .map(|n| json!({ "tsUs": n, "payload": "y".repeat(10_000) }))
-            .collect();
+    fn a_bundle_over_what_the_servers_take_keeps_its_newest_and_says_what_went() {
+        let frame = |n: u64| json!({ "tsUs": 1000 + n, "payload": "y".repeat(10_000) });
         let line = |n: usize| format!("{n:05} {}", "x".repeat(400));
+        // 9 MB of trace, the page's errors and the notifications newest first.
         let mut bundle = json!({
             "schema": BUNDLE_SCHEMA,
-            "trace": frames,
+            "trace": (0..900).map(frame).collect::<Vec<_>>(),
             "log": (0..500).map(line).collect::<Vec<_>>(),
             "chat": [{ "kind": "user-message", "text": "Why did it climb?" }],
+            "errors": [{ "code": "map-unavailable", "atUs": 7 }],
+            "daemon": { "notifications": [
+                { "severity": "info", "title": "newer", "createdAtUs": 9 },
+                { "severity": "info", "title": "older", "createdAtUs": 8 },
+            ] },
         });
-        fit(&mut bundle);
+        let left_out = fit(&mut bundle, FeedbackLeftOut::default());
         assert!(json_len(&bundle) <= MAX_BUNDLE);
         let trace = bundle["trace"].as_array().unwrap();
-        assert!(!trace.is_empty() && trace.len() < 400, "{}", trace.len());
-        assert_eq!(trace.last().unwrap()["tsUs"], 399, "the newest frames stay");
         assert_eq!(
-            bundle["log"].as_array().unwrap().len(),
-            500,
-            "the log is whole while dropping frames makes room"
+            trace.last().unwrap()["tsUs"],
+            1899,
+            "the newest frames stay"
         );
-        assert_eq!(bundle["chat"].as_array().unwrap().len(), 1);
+        let went = left_out.trace.clone().unwrap();
+        assert_eq!(went.count + trace.len() as u64, 900, "none unaccounted for");
+        assert!(went.count > 350, "{went:?}");
+        assert_eq!(went.from_us, Some(1000));
+        assert_eq!(went.to_us, Some(1000 + went.count - 1));
+        assert_eq!(trace[0]["tsUs"], 1000 + went.count);
+        assert!(went.bytes > went.count * 10_000, "{went:?}");
+        assert_eq!(went.limit_bytes, MAX_BUNDLE as u64);
+        assert_eq!(
+            left_out,
+            FeedbackLeftOut {
+                trace: Some(went.clone()),
+                ..FeedbackLeftOut::default()
+            },
+            "the log, the chat, the errors and the notifications are whole"
+        );
+        assert_eq!(bundle["log"].as_array().unwrap().len(), 500);
+        assert_eq!(
+            bundle["leftOut"],
+            json!({ "trace": {
+                "count": went.count,
+                "bytes": went.bytes,
+                "fromUs": 1000,
+                "toUs": 1000 + went.count - 1,
+                "limitBytes": MAX_BUNDLE,
+            } }),
+            "the bundle says it too"
+        );
 
-        let mut logged = json!({
+        // Under what the servers take, over the 2 MB a bundle was once cut
+        // to: whole, and nothing to say.
+        let mut whole = json!({
             "schema": BUNDLE_SCHEMA,
-            "trace": [],
-            "log": (0..10_000).map(line).collect::<Vec<_>>(),
+            "trace": (0..400).map(frame).collect::<Vec<_>>(),
+            "log": ["one"],
         });
-        fit(&mut logged);
-        assert!(json_len(&logged) <= MAX_BUNDLE);
-        let log = logged["log"].as_array().unwrap();
-        assert!(log.len() < 10_000);
-        assert_eq!(log.last().unwrap().as_str(), Some(line(9999).as_str()));
+        let before = whole.clone();
+        assert!(json_len(&whole) > 4_000_000);
+        assert_eq!(
+            fit(&mut whole, FeedbackLeftOut::default()),
+            FeedbackLeftOut::default()
+        );
+        assert_eq!(whole, before, "a bundle that fits is left as it is");
+    }
 
-        let mut small =
-            json!({ "schema": BUNDLE_SCHEMA, "trace": [{ "tsUs": 1 }], "log": ["one"] });
-        let before = small.clone();
-        fit(&mut small);
-        assert_eq!(small, before, "a bundle that fits is left as it is");
+    /// Each part of a bundle gives way in turn, its oldest first, and what
+    /// the root left out of the flight data is said beside them.
+    #[test]
+    fn a_bundles_parts_give_way_in_turn_and_the_flight_data_is_said_beside_them() {
+        let frame = |n: u64| json!({ "tsUs": 1000 + n, "payload": "y".repeat(10_000) });
+        let line = |n: usize| format!("{n:05} {}", "x".repeat(400));
+        // The notifications come newest first, so their oldest are the last.
+        let mut wordy = json!({
+            "schema": BUNDLE_SCHEMA,
+            "trace": [frame(0)],
+            "log": (0..2_000).map(line).collect::<Vec<_>>(),
+            "chat": (0..3).map(|n| json!({ "kind": "tool-call", "text": format!("{n}{}", "c".repeat(900_000)) })).collect::<Vec<_>>(),
+            "errors": (0..3u64).map(|n| json!({ "code": "x", "stack": "s".repeat(900_000), "atUs": 20 + n })).collect::<Vec<_>>(),
+            "daemon": { "notifications": (0..4u64).map(|n| json!({ "severity": "info", "title": "t".repeat(700_000), "createdAtUs": 40 - n })).collect::<Vec<_>>() },
+        });
+        let left_out = fit(&mut wordy, FeedbackLeftOut::default());
+        assert!(json_len(&wordy) <= MAX_BUNDLE);
+        assert_eq!(left_out.trace.as_ref().map(|l| l.count), Some(1));
+        assert_eq!(
+            left_out.log.as_ref().map(|l| (l.count, l.from_us)),
+            Some((2_000, None))
+        );
+        assert_eq!(left_out.chat.as_ref().map(|l| l.count), Some(3));
+        assert_eq!(
+            left_out
+                .errors
+                .as_ref()
+                .map(|l| (l.count, l.from_us, l.to_us)),
+            Some((1, Some(20), Some(20))),
+            "the oldest error"
+        );
+        assert_eq!(wordy["errors"][0]["atUs"], 21);
+        assert_eq!(left_out.notifications, None);
+        assert_eq!(
+            wordy["daemon"]["notifications"].as_array().unwrap().len(),
+            4
+        );
+
+        // What the root left out of the flight data is said beside it.
+        let flight = LeftOut {
+            count: 12,
+            bytes: 3_456,
+            from_us: Some(5),
+            to_us: Some(6),
+            limit_bytes: 20 * 1024 * 1024,
+        };
+        let mut small = json!({ "schema": BUNDLE_SCHEMA, "trace": [], "log": ["one"] });
+        let said = FeedbackLeftOut {
+            flight: Some(flight),
+            ..FeedbackLeftOut::default()
+        };
+        assert_eq!(fit(&mut small, said.clone()), said);
+        assert_eq!(small["leftOut"]["flight"]["count"], 12);
+        assert_eq!(small["log"], json!(["one"]));
+    }
+
+    #[test]
+    fn the_context_line_counts_the_vehicles_it_does_not_name_and_marks_what_it_cuts() {
+        let parts = ["p".repeat(260)];
+        let line = fitted(&parts, &[]);
+        assert_eq!(line.chars().count(), 250);
+        assert!(line.ends_with('…'), "{line}");
     }
 }

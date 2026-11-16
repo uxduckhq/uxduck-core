@@ -463,8 +463,14 @@ fn run_test(order: &TestOrder, tlogs: &Path) -> Result<PluginTestResult, String>
     let flight = order
         .flight
         .as_ref()
-        .map(|f| crate::feedback::last_minutes(tlogs, f, now_us))
-        .unwrap_or_default();
+        // All of the five minutes. Until 2026-11-15 a test ran against
+        // their first 20 MB, which is what the servers take of a report's
+        // flight data and no reason here, and said nothing of the rest.
+        .map(|f| crate::feedback::last_minutes(tlogs, f, now_us, usize::MAX))
+        .transpose()
+        .map_err(|error| format!("UXDuck could not read its log {error}."))?
+        .unwrap_or_default()
+        .log;
     let records = uxduck_mavlink::tlog::read(&flight);
     let mut result = PluginTestResult {
         flight_s: match (records.first(), records.last()) {

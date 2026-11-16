@@ -6,6 +6,11 @@
 //! API. People in the field are often offline: a report that cannot be sent
 //! stays there and goes out later, including after a restart, for up to a
 //! week. No timer runs while nothing waits (S24).
+//!
+//! The API takes so much of a bundle and of flight data and refuses the
+//! whole report over more. What is over is left out here, always the
+//! oldest, and said: in the bundle's `leftOut` for whoever reads the
+//! report, and in the answer for the person who sent it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +20,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use uxduck_contracts::dto::feedback::{FeedbackKind, FeedbackSendResult, FeedbackStatus};
+use uxduck_contracts::dto::feedback::{
+    FeedbackKind, FeedbackLeftOut, FeedbackSendResult, FeedbackStatus, LeftOut,
+};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_engine::feedback::{FeedbackAddition, FeedbackOrder, FeedbackPort, FlightRef};
 
@@ -29,8 +36,13 @@ pub fn api_url() -> Option<String> {
     crate::dev_api::api_url()
 }
 
+/// How far back the flight data goes: the form says "the last 5 minutes".
 const FLIGHT_US: u64 = 5 * 60 * 1_000_000;
-const MAX_FLIGHT: usize = 20 * 1024 * 1024;
+/// The most UXDuck's servers take of flight data (`LIMITS.flight` in
+/// `apps/api/src/features/feedback/report.ts`): they refuse the whole
+/// report for more, the person's words with it. Five minutes of a busy link
+/// can be more, so the newest of it goes and the answer says what did not.
+pub(crate) const MAX_FLIGHT: usize = 20 * 1024 * 1024;
 const KEEP_FOR: Duration = Duration::from_hours(24 * 7);
 const RETRY: Duration = Duration::from_mins(1);
 /// The longest a 429's `Retry-After` holds kept reports back.
@@ -45,7 +57,10 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const STALLED: Duration = Duration::from_mins(1);
 const SLOWEST_UPLOAD: usize = 32 * 1024;
 
-/// How many follow-up keys of reports the agent filed are kept (S294).
+/// How many follow-up keys of reports the agent filed are kept (S294): a
+/// file on this computer that would otherwise grow with every report an
+/// agent files. An addition to an older report is refused in words ("this
+/// computer no longer has that report's key").
 const KEYS_KEPT: usize = 200;
 
 /// What the sender task is asked to do.
@@ -127,7 +142,7 @@ struct Sender {
 
 /// How a send went.
 enum Sent {
-    Done(FeedbackSendResult),
+    Done(Box<FeedbackSendResult>),
     /// Offline, or the API cannot take it now: kept for later.
     Later,
     /// The API takes no more reports from this address for now (429): kept,
@@ -175,21 +190,31 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
         };
         let report_id = order.report_id.clone();
         let answer = match sender.keep(order).await {
-            Err(error) => Err(ApiError::new(
-                ErrorKind::Internal,
-                format!("the report could not be kept: {error}"),
-            )),
-            Ok(dir) => match sender.send(&dir).await {
+            Err(error) => {
+                // Nothing of it stays to go out later without the file that
+                // could not be kept, as a report the person was told had
+                // failed.
+                let _ = std::fs::remove_dir_all(sender.outbox.join(&report_id));
+                Err(ApiError::new(
+                    ErrorKind::Internal,
+                    format!("the report could not be kept: {error}"),
+                ))
+            }
+            Ok((dir, left_out)) => match sender.send(&dir).await {
                 Sent::Done(result) => {
                     sender.remember(&dir, &result);
                     let _ = std::fs::remove_dir_all(&dir);
-                    Ok(result)
+                    Ok(FeedbackSendResult {
+                        left_out,
+                        ..*result
+                    })
                 }
                 Sent::Later => Ok(FeedbackSendResult {
                     status: FeedbackStatus::Queued,
                     issue: None,
                     transcript: None,
                     limited: false,
+                    left_out,
                 }),
                 Sent::Limited(wait) => {
                     paused_until = Some(Instant::now() + wait);
@@ -198,6 +223,7 @@ async fn run(sender: Sender, mut rx: mpsc::UnboundedReceiver<Job>) {
                         issue: None,
                         transcript: None,
                         limited: true,
+                        left_out,
                     })
                 }
                 Sent::Refused(why) => {
@@ -371,6 +397,7 @@ impl Sender {
                 issue: answer["issue"].as_str().map(str::to_owned),
                 transcript: None,
                 limited: false,
+                left_out: None,
             }),
             404 => Err(ApiError::new(
                 ErrorKind::NotFound,
@@ -398,7 +425,34 @@ impl Sender {
     }
 
     /// Writes the report and its files to the outbox before any sending.
-    async fn keep(&self, order: FeedbackOrder) -> std::io::Result<PathBuf> {
+    /// With the report's folder, what was left out of it for what the
+    /// servers take, if anything was.
+    async fn keep(
+        &self,
+        mut order: FeedbackOrder,
+    ) -> std::io::Result<(PathBuf, Option<FeedbackLeftOut>)> {
+        // The flight data first: what of it does not go is said in the
+        // bundle.
+        let (mut log, mut left_out) = (Vec::new(), FeedbackLeftOut::default());
+        if let Some(flight) = order.flight.take() {
+            let tlogs = self.tlogs.clone();
+            let now = now_us();
+            let read =
+                tokio::task::spawn_blocking(move || last_minutes(&tlogs, &flight, now, MAX_FLIGHT))
+                    .await
+                    .map_err(std::io::Error::other)
+                    .and_then(|read| read);
+            (log, left_out) = asked_flight(read);
+        }
+        self.write(order, &log, left_out)
+    }
+
+    fn write(
+        &self,
+        order: FeedbackOrder,
+        flight: &[u8],
+        mut left_out: FeedbackLeftOut,
+    ) -> std::io::Result<(PathBuf, Option<FeedbackLeftOut>)> {
         let dir = self.outbox.join(&order.report_id);
         std::fs::create_dir_all(&dir)?;
         let mut report = json!({
@@ -418,7 +472,7 @@ impl Sender {
             "name": order.reporter_name,
             "surface": order.surface,
             "via": "daemon",
-            "context": format!("{} · {}", platform_name(), order.context),
+            "context": context(&order.context, &left_out),
             "followUpKey": order.follow_up_key,
         });
         // One entry per `voice-<n>` file, in order: what the app wrote down.
@@ -444,7 +498,7 @@ impl Sender {
                 report.insert("arch".into(), json!(crate::analytics::arch()));
             }
             bundle["log"] = json!(crate::logs::tail());
-            uxduck_engine::feedback::fit(&mut bundle);
+            left_out = uxduck_engine::feedback::fit(&mut bundle, left_out);
             std::fs::write(dir.join("feedback-bundle.json"), bundle.to_string())?;
         }
         if let Some(image) = order.screenshot.as_deref().and_then(base64_decode) {
@@ -476,17 +530,11 @@ impl Sender {
             }
             std::fs::write(files.join("names.json"), json!(names).to_string())?;
         }
-        if let Some(flight) = order.flight {
-            let tlogs = self.tlogs.clone();
-            let now = now_us();
-            let cut = tokio::task::spawn_blocking(move || last_minutes(&tlogs, &flight, now))
-                .await
-                .unwrap_or_default();
-            if !cut.is_empty() {
-                std::fs::write(dir.join("flight.tlog"), cut)?;
-            }
+        if !flight.is_empty() {
+            std::fs::write(dir.join("flight.tlog"), flight)?;
         }
-        Ok(dir)
+        let left_out = (left_out != FeedbackLeftOut::default()).then_some(left_out);
+        Ok((dir, left_out))
     }
 
     /// Posts one kept report as multipart, as the API takes it.
@@ -604,12 +652,13 @@ impl Sender {
                     Some("held") => FeedbackStatus::Held,
                     _ => FeedbackStatus::Filed,
                 };
-                Sent::Done(FeedbackSendResult {
+                Sent::Done(Box::new(FeedbackSendResult {
                     status,
                     issue: answer["issue"].as_str().map(str::to_owned),
                     transcript: answer["transcript"].as_str().map(str::to_owned),
                     limited: false,
-                })
+                    left_out: None,
+                }))
             }
             429 => {
                 let wait = retry_after.unwrap_or(self.retry).max(self.retry);
@@ -731,40 +780,145 @@ fn now_us() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
-/// The vehicle's frames from its link's newest tlog in the last five
-/// minutes, as a tlog of their own.
-pub(crate) fn last_minutes(tlogs: &Path, flight: &FlightRef, now_us: u64) -> Vec<u8> {
-    let prefix = format!("{}-", flight.link_id);
-    let newest = std::fs::read_dir(tlogs)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let named = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&prefix));
-            named
-                && p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("tlog"))
-        })
-        .max();
-    let Some(bytes) = newest.and_then(|path| std::fs::read(path).ok()) else {
-        return Vec::new();
+/// The report's one line for people: the platform first, then what of the
+/// flight data did not go, so whoever reads the issue knows before opening
+/// anything, then the engine's line.
+fn context(line: &str, left_out: &FeedbackLeftOut) -> String {
+    let flight = match (&left_out.flight, &left_out.no_flight) {
+        (Some(left), _) => format!("telemetry without its oldest {} · ", megabytes(left.bytes)),
+        (None, Some(_)) => "telemetry asked for and not sent · ".to_owned(),
+        (None, None) => String::new(),
     };
+    format!("{} · {flight}{line}", platform_name())
+}
+
+/// "11.2 MB", as the window writes a size.
+#[allow(clippy::cast_precision_loss, reason = "a size for people")]
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// A vehicle's last minutes as a tlog of their own, and what of them did
+/// not go in it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Flight {
+    pub log: Vec<u8>,
+    pub left_out: Option<LeftOut>,
+}
+
+/// The vehicle's frames of the last five minutes from its link's tlogs, as
+/// a tlog of their own of `most` bytes at most: the newest of them, which
+/// are the ones nearest what a report is about, with what was left out,
+/// how much and from when to when.
+///
+/// The logs are read backwards from the newest's end, a part at a time, and
+/// on into the log before it where the link reopened inside the five
+/// minutes, so none is held whole. Until 2026-11-15 the link's newest log
+/// was read whole into memory, the first 20 MB of the five minutes were
+/// kept, the newest left out, and nothing said so.
+///
+/// # Errors
+/// When a log cannot be read.
+pub(crate) fn last_minutes(
+    tlogs: &Path,
+    flight: &FlightRef,
+    now_us: u64,
+    most: usize,
+) -> std::io::Result<Flight> {
     let since = now_us.saturating_sub(FLIGHT_US);
-    let mut out = Vec::new();
-    for (at, frame) in uxduck_mavlink::tlog::read(&bytes) {
-        if at < since || system_id(frame) != Some(flight.system_id) {
-            continue;
+    // The newest part first, each part's frames in the order recorded.
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut kept = 0;
+    let mut left_out: Option<LeftOut> = None;
+    'logs: for path in crate::tlog_index::logs(tlogs, &flight.link_id) {
+        let mut log = match crate::tlog_index::Backward::open(&path, None) {
+            Ok(log) => log,
+            // Removed since the folder was listed.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(named(&path, &error)),
+        };
+        while let Some((_, bytes)) = log.part().map_err(|error| named(&path, &error))? {
+            let records: Vec<(u64, &[u8])> = uxduck_mavlink::tlog::records(bytes).collect();
+            let mut part: Vec<(u64, &[u8])> = Vec::new();
+            let mut before = false;
+            for &(at, frame) in records.iter().rev() {
+                if at < since {
+                    before = true;
+                    break;
+                }
+                if system_id(frame) != Some(flight.system_id) {
+                    continue;
+                }
+                let len = 8 + frame.len();
+                // Once one does not fit, none older goes in either: what is
+                // kept has no gaps.
+                match &mut left_out {
+                    None if kept + len <= most => {
+                        kept += len;
+                        part.push((at, frame));
+                    }
+                    None => {
+                        left_out = Some(LeftOut {
+                            count: 1,
+                            bytes: len as u64,
+                            from_us: Some(at),
+                            to_us: Some(at),
+                            limit_bytes: most as u64,
+                        });
+                    }
+                    Some(left) => {
+                        left.count += 1;
+                        left.bytes += len as u64;
+                        left.from_us = Some(at);
+                    }
+                }
+            }
+            let mut out = Vec::with_capacity(part.iter().map(|(_, f)| 8 + f.len()).sum());
+            for (at, frame) in part.into_iter().rev() {
+                let _ = uxduck_mavlink::tlog::record(&mut out, at, frame);
+            }
+            parts.push(out);
+            if before {
+                break 'logs;
+            }
         }
-        if out.len() + frame.len() + 8 > MAX_FLIGHT {
-            break;
-        }
-        let _ = uxduck_mavlink::tlog::record(&mut out, at, frame);
     }
-    out
+    Ok(Flight {
+        log: parts.into_iter().rev().flatten().collect(),
+        left_out,
+    })
+}
+
+/// The flight data a person asked for as it goes, and what is said of what
+/// does not go: its oldest when it is more than the servers take, or why
+/// none of it goes. The report goes either way, because the person's words
+/// matter more than its files.
+fn asked_flight(read: std::io::Result<Flight>) -> (Vec<u8>, FeedbackLeftOut) {
+    let mut left_out = FeedbackLeftOut::default();
+    let log = match read {
+        Err(error) => {
+            left_out.no_flight = Some(format!("UXDuck could not read its log {error}."));
+            Vec::new()
+        }
+        Ok(flight) if flight.log.is_empty() => {
+            left_out.no_flight = Some(
+                "UXDuck's logs hold no telemetry from this vehicle in the last 5 minutes."
+                    .to_owned(),
+            );
+            Vec::new()
+        }
+        Ok(flight) => {
+            left_out.flight = flight.left_out;
+            flight.log
+        }
+    };
+    (log, left_out)
+}
+
+/// A log's reading error with the log's name, for the person.
+fn named(path: &Path, error: &std::io::Error) -> std::io::Error {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    std::io::Error::new(error.kind(), format!("{name}: {error}"))
 }
 
 /// The sending system of a MAVLink v1 or v2 frame.
@@ -984,16 +1138,185 @@ mod tests {
         uxduck_mavlink::tlog::record(&mut log, now - 30 * 1_000_000, &frame(2)).unwrap();
         std::fs::write(dir.path().join("li1-100.tlog"), &log).unwrap();
         std::fs::write(dir.path().join("li2-200.tlog"), &log).unwrap();
-        let cut = last_minutes(
-            dir.path(),
-            &FlightRef {
-                link_id: "li1".into(),
-                system_id: 1,
-            },
-            now,
-        );
-        let records = uxduck_mavlink::tlog::read(&cut);
+        let cut = last_minutes(dir.path(), &vehicle_one(), now, MAX_FLIGHT).unwrap();
+        let records = uxduck_mavlink::tlog::read(&cut.log);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].0, now - 60 * 1_000_000);
+        assert_eq!(cut.left_out, None, "all of it went");
+    }
+
+    fn vehicle_one() -> FlightRef {
+        FlightRef {
+            link_id: "li1".into(),
+            system_id: 1,
+        }
+    }
+
+    /// A v2 frame of 20 bytes from `sysid`, so a record of 28.
+    fn frame(sysid: u8) -> Vec<u8> {
+        let mut frame = vec![0xFD, 8, 0, 0, 0, sysid, 1, 0, 0, 0];
+        frame.extend([7; 8]);
+        frame.extend([0xAA, 0xBB]);
+        frame
+    }
+
+    const SECOND: u64 = 1_000_000;
+
+    /// More flight data than the servers take: the newest of it goes, as
+    /// what is nearest the report, and what did not is counted. Until
+    /// 2026-11-15 the oldest went, the newest was left out and nothing
+    /// said so.
+    #[test]
+    fn flight_data_over_what_is_taken_keeps_the_newest_and_says_what_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_000 * 60 * SECOND;
+        let mut log = Vec::new();
+        // One frame a second for the last 100 seconds, another vehicle's
+        // between them.
+        for n in (1..=100).rev() {
+            uxduck_mavlink::tlog::record(&mut log, now - n * SECOND, &frame(1)).unwrap();
+            uxduck_mavlink::tlog::record(&mut log, now - n * SECOND + 1, &frame(2)).unwrap();
+        }
+        std::fs::write(dir.path().join("li1-100.tlog"), &log).unwrap();
+        // Room for ten records and a half.
+        let most = 10 * 28 + 14;
+        let cut = last_minutes(dir.path(), &vehicle_one(), now, most).unwrap();
+        let records = uxduck_mavlink::tlog::read(&cut.log);
+        assert_eq!(
+            records.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            (1..=10).rev().map(|n| now - n * SECOND).collect::<Vec<_>>(),
+            "the last ten seconds, in the order recorded"
+        );
+        assert!(records.iter().all(|(_, f)| *f == frame(1).as_slice()));
+        assert_eq!(
+            cut.left_out,
+            Some(LeftOut {
+                count: 90,
+                bytes: 90 * 28,
+                from_us: Some(now - 100 * SECOND),
+                to_us: Some(now - 11 * SECOND),
+                limit_bytes: most as u64,
+            })
+        );
+        // With no bound, as a plugin's test reads it: all of it.
+        let all = last_minutes(dir.path(), &vehicle_one(), now, usize::MAX).unwrap();
+        assert_eq!(uxduck_mavlink::tlog::read(&all.log).len(), 100);
+        assert_eq!(all.left_out, None);
+    }
+
+    /// A link that reopened inside the five minutes wrote two logs: the
+    /// flight data goes on into the earlier one. Until 2026-11-15 only the
+    /// newest log was read.
+    #[test]
+    fn the_flight_goes_on_into_the_log_before_and_a_long_log_is_read_from_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_000 * 60 * SECOND;
+        // An earlier log of 4 MB, most of it older than the five minutes.
+        let mut earlier = Vec::new();
+        let old = 150_000;
+        for n in 0..old {
+            uxduck_mavlink::tlog::record(&mut earlier, now - 3_600 * SECOND + n, &frame(1))
+                .unwrap();
+        }
+        for n in (101..=200).rev() {
+            uxduck_mavlink::tlog::record(&mut earlier, now - n * SECOND, &frame(1)).unwrap();
+        }
+        let mut newest = Vec::new();
+        for n in (1..=50).rev() {
+            uxduck_mavlink::tlog::record(&mut newest, now - n * SECOND, &frame(1)).unwrap();
+        }
+        std::fs::write(dir.path().join("li1-100.tlog"), &earlier).unwrap();
+        std::fs::write(dir.path().join("li1-200.tlog"), &newest).unwrap();
+        let cut = last_minutes(dir.path(), &vehicle_one(), now, MAX_FLIGHT).unwrap();
+        let stamps: Vec<u64> = uxduck_mavlink::tlog::read(&cut.log)
+            .iter()
+            .map(|(at, _)| *at)
+            .collect();
+        assert_eq!(stamps.len(), 150);
+        assert!(stamps.is_sorted(), "in the order recorded");
+        assert_eq!(stamps[0], now - 200 * SECOND);
+        assert_eq!(stamps[149], now - SECOND);
+        assert_eq!(cut.left_out, None);
+    }
+
+    /// A log that is not records is an error with the log's name, which
+    /// the person sending the report is told. Until 2026-11-15 the report
+    /// went without its flight data and nothing said so.
+    #[test]
+    fn a_log_that_cannot_be_read_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_000 * 60 * SECOND;
+        let mut log = vec![0x55; 4_000];
+        uxduck_mavlink::tlog::record(&mut log, now - SECOND, &frame(1)).unwrap();
+        log.extend([0x55; 4_000]);
+        std::fs::write(dir.path().join("li1-100.tlog"), &log).unwrap();
+        let error = last_minutes(dir.path(), &vehicle_one(), now, MAX_FLIGHT).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "li1-100.tlog: no MAVLink record ends at byte 8028"
+        );
+        // No log at all, and one with nothing from the vehicle, are not
+        // errors: there is nothing to send, which the caller says.
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(
+            last_minutes(none.path(), &vehicle_one(), now, MAX_FLIGHT).unwrap(),
+            Flight::default()
+        );
+    }
+
+    /// Flight data that was asked for and cannot go is said in words, and
+    /// the report goes without it. Until 2026-11-15 nothing said so.
+    #[test]
+    fn flight_data_that_cannot_go_is_said_in_words() {
+        let none = asked_flight(Ok(Flight::default()));
+        assert!(none.0.is_empty());
+        assert_eq!(
+            none.1.no_flight.as_deref(),
+            Some("UXDuck's logs hold no telemetry from this vehicle in the last 5 minutes.")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("li1-100.tlog"), [0x55; 100]).unwrap();
+        let unread = asked_flight(last_minutes(dir.path(), &vehicle_one(), 0, MAX_FLIGHT));
+        assert!(unread.0.is_empty());
+        assert_eq!(
+            unread.1.no_flight.as_deref(),
+            Some("UXDuck could not read its log li1-100.tlog: no MAVLink record ends at byte 100.")
+        );
+        let mut log = Vec::new();
+        uxduck_mavlink::tlog::record(&mut log, 5, &frame(1)).unwrap();
+        let whole = asked_flight(Ok(Flight {
+            log: log.clone(),
+            left_out: None,
+        }));
+        assert_eq!(whole, (log, FeedbackLeftOut::default()));
+    }
+
+    #[test]
+    fn the_context_line_says_what_of_the_flight_data_did_not_go() {
+        let left = |bytes| LeftOut {
+            count: 1,
+            bytes,
+            from_us: None,
+            to_us: None,
+            limit_bytes: MAX_FLIGHT as u64,
+        };
+        let cut = FeedbackLeftOut {
+            flight: Some(left(11 * 1024 * 1024 + 200_000)),
+            ..FeedbackLeftOut::default()
+        };
+        assert!(
+            context("UXDuck 0.17.0 · no vehicle", &cut)
+                .ends_with(" · telemetry without its oldest 11.2 MB · UXDuck 0.17.0 · no vehicle")
+        );
+        let none = FeedbackLeftOut {
+            no_flight: Some("why".into()),
+            ..FeedbackLeftOut::default()
+        };
+        assert!(
+            context("UXDuck 0.17.0", &none)
+                .ends_with(" · telemetry asked for and not sent · UXDuck 0.17.0")
+        );
+        let whole = context("UXDuck 0.17.0", &FeedbackLeftOut::default());
+        assert!(!whole.contains("telemetry"), "{whole}");
     }
 }

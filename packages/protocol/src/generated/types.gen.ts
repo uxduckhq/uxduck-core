@@ -3438,7 +3438,7 @@ export type ClientRequest = {
     params: Empty;
 } | {
     method: 'flights/found';
-    params: Empty;
+    params: FoundFlightsParams;
 } | {
     method: 'flights/folder';
     params: FlightFolderParams;
@@ -5587,6 +5587,12 @@ export type FeedbackBundle = {
     daemon?: BundleDaemon | null;
     errors?: Array<PageError>;
     /**
+     * What UXDuck left out of this report to fit what its servers take:
+     * how much of each part, and from when to when. Absent when all of it
+     * went.
+     */
+    leftOut?: FeedbackLeftOut | null;
+    /**
      * UXDuck's last log lines.
      */
     log?: Array<string>;
@@ -5650,6 +5656,46 @@ export type FeedbackKey = {
 };
 
 export type FeedbackKind = 'problem' | 'idea' | 'other' | 'suggestion';
+
+/**
+ * What UXDuck left out of a report, always the oldest of a part, because
+ * its servers take no more of that part. Told to the person who sent the
+ * report (`FeedbackSendResult`) and kept in the bundle for whoever reads
+ * it (`FeedbackBundle`). A part absent here went whole.
+ */
+export type FeedbackLeftOut = {
+    /**
+     * The bundle's oldest chat items.
+     */
+    chat?: LeftOut | null;
+    /**
+     * The bundle's oldest page errors.
+     */
+    errors?: LeftOut | null;
+    /**
+     * The oldest frames of the flight data, `flight.tlog`.
+     */
+    flight?: LeftOut | null;
+    /**
+     * The bundle's oldest log lines.
+     */
+    log?: LeftOut | null;
+    /**
+     * Why the flight data the person asked for did not go at all, in
+     * words for them: UXDuck's logs held none of the vehicle's last five
+     * minutes, or one of them could not be read. The rest of the report
+     * went.
+     */
+    noFlight?: string | null;
+    /**
+     * The bundle's oldest notifications.
+     */
+    notifications?: LeftOut | null;
+    /**
+     * The bundle's oldest trace frames.
+     */
+    trace?: LeftOut | null;
+};
 
 /**
  * A map on the page: a blank map looks the same whether it had no key, its
@@ -5761,7 +5807,9 @@ export type FeedbackSendParams = {
     credit?: boolean;
     errors?: Array<PageError>;
     /**
-     * The last five minutes of this vehicle's raw tlog.
+     * The last five minutes of this vehicle's raw tlog: the newest of them
+     * when they are more than UXDuck's servers take, with what did not go
+     * in the result's `left_out`.
      */
     flightDataVehicleId?: string | null;
     /**
@@ -5814,6 +5862,11 @@ export type FeedbackSendResult = {
      * The Linear issue, such as `FB-12`.
      */
     issue?: string | null;
+    /**
+     * What UXDuck left out of the report to fit what its servers take,
+     * for the person who sent it. Absent when all of it went.
+     */
+    leftOut?: FeedbackLeftOut | null;
     /**
      * Queued because UXDuck's servers take no more reports from this
      * network for now, not because they could not be reached.
@@ -6532,8 +6585,9 @@ export type FlightFolder = {
      */
     added?: boolean;
     /**
-     * The last look through its whole tree stopped at the most entries a
-     * look reads (250,000): a smaller folder is needed.
+     * Only from UXDuck 0.17 and earlier, whose look through a whole tree
+     * stopped at 250,000 entries and set this. A tree is read whole now,
+     * however large (see `walk`), and this is never set.
      */
     cut?: boolean;
     /**
@@ -6557,10 +6611,39 @@ export type FlightFolder = {
      */
     name: string;
     /**
+     * How many of `notReadTotal` are files named as a log that do not
+     * begin with a record, such as a build tool's `.tlog`. No flights are
+     * missing with these, so the Logbook's note does not count them.
+     */
+    notLogs?: number;
+    /**
+     * What the last look could not read in this folder, each with why: a
+     * folder that could not be listed, a log that could not be opened or
+     * read, a log that stops being records before its end, a file named
+     * as a log that is not one. One page of them, from `notReadOffset`:
+     * `notReadTotal` says how many there are, and `flights/found` with
+     * `notRead` reads on. Those that may hold flights come first, then
+     * the files that are not logs, each by path.
+     */
+    notRead?: Array<NotRead>;
+    /**
+     * How many of them come before `notRead`. Absent at the start.
+     */
+    notReadOffset?: number;
+    /**
+     * How many the last look could not read in this folder, in all.
+     */
+    notReadTotal?: number;
+    /**
      * Looked in.
      */
     on: boolean;
     path: string;
+    /**
+     * The walk through its whole tree, for a folder with all subfolders
+     * on: the one under way, or else the last. Absent before the first.
+     */
+    walk?: FolderWalk | null;
 };
 
 /**
@@ -6568,8 +6651,8 @@ export type FlightFolder = {
  */
 export type FlightFolderParams = {
     /**
-     * Looks through all of an added folder's subfolders (true), or four
-     * levels as the apps' folders are (false).
+     * Looks through all of an added folder's subfolders (true), or its top
+     * level only (false).
      */
     deep?: boolean | null;
     /**
@@ -6944,6 +7027,20 @@ export type FolderUpdateParams = {
 };
 
 /**
+ * A walk through a folder's whole tree.
+ */
+export type FolderWalk = {
+    /**
+     * Files and folders read: so far while it is under way, else in all.
+     */
+    entries: number;
+    /**
+     * How long it took, in milliseconds. Absent while it is under way.
+     */
+    tookMs?: number | null;
+};
+
+/**
  * What sending during a turn means.
  */
 export type FollowUpBehavior = 'queue' | 'steer';
@@ -6972,6 +7069,17 @@ export type FoundFlight = {
      * `MAV_TYPE`, such as `Quadrotor`.
      */
     vehicleType: string;
+};
+
+/**
+ * `flights/found`. Params may be omitted.
+ */
+export type FoundFlightsParams = {
+    /**
+     * Reads on through what one folder could not read. Without it every
+     * folder gives the start of its list.
+     */
+    notRead?: NotReadFrom | null;
 };
 
 /**
@@ -7825,6 +7933,32 @@ export type LayoutPreset = {
 };
 
 export type LayoutPresetKind = 'simple' | 'advanced';
+
+/**
+ * The oldest of one part of a report, left out.
+ */
+export type LeftOut = {
+    /**
+     * Their size in bytes.
+     */
+    bytes: number;
+    /**
+     * How many: frames, lines, items, errors or notifications.
+     */
+    count: number;
+    /**
+     * When the oldest and the newest of them were, in microseconds since
+     * the Unix epoch. Absent for log lines and chat items, which carry
+     * their times in their text or not at all.
+     */
+    fromUs?: number | null;
+    /**
+     * The most UXDuck's servers take, in bytes, of what this is part of:
+     * the bundle, or the flight data.
+     */
+    limitBytes: number;
+    toUs?: number | null;
+};
 
 /**
  * A connection another computer published to the account (C2): how to
@@ -8707,8 +8841,8 @@ export type MavlinkHistoryResult = {
     messages: Array<PastMessage>;
     /**
      * Pass as `before` for the next page; none when nothing older is
-     * kept. From tlogs it can lead to an empty last page, when only
-     * earlier files are left and none of them holds the message.
+     * kept. From tlogs a page may hold fewer than asked for, or none,
+     * and still have this: a long log is read back a part at a time.
      */
     older?: string | null;
 };
@@ -9192,6 +9326,32 @@ export type NetworkStatus = {
 
 export type NonFiniteMissionFloat = {
     nonFiniteF64: string;
+};
+
+/**
+ * A folder or a log that a look could not read.
+ */
+export type NotRead = {
+    path: string;
+    /**
+     * Why, in words for the person, with the system's own for an error.
+     */
+    why: string;
+};
+
+/**
+ * Where to read on in what one folder could not read.
+ */
+export type NotReadFrom = {
+    /**
+     * The folder's id from `flights/found`.
+     */
+    folder: string;
+    /**
+     * How many to pass over: `notReadOffset` and the length of
+     * `notRead` in the answer before.
+     */
+    offset: number;
 };
 
 export type NoteCategory = 'maintenance' | 'repair' | 'damage' | 'configuration' | 'calibration' | 'firmware' | 'test' | 'other';
