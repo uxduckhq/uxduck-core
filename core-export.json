@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "1608eb4304546d1b1becdfb755c89df48dd473b0",
+  "sourceCommit": "1cd979d7aa498e7b5cc7c900a6eb3d65ce3f1ce7",
   "licenseReady": true,
   "files": [
     {
       "path": ".gitattributes",
-      "sha256": "4e26122efcafe93256bd570ad631a08b00fb866cdaf8d80361663acbee0ee60a",
+      "sha256": "7d3e32a2d63d685ab3416a2baaf3165c77587d8eec4ee1b7d2afc7b63d30d2a2",
       "executable": false
     },
     {
