@@ -82,6 +82,84 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
     std::fs::rename(&partial, mp4)
 }
 
+/// A clip of a recording kept as MPEG-TS, as MP4, and where it begins and
+/// ends in the recording's media.
+pub struct Clip {
+    pub mp4: Vec<u8>,
+    /// Where its first picture is: the last one a decoder can start from at
+    /// or before the start asked for, so up to one keyframe interval early.
+    pub from_us: u64,
+    /// Where its last picture ends: that picture starts before the end asked
+    /// for, so this may be a frame past it, or earlier when the recording ends first.
+    pub to_us: u64,
+}
+
+/// Cuts `from_us` to `to_us` of a recording kept as MPEG-TS into MP4
+/// without re-encoding, its times counted from its first picture as the
+/// playable copy counts them. Nothing is decoded, so it starts at the last
+/// picture a decoder can start from at or before `from_us`.
+///
+/// # Errors
+/// The recording cannot be read, or has no picture in the range.
+pub fn clip(ts: &Path, from_us: u64, to_us: u64) -> std::io::Result<Clip> {
+    let mut input = std::fs::File::open(ts)?;
+    let mut source = Source::new();
+    let mut recorder = Recorder::with_sound();
+    let mut out = Vec::new();
+    let mut first_us = None;
+    let (mut start_us, mut last_us) = (None, 0);
+    let mut buffer = vec![0u8; PACKET_SIZE * 7 * 512];
+    let mut pending = Vec::new();
+    'read: loop {
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        pending.extend_from_slice(&buffer[..n]);
+        let whole = pending.len() / PACKET_SIZE * PACKET_SIZE;
+        for chunk in pending[..whole].chunks(PACKET_SIZE * 7) {
+            for output in source.push(chunk) {
+                match output {
+                    Output::Unit(unit) => {
+                        if first_us.is_none() && unit.start() {
+                            first_us = Some(unit.timestamp_us);
+                        }
+                        let Some(first) = first_us else { continue };
+                        let at = unit.timestamp_us.saturating_sub(first);
+                        if at >= to_us {
+                            break 'read;
+                        }
+                        // Each place to start before the clip's start begins it again.
+                        if unit.start() && at <= from_us {
+                            recorder = Recorder::with_sound();
+                            out.clear();
+                            start_us = Some(at);
+                        }
+                        if start_us.is_some() {
+                            last_us = at;
+                            out.extend(recorder.push(unit));
+                        }
+                    }
+                    Output::Audio(unit) => out.extend(recorder.push_audio(unit)),
+                    Output::Klv { .. } => {}
+                }
+            }
+        }
+        pending.drain(..whole);
+    }
+    out.extend(recorder.finish());
+    match start_us {
+        Some(start) if !out.is_empty() && last_us >= from_us => Ok(Clip {
+            to_us: start + uxduck_media::mp4::duration_us(&out),
+            from_us: start,
+            mp4: out,
+        }),
+        _ => Err(std::io::Error::other(
+            "the recording has no picture in this part",
+        )),
+    }
+}
+
 /// Where a video added from elsewhere (S208) keeps its playable copy:
 /// named after the file's path, length and time, so a changed file is
 /// made again.
@@ -256,6 +334,26 @@ mod tests {
         let made = std::fs::metadata(&mp4).unwrap().modified().unwrap();
         convert(&ts, &mp4).unwrap();
         assert_eq!(std::fs::metadata(&mp4).unwrap().modified().unwrap(), made);
+    }
+
+    #[test]
+    fn a_clip_starts_at_the_keyframe_before_it_and_ends_where_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("r.ts");
+        std::fs::write(&ts, three_seconds()).unwrap();
+        // 1.4 s to 2.2 s: the keyframe at 1 s is the place to start.
+        let cut = clip(&ts, 1_400_000, 2_200_000).unwrap();
+        assert_eq!(cut.from_us, 1_000_000);
+        assert_eq!(uxduck_media::mp4::complete_length(&cut.mp4), cut.mp4.len());
+        let length = uxduck_media::mp4::duration_us(&cut.mp4);
+        assert!((1_150_000..=1_250_000).contains(&length), "{length}");
+        assert_eq!(cut.to_us, cut.from_us + length);
+        // Past the recording's end, it ends with the recording.
+        let tail = clip(&ts, 2_500_000, 60_000_000).unwrap();
+        assert_eq!(tail.from_us, 2_000_000);
+        assert!(tail.to_us <= 3_100_000, "{}", tail.to_us);
+        // After its end there is nothing to cut.
+        assert!(clip(&ts, 10_000_000, 20_000_000).is_err());
     }
 
     #[test]

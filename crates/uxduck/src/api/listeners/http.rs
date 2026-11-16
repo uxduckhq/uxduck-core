@@ -831,19 +831,82 @@ async fn video_socket(
 /// Recordings converted for playback one at a time (S151).
 static CONVERTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingQuery {
+    token: String,
+    /// A clip: from here in the recording's media, in microseconds, with `to_us`.
+    from_us: Option<u64>,
+    to_us: Option<u64>,
+}
+
+/// A clip of one of UXDuck's own recordings kept as MPEG-TS, for
+/// `recording`: `<id>.mp4` cut from `from_us` to `to_us` without re-encoding.
+async fn recording_clip(
+    dir: &std::path::Path,
+    id: &str,
+    name: &str,
+    file: &str,
+    from_us: u64,
+    to_us: u64,
+) -> Response {
+    let own_ts = !std::path::Path::new(name).is_absolute()
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e == "ts");
+    if file != format!("{id}.mp4") || !own_ts {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Clips are cut from UXDuck's own camera recordings. Download a copy of this video instead.",
+        )
+            .into_response();
+    }
+    if to_us <= from_us {
+        return (StatusCode::BAD_REQUEST, "A clip ends after it starts.").into_response();
+    }
+    let ts = dir.join(name);
+    let cut =
+        tokio::task::spawn_blocking(move || crate::video::playback::clip(&ts, from_us, to_us))
+            .await;
+    match cut {
+        Ok(Ok(clip)) => (
+            [
+                (header::CONTENT_TYPE, "video/mp4".to_owned()),
+                (
+                    header::HeaderName::from_static("x-clip-from-us"),
+                    clip.from_us.to_string(),
+                ),
+                (
+                    header::HeaderName::from_static("x-clip-to-us"),
+                    clip.to_us.to_string(),
+                ),
+            ],
+            clip.mp4,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// A recording to play (S40), with the token `video/playback` gave. Range
 /// requests work, so a `<video>` can seek; one kept as MPEG-TS plays as its
-/// MP4 copy, and gives its original as `<id>.ts` (S151).
+/// MP4 copy, and gives its original as `<id>.ts` (S151). With `fromUs` and
+/// `toUs`, `<id>.mp4` is a clip of it, cut without re-encoding, and its
+/// `X-Clip-From-Us` and `X-Clip-To-Us` say where it begins and ends.
 async fn recording(
     State(state): State<AppState>,
     Path(file): Path<String>,
-    Query(query): Query<VideoQuery>,
+    Query(query): Query<RecordingQuery>,
     request: Request,
 ) -> Response {
     let Some((id, name)) = state.video.playback(&query.token) else {
         return (StatusCode::UNAUTHORIZED, "ask for the recording first").into_response();
     };
     let dir = state.video.dir().to_owned();
+    if let (Some(from_us), Some(to_us)) = (query.from_us, query.to_us) {
+        return recording_clip(&dir, &id, &name, &file, from_us, to_us).await;
+    }
     // A video added from elsewhere (S208): its file where it is, or the
     // copy a browser plays.
     if std::path::Path::new(&name).is_absolute() {
