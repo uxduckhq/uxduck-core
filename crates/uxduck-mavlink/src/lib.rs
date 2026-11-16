@@ -51,6 +51,7 @@ pub mod transfers;
 mod tuning;
 pub mod ulog;
 pub mod usb_ids;
+pub mod xz;
 
 #[cfg(feature = "native")]
 pub mod links;

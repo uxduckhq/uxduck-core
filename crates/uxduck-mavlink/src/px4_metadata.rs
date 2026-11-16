@@ -16,7 +16,9 @@ const PARAMETER: u64 = 1;
 /// files.
 pub const READ_ID: &str = "uxduck:px4-metadata";
 /// The most a file may hold, read or unpacked: PX4 1.17's parameters are
-/// 68 KB compressed and 717 KB unpacked.
+/// 68 KB compressed and 717 KB unpacked. The vehicle sends the file, so
+/// its size is not UXDuck's to choose, and a packed one can say it unpacks
+/// to gigabytes.
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const ASK_EVERY_US: u64 = 5_000_000;
 const ASKS: u8 = 3;
@@ -145,34 +147,21 @@ fn ftp_path(uri: &str) -> Option<String> {
     (!path.is_empty()).then(|| format!("/{path}"))
 }
 
-/// A file as text, unpacked when it is xz-compressed.
+/// A file as text, unpacked when it is xz-compressed. A packed file that
+/// says it unpacks to more than [`MAX_BYTES`] is refused before any of it is
+/// unpacked.
 fn unpack(bytes: &[u8]) -> Result<String, String> {
-    let text = if bytes.starts_with(b"\xFD7zXZ\0") {
-        let mut out = Limited(Vec::new());
-        lzma_rs::xz_decompress(&mut &bytes[..], &mut out)
-            .map_err(|e| format!("they couldn't be unpacked: {e}"))?;
-        out.0
+    let text = if crate::xz::is_xz(bytes) {
+        crate::xz::unpack(bytes, MAX_BYTES).map_err(|refused| match refused {
+            crate::xz::Refused::TooLarge => "they unpack to more than 16 MB".to_owned(),
+            crate::xz::Refused::Unreadable(why) => {
+                format!("they couldn't be unpacked: the file {why}")
+            }
+        })?
     } else {
         bytes.to_vec()
     };
     String::from_utf8(text).map_err(|_| "they aren't text".to_owned())
-}
-
-/// Unpacked bytes, refused past [`MAX_BYTES`].
-struct Limited(Vec<u8>);
-
-impl std::io::Write for Limited {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.0.len() + bytes.len() > MAX_BYTES {
-            return Err(std::io::Error::other("they are too large"));
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Where the general metadata says the parameters' metadata is.
@@ -272,6 +261,22 @@ mod tests {
         assert_eq!(
             metadata.done(Ok(())),
             Next::Said(Err("its list of them doesn't name its parameters'".into()))
+        );
+    }
+
+    #[test]
+    fn a_packed_file_that_says_it_unpacks_too_large_is_refused_unread() {
+        // 64 MiB of zeros in under 10 KB, and the same with its body
+        // damaged: the size is the answer for both, so neither was unpacked.
+        let (bomb, damaged) = crate::xz::bomb();
+        for file in [bomb, damaged.as_slice()] {
+            assert_eq!(unpack(file).unwrap_err(), "they unpack to more than 16 MB");
+        }
+        let mut cut = xz(GENERAL);
+        cut.truncate(cut.len() / 2);
+        assert_eq!(
+            unpack(&cut).unwrap_err(),
+            "they couldn't be unpacked: the file is cut short"
         );
     }
 

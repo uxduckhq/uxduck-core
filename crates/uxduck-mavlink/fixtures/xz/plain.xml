@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<mavlinkcamera>
+    <definition version="1">
+        <model>SimCamera</model>
+        <vendor>UXDuck</vendor>
+    </definition>
+    <parameters>
+        <parameter name="CAM_MODE" type="uint32" default="0" control="0">
+            <description>Camera mode</description>
+            <options>
+                <option name="Photo" value="0">
+                    <exclusions>
+                        <exclude>CAM_VIDRES</exclude>
+                        <exclude>CAM_VIDFPS</exclude>
+                    </exclusions>
+                </option>
+                <option name="Video" value="1">
+                    <exclusions>
+                        <exclude>CAM_PHOTOFMT</exclude>
+                    </exclusions>
+                </option>
+            </options>
+        </parameter>
+        <parameter name="CAM_EXPMODE" type="uint32" default="0">
+            <description>Exposure mode</description>
+            <updates>
+                <update>CAM_ISO</update>
+                <update>CAM_SHUTTERSPD</update>
+            </updates>
+            <options>
+                <option name="Auto" value="0">
+                    <exclusions>
+                        <exclude>CAM_ISO</exclude>
+                        <exclude>CAM_SHUTTERSPD</exclude>
+                    </exclusions>
+                </option>
+                <option name="Manual" value="1">
+                    <exclusions>
+                        <exclude>CAM_EV</exclude>
+                    </exclusions>
+                </option>
+            </options>
+        </parameter>
+        <parameter name="CAM_EV" type="float" default="0" min="-3" max="3" step="0.5" unit="EV">
+            <description>Exposure compensation</description>
+        </parameter>
+        <parameter name="CAM_ISO" type="uint32" default="400">
+            <description>ISO</description>
+            <options>
+                <option name="100" value="100" />
+                <option name="200" value="200" />
+                <option name="400" value="400" />
+                <option name="800" value="800" />
+                <option name="1600" value="1600" />
+                <option name="3200" value="3200" />
+            </options>
+        </parameter>
+        <parameter name="CAM_SHUTTERSPD" type="float" default="0.002">
+            <description>Shutter speed</description>
+            <options>
+                <option name="1/2000" value="0.0005" />
+                <option name="1/1000" value="0.001" />
+                <option name="1/500" value="0.002" />
+                <option name="1/250" value="0.004" />
+                <option name="1/125" value="0.008" />
+                <option name="1/60" value="0.016666" />
+                <option name="1/30" value="0.033333" />
+            </options>
+        </parameter>
+        <parameter name="CAM_VIDRES" type="uint32" default="1">
+            <description>Video resolution</description>
+            <updates>
+                <update>CAM_VIDFPS</update>
+            </updates>
+            <options>
+                <option name="3840 x 2160" value="0">
+                    <parameterranges>
+                        <parameterrange parameter="CAM_VIDFPS">
+                            <roption name="24" value="24" />
+                            <roption name="30" value="30" />
+                        </parameterrange>
+                    </parameterranges>
+                </option>
+                <option name="1920 x 1080" value="1" />
+                <option name="1280 x 720" value="2" />
+            </options>
+        </parameter>
+        <parameter name="CAM_VIDFPS" type="uint32" default="30" unit="fps">
+            <description>Video frame rate</description>
+            <options>
+                <option name="24" value="24" />
+                <option name="30" value="30" />
+                <option name="60" value="60" />
+            </options>
+        </parameter>
+        <parameter name="CAM_PHOTOFMT" type="uint32" default="0">
+            <description>Photo format</description>
+            <options>
+                <option name="JPEG" value="0" />
+                <option name="RAW" value="1" />
+                <option name="JPEG and RAW" value="2" />
+            </options>
+        </parameter>
+        <parameter name="CAM_SHUTTERCNT" type="uint32" default="0" readonly="1">
+            <description>Photos taken since it was switched on</description>
+        </parameter>
+    </parameters>
+</mavlinkcamera>
