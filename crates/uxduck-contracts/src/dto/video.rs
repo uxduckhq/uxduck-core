@@ -505,6 +505,14 @@ pub enum AddressReason {
     /// The vehicle came back to the preferred address's connection, which
     /// answered a probe.
     ReturnedWithVehicle,
+    /// Nothing came from the address before for 2 s while this one was set
+    /// up on a connection the vehicle is heard on (ADR-0057 D13).
+    Stalled,
+    /// This address's connection, higher in the vehicle's order, answered
+    /// for the 10 s the vehicle needs to go back, but a hold kept the
+    /// vehicle where it was, so the camera went back ahead of it (ADR-0057
+    /// D13).
+    AheadOfVehicle,
 }
 
 /// Why a camera is on its active address, since when, and when it next
@@ -522,6 +530,69 @@ pub struct AddressChoice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub next_check_us: Option<u64>,
+    /// The address kept set up to move to by PLAY alone (ADR-0057 D12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby: Option<AddressStandby>,
+    /// How the move to this address went (ADR-0057 D14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<AddressMove>,
+    /// While the camera is on its vehicle's connection: a hold that keeps
+    /// the vehicle off a connection higher in its order that an address of
+    /// the camera is on. For a camera that went ahead of its vehicle: the
+    /// hold as it was then (ADR-0057 D13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<AddressAhead>,
+}
+
+/// A connection higher in a vehicle's order, heard again, that a hold
+/// keeps the vehicle off (ADR-0057 D13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressAhead {
+    /// The connection higher in the order.
+    pub link_id: String,
+    /// The connection the vehicle stays on.
+    pub vehicle_link_id: String,
+    /// What keeps the vehicle there.
+    pub holds: Vec<crate::dto::vehicle::RouteHold>,
+}
+
+/// The address a camera keeps set up, without playing, on another vehicle
+/// connection that is heard (ADR-0057 D12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressStandby {
+    /// The vehicle connection whose remote host is its host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
+    /// Set up and answering, so a move there needs only PLAY.
+    pub ready: bool,
+}
+
+/// When each step of a camera's move to another address happened, in
+/// microseconds since the Unix epoch on the computer running UXDuck
+/// (ADR-0057 D14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressMove {
+    /// The last picture from the address it left, if it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub last_picture_us: Option<u64>,
+    /// When it chose this address.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub decided_us: u64,
+    /// When it asked this address to play.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub play_sent_us: u64,
+    /// The first picture from this address.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub first_picture_us: u64,
+    /// The first keyframe from it, where a browser starts showing video.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub first_keyframe_us: u64,
+    /// Whether this address was already set up, so the move needed only PLAY.
+    pub pre_opened: bool,
 }
 
 /// The largest photo `video/photo` takes, in bytes.

@@ -124,6 +124,23 @@ impl From<&core::VideoSource> for dto::VideoSource {
                 since_us: c.since_us,
                 link_id: c.link_id.clone(),
                 next_check_us: c.next_check_us,
+                standby: c.standby.as_ref().map(|s| dto::AddressStandby {
+                    link_id: s.link_id.clone(),
+                    ready: s.ready,
+                }),
+                moved: c.moved.as_ref().map(|m| dto::AddressMove {
+                    last_picture_us: m.last_picture_us,
+                    decided_us: m.decided_us,
+                    play_sent_us: m.play_sent_us,
+                    first_picture_us: m.first_picture_us,
+                    first_keyframe_us: m.first_keyframe_us,
+                    pre_opened: m.pre_opened,
+                }),
+                ahead: c.ahead.as_ref().map(|a| dto::AddressAhead {
+                    link_id: a.link_id.clone(),
+                    vehicle_link_id: a.vehicle_link_id.clone(),
+                    holds: a.holds.iter().copied().map(Into::into).collect(),
+                }),
             }),
             added_by_hand: v.added_by_hand,
             capture: v.capture.as_ref().map(Into::into),
@@ -149,6 +166,8 @@ impl From<core::AddressReason> for dto::AddressReason {
             core::AddressReason::ConnectionFailed => Self::ConnectionFailed,
             core::AddressReason::FollowedVehicle => Self::FollowedVehicle,
             core::AddressReason::ReturnedWithVehicle => Self::ReturnedWithVehicle,
+            core::AddressReason::Stalled => Self::Stalled,
+            core::AddressReason::AheadOfVehicle => Self::AheadOfVehicle,
         }
     }
 }

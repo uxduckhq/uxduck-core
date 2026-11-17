@@ -15,18 +15,27 @@
 //! pictures even when the two clocks are days apart. Once a second it asks
 //! the engine for the companion computer serving the camera, whose TIMESYNC
 //! clock dates them first (S357).
+//!
+//! A camera with addresses on two of its vehicle's connections keeps the
+//! next one set up but not playing while that connection is heard, so a
+//! move there needs only PLAY (ADR-0057 D12). It moves there when its own
+//! address goes silent for 2 s, and with its vehicle, which alone brings
+//! it back from an address the vehicle uses (D13). Each move is timed for
+//! the engine and the log (D14).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use uxduck_core::domain::video::{AddressReason, VideoTrack, redact};
+use uxduck_core::domain::video::{AddressMove, AddressReason, VideoTrack, redact};
+use uxduck_engine::Engine;
+use uxduck_engine::video::AddressRoute;
 use uxduck_media::audio::AudioUnit;
 use uxduck_media::latency::Arrival;
 use uxduck_media::nal::Codec;
@@ -48,6 +57,38 @@ const BACKOFF: [Duration; 4] = [
 ];
 /// Nothing at all from the camera for this long: the connection is dead.
 const SILENT_FOR: Duration = Duration::from_secs(5);
+/// Nothing at all from a playing camera for 1 s: ask it once whether it is
+/// still there. A camera that stops its pictures still answers.
+const PING_AFTER: Duration = Duration::from_secs(1);
+/// Nothing at all for 2 s, not even that answer: the address has stalled,
+/// and a camera whose next address is set up on a connection the vehicle
+/// is heard on moves there (ADR-0057 D13). Linux, which companion
+/// computers run, resends a lost packet after at least 200 ms and doubles
+/// the wait each time, so the pictures of a 1 s radio hiccup resume after
+/// about 1.4 s. That stays short of 2 s, so a hiccup never spends a move
+/// and the 4G data the camera uses until it returns. A cut is still found
+/// about 1 s before the vehicle's connection is, at 3 s.
+const STALL_AFTER: Duration = Duration::from_secs(2);
+/// Setting up and starting an address, at most.
+const START_WITHIN: Duration = Duration::from_secs(15);
+/// A camera that went back ahead of its vehicle and stayed this long had a
+/// steady connection, so its next fall back starts the waits again
+/// (ADR-0057 D13). Six times the 10 s the vehicle needs before it goes back
+/// itself: a radio at the edge of its range that drops within a minute has
+/// not come back.
+const AHEAD_STAYS: Duration = Duration::from_mins(1);
+/// How long a camera that fell back soon after it went ahead waits before
+/// it goes ahead again, doubling with each such fall back up to
+/// `AHEAD_WAIT_MAX`. 30 s is what a camera that left on its own waits
+/// before its first probe (decision 3), so going ahead is never the quicker
+/// way to flap.
+const AHEAD_WAIT: Duration = Duration::from_secs(30);
+/// Each fall back freezes the picture for the 2 s of a stall and the wait
+/// for a keyframe. At this cap a radio that keeps dropping freezes it at
+/// most once every 5 min, about 1% of the time, and one that has come back
+/// for good is used again within 5 min. The vehicle still takes the camera
+/// back with it as soon as it returns.
+const AHEAD_WAIT_MAX: Duration = Duration::from_mins(5);
 /// Why playing ends when the pictures stop.
 const NO_PICTURES: &str = "no video pictures for 5 s";
 const OFFLINE_LOG_EVERY: Duration = Duration::from_mins(5);
@@ -662,6 +703,8 @@ impl Session {
             self.send(method, uri, extra).await?;
             loop {
                 match self.frame().await? {
+                    // A late answer to an earlier request, such as a keepalive.
+                    Frame::Response { headers, .. } if !answers(&headers, self.cseq) => {}
                     Frame::Response {
                         status: 401,
                         headers,
@@ -694,9 +737,16 @@ impl Session {
     }
 
     async fn fill(&mut self) -> Result<(), String> {
-        let read = tokio::time::timeout(SILENT_FOR, self.stream.read(&mut self.scratch))
+        tokio::time::timeout(SILENT_FOR, self.read())
             .await
             .map_err(|_| "the camera went quiet".to_owned())?
+    }
+
+    async fn read(&mut self) -> Result<(), String> {
+        let read = self
+            .stream
+            .read(&mut self.scratch)
+            .await
             .map_err(|e| e.to_string())?;
         if read == 0 {
             return Err("the camera closed the connection".into());
@@ -715,6 +765,34 @@ impl Session {
             self.fill().await?;
         }
     }
+
+    /// The next frame however long it takes, for a session that is set up
+    /// and not playing, which the camera has no reason to send to.
+    async fn idle_frame(&mut self) -> Result<Frame, String> {
+        loop {
+            if let Some((frame, used)) = parse_frame(&self.buffer)? {
+                self.buffer.drain(..used);
+                return Ok(frame);
+            }
+            self.read().await?;
+        }
+    }
+
+    /// `GET_PARAMETER`, which any answer shows the session still holds,
+    /// and its `CSeq`.
+    async fn ping(&mut self, uri: &str) -> Result<u32, String> {
+        self.send("GET_PARAMETER", uri, &[]).await?;
+        Ok(self.cseq)
+    }
+}
+
+/// Whether an answer is to the request with `cseq`. One without a `CSeq`
+/// is taken as the answer.
+fn answers(headers: &HashMap<String, String>, cseq: u32) -> bool {
+    headers
+        .get("cseq")
+        .and_then(|c| c.parse::<u32>().ok())
+        .is_none_or(|c| c == cseq)
 }
 
 /// A whole frame at the start of `b` and its length, or `None` for more.
@@ -772,15 +850,19 @@ fn parse_frame(b: &[u8]) -> Result<Option<(Frame, usize)>, String> {
     }))
 }
 
-/// A camera asked to play: its connection, the track playing, its KLV
-/// track if it has one set up, and what to say about it.
-struct Playing {
+/// A camera address set up but not yet playing: its connection, the track
+/// to play, its KLV and sound tracks if set up, and what to say about it.
+/// The address a camera keeps ready to move to waits like this (ADR-0057
+/// D12).
+struct Prepared {
     session: Session,
     base: String,
     video: Video,
+    /// Every video track offered, told to the engine when it plays.
+    described: Vec<VideoTrack>,
     klv: Option<(KlvDepacketizer, KlvClock)>,
-    /// The sound track, when it is set up (S149).
-    sound: Option<SoundPlaying>,
+    /// The sound track and its control, when it is set up (S149).
+    sound: Option<(SoundPlaying, String)>,
     /// What the source says about the sound, set up or not.
     sound_description: Option<Sound>,
     note: Option<String>,
@@ -892,13 +974,14 @@ async fn start_playing(
     }))
 }
 
-/// DESCRIBE, SETUP of the chosen track and any KLV and sound tracks, and PLAY.
-async fn set_up(
+/// DESCRIBE, and SETUP of the chosen track and any KLV and sound tracks:
+/// everything but PLAY. `offered` hears the tracks as soon as they are
+/// known, even when the one chosen is not among them.
+async fn prepare(
     source_id: &str,
     address: &Address,
-    engine: &EngineHandle,
-    epoch: u64,
-) -> Result<Playing, String> {
+    offered: impl FnOnce(Vec<VideoTrack>),
+) -> Result<Prepared, String> {
     let mut s = Session::connect(address.clone()).await?;
     let (headers, body) = s
         .ask(
@@ -914,17 +997,16 @@ async fn set_up(
         .unwrap_or_else(|| address.url.clone());
     let server = headers.get("server").cloned();
     let sdp = String::from_utf8_lossy(&body);
-    let offered = tracks(&sdp, &base)?;
+    let available = tracks(&sdp, &base)?;
     let chosen = address.track.unwrap_or(1);
-    let described: Vec<VideoTrack> = offered
+    let described: Vec<VideoTrack> = available
         .iter()
         .enumerate()
         .map(|(i, t)| t.describe(i + 1, i + 1 == chosen))
         .collect();
-    let id = source_id.to_owned();
-    engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_tracks(&id, described)));
-    let count = offered.len();
-    let video = offered.into_iter().nth(chosen - 1).ok_or_else(|| {
+    offered(described.clone());
+    let count = available.len();
+    let video = available.into_iter().nth(chosen - 1).ok_or_else(|| {
         format!(
             "the camera offers {count} video track{}, not track {chosen}",
             if count == 1 { "" } else { "s" }
@@ -961,8 +1043,6 @@ async fn set_up(
         {
             Ok(_) => {
                 klv = Some((KlvDepacketizer::new(), KlvClock::new(track.clock_rate)));
-                let id = source_id.to_owned();
-                engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_metadata_announced(&id)));
             }
             Err(error) => {
                 tracing::info!(source = %source_id, %error, "an RTSP camera refused its KLV track");
@@ -980,11 +1060,11 @@ async fn set_up(
         }
         _ => (None, None),
     };
-    let sound = start_playing(&mut s, &base, &video.control, sound).await?;
-    Ok(Playing {
+    Ok(Prepared {
         session: s,
         base,
         video,
+        described,
         klv,
         sound,
         sound_description,
@@ -1042,33 +1122,152 @@ impl ConnectionLog {
     }
 }
 
-/// Connects, plays and relays until the connection fails.
+/// The camera a worker serves, and how it tells the engine.
+#[derive(Clone, Copy)]
+struct Camera<'a> {
+    id: &'a str,
+    epoch: u64,
+    hub: &'a Hub,
+    engine: &'a EngineHandle,
+}
+
+impl Camera<'_> {
+    /// Runs `event` in the engine while this worker is the camera's.
+    fn post(self, event: impl FnOnce(&mut Engine, &str) + Send + 'static) {
+        let (id, epoch) = (self.id.to_owned(), self.epoch);
+        self.engine
+            .post(move |e| e.rtsp_event(&id, epoch, |e| event(e, &id)));
+    }
+}
+
+/// This computer's clock, as the engine's.
+fn wall_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
+/// When `at` was, on this computer's clock.
+fn wall_us_at(at: Instant) -> u64 {
+    wall_us().saturating_sub(u64::try_from(at.elapsed().as_micros()).unwrap_or(u64::MAX))
+}
+
+/// A move to another address, timed until its first keyframe (ADR-0057
+/// D14).
+struct Moving {
+    reason: AddressReason,
+    last_picture_us: Option<u64>,
+    decided_us: u64,
+    pre_opened: bool,
+    play_sent_us: Option<u64>,
+    first_picture_us: Option<u64>,
+}
+
+/// What playing an address leaves for the worker: when its last picture
+/// came, and the move to it while it has not shown a keyframe yet.
+#[derive(Default)]
+struct Progress {
+    last_picture: Option<Instant>,
+    moving: Option<Moving>,
+}
+
+impl Progress {
+    /// A picture. The first after a move is timed, and the first keyframe
+    /// ends the move: it is logged once and told to the engine.
+    fn picture(&mut self, camera: Camera<'_>, url: &str, key: bool) {
+        self.last_picture = Some(Instant::now());
+        let Some(moving) = self.moving.as_mut() else {
+            return;
+        };
+        let now = wall_us();
+        let first_picture_us = *moving.first_picture_us.get_or_insert(now);
+        if !key {
+            return;
+        }
+        let Some(moving) = self.moving.take() else {
+            return;
+        };
+        let moved = AddressMove {
+            last_picture_us: moving.last_picture_us,
+            decided_us: moving.decided_us,
+            play_sent_us: moving.play_sent_us.unwrap_or(moving.decided_us),
+            first_picture_us,
+            first_keyframe_us: now,
+            pre_opened: moving.pre_opened,
+        };
+        let ms = |from: u64, to: u64| to.saturating_sub(from) / 1000;
+        tracing::info!(
+            source = %camera.id,
+            to = %redact(url),
+            reason = ?moving.reason,
+            pre_opened = moved.pre_opened,
+            silent_ms = ?moved.last_picture_us.map(|at| ms(at, moved.decided_us)),
+            play_sent_ms = ms(moved.decided_us, moved.play_sent_us),
+            first_picture_ms = ms(moved.decided_us, moved.first_picture_us),
+            first_keyframe_ms = ms(moved.decided_us, moved.first_keyframe_us),
+            gap_ms = ?moved.last_picture_us.map(|at| ms(at, moved.first_keyframe_us)),
+            "an RTSP camera moved to another address"
+        );
+        camera.post(move |e, id| e.rtsp_moved(id, moved));
+    }
+}
+
+/// Plays an address, set up now or already, and relays until it fails.
+/// `silent` says when nothing has come for `STALL_AFTER`.
 #[allow(clippy::too_many_lines, reason = "one arm per interleaved channel")]
 async fn play(
-    source_id: &str,
+    camera: Camera<'_>,
     url: &str,
-    hub: &Hub,
-    engine: &EngineHandle,
+    pre_opened: Option<Prepared>,
     connection_log: &mut ConnectionLog,
-    epoch: u64,
+    silent: &tokio::sync::watch::Sender<bool>,
+    progress: &mut Progress,
 ) -> Result<(), String> {
+    let source_id = camera.id;
     let address = address(url)?;
-    let Playing {
+    let (prepared, mut sound, play_sent_us) = tokio::time::timeout(START_WITHIN, async {
+        let mut prepared = match pre_opened {
+            Some(prepared) => {
+                let described = prepared.described.clone();
+                camera.post(move |e, id| e.video_tracks(id, described));
+                prepared
+            }
+            None => {
+                prepare(source_id, &address, |described| {
+                    camera.post(move |e, id| e.video_tracks(id, described));
+                })
+                .await?
+            }
+        };
+        let sent = wall_us();
+        let sound = start_playing(
+            &mut prepared.session,
+            &prepared.base,
+            &prepared.video.control,
+            prepared.sound.take(),
+        )
+        .await?;
+        Ok::<_, String>((prepared, sound, sent))
+    })
+    .await
+    .map_err(|_| "the camera did not start within 15 s".to_owned())??;
+    if prepared.klv.is_some() {
+        camera.post(Engine::video_metadata_announced);
+    }
+    if let Some(moving) = progress.moving.as_mut() {
+        moving.play_sent_us = Some(play_sent_us);
+    }
+    let Prepared {
         session: mut s,
         base,
         video,
         mut klv,
-        mut sound,
         sound_description,
         note,
         keepalive,
         server,
-    } = tokio::time::timeout(
-        Duration::from_secs(15),
-        set_up(source_id, &address, engine, epoch),
-    )
-    .await
-    .map_err(|_| "the camera did not start within 15 s".to_owned())??;
+        ..
+    } = prepared;
     let peer = s
         .peer()
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], address.port)));
@@ -1083,6 +1282,9 @@ async fn play(
     }
     let playing = Instant::now();
     let mut last_picture = tokio::time::Instant::now();
+    // When anything at all last came, and whether this silence was asked about.
+    let mut last_heard = last_picture;
+    let mut pinged = false;
     let mut last_keepalive = playing;
     // The GET_PARAMETER awaiting its answer: its CSeq and when it was sent.
     let mut asked: Option<(u32, Instant)> = None;
@@ -1091,24 +1293,46 @@ async fn play(
     let mut video_us = 0u64;
     let relay = |output: uxduck_media::source::Output, posted: &mut Option<Instant>| {
         if let Some(metadata) = metadata_due(&output, posted) {
-            let id = source_id.to_owned();
-            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.video_klv(&id, &metadata)));
+            camera.post(move |e, id| e.video_klv(id, &metadata));
         }
-        hub.publish(source_id, &item(output));
+        camera.hub.publish(source_id, &item(output));
     };
     loop {
-        match tokio::time::timeout_at(last_picture + SILENT_FOR, s.frame())
-            .await
-            .map_err(|_| NO_PICTURES.to_owned())??
-        {
+        let mut wake = last_picture + SILENT_FOR;
+        if !pinged {
+            wake = wake.min(last_heard + PING_AFTER);
+        }
+        if !*silent.borrow() {
+            wake = wake.min(last_heard + STALL_AFTER);
+        }
+        let Ok(frame) = tokio::time::timeout_at(wake, s.frame()).await else {
+            let now = tokio::time::Instant::now();
+            if now >= last_picture + SILENT_FOR {
+                return Err(NO_PICTURES.to_owned());
+            }
+            if !pinged && now >= last_heard + PING_AFTER {
+                pinged = true;
+                asked = Some((s.ping(&base).await?, Instant::now()));
+            }
+            if now >= last_heard + STALL_AFTER {
+                silent.send_replace(true);
+            }
+            continue;
+        };
+        let frame = frame?;
+        last_heard = tokio::time::Instant::now();
+        pinged = false;
+        silent.send_if_modified(|was| std::mem::replace(was, false));
+        match frame {
             Frame::Interleaved { channel: 0, data } => {
                 // MPEG-TS over RTSP is kept as received; RTP video is not TS.
-                hub.publish_ts(source_id, &data);
+                camera.hub.publish_ts(source_id, &data);
                 for output in source.push(&data) {
                     if let uxduck_media::source::Output::Unit(unit) = &output {
                         last_picture = tokio::time::Instant::now();
                         video_us = unit.timestamp_us;
                         connection_log.receiving(source_id, Instant::now());
+                        progress.picture(camera, url, unit.key);
                     }
                     relay(output, &mut klv_posted);
                 }
@@ -1147,7 +1371,7 @@ async fn play(
             // Any answer to the keepalive is a round trip (S355).
             Frame::Response { headers, .. } => {
                 if let Some((cseq, sent)) = asked
-                    && headers.get("cseq").and_then(|c| c.parse().ok()) == Some(cseq)
+                    && answers(&headers, cseq)
                 {
                     source.round_trip(sent, s.read_at.at);
                     asked = None;
@@ -1159,7 +1383,8 @@ async fn play(
         if reported.0.elapsed() >= REPORT_EVERY {
             let (id, host) = (source_id.to_owned(), address.host.clone());
             source.companion(
-                engine
+                camera
+                    .engine
                     .run(move |e| e.camera_companion(&id, &host))
                     .await
                     .ok()
@@ -1177,14 +1402,13 @@ async fn play(
             );
             observed.id = Some(source_id.to_owned());
             observed.note.clone_from(&note);
-            observed.counters.hold_us = hub.hold_us(source_id);
+            observed.counters.hold_us = camera.hub.hold_us(source_id);
             reported = (
                 Instant::now(),
                 status.counters.bytes,
                 status.counters.pictures,
             );
-            let id = source_id.to_owned();
-            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_observed(observed)));
+            camera.post(move |e, _| e.rtsp_observed(observed));
         }
         let every = if playing.elapsed() < ASK_OFTEN_FOR {
             ASK_OFTEN
@@ -1193,8 +1417,7 @@ async fn play(
         };
         if last_keepalive.elapsed() >= every {
             last_keepalive = Instant::now();
-            s.send("GET_PARAMETER", &base, &[]).await?;
-            asked = Some((s.cseq, last_keepalive));
+            asked = Some((s.ping(&base).await?, last_keepalive));
         }
     }
 }
@@ -1217,12 +1440,30 @@ async fn probe(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether an address answers: the session kept set up there when it is
+/// ready, which a `GET_PARAMETER` asks, else a DESCRIBE on a connection
+/// of its own.
+async fn answers_now(url: &str, kept: Option<Standby>) -> bool {
+    match kept {
+        Some(standby) => standby.ping().await,
+        None => matches!(
+            tokio::time::timeout(SILENT_FOR, probe(url)).await,
+            Ok(Ok(()))
+        ),
+    }
+}
+
 /// Wait for a preferred address, one of those at the places `to`, to
 /// answer twice. Playback continues during these small control-only probes.
 /// The delay also limits flapping when a server answers DESCRIBE but its
 /// video still cannot play. `next` hears how long until each round of
 /// probes, or, with nothing to go back to on its own, that there is none.
-async fn preferred(urls: &[String], to: Vec<usize>, next: impl Fn(Option<Duration>)) -> usize {
+async fn preferred(
+    urls: &[String],
+    to: Vec<usize>,
+    kept: tokio::sync::watch::Receiver<Option<Standby>>,
+    next: impl Fn(Option<Duration>),
+) -> usize {
     if to.is_empty() {
         next(None);
         return std::future::pending().await;
@@ -1233,10 +1474,8 @@ async fn preferred(urls: &[String], to: Vec<usize>, next: impl Fn(Option<Duratio
     loop {
         let mut healthy = None;
         for &index in &to {
-            if matches!(
-                tokio::time::timeout(SILENT_FOR, probe(&urls[index])).await,
-                Ok(Ok(()))
-            ) {
+            let ready = ready_at(kept.borrow().as_ref(), index);
+            if answers_now(&urls[index], ready).await {
                 healthy = Some(index);
                 break;
             }
@@ -1250,6 +1489,344 @@ async fn preferred(urls: &[String], to: Vec<usize>, next: impl Fn(Option<Duratio
     }
 }
 
+/// What the worker asks of the address it keeps set up.
+enum Ask {
+    /// Its session, when ready, to PLAY.
+    Take(tokio::sync::oneshot::Sender<Prepared>),
+    /// Whether it answers now, for a preference probe.
+    Ping(tokio::sync::oneshot::Sender<bool>),
+}
+
+/// The camera's next address on another vehicle connection that is heard,
+/// kept set up without playing, so a move there needs only PLAY (ADR-0057
+/// D12). It closes when its last handle is dropped.
+#[derive(Clone)]
+struct Standby {
+    index: usize,
+    asks: tokio::sync::mpsc::UnboundedSender<Ask>,
+    ready: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Standby {
+    fn open(source_id: &str, index: usize, url: &str, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        let (asks, asked) = tokio::sync::mpsc::unbounded_channel();
+        let (set_up, ready) = tokio::sync::watch::channel(false);
+        tokio::spawn(keep_ready(
+            source_id.to_owned(),
+            url.to_owned(),
+            asked,
+            set_up,
+            gate,
+        ));
+        Self { index, asks, ready }
+    }
+
+    fn is_ready(&self) -> bool {
+        *self.ready.borrow()
+    }
+
+    /// Its session, if it is set up.
+    async fn take(&self) -> Option<Prepared> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.asks.send(Ask::Take(reply)).ok()?;
+        answer.await.ok()
+    }
+
+    async fn ping(&self) -> bool {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.asks.send(Ask::Ping(reply)).is_ok() && answer.await.unwrap_or(false)
+    }
+}
+
+/// The address kept set up at `index`, when it is ready.
+fn ready_at(kept: Option<&Standby>, index: usize) -> Option<Standby> {
+    kept.filter(|s| s.index == index && s.is_ready()).cloned()
+}
+
+/// Goes back ahead of the vehicle to the address kept set up, after `wait`
+/// and once it answers a `GET_PARAMETER` (ADR-0057 D13).
+async fn go_ahead(kept: Standby, wait: Option<Duration>) -> bool {
+    if let Some(wait) = wait {
+        tokio::time::sleep(wait).await;
+    }
+    kept.ping().await
+}
+
+/// How a camera that went back ahead of its vehicle fares there, so one
+/// that keeps falling back waits longer each time (ADR-0057 D13).
+#[derive(Debug, Default)]
+struct Ahead {
+    /// When it went ahead, while it is still on that address.
+    since: Option<Instant>,
+    /// The wait after its last fall back.
+    wait: Duration,
+    /// When it may go ahead again.
+    not_before: Option<Instant>,
+}
+
+impl Ahead {
+    fn went(&mut self, now: Instant) {
+        self.since = Some(now);
+    }
+
+    /// It left the address it went ahead to: by a stall or a failure when
+    /// it `fell_back`, else with its vehicle.
+    fn left(&mut self, now: Instant, fell_back: bool) {
+        let Some(since) = self.since.take() else {
+            return;
+        };
+        if now.duration_since(since) >= AHEAD_STAYS {
+            *self = Self::default();
+        } else if fell_back {
+            self.wait = (self.wait * 2).clamp(AHEAD_WAIT, AHEAD_WAIT_MAX);
+            self.not_before = Some(now + self.wait);
+        }
+    }
+
+    /// How long until it may go ahead again.
+    fn waiting(&self, now: Instant) -> Option<Duration> {
+        self.not_before
+            .map(|at| at.saturating_duration_since(now))
+            .filter(|left| !left.is_zero())
+    }
+}
+
+/// The address to keep set up while `current` plays (ADR-0057 D12): the
+/// first whose vehicle connection is heard and is not the one `current` is
+/// on. None for a camera whose addresses are on no connection of its
+/// vehicle: nothing says whether one is reachable.
+fn standby_for(routes: &[Option<AddressRoute>], current: usize) -> Option<usize> {
+    let on = routes
+        .get(current)
+        .and_then(Option::as_ref)
+        .map(|r| r.link_id.as_str());
+    routes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, route)| {
+            let route = route.as_ref()?;
+            (index != current && route.up && on != Some(route.link_id.as_str()))
+                .then_some((!route.returns, index))
+        })
+        .min()
+        .map(|(_, index)| index)
+}
+
+/// Where a camera on its vehicle's connection goes back ahead of it: its
+/// address on the connection the vehicle would go back to, higher in its
+/// order and answering for 10 s, while a hold keeps the vehicle where it is
+/// (ADR-0057 D13).
+fn ahead_to(routes: &[Option<AddressRoute>], current: usize) -> Option<usize> {
+    if !with_vehicle(routes, current) {
+        return None;
+    }
+    routes.iter().enumerate().find_map(|(index, route)| {
+        route
+            .as_ref()
+            .filter(|r| index != current && r.returns && r.up)
+            .map(|_| index)
+    })
+}
+
+/// Whether the address playing is on the connection the vehicle uses: the
+/// camera then returns to an earlier address only with the vehicle, never
+/// on its own (ADR-0057 D13).
+fn with_vehicle(routes: &[Option<AddressRoute>], current: usize) -> bool {
+    routes
+        .get(current)
+        .and_then(Option::as_ref)
+        .is_some_and(|r| r.in_use)
+}
+
+/// The earlier addresses a camera playing `current` may go back to on its
+/// own: those the engine allows (ADR-0057 D11), any before it says, and
+/// always its address on the connection its vehicle uses, so a camera
+/// that left it while the vehicle stayed comes back (ADR-0057 D13).
+fn may_go_back(
+    allowed: Option<&[usize]>,
+    routes: &[Option<AddressRoute>],
+    current: usize,
+) -> Vec<usize> {
+    (0..current)
+        .filter(|index| allowed.is_none_or(|to| to.contains(index)) || with_vehicle(routes, *index))
+        .collect()
+}
+
+/// Keeps `url` set up and answering, setting it up again with backoff when
+/// it fails, until the worker takes it or drops every handle.
+async fn keep_ready(
+    source_id: String,
+    url: String,
+    mut asks: tokio::sync::mpsc::UnboundedReceiver<Ask>,
+    ready: tokio::sync::watch::Sender<bool>,
+    _gate: Arc<tokio::sync::Mutex<()>>,
+) {
+    let Ok(address) = address(&url) else {
+        return;
+    };
+    let mut failures = 0usize;
+    loop {
+        let Some(set_up) = set_up_standby(&source_id, &address, failures, &mut asks).await else {
+            return;
+        };
+        let prepared = match set_up {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if failures == 0 {
+                    tracing::info!(
+                        source = %source_id,
+                        to = %redact(&url),
+                        %error,
+                        "an RTSP camera's next address could not be set up, retrying"
+                    );
+                }
+                failures = failures.saturating_add(1);
+                continue;
+            }
+        };
+        ready.send_replace(true);
+        tracing::info!(
+            source = %source_id,
+            to = %redact(&url),
+            "an RTSP camera's next address is set up"
+        );
+        let Some(error) = keep_answering(prepared, &mut asks, &ready).await else {
+            return;
+        };
+        ready.send_replace(false);
+        tracing::info!(
+            source = %source_id,
+            to = %redact(&url),
+            %error,
+            "an RTSP camera's next address stopped answering, setting it up again"
+        );
+        failures = 1;
+    }
+}
+
+/// Sets an address up, after the backoff `failures` earn, and tells the
+/// worker it is not ready meanwhile. None once the worker drops it.
+async fn set_up_standby(
+    source_id: &str,
+    address: &Address,
+    failures: usize,
+    asks: &mut tokio::sync::mpsc::UnboundedReceiver<Ask>,
+) -> Option<Result<Prepared, String>> {
+    let wait = failures
+        .checked_sub(1)
+        .map(|failed| BACKOFF[failed.min(BACKOFF.len() - 1)]);
+    let setting_up = async move {
+        if let Some(wait) = wait {
+            tokio::time::sleep(wait).await;
+        }
+        tokio::time::timeout(START_WITHIN, prepare(source_id, address, drop))
+            .await
+            .map_err(|_| "the camera did not start within 15 s".to_owned())?
+    };
+    tokio::pin!(setting_up);
+    loop {
+        tokio::select! {
+            ask = asks.recv() => match ask? {
+                // Not ready: the worker sets the address up itself.
+                Ask::Take(_) => {}
+                Ask::Ping(reply) => {
+                    let _ = reply.send(false);
+                }
+            },
+            result = &mut setting_up => return Some(result),
+        }
+    }
+}
+
+/// A `GET_PARAMETER` each keepalive, and when the worker asks, each
+/// answered within 5 s. Why it stopped answering, or None once the worker
+/// takes it or drops it.
+async fn keep_answering(
+    mut prepared: Prepared,
+    asks: &mut tokio::sync::mpsc::UnboundedReceiver<Ask>,
+    ready: &tokio::sync::watch::Sender<bool>,
+) -> Option<String> {
+    let mut next_ping = tokio::time::Instant::now() + prepared.keepalive;
+    // The GET_PARAMETER awaiting its answer: its CSeq, by when, and who asked.
+    let mut waiting: Option<(
+        u32,
+        tokio::time::Instant,
+        Vec<tokio::sync::oneshot::Sender<bool>>,
+    )> = None;
+    loop {
+        let deadline = waiting.as_ref().map_or(next_ping, |w| w.1);
+        tokio::select! {
+            ask = asks.recv() => match ask? {
+                Ask::Take(reply) => {
+                    ready.send_replace(false);
+                    let _ = reply.send(prepared);
+                    return None;
+                }
+                Ask::Ping(reply) => match waiting.as_mut() {
+                    Some((_, _, askers)) => askers.push(reply),
+                    None => match prepared.session.ping(&prepared.base).await {
+                        Ok(cseq) => {
+                            let by = tokio::time::Instant::now() + SILENT_FOR;
+                            waiting = Some((cseq, by, vec![reply]));
+                        }
+                        Err(error) => return Some(error),
+                    },
+                },
+            },
+            frame = prepared.session.idle_frame() => match frame {
+                Err(error) => return Some(error),
+                Ok(Frame::Response { status, headers, .. })
+                    if waiting.as_ref().is_some_and(|w| answers(&headers, w.0)) =>
+                {
+                    // 454: the camera no longer holds the session.
+                    if status == 454 {
+                        return Some("the camera ended the session".to_owned());
+                    }
+                    for asker in waiting.take().map(|w| w.2).unwrap_or_default() {
+                        let _ = asker.send(true);
+                    }
+                    next_ping = tokio::time::Instant::now() + prepared.keepalive;
+                }
+                Ok(_) => {}
+            },
+            () = tokio::time::sleep_until(deadline) => {
+                if waiting.is_some() {
+                    return Some("no answer for 5 s".to_owned());
+                }
+                match prepared.session.ping(&prepared.base).await {
+                    Ok(cseq) => {
+                        let by = tokio::time::Instant::now() + SILENT_FOR;
+                        waiting = Some((cseq, by, Vec::new()));
+                    }
+                    Err(error) => return Some(error),
+                }
+            }
+        }
+    }
+}
+
+/// Keeps the address `standby_for` names set up, and only that one, and
+/// tells the engine when it changes. `lent` holds the one the engine was
+/// told of: after a move took it, `standby` is empty and `lent` is not.
+fn keep_standby(
+    camera: Camera<'_>,
+    urls: &[String],
+    current: usize,
+    routes: &[Option<AddressRoute>],
+    standby: &mut Option<Standby>,
+    lent: &tokio::sync::watch::Sender<Option<Standby>>,
+    gate: &Arc<tokio::sync::Mutex<()>>,
+) {
+    let wanted = standby_for(routes, current);
+    if lent.borrow().as_ref().map(|s| s.index) == wanted {
+        return;
+    }
+    *standby = wanted.map(|index| Standby::open(camera.id, index, &urls[index], gate.clone()));
+    lent.send_replace(standby.clone());
+    let told = wanted.map(|index| (urls[index].clone(), false));
+    camera.post(move |e, id| e.rtsp_standby(id, told));
+}
+
 /// The shared gate survives rapid edits that cancel a replacement worker
 /// before its predecessor has finished dropping the old TCP session.
 #[derive(Debug)]
@@ -1257,6 +1834,7 @@ pub struct Worker {
     pub task: tokio::task::JoinHandle<()>,
     gate: Arc<tokio::sync::Mutex<()>>,
     steer: tokio::sync::watch::Sender<Option<usize>>,
+    routes: tokio::sync::watch::Sender<Vec<Option<AddressRoute>>>,
     may_return: tokio::sync::watch::Sender<Option<Vec<usize>>>,
 }
 
@@ -1271,8 +1849,13 @@ impl Worker {
         self.steer.send_replace(Some(index));
     }
 
+    /// The vehicle connection on each address's host (ADR-0057 D12).
+    pub fn route(&self, routes: &[Option<AddressRoute>]) {
+        self.routes.send_replace(routes.to_vec());
+    }
+
     /// The earlier addresses, by place, it may go back to on its own
-    /// (ADR-0057 D10, amended 2026-11-16). Only the latest counts.
+    /// (ADR-0057 D11). Only the latest counts.
     pub fn may_return(&self, to: &[usize]) {
         self.may_return.send_replace(Some(to.to_vec()));
     }
@@ -1283,10 +1866,14 @@ enum Move {
     Failed(String),
     Recovered(usize),
     Steered(usize, AddressReason),
+    /// Nothing came for `STALL_AFTER`, and the address at this index is set up.
+    Stalled(usize),
+    /// Back ahead of the vehicle to the address set up at this index.
+    Ahead(usize),
 }
 
 /// One worker per physical camera, with at most one PLAY session. Dropping
-/// `play` closes its TCP session before the next address is opened.
+/// `play` closes its TCP session before the next address plays.
 #[allow(
     clippy::too_many_lines,
     reason = "one worker loop: pick an address, play it until it moves, back off"
@@ -1309,16 +1896,34 @@ pub fn spawn(
     );
     let held = gate.clone();
     let (steer, mut steered) = tokio::sync::watch::channel(None);
+    let (routes, mut heard) = tokio::sync::watch::channel(Vec::new());
     let (may_return, mut allowed) = tokio::sync::watch::channel(None::<Vec<usize>>);
     let task = runtime.spawn(async move {
         let _session = held.lock().await;
         if urls.is_empty() {
             return;
         }
+        let camera = Camera {
+            id: &source_id,
+            epoch,
+            hub: &hub,
+            engine: &engine,
+        };
         let mut current = 0;
         let mut reason = AddressReason::Preferred;
         let mut failures = 0usize;
         let mut connection_log = ConnectionLog::default();
+        // The next address kept set up, and lent to preference probes.
+        let mut standby: Option<Standby> = None;
+        let (lent, _) = tokio::sync::watch::channel(None::<Standby>);
+        let mut progress = Progress::default();
+        // The last picture before a move, and when it was decided.
+        let mut decided: Option<(Option<u64>, u64)> = None;
+        let mut ahead = Ahead::default();
+        let next_check = |wait: Option<Duration>| {
+            let in_us = wait.map(|w| u64::try_from(w.as_micros()).unwrap_or(u64::MAX));
+            camera.post(move |e, id| e.rtsp_next_check(id, in_us));
+        };
         loop {
             // A move to a fallback that came before connecting goes first.
             let pending = steered
@@ -1333,33 +1938,64 @@ pub fn spawn(
                     reason = AddressReason::FollowedVehicle;
                 }
             }
+            // The address kept set up there needs only PLAY.
+            let pre_opened = match standby.take() {
+                Some(kept) if kept.index == current => kept.take().await,
+                kept => {
+                    standby = kept;
+                    None
+                }
+            };
+            progress.moving = decided.take().map(|(last_picture_us, decided_us)| Moving {
+                reason,
+                last_picture_us,
+                decided_us,
+                pre_opened: pre_opened.is_some(),
+                play_sent_us: None,
+                first_picture_us: None,
+            });
             hub.restart_source(&source_id);
             let url = &urls[current];
-            let id = source_id.clone();
             let active = url.clone();
-            engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_address(&id, active, reason)));
+            camera.post(move |e, id| e.rtsp_address(id, active, reason));
+            let mut routes = heard.borrow_and_update().clone();
+            keep_standby(camera, &urls, current, &routes, &mut standby, &lent, &held);
+            let mut following = with_vehicle(&routes, current);
+            let mut returning =
+                may_go_back(allowed.borrow_and_update().as_deref(), &routes, current);
             let started = Instant::now();
+            let (silent, mut silenced) = tokio::sync::watch::channel(false);
             let outcome = {
-                let playing = play(&source_id, url, &hub, &engine, &mut connection_log, epoch);
+                let playing = play(
+                    camera,
+                    url,
+                    pre_opened,
+                    &mut connection_log,
+                    &silent,
+                    &mut progress,
+                );
                 tokio::pin!(playing);
-                let next = |wait: Option<Duration>| {
-                    let id = source_id.clone();
-                    let in_us = wait.map(|w| u64::try_from(w.as_micros()).unwrap_or(u64::MAX));
-                    engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_next_check(&id, in_us)));
-                };
-                let earlier = |allowed: &tokio::sync::watch::Receiver<Option<Vec<usize>>>| -> Vec<usize> {
-                    allowed.borrow().as_ref().map_or_else(
-                        || (0..current).collect(),
-                        |to| to.iter().copied().filter(|index| *index < current).collect(),
-                    )
-                };
-                let mut returning = earlier(&allowed);
-                let recovered = preferred(&urls, returning.clone(), &next);
+                let recovered = preferred(&urls, returning.clone(), lent.subscribe(), next_check);
                 tokio::pin!(recovered);
-                // A return to the first address waits for one DESCRIBE, and
+                // A return to the first address waits for it to answer, and
                 // the current address keeps playing meanwhile.
                 let mut probing = None;
+                // Ahead of the vehicle, once the connection it would go back
+                // to has answered for 10 s and the address there answers.
+                let mut going = None;
+                let mut rethink = true;
                 loop {
+                    if rethink {
+                        rethink = false;
+                        let to = ahead_to(&routes, current);
+                        let wait = to.and(ahead.waiting(Instant::now()));
+                        if following {
+                            next_check(wait);
+                        }
+                        going = to
+                            .and_then(|to| ready_at(standby.as_ref(), to))
+                            .map(|kept| Box::pin(go_ahead(kept, wait)));
+                    }
                     tokio::select! {
                         biased;
                         Ok(()) = steered.changed() => {
@@ -1373,7 +2009,41 @@ pub fn spawn(
                             if index > 0 {
                                 break Move::Steered(index, AddressReason::FollowedVehicle);
                             }
-                            probing = Some(Box::pin(tokio::time::timeout(SILENT_FOR, probe(&urls[0]))));
+                            let kept = ready_at(standby.as_ref(), 0);
+                            probing = Some(Box::pin(answers_now(&urls[0], kept)));
+                        }
+                        Ok(()) = heard.changed() => {
+                            routes.clone_from(&heard.borrow_and_update());
+                            keep_standby(
+                                camera,
+                                &urls,
+                                current,
+                                &routes,
+                                &mut standby,
+                                &lent,
+                                &held,
+                            );
+                            let was = following;
+                            following = with_vehicle(&routes, current);
+                            rethink = true;
+                            // Ahead of a vehicle that no longer follows: back
+                            // with it. A fall back when the connection went quiet.
+                            if reason == AddressReason::AheadOfVehicle
+                                && let Some(here) = routes.get(current).and_then(Option::as_ref)
+                                && !here.returns
+                                && !here.in_use
+                                && let Some(to) = routes
+                                    .iter()
+                                    .position(|r| r.as_ref().is_some_and(|r| r.in_use))
+                            {
+                                ahead.left(Instant::now(), !here.up);
+                                break Move::Steered(to, AddressReason::FollowedVehicle);
+                            }
+                            let now = may_go_back(allowed.borrow().as_deref(), &routes, current);
+                            if now != returning || (was && !following) {
+                                returning = now;
+                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                            }
                         }
                         Some(answered) = async {
                             match probing.as_mut() {
@@ -1382,50 +2052,116 @@ pub fn spawn(
                             }
                         }, if probing.is_some() => {
                             probing = None;
-                            if matches!(answered, Ok(Ok(()))) {
+                            if answered {
                                 break Move::Steered(0, AddressReason::ReturnedWithVehicle);
                             }
                         }
-                        Ok(()) = allowed.changed() => {
-                            let now = earlier(&allowed);
-                            if now != returning {
-                                returning = now;
-                                recovered.set(preferred(&urls, returning.clone(), &next));
+                        Some(answered) = async {
+                            match going.as_mut() {
+                                Some(going) => Some(going.await),
+                                None => None,
+                            }
+                        }, if going.is_some() => {
+                            going = None;
+                            if answered {
+                                break Move::Ahead(standby.as_ref().map_or(current, |s| s.index));
                             }
                         }
-                        result = &mut playing => break Move::Failed(result.err().unwrap_or_default()),
-                        index = &mut recovered, if current > 0 => break Move::Recovered(index),
+                        Ok(()) = allowed.changed() => {
+                            let now = may_go_back(allowed.borrow_and_update().as_deref(), &routes, current);
+                            if now != returning {
+                                returning = now;
+                                recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                            }
+                        }
+                        result = &mut playing => {
+                            break Move::Failed(result.err().unwrap_or_default());
+                        }
+                        Ok(()) = async { silenced.wait_for(|s| *s).await.map(drop) },
+                            if standby.as_ref().is_some_and(Standby::is_ready) => {
+                            break Move::Stalled(standby.as_ref().map_or(0, |s| s.index));
+                        }
+                        Ok(()) = async {
+                            match standby.as_mut() {
+                                Some(kept) => kept.ready.changed().await,
+                                None => std::future::pending().await,
+                            }
+                        }, if standby.is_some() => {
+                            let told = standby
+                                .as_ref()
+                                .map(|s| (urls[s.index].clone(), s.is_ready()));
+                            camera.post(move |e, id| e.rtsp_standby(id, told));
+                            rethink = true;
+                        }
+                        index = &mut recovered, if current > 0 && !following => {
+                            break Move::Recovered(index);
+                        }
                     }
                 }
             }; // `playing` and its socket have been dropped here.
-            let why = match outcome {
-                Move::Recovered(index) => {
-                    current = index;
-                    reason = AddressReason::Preferred;
-                    failures = 0;
-                    "Returning to a preferred camera address".to_owned()
-                }
-                Move::Steered(index, because) => {
-                    current = index;
-                    reason = because;
-                    failures = 0;
-                    "Following the vehicle's connection".to_owned()
-                }
+            decided = Some((progress.last_picture.take().map(wall_us_at), wall_us()));
+            if let Some(moving) = progress.moving.take() {
+                tracing::info!(
+                    source = %source_id,
+                    to = %redact(url),
+                    reason = ?moving.reason,
+                    "an RTSP camera left an address before its first keyframe"
+                );
+            }
+            let (next, because, why) = match outcome {
+                Move::Recovered(index) => (
+                    index,
+                    AddressReason::Preferred,
+                    "Returning to a preferred camera address".to_owned(),
+                ),
+                Move::Steered(index, because) => (
+                    index,
+                    because,
+                    "Following the vehicle's connection".to_owned(),
+                ),
+                Move::Stalled(index) => (
+                    index,
+                    AddressReason::Stalled,
+                    format!("Nothing from {} for 2 s", redact(url)),
+                ),
+                Move::Ahead(index) => (
+                    index,
+                    AddressReason::AheadOfVehicle,
+                    "Going back ahead of the vehicle".to_owned(),
+                ),
                 Move::Failed(error) => {
                     if started.elapsed() > Duration::from_secs(30) {
                         failures = 0;
                     }
                     connection_log.failed(&source_id, &error, Instant::now());
-                    current = (current + 1) % urls.len();
-                    reason = if error == NO_PICTURES {
+                    let because = if error == NO_PICTURES {
                         AddressReason::NoPictures
                     } else {
                         AddressReason::ConnectionFailed
                     };
-                    failures = failures.saturating_add(1);
-                    format!("Can't reach {}: {error}", redact(url))
+                    (
+                        (current + 1) % urls.len(),
+                        because,
+                        format!("Can't reach {}: {error}", redact(url)),
+                    )
                 }
             };
+            failures = match because {
+                AddressReason::NoPictures | AddressReason::ConnectionFailed => {
+                    failures.saturating_add(1)
+                }
+                _ => 0,
+            };
+            let now = Instant::now();
+            match because {
+                AddressReason::AheadOfVehicle => ahead.went(now),
+                AddressReason::Stalled
+                | AddressReason::NoPictures
+                | AddressReason::ConnectionFailed => ahead.left(now, true),
+                _ => ahead.left(now, false),
+            }
+            current = next;
+            reason = because;
             let id = source_id.clone();
             // Finish detaching the current recording before new media can
             // arrive. Posting without awaiting can mix two session clocks
@@ -1447,6 +2183,7 @@ pub fn spawn(
         task,
         gate,
         steer,
+        routes,
         may_return,
     }
 }
@@ -1533,9 +2270,12 @@ mod tests {
     async fn with_nothing_to_go_back_to_a_camera_waits_for_its_vehicle() {
         let told = std::sync::Mutex::new(Vec::new());
         let urls = vec!["rtsp://127.0.0.1:9/radio".to_owned()];
+        let (_lent, kept) = tokio::sync::watch::channel(None);
         let waited = tokio::time::timeout(
             Duration::from_millis(100),
-            preferred(&urls, Vec::new(), |next| told.lock().unwrap().push(next)),
+            preferred(&urls, Vec::new(), kept, |next| {
+                told.lock().unwrap().push(next);
+            }),
         )
         .await;
         assert!(waited.is_err(), "it never goes back on its own");
@@ -1780,6 +2520,188 @@ mod tests {
         );
         let basic = authorization(r#"Basic realm="cam""#, &a, "DESCRIBE", "rtsp://h/").unwrap();
         assert_eq!(basic, "Basic TXVmYXNhOkNpcmNsZSBPZiBMaWZl");
+    }
+
+    fn route(link: &str, up: bool, in_use: bool) -> AddressRoute {
+        AddressRoute {
+            link_id: link.into(),
+            up,
+            in_use,
+            returns: false,
+        }
+    }
+
+    #[test]
+    fn the_address_kept_set_up_is_the_first_on_another_connection_the_vehicle_is_heard_on() {
+        let radio = Some(route("radio", true, true));
+        let internet = Some(route("internet", true, false));
+        assert_eq!(standby_for(&[radio.clone(), internet.clone()], 0), Some(1));
+        // A second address on the radio's host is on the same connection.
+        assert_eq!(
+            standby_for(&[radio.clone(), radio.clone(), internet.clone()], 0),
+            Some(2)
+        );
+        // Not while the vehicle is not heard there.
+        assert_eq!(
+            standby_for(&[radio, Some(route("internet", false, false))], 0),
+            None
+        );
+        // Playing the internet address: the radio one, once heard again.
+        let back = [
+            Some(route("radio", true, false)),
+            Some(route("internet", true, true)),
+        ];
+        assert_eq!(standby_for(&back, 1), Some(0));
+        // An address on no connection plays with a heard one kept set up.
+        assert_eq!(standby_for(&[None, internet], 0), Some(1));
+        // Without a vehicle nothing says an address is reachable.
+        assert_eq!(standby_for(&[None, None], 0), None);
+        assert_eq!(standby_for(&[], 0), None);
+    }
+
+    /// The engine says which earlier addresses a camera may go back to on
+    /// its own (ADR-0057 D11). Its address on the connection its vehicle
+    /// uses is always one, so a camera that stalled away while the vehicle
+    /// stayed comes back (ADR-0057 D13).
+    #[test]
+    fn a_camera_may_go_back_to_what_the_engine_allows_and_to_its_vehicles_connection() {
+        let routes = [
+            Some(route("radio", true, true)),
+            Some(route("internet", true, false)),
+            None,
+        ];
+        assert_eq!(may_go_back(None, &routes, 2), [0, 1], "before it is told");
+        assert_eq!(may_go_back(Some(&[]), &routes, 2), [0]);
+        assert_eq!(may_go_back(Some(&[1]), &routes, 2), [0, 1]);
+        assert_eq!(may_go_back(Some(&[0, 1, 2]), &routes, 1), [0]);
+        let elsewhere = [
+            Some(route("radio", true, false)),
+            Some(route("internet", true, true)),
+        ];
+        assert!(may_go_back(Some(&[]), &elsewhere, 1).is_empty());
+        assert!(may_go_back(None, &[], 0).is_empty());
+    }
+
+    /// A camera on its vehicle's connection goes back ahead of it only to an
+    /// address on the connection the vehicle would go back to but a hold
+    /// keeps it off, and keeps that address set up first (ADR-0057 D13).
+    #[test]
+    fn a_camera_goes_ahead_only_to_the_connection_its_held_vehicle_would_go_back_to() {
+        let returning = AddressRoute {
+            returns: true,
+            ..route("radio", true, false)
+        };
+        let routes = [
+            Some(route("lan", true, false)),
+            Some(returning.clone()),
+            Some(route("internet", true, true)),
+        ];
+        assert_eq!(ahead_to(&routes, 2), Some(1));
+        assert_eq!(standby_for(&routes, 2), Some(1), "set up before the LAN");
+        // Not from an address the vehicle does not use, nor to one not heard.
+        assert_eq!(ahead_to(&routes, 0), None);
+        let unheard = AddressRoute {
+            up: false,
+            ..returning
+        };
+        assert_eq!(
+            ahead_to(&[Some(unheard), Some(route("internet", true, true))], 1),
+            None
+        );
+        // Nothing held: the vehicle goes back itself, and the camera with it.
+        assert_eq!(
+            ahead_to(
+                &[
+                    Some(route("radio", true, false)),
+                    Some(route("internet", true, true))
+                ],
+                1
+            ),
+            None
+        );
+    }
+
+    /// One that falls back soon after it went ahead waits 30 s, then twice
+    /// as long each time up to 5 min. One that stayed a minute starts again
+    /// (ADR-0057 D13).
+    #[test]
+    fn a_camera_that_keeps_falling_back_waits_longer_each_time_and_starts_again_once_it_stays() {
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        let mut ahead = Ahead::default();
+        assert_eq!(ahead.waiting(start), None);
+        let mut waits = Vec::new();
+        let mut now = 0;
+        for _ in 0..6 {
+            ahead.went(at(now));
+            ahead.left(at(now + 10), true);
+            waits.push(ahead.waiting(at(now + 10)).unwrap().as_secs());
+            now += 10 + waits.last().unwrap();
+        }
+        assert_eq!(waits, [30, 60, 120, 240, 300, 300]);
+        assert_eq!(ahead.waiting(at(now)), None, "over once it has waited");
+        // Moved on with its vehicle: no fall back, the wait is kept.
+        ahead.went(at(now));
+        ahead.left(at(now + 5), false);
+        ahead.went(at(now + 10));
+        ahead.left(at(now + 20), true);
+        assert_eq!(ahead.waiting(at(now + 20)), Some(Duration::from_mins(5)));
+        // Stayed a minute: the next fall back waits 30 s again.
+        now += 320;
+        ahead.went(at(now));
+        ahead.left(at(now + 61), true);
+        assert_eq!(ahead.waiting(at(now + 61)), None);
+        ahead.went(at(now + 100));
+        ahead.left(at(now + 110), true);
+        assert_eq!(ahead.waiting(at(now + 110)), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn only_an_address_on_the_connection_the_vehicle_uses_stays_with_it() {
+        let routes = [
+            Some(route("radio", true, false)),
+            Some(route("internet", true, true)),
+        ];
+        assert!(with_vehicle(&routes, 1));
+        assert!(!with_vehicle(&routes, 0));
+        assert!(!with_vehicle(&[None, None], 1));
+        assert!(!with_vehicle(&[], 0));
+    }
+
+    /// The address kept set up answers keepalives. One that comes late
+    /// must not be taken for PLAY's answer, whose `RTP-Info` lines up the
+    /// sound (S149).
+    #[tokio::test]
+    async fn a_late_answer_to_a_keepalive_is_not_taken_for_plays() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let camera = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut asked = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while asked.windows(4).filter(|w| w == b"\r\n\r\n").count() < 2 {
+                let read = stream.read(&mut buffer).await.unwrap();
+                asked.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(
+                    b"RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n\
+                      RTSP/1.0 200 OK\r\nCSeq: 2\r\nRTP-Info: url=rtsp://cam/v;rtptime=9\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let at = address(&format!("rtsp://127.0.0.1:{port}/v")).unwrap();
+        let mut session = Session::connect(at).await.unwrap();
+        assert_eq!(session.ping("rtsp://cam/v").await.unwrap(), 1);
+        let (headers, _) = session.ask("PLAY", "rtsp://cam/v", &[]).await.unwrap();
+        assert_eq!(
+            headers.get("rtp-info").map(String::as_str),
+            Some("url=rtsp://cam/v;rtptime=9")
+        );
+        camera.await.unwrap();
+        let without = HashMap::new();
+        assert!(answers(&without, 3), "an answer without a CSeq is taken");
     }
 
     #[test]

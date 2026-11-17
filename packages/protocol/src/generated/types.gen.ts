@@ -388,27 +388,108 @@ export type AddNoteParams = {
 };
 
 /**
+ * A connection higher in a vehicle's order, heard again, that a hold
+ * keeps the vehicle off (ADR-0057 D13).
+ */
+export type AddressAhead = {
+    /**
+     * What keeps the vehicle there.
+     */
+    holds: Array<RouteHold>;
+    /**
+     * The connection higher in the order.
+     */
+    linkId: string;
+    /**
+     * The connection the vehicle stays on.
+     */
+    vehicleLinkId: string;
+};
+
+/**
  * Why a camera is on its active address, since when, and when it next
  * checks an earlier one (ADR-0057 D10).
  */
 export type AddressChoice = {
     /**
+     * While the camera is on its vehicle's connection: a hold that keeps
+     * the vehicle off a connection higher in its order that an address of
+     * the camera is on. For a camera that went ahead of its vehicle: the
+     * hold as it was then (ADR-0057 D13).
+     */
+    ahead?: AddressAhead | null;
+    /**
      * The vehicle connection whose remote host is this address's host.
      */
     linkId?: string | null;
+    /**
+     * How the move to this address went (ADR-0057 D14).
+     */
+    moved?: AddressMove | null;
     /**
      * While on a fallback: when it next probes the earlier addresses.
      */
     nextCheckUs?: number | null;
     reason: AddressReason;
     sinceUs: number;
+    /**
+     * The address kept set up to move to by PLAY alone (ADR-0057 D12).
+     */
+    standby?: AddressStandby | null;
+};
+
+/**
+ * When each step of a camera's move to another address happened, in
+ * microseconds since the Unix epoch on the computer running UXDuck
+ * (ADR-0057 D14).
+ */
+export type AddressMove = {
+    /**
+     * When it chose this address.
+     */
+    decidedUs: number;
+    /**
+     * The first keyframe from it, where a browser starts showing video.
+     */
+    firstKeyframeUs: number;
+    /**
+     * The first picture from this address.
+     */
+    firstPictureUs: number;
+    /**
+     * The last picture from the address it left, if it gave one.
+     */
+    lastPictureUs?: number | null;
+    /**
+     * When it asked this address to play.
+     */
+    playSentUs: number;
+    /**
+     * Whether this address was already set up, so the move needed only PLAY.
+     */
+    preOpened: boolean;
 };
 
 /**
  * Why a camera with fallback addresses is on the address it tries or
  * plays (ADR-0057 D10).
  */
-export type AddressReason = 'preferred' | 'no-pictures' | 'connection-failed' | 'followed-vehicle' | 'returned-with-vehicle';
+export type AddressReason = 'preferred' | 'no-pictures' | 'connection-failed' | 'followed-vehicle' | 'returned-with-vehicle' | 'stalled' | 'ahead-of-vehicle';
+
+/**
+ * The address a camera keeps set up, without playing, on another vehicle
+ * connection that is heard (ADR-0057 D12).
+ */
+export type AddressStandby = {
+    /**
+     * The vehicle connection whose remote host is its host.
+     */
+    linkId?: string | null;
+    /**
+     * Set up and answering, so a move there needs only PLAY.
+     */
+    ready: boolean;
+};
 
 /**
  * Whether the assistant sees through cameras.

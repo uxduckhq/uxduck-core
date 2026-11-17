@@ -25,8 +25,8 @@ use uxduck_core::domain::notification::{
 use uxduck_core::domain::telemetry::ClockMeasured;
 use uxduck_core::domain::vehicle::{Vehicle, VehicleRoute};
 use uxduck_core::domain::video::{
-    AddressChoice, AddressReason, CaptureInput, VideoReport, VideoSource, VideoState, VideoTrack,
-    redact, sender_host, udp_name, url_host,
+    AddressAhead, AddressChoice, AddressMove, AddressReason, AddressStandby, CaptureInput,
+    VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name, url_host,
 };
 use uxduck_core::events::{Actor, Change};
 use uxduck_media::latency::{Companion, CompanionClock, Offset};
@@ -47,6 +47,19 @@ const LISTEN_CONDITION: &str = "video-listen";
 const PORTS_CONDITION: &str = "video-ports";
 
 /// Where watches go: the daemon's `/video` hub.
+/// The vehicle connection on an RTSP camera address's host, as its worker
+/// needs it (ADR-0057 D12): which one, whether the vehicle is heard on it,
+/// and whether the vehicle uses it now. `returns` while the vehicle would
+/// go back to it, higher in its order and answering for 10 s, but a hold
+/// keeps the vehicle where it is (`connections.returnsTo`, ADR-0057 D13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressRoute {
+    pub link_id: String,
+    pub up: bool,
+    pub in_use: bool,
+    pub returns: bool,
+}
+
 pub trait VideoPort: Send + std::fmt::Debug {
     /// A client may open `/video?token=<token>` for this source.
     fn allow(&mut self, token: &str, source_id: &str);
@@ -71,6 +84,9 @@ pub trait VideoPort: Send + std::fmt::Debug {
     /// vehicle moved to the connection on that address's host (ADR-0057
     /// D10): straight away, or to the first address once it answers a probe.
     fn steer_rtsp(&mut self, _source_id: &str, _index: usize) {}
+    /// Each address of an open RTSP camera, in its worker's order: the
+    /// vehicle connection on its host, if any (ADR-0057 D12).
+    fn route_rtsp(&mut self, _source_id: &str, _routes: &[Option<AddressRoute>]) {}
     /// The earlier addresses, by place, an open RTSP camera may go back to
     /// on its own once they answer its probes (ADR-0057 D10, amended
     /// 2026-11-16). A worker told nothing may go back to any.
@@ -303,6 +319,8 @@ pub(crate) struct Video {
     /// The addresses each open RTSP worker was given, in its order: a steer
     /// names one by its place in this list (ADR-0057 D10).
     rtsp_urls: BTreeMap<String, Vec<String>>,
+    /// The routes each open RTSP worker was last told, so it hears changes only.
+    rtsp_routes: BTreeMap<String, Vec<Option<AddressRoute>>>,
     /// What each open RTSP worker was last told it may go back to on its
     /// own, by place in `rtsp_urls`.
     rtsp_may_return: BTreeMap<String, Vec<usize>>,
@@ -1363,16 +1381,24 @@ impl Engine {
         };
         if matches!(
             reason,
-            AddressReason::FollowedVehicle | AddressReason::ReturnedWithVehicle
+            AddressReason::FollowedVehicle
+                | AddressReason::ReturnedWithVehicle
+                | AddressReason::Stalled
+                | AddressReason::AheadOfVehicle
         ) && source.state == VideoState::Stopped
         {
             source.state_detail = Some(self.connecting(&source, &url));
         }
+        // The address kept ready outlives a move. The worker says when it changes.
+        let standby = source.active_choice.take().and_then(|c| c.standby);
         source.active_choice = (!source.fallback_urls.is_empty()).then(|| AddressChoice {
             reason,
             since_us: self.clock.now_us(),
             link_id: self.address_link(&source, &url),
             next_check_us: None,
+            standby,
+            moved: None,
+            ahead: self.camera_ahead(&source, &url, reason),
         });
         source.active_url = Some(url);
         source.version += 1;
@@ -1380,19 +1406,46 @@ impl Engine {
     }
 
     /// While on a fallback, the RTSP worker probes the earlier addresses
-    /// again in `in_us`, or, with none, waits for the vehicle to move.
+    /// again in `in_us`, or, with none, waits for the vehicle (ADR-0057
+    /// D11 and D13). On its vehicle's connection after it went ahead and
+    /// fell back, when it may go ahead again (D13).
     pub fn rtsp_next_check(&mut self, id: &str, in_us: Option<u64>) {
+        let now = self.clock.now_us();
+        self.change_choice(id, |c| {
+            c.next_check_us = in_us.map(|us| now.saturating_add(us));
+        });
+    }
+
+    /// The address the RTSP worker keeps set up to move to, and whether it
+    /// is ready (ADR-0057 D12).
+    pub fn rtsp_standby(&mut self, id: &str, standby: Option<(String, bool)>) {
+        let Some(source) = self.state.video_sources.get(id) else {
+            return;
+        };
+        let standby = standby.map(|(url, ready)| AddressStandby {
+            link_id: self.address_link(source, &url),
+            ready,
+        });
+        self.change_choice(id, |c| c.standby = standby);
+    }
+
+    /// How the RTSP worker's move to its active address went (ADR-0057 D14).
+    pub fn rtsp_moved(&mut self, id: &str, moved: AddressMove) {
+        self.change_choice(id, |c| c.moved = Some(moved));
+    }
+
+    fn change_choice(&mut self, id: &str, change: impl FnOnce(&mut AddressChoice)) {
         let Some(mut source) = self.state.video_sources.get(id).cloned() else {
             return;
         };
         let Some(choice) = source.active_choice.as_mut() else {
             return;
         };
-        let next = in_us.map(|in_us| self.clock.now_us().saturating_add(in_us));
-        if choice.next_check_us == next {
+        let before = choice.clone();
+        change(choice);
+        if *choice == before {
             return;
         }
-        choice.next_check_us = next;
         source.version += 1;
         self.commit_as(actor(), Change::VideoSourceUpserted { source });
     }
@@ -1466,6 +1519,50 @@ impl Engine {
                 .map_or(0, |c| c.bitrate_bps);
         }
         total
+    }
+
+    /// A hold keeping a camera's vehicle off a connection higher in its
+    /// order that an address of the camera is on (ADR-0057 D13): the one it
+    /// would go back to, else the highest heard. None while a person has
+    /// switched the vehicle by hand, as nothing then takes it back.
+    fn held_back(&self, source: &VideoSource) -> Option<AddressAhead> {
+        let urls = self.video.rtsp_urls.get(&source.id)?;
+        let vehicle = self.camera_vehicle(source)?;
+        let connections = vehicle.connections.as_ref()?;
+        let using = route_in_use(vehicle)?;
+        if connections.holds.is_empty() || connections.chosen.is_some() {
+            return None;
+        }
+        let higher = connections
+            .routes
+            .iter()
+            .filter(|r| r.priority < using.priority && r.reachable && r.writable)
+            .filter(|r| urls.iter().any(|url| on_route(url, r)))
+            .min_by_key(|r| {
+                (
+                    connections.returns_to.as_deref() != Some(&r.link_id),
+                    r.priority,
+                )
+            })?;
+        Some(AddressAhead {
+            link_id: higher.link_id.clone(),
+            vehicle_link_id: using.link_id.clone(),
+            holds: connections.holds.clone(),
+        })
+    }
+
+    /// What `ahead` says on the choice of a camera on `url`: the hold while
+    /// it is on its vehicle's connection, or when it went ahead of it.
+    fn camera_ahead(
+        &self,
+        source: &VideoSource,
+        url: &str,
+        reason: AddressReason,
+    ) -> Option<AddressAhead> {
+        let ahead = self.held_back(source)?;
+        (reason == AddressReason::AheadOfVehicle
+            || self.address_link(source, url).as_deref() == Some(ahead.vehicle_link_id.as_str()))
+        .then_some(ahead)
     }
 
     /// The vehicle connection on an address's host, which names it.
@@ -1582,9 +1679,56 @@ impl Engine {
         }
     }
 
-    /// A vehicle changed: when the connection it uses moved, its cameras
-    /// with fallback addresses follow it, and say which connection each
-    /// address is on.
+    /// Tells an open camera's worker which vehicle connection each of its
+    /// addresses is on, whether the vehicle is heard there, and which one
+    /// it uses (ADR-0057 D12 and D13), when that changed.
+    fn route_camera(&mut self, source_id: &str) {
+        let Some(urls) = self
+            .video
+            .rtsp_urls
+            .get(source_id)
+            .filter(|_| self.video.opened.contains(source_id))
+        else {
+            return;
+        };
+        let Some(source) = self.state.video_sources.get(source_id) else {
+            return;
+        };
+        let vehicle = self.camera_vehicle(source);
+        let using = vehicle.and_then(route_in_use).map(|r| r.link_id.as_str());
+        let returns_to = vehicle
+            .and_then(|v| v.connections.as_ref())
+            .and_then(|c| c.returns_to.as_deref());
+        let routes: Vec<Option<AddressRoute>> = urls
+            .iter()
+            .map(|url| {
+                let route = vehicle?
+                    .connections
+                    .as_ref()?
+                    .routes
+                    .iter()
+                    .find(|r| on_route(url, r))?;
+                Some(AddressRoute {
+                    link_id: route.link_id.clone(),
+                    up: route.reachable,
+                    in_use: using == Some(route.link_id.as_str()),
+                    returns: returns_to == Some(route.link_id.as_str()),
+                })
+            })
+            .collect();
+        if self.video.rtsp_routes.get(source_id) == Some(&routes) {
+            return;
+        }
+        if let Some(port) = self.video.port.as_mut() {
+            port.route_rtsp(source_id, &routes);
+        }
+        self.video.rtsp_routes.insert(source_id.to_owned(), routes);
+    }
+
+    /// A vehicle changed: its cameras with fallback addresses hear how its
+    /// connections are and what they may go back to, and when the
+    /// connection it uses moved, they follow it, and say which connection
+    /// each address is on.
     pub(crate) fn video_vehicle_changed(&mut self, before: Option<&Vehicle>, after: &Vehicle) {
         let cameras: Vec<VideoSource> = self
             .state
@@ -1595,16 +1739,24 @@ impl Engine {
             .cloned()
             .collect();
         // A new order or a switch by hand changes what a camera may go back
-        // to, without moving the vehicle.
+        // to, without moving the vehicle, and a hold what it may go ahead to.
         for source in &cameras {
+            self.route_camera(&source.id);
             self.hold_camera(&source.id);
+            if let (Some(url), Some(choice)) = (&source.active_url, &source.active_choice) {
+                let ahead = self.camera_ahead(source, url, choice.reason);
+                self.change_choice(&source.id, |c| c.ahead = ahead);
+            }
         }
         let link = |v: &Vehicle| route_in_use(v).map(|r| r.link_id.clone());
         if before.is_some_and(|b| link(b) == link(after)) {
             return;
         }
-        for mut source in cameras {
+        for source in &cameras {
             self.steer_camera(&source.id);
+            let Some(mut source) = self.state.video_sources.get(&source.id).cloned() else {
+                continue;
+            };
             let Some(url) = source.active_url.as_deref() else {
                 continue;
             };
@@ -2757,6 +2909,7 @@ impl Engine {
                         let epoch = self.video.next_rtsp_epoch;
                         self.video.rtsp_epochs.insert(source.id.clone(), epoch);
                         self.video.rtsp_urls.insert(source.id.clone(), urls.clone());
+                        self.video.rtsp_routes.remove(&source.id);
                         self.video.rtsp_may_return.remove(&source.id);
                         port.open_rtsp(&source.id, &urls, epoch);
                         opened.push(source.id.clone());
@@ -2846,6 +2999,7 @@ impl Engine {
         }
         // A vehicle already on another address's connection: start there.
         for id in opened {
+            self.route_camera(&id);
             self.steer_camera(&id);
         }
         self.release_watched_ports();

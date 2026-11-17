@@ -28,8 +28,17 @@ Action::UseTerrainDataset.dataset
 Action::UseTerrainDataset.vehicle_id
 ActionBinding.action
 ActionBinding.button
+AddressAhead.holds
+AddressAhead.link_id
+AddressAhead.vehicle_link_id
 AddressChoice.reason
 AddressChoice.since_us
+AddressMove.decided_us
+AddressMove.first_keyframe_us
+AddressMove.first_picture_us
+AddressMove.play_sent_us
+AddressMove.pre_opened
+AddressStandby.ready
 Actor.client_id
 ActorIdentity.operator_name
 Approval.capability

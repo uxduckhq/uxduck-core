@@ -152,6 +152,16 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         }
     }
 
+    fn route_rtsp(
+        &mut self,
+        source_id: &str,
+        routes: &[Option<uxduck_engine::video::AddressRoute>],
+    ) {
+        if let Some(worker) = self.rtsp.get(source_id) {
+            worker.route(routes);
+        }
+    }
+
     fn rtsp_may_return(&mut self, source_id: &str, to: &[usize]) {
         if let Some(worker) = self.rtsp.get(source_id) {
             worker.may_return(to);
