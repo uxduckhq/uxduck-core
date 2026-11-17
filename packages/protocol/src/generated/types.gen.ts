@@ -19254,8 +19254,11 @@ export type VideoAddParams = {
      */
     name?: string | null;
     /**
-     * An RTSP address (`rtsp://user:password@host:554/path`), or a UDP port
-     * to listen on (`udp://:5601` or `udp:5601`).
+     * An RTSP address (`rtsp://user:password@host:554/path`), a WHEP
+     * address played over WebRTC (`http://user:password@host:8889/path/whep`,
+     * or `https://…` with `#sha256=` and the hex SHA-256 of the certificate
+     * it must present, ADR-0064 W5, W10), or a UDP port to listen on
+     * (`udp://:5601` or `udp:5601`).
      */
     url: string;
     /**
@@ -19280,8 +19283,10 @@ export type VideoAddResult = {
 export type VideoAddressesParams = {
     sourceId: string;
     /**
-     * Preferred RTSP address first, followed by up to three fallbacks.
-     * Unchanged redacted addresses retain their stored credentials.
+     * Preferred RTSP or WHEP address first, followed by up to three
+     * fallbacks. A WHEP address goes before the RTSP address on its host,
+     * which is its fallback (ADR-0064 W5). Unchanged redacted addresses
+     * retain their stored credentials.
      */
     urls: Array<string>;
 };

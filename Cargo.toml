@@ -47,6 +47,13 @@ lzma-rs = "0.3"
 # ArduPilot's apm.pdef.xml parameter definitions (S67).
 quick-xml = "0.42"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The rustls reqwest builds on, for a WHEP address's pinned certificate
+# (ADR-0064 W10): the same 0.23 and aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+# WebRTC for WHEP cameras (ADR-0064 W2), pinned: sans-IO, on the daemon's own
+# tasks and sockets, with aws-lc-rs as the workspace's TLS has. Its default
+# features add the examples' web server.
+str0m = { version = "=0.25.0", default-features = false, features = ["aws-lc-rs"] }
 rust-embed = { version = "8", features = ["include-exclude", "mime-guess"] }
 semver = "1"
 # Canonical paths without Windows' `\\?\` prefix: Electron started from one failed to load its page.

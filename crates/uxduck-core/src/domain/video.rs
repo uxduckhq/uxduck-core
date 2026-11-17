@@ -551,6 +551,17 @@ pub fn sender_host(sender: &str) -> &str {
     host.trim_start_matches('[').trim_end_matches(']')
 }
 
+/// Whether a camera address is a WHEP endpoint, played over WebRTC: an
+/// `http://` or `https://` address among its RTSP ones (ADR-0064 W5).
+#[must_use]
+pub fn is_whep(url: &str) -> bool {
+    let url = url.trim_start();
+    ["http://", "https://"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    })
+}
+
 /// `10.0.0.5` from `rtsp://admin:secret@10.0.0.5:8554/main`, `::1` from
 /// `rtsp://[::1]/main`.
 #[must_use]
@@ -794,6 +805,19 @@ pub fn redact(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_http_address_is_whep_and_an_rtsp_one_is_not() {
+        assert!(is_whep("http://10.0.0.5:8889/front/whep"));
+        assert!(is_whep("HTTPS://gw/front/whep#sha256=00"));
+        assert!(!is_whep("rtsp://10.0.0.5:8554/front"));
+        assert!(!is_whep("udp:5601"));
+        assert!(!is_whep("http"));
+        assert_eq!(
+            url_host("https://viewer:secret@10.0.0.5:8889/front/whep"),
+            "10.0.0.5"
+        );
+    }
 
     #[test]
     fn a_source_is_its_port_and_sender_host() {

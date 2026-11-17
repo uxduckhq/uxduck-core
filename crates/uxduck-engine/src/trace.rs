@@ -60,7 +60,8 @@ pub fn redact(value: &Value) -> Value {
             if text
                 .trim()
                 .get(..7)
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("rtsp://")) =>
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("rtsp://"))
+                || uxduck_core::domain::video::is_whep(text) =>
         {
             Value::String(uxduck_core::domain::video::redact(text.trim()))
         }
@@ -151,9 +152,10 @@ mod tests {
 
     #[test]
     fn nested_camera_addresses_and_wifi_passwords_never_reach_diagnostics() {
-        let input = json!({"urls":[" rtsp://admin:camera-secret@radio/front ","RTSP://user:backup-secret@cell/front"],"wifi":{"ssid":"Field","password":"wifi-secret"}});
+        let input = json!({"urls":[" rtsp://admin:camera-secret@radio/front ","RTSP://user:backup-secret@cell/front","https://viewer:whep-secret@radio:8889/front/whep"],"wifi":{"ssid":"Field","password":"wifi-secret"}});
         let safe = redact(&input);
         assert_eq!(safe["urls"][0], "rtsp://admin@radio/front");
+        assert_eq!(safe["urls"][2], "https://viewer@radio:8889/front/whep");
         assert!(!safe.to_string().contains("secret"));
         assert_eq!(safe["wifi"]["password"], REDACTED);
     }

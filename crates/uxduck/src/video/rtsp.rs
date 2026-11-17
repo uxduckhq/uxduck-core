@@ -33,7 +33,7 @@ use base64::Engine as _;
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use uxduck_core::domain::video::{AddressMove, AddressReason, VideoTrack, redact};
+use uxduck_core::domain::video::{AddressMove, AddressReason, VideoTrack, is_whep, redact};
 use uxduck_engine::Engine;
 use uxduck_engine::video::AddressRoute;
 use uxduck_media::audio::AudioUnit;
@@ -56,7 +56,7 @@ const BACKOFF: [Duration; 4] = [
     Duration::from_secs(10),
 ];
 /// Nothing at all from the camera for this long: the connection is dead.
-const SILENT_FOR: Duration = Duration::from_secs(5);
+pub(super) const SILENT_FOR: Duration = Duration::from_secs(5);
 /// Nothing at all from a playing camera for 1 s: ask it once whether it is
 /// still there. A camera that stops its pictures still answers.
 const PING_AFTER: Duration = Duration::from_secs(1);
@@ -68,9 +68,9 @@ const PING_AFTER: Duration = Duration::from_secs(1);
 /// about 1.4 s. That stays short of 2 s, so a hiccup never spends a move
 /// and the 4G data the camera uses until it returns. A cut is still found
 /// about 1 s before the vehicle's connection is, at 3 s.
-const STALL_AFTER: Duration = Duration::from_secs(2);
+pub(super) const STALL_AFTER: Duration = Duration::from_secs(2);
 /// Setting up and starting an address, at most.
-const START_WITHIN: Duration = Duration::from_secs(15);
+pub(super) const START_WITHIN: Duration = Duration::from_secs(15);
 /// A camera that went back ahead of its vehicle and stayed this long had a
 /// steady connection, so its next fall back starts the waits again
 /// (ADR-0057 D13). Six times the 10 s the vehicle needs before it goes back
@@ -90,9 +90,9 @@ const AHEAD_WAIT: Duration = Duration::from_secs(30);
 /// back with it as soon as it returns.
 const AHEAD_WAIT_MAX: Duration = Duration::from_mins(5);
 /// Why playing ends when the pictures stop.
-const NO_PICTURES: &str = "no video pictures for 5 s";
+pub(super) const NO_PICTURES: &str = "no video pictures for 5 s";
 const OFFLINE_LOG_EVERY: Duration = Duration::from_mins(5);
-const REPORT_EVERY: Duration = Duration::from_secs(1);
+pub(super) const REPORT_EVERY: Duration = Duration::from_secs(1);
 /// Sound with neither `RTP-Info` nor sender reports for this long is lined
 /// up by when it arrives (S149).
 const ALIGN_BY_ARRIVAL_AFTER: Duration = Duration::from_secs(3);
@@ -178,7 +178,7 @@ pub fn address(url: &str) -> Result<Address, String> {
 }
 
 /// `%40` as `@` in a user or password.
-fn decode(s: &str) -> String {
+pub(super) fn decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1076,7 +1076,7 @@ async fn prepare(
 
 /// Log an outage once, then occasional reminders until pictures return.
 #[derive(Default)]
-struct ConnectionLog {
+pub(super) struct ConnectionLog {
     offline: Option<Offline>,
 }
 
@@ -1110,7 +1110,7 @@ impl ConnectionLog {
         }
     }
 
-    fn receiving(&mut self, source_id: &str, now: Instant) {
+    pub(super) fn receiving(&mut self, source_id: &str, now: Instant) {
         if let Some(offline) = self.offline.take() {
             tracing::info!(
                 source = %source_id,
@@ -1124,16 +1124,16 @@ impl ConnectionLog {
 
 /// The camera a worker serves, and how it tells the engine.
 #[derive(Clone, Copy)]
-struct Camera<'a> {
-    id: &'a str,
+pub(super) struct Camera<'a> {
+    pub(super) id: &'a str,
     epoch: u64,
-    hub: &'a Hub,
-    engine: &'a EngineHandle,
+    pub(super) hub: &'a Hub,
+    pub(super) engine: &'a EngineHandle,
 }
 
 impl Camera<'_> {
     /// Runs `event` in the engine while this worker is the camera's.
-    fn post(self, event: impl FnOnce(&mut Engine, &str) + Send + 'static) {
+    pub(super) fn post(self, event: impl FnOnce(&mut Engine, &str) + Send + 'static) {
         let (id, epoch) = (self.id.to_owned(), self.epoch);
         self.engine
             .post(move |e| e.rtsp_event(&id, epoch, |e| event(e, &id)));
@@ -1141,40 +1141,40 @@ impl Camera<'_> {
 }
 
 /// This computer's clock, as the engine's.
-fn wall_us() -> u64 {
+pub(super) fn wall_us() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
 /// When `at` was, on this computer's clock.
-fn wall_us_at(at: Instant) -> u64 {
+pub(super) fn wall_us_at(at: Instant) -> u64 {
     wall_us().saturating_sub(u64::try_from(at.elapsed().as_micros()).unwrap_or(u64::MAX))
 }
 
 /// A move to another address, timed until its first keyframe (ADR-0057
 /// D14).
-struct Moving {
-    reason: AddressReason,
-    last_picture_us: Option<u64>,
-    decided_us: u64,
-    pre_opened: bool,
-    play_sent_us: Option<u64>,
-    first_picture_us: Option<u64>,
+pub(super) struct Moving {
+    pub(super) reason: AddressReason,
+    pub(super) last_picture_us: Option<u64>,
+    pub(super) decided_us: u64,
+    pub(super) pre_opened: bool,
+    pub(super) play_sent_us: Option<u64>,
+    pub(super) first_picture_us: Option<u64>,
 }
 
 /// What playing an address leaves for the worker: when its last picture
 /// came, and the move to it while it has not shown a keyframe yet.
 #[derive(Default)]
-struct Progress {
-    last_picture: Option<Instant>,
-    moving: Option<Moving>,
+pub(super) struct Progress {
+    pub(super) last_picture: Option<Instant>,
+    pub(super) moving: Option<Moving>,
 }
 
 impl Progress {
     /// A picture. The first after a move is timed, and the first keyframe
     /// ends the move: it is logged once and told to the engine.
-    fn picture(&mut self, camera: Camera<'_>, url: &str, key: bool) {
+    pub(super) fn picture(&mut self, camera: Camera<'_>, url: &str, key: bool) {
         self.last_picture = Some(Instant::now());
         let Some(moving) = self.moving.as_mut() else {
             return;
@@ -1424,6 +1424,9 @@ async fn play(
 
 /// A preference probe never SETUPs or PLAYs, so the standby carries no media.
 async fn probe(url: &str) -> Result<(), String> {
+    if is_whep(url) {
+        return super::whep::probe(url).await;
+    }
     let address = address(url)?;
     let mut session = Session::connect(address.clone()).await?;
     let (_, body) = session
@@ -1543,13 +1546,14 @@ fn ready_at(kept: Option<&Standby>, index: usize) -> Option<Standby> {
     kept.filter(|s| s.index == index && s.is_ready()).cloned()
 }
 
-/// Goes back ahead of the vehicle to the address kept set up, after `wait`
-/// and once it answers a `GET_PARAMETER` (ADR-0057 D13).
-async fn go_ahead(kept: Standby, wait: Option<Duration>) -> bool {
+/// Goes back ahead of the vehicle to `url`, after `wait` and once it
+/// answers: the address kept set up a `GET_PARAMETER` (ADR-0057 D13), a
+/// WHEP address, never kept set up, a probe (ADR-0064 W14).
+async fn go_ahead(url: &str, kept: Option<Standby>, wait: Option<Duration>) -> bool {
     if let Some(wait) = wait {
         tokio::time::sleep(wait).await;
     }
-    kept.ping().await
+    answers_now(url, kept).await
 }
 
 /// How a camera that went back ahead of its vehicle fares there, so one
@@ -1594,8 +1598,10 @@ impl Ahead {
 /// The address to keep set up while `current` plays (ADR-0057 D12): the
 /// first whose vehicle connection is heard and is not the one `current` is
 /// on. None for a camera whose addresses are on no connection of its
-/// vehicle: nothing says whether one is reachable.
-fn standby_for(routes: &[Option<AddressRoute>], current: usize) -> Option<usize> {
+/// vehicle: nothing says whether one is reachable. A WHEP address is never
+/// kept set up: its session follows the vehicle with an ICE restart
+/// instead (ADR-0064 W14).
+fn standby_for(urls: &[String], routes: &[Option<AddressRoute>], current: usize) -> Option<usize> {
     let on = routes
         .get(current)
         .and_then(Option::as_ref)
@@ -1605,7 +1611,8 @@ fn standby_for(routes: &[Option<AddressRoute>], current: usize) -> Option<usize>
         .enumerate()
         .filter_map(|(index, route)| {
             let route = route.as_ref()?;
-            (index != current && route.up && on != Some(route.link_id.as_str()))
+            let whep = urls.get(index).is_some_and(|url| is_whep(url));
+            (index != current && route.up && on != Some(route.link_id.as_str()) && !whep)
                 .then_some((!route.returns, index))
         })
         .min()
@@ -1817,7 +1824,7 @@ fn keep_standby(
     lent: &tokio::sync::watch::Sender<Option<Standby>>,
     gate: &Arc<tokio::sync::Mutex<()>>,
 ) {
-    let wanted = standby_for(routes, current);
+    let wanted = standby_for(urls, routes, current);
     if lent.borrow().as_ref().map(|s| s.index) == wanted {
         return;
     }
@@ -1965,15 +1972,19 @@ pub fn spawn(
                 may_go_back(allowed.borrow_and_update().as_deref(), &routes, current);
             let started = Instant::now();
             let (silent, mut silenced) = tokio::sync::watch::channel(false);
+            // A WHEP session follows the vehicle with an ICE restart
+            // (ADR-0064 W14), so a move to another WHEP address asks it.
+            let (follow, mut follows) = tokio::sync::mpsc::unbounded_channel();
             let outcome = {
-                let playing = play(
-                    camera,
-                    url,
-                    pre_opened,
-                    &mut connection_log,
-                    &silent,
-                    &mut progress,
-                );
+                let playing = async {
+                    let (log, progress) = (&mut connection_log, &mut progress);
+                    if is_whep(url) {
+                        Box::pin(super::whep::play(camera, url, log, &silent, progress, &mut follows))
+                            .await
+                    } else {
+                        play(camera, url, pre_opened, log, &silent, progress).await
+                    }
+                };
                 tokio::pin!(playing);
                 let recovered = preferred(&urls, returning.clone(), lent.subscribe(), next_check);
                 tokio::pin!(recovered);
@@ -1983,6 +1994,9 @@ pub fn spawn(
                 // Ahead of the vehicle, once the connection it would go back
                 // to has answered for 10 s and the address there answers.
                 let mut going = None;
+                // An ICE restart asked of the WHEP session: where to, why,
+                // and its outcome.
+                let mut restarting = None;
                 let mut rethink = true;
                 loop {
                     if rethink {
@@ -1993,8 +2007,13 @@ pub fn spawn(
                             next_check(wait);
                         }
                         going = to
-                            .and_then(|to| ready_at(standby.as_ref(), to))
-                            .map(|kept| Box::pin(go_ahead(kept, wait)));
+                            .and_then(|to| {
+                                if is_whep(&urls[to]) {
+                                    return Some((to, None));
+                                }
+                                ready_at(standby.as_ref(), to).map(|kept| (to, Some(kept)))
+                            })
+                            .map(|(to, kept)| (to, Box::pin(go_ahead(&urls[to], kept, wait))));
                     }
                     tokio::select! {
                         biased;
@@ -2007,7 +2026,12 @@ pub fn spawn(
                                 continue;
                             }
                             if index > 0 {
-                                break Move::Steered(index, AddressReason::FollowedVehicle);
+                                let because = AddressReason::FollowedVehicle;
+                                if let Some(outcome) = super::whep::follow(&follow, &urls[current], &urls[index], because) {
+                                    restarting = Some((index, because, outcome));
+                                    continue;
+                                }
+                                break Move::Steered(index, because);
                             }
                             let kept = ready_at(standby.as_ref(), 0);
                             probing = Some(Box::pin(answers_now(&urls[0], kept)));
@@ -2037,7 +2061,12 @@ pub fn spawn(
                                     .position(|r| r.as_ref().is_some_and(|r| r.in_use))
                             {
                                 ahead.left(Instant::now(), !here.up);
-                                break Move::Steered(to, AddressReason::FollowedVehicle);
+                                let because = AddressReason::FollowedVehicle;
+                                if let Some(outcome) = super::whep::follow(&follow, &urls[current], &urls[to], because) {
+                                    restarting = Some((to, because, outcome));
+                                    continue;
+                                }
+                                break Move::Steered(to, because);
                             }
                             let now = may_go_back(allowed.borrow().as_deref(), &routes, current);
                             if now != returning || (was && !following) {
@@ -2053,19 +2082,67 @@ pub fn spawn(
                         }, if probing.is_some() => {
                             probing = None;
                             if answered {
-                                break Move::Steered(0, AddressReason::ReturnedWithVehicle);
+                                let because = AddressReason::ReturnedWithVehicle;
+                                if let Some(outcome) = super::whep::follow(&follow, &urls[current], &urls[0], because) {
+                                    restarting = Some((0, because, outcome));
+                                    continue;
+                                }
+                                break Move::Steered(0, because);
                             }
                         }
-                        Some(answered) = async {
+                        Some((to, answered)) = async {
                             match going.as_mut() {
-                                Some(going) => Some(going.await),
+                                Some((to, going)) => Some((*to, going.await)),
                                 None => None,
                             }
                         }, if going.is_some() => {
                             going = None;
                             if answered {
-                                break Move::Ahead(standby.as_ref().map_or(current, |s| s.index));
+                                let because = AddressReason::AheadOfVehicle;
+                                if let Some(outcome) = super::whep::follow(&follow, &urls[current], &urls[to], because) {
+                                    restarting = Some((to, because, outcome));
+                                    continue;
+                                }
+                                break Move::Ahead(to);
                             }
+                        }
+                        Some(restarted) = async {
+                            match restarting.as_mut() {
+                                Some((_, _, outcome)) => Some(outcome.await),
+                                None => None,
+                            }
+                        }, if restarting.is_some() => {
+                            let Some((index, because, _)) = restarting.take() else {
+                                continue;
+                            };
+                            if !matches!(restarted, Ok(Ok(()))) {
+                                let error = match restarted {
+                                    Ok(Err(error)) => error,
+                                    _ => "the WHEP session ended".to_owned(),
+                                };
+                                tracing::info!(source = %source_id, %error, "a WHEP camera could not restart ICE, so it opens a new session");
+                                // A new session there, then the next address (W14).
+                                break if because == AddressReason::AheadOfVehicle {
+                                    Move::Ahead(index)
+                                } else {
+                                    Move::Steered(index, because)
+                                };
+                            }
+                            // The same session plays on at the new address.
+                            current = index;
+                            reason = because;
+                            failures = 0;
+                            match because {
+                                AddressReason::AheadOfVehicle => ahead.went(Instant::now()),
+                                _ => ahead.left(Instant::now(), false),
+                            }
+                            let active = urls[current].clone();
+                            camera.post(move |e, id| e.rtsp_address(id, active, because));
+                            keep_standby(camera, &urls, current, &routes, &mut standby, &lent, &held);
+                            following = with_vehicle(&routes, current);
+                            returning = may_go_back(allowed.borrow().as_deref(), &routes, current);
+                            recovered.set(preferred(&urls, returning.clone(), lent.subscribe(), next_check));
+                            rethink = true;
                         }
                         Ok(()) = allowed.changed() => {
                             let now = may_go_back(allowed.borrow_and_update().as_deref(), &routes, current);
@@ -2099,6 +2176,8 @@ pub fn spawn(
                     }
                 }
             }; // `playing` and its socket have been dropped here.
+            // An ICE restart may have moved it on.
+            let url = &urls[current];
             decided = Some((progress.last_picture.take().map(wall_us_at), wall_us()));
             if let Some(moving) = progress.moving.take() {
                 tracing::info!(
@@ -2535,15 +2614,18 @@ mod tests {
     fn the_address_kept_set_up_is_the_first_on_another_connection_the_vehicle_is_heard_on() {
         let radio = Some(route("radio", true, true));
         let internet = Some(route("internet", true, false));
-        assert_eq!(standby_for(&[radio.clone(), internet.clone()], 0), Some(1));
+        assert_eq!(
+            standby_for(&[], &[radio.clone(), internet.clone()], 0),
+            Some(1)
+        );
         // A second address on the radio's host is on the same connection.
         assert_eq!(
-            standby_for(&[radio.clone(), radio.clone(), internet.clone()], 0),
+            standby_for(&[], &[radio.clone(), radio.clone(), internet.clone()], 0),
             Some(2)
         );
         // Not while the vehicle is not heard there.
         assert_eq!(
-            standby_for(&[radio, Some(route("internet", false, false))], 0),
+            standby_for(&[], &[radio, Some(route("internet", false, false))], 0),
             None
         );
         // Playing the internet address: the radio one, once heard again.
@@ -2551,12 +2633,30 @@ mod tests {
             Some(route("radio", true, false)),
             Some(route("internet", true, true)),
         ];
-        assert_eq!(standby_for(&back, 1), Some(0));
+        assert_eq!(standby_for(&[], &back, 1), Some(0));
         // An address on no connection plays with a heard one kept set up.
-        assert_eq!(standby_for(&[None, internet], 0), Some(1));
+        assert_eq!(standby_for(&[], &[None, internet], 0), Some(1));
         // Without a vehicle nothing says an address is reachable.
-        assert_eq!(standby_for(&[None, None], 0), None);
-        assert_eq!(standby_for(&[], 0), None);
+        assert_eq!(standby_for(&[], &[None, None], 0), None);
+        assert_eq!(standby_for(&[], &[], 0), None);
+    }
+
+    /// A WHEP address is never kept set up: a WHEP camera follows its
+    /// vehicle with an ICE restart instead (ADR-0064 W14). The RTSP address
+    /// after it on that connection is kept set up.
+    #[test]
+    fn a_whep_address_is_never_the_one_kept_set_up() {
+        let urls = [
+            "http://radio:8889/cam/whep".to_owned(),
+            "http://internet:8889/cam/whep".to_owned(),
+            "rtsp://radio:8554/cam".to_owned(),
+            "rtsp://internet:8554/cam".to_owned(),
+        ];
+        let radio = Some(route("radio", true, true));
+        let internet = Some(route("internet", true, false));
+        let routes = [radio.clone(), internet.clone(), radio, internet];
+        assert_eq!(standby_for(&urls, &routes, 0), Some(3));
+        assert_eq!(standby_for(&urls[..2], &routes[..2], 0), None);
     }
 
     /// The engine says which earlier addresses a camera may go back to on
@@ -2597,7 +2697,11 @@ mod tests {
             Some(route("internet", true, true)),
         ];
         assert_eq!(ahead_to(&routes, 2), Some(1));
-        assert_eq!(standby_for(&routes, 2), Some(1), "set up before the LAN");
+        assert_eq!(
+            standby_for(&[], &routes, 2),
+            Some(1),
+            "set up before the LAN"
+        );
         // Not from an address the vehicle does not use, nor to one not heard.
         assert_eq!(ahead_to(&routes, 0), None);
         let unheard = AddressRoute {

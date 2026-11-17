@@ -17,6 +17,7 @@ pub mod reencode;
 pub mod rtsp;
 pub mod slice;
 pub mod socket;
+pub mod whep;
 
 use std::collections::HashMap;
 use std::sync::Arc;

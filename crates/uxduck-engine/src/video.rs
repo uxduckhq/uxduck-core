@@ -233,7 +233,25 @@ fn with_track(url: &str, track: u32) -> String {
 
 enum Input {
     Udp(u16),
-    Rtsp { host: String, port: u16 },
+    Rtsp {
+        host: String,
+        port: u16,
+    },
+    /// A WHEP endpoint, played over WebRTC (ADR-0064 W5).
+    Whep {
+        host: String,
+        port: u16,
+    },
+}
+
+/// `#sha256=` and the 32 bytes of a certificate's SHA-256 fingerprint in
+/// hex, with or without colons: the certificate an https:// WHEP address
+/// must present (ADR-0064 W10). Never sent to the camera.
+fn whep_pin(fragment: &str) -> bool {
+    fragment.strip_prefix("sha256=").is_some_and(|hex| {
+        let digits: String = hex.chars().filter(|c| *c != ':').collect();
+        digits.len() == 64 && digits.chars().all(|c| c.is_ascii_hexdigit())
+    })
 }
 
 fn input(url: &str) -> Result<Input, ApiError> {
@@ -251,9 +269,48 @@ fn input(url: &str) -> Result<Input, ApiError> {
             .map(Input::Udp)
             .ok_or_else(|| invalid("a UDP port is a number from 1 to 65535, such as udp:5601"));
     }
+    if uxduck_core::domain::video::is_whep(url) {
+        let (scheme, rest) = url.split_once("://").unwrap_or_default();
+        let secure = scheme.eq_ignore_ascii_case("https");
+        let (rest, fragment) = rest
+            .split_once('#')
+            .map_or((rest, None), |(b, f)| (b, Some(f)));
+        if let Some(fragment) = fragment {
+            if !whep_pin(fragment) {
+                return Err(invalid(
+                    "after # a WHEP address takes only its certificate's fingerprint, such as #sha256= and 64 hex digits",
+                ));
+            }
+            if !secure {
+                return Err(invalid(
+                    "a certificate fingerprint needs an https:// WHEP address",
+                ));
+            }
+        }
+        let authority = rest.split(['/', '?']).next().unwrap_or_default();
+        let host = uxduck_core::domain::video::url_host(url);
+        let port = match authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, h)| h)
+            .rsplit_once(':')
+        {
+            Some((host, port)) if !host.ends_with(']') || host.starts_with('[') => port
+                .parse::<u16>()
+                .map_err(|_| invalid("the WHEP address has a port that is not a number"))?,
+            _ if secure => 443,
+            _ => 80,
+        };
+        if host.is_empty() {
+            return Err(invalid("the WHEP address has no host"));
+        }
+        return Ok(Input::Whep {
+            host: host.to_owned(),
+            port,
+        });
+    }
     let Some(rest) = url.strip_prefix("rtsp://") else {
         return Err(invalid(
-            "add an RTSP address (rtsp://…) or a UDP port (udp:5601)",
+            "add an RTSP address (rtsp://…), a WHEP address (http://…/whep) or a UDP port (udp:5601)",
         ));
     };
     // `#track=N` (S90) is UXDuck's, never part of the camera's address.
@@ -1267,10 +1324,10 @@ impl Engine {
                 .iter()
                 .find(|u| redact(u) == given)
                 .map_or_else(|| given.to_owned(), |u| (*u).clone());
-            if !matches!(input(&url)?, Input::Rtsp { .. }) {
+            if !matches!(input(&url)?, Input::Rtsp { .. } | Input::Whep { .. }) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
-                    "Fallback addresses must use RTSP.",
+                    "Fallback addresses must use RTSP or WHEP.",
                 ));
             }
             if urls.iter().any(|u: &String| redact(u) == redact(&url)) {
@@ -1315,7 +1372,7 @@ impl Engine {
             return Ok(source);
         }
         let primary = urls.remove(0);
-        if let Input::Rtsp { host, port } = input(&primary)? {
+        if let Input::Rtsp { host, port } | Input::Whep { host, port } = input(&primary)? {
             source.port = port;
             source.sender = format!("{host}:{port}");
         }
@@ -2469,7 +2526,7 @@ impl Engine {
                     port: Some(port),
                 })
             }
-            Input::Rtsp { host, port } => {
+            Input::Rtsp { host, port } | Input::Whep { host, port } => {
                 let url = url.trim().to_owned();
                 if let Some(same) = self
                     .state

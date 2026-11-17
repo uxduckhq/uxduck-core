@@ -14,7 +14,7 @@ use crate::latency::{
 };
 use crate::nal::{Codec, SpsInfo};
 use crate::rtcp::{SenderReport, sender_report};
-use crate::rtp::{Depacketizer, Header};
+use crate::rtp::{Depacketizer, Header, Picture};
 use crate::ts::{Demuxer, StreamKind};
 use crate::udp::{Container, Packet, classify};
 
@@ -190,6 +190,8 @@ pub struct Source {
     jitter: Jitter,
     /// The latest sender report for the RTP video, from RTCP.
     sender_report: Option<SenderReport>,
+    /// Packets missing for good from pictures put back together elsewhere.
+    lost: u64,
     capture: CaptureDelay,
     /// The RTSP server's clock, for a camera reached over RTSP (S355).
     server_clock: Option<ServerClock>,
@@ -228,6 +230,7 @@ impl Source {
             picture_from: None,
             jitter: Jitter::default(),
             sender_report: None,
+            lost: 0,
             capture: CaptureDelay::default(),
             server_clock: None,
             companion: None,
@@ -290,6 +293,7 @@ impl Source {
         self.picture_from = None;
         self.jitter = Jitter::default();
         self.sender_report = None;
+        self.lost = 0;
         self.capture = CaptureDelay::default();
     }
 
@@ -587,27 +591,18 @@ impl Source {
         }
         // A picture this packet ended began with the first packet of its
         // timestamp, which may be an earlier one's.
+        let latest = self.picture_from;
         let began = |timestamp: u32| {
-            [previous, self.picture_from]
+            [previous, latest]
                 .into_iter()
                 .flatten()
                 .find_map(|(t, at)| (t == timestamp).then_some(at))
                 .unwrap_or(arrival)
         };
-        if let (Some(depacketizer), Some(filter)) = (&mut self.depacketizer, &mut self.filter) {
+        if let (Some(depacketizer), Some(_)) = (&mut self.depacketizer, &self.filter) {
             for picture in depacketizer.push(header, payload) {
                 let started = began(picture.timestamp);
-                if let Some(captured) = self
-                    .sender_report
-                    .and_then(|r| rtp_capture_us(&r, picture.timestamp))
-                {
-                    self.capture
-                        .push(CameraClock::SenderReports, captured, started);
-                }
-                let pts = self.rtp_clock.pts(picture.timestamp);
-                if let Some(unit) = filter.push(&picture.annex_b, Some(pts), picture.damaged) {
-                    out.push(arrived_unit(unit, started, &mut self.jitter));
-                }
+                out.extend(self.picture(&picture, started));
             }
             return out;
         }
@@ -652,6 +647,43 @@ impl Source {
         out
     }
 
+    /// A picture an RTP stack put back together itself, from `packets`
+    /// packets of `bytes` with `lost` missing for good, and when its first
+    /// packet arrived: WebRTC's, which reorders and asks again for what went
+    /// missing, where this one's depacketizer reads RTSP's TCP in order
+    /// (ADR-0064 W1). For a source made with `rtp`.
+    pub fn push_picture(
+        &mut self,
+        picture: &Picture,
+        packets: u64,
+        bytes: u64,
+        lost: u64,
+        arrival: Arrival,
+    ) -> Option<Output> {
+        self.datagrams += packets;
+        self.bytes += bytes;
+        self.lost += lost;
+        self.rtp_packets += packets;
+        self.picture(picture, arrival)
+    }
+
+    /// A whole picture into the video filter, dated by the latest sender
+    /// report and by when it began to arrive (S262).
+    fn picture(&mut self, picture: &Picture, started: Arrival) -> Option<Output> {
+        let filter = self.filter.as_mut()?;
+        if let Some(captured) = self
+            .sender_report
+            .and_then(|r| rtp_capture_us(&r, picture.timestamp))
+        {
+            self.capture
+                .push(CameraClock::SenderReports, captured, started);
+        }
+        let pts = self.rtp_clock.pts(picture.timestamp);
+        filter
+            .push(&picture.annex_b, Some(pts), picture.damaged)
+            .map(|unit| arrived_unit(unit, started, &mut self.jitter))
+    }
+
     fn why_unsupported(&self) -> Option<String> {
         let streams = self.demuxer.streams();
         let video = streams
@@ -670,6 +702,7 @@ impl Source {
             datagrams: self.datagrams,
             lost: d.continuity_errors
                 + d.transport_errors
+                + self.lost
                 + self.depacketizer.as_ref().map_or(0, |r| r.lost),
             pes_length_mismatches: d.pes_length_mismatches,
             pes_length_max_excess: d.pes_length_max_excess,

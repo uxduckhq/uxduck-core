@@ -146,8 +146,10 @@ pub enum ClockWay {
     /// MAVLink TIMESYNC: the computer in the profile of the camera's vehicle
     /// whose host is the camera's (S357).
     Companion,
-    /// The RTSP server's clock, from its RTCP sender reports and
-    /// `GET_PARAMETER` round trips. Used only for sender reports' times.
+    /// The camera server's clock, from its RTCP sender reports and its
+    /// round trips: `GET_PARAMETER` over RTSP, ICE's consent checks over
+    /// WHEP, whose `MediaMTX` sends no RTCP round trip (ADR-0064 W11). Used
+    /// only for sender reports' times.
     Rtsp,
     /// The two clocks assumed in step.
     Assumed,
@@ -157,8 +159,8 @@ pub enum ClockWay {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClockGap {
-    /// The camera is not reached this way: not over RTSP, or no companion
-    /// computer serves it.
+    /// The camera is not reached this way: not over RTSP or WHEP, or no
+    /// companion computer serves it.
     NotServed,
     /// No sender report in the last minute.
     NoReports,
@@ -410,8 +412,11 @@ pub struct VideoPortStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoAddParams {
-    /// An RTSP address (`rtsp://user:password@host:554/path`), or a UDP port
-    /// to listen on (`udp://:5601` or `udp:5601`).
+    /// An RTSP address (`rtsp://user:password@host:554/path`), a WHEP
+    /// address played over WebRTC (`http://user:password@host:8889/path/whep`,
+    /// or `https://…` with `#sha256=` and the hex SHA-256 of the certificate
+    /// it must present, ADR-0064 W5, W10), or a UDP port to listen on
+    /// (`udp://:5601` or `udp:5601`).
     pub url: String,
     /// What to call the camera ("Front"); its address when absent or empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,8 +443,10 @@ pub struct VideoAddResult {
 #[serde(rename_all = "camelCase")]
 pub struct VideoAddressesParams {
     pub source_id: String,
-    /// Preferred RTSP address first, followed by up to three fallbacks.
-    /// Unchanged redacted addresses retain their stored credentials.
+    /// Preferred RTSP or WHEP address first, followed by up to three
+    /// fallbacks. A WHEP address goes before the RTSP address on its host,
+    /// which is its fallback (ADR-0064 W5). Unchanged redacted addresses
+    /// retain their stored credentials.
     pub urls: Vec<String>,
 }
 

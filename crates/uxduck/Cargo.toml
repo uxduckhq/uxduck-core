@@ -33,6 +33,9 @@ futures = { workspace = true, features = ["executor"] }
 getrandom.workspace = true
 minisign-verify.workspace = true
 reqwest = { workspace = true, features = ["json", "query", "stream"] }
+rustls.workspace = true
+# WHEP cameras (ADR-0064 W1, W2).
+str0m.workspace = true
 rust-embed = { workspace = true, optional = true }
 gilrs = { workspace = true, optional = true }
 gilrs-core = { workspace = true, optional = true }
@@ -124,6 +127,8 @@ plugins = ["dep:extism", "dep:wasmtime", "dep:oxc"]
 
 [dev-dependencies]
 minisign.workspace = true
+# A certificate for the WHEP tests' MediaMTX (S383).
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 semver.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
