@@ -438,20 +438,22 @@ pub(crate) fn handle(
         }
         ClientRequest::FlightsFound(params) => {
             require(Read)?;
-            let found = engine
+            let mut found = engine
                 .system
                 .found_flights(&params)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
             // A disk plugged in shows its flights in the Logbook (ADR-0062).
             engine.adopt_found_flight_files(&found.flight_files);
+            engine.count_folder_entries(&mut found);
             to_value(&found)
         }
         ClientRequest::FlightsFolder(params) => {
             require(Config)?;
-            let found = engine
+            let mut found = engine
                 .system
                 .flight_folder(&params)
                 .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+            engine.count_folder_entries(&mut found);
             to_value(&found)
         }
         ClientRequest::LogsCards(_) => {

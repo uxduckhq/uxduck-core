@@ -169,13 +169,74 @@ fn offload_target(
     let probe = there.join(format!(".uxduck-write-check-{}", std::process::id()));
     std::fs::write(&probe, b"")
         .and_then(|()| std::fs::remove_file(&probe))
-        .map_err(|e| format!("UXDuck cannot write to {}: {e}.", there.display()))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
+                // macOS reads NTFS disks but never writes to them.
+                format!(
+                    "{place} can only be read, so nothing can be written to it. A Mac reads a disk formatted as NTFS but cannot write to it."
+                )
+            } else {
+                format!("UXDuck cannot write to {}: {e}.", there.display())
+            }
+        })?;
+    let names = std::fs::read_dir(&target)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_lowercase())
+        .filter(|n| n.ends_with(".uxflight"))
+        .collect();
     Ok(uxduck_engine::runtime::OffloadTarget {
         folder: target.display().to_string(),
         free_bytes: fs4::available_space(&there).ok(),
         log_folder,
         deep,
+        names,
+        max_file: max_file(&there),
     })
+}
+
+/// The largest file the disk at `place` keeps, and its format: FAT32,
+/// which many external disks come formatted as, keeps files of 4 GB less
+/// a byte, a bound of its own format. None for formats without such a
+/// bound (exFAT, APFS, NTFS, ext4), and where the format cannot be read:
+/// on Windows a FAT32 disk refuses the file as it is written instead.
+fn max_file(place: &std::path::Path) -> Option<(u64, String)> {
+    const FAT_LARGEST: u64 = u32::MAX as u64;
+    #[cfg(target_os = "linux")]
+    {
+        let fs = rustix::fs::statfs(place).ok()?;
+        // MSDOS_SUPER_MAGIC, for vfat and msdos alike.
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            clippy::unnecessary_cast,
+            reason = "the kernel's magic number, whatever the field's type"
+        )]
+        let magic = fs.f_type as u64;
+        return (magic == 0x4d44).then(|| (FAT_LARGEST, "FAT32".to_owned()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let fs = rustix::fs::statfs(place).ok()?;
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "a C string's bytes"
+        )]
+        let format: String = fs
+            .f_fstypename
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| char::from(*c as u8))
+            .collect();
+        return (format == "msdos").then(|| (FAT_LARGEST, "FAT32".to_owned()));
+    }
+    #[allow(unreachable_code, reason = "Linux and macOS return above")]
+    {
+        let _ = (place, FAT_LARGEST);
+        None
+    }
 }
 
 /// The wake lock: the system stays awake, the display may sleep.
@@ -283,6 +344,10 @@ impl System for Host {
 
     fn file_present(&self, path: &str) -> Option<bool> {
         Some(std::path::Path::new(path).is_file())
+    }
+
+    fn telemetry_bytes(&self, read: &uxduck_engine::runtime::ReplayRead) -> Option<(u64, u64)> {
+        crate::replay::telemetry_bytes(&self.data_dir.join("tlogs"), read)
     }
 
     fn offload_target(

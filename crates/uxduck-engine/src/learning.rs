@@ -15,7 +15,8 @@ use crate::account::AccountAction;
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
 
-/// The longest comment kept.
+/// The longest comment the account's service takes with a rating
+/// (`apps/api`, turns), in characters.
 const MAX_COMMENT: usize = 2_000;
 
 /// A message as the API takes it with a sent conversation.
@@ -57,8 +58,22 @@ pub(crate) fn feedback(
         .ok_or_else(|| ApiError::new(ErrorKind::NotFound, "no such answer"))?;
     let comment = params
         .comment
-        .map(|c| c.trim().chars().take(MAX_COMMENT).collect::<String>())
+        .map(|c| c.trim().to_owned())
         .filter(|c| !c.is_empty());
+    // Refused whole, never cut: until 2026-11-17 a longer one was cut to
+    // fit without a word.
+    if let Some(long) = comment
+        .as_ref()
+        .map(|c| c.chars().count())
+        .filter(|n| *n > MAX_COMMENT)
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "This comment is {long} characters. UXDuck's account service takes {MAX_COMMENT} with a rating. Shorten it to send it."
+            ),
+        ));
+    }
     let rating = match params.rating {
         RatingDto::Up => Rating::Up,
         RatingDto::Down => Rating::Down,

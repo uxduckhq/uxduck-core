@@ -358,6 +358,12 @@ pub struct FlightFolder {
     /// flights last found in it stay listed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub place: String,
+    /// Logbook entries with a copy in this folder or below it, a
+    /// `.uxflight` each (ADR-0062, S379). They are in `flight/list`, not
+    /// in `flights`. Counted whether the folder is there now or not.
+    #[serde(default, skip_serializing_if = "none")]
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub entries: u64,
 }
 
 /// A disk plugged in that UXDuck can write to (ADR-0062): an external

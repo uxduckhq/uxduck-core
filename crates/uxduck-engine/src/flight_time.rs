@@ -35,6 +35,7 @@ use uxduck_core::domain::telemetry::{TelemetryItem, Unit, VehicleTelemetry, off_
 use uxduck_core::domain::telemetry_layout::VehicleClass;
 
 use uxduck_contracts::dto::analytics::DaemonEvent;
+use uxduck_contracts::dto::flight::place_of;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_core::domain::flight::{Flight, FlightEnd, FlightMission, FlightOperator};
 use uxduck_core::domain::settings::SyncContent;
@@ -529,8 +530,24 @@ impl Engine {
             .filter(|f| vehicle.as_ref().is_none_or(|v| &f.vehicle_id == v))
             .collect();
         let operators = self.logbook_operators(&flights);
+        let places = self.logbook_places(&flights);
         if let Some(id) = &params.operator_id {
             flights.retain(|f| f.operators.iter().any(|o| &o.operator_id == id));
+        }
+        if params.here {
+            let moved = self.moved_videos();
+            flights
+                .retain(|f| f.recorded_here && !moved.iter().any(|r| self.is_flight_video(f, r)));
+        }
+        if let Some(place) = &params.place {
+            flights.retain(|f| f.copies.iter().any(|c| &place_of(&c.path) == place));
+        }
+        if let Some(folder) = &params.under {
+            flights.retain(|f| {
+                f.copies
+                    .iter()
+                    .any(|c| crate::offload::inside(folder, &c.path))
+            });
         }
         // Newest first, and the same order every time, so a page ends where
         // the next begins even when two flights armed together.
@@ -566,7 +583,49 @@ impl Engine {
             older,
             totals,
             operators,
+            places,
         })
+    }
+
+    /// The disks and folders holding the entries' copies, by name, each
+    /// with how many and whether any copy there is there now (S379).
+    fn logbook_places(
+        &self,
+        flights: &[&Flight],
+    ) -> Vec<uxduck_contracts::dto::flight::FlightListPlace> {
+        let mut places: BTreeMap<String, (u32, bool)> = BTreeMap::new();
+        for flight in flights {
+            let mut seen = std::collections::BTreeSet::new();
+            for copy in &flight.copies {
+                let place = place_of(&copy.path);
+                let entry = places.entry(place.clone()).or_insert((0, true));
+                if self.system.file_present(&copy.path) != Some(false) {
+                    entry.1 = false;
+                }
+                if seen.insert(place) {
+                    entry.0 += 1;
+                }
+            }
+        }
+        places
+            .into_iter()
+            .map(
+                |(place, (count, unplugged))| uxduck_contracts::dto::flight::FlightListPlace {
+                    place,
+                    count,
+                    unplugged,
+                },
+            )
+            .collect()
+    }
+
+    /// The recordings moved to a disk (ADR-0062): no longer on this computer.
+    fn moved_videos(&self) -> Vec<&uxduck_core::domain::video::VideoRecording> {
+        self.state
+            .video_recordings
+            .values()
+            .filter(|r| r.packed.is_some())
+            .collect()
     }
 
     /// Who acted on the entries, over every entry whatever the operator

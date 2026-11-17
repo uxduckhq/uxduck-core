@@ -32,7 +32,9 @@ pub type Ground<'a> = dyn FnMut(LatLon) -> Option<Option<f64>> + 'a;
 
 /// Over this, many countries ask for permission: said, not refused.
 const HEIGHT_LIMIT_M: f64 = 120.0;
-/// Samples along a leg, at most this far apart.
+/// Samples along a leg, at most this far apart, however long the leg.
+/// Until 2026-11-17 a leg had 200 samples at most, so past 10 km they
+/// spread out and a narrow ridge between them went unchecked, unsaid.
 const LEG_STEP_M: f64 = 50.0;
 
 const TAKE_OFF: [u16; 2] = [22, 84];
@@ -495,7 +497,7 @@ fn clearance(body: &PlanBody, ground: &mut Ground<'_>, checks: &mut Vec<Check>) 
             clippy::cast_sign_loss,
             reason = "a count of samples along a leg"
         )]
-        let pieces = (length / LEG_STEP_M).ceil().min(200.0) as u32;
+        let pieces = (length / LEG_STEP_M).ceil() as u32;
         for k in 1..pieces {
             let f = f64::from(k) / f64::from(pieces);
             let spot = LatLon {
@@ -884,6 +886,28 @@ mod tests {
         }
         plan.frame = PlanFrame::AboveTerrain;
         assert!(check(&plan, &mut hill).is_empty());
+    }
+
+    /// A 20 km leg is sampled every 50 m too, so a ridge 20 m wide on it is
+    /// found. Until 2026-11-17 its samples were 100 m apart and missed it.
+    #[test]
+    fn a_narrow_ridge_on_a_long_leg_is_found() {
+        #[allow(clippy::option_option, clippy::unnecessary_wraps)]
+        fn ridge(at: LatLon) -> Option<Option<f64>> {
+            Some(Some(if (0.00136..0.00154).contains(&at.longitude_deg) {
+                300.0
+            } else {
+                100.0
+            }))
+        }
+        let plan = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 40.0, 3),
+            item(16, 0.0001, 0.181, 40.0, 3),
+            item(20, 0.0, 0.0, 0.0, 3),
+        ]);
+        let checks = check(&plan, &mut ridge);
+        assert_eq!(codes(&checks), ["below-ground"], "{checks:?}");
     }
 
     #[test]

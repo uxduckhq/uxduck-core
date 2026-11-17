@@ -47,10 +47,39 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
     if let Some(dir) = mp4.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let partial = mp4.with_extension("mp4.part");
+    let written = std::fs::File::create(&partial).and_then(|file| {
+        let mut out = std::io::BufWriter::new(file);
+        convert_into(ts, &mut out)?;
+        out.into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?
+            .sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+    std::fs::rename(&partial, mp4)
+}
+
+/// Converts `ts` into MP4 written to `out` as it is made, so none of it
+/// is held in memory: a flight's file (ADR-0062) takes it straight into
+/// itself, with no copy on this computer's disk. Until 2026-11-17 the
+/// whole copy was held in memory, so a recording of hours took that much,
+/// and a file's copies were made in the playback cache first. The bytes
+/// written.
+///
+/// # Errors
+/// The recording cannot be read, has no picture, or `out` refused it.
+pub fn convert_into(ts: &Path, out: &mut dyn std::io::Write) -> std::io::Result<u64> {
     let mut input = std::fs::File::open(ts)?;
     let mut source = Source::new();
     let mut recorder = Recorder::with_sound();
-    let mut out = Vec::new();
+    let mut written = 0u64;
+    let mut put = |bytes: Vec<u8>| -> std::io::Result<()> {
+        written += bytes.len() as u64;
+        out.write_all(&bytes)
+    };
     let mut buffer = vec![0u8; PACKET_SIZE * 7 * 512];
     let mut pending = Vec::new();
     loop {
@@ -63,23 +92,21 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
         for chunk in pending[..whole].chunks(PACKET_SIZE * 7) {
             for output in source.push(chunk) {
                 match output {
-                    Output::Unit(unit) => out.extend(recorder.push(unit)),
-                    Output::Audio(unit) => out.extend(recorder.push_audio(unit)),
+                    Output::Unit(unit) => put(recorder.push(unit))?,
+                    Output::Audio(unit) => put(recorder.push_audio(unit))?,
                     Output::Klv { .. } => {}
                 }
             }
         }
         pending.drain(..whole);
     }
-    out.extend(recorder.finish());
-    if out.is_empty() {
+    put(recorder.finish())?;
+    if written == 0 {
         return Err(std::io::Error::other(
             "the recording has no picture to play",
         ));
     }
-    let partial = mp4.with_extension("mp4.part");
-    std::fs::write(&partial, &out)?;
-    std::fs::rename(&partial, mp4)
+    Ok(written)
 }
 
 /// A clip of a recording kept as MPEG-TS, as MP4, and where it begins and
@@ -283,13 +310,13 @@ pub fn clean(cache: &Path, unused_for: Duration) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Three seconds of H.264 at 25 pictures a second, a keyframe each
     /// second, as UXDuck's own MPEG-TS writer makes it: the fixtures are
     /// private validation files, not part of the exported source.
-    fn three_seconds() -> Vec<u8> {
+    pub(crate) fn three_seconds() -> Vec<u8> {
         use uxduck_media::nal::Codec;
         use uxduck_media::tsmux::TsWriter;
         let sps = [

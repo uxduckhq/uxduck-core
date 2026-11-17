@@ -183,8 +183,9 @@ pub struct FlightOffloadResult {
     pub adds_folder: bool,
     /// The files, one a flight, by name.
     pub files: Vec<String>,
-    /// The videos' bytes to write, original and playable copy. The
-    /// telemetry is added to this as each flight's log is read.
+    /// The videos' bytes to write at most, original and playable copy, of
+    /// the files not on the disk already. The telemetry is added to this as
+    /// each flight's log is read.
     #[schemars(schema_with = "crate::safe::integer")]
     pub video_bytes: u64,
     /// How many video recordings go in the files.
@@ -204,6 +205,10 @@ pub struct FlightOffloadResult {
     /// With `check`: why it would be refused, in the numbers measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// What may not fit, and is allowed: the disk's free space or its
+    /// format's largest file within what the files may take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// The disk a folder is on, by the name a person knows it by (ADR-0062):
@@ -399,6 +404,19 @@ pub struct FlightListParams {
     /// Only the entries this operator acted on, and totals over them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_id: Option<String>,
+    /// Only the entries on this computer, and totals over them: recorded
+    /// here, with none of their video moved to a disk. One copied to a disk
+    /// is here too (S379).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub here: bool,
+    /// Only the entries with a copy on this disk or folder, by its
+    /// `place` (ADR-0062, S379), and totals over them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+    /// Only the entries with a copy in this folder or below it, such as a
+    /// Log folder, and totals over them (S379).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -416,6 +434,25 @@ pub struct FlightListResult {
     /// whole logbook whatever `operatorId` asked, by name.
     #[serde(default)]
     pub operators: Vec<FlightListOperator>,
+    /// The disks and folders holding entries' copies, with how many each,
+    /// over the whole logbook whatever `here`, `place` or `operatorId`
+    /// asked, by name (S379).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<FlightListPlace>,
+}
+
+/// A disk or folder holding copies of entries (ADR-0062), as
+/// [`FlightCopy::place`] names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightListPlace {
+    pub place: String,
+    /// Entries with a copy there.
+    pub count: u32,
+    /// No copy there is there now: its disk is not plugged in. False when
+    /// this host cannot tell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unplugged: bool,
 }
 
 /// An operator with entries in the logbook.

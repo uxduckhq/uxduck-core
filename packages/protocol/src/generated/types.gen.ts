@@ -7298,6 +7298,12 @@ export type FlightFolder = {
      */
     deep?: boolean;
     /**
+     * Logbook entries with a copy in this folder or below it, a
+     * `.uxflight` each (ADR-0062, S379). They are in `flight/list`, not
+     * in `flights`. Counted whether the folder is there now or not.
+     */
+    entries?: number;
+    /**
      * It is there on this computer.
      */
     exists: boolean;
@@ -7411,6 +7417,12 @@ export type FlightListParams = {
      */
     before?: string | null;
     /**
+     * Only the entries on this computer, and totals over them: recorded
+     * here, with none of their video moved to a disk. One copied to a disk
+     * is here too (S379).
+     */
+    here?: boolean;
+    /**
      * Only these flights, every one found, wherever they are in the
      * logbook: `limit` and `before` do not apply.
      */
@@ -7424,14 +7436,41 @@ export type FlightListParams = {
      */
     operatorId?: string | null;
     /**
+     * Only the entries with a copy on this disk or folder, by its
+     * `place` (ADR-0062, S379), and totals over them.
+     */
+    place?: string | null;
+    /**
      * Also totals since this time, such as the start of the month where
      * the page is.
      */
     totalsSinceUs?: number | null;
     /**
+     * Only the entries with a copy in this folder or below it, such as a
+     * Log folder, and totals over them (S379).
+     */
+    under?: string | null;
+    /**
      * Only this vehicle's.
      */
     vehicleId?: string | null;
+};
+
+/**
+ * A disk or folder holding copies of entries (ADR-0062), as
+ * [`FlightCopy::place`] names it.
+ */
+export type FlightListPlace = {
+    /**
+     * Entries with a copy there.
+     */
+    count: number;
+    place: string;
+    /**
+     * No copy there is there now: its disk is not plugged in. False when
+     * this host cannot tell.
+     */
+    unplugged?: boolean;
 };
 
 export type FlightListResult = {
@@ -7446,6 +7485,12 @@ export type FlightListResult = {
      * whole logbook whatever `operatorId` asked, by name.
      */
     operators?: Array<FlightListOperator>;
+    /**
+     * The disks and folders holding entries' copies, with how many each,
+     * over the whole logbook whatever `here`, `place` or `operatorId`
+     * asked, by name (S379).
+     */
+    places?: Array<FlightListPlace>;
     /**
      * Time in the air and time armed over every entry, listed or not (C9).
      */
@@ -7585,14 +7630,20 @@ export type FlightOffloadResult = {
      */
     refused?: string | null;
     /**
-     * The videos' bytes to write, original and playable copy. The
-     * telemetry is added to this as each flight's log is read.
+     * The videos' bytes to write at most, original and playable copy, of
+     * the files not on the disk already. The telemetry is added to this as
+     * each flight's log is read.
      */
     videoBytes: number;
     /**
      * How many video recordings go in the files.
      */
     videos: number;
+    /**
+     * What may not fit, and is allowed: the disk's free space or its
+     * format's largest file within what the files may take.
+     */
+    warning?: string | null;
 };
 
 /**

@@ -8,5 +8,6 @@
   "freedBytes": 1288490188,
   "keptVideos": 1,
   "keptBytes": 52428800,
-  "freeBytes": 871878361088
+  "freeBytes": 2147483648,
+  "warning": "T7 has 2 GB free. These flights' files take 1.3 GB to 2.4 GB with their telemetry logs and MP4 copies, so some may not fit. One that does not is not written, and nothing on this computer is deleted for it."
 }

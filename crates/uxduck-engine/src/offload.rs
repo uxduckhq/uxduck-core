@@ -24,6 +24,12 @@ use uxduck_core::events::{Actor, Change};
 use crate::Engine;
 use crate::runtime::{OffloadFlight, OffloadJob, OffloadVideo, ReplayRead, VideoAt};
 
+/// Whether a file is in this folder or below it.
+pub(crate) fn inside(folder: &str, path: &str) -> bool {
+    path.strip_prefix(folder.trim_end_matches(['/', '\\']))
+        .is_some_and(|rest| rest.starts_with(['/', '\\']))
+}
+
 /// The flight's telemetry in a `.uxflight`.
 pub const TELEMETRY: &str = "telemetry.tlog";
 
@@ -94,6 +100,24 @@ fn bytes_in_file(video: &OffloadVideo) -> u64 {
     }
 }
 
+/// `stem`, or `stem 2`, `stem 3` and on when its file's name is taken, by
+/// name in lower case, as exFAT, APFS and NTFS compare names. The name is
+/// taken from then on.
+fn free_stem(taken: &mut BTreeSet<String>, stem: &str) -> String {
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            stem.to_owned()
+        } else {
+            format!("{stem} {n}")
+        };
+        if taken.insert(format!("{candidate}.uxflight").to_lowercase()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// `video/<stem> <n>.<ext>` for the `n`th video of one name.
 fn numbered(entry: &str, n: u32) -> String {
     let path = std::path::Path::new(entry);
@@ -112,25 +136,50 @@ impl Engine {
     /// The recordings the Logbook counts as a flight's video: added to it,
     /// or of its vehicle over its time.
     pub(crate) fn flight_videos(&self, flight: &Flight) -> Vec<VideoRecording> {
-        let end = flight.ended_at_us.unwrap_or_else(|| self.clock.now_us());
         let mut videos: Vec<VideoRecording> = self
             .state
             .video_recordings
             .values()
-            .filter(|r| r.state != RecordingState::Recording && r.state != RecordingState::Failed)
-            .filter(|r| {
-                let r_end = r
-                    .ended_at_us
-                    .unwrap_or_else(|| r.started_at_us.saturating_add(r.duration_us));
-                r.flight_id.as_deref() == Some(flight.id.as_str())
-                    || (r.vehicle_id.as_deref() == Some(flight.vehicle_id.as_str())
-                        && r.started_at_us < end
-                        && flight.armed_at_us < r_end)
-            })
+            .filter(|r| self.is_flight_video(flight, r))
             .cloned()
             .collect();
         videos.sort_by_key(|r| (r.started_at_us, r.id.clone()));
         videos
+    }
+
+    /// Whether the Logbook counts this recording as the flight's video.
+    pub(crate) fn is_flight_video(&self, flight: &Flight, recording: &VideoRecording) -> bool {
+        if recording.state == RecordingState::Recording || recording.state == RecordingState::Failed
+        {
+            return false;
+        }
+        let end = flight.ended_at_us.unwrap_or_else(|| self.clock.now_us());
+        let r_end = recording.ended_at_us.unwrap_or_else(|| {
+            recording
+                .started_at_us
+                .saturating_add(recording.duration_us)
+        });
+        recording.flight_id.as_deref() == Some(flight.id.as_str())
+            || (recording.vehicle_id.as_deref() == Some(flight.vehicle_id.as_str())
+                && recording.started_at_us < end
+                && flight.armed_at_us < r_end)
+    }
+
+    /// Each Log folder's count of Logbook entries with a copy in it or
+    /// below it (S379), so a disk of `.uxflight` files does not read 0.
+    pub(crate) fn count_folder_entries(
+        &self,
+        found: &mut uxduck_contracts::dto::replay::FoundFlightsResult,
+    ) {
+        for folder in &mut found.folders {
+            let entries = self
+                .state
+                .flights
+                .values()
+                .filter(|f| f.copies.iter().any(|c| inside(&folder.path, &c.path)))
+                .count();
+            folder.entries = u64::try_from(entries).unwrap_or(u64::MAX);
+        }
     }
 
     /// The videos of a flight as its file holds them, each named once.
@@ -150,20 +199,27 @@ impl Engine {
             let (entry, playable) = match &from {
                 VideoAt::Packed(p) => (p.entry.clone(), p.playable.clone()),
                 VideoAt::Media { file } => names_in_file(file),
-                // Kept as it was.
+                // Kept as it was, under a name exFAT and NTFS take when the
+                // file is unzipped: a Mac's file may have `:` or `?` in it.
                 VideoAt::Added { path } => {
-                    let name = std::path::Path::new(path).file_name().map_or_else(
+                    let path = std::path::Path::new(path);
+                    let stem = path.file_stem().map_or_else(
                         || recording.id.clone(),
-                        |n| n.to_string_lossy().into_owned(),
+                        |s| s.to_string_lossy().into_owned(),
                     );
-                    let entry = format!("video/{name}");
+                    let ext = path
+                        .extension()
+                        .map(|e| format!(".{}", crate::photos::file_safe(&e.to_string_lossy())))
+                        .unwrap_or_default();
+                    let entry = format!("video/{}{ext}", crate::photos::file_safe(&stem));
                     (entry.clone(), entry)
                 }
             };
             // Two added videos may share a name: the second is " 2".
             let mut unique = entry.clone();
             let mut n = 1;
-            while taken.contains(&unique) {
+            // Told apart as unzipped onto a disk that ignores case.
+            while taken.contains(&unique.to_lowercase()) {
                 n += 1;
                 unique = numbered(&entry, n);
             }
@@ -174,8 +230,8 @@ impl Engine {
             } else {
                 playable
             };
-            taken.insert(unique.clone());
-            taken.insert(playable.clone());
+            taken.insert(unique.to_lowercase());
+            taken.insert(playable.to_lowercase());
             videos.push(OffloadVideo {
                 recording,
                 entry: unique,
@@ -309,24 +365,83 @@ impl Engine {
             Vec::new()
         };
         let mut job_flights = Vec::new();
-        let mut video_bytes = 0u64;
+        // What the files take: at least the recordings as they are, and at
+        // most with each camera recording's MP4 copy as large again. The
+        // copy is made as it is written, so its size is not known before.
+        // The telemetry adds what its logs measure: a link's at most what
+        // they hold from the flight's start, as later flights may follow.
+        let (mut video_bytes, mut most_bytes, mut sure_bytes) = (0u64, 0u64, 0u64);
         let mut videos = 0u32;
         let mut theirs: BTreeMap<String, VideoRecording> = BTreeMap::new();
+        let mut taken = target.names.clone();
+        let (mut too_large, mut may_not_fit) = (Vec::new(), Vec::new());
+        let mut unplugged: Option<String> = None;
         for flight in &flights {
             let in_file = self.videos_for_file(flight);
+            let telemetry = self.telemetry_for_file(flight);
+            let (mut least, mut most) = telemetry
+                .as_ref()
+                .and_then(|read| self.system.telemetry_bytes(read))
+                .unwrap_or((0, 0));
+            let mut flight_video = 0u64;
             for video in &in_file {
-                video_bytes = video_bytes.saturating_add(bytes_in_file(video));
+                flight_video = flight_video.saturating_add(bytes_in_file(video));
+                most = most.saturating_add(bytes_in_file(video));
+                least = least.saturating_add(video.recording.bytes);
                 videos += 1;
                 theirs.insert(video.recording.id.clone(), video.recording.clone());
+            }
+            // A Copy then a Move, or a second Copy, to the same folder keeps
+            // the file there rather than writing the flight again.
+            let reuse = flight.copies.iter().map(|c| c.path.clone()).find(|path| {
+                std::path::Path::new(path).parent() == Some(std::path::Path::new(&target.folder))
+                    && self.system.file_present(path) != Some(false)
+            });
+            let stem = match &reuse {
+                Some(path) => std::path::Path::new(path).file_stem().map_or_else(
+                    || self.file_stem(flight),
+                    |s| s.to_string_lossy().into_owned(),
+                ),
+                None => free_stem(&mut taken, &self.file_stem(flight)),
+            };
+            if reuse.is_none()
+                && let Some(away) = in_file.iter().find_map(|v| match &v.from {
+                    VideoAt::Packed(packed)
+                        if self.system.file_present(&packed.path) == Some(false) =>
+                    {
+                        Some(place_of(&packed.path))
+                    }
+                    _ => None,
+                })
+            {
+                let name = flight.name.as_deref().unwrap_or(&flight.vehicle_name);
+                unplugged.get_or_insert(format!(
+                    "{name}'s video is on {away}, which is not plugged in. Plug it in to move or copy it."
+                ));
+            }
+            if reuse.is_none() {
+                video_bytes = video_bytes.saturating_add(flight_video);
+                most_bytes = most_bytes.saturating_add(most);
+                sure_bytes = sure_bytes.saturating_add(least);
+                if let Some((largest, _)) = &target.max_file {
+                    let name = flight.name.as_deref().unwrap_or(&flight.vehicle_name);
+                    if least > *largest {
+                        too_large
+                            .push(format!("{name} ({})", crate::sync::size_words(least, true)));
+                    } else if most > *largest {
+                        may_not_fit.push(name.to_owned());
+                    }
+                }
             }
             job_flights.push(OffloadFlight {
                 flight: Flight {
                     copies: Vec::new(),
                     ..flight.clone()
                 },
-                stem: self.file_stem(flight),
-                telemetry: self.telemetry_for_file(flight),
+                stem,
+                telemetry,
                 videos: in_file,
+                reuse,
             });
         }
         let freed_ids: BTreeSet<&str> = freed.iter().map(|r| r.id.as_str()).collect();
@@ -334,16 +449,48 @@ impl Engine {
             .values()
             .filter(|r| r.packed.is_none() && !freed_ids.contains(r.id.as_str()))
             .collect();
-        let refused = target
-            .free_bytes
-            .filter(|free| *free < video_bytes)
-            .map(|free| {
-                format!(
-                    "{place} has {} free, and the video of these flights alone needs {}.",
-                    crate::sync::size_words(free, false),
-                    crate::sync::size_words(video_bytes, true)
-                )
-            });
+        let format_words = |(largest, format): &(u64, String)| {
+            format!(
+                "{place} is formatted as {format}, which keeps files of {} at most",
+                crate::sync::size_words(*largest, true)
+            )
+        };
+        let refused = match (&target.max_file, target.free_bytes) {
+            _ if unplugged.is_some() => unplugged,
+            (Some(max_file), _) if !too_large.is_empty() => Some(format!(
+                "{}, and these flights' files need more: {}. Leave them out, or choose a disk formatted as exFAT, APFS or NTFS.",
+                format_words(max_file),
+                too_large.join(", ")
+            )),
+            (_, Some(free)) if free < sure_bytes => Some(format!(
+                "{place} has {} free, and these flights' files need {} at least.",
+                crate::sync::size_words(free, false),
+                crate::sync::size_words(sure_bytes, true)
+            )),
+            _ => None,
+        };
+        // Allowed, and said: what may not fit, in the numbers measured.
+        let mut warnings = Vec::new();
+        if let (Some(free), true) = (target.free_bytes, refused.is_none())
+            && free < most_bytes
+        {
+            warnings.push(format!(
+                "{place} has {} free. These flights' files take {} to {} with their telemetry logs and MP4 copies, so some may not fit. One that does not is not written, and nothing on this computer is deleted for it.",
+                crate::sync::size_words(free, false),
+                crate::sync::size_words(sure_bytes, true),
+                crate::sync::size_words(most_bytes, true)
+            ));
+        }
+        if let (Some(max_file), true) = (
+            &target.max_file,
+            refused.is_none() && !may_not_fit.is_empty(),
+        ) {
+            warnings.push(format!(
+                "{}, so the file of {} may not fit with its telemetry log and MP4 copies. One that does not is not written.",
+                format_words(max_file),
+                may_not_fit.join(", ")
+            ));
+        }
         let result = FlightOffloadResult {
             folder: target.folder.clone(),
             place: place.clone(),
@@ -352,6 +499,7 @@ impl Engine {
                 .iter()
                 .map(|f| format!("{}.uxflight", f.stem))
                 .collect(),
+            warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
             video_bytes,
             videos,
             freed_bytes: freed.iter().map(|r| r.bytes).sum(),

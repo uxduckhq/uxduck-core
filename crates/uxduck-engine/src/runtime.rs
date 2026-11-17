@@ -543,6 +543,10 @@ pub struct OffloadFlight {
     /// none of it.
     pub telemetry: Option<ReplayRead>,
     pub videos: Vec<OffloadVideo>,
+    /// This flight's file already in the folder, from an earlier Copy: read
+    /// back and kept rather than written again, when it holds every file
+    /// this one would.
+    pub reuse: Option<String>,
 }
 
 /// A recording to put in a `.uxflight`.
@@ -579,6 +583,14 @@ pub struct OffloadTarget {
     /// A disk's own folder, looked through with all its subfolders once
     /// added.
     pub deep: bool,
+    /// The `.uxflight` files in it now, by name in lower case, so the names
+    /// a check shows are the names written, on a disk that tells case apart
+    /// or one that does not.
+    pub names: std::collections::BTreeSet<String>,
+    /// The largest file its disk keeps, 4 GB less a byte on FAT32, and the
+    /// format that bounds it. None when it has no such bound or it cannot
+    /// be read.
+    pub max_file: Option<(u64, String)>,
 }
 
 /// A `.uxflight`'s `flight.json` as the host reads it (ADR-0062).
@@ -656,6 +668,13 @@ pub trait System: Send {
     /// may be unplugged (ADR-0062). None when this host cannot tell.
     fn file_present(&self, path: &str) -> Option<bool> {
         let _ = path;
+        None
+    }
+    /// What a flight's telemetry takes in its `.uxflight`, at least and at
+    /// most, measured without reading it (ADR-0062). None when this host
+    /// cannot tell.
+    fn telemetry_bytes(&self, read: &ReplayRead) -> Option<(u64, u64)> {
+        let _ = read;
         None
     }
     /// Where Move or copy writes for `folder` (ADR-0062): a Log folder, a
