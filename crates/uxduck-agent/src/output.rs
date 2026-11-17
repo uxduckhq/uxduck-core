@@ -7,6 +7,52 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::conversation::Shown;
+
+/// Takes a camera look's frames (`video/frame`, FB-244) out of its result,
+/// to be shown as images, each told as the camera and the time it was
+/// seen: the result keeps when and how large each was. Nothing for any
+/// other result.
+pub fn take_images(value: &mut Value) -> Vec<Shown> {
+    let camera = value["camera"].as_str().unwrap_or("the camera").to_owned();
+    let Some(frames) = value.get_mut("frames").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    let images: Vec<Shown> = frames
+        .iter_mut()
+        .filter_map(|frame| {
+            let seconds = frame["atUs"].as_u64().unwrap_or_default() / 1_000_000;
+            let jpeg = frame.as_object_mut()?.remove("jpegBase64")?;
+            Some(Shown {
+                jpeg: jpeg.as_str()?.to_owned(),
+                label: format!(
+                    "Image from {camera} at {:02}:{:02}:{:02} UTC",
+                    seconds / 3600 % 24,
+                    seconds / 60 % 60,
+                    seconds % 60
+                ),
+            })
+        })
+        .collect();
+    if !images.is_empty() {
+        value["shown"] = json!("The frames follow as images, in this order.");
+    }
+    images
+}
+
+/// An MCP tool result's `content`: the result as text, then any frames as
+/// MCP images.
+#[must_use]
+pub fn mcp_content(text: &str, images: &[Shown]) -> Value {
+    std::iter::once(json!({ "type": "text", "text": text }))
+        .chain(
+            images.iter().map(
+                |image| json!({ "type": "image", "data": image.jpeg, "mimeType": "image/jpeg" }),
+            ),
+        )
+        .collect()
+}
+
 /// A successful tool result as the model reads it. Errors are not passed
 /// through here: the model gets them as they are.
 #[must_use]

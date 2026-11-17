@@ -2,6 +2,7 @@
 //! the same stream shape as a real one, speaking the Responses API's items.
 //! It calls `vehicle_list` when asked about vehicles and answers from the
 //! result, and searches and reads parameters when asked why it climbs.
+//! Asked what a camera shows, it looks through it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -34,9 +35,20 @@ fn latest(conversation: &[Value]) -> Vec<Input> {
         .iter()
         .filter_map(|item| {
             if item["type"] == "function_call_output" {
+                // A result with images is a list of parts: its text first,
+                // then each image's label and the image, which a scripted
+                // answer does not read.
+                let output = match &item["output"] {
+                    Value::Array(parts) => parts
+                        .first()
+                        .and_then(|part| part["text"].as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    output => output.as_str().unwrap_or_default().to_owned(),
+                };
                 Some(Input::ToolOutput {
                     call_id: item["call_id"].as_str().unwrap_or_default().to_owned(),
-                    output: item["output"].as_str().unwrap_or_default().to_owned(),
+                    output,
                 })
             } else if item["role"] == "user" {
                 item["content"]
@@ -122,6 +134,9 @@ impl FakeProvider {
             return Ok(events);
         }
         if let Some(events) = Self::plugin(input)? {
+            return Ok(events);
+        }
+        if let Some(events) = Self::look(input) {
             return Ok(events);
         }
         for respond in [
@@ -376,6 +391,36 @@ impl FakeProvider {
                 arguments: "{}".into(),
             }]
         }))
+    }
+
+    /// A look through a camera (FB-244): asked "what does camera <id>
+    /// show?", it looks once, then says it looked or why it could not.
+    fn look(input: &[Input]) -> Option<Vec<ProviderEvent>> {
+        for item in input {
+            if let Input::ToolOutput { call_id, output } = item
+                && call_id == LOOK_CALL
+            {
+                let text = if output.contains("The frames follow as images") {
+                    "I looked through the camera.".to_owned()
+                } else {
+                    format!("I could not look through the camera: {output}")
+                };
+                return Some(vec![ProviderEvent::TextDelta(text)]);
+            }
+        }
+        let camera = input.iter().find_map(|item| match item {
+            Input::UserText(text) => text
+                .to_lowercase()
+                .split_once("what does camera ")
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .map(|id| id.trim_end_matches(['?', '.', ',']).to_owned()),
+            Input::ToolOutput { .. } => None,
+        })?;
+        Some(vec![ProviderEvent::ToolCall {
+            call_id: LOOK_CALL.into(),
+            name: "video_frame".into(),
+            arguments: json!({ "sourceId": camera }).to_string(),
+        }])
     }
 
     /// A message with chips (ADR-0020 H2): answers from the first one, so a
@@ -958,6 +1003,8 @@ const INSTALL: &str = "call_install";
 
 /// Tool call ids that carry a photo request across turns (S57).
 const PHOTO_LIST: &str = "call_photo_list";
+/// The tool call id of a look through a camera (FB-244).
+const LOOK_CALL: &str = "call_look";
 const PHOTO_SEARCH: &str = "call_photo_search:";
 const PHOTO_CALL: &str = "call_photo_call:";
 
@@ -1055,5 +1102,39 @@ impl Provider for FakeProvider {
                 }
             })
             .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asked_what_a_camera_shows_it_looks_and_reads_a_result_with_images() {
+        let asked = [json!({ "role": "user", "content": "What does camera vs1 show?" })];
+        let events = FakeProvider::answer(&latest(&asked)).unwrap();
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::ToolCall { name, arguments, .. }]
+                if name == "video_frame" && arguments.contains("vs1")
+        ));
+        let looked = [
+            asked[0].clone(),
+            json!({ "type": "function_call", "call_id": LOOK_CALL, "name": "video_frame", "arguments": "{}" }),
+            json!({
+                "type": "function_call_output",
+                "call_id": LOOK_CALL,
+                "output": [
+                    { "type": "input_text", "text": "{\"frames\":[{}],\"shown\":\"The frames follow as images, in this order.\"}" },
+                    { "type": "input_text", "text": "Image from Front at 14:02:07 UTC:" },
+                    { "type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AQ==" },
+                ],
+            }),
+        ];
+        let events = FakeProvider::answer(&latest(&looked)).unwrap();
+        assert!(matches!(
+            &events[..],
+            [ProviderEvent::TextDelta(text)] if text == "I looked through the camera."
+        ));
     }
 }

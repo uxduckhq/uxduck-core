@@ -30,6 +30,12 @@ use crate::tools::Tool;
 /// UXDuck's API checks.
 pub const HOSTED_MAX_REQUEST_BYTES: usize = 256 * 1024;
 
+/// The largest hosted request that carries camera frames (FB-244), in
+/// bytes: the API's `MAX_IMAGE_BODY`, set by the memory of the Worker that
+/// reads, checks and sends it. Such a request goes over HTTP, not the
+/// socket, whose messages stay at the limit above.
+pub const HOSTED_MAX_IMAGE_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+
 /// Said when a request would pass that limit even with every earlier tool
 /// result left out, and when the hosted model refuses one for its size.
 pub const TOO_LARGE: &str =
@@ -171,6 +177,12 @@ pub trait Provider: Send + Sync {
     /// short of the model's own window.
     fn max_request_bytes(&self) -> Option<usize> {
         None
+    }
+
+    /// The largest request body this provider takes when it carries
+    /// images, when that is larger than `max_request_bytes`.
+    fn max_image_request_bytes(&self) -> Option<usize> {
+        self.max_request_bytes()
     }
 
     /// How long after a request with `model` this provider likely still

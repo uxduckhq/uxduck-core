@@ -209,6 +209,9 @@ pub const AGENT_METHODS: &[&str] = &[
     // Camera video (S38, ADR-0017 V15): what is arriving and why it plays
     // badly; assigning or naming a camera asks the operator first.
     "video/list",
+    // A look through a camera, as images (FB-244): read only, refused
+    // while Settings › Privacy keeps cameras from the assistant.
+    "video/frame",
     // A vehicle's cameras and what each can do (S404, ADR-0063 Y5), freely.
     "camera/list",
     // Having one take a photo, record, zoom, focus or format its card

@@ -293,6 +293,8 @@ pub enum SettingName {
     VideoRecording,
     /// How cameras that send no IDR are re-encoded for live view.
     VideoReencoder,
+    /// Whether the assistant may see camera images (FB-244).
+    AgentCameras,
     /// A keyboard shortcut was changed, cleared or reset (S51).
     Shortcuts,
     /// A skipped confirmation was reset (S53).

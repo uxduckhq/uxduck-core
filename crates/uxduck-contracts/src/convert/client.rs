@@ -46,6 +46,7 @@ impl From<&a::Approval> for dto::Approval {
             capability: v.capability.into(),
             method: v.method.clone(),
             summary: v.summary.clone(),
+            question: v.question.clone(),
             preflight: v.preflight.iter().map(Into::into).collect(),
             item_id: v.item_id.clone(),
             state: match v.state {

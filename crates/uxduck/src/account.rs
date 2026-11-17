@@ -1250,12 +1250,22 @@ pub struct Sessions {
     client: Option<reqwest::Client>,
     credentials: FileCredentials,
     cached: Mutex<Option<(String, std::time::Instant)>>,
+    /// The hosted models that take images in tool results, as `/v1/me`
+    /// said with the session. None: the API does not say (FB-244).
+    image_models: Mutex<Option<Vec<String>>>,
+    /// How many camera frames one request to each hosted model may carry
+    /// within an account's daily budget, as /v1/me said with the session.
+    image_frames: Mutex<std::collections::HashMap<String, usize>>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MeSession {
     signed_session: SignedSession,
+    #[serde(default)]
+    hosted_image_models: Option<Vec<String>>,
+    #[serde(default)]
+    hosted_image_frames: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Deserialize)]
@@ -1271,7 +1281,56 @@ impl Sessions {
             client: crate::online::client(Duration::from_secs(20)),
             credentials,
             cached: Mutex::new(None),
+            image_models: Mutex::new(None),
+            image_frames: Mutex::default(),
         }
+    }
+
+    /// Why the hosted `model` can't take a camera's frames, in words for
+    /// the model, as the server said with the last session. None: it can.
+    #[must_use]
+    pub fn cannot_see(&self, model: &str) -> Option<String> {
+        if self.frames_within_budget(model) == Some(0) {
+            return Some(format!(
+                "An account's daily budget for UXDuck's AI service doesn't pay for even one \
+                 camera image in a request to {model}, so the assistant can't see the camera \
+                 with this model."
+            ));
+        }
+        let models = self
+            .image_models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match models.as_deref() {
+            None => Some(
+                "UXDuck's AI service doesn't say yet which of its models can take images, so the \
+                 assistant can't see the camera in this chat."
+                    .to_owned(),
+            ),
+            Some(models) if models.iter().any(|m| m == model) => None,
+            Some([]) => Some(
+                "None of the AI models UXDuck's AI service offers can take images, so the \
+                 assistant can't see the camera."
+                    .to_owned(),
+            ),
+            Some(models) => Some(format!(
+                "This chat's AI model, {model}, can't take images, so the assistant can't see the \
+                 camera in this chat. A person can choose a model that can for this chat: {}.",
+                models.join(", ")
+            )),
+        }
+    }
+
+    /// How many camera frames one request to the hosted `model` may carry
+    /// within an account's daily budget, as the server said with the last
+    /// session. None: it doesn't say.
+    #[must_use]
+    pub fn frames_within_budget(&self, model: &str) -> Option<usize> {
+        self.image_frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(model)
+            .copied()
     }
 
     /// The account server, if this UXDuck has one.
@@ -1325,6 +1384,14 @@ impl Sessions {
             .await
             .map_err(|_| "UXDuck's server did not give a session.".to_owned())?;
         let token = me.signed_session.token;
+        *self
+            .image_models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = me.hosted_image_models;
+        *self
+            .image_frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = me.hosted_image_frames;
         *self.cached.lock().unwrap_or_else(PoisonError::into_inner) = Some((
             token.clone(),
             std::time::Instant::now() + Duration::from_mins(4),

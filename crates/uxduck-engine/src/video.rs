@@ -173,6 +173,17 @@ pub trait VideoPort: Send + std::fmt::Debug {
     fn reveal(&mut self, _file: Option<&str>) -> Result<String, String> {
         Err("Recordings need UXDuck Desktop.".into())
     }
+    /// Looks through a camera for the assistant (FB-244): `order.frames`
+    /// JPEGs over `order.seconds`, reported with `Engine::video_looked`.
+    ///
+    /// # Errors
+    /// Why it cannot start, such as no capture helper.
+    fn look(&mut self, _order: crate::looks::LookOrder) -> Result<(), String> {
+        Err("Camera images need UXDuck Desktop.".into())
+    }
+    /// Stops a look the engine no longer waits for: its request was
+    /// cancelled or its connection closed. Its answer is not wanted.
+    fn stop_look(&mut self, _id: &str) {}
     /// Writes a photo (S144) to the pictures folder as `<stem>.jpg`, or
     /// `<stem> 2.jpg` and on when that is taken: the name it got.
     ///
@@ -313,6 +324,8 @@ pub(crate) struct Video {
     /// Recordings whose files were deleted outside UXDuck this session
     /// (S151), for telling what of them never reached the account.
     pub(crate) forgotten: BTreeMap<String, uxduck_core::domain::video::VideoRecording>,
+    /// The assistant's looks waiting for the video host (FB-244), by id.
+    pub(crate) looks: BTreeMap<String, crate::looks::Waiting>,
     /// The UDP port the listener holds, or why it holds none.
     listening: Option<u16>,
     listen_error: Option<String>,
@@ -2654,6 +2667,7 @@ impl Engine {
             .chain(self.video.metadata_watches.values())
             .map(|(_, id)| id.clone())
             .chain(self.video.remote_watches.iter().cloned())
+            .chain(self.video.looks.values().map(|look| look.source_id.clone()))
             .collect();
         let sources: Vec<_> = self.state.video_sources.values().cloned().collect();
         let mut opened = Vec::new();
@@ -3056,6 +3070,10 @@ pub(crate) fn handle(
         ClientRequest::VideoPhoto(params) => {
             require(Capability::Config)?;
             crate::photos::photo(engine, &params)
+        }
+        ClientRequest::VideoFrame(params) => {
+            require(Capability::Read)?;
+            engine.video_frame(connection, &params)
         }
         ClientRequest::VideoPhotoShow(params) => {
             require(Capability::Read)?;

@@ -410,6 +410,11 @@ export type AddressChoice = {
  */
 export type AddressReason = 'preferred' | 'no-pictures' | 'connection-failed' | 'followed-vehicle' | 'returned-with-vehicle';
 
+/**
+ * Whether the assistant sees through cameras.
+ */
+export type AgentCameras = 'always' | 'never' | 'ask';
+
 export type AgentConfig = {
     /**
      * Local provider connections; contains no credentials or authorization URLs.
@@ -1007,6 +1012,12 @@ export type Approval = {
      * operator's override.
      */
     preflight?: Array<CheckRef>;
+    /**
+     * What a person is asked, in place of "wants to" and the summary,
+     * when the request reads better as a question: "Can the assistant see
+     * Front on Copter 1? It asked for the picture now."
+     */
+    question?: string | null;
     remember?: Remember | null;
     state: ApprovalState;
     /**
@@ -3916,6 +3927,9 @@ export type ClientRequest = {
 } | {
     method: 'video/photo/show';
     params: VideoPhotoShowParams;
+} | {
+    method: 'video/frame';
+    params: VideoFrameParams;
 } | {
     method: 'video/vehicleCamera';
     params: VideoVehicleCameraParams;
@@ -14469,12 +14483,17 @@ export type SetChoice = {
 /**
  * A setting that was changed; never its value.
  */
-export type SettingName = 'units' | 'coordinate_format' | 'basemap' | 'map_engine' | 'place_search' | 'usage_analytics' | 'conversations' | 'flight_data' | 'close_policy' | 'auto_delete' | 'altitude_frame' | 'video_recording' | 'video_reencoder' | 'shortcuts' | 'confirmations' | 'photorealistic';
+export type SettingName = 'units' | 'coordinate_format' | 'basemap' | 'map_engine' | 'place_search' | 'usage_analytics' | 'conversations' | 'flight_data' | 'close_policy' | 'auto_delete' | 'altitude_frame' | 'video_recording' | 'video_reencoder' | 'agent_cameras' | 'shortcuts' | 'confirmations' | 'photorealistic';
 
 /**
  * The daemon's settings; one entity, id `daemon`.
  */
 export type Settings = {
+    /**
+     * Whether the assistant's `video/frame` may send a camera's pictures
+     * to its AI provider: asked each time, always, or never.
+     */
+    agentCameras?: AgentCameras;
     /**
      * Age-based deletion policies; the simulator-log size budget is independent.
      */
@@ -14649,6 +14668,7 @@ export type Settings = {
 };
 
 export type SettingsUpdateParams = {
+    agentCameras?: AgentCameras | null;
     /**
      * Replaces the whole list when present.
      */
@@ -19364,6 +19384,38 @@ export type VideoFileParams = {
     path?: string | null;
     repeat: boolean;
     sourceId?: string | null;
+};
+
+/**
+ * A look through a camera for the assistant (FB-244): the picture now, or
+ * a short clip of frames.
+ */
+export type VideoFrameParams = {
+    /**
+     * 1, the default, for the picture now. 2 or more for a clip of that
+     * many frames, evenly spaced over `seconds`. A clip has no more frames
+     * than the camera sends pictures in that time.
+     */
+    frames?: number | null;
+    /**
+     * The most bytes of JPEG the frames may take together. UXDuck sets it
+     * for a model whose requests are limited in size, and the frames are
+     * made smaller to fit. Absent, `LOOK_REPLY_BYTES`. More than that is
+     * held to it, and the result's note says so.
+     */
+    maxBytes?: number | null;
+    /**
+     * A clip's length in seconds, more than 0. 3 when absent.
+     */
+    seconds?: number | null;
+    /**
+     * The camera, a video source's id. Absent: the vehicle's only camera.
+     */
+    sourceId?: string | null;
+    /**
+     * The vehicle whose camera to look through.
+     */
+    vehicleId?: string | null;
 };
 
 /**

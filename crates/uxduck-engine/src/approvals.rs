@@ -19,6 +19,7 @@ use uxduck_core::domain::client::{Capability, ClientKind, ClientRecord};
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
+use uxduck_core::domain::settings::AgentCameras;
 use uxduck_core::domain::thread::{ItemKind, ItemStatus};
 use uxduck_core::events::{Actor, Change};
 
@@ -169,6 +170,8 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::ParamDefinitionsUse(_)
         // Which dialects a vehicle uses (F13).
         | ClientRequest::MavlinkDialectsUse(_) => Some(Capability::Config),
+        // A camera look (FB-244), asked under "Ask" by `camera_look_asks`.
+        ClientRequest::VideoFrame(_) => Some(Capability::Read),
         // Where this computer is (ADR-0030 L4): an agent asks first, and
         // "Always allow" remembers it for that agent.
         ClientRequest::LocationStatus(_) => Some(Capability::Location),
@@ -238,6 +241,10 @@ impl Engine {
 
     /// Holds a request that needs a capability its non-operator client lacks
     /// and asks the operators. True when it was held (answered later).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one approval's words, actions and notice, read top to bottom"
+    )]
     pub(crate) fn escalate(
         &mut self,
         connection: ConnectionId,
@@ -255,9 +262,15 @@ impl Engine {
         // Launching past failing checks set to hold always asks (ADR-0038
         // K24), listing them: a client never overrides them on its own.
         let preflight = self.preflight_asks(request);
+        let camera = self.camera_look_asks(connection, request);
+        // Whether the assistant sees cameras is a person's choice: an
+        // agent's change to it always asks, whatever Config it was given.
+        let setting = self.camera_setting_asks(request);
         // Taking a gimbal from whoever has it always asks (S406), as a
         // person's own is confirmed.
         let always = install
+            || camera.is_some()
+            || setting.is_some()
             || self.dangerous_plugin_command(request)
             || self.spoken_turn_asks(connection, request)
             || self.gimbal_asks(request)
@@ -283,7 +296,11 @@ impl Engine {
             return false;
         };
         let now = self.clock.now_us();
-        let (summary, body) = self.approval_words(request, capability, &preflight);
+        let words = camera.as_ref().or(setting.as_ref());
+        let (summary, body) = match words {
+            Some(words) => (words.summary.clone(), words.body.clone()),
+            None => self.approval_words(request, capability, &preflight),
+        };
         let item_id = self.waiting_tool_call(connection, &method_of(request));
         let approval = Approval {
             id: format!("ap{}", &self.random.token()[..16]),
@@ -292,6 +309,7 @@ impl Engine {
             capability,
             method: method_of(request),
             summary,
+            question: words.map(|words| words.question.clone()),
             preflight,
             item_id,
             state: ApprovalState::Pending,
@@ -311,7 +329,10 @@ impl Engine {
             },
         );
         let dto = ApprovalDto::from(&approval);
-        let title = format!("{name} wants to {}", approval.summary);
+        let title = approval
+            .question
+            .clone()
+            .unwrap_or_else(|| format!("{name} wants to {}", approval.summary));
         self.commit_as(daemon(), Change::ApprovalUpserted { approval });
         self.broadcast_approval(&ServerNotification::ApprovalRequested(dto));
         let action = |label: &str, allow: bool, remember: Remember| NotificationAction {
@@ -328,7 +349,15 @@ impl Engine {
             subject: Subject::Client { id: record },
             title,
             body: Some(body),
-            actions: if always {
+            actions: if camera.is_some() {
+                // "Always allow" chooses it in Settings › Privacy for every
+                // chat and connection, so later looks run unasked.
+                vec![
+                    action("Allow once", true, Remember::Once),
+                    action("Always allow", true, Remember::Always),
+                    action("Don't allow", false, Remember::Once),
+                ]
+            } else if always {
                 vec![
                     action(
                         if install { "Install" } else { "Allow once" },
@@ -349,6 +378,75 @@ impl Engine {
             report: None,
         });
         true
+    }
+
+    /// A look through a camera that a person allows first (FB-244): under
+    /// "Ask", from a chat's tool call, through a camera there is. The words
+    /// it is asked in. Any other look is refused or run by `video/frame`.
+    fn camera_look_asks(&self, connection: ConnectionId, request: &ClientRequest) -> Option<Asked> {
+        let ClientRequest::VideoFrame(params) = request else {
+            return None;
+        };
+        if self.state.settings.agent_cameras != AgentCameras::Ask {
+            return None;
+        }
+        self.waiting_tool_call(connection, &method_of(request))?;
+        let asked = crate::looks::asked(params).ok()?;
+        let source = self.look_source(params).ok()?;
+        let seen = source
+            .vehicle_id
+            .as_ref()
+            .and_then(|id| self.vehicle(id))
+            .map_or_else(
+                || source.name.clone(),
+                |v| format!("{} on {}", source.name, v.name),
+            );
+        let what = crate::looks::asked_words(&asked);
+        let deadline = APPROVAL_DEADLINE_US / 1_000_000;
+        Some(Asked {
+            summary: format!("see {seen}, {what}"),
+            question: format!("Can the assistant see {seen}? It asked for {what}."),
+            body: format!(
+                "The pictures go to this chat's AI provider and are not saved. Not allowed in \
+                 {deadline} s if nobody answers."
+            ),
+        })
+    }
+
+    /// A client's change to whether the assistant sees cameras (FB-244),
+    /// in the words it is asked in. An operator changes it unasked.
+    fn camera_setting_asks(&self, request: &ClientRequest) -> Option<Asked> {
+        let ClientRequest::SettingsUpdate(params) = request else {
+            return None;
+        };
+        let choice: AgentCameras = params.agent_cameras?.into();
+        if choice == self.state.settings.agent_cameras {
+            return None;
+        }
+        let (summary, question) = match choice {
+            AgentCameras::Always => (
+                "always see your cameras without asking",
+                "The assistant wants to always see your cameras without asking.",
+            ),
+            AgentCameras::Ask => (
+                "ask before each look through your cameras",
+                "The assistant wants to ask before each look through your cameras.",
+            ),
+            AgentCameras::Never => (
+                "never see your cameras",
+                "The assistant wants to stop seeing your cameras.",
+            ),
+        };
+        let deadline = APPROVAL_DEADLINE_US / 1_000_000;
+        Some(Asked {
+            summary: summary.into(),
+            question: question.into(),
+            body: format!(
+                "This changes {} for every chat and connection. Not allowed in {deadline} s if \
+                 nobody answers.",
+                crate::looks::CAMERAS_SETTING
+            ),
+        })
     }
 
     /// Whether the request comes from a turn said aloud (ADR-0012 V6): its
@@ -893,6 +991,10 @@ impl Engine {
 
     /// Ends an approval: allowed ones run now with the allowance, the rest
     /// answer `capability-denied`.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each decision and each held request, in turn"
+    )]
     fn finish(&mut self, id: &str, state: ApprovalState, remember: Option<Remember>, why: &str) {
         let Some(mut approval) = self.state.approvals.get(id).cloned() else {
             return;
@@ -921,10 +1023,18 @@ impl Engine {
             return;
         };
         if state != ApprovalState::Allowed {
-            let error = ApiError::new(
-                ErrorKind::CapabilityDenied,
-                format!("{why} (approval {id})"),
-            );
+            let message = match &held.request {
+                ClientRequest::VideoFrame(params) if state == ApprovalState::Denied => {
+                    self.look_source(params).map_or_else(
+                        |_| "The person didn't let the assistant see the camera.".to_owned(),
+                        |source| {
+                            format!("The person didn't let the assistant see {}.", source.name)
+                        },
+                    )
+                }
+                _ => format!("{why} (approval {id})"),
+            };
+            let error = ApiError::new(ErrorKind::CapabilityDenied, message);
             self.send(
                 held.connection,
                 &rpc::router::error(&held.request_id, &error),
@@ -938,8 +1048,24 @@ impl Engine {
             );
             return;
         }
+        // "Always allow" for a camera look is Settings › Privacy's choice,
+        // for every chat and connection, not this client's (FB-244).
+        if matches!(held.request, ClientRequest::VideoFrame(_))
+            && remember == Some(Remember::Always)
+            && self.state.settings.agent_cameras != AgentCameras::Always
+        {
+            let mut settings = self.state.settings.clone();
+            settings.agent_cameras = AgentCameras::Always;
+            settings.version += 1;
+            self.commit_as(daemon(), Change::SettingsChanged { settings });
+        }
         // An install is never remembered: the next one asks again (X12).
-        let remember = if matches!(held.request, ClientRequest::PluginInstall(_)) {
+        // Nor is a change to whether the assistant sees cameras, or a look.
+        let remember = if matches!(
+            &held.request,
+            ClientRequest::PluginInstall(_) | ClientRequest::VideoFrame(_)
+        ) || matches!(&held.request, ClientRequest::SettingsUpdate(p) if p.agent_cameras.is_some())
+        {
             Remember::Once
         } else {
             remember.unwrap_or(Remember::Once)
@@ -1257,6 +1383,14 @@ fn resolve_approval(
     done.remember = remember;
     done.version += 1;
     to_value(&ApprovalDto::from(&done))
+}
+
+/// The words a camera look, or a change to whether the assistant sees
+/// cameras, is asked for in (FB-244).
+struct Asked {
+    summary: String,
+    question: String,
+    body: String,
 }
 
 #[cfg(test)]

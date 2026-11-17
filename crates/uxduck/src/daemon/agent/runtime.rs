@@ -109,9 +109,12 @@ async fn mcp(
                     _ = cancelled.wait_for(|stopped| *stopped) => Err(json!({"code":-32800,"message":"The turn was stopped."})),
                     result = server.host.call(method,params) => result,
                 } };
+            let mut result = result;
+            // A camera's frames go to the model as images (FB-244), never into the chat's record.
+            let images = match &mut result { Ok(value) => uxduck_agent::output::take_images(value), Err(_) => Vec::new() };
             server.host.tool_finish(item,result.clone()).await;
             let (value, failed) = match result { Ok(v) => (v,false), Err(e) => (e,true) };
-            json!({"content":[{"type":"text","text":value.to_string()}],"isError":failed})
+            json!({"content":uxduck_agent::output::mcp_content(&value.to_string(), &images),"isError":failed})
         }
         _ => return Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported MCP method."}})).into_response(),
     };

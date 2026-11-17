@@ -6,6 +6,8 @@
 //! compacted well before a model's context fills, because every request
 //! carries the whole of it.
 
+use crate::conversation::Wire;
+
 /// The models a development build offers with a developer's own keys or
 /// the fake, comma-separated; the first is the default. The hosted model
 /// offers only what the server says.
@@ -15,6 +17,45 @@ pub const DEFAULT_MODELS: &str =
 /// Past this many tokens a Claude chat is summarised. The hour-long cache
 /// keeps a longer chat cheap to send again (maintainer, 2026-11-14).
 const CLAUDE_COMPACT_AT_TOKENS: usize = 150_000;
+
+/// Whether `model`, asked with a developer's own key, takes images in a
+/// tool's result: Claude and OpenAI's GPT models do. Open-weight models are
+/// not assumed to (FB-244).
+#[must_use]
+pub fn takes_images(model: &str) -> bool {
+    model.starts_with("claude-") || model.starts_with("gpt-") || model == "fake"
+}
+
+/// Why `model`, through its company's own API, can't take a camera's
+/// frames, in words for the model. None: it can.
+#[must_use]
+pub fn cannot_see(model: &str) -> Option<String> {
+    let family = match Wire::for_model(model) {
+        Wire::Anthropic => "Claude",
+        Wire::OpenAi => "GPT",
+    };
+    (!takes_images(model)).then(|| {
+        format!(
+            "This chat's AI model, {model}, can't take images, so the assistant can't see the \
+             camera in this chat. A person can choose a {family} model for this chat."
+        )
+    })
+}
+
+/// The most images `model`'s provider takes in one request, and who that
+/// is in words, for the models UXDuck knows a limit for: Anthropic takes
+/// 100 for Claude, OpenAI 500 for GPT (FB-244). Past it, the provider
+/// refuses the whole request.
+#[must_use]
+pub fn image_limit(model: &str) -> Option<(usize, &'static str)> {
+    if model.contains("claude") {
+        Some((100, "Claude takes"))
+    } else if model.starts_with("gpt-") || model.starts_with("openai/") {
+        Some((500, "OpenAI's GPT models take"))
+    } else {
+        None
+    }
+}
 
 /// Settings for one model.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,5 +114,22 @@ pub fn settings(model: &str) -> ModelSettings {
             compact_at_tokens: 100_000,
             fallback: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cannot_see;
+
+    #[test]
+    fn a_model_by_its_own_key_that_takes_no_images_is_told_which_can() {
+        assert_eq!(cannot_see("claude-opus-5-5"), None);
+        assert_eq!(cannot_see("gpt-6.1-sol"), None);
+        let why = cannot_see("o-mini").unwrap();
+        assert!(
+            why.contains("o-mini, can't take images") && why.contains("a GPT model"),
+            "{why}"
+        );
+        assert!(!why.contains(';'));
     }
 }

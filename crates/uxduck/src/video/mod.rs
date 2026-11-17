@@ -9,6 +9,7 @@ pub mod file;
 pub mod folder;
 pub mod hub;
 pub mod listener;
+pub mod look;
 pub mod permission;
 pub mod playback;
 pub mod recorder;
@@ -82,6 +83,8 @@ pub struct VideoHost {
     devices: Arc<capture::Devices>,
     files: HashMap<String, tokio::task::JoinHandle<()>>,
     demos: Arc<demos::Demos>,
+    /// Looks being made, to stop one whose request was cancelled.
+    looks: HashMap<String, tokio::task::AbortHandle>,
 }
 
 impl uxduck_engine::video::VideoPort for VideoHost {
@@ -332,6 +335,22 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         Ok(dir.display().to_string())
     }
 
+    fn look(&mut self, order: uxduck_engine::looks::LookOrder) -> Result<(), String> {
+        let program = capture::program()?;
+        let _entered = self.runtime.enter();
+        self.looks.retain(|_, look| !look.is_finished());
+        let id = order.id.clone();
+        let look = look::start(self.hub.clone(), self.engine.clone(), program, order);
+        self.looks.insert(id, look);
+        Ok(())
+    }
+
+    fn stop_look(&mut self, id: &str) {
+        if let Some(look) = self.looks.remove(id) {
+            look.abort();
+        }
+    }
+
     fn save_photo(&mut self, stem: &str, jpeg: &[u8]) -> Result<String, String> {
         save_photo(self.hub.dir(), stem, jpeg)
     }
@@ -432,6 +451,7 @@ pub async fn start(
         demos: Arc::new(demos::Demos::new(
             playback::cache_dir(hub.dir()).with_file_name("demo-videos"),
         )),
+        looks: HashMap::new(),
     };
     let _ = engine.run(move |e| e.set_video(Box::new(host))).await;
     // Files deleted in Finder leave the list (S151).

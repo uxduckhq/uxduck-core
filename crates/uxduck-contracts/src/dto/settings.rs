@@ -12,6 +12,17 @@ pub enum ClosePolicy {
     Quit,
 }
 
+/// Whether the assistant sees through cameras.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentCameras {
+    /// Each look is approved in the chat that asked for it.
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
 /// What opening UXDuck from its app icon does; not MCP or login startup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -114,6 +125,10 @@ pub struct Settings {
     /// How a camera that sends no IDR is re-encoded for live view.
     #[serde(default)]
     pub video_reencoder: crate::dto::video::Reencoder,
+    /// Whether the assistant's `video/frame` may send a camera's pictures
+    /// to its AI provider: asked each time, always, or never.
+    #[serde(default)]
+    pub agent_cameras: AgentCameras,
     /// The tray icon while UXDuck runs on a desktop.
     #[serde(default = "on")]
     pub show_in_menu_bar: bool,
@@ -266,6 +281,8 @@ pub struct SettingsUpdateParams {
     pub video_recording: Option<crate::dto::video::RecordPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_reencoder: Option<crate::dto::video::Reencoder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cameras: Option<AgentCameras>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_in_menu_bar: Option<bool>,
     /// Off ends this computer's watch links.

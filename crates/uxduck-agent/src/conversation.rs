@@ -63,7 +63,29 @@ pub struct ToolResult {
     pub call_id: String,
     pub output: String,
     pub failed: bool,
+    /// Images the model is shown after `output` (a camera's frames,
+    /// FB-244).
+    pub images: Vec<Shown>,
 }
+
+/// An image a tool's result shows the model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    /// The JPEG, base64.
+    pub jpeg: String,
+    /// What it is, told just before it, such as "Image from Front at
+    /// 14:02:07 UTC".
+    pub label: String,
+}
+
+/// Stands in for an image once the turn that took it has ended, so a chat
+/// keeps no camera picture and sends it only while that turn runs.
+pub const IMAGE_NOT_KEPT: &str =
+    "[Not kept after the turn that took it. Look through the camera again to see it now.]";
+
+/// What one image costs a model, in tokens, for estimates: Claude reads a
+/// 1024 × 576 picture as about 790, GPT as 765 at high detail.
+pub const IMAGE_TOKENS: usize = 800;
 
 /// Whether a Claude model takes a `role: "system"` message inside the
 /// conversation, which keeps per-chat context out of the cached prefix.
@@ -284,22 +306,106 @@ pub fn tool_results(wire: Wire, results: &[ToolResult]) -> Vec<Value> {
     match wire {
         Wire::OpenAi => results
             .iter()
-            .map(|r| json!({ "type": "function_call_output", "call_id": r.call_id, "output": r.output }))
+            .map(|r| {
+                let output = if r.images.is_empty() {
+                    json!(r.output)
+                } else {
+                    std::iter::once(json!({ "type": "input_text", "text": r.output }))
+                        .chain(r.images.iter().flat_map(|image| {
+                            [
+                                json!({ "type": "input_text", "text": format!("{}:", image.label) }),
+                                json!({
+                                    "type": "input_image",
+                                    "image_url": format!("data:image/jpeg;base64,{}", image.jpeg),
+                                    "detail": "high",
+                                }),
+                            ]
+                        }))
+                        .collect()
+                };
+                json!({ "type": "function_call_output", "call_id": r.call_id, "output": output })
+            })
             .collect(),
         Wire::Anthropic if results.is_empty() => Vec::new(),
         Wire::Anthropic => vec![json!({
             "role": "user",
             "content": results
                 .iter()
-                .map(|r| json!({
-                    "type": "tool_result",
-                    "tool_use_id": r.call_id,
-                    "content": r.output,
-                    "is_error": r.failed,
-                }))
+                .map(|r| {
+                    let content = if r.images.is_empty() {
+                        json!(r.output)
+                    } else {
+                        std::iter::once(json!({ "type": "text", "text": r.output }))
+                            .chain(r.images.iter().flat_map(|image| [
+                                json!({ "type": "text", "text": format!("{}:", image.label) }),
+                                json!({
+                                    "type": "image",
+                                    "source": { "type": "base64", "media_type": "image/jpeg", "data": image.jpeg },
+                                }),
+                            ]))
+                            .collect()
+                    };
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": r.call_id,
+                        "content": content,
+                        "is_error": r.failed,
+                    })
+                })
                 .collect::<Vec<_>>(),
         })],
     }
+}
+
+/// Puts `IMAGE_NOT_KEPT` in place of every image in tool results, on
+/// either wire, once the turn that took them has ended.
+pub fn forget_images(items: &mut [Value]) {
+    fn forget(output: Option<&mut Value>) {
+        for part in output.and_then(Value::as_array_mut).into_iter().flatten() {
+            match part["type"].as_str() {
+                Some("input_image") => {
+                    *part = json!({ "type": "input_text", "text": IMAGE_NOT_KEPT });
+                }
+                Some("image") => *part = json!({ "type": "text", "text": IMAGE_NOT_KEPT }),
+                _ => {}
+            }
+        }
+    }
+    for item in items {
+        if item["type"] == "function_call_output" {
+            forget(item.get_mut("output"));
+        } else if let Some(blocks) = item.get_mut("content").and_then(Value::as_array_mut) {
+            for block in blocks
+                .iter_mut()
+                .filter(|block| block["type"] == "tool_result")
+            {
+                forget(block.get_mut("content"));
+            }
+        }
+    }
+}
+
+/// Whether any tool result in `items` carries an image: a camera's frames.
+#[must_use]
+pub fn has_images(items: &[Value]) -> bool {
+    let images = |output: Option<&Value>| {
+        output.and_then(Value::as_array).is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| matches!(part["type"].as_str(), Some("input_image" | "image")))
+        })
+    };
+    items.iter().any(|item| {
+        (item["type"] == "function_call_output" && images(item.get("output")))
+            || item
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block["type"] == "tool_result" && images(block.get("content")))
+                })
+    })
 }
 
 /// Stands in for a tool result left out so the chat still fits a request.
@@ -336,9 +442,10 @@ pub fn leave_out_tool_results(
             None => &mut items[index]["output"],
             Some(block) => &mut items[index]["content"][block]["content"],
         };
+        // A result with images is always worth leaving out.
         if output
             .as_str()
-            .is_some_and(|text| text.len() > LEFT_OUT.len())
+            .map_or(output.is_array(), |text| text.len() > LEFT_OUT.len())
         {
             *output = json!(LEFT_OUT);
             if fits(items) {
@@ -362,12 +469,45 @@ pub fn latest_round(items: &[Value]) -> usize {
         .map_or(0, |index| index + 1)
 }
 
-/// A rough count of a conversation's tokens: four characters each.
+/// The images in `value`, and the characters they take.
+fn images(value: &Value) -> (usize, usize) {
+    match value {
+        Value::Object(fields)
+            if matches!(
+                fields.get("type").and_then(Value::as_str),
+                Some("input_image" | "image")
+            ) =>
+        {
+            (1, value.to_string().len())
+        }
+        Value::Object(fields) => fields
+            .values()
+            .map(images)
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1)),
+        Value::Array(items) => items
+            .iter()
+            .map(images)
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1)),
+        _ => (0, 0),
+    }
+}
+
+/// How many images a conversation carries.
+#[must_use]
+pub fn image_count(items: &[Value]) -> usize {
+    items.iter().map(|item| images(item).0).sum()
+}
+
+/// A rough count of a conversation's tokens: four characters each, and an
+/// image's `IMAGE_TOKENS` rather than its bytes.
 #[must_use]
 pub fn estimate_tokens(items: &[Value]) -> usize {
     items
         .iter()
-        .map(|item| item.to_string().len().div_ceil(4))
+        .map(|item| {
+            let (count, bytes) = images(item);
+            (item.to_string().len() - bytes).div_ceil(4) + count * IMAGE_TOKENS
+        })
         .sum()
 }
 
@@ -443,11 +583,13 @@ mod tests {
                 call_id: "a".into(),
                 output: "1".into(),
                 failed: false,
+                images: Vec::new(),
             },
             ToolResult {
                 call_id: "b".into(),
                 output: "no".into(),
                 failed: true,
+                images: Vec::new(),
             },
         ];
         let anthropic = tool_results(Wire::Anthropic, &results);

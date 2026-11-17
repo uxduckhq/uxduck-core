@@ -95,10 +95,10 @@ use crate::dto::vehicle::{
 use crate::dto::video::{
     VideoAddParams, VideoAddressesParams, VideoAssignParams, VideoCaptureEnableParams,
     VideoCaptureParams, VideoCaptureSettingsParams, VideoDemosParams, VideoFileParams,
-    VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams, VideoRecordAllParams,
-    VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams, VideoRenameParams,
-    VideoRevealParams, VideoServedByParams, VideoTrackParams, VideoUnwatchParams,
-    VideoVehicleCameraParams, VideoWatchParams,
+    VideoFrameParams, VideoPhotoParams, VideoPhotoShowParams, VideoPlaybackParams,
+    VideoRecordAllParams, VideoRecordParams, VideoRecordWithOthersParams, VideoRemoveParams,
+    VideoRenameParams, VideoRevealParams, VideoServedByParams, VideoTrackParams,
+    VideoUnwatchParams, VideoVehicleCameraParams, VideoWatchParams,
 };
 
 /// A request from a client to the daemon. Results are listed in `Result`
@@ -1934,6 +1934,22 @@ pub enum ClientRequest {
     /// hour. Needs `read`. Result: `VideoPlaybackResult`.
     #[serde(rename = "video/photo/show")]
     VideoPhotoShow(VideoPhotoShowParams),
+    /// Looks through a live camera, for the assistant to see what it shows
+    /// (FB-244): the picture now as a JPEG, or a clip of as many frames over
+    /// as many seconds as asked, in time order with when each was seen.
+    /// Frames are at most 1024 px on their long edge, and smaller when the
+    /// chat's requests are limited in size. Name the vehicle, and the camera
+    /// when it has several (`video/list`). Settings › Privacy › Assistant sees
+    /// cameras decides: Ask, the default, holds the look until a person
+    /// allows it in the chat, and refuses it outside a chat. Never refuses
+    /// it. Also refused when the camera sends no picture, when the chat's AI
+    /// model cannot take images, when the frames would not fit, or while 2
+    /// other looks are being made. A cancelled request stops its look.
+    /// Changes nothing. The chat sends the frames only during the turn that
+    /// looked and keeps a note in their place. Needs `read`. Result:
+    /// `VideoFrameResult`.
+    #[serde(rename = "video/frame")]
+    VideoFrame(VideoFrameParams),
     /// Whether a camera's vehicle takes its own camera's photo and records
     /// along with UXDuck's (S145, ADR-0017 V20): `IMAGE_START_CAPTURE` with
     /// each photo, `VIDEO_START_CAPTURE` and `VIDEO_STOP_CAPTURE` with each
@@ -2247,7 +2263,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 402] = [
+    pub const METHODS: [&'static str; 403] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2561,6 +2577,7 @@ impl ClientRequest {
         "video/reveal",
         "video/photo",
         "video/photo/show",
+        "video/frame",
         "video/vehicleCamera",
         "video/servedBy",
         "find/start",

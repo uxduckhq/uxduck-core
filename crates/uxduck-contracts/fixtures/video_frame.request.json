@@ -1,0 +1,9 @@
+{
+  "method": "video/frame",
+  "params": {
+    "sourceId": "udp-5600-192.168.144.25",
+    "frames": 4,
+    "seconds": 3.0,
+    "maxBytes": 196608
+  }
+}

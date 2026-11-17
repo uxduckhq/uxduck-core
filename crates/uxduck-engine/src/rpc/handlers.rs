@@ -567,6 +567,7 @@ pub(crate) fn handle(
         | ClientRequest::VideoReveal(_)
         | ClientRequest::VideoPhoto(_)
         | ClientRequest::VideoPhotoShow(_)
+        | ClientRequest::VideoFrame(_)
         | ClientRequest::VideoVehicleCamera(_)
         | ClientRequest::VideoServedBy(_)) => {
             crate::video::handle(engine, connection, request, &granted)
@@ -1530,6 +1531,7 @@ pub(crate) fn notify(
     match notification {
         ClientNotification::Cancel(params) => {
             engine.cancel_approval(connection, &json!(params.id));
+            engine.stop_looks(connection, Some(&json!(params.id)));
             if let Some(client) = engine.connections.get_mut(&connection) {
                 client.pending.remove(&params.id);
                 client.private_requests.remove(&params.id);

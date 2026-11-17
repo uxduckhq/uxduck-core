@@ -27,6 +27,7 @@
           "usageAnalytics": true,
           "shareConversations": true,
           "shareFlightData": false,
+          "agentCameras": "ask",
           "autoDelete": [
             {
               "category": "tlogs",

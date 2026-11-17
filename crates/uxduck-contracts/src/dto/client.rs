@@ -95,6 +95,11 @@ pub struct Approval {
     pub method: String,
     /// For people: "arm Copter 1".
     pub summary: String,
+    /// What a person is asked, in place of "wants to" and the summary,
+    /// when the request reads better as a question: "Can the assistant see
+    /// Front on Copter 1? It asked for the picture now."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
     /// Launching past these checks set to hold: allowing it is the
     /// operator's override.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

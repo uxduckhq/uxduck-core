@@ -457,7 +457,7 @@ async fn hosted_provider(
     sessions: &Sessions,
     request: &TurnRequest,
     wire: Wire,
-) -> Result<Box<dyn Provider>, String> {
+) -> Result<Chosen, String> {
     let session = sessions.current().await?;
     // A chat sent before the server said which models there are.
     if request.model.is_empty() {
@@ -468,17 +468,27 @@ async fn hosted_provider(
         .ok_or("This UXDuck has no account server.")?
         .to_owned();
     let chat = crate::account::chat_id(sessions.credentials(), &request.thread_id);
-    Ok(hosted::provider(&api, &session, request.share, &chat, wire))
+    Ok((
+        hosted::provider(&api, &session, request.share, &chat, wire),
+        sessions.cannot_see(&request.model),
+        sessions.frames_within_budget(&request.model),
+    ))
 }
 
+/// A turn's provider, why its model can't take images that way, if it
+/// can't, and how many camera frames a request may carry within an
+/// account's daily budget, for a hosted model.
+type Chosen = (Box<dyn Provider>, Option<String>, Option<usize>);
+
 /// The provider for this turn's model: a developer's own key for its
-/// company where development builds allow one, else the hosted model.
+/// company where development builds allow one, else the hosted model; and
+/// why the model can't take images that way, if it can't.
 async fn provider_for_turn(
     choice: ProviderChoice,
     credentials: &FileCredentials,
     sessions: &Sessions,
     request: &TurnRequest,
-) -> Result<Box<dyn Provider>, String> {
+) -> Result<Chosen, String> {
     let wire = Wire::for_model(&request.model);
     let own = |name: &str| credentials.get(name).filter(|key| !key.is_empty());
     let direct =
@@ -494,23 +504,29 @@ async fn provider_for_turn(
     match choice {
         ProviderChoice::Fake { delay } => {
             let sleep = Arc::new(|every: Duration| tokio::time::sleep(every).boxed());
-            Ok(Box::new(FakeProvider::new().with_delay(sleep, delay)))
+            Ok((
+                Box::new(FakeProvider::new().with_delay(sleep, delay)),
+                None,
+                None,
+            ))
         }
         ProviderChoice::OpenAi {
             api_base,
             anthropic_base,
-        } => direct(api_base.as_deref(), anthropic_base.as_deref()).ok_or_else(|| {
-            match wire {
-                Wire::OpenAi => NO_KEY,
-                Wire::Anthropic => NO_ANTHROPIC_KEY,
-            }
-            .to_owned()
-        }),
+        } => direct(api_base.as_deref(), anthropic_base.as_deref())
+            .map(|provider| (provider, models::cannot_see(&request.model), None))
+            .ok_or_else(|| {
+                match wire {
+                    Wire::OpenAi => NO_KEY,
+                    Wire::Anthropic => NO_ANTHROPIC_KEY,
+                }
+                .to_owned()
+            }),
         ProviderChoice::Auto {
             api_base,
             anthropic_base,
         } => match direct(api_base.as_deref(), anthropic_base.as_deref()) {
-            Some(provider) => Ok(provider),
+            Some(provider) => Ok((provider, models::cannot_see(&request.model), None)),
             None => hosted_provider(sessions, request, wire).await,
         },
         ProviderChoice::Hosted => hosted_provider(sessions, request, wire).await,
@@ -669,7 +685,7 @@ async fn run(
         run_local(rpc, &services.connections, request, inputs).await;
         return;
     }
-    let provider = match provider_for_turn(
+    let (provider, cannot_see, frames_within_budget) = match provider_for_turn(
         services.choice.clone(),
         &services.credentials,
         &services.sessions,
@@ -677,7 +693,7 @@ async fn run(
     )
     .await
     {
-        Ok(provider) => provider,
+        Ok(chosen) => chosen,
         Err(why) => {
             let thread = thread_id.clone();
             let _ = engine
@@ -729,6 +745,8 @@ async fn run(
         context_sent,
         previous,
         cache_key: cache_key.clone(),
+        cannot_see,
+        frames_within_budget,
     };
     let began = std::time::Instant::now();
     let outcome = run_turn(&provider, &host, turn).await;

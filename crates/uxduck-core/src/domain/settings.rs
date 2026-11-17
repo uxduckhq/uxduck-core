@@ -48,6 +48,18 @@ pub enum ClosePolicy {
     Quit,
 }
 
+/// Whether the assistant and other connections see through cameras
+/// (FB-244, maintainer 2026-11-17): asked each time, always, or never.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentCameras {
+    /// Each look is approved in the chat that asked for it.
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
 /// What a deliberate app launch opens. Background startup never uses it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -169,6 +181,11 @@ pub struct Settings {
     /// How a camera that sends no IDR is re-encoded for live view.
     #[serde(default)]
     pub video_reencoder: crate::domain::video::Reencoder,
+    /// Whether the assistant sees through cameras (FB-244): `video/frame`
+    /// sends a camera's pictures to the chat's AI provider. It asks first
+    /// until a person chooses otherwise.
+    #[serde(default)]
+    pub agent_cameras: AgentCameras,
     /// The tray icon while UXDuck runs on a desktop (S64): on until
     /// switched off.
     #[serde(default = "on")]
@@ -452,6 +469,7 @@ impl Default for Settings {
             video_ports: Vec::new(),
             video_recording: crate::domain::video::RecordPolicy::default(),
             video_reencoder: crate::domain::video::Reencoder::default(),
+            agent_cameras: AgentCameras::Ask,
             show_in_menu_bar: true,
             start_at_login: false,
             start_at_login_suggested: false,

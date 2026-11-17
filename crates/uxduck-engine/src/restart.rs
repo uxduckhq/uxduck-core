@@ -625,6 +625,9 @@ fn update_settings(
     if let Some(reencoder) = params.video_reencoder {
         settings.video_reencoder = reencoder.into();
     }
+    if let Some(choice) = params.agent_cameras {
+        settings.agent_cameras = choice.into();
+    }
     if let Some(ports) = params.video_ports {
         settings.video_ports = video_ports(ports)?;
     }

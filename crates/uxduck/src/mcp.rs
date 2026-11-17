@@ -241,9 +241,11 @@ fn invalid_arguments(message: &str) -> Value {
 
 /// MCP clients may consume either representation. Compact JSON saves tokens
 /// in text-only clients without dropping fields, schemas or coverage evidence.
-fn tool_result(result: Value) -> Value {
+fn tool_result(mut result: Value) -> Value {
+    // A camera's frames are images (FB-244), never base64 in the text.
+    let images = uxduck_agent::output::take_images(&mut result);
     let mut content = json!({
-        "content": [{ "type": "text", "text": result.to_string() }],
+        "content": uxduck_agent::output::mcp_content(&result.to_string(), &images),
         "isError": false
     });
     if result.is_object() {
@@ -302,6 +304,28 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, value.to_string());
         assert_eq!(serde_json::from_str::<Value>(text).unwrap(), value);
+    }
+
+    /// A camera's frames (FB-244) reach an MCP client as images, not as
+    /// base64 in its text.
+    #[test]
+    fn a_cameras_frames_are_mcp_images() {
+        let result = tool_result(json!({
+            "sourceId": "front",
+            "frames": [{ "offsetS": 0, "width": 1024, "height": 576, "jpegBase64": "/9j/AQ==" }],
+        }));
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert!(!content[0]["text"].as_str().unwrap().contains("jpegBase64"));
+        assert_eq!(
+            content[1],
+            json!({ "type": "image", "data": "/9j/AQ==", "mimeType": "image/jpeg" })
+        );
+        assert!(
+            result["structuredContent"]["frames"][0]
+                .get("jpegBase64")
+                .is_none()
+        );
     }
 
     /// An MCP client files reports itself: the instructions give the call

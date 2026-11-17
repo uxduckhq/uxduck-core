@@ -600,6 +600,85 @@ pub struct VideoPhoto {
     pub version: u64,
 }
 
+/// A clip's length when none is asked for, in seconds.
+pub const LOOK_SECONDS_DEFAULT: f64 = 3.0;
+
+/// The long edge of a frame for the assistant, in pixels. Claude and GPT
+/// models scale a larger picture down before they read it, so more pixels
+/// cost bytes and tokens without detail.
+pub const LOOK_LONG_EDGE: u32 = 1024;
+
+/// The most bytes of JPEG a look's frames take together: 8 MB. The daemon
+/// holds a look's frames in memory while it answers, about three times
+/// over (the JPEGs, their base64 and the reply's text), and 2 looks may run
+/// at once, so this keeps looks to tens of MB of the daemon's memory. It is
+/// also about as much as the largest provider requests carry: the hosted
+/// API takes 8 MB, Anthropic 32 MB and OpenAI 50 MB, as base64.
+pub const LOOK_REPLY_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A look through a camera for the assistant (FB-244): the picture now, or
+/// a short clip of frames.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFrameParams {
+    /// The camera, a video source's id. Absent: the vehicle's only camera.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// The vehicle whose camera to look through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// 1, the default, for the picture now. 2 or more for a clip of that
+    /// many frames, evenly spaced over `seconds`. A clip has no more frames
+    /// than the camera sends pictures in that time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    /// A clip's length in seconds, more than 0. 3 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    /// The most bytes of JPEG the frames may take together. UXDuck sets it
+    /// for a model whose requests are limited in size, and the frames are
+    /// made smaller to fit. Absent, `LOOK_REPLY_BYTES`. More than that is
+    /// held to it, and the result's note says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub max_bytes: Option<u64>,
+}
+
+/// One frame of a look, as a JPEG.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFrame {
+    /// Seconds after the look's first frame.
+    pub offset_s: f64,
+    /// When the camera's picture arrived, in microseconds since the epoch.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub at_us: u64,
+    pub width: u32,
+    pub height: u32,
+    /// The JPEG, base64. The assistant is shown it as an image.
+    pub jpeg_base64: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoFrameResult {
+    pub source_id: String,
+    /// The camera's name.
+    pub camera: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// The camera's own picture size, before scaling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_height: Option<u32>,
+    /// In time order.
+    pub frames: Vec<VideoFrame>,
+    /// What was changed on the way, such as the size the frames were made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoRemoveParams {

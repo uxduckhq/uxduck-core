@@ -1,0 +1,37 @@
+{
+  "sourceId": "udp-5600-192.168.144.25",
+  "camera": "Gimbal",
+  "vehicleId": "veh_1",
+  "cameraWidth": 1920,
+  "cameraHeight": 1080,
+  "frames": [
+    {
+      "offsetS": 0.0,
+      "atUs": 1792316523000000,
+      "width": 1024,
+      "height": 576,
+      "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+    },
+    {
+      "offsetS": 1.0,
+      "atUs": 1792316524000000,
+      "width": 1024,
+      "height": 576,
+      "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+    },
+    {
+      "offsetS": 2.0,
+      "atUs": 1792316525000000,
+      "width": 1024,
+      "height": 576,
+      "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+    },
+    {
+      "offsetS": 3.0,
+      "atUs": 1792316526000000,
+      "width": 1024,
+      "height": 576,
+      "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+    }
+  ]
+}

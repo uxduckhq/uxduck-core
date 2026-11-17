@@ -267,7 +267,11 @@ impl Provider for OpenAiProvider {
                 HeaderValue::from_static("none"),
             );
         }
-        if !request.model.starts_with("gpt-6") {
+        // Camera frames go over HTTP, which takes a larger request than a
+        // socket message (`HOSTED_MAX_IMAGE_REQUEST_BYTES`).
+        if !request.model.starts_with("gpt-6")
+            || crate::conversation::has_images(&request.conversation)
+        {
             return provider.respond(request);
         }
         let url = format!("{}/responses", self.api_base)
@@ -281,6 +285,10 @@ impl Provider for OpenAiProvider {
 
     fn max_request_bytes(&self) -> Option<usize> {
         self.hosted.then_some(super::HOSTED_MAX_REQUEST_BYTES)
+    }
+
+    fn max_image_request_bytes(&self) -> Option<usize> {
+        self.hosted.then_some(super::HOSTED_MAX_IMAGE_REQUEST_BYTES)
     }
 
     fn respond(

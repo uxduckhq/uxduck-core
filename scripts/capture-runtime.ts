@@ -317,6 +317,29 @@ try {
         "pipe:1",
       ]);
       if (sound.length < 188) throw new Error("The capture helper could not encode test sound.");
+      // The assistant's look at a camera (FB-244): pictures sampled, scaled
+      // and written as JPEGs.
+      const look = execFileSync(executable, [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=128x96:rate=25:duration=1",
+        "-vf",
+        "fps=2,scale=64:-2:out_range=full,format=yuvj420p",
+        "-frames:v",
+        "2",
+        "-c:v",
+        "mjpeg",
+        "-f",
+        "mjpeg",
+        "pipe:1",
+      ]);
+      if (look.length < 4 || look[0] !== 0xff || look[1] !== 0xd8)
+        throw new Error("The capture helper could not write a test JPEG.");
     } else {
       execFileSync("lipo", [
         executable,
@@ -335,6 +358,9 @@ try {
         "MOV_DEMUXER",
         "MPEGTS_DEMUXER",
         "H264_MP4TOANNEXB_BSF",
+        "MJPEG_ENCODER",
+        "MJPEG_MUXER",
+        "FPS_FILTER",
       ]) {
         if (!components.includes(`#define CONFIG_${required} 1`))
           throw new Error(`The cross-built capture helper is missing ${required}.`);

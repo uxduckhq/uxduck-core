@@ -533,3 +533,59 @@ fn verifying_says_which_terms_the_form_showed_only_when_it_showed_them() {
         json!({ "version": "2026-11-03", "client": "desktop" })
     );
 }
+
+#[test]
+fn a_hosted_model_that_cannot_take_images_is_told_why_in_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Sessions::new(FileCredentials::new(dir.path()));
+    let unlisted = sessions.cannot_see("claude-opus-5-5").unwrap();
+    assert!(
+        unlisted.contains("doesn't say yet which of its models"),
+        "{unlisted}"
+    );
+    *sessions.image_models.lock().unwrap() =
+        Some(vec!["claude-opus-5-5".into(), "gpt-6.1-sol".into()]);
+    assert_eq!(sessions.cannot_see("gpt-6.1-sol"), None);
+    let other = sessions.cannot_see("z-ai/glm-5.3").unwrap();
+    assert!(
+        other.contains("z-ai/glm-5.3, can't take images")
+            && other.ends_with("claude-opus-5-5, gpt-6.1-sol."),
+        "{other}"
+    );
+    *sessions.image_models.lock().unwrap() = Some(Vec::new());
+    assert!(
+        sessions
+            .cannot_see("z-ai/glm-5.3")
+            .unwrap()
+            .starts_with("None of the AI models")
+    );
+    for words in [unlisted, other] {
+        assert!(!words.contains(';'), "{words}");
+    }
+}
+
+#[test]
+fn a_hosted_model_whose_budget_pays_for_no_frame_is_told_so_and_others_get_their_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Sessions::new(FileCredentials::new(dir.path()));
+    let me: MeSession = serde_json::from_value(serde_json::json!({
+        "signedSession": { "token": "t" },
+        "hostedImageModels": ["gpt-6-astra", "claude-opus-5-5"],
+        "hostedImageFrames": { "gpt-6-astra": 0, "claude-opus-5-5": 1200 },
+    }))
+    .unwrap();
+    *sessions.image_models.lock().unwrap() = me.hosted_image_models;
+    *sessions.image_frames.lock().unwrap() = me.hosted_image_frames;
+    assert_eq!(sessions.frames_within_budget("claude-opus-5-5"), Some(1200));
+    assert_eq!(sessions.cannot_see("claude-opus-5-5"), None);
+    let words = sessions.cannot_see("gpt-6-astra").unwrap();
+    assert!(
+        words.starts_with("An account's daily budget for UXDuck's AI service doesn't pay for even one camera image in a request to gpt-6-astra"),
+        "{words}"
+    );
+    assert!(!words.contains(';'), "{words}");
+    // An older server says nothing, and no budget limits the frames.
+    let older: MeSession =
+        serde_json::from_value(serde_json::json!({ "signedSession": { "token": "t" } })).unwrap();
+    assert!(older.hosted_image_frames.is_empty());
+}

@@ -207,6 +207,53 @@ pub struct Turn {
     pub previous: Option<String>,
     /// Groups this chat's requests for OpenAI's cache.
     pub cache_key: Option<String>,
+    /// Why the model, by this route, can't take images in tool results, in
+    /// words for the model: a camera's frames (FB-244). None: it can.
+    pub cannot_see: Option<String>,
+    /// How many camera frames one request may carry within an account's
+    /// daily budget, for a hosted model, as the server says. None: no
+    /// budget limits it (FB-244).
+    pub frames_within_budget: Option<usize>,
+}
+
+/// The most images one request may hold, with that limit in words: the
+/// provider's (Claude 100, GPT 500) or, for a hosted model, what an
+/// account's daily budget pays for, whichever is fewer.
+fn image_limit(turn: &Turn) -> Option<(usize, String)> {
+    let provider = models::image_limit(&turn.model)
+        .map(|(most, who)| (most, format!("{who} at most {most} images in one request")));
+    let budget = turn.frames_within_budget.map(|most| {
+        (
+            most,
+            format!(
+                "An account's daily budget for UXDuck's AI service pays for at most {most} images in one request to {}",
+                turn.model
+            ),
+        )
+    });
+    provider
+        .into_iter()
+        .chain(budget)
+        .min_by_key(|(most, _)| *most)
+}
+
+/// The method whose result carries images: a camera's frames (FB-244).
+const LOOK: &str = "video/frame";
+
+/// The least room, in bytes of JPEG, worth a look: one small frame.
+const LEAST_LOOK_BYTES: u64 = 8 * 1024;
+
+/// What a round's tools may show the model.
+#[derive(Clone, Debug, Default)]
+struct Images {
+    /// Why the model can't take images. None: it can.
+    cannot_see: Option<String>,
+    /// Bytes of JPEG the next request still has room for, for a model whose
+    /// requests are limited in size: less each look's frames as it returns.
+    room: Option<u64>,
+    /// Images the next request still has room for, for a model whose
+    /// provider limits how many one request holds, with that limit in words.
+    count: Option<(usize, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -391,17 +438,22 @@ fn tool_arguments(name: String, arguments: &str) -> Option<(String, Value)> {
 }
 
 /// Calls the tools a round asked for, in order, recording each in the chat.
+#[allow(
+    clippy::too_many_lines,
+    reason = "each call checked, run and recorded in turn"
+)]
 async fn run_tools(
     host: &dyn Host,
     tools: &[Tool],
     calls: Vec<(String, String, String)>,
     stats: &mut TurnStats,
+    images: &mut Images,
 ) -> Vec<ToolResult> {
     let mut results = Vec::new();
     let inputs = host.inputs();
     for (call_id, name, arguments) in calls {
         if inputs.pending() {
-            results.push(ToolResult { call_id, output: json!({"error":"Superseded by an operator update before execution. Reconsider this action with the new instructions."}).to_string(), failed: true });
+            results.push(ToolResult { call_id, output: json!({"error":"Superseded by an operator update before execution. Reconsider this action with the new instructions."}).to_string(), failed: true, images: Vec::new() });
             continue;
         }
         stats.tool_calls += 1;
@@ -411,11 +463,41 @@ async fn run_tools(
                 call_id,
                 output: json!({ "error": "Tool arguments must be a valid JSON object. For tool_call, provide a tool name and a JSON object for params. No action was taken; correct the arguments before retrying." }).to_string(),
                 failed: true,
+                images: Vec::new(),
             });
             continue;
         };
+        let mut shown = Vec::new();
         let (output, failed) = match Tool::method_for(tools, &name) {
+            Some(method) if method == LOOK && images.cannot_see.is_some() => (
+                json!({ "error": images.cannot_see }).to_string(),
+                true,
+            ),
+            Some(method) if method == LOOK && images.room.is_some_and(|room| room < LEAST_LOOK_BYTES) => (
+                json!({ "error": "There is no room left in this request for another camera image. Look through one camera at a time, or start a new chat if this one is long." }).to_string(),
+                true,
+            ),
+            Some(method)
+                if method == LOOK
+                    && images.count.as_ref().is_some_and(|(left, _)| {
+                        params["frames"].as_u64().unwrap_or(1) > *left as u64
+                    }) =>
+            {
+                let (left, limit) = images.count.clone().unwrap_or_default();
+                let error = if left == 0 {
+                    format!("{limit}, and this request already holds that many. Look again after reading these results.")
+                } else {
+                    format!("{limit}. There is room for {left} more in this request, so ask for {left} or fewer frames.")
+                };
+                (json!({ "error": error }).to_string(), true)
+            }
             Some(method) => {
+                if method == LOOK
+                    && let Some(room) = images.room
+                {
+                    let asked = params["maxBytes"].as_u64().unwrap_or(room);
+                    params["maxBytes"] = json!(asked.min(room));
+                }
                 if let Some(limit) = model_limit(&method, params.get("limit")) {
                     params["limit"] = json!(limit);
                 }
@@ -440,9 +522,24 @@ async fn run_tools(
                         .collect();
                     found["uxduckTools"] = json!(own);
                 }
+                if method == LOOK
+                    && let Ok(value) = &mut outcome
+                {
+                    shown = crate::output::take_images(value);
+                    if let Some(room) = &mut images.room {
+                        let taken: u64 = shown.iter().map(|image| image.jpeg.len() as u64 / 4 * 3).sum();
+                        *room = room.saturating_sub(taken);
+                    }
+                    if let Some((left, _)) = &mut images.count {
+                        *left = left.saturating_sub(shown.len());
+                    }
+                }
                 host.tool_finish(item, outcome.clone()).await;
                 match outcome {
                     Ok(value) => (for_model(&method, value).to_string(), false),
+                    Err(value) if method == LOOK && value["message"].is_string() => {
+                        (json!({ "error": value["message"] }).to_string(), true)
+                    }
                     Err(value) => (value.to_string(), true),
                 }
             }
@@ -458,6 +555,7 @@ async fn run_tools(
             call_id,
             output: capped(output),
             failed,
+            images: shown,
         });
     }
     results
@@ -499,27 +597,57 @@ fn fit(
     provider: &dyn Provider,
     conversation: &mut Vec<Value>,
     turn_start: usize,
+    most: Option<usize>,
     request: impl Fn(&[Value]) -> ProviderRequest,
 ) -> Result<(), ProviderError> {
-    let Some(limit) = provider.max_request_bytes() else {
-        return Ok(());
+    let limit = if conversation::has_images(conversation) {
+        provider.max_image_request_bytes()
+    } else {
+        provider.max_request_bytes()
     };
+    // The most images one request may hold (`image_limit`) is kept as its
+    // size is: an earlier look is left out whole.
+    if limit.is_none() && most.is_none() {
+        return Ok(());
+    }
+    let limit = limit.unwrap_or(usize::MAX);
     let ceiling = limit - limit / 16;
-    let size = |conversation: &[Value]| request_bytes(provider, &request(conversation));
-    if size(conversation) <= ceiling {
+    let fits = |conversation: &[Value], bytes: usize| {
+        most.is_none_or(|most| conversation::image_count(conversation) <= most)
+            && (limit == usize::MAX || request_bytes(provider, &request(conversation)) <= bytes)
+    };
+    if fits(conversation, ceiling) {
         return Ok(());
     }
     let earlier = conversation::latest_round(conversation).max(turn_start);
     let mut roomy = conversation.clone();
-    if conversation::leave_out_tool_results(&mut roomy, earlier, |c| size(c) <= limit / 4 * 3) {
+    if conversation::leave_out_tool_results(&mut roomy, earlier, |c| fits(c, limit / 4 * 3)) {
         *conversation = roomy;
         return Ok(());
     }
-    if conversation::leave_out_tool_results(conversation, earlier, |c| size(c) <= ceiling) {
+    if conversation::leave_out_tool_results(conversation, earlier, |c| fits(c, ceiling)) {
         Ok(())
     } else {
         Err(ProviderError::Account(TOO_LARGE.into()))
     }
+}
+
+/// Bytes of JPEG the next request has room for, for a provider whose
+/// requests are limited in size: what is left of three quarters of the
+/// limit with every earlier tool result left out, as `fit` would leave
+/// them, less a margin for the result's text, in bytes before base64.
+fn room_for_images(
+    provider: &dyn Provider,
+    conversation: &[Value],
+    request: impl Fn(&[Value]) -> ProviderRequest,
+) -> Option<u64> {
+    let limit = provider.max_image_request_bytes()?;
+    let mut bare = conversation.to_vec();
+    let all = bare.len();
+    conversation::leave_out_tool_results(&mut bare, all, |_| false);
+    let used = request_bytes(provider, &request(&bare)) + 4 * 1024;
+    let base64 = (limit / 4 * 3).saturating_sub(used);
+    Some(base64 as u64 / 4 * 3)
 }
 
 /// Whether a chat should be summarised before it nears the provider's
@@ -557,7 +685,7 @@ async fn summary(
     let mut asking = conversation.to_vec();
     asking.extend(conversation::user(wire, SUMMARY_REQUEST));
     let question = asking.len() - 1;
-    fit(provider, &mut asking, question, |c| request(c, None)).ok()?;
+    fit(provider, &mut asking, question, None, |c| request(c, None)).ok()?;
     let asking = request(&asking, previous);
     let answer = round(provider, host, asking, stats, started, None, false)
         .await
@@ -567,12 +695,14 @@ async fn summary(
 }
 
 /// Runs one turn.
+#[allow(clippy::too_many_lines, reason = "one turn's loop, step by step")]
 pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> TurnOutcome {
     let wire = provider.wire();
     let settings = models::settings(&turn.model);
     let (tools, sent) = chat_tools(host.can_file_feedback());
     let started = host.now_ms();
     let mut stats = TurnStats::default();
+    let limit = image_limit(&turn);
     let mut conversation = turn.conversation;
     let mut context_sent = turn.context_sent;
     let request = |conversation: &[Value], continues: Option<String>| ProviderRequest {
@@ -620,9 +750,13 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
     let mut message: Option<String> = None;
     let result = loop {
         apply_inputs(wire, host, &mut conversation, &inputs).await;
-        if let Err(error) = fit(provider, &mut conversation, turn_start, |c| {
-            request(c, None)
-        }) {
+        if let Err(error) = fit(
+            provider,
+            &mut conversation,
+            turn_start,
+            limit.as_ref().map(|(most, _)| *most),
+            |c| request(c, None),
+        ) {
             break Err(error.into());
         }
         let continues = last.clone();
@@ -652,7 +786,12 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
         // call a result so both provider histories remain valid.
         let had_calls = !answered.calls.is_empty();
         if had_calls {
-            let results = run_tools(host, &tools, answered.calls, &mut stats).await;
+            let mut images = Images {
+                cannot_see: turn.cannot_see.clone(),
+                room: room_for_images(provider, &conversation, |c| request(c, None)),
+                count: limit.clone(),
+            };
+            let results = run_tools(host, &tools, answered.calls, &mut stats, &mut images).await;
             conversation.extend(conversation::tool_results(wire, &results));
         }
         let steered = apply_inputs(wire, host, &mut conversation, &inputs).await;
@@ -663,6 +802,7 @@ pub async fn run_turn(provider: &dyn Provider, host: &dyn Host, turn: Turn) -> T
             break Ok(());
         }
     };
+    conversation::forget_images(&mut conversation);
     TurnOutcome {
         result,
         response_id: last,
@@ -730,6 +870,8 @@ mod tests {
             context_sent: false,
             previous: None,
             cache_key: None,
+            cannot_see: None,
+            frames_within_budget: None,
         }
     }
 
@@ -1420,6 +1562,7 @@ mod tests {
                 ),
             ],
             &mut stats,
+            &mut Images::default(),
         )
         .now_or_never()
         .unwrap();
@@ -1515,6 +1658,7 @@ mod tests {
                 ),
             ],
             &mut stats,
+            &mut Images::default(),
         )
         .now_or_never()
         .unwrap();
@@ -1582,6 +1726,7 @@ mod tests {
                 &tools(),
                 vec![("bad-call".into(), name.into(), arguments.into())],
                 &mut stats,
+                &mut Images::default(),
             )
             .now_or_never()
             .unwrap();
@@ -2120,6 +2265,583 @@ mod tests {
         assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
         assert!(
             provider.largest.load(Ordering::Relaxed) <= crate::provider::HOSTED_MAX_REQUEST_BYTES
+        );
+    }
+
+    /// A host whose camera answers `video/frame` with two frames.
+    #[derive(Default)]
+    struct Camera {
+        asked: Mutex<Vec<Value>>,
+        finished: Mutex<Vec<Value>>,
+        /// The engine's error for every look, in place of its frames.
+        refusal: Option<Value>,
+    }
+
+    impl Host for Camera {
+        fn message_start(&self) -> BoxFuture<'_, String> {
+            async { "m1".to_owned() }.boxed()
+        }
+        fn text_delta(&self, _: String, _: String) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn message_finish(&self, _: String, _: Option<String>) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn tool_start(&self, _: String, _: Value) -> BoxFuture<'_, String> {
+            async { "t1".to_owned() }.boxed()
+        }
+        /// Two frames as large as `maxBytes` lets them be, up to 30 KB, as
+        /// the daemon makes them, seen at 14:02:07 UTC.
+        fn call(&self, _: String, params: Value) -> BoxFuture<'_, Result<Value, Value>> {
+            #[allow(clippy::cast_possible_truncation, reason = "a test's sizes")]
+            let jpeg = params["maxBytes"].as_u64().map_or_else(
+                || "/9j/AQ==".to_owned(),
+                |bytes| "A".repeat(((bytes / 2).min(30_000) / 3 * 4) as usize),
+            );
+            self.asked.lock().unwrap().push(params);
+            if let Some(refusal) = self.refusal.clone() {
+                return async move { Err(refusal) }.boxed();
+            }
+            async move {
+                Ok(json!({
+                    "sourceId": "front",
+                    "camera": "Front",
+                    "frames": [
+                        { "offsetS": 0.0, "atUs": 50_527_000_000u64, "width": 1024, "height": 576, "jpegBase64": jpeg },
+                        { "offsetS": 1.5, "atUs": 50_528_500_000u64, "width": 1024, "height": 576, "jpegBase64": jpeg },
+                    ],
+                }))
+            }
+            .boxed()
+        }
+        fn tool_finish(&self, _: String, outcome: Result<Value, Value>) -> BoxFuture<'_, ()> {
+            self.finished
+                .lock()
+                .unwrap()
+                .push(outcome.unwrap_or_else(|e| e));
+            async {}.boxed()
+        }
+    }
+
+    fn looks(host: &Camera, images: &mut Images, calls: usize) -> Vec<ToolResult> {
+        let mut stats = TurnStats::default();
+        let calls = (0..calls)
+            .map(|n| {
+                (
+                    format!("c{n}"),
+                    "video_frame".into(),
+                    r#"{"sourceId":"front","frames":2}"#.into(),
+                )
+            })
+            .collect();
+        run_tools(host, &tools(), calls, &mut stats, images)
+            .now_or_never()
+            .unwrap()
+    }
+
+    fn look(host: &Camera, images: &mut Images) -> ToolResult {
+        looks(host, images, 1).remove(0)
+    }
+
+    #[test]
+    fn a_cameras_frames_are_shown_to_the_model_as_images_and_kept_out_of_the_chat() {
+        let host = Camera::default();
+        let result = look(
+            &host,
+            &mut Images {
+                cannot_see: None,
+                room: Some(50_000),
+                count: None,
+            },
+        );
+        assert!(!result.failed, "{}", result.output);
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(result.images[0].label, "Image from Front at 14:02:07 UTC");
+        assert!(!result.output.contains("jpegBase64"), "{}", result.output);
+        assert!(
+            result
+                .output
+                .contains("The frames follow as images, in this order.")
+        );
+        // A model whose requests are limited asks for frames that fit.
+        assert_eq!(host.asked.lock().unwrap()[0]["maxBytes"], 50_000);
+        // The chat's record of the call has no pictures in it.
+        assert!(
+            !host.finished.lock().unwrap()[0]
+                .to_string()
+                .contains("jpegBase64")
+        );
+
+        let jpeg = result.images[1].jpeg.clone();
+        let anthropic = conversation::tool_results(
+            conversation::Wire::Anthropic,
+            std::slice::from_ref(&result),
+        );
+        let content = &anthropic[0]["content"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(
+            content[1],
+            json!({ "type": "text", "text": "Image from Front at 14:02:07 UTC:" })
+        );
+        assert_eq!(
+            content[4],
+            json!({ "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": jpeg } })
+        );
+        let openai = conversation::tool_results(conversation::Wire::OpenAi, &[result]);
+        assert_eq!(openai[0]["output"][0]["type"], "input_text");
+        assert_eq!(
+            openai[0]["output"][4],
+            json!({ "type": "input_image", "image_url": format!("data:image/jpeg;base64,{jpeg}"), "detail": "high" })
+        );
+        // Counted as images, not as their bytes.
+        let big = ToolResult {
+            call_id: "c1".into(),
+            output: "{}".into(),
+            failed: false,
+            images: vec![conversation::Shown {
+                jpeg: "A".repeat(400_000),
+                label: "Image from Front at 14:02:07 UTC".into(),
+            }],
+        };
+        let tokens = conversation::estimate_tokens(&conversation::tool_results(
+            conversation::Wire::OpenAi,
+            &[big],
+        ));
+        assert!(
+            (conversation::IMAGE_TOKENS..conversation::IMAGE_TOKENS + 100).contains(&tokens),
+            "{tokens}"
+        );
+    }
+
+    #[test]
+    fn two_looks_in_one_round_share_the_requests_room_and_the_second_is_refused_in_words() {
+        let host = Camera::default();
+        let results = looks(
+            &host,
+            &mut Images {
+                cannot_see: None,
+                room: Some(50_000),
+                count: None,
+            },
+            2,
+        );
+        assert!(!results[0].failed, "{}", results[0].output);
+        let taken: usize = results[0].images.iter().map(|i| i.jpeg.len() / 4 * 3).sum();
+        assert!(taken <= 50_000, "{taken}");
+        assert!(results[1].failed);
+        assert!(
+            results[1].output.contains("no room left in this request"),
+            "{}",
+            results[1].output
+        );
+        assert!(!results[1].output.contains(';'));
+        // The second camera was never asked.
+        assert_eq!(host.asked.lock().unwrap().len(), 1);
+
+        // With room for both, the second asks for what the first left.
+        let host = Camera::default();
+        let results = looks(
+            &host,
+            &mut Images {
+                cannot_see: None,
+                room: Some(200_000),
+                count: None,
+            },
+            2,
+        );
+        assert!(results.iter().all(|r| !r.failed));
+        let asked = host.asked.lock().unwrap();
+        let first: u64 = results[0]
+            .images
+            .iter()
+            .map(|i| i.jpeg.len() as u64 / 4 * 3)
+            .sum();
+        assert_eq!(asked[1]["maxBytes"], 200_000 - first);
+    }
+
+    #[test]
+    fn a_model_that_takes_no_images_is_told_why_and_the_camera_is_not_asked() {
+        let host = Camera::default();
+        let why = "This chat's AI model, z-ai/glm-5.3, can't take images, so the assistant can't see the camera in this chat.";
+        let result = look(
+            &host,
+            &mut Images {
+                cannot_see: Some(why.into()),
+                room: None,
+                count: None,
+            },
+        );
+        assert!(result.failed);
+        assert!(result.output.contains(why), "{}", result.output);
+        assert!(host.asked.lock().unwrap().is_empty());
+        let full = look(
+            &Camera::default(),
+            &mut Images {
+                cannot_see: None,
+                room: Some(1_000),
+                count: None,
+            },
+        );
+        assert!(full.failed && full.output.contains("no room left in this request"));
+    }
+
+    /// The hosted model's two limits: text, and a request carrying frames.
+    struct HostedFrames;
+
+    impl Provider for HostedFrames {
+        fn wire(&self) -> conversation::Wire {
+            conversation::Wire::OpenAi
+        }
+        fn max_request_bytes(&self) -> Option<usize> {
+            Some(crate::provider::HOSTED_MAX_REQUEST_BYTES)
+        }
+        fn max_image_request_bytes(&self) -> Option<usize> {
+            Some(crate::provider::HOSTED_MAX_IMAGE_REQUEST_BYTES)
+        }
+        fn respond(
+            &self,
+            _: ProviderRequest,
+        ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+            futures::stream::empty().boxed()
+        }
+    }
+
+    fn frames_request(conversation: &[Value]) -> ProviderRequest {
+        ProviderRequest {
+            model: "gpt-6-sol".into(),
+            instructions: String::new(),
+            conversation: conversation.to_vec(),
+            tools: Vec::new(),
+            max_output_tokens: 1_000,
+            effort: None,
+            continues: None,
+            cache_key: None,
+        }
+    }
+
+    #[test]
+    fn a_request_carrying_frames_may_pass_the_text_limit_up_to_the_image_limit() {
+        let look = ToolResult {
+            call_id: "c1".into(),
+            output: "{}".into(),
+            failed: false,
+            images: vec![conversation::Shown {
+                jpeg: "A".repeat(1024 * 1024),
+                label: "Image from Front at 14:02:07 UTC".into(),
+            }],
+        };
+        let mut items = vec![json!({ "role": "user", "content": "What does it show?" })];
+        let turn_start = 0;
+        items.extend(conversation::tool_results(
+            conversation::Wire::OpenAi,
+            &[look],
+        ));
+        assert!(conversation::has_images(&items));
+        fit(&HostedFrames, &mut items, turn_start, None, frames_request).expect("it fits");
+        assert!(conversation::has_images(&items), "the frames were kept");
+
+        // Without frames the text limit holds.
+        let mut text = vec![json!({ "role": "user", "content": "x".repeat(300 * 1024) })];
+        assert!(!conversation::has_images(&text));
+        assert!(fit(&HostedFrames, &mut text, 0, None, frames_request).is_err());
+
+        // A look's room is the image limit's, far past the text limit.
+        let room = room_for_images(&HostedFrames, &items[..1], frames_request).unwrap();
+        assert!(room > 4 * 1024 * 1024, "{room}");
+    }
+
+    #[test]
+    fn a_look_past_the_providers_image_limit_is_refused_in_words_that_name_it() {
+        let host = Camera::default();
+        let results = looks(
+            &host,
+            &mut Images {
+                cannot_see: None,
+                room: None,
+                count: Some((3, "Claude takes at most 100 images in one request".into())),
+            },
+            2,
+        );
+        assert!(!results[0].failed, "{}", results[0].output);
+        assert!(results[1].failed);
+        assert!(
+            results[1].output.contains(
+                "Claude takes at most 100 images in one request. There is room for 1 more in \
+                 this request, so ask for 1 or fewer frames."
+            ),
+            "{}",
+            results[1].output
+        );
+        assert!(!results[1].output.contains(';'));
+        assert_eq!(
+            host.asked.lock().unwrap().len(),
+            1,
+            "the second was never asked"
+        );
+        assert_eq!(
+            crate::models::image_limit("claude-opus-5-5"),
+            Some((100, "Claude takes"))
+        );
+        assert_eq!(
+            crate::models::image_limit("gpt-6.1-sol"),
+            Some((500, "OpenAI's GPT models take"))
+        );
+    }
+
+    #[test]
+    fn a_hosted_budget_that_pays_for_fewer_images_than_the_provider_takes_is_the_limit_it_names() {
+        let mut astra = turn("What does it show?");
+        astra.model = "gpt-6-astra".into();
+        assert_eq!(image_limit(&astra).map(|(most, _)| most), Some(500));
+        astra.frames_within_budget = Some(321);
+        let (most, words) = image_limit(&astra).unwrap();
+        assert_eq!(most, 321);
+        assert_eq!(
+            words,
+            "An account's daily budget for UXDuck's AI service pays for at most 321 images in \
+             one request to gpt-6-astra"
+        );
+        astra.frames_within_budget = Some(900);
+        assert_eq!(image_limit(&astra).map(|(most, _)| most), Some(500));
+        let mut kimi = turn("What does it show?");
+        kimi.model = "moonshotai/kimi-k3.1-pro".into();
+        kimi.frames_within_budget = Some(600);
+        assert_eq!(image_limit(&kimi).map(|(most, _)| most), Some(600));
+
+        let host = Camera::default();
+        let results = looks(
+            &host,
+            &mut Images {
+                cannot_see: None,
+                room: None,
+                count: Some((0, words)),
+            },
+            1,
+        );
+        assert!(results[0].failed);
+        assert!(
+            results[0].output.contains(
+                "pays for at most 321 images in one request to gpt-6-astra, and this request \
+                 already holds that many. Look again after reading these results."
+            ),
+            "{}",
+            results[0].output
+        );
+        assert!(!results[0].output.contains(';'));
+        assert!(
+            host.asked.lock().unwrap().is_empty(),
+            "the camera was never asked"
+        );
+    }
+
+    #[test]
+    fn a_refused_look_reaches_the_model_as_the_engines_words() {
+        let host = Camera {
+            refusal: Some(json!({
+                "code": -32003,
+                "data": { "kind": "capability-denied" },
+                "message": "The person didn't let the assistant see Front.",
+            })),
+            ..Camera::default()
+        };
+        let result = look(&host, &mut Images::default());
+        assert!(result.failed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.output).unwrap(),
+            json!({ "error": "The person didn't let the assistant see Front." })
+        );
+    }
+
+    /// A provider with no limit on a request's size.
+    struct Unlimited;
+
+    impl Provider for Unlimited {
+        fn wire(&self) -> conversation::Wire {
+            conversation::Wire::Anthropic
+        }
+        fn respond(
+            &self,
+            _: ProviderRequest,
+        ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+            futures::stream::empty().boxed()
+        }
+    }
+
+    #[test]
+    fn an_earlier_look_is_left_out_when_a_request_would_pass_claudes_100_images() {
+        let shown = |n: usize| ToolResult {
+            call_id: format!("c{n}"),
+            output: "{}".into(),
+            failed: false,
+            images: (0..n)
+                .map(|_| conversation::Shown {
+                    jpeg: "/9j/AQ==".into(),
+                    label: "Image from Front at 14:02:07 UTC".into(),
+                })
+                .collect(),
+        };
+        let claude = |conversation: &[Value]| ProviderRequest {
+            model: "claude-opus-5-5".into(),
+            ..frames_request(conversation)
+        };
+        let mut items = vec![json!({ "role": "user", "content": "What does it show?" })];
+        items.extend(conversation::tool_results(
+            conversation::Wire::Anthropic,
+            &[shown(60)],
+        ));
+        items.push(json!({ "role": "assistant", "content": "Looking again." }));
+        let turn_start = items.len();
+        items.extend(conversation::tool_results(
+            conversation::Wire::Anthropic,
+            &[shown(50)],
+        ));
+        assert_eq!(conversation::image_count(&items), 110);
+        let mut opus = turn("What does it show?");
+        opus.model = "claude-opus-5-5".into();
+        let most = image_limit(&opus).map(|(most, _)| most);
+        fit(&Unlimited, &mut items, turn_start, most, claude).expect("it fits");
+        assert_eq!(
+            conversation::image_count(&items),
+            50,
+            "the earlier look left out"
+        );
+
+        // A model with no known limit keeps both.
+        let mut items = vec![json!({ "role": "user", "content": "What does it show?" })];
+        items.extend(conversation::tool_results(
+            conversation::Wire::Anthropic,
+            &[shown(60)],
+        ));
+        items.push(json!({ "role": "assistant", "content": "Looking again." }));
+        items.extend(conversation::tool_results(
+            conversation::Wire::Anthropic,
+            &[shown(50)],
+        ));
+        let fake = |conversation: &[Value]| ProviderRequest {
+            model: "fake".into(),
+            ..frames_request(conversation)
+        };
+        let most = image_limit(&turn("What does it show?")).map(|(most, _)| most);
+        assert_eq!(most, None);
+        fit(&Unlimited, &mut items, turn_start, most, fake).expect("it fits");
+        assert_eq!(conversation::image_count(&items), 110);
+    }
+
+    #[test]
+    fn an_earlier_look_is_left_out_whole_when_the_chat_must_fit() {
+        let result = ToolResult {
+            call_id: "c1".into(),
+            output: "{}".into(),
+            failed: false,
+            images: vec![conversation::Shown {
+                jpeg: "A".repeat(10_000),
+                label: "Image from Front at 14:02:07 UTC".into(),
+            }],
+        };
+        let mut items = conversation::tool_results(conversation::Wire::OpenAi, &[result]);
+        items.push(json!({ "role": "user", "content": "and now?" }));
+        assert!(conversation::leave_out_tool_results(
+            &mut items,
+            1,
+            |items| { items[0]["output"].is_string() }
+        ));
+        assert_eq!(items[0]["output"], conversation::LEFT_OUT);
+    }
+
+    /// Asks for a look in its first round and answers in its second,
+    /// keeping what each request carried.
+    #[derive(Default)]
+    struct Looking {
+        requests: Mutex<Vec<Vec<Value>>>,
+    }
+
+    impl Provider for Looking {
+        fn wire(&self) -> conversation::Wire {
+            conversation::Wire::OpenAi
+        }
+
+        fn respond(
+            &self,
+            request: ProviderRequest,
+        ) -> futures::stream::BoxStream<'static, Result<ProviderEvent, ProviderError>> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.conversation);
+            let events = if requests.len() == 1 {
+                let arguments = r#"{"sourceId":"front"}"#;
+                vec![
+                    Ok(ProviderEvent::ToolCall {
+                        call_id: "c1".into(),
+                        name: "video_frame".into(),
+                        arguments: arguments.into(),
+                    }),
+                    Ok(ProviderEvent::Completed {
+                        response_id: "r1".into(),
+                        output: vec![
+                            json!({ "type": "function_call", "call_id": "c1", "name": "video_frame", "arguments": arguments }),
+                        ],
+                        usage: Usage::default(),
+                        usage_known: true,
+                        cut: false,
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(ProviderEvent::TextDelta("A field.".into())),
+                    Ok(ProviderEvent::Completed {
+                        response_id: "r2".into(),
+                        output: vec![json!({ "role": "assistant", "content": "A field." })],
+                        usage: Usage::default(),
+                        usage_known: true,
+                        cut: false,
+                    }),
+                ]
+            };
+            futures::stream::iter(events).boxed()
+        }
+    }
+
+    #[test]
+    fn a_looks_images_are_sent_while_its_turn_runs_and_not_kept_after_it() {
+        let provider = Looking::default();
+        let outcome = run_turn(
+            &provider,
+            &Camera::default(),
+            turn("what does the front camera show?"),
+        )
+        .now_or_never()
+        .unwrap();
+        assert_eq!(outcome.result, Ok(()));
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .iter()
+                .any(|item| item.to_string().contains("input_image"))
+        );
+        let kept = serde_json::to_string(&outcome.conversation).unwrap();
+        assert!(
+            !kept.contains("input_image") && !kept.contains("base64,"),
+            "{kept}"
+        );
+        assert!(kept.contains("Image from Front at 14:02:07 UTC:"), "{kept}");
+        assert!(kept.contains(conversation::IMAGE_NOT_KEPT), "{kept}");
+
+        let mut anthropic = conversation::tool_results(
+            conversation::Wire::Anthropic,
+            &[ToolResult {
+                call_id: "c1".into(),
+                output: "{}".into(),
+                failed: false,
+                images: vec![conversation::Shown {
+                    jpeg: "/9j/AQ==".into(),
+                    label: "Image from Front at 14:02:07 UTC".into(),
+                }],
+            }],
+        );
+        conversation::forget_images(&mut anthropic);
+        assert_eq!(
+            anthropic[0]["content"][0]["content"][2],
+            json!({ "type": "text", "text": conversation::IMAGE_NOT_KEPT })
         );
     }
 }

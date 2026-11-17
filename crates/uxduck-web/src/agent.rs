@@ -447,6 +447,9 @@ impl Runtime {
             context_sent,
             previous,
             cache_key: Some(format!("web-{}", request.thread_id)),
+            // The browser's daemon has no video (ADR-0017).
+            cannot_see: Some("Camera images need UXDuck Desktop.".into()),
+            frames_within_budget: None,
         };
         let inputs = uxduck_agent::input::Inputs::default();
         let host = BrowserHost {

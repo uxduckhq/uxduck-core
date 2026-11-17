@@ -456,6 +456,10 @@ impl Provider for AnthropicProvider {
         self.hosted.then_some(super::HOSTED_MAX_REQUEST_BYTES)
     }
 
+    fn max_image_request_bytes(&self) -> Option<usize> {
+        self.hosted.then_some(super::HOSTED_MAX_IMAGE_REQUEST_BYTES)
+    }
+
     fn respond(
         &self,
         request: ProviderRequest,

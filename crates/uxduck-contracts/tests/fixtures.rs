@@ -553,6 +553,9 @@ fn check(name: &str) {
         ("result", "find_start" | "find_vehicles") => {
             round_trip::<uxduck_contracts::dto::find::FindResult>(name, &json);
         }
+        ("result", "video_frame") => {
+            round_trip::<uxduck_contracts::dto::video::VideoFrameResult>(name, &json);
+        }
         ("result", "video_photo") => {
             round_trip::<uxduck_contracts::dto::video::VideoPhoto>(name, &json);
         }

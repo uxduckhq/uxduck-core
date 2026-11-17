@@ -246,6 +246,9 @@ impl Provider for Resilient {
     fn max_request_bytes(&self) -> Option<usize> {
         self.inner.max_request_bytes()
     }
+    fn max_image_request_bytes(&self) -> Option<usize> {
+        self.inner.max_image_request_bytes()
+    }
 
     fn cached_for_ms(&self, model: &str) -> u64 {
         self.inner.cached_for_ms(model)

@@ -54,6 +54,7 @@ mod klv;
 mod launch;
 mod learning;
 pub mod location;
+pub mod looks;
 pub mod markers;
 pub mod mavlink_inspect;
 mod messages;
@@ -855,6 +856,7 @@ impl Engine {
         self.disconnect_places(id);
         self.disconnect_display(id);
         self.abandon_approvals(id);
+        self.stop_looks(id, None);
         self.release_claims_of(id);
         self.drop_video_watches(id);
         self.gimbals_unwatched_by(id);
@@ -1060,7 +1062,13 @@ impl Engine {
 
     /// Serialises and sends one frame to a connection, through the tap.
     fn send(&mut self, id: ConnectionId, frame: &Value) {
-        let text = frame.to_string();
+        self.send_text(id, frame.to_string(), frame);
+    }
+
+    /// Sends `text`, a frame already serialised, through the tap, which
+    /// sees `traced`: the same frame, or one with its bulk left out.
+    fn send_text(&mut self, id: ConnectionId, text: String, traced: &Value) {
+        let frame = traced;
         let mut parsed = trace::classify(frame);
         let latency = match (&parsed.id, self.connections.get_mut(&id)) {
             (Some(request_id), Some(connection))

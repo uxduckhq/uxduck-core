@@ -42,6 +42,26 @@ impl From<dto::SyncContent> for s::SyncContent {
     }
 }
 
+impl From<s::AgentCameras> for dto::AgentCameras {
+    fn from(v: s::AgentCameras) -> Self {
+        match v {
+            s::AgentCameras::Ask => Self::Ask,
+            s::AgentCameras::Always => Self::Always,
+            s::AgentCameras::Never => Self::Never,
+        }
+    }
+}
+
+impl From<dto::AgentCameras> for s::AgentCameras {
+    fn from(v: dto::AgentCameras) -> Self {
+        match v {
+            dto::AgentCameras::Ask => Self::Ask,
+            dto::AgentCameras::Always => Self::Always,
+            dto::AgentCameras::Never => Self::Never,
+        }
+    }
+}
+
 impl From<s::ClosePolicy> for dto::ClosePolicy {
     fn from(v: s::ClosePolicy) -> Self {
         match v {
@@ -169,6 +189,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         video_ports: settings.video_ports.clone(),
         video_recording: settings.video_recording.into(),
         video_reencoder: settings.video_reencoder.into(),
+        agent_cameras: settings.agent_cameras.into(),
         show_in_menu_bar: settings.show_in_menu_bar,
         live_sharing: settings.live_sharing,
         network_address: settings.network_address.clone(),
