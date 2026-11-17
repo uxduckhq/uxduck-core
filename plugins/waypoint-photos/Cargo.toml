@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
-name = "camera-manager"
-description = "Drives a vehicle's camera through the MAVLink camera protocol: photos, video, zoom (ADR-0006)."
+name = "waypoint-photos"
+description = "An automation: a photo at every waypoint a vehicle reaches, taken with UXDuck's own camera command (ADR-0006, ADR-0063 Y12)."
 version = "0.1.0"
 edition = "2024"
 publish = false

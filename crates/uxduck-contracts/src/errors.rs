@@ -39,8 +39,9 @@ pub enum ErrorKind {
     /// Another program holds the port; the message names it when the
     /// platform says. `-32008`.
     PortInUse,
-    /// The command needs `confirm: true` while the vehicle is not online
-    /// (its offline behaviour is `warn`). `-32009`.
+    /// The command needs `confirm: true`: while the vehicle is not online
+    /// (its offline behaviour is `warn`), or before it takes a gimbal from
+    /// whoever has it (S406). `-32009`.
     ConfirmationRequired,
 }
 

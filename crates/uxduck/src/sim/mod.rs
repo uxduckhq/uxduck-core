@@ -7,21 +7,27 @@
 //! pipe closes, so a stopped or killed daemon leaves no process behind.
 //! The data plane then connects to it: ArduPilot over TCP, PX4 over UDP.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
-use uxduck_contracts::dto::link::{SimAutopilot as SimAutopilotDto, SimVehicle as SimVehicleDto};
+use uxduck_contracts::dto::link::{
+    ArdupilotGimbal as ArdupilotGimbalDto, SimAutopilot as SimAutopilotDto,
+    SimVehicle as SimVehicleDto,
+};
 use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult};
-use uxduck_core::domain::link::{JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle};
+use uxduck_core::domain::link::{
+    ArdupilotGimbal, JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle,
+};
 
 #[cfg(debug_assertions)]
 mod cache;
 pub mod catalogue;
+pub mod picture;
 mod profiles;
 
 /// A catalogue build's description, beside its files (S18).
@@ -169,6 +175,12 @@ pub struct Simulators {
     /// Guard roots for local resource measurements, held until their exit is reaped.
     guards: Arc<Mutex<HashSet<u32>>>,
     binaries: Mutex<Vec<SimBinary>>,
+    /// What each build found can simulate of ArduPilot's own gimbals
+    /// (ADR-0063 Y4), kept by the build's size and modified time. Finding
+    /// that out reads the build whole, and `sim/binaries` probes again on
+    /// the engine's thread, so a build is read again only when it has
+    /// changed. The probe at the daemon's start fills this on its own thread.
+    kept_own_gimbals: Mutex<HashMap<PathBuf, KeptOwnGimbals>>,
     /// Set once the builds have been probed; a link reopened as the daemon
     /// starts waits for it.
     probed: std::sync::OnceLock<()>,
@@ -176,6 +188,14 @@ pub struct Simulators {
     /// scan already running, so the older list never lands last.
     scanning: Mutex<()>,
     frame_probe: Mutex<Option<FrameProbe>>,
+}
+
+/// A build's own gimbals as they were last read, and what its file was then.
+#[derive(Debug)]
+struct KeptOwnGimbals {
+    size: u64,
+    modified: SystemTime,
+    gimbals: Vec<ArdupilotGimbalDto>,
 }
 
 #[derive(Debug)]
@@ -193,6 +213,7 @@ impl Simulators {
             active: Arc::default(),
             guards: Arc::default(),
             binaries: Mutex::new(Vec::new()),
+            kept_own_gimbals: Mutex::default(),
             probed: std::sync::OnceLock::new(),
             scanning: Mutex::new(()),
             frame_probe: Mutex::new(None),
@@ -319,6 +340,7 @@ impl Simulators {
     fn probe(&self) {
         let _scanning = self.scanning.lock().unwrap_or_else(PoisonError::into_inner);
         let mut found: Vec<SimBinary> = Vec::new();
+        let mut paths: HashSet<PathBuf> = HashSet::new();
         for (directory, catalogue) in self.directories() {
             let programs = PROGRAMS.iter().map(|(program, _)| *program);
             for program in programs.chain([PX4]) {
@@ -332,16 +354,65 @@ impl Simulators {
                 {
                     continue;
                 }
-                match probe(&path) {
-                    Ok(binary) => found.push(binary),
+                match probe_found(&path, &|path| self.own_gimbals_of(path)) {
+                    Ok(binary) => {
+                        found.push(binary);
+                        paths.insert(path);
+                    }
                     Err(error) => {
                         tracing::warn!(path = %path.display(), %error, "not a SITL build");
                     }
                 }
             }
         }
+        // An answer is kept only while its build is among those found.
+        self.kept_own_gimbals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path, _| paths.contains(path));
         tracing::info!(builds = found.len(), "found SITL builds");
         *self.lock() = found;
+    }
+
+    /// The gimbals of ArduPilot's own that a build found can simulate: its
+    /// kept answer while the build's size and modified time are what they
+    /// were, and read from the build otherwise. The build is opened each
+    /// time, so one that cannot be read says so each time, and a failure is
+    /// never kept.
+    fn own_gimbals_of(&self, path: &Path) -> Result<Vec<ArdupilotGimbalDto>, String> {
+        let cannot_read =
+            |error: std::io::Error| format!("cannot read {}: {error}", path.display());
+        let mut kept = self
+            .kept_own_gimbals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let before = kept.remove(path);
+        let mut file = std::fs::File::open(path).map_err(cannot_read)?;
+        let metadata = file.metadata().map_err(cannot_read)?;
+        // Without a modified time there is nothing to tell a changed build by.
+        let modified = metadata.modified().ok();
+        if let Some(before) = before
+            && before.size == metadata.len()
+            && Some(before.modified) == modified
+        {
+            let gimbals = before.gimbals.clone();
+            kept.insert(path.to_owned(), before);
+            return Ok(gimbals);
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(cannot_read)?;
+        let gimbals = own_gimbals_among(&bytes)?;
+        if let Some(modified) = modified {
+            kept.insert(
+                path.to_owned(),
+                KeptOwnGimbals {
+                    size: metadata.len(),
+                    modified,
+                    gimbals: gimbals.clone(),
+                },
+            );
+        }
+        Ok(gimbals)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<SimBinary>> {
@@ -417,7 +488,11 @@ impl Simulators {
     /// Whether a new simulator link has the build it would start, so a
     /// start without one is refused before its link is added (FB-179): the
     /// same choice as [`Self::launch`]. A build of the user's own must be
-    /// there, and is probed only when it starts.
+    /// there, and is probed only when it starts. A gimbal of ArduPilot's
+    /// own (ADR-0063 Y4) must be one the build can simulate: a build
+    /// without the device would stop as it starts. And it must be on a
+    /// frame whose model runs a simulated device: on the others the
+    /// autopilot would wait for a mount that never answers.
     ///
     /// # Errors
     /// What is missing and how to get it.
@@ -427,20 +502,35 @@ impl Simulators {
             autopilot,
             ref frame,
             ref binary,
+            ardupilot_gimbal,
             ..
         } = *kind
         else {
             return Ok(());
         };
-        match binary {
-            Some(path) if Path::new(path).is_file() => Ok(()),
-            Some(path) => Err(format!(
-                "There is no simulator build at {path}. Choose another build."
-            )),
-            None => self
-                .installed_build(autopilot, vehicle, frame.as_deref())
-                .map(drop),
+        if let (Some(_), Some(frame)) = (ardupilot_gimbal, frame.as_deref())
+            && !profiles::runs_own_gimbals(frame)?
+        {
+            return Err(format!(
+                "ArduPilot's own simulated gimbals do not run on its {frame} frame. Choose another frame, or start without that gimbal."
+            ));
         }
+        let simulated = match binary {
+            Some(path) if Path::new(path).is_file() => match ardupilot_gimbal {
+                Some(_) => own_gimbals_in(Path::new(path))?,
+                None => return Ok(()),
+            },
+            Some(path) => {
+                return Err(format!(
+                    "There is no simulator build at {path}. Choose another build."
+                ));
+            }
+            None => {
+                self.installed_build(autopilot, vehicle, frame.as_deref())?
+                    .ardupilot_gimbals
+            }
+        };
+        ardupilot_gimbal.map_or(Ok(()), |model| require_own_gimbal(&simulated, model))
     }
 
     /// The first installed build of the autopilot that flies the vehicle,
@@ -480,6 +570,10 @@ impl Simulators {
             allow_network,
             wipe,
             traffic,
+            camera,
+            gimbal,
+            ardupilot_gimbal,
+            payload_profile,
             instance,
             // The take-off is the engine's, over MAVLink (S33).
             in_air_m: _,
@@ -514,6 +608,7 @@ impl Simulators {
         if !build.frames.contains(&frame) && !frame.contains(':') && launcher.is_none() {
             return Err(format!("{} has no frame {frame}", build.program));
         }
+        let devices = device_ports(traffic, &build.ardupilot_gimbals, ardupilot_gimbal)?;
         // A model file of the user's own is whatever it is. A jet is
         // ArduPlane's jet frame, which flies as a plane (S143).
         let flies_as = if wanted == SimVehicleDto::Jet {
@@ -542,26 +637,31 @@ impl Simulators {
             format!("--home={latitude_deg},{longitude_deg},{altitude_m},{heading_deg}"),
             format!("--speedup={}", speedup.unwrap_or(1)),
             format!("--instance={instance}"),
-            format!("--sysid={}", instance + 1),
+            format!("--sysid={}", system_id(instance)),
             // SITL waits for the daemon's connection, so start-up is the
             // same every time; the other ports would listen for nobody.
             "--serial0=tcp:0:wait".into(),
-            // ArduPilot's simulated ADS-B receiver when the simulation asks
-            // for traffic (ADR-0034; the profile's `traffic` sets the vehicle
-            // up for it).
-            if traffic {
-                "--serial1=sim:adsb"
-            } else {
-                "--serial1=none"
-            }
-            .into(),
-            "--serial2=none".into(),
         ]);
+        args.extend(devices);
         if wipe {
             args.push("--wipe".into());
         }
-        let defaults =
-            profiles::with_defaults(&directory, &build.program, &frame, defaults, traffic)?;
+        // The camera's and the gimbal's set-up go in with the payload the
+        // daemon attaches to this link, never without it (ADR-0063 Y3). A
+        // gimbal of ArduPilot's own goes in with its simulated device.
+        let defaults = profiles::with_defaults(
+            &directory,
+            &build.program,
+            &frame,
+            defaults,
+            profiles::Extras {
+                traffic,
+                camera,
+                gimbal,
+                ardupilot_gimbal,
+                payload_profile,
+            },
+        )?;
         if let Some(defaults) = defaults {
             args.push(format!("--defaults={defaults}"));
         }
@@ -587,6 +687,7 @@ impl Simulators {
             altitude_m,
             speedup,
             wipe,
+            gimbal,
             ..
         } = link.kind
         else {
@@ -629,11 +730,105 @@ impl Simulators {
         if let Some(speedup) = speedup.filter(|s| *s > 1) {
             env.push(("PX4_SIM_SPEED_FACTOR".into(), speedup.to_string()));
         }
+        // The simulated gimbal's set-up (ADR-0063 Y3, S413): PX4 takes a
+        // MAVLink gimbal manager's messages (`MNT_MODE_IN` 4) and drives a
+        // MAVLink gimbal device (`MNT_MODE_OUT` 2), which it then looks
+        // for on its links, the daemon's among them. Its start-up script
+        // sets a parameter from each `PX4_PARAM_` variable and starts the
+        // gimbal's module when the first is set, so both go in as it
+        // starts, with the payload the daemon attaches to this link and
+        // never without it. PX4 keeps them in the link's directory, where
+        // only a link that carries the gimbal ever runs.
+        if gimbal {
+            env.push(("PX4_PARAM_MNT_MODE_IN".into(), "4".to_owned()));
+            env.push(("PX4_PARAM_MNT_MODE_OUT".into(), "2".to_owned()));
+        }
         let running = Running::start(program, &args, &directory, &env)?;
         let port = PX4_GCS_PORT + u16::from(instance);
         tracing::info!(link = %link.id, program = PX4, %frame, port, "started a simulated vehicle");
         Ok((running, Endpoint::Udp(port)))
     }
+}
+
+/// What a gimbal of ArduPilot's own is called in what a person reads.
+fn own_gimbal_name(model: ArdupilotGimbalDto) -> &'static str {
+    match model {
+        ArdupilotGimbalDto::Viewpro => "Viewpro",
+        ArdupilotGimbalDto::AvtCm62 => "AVT CM62",
+    }
+}
+
+/// The gimbals of ArduPilot's own that a build can simulate (ADR-0063 Y4).
+/// ArduPilot's simulator finds a simulated device by its name, which the
+/// build holds as text, and has no option that lists the devices it has.
+/// So the build's file is read for each name, whole, between two NUL bytes.
+/// Nothing is run.
+///
+/// # Errors
+/// When the build's file cannot be read.
+fn own_gimbals_in(path: &Path) -> Result<Vec<ArdupilotGimbalDto>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    own_gimbals_among(&bytes)
+}
+
+/// [`own_gimbals_in`], of a build's bytes.
+fn own_gimbals_among(bytes: &[u8]) -> Result<Vec<ArdupilotGimbalDto>, String> {
+    let mut found = Vec::new();
+    for model in [ArdupilotGimbal::Viewpro, ArdupilotGimbal::AvtCm62] {
+        let device = profiles::own_gimbal_device(model)?;
+        if bytes
+            .split(|byte| *byte == 0)
+            .any(|text| text == device.as_bytes())
+        {
+            found.push(model.into());
+        }
+    }
+    Ok(found)
+}
+
+/// What the autopilot's serial ports 1 and 2 carry. Port 1 has ArduPilot's
+/// simulated ADS-B receiver when the simulation asks for traffic (ADR-0034;
+/// the profile's `traffic` sets the vehicle up for it). Port 2 has a gimbal
+/// of ArduPilot's own as a simulated device (ADR-0063 Y4). A build without
+/// that device would stop on the unknown name, so it is refused here with
+/// the reason.
+fn device_ports(
+    traffic: bool,
+    simulated: &[ArdupilotGimbalDto],
+    own_gimbal: Option<ArdupilotGimbal>,
+) -> Result<[String; 2], String> {
+    let gimbal = match own_gimbal {
+        Some(model) => {
+            require_own_gimbal(simulated, model)?;
+            format!("sim:{}", profiles::own_gimbal_device(model)?)
+        }
+        None => "none".to_owned(),
+    };
+    Ok([
+        format!("--serial1={}", if traffic { "sim:adsb" } else { "none" }),
+        format!("--serial{}={gimbal}", profiles::OWN_GIMBAL_SERIAL),
+    ])
+}
+
+/// Refuses a gimbal of ArduPilot's own that the build cannot simulate.
+fn require_own_gimbal(
+    simulated: &[ArdupilotGimbalDto],
+    model: ArdupilotGimbal,
+) -> Result<(), String> {
+    let model: ArdupilotGimbalDto = model.into();
+    if simulated.contains(&model) {
+        return Ok(());
+    }
+    Err(format!(
+        "This simulator build cannot simulate ArduPilot's {} gimbal. Choose a newer ArduPilot build, or start without that gimbal.",
+        own_gimbal_name(model)
+    ))
+}
+
+/// The MAVLink system id a simulated ArduPilot vehicle is started with, and
+/// so its simulated camera's and gimbal's (ADR-0063 Y2).
+pub(crate) fn system_id(instance: u8) -> u8 {
+    instance + 1
 }
 
 /// The path PX4 runs in. Its start-up scripts use their root unquoted
@@ -813,6 +1008,15 @@ fn find_program(directory: &Path, program: &str) -> Option<PathBuf> {
 /// # Errors
 /// When it does not run, or does not answer as SITL does.
 pub fn probe(path: &Path) -> Result<SimBinary, String> {
+    probe_found(path, &own_gimbals_in)
+}
+
+/// What says which of ArduPilot's own gimbals a build can simulate.
+type OwnGimbalsOf<'a> = &'a dyn Fn(&Path) -> Result<Vec<ArdupilotGimbalDto>, String>;
+
+/// [`probe`], with the build's own gimbals from `own_gimbals`: the daemon's
+/// scan keeps them from one scan to the next, where [`probe`] reads the build.
+fn probe_found(path: &Path, own_gimbals: OwnGimbalsOf) -> Result<SimBinary, String> {
     let name = path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -832,7 +1036,7 @@ pub fn probe(path: &Path) -> Result<SimBinary, String> {
                 path.display()
             )
         })?;
-    probe_ardupilot(path, program, vehicles, None)
+    probe_ardupilot(path, program, vehicles, None, own_gimbals)
 }
 
 /// A directly supplied executable need not be named like a catalogue build
@@ -873,7 +1077,13 @@ fn probe_own(
         SimVehicle::Submarine => "vectored",
         SimVehicle::Airship => "blimp",
     };
-    probe_ardupilot(path, program, vehicles, Some(frame.unwrap_or(usual)))
+    probe_ardupilot(
+        path,
+        program,
+        vehicles,
+        Some(frame.unwrap_or(usual)),
+        &own_gimbals_in,
+    )
 }
 
 fn probe_ardupilot(
@@ -881,6 +1091,7 @@ fn probe_ardupilot(
     program: &str,
     vehicles: Vec<SimVehicleDto>,
     own_frame: Option<&str>,
+    own_gimbals: OwnGimbalsOf,
 ) -> Result<SimBinary, String> {
     let text = describe(path, "--list-models")?;
     let folder = path.parent().unwrap_or(Path::new("."));
@@ -925,6 +1136,7 @@ fn probe_ardupilot(
         default_frame,
         version: build.as_ref().map(|b| b.version.clone()),
         catalogue_id: build.map(|b| b.id),
+        ardupilot_gimbals: own_gimbals(path)?,
     })
 }
 
@@ -1178,6 +1390,7 @@ fn probe_px4(path: &Path) -> Result<SimBinary, String> {
         default_frame,
         version,
         catalogue_id: build.map(|b| b.id),
+        ardupilot_gimbals: Vec::new(),
     })
 }
 
@@ -1962,6 +2175,246 @@ mod tests {
         );
     }
 
+    /// ADR-0063 Y4: what a build can simulate is read from its file, where
+    /// each device's name stands whole, and nothing is run.
+    #[test]
+    fn a_builds_own_gimbals_are_the_device_names_its_file_holds_whole() {
+        use ArdupilotGimbalDto::{AvtCm62, Viewpro};
+        let folder = tempfile::tempdir().unwrap();
+        let build = folder.path().join("arducopter");
+        std::fs::write(&build, b"\x7fELF\0vicon\0gps\0").unwrap();
+        assert_eq!(own_gimbals_in(&build), Ok(vec![]));
+        // A name inside a longer one is another device's.
+        std::fs::write(&build, b"\0viewpro_old\0my_avt_cm62_gimbal\0Viewpro\0").unwrap();
+        assert_eq!(own_gimbals_in(&build), Ok(vec![]));
+        std::fs::write(&build, b"\x7fELF\0gps\0viewpro\0vicon\0").unwrap();
+        assert_eq!(own_gimbals_in(&build), Ok(vec![Viewpro]));
+        std::fs::write(&build, b"\0avt_cm62_gimbal\0viewpro\0").unwrap();
+        assert_eq!(own_gimbals_in(&build), Ok(vec![Viewpro, AvtCm62]));
+        assert!(
+            own_gimbals_in(&folder.path().join("missing"))
+                .unwrap_err()
+                .contains("cannot read")
+        );
+
+        assert_eq!(
+            require_own_gimbal(&[Viewpro], ArdupilotGimbal::Viewpro),
+            Ok(())
+        );
+        assert_eq!(
+            require_own_gimbal(&[Viewpro], ArdupilotGimbal::AvtCm62),
+            Err("This simulator build cannot simulate ArduPilot's AVT CM62 gimbal. Choose a newer ArduPilot build, or start without that gimbal.".into())
+        );
+        assert_eq!(
+            require_own_gimbal(&[], ArdupilotGimbal::Viewpro),
+            Err("This simulator build cannot simulate ArduPilot's Viewpro gimbal. Choose a newer ArduPilot build, or start without that gimbal.".into())
+        );
+    }
+
+    /// `sim/binaries` probes the builds again on the engine's thread, so
+    /// what a build can simulate is kept by its size and modified time, and
+    /// the build is read again only when one of them has changed. From
+    /// outside, a read shows only in its answer. So the file is written
+    /// again at the same size and its time put back: an answer that still
+    /// names the gimbal was not read from the file.
+    #[test]
+    fn a_builds_own_gimbals_are_read_again_only_when_the_build_has_changed() {
+        use ArdupilotGimbalDto::{AvtCm62, Viewpro};
+        let dir = tempfile::tempdir().expect("data directory");
+        let simulators = Simulators::new(dir.path());
+        let build = dir.path().join("arducopter");
+        let set_modified = |time: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&build)
+                .and_then(|file| file.set_modified(time))
+                .expect("modified time");
+        };
+        std::fs::write(&build, b"\x7fELF\0viewpro\0").unwrap();
+        let first = std::fs::metadata(&build).unwrap().modified().unwrap();
+        assert_eq!(simulators.own_gimbals_of(&build), Ok(vec![Viewpro]));
+
+        // The same size and time: the build is not read.
+        std::fs::write(&build, b"\x7fELF\0viewprx\0").unwrap();
+        set_modified(first);
+        assert_eq!(simulators.own_gimbals_of(&build), Ok(vec![Viewpro]));
+
+        // Another time at the same size: it is read again.
+        let later = first + Duration::from_secs(60);
+        set_modified(later);
+        assert_eq!(simulators.own_gimbals_of(&build), Ok(vec![]));
+
+        // Another size at the same time: it is read again.
+        std::fs::write(&build, b"\x7fELF\0avt_cm62_gimbal\0").unwrap();
+        set_modified(later);
+        assert_eq!(simulators.own_gimbals_of(&build), Ok(vec![AvtCm62]));
+    }
+
+    /// A build that cannot be read says so each time it is asked for. Its
+    /// failure is not kept, and neither is the answer of a build that has
+    /// gone since.
+    #[test]
+    fn a_build_that_cannot_be_read_says_so_each_time() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let simulators = Simulators::new(dir.path());
+        let build = dir.path().join("arducopter");
+        let unread = || {
+            let error = simulators.own_gimbals_of(&build).unwrap_err();
+            assert!(error.starts_with("cannot read "), "{error}");
+        };
+        unread();
+        unread();
+        std::fs::write(&build, b"\0viewpro\0").unwrap();
+        assert_eq!(
+            simulators.own_gimbals_of(&build),
+            Ok(vec![ArdupilotGimbalDto::Viewpro])
+        );
+        std::fs::remove_file(&build).unwrap();
+        unread();
+        unread();
+    }
+
+    /// The scan fills the kept answers, one for each ArduPilot build it
+    /// finds, and a build that is no longer found takes its answer with it.
+    #[cfg(unix)]
+    #[test]
+    fn the_scan_keeps_own_gimbals_for_the_builds_it_finds_and_no_others() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let bin = dir.path().join("simulators/bin");
+        std::fs::create_dir_all(&bin).expect("build directory");
+        let put = |program: &str| {
+            let path = bin.join(program);
+            let table = serde_json::json!({
+                "vehicle": {
+                    "default_frame": "test",
+                    "frames": { "test": { "waf_target": format!("bin/{program}") } }
+                }
+            });
+            std::fs::write(description_fixture(&path), table.to_string()).expect("frame table");
+            path
+        };
+        let copter = put("arducopter");
+        let plane = put("arduplane");
+        let simulators = Simulators::new(dir.path());
+        let kept = || {
+            let mut paths: Vec<PathBuf> = simulators
+                .kept_own_gimbals
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            paths.sort();
+            paths
+        };
+        // A development build also finds the checkout's cached builds.
+        let found = || {
+            let mut paths: Vec<PathBuf> = simulators
+                .refresh_binaries()
+                .iter()
+                .filter(|build| build.autopilot == SimAutopilotDto::Ardupilot)
+                .map(|build| PathBuf::from(&build.path))
+                .collect();
+            paths.sort();
+            paths
+        };
+        for _ in 0..2 {
+            let builds = found();
+            assert!(builds.contains(&copter) && builds.contains(&plane));
+            assert_eq!(kept(), builds);
+        }
+        std::fs::remove_file(&plane).expect("remove test build");
+        let builds = found();
+        assert!(builds.contains(&copter) && !builds.contains(&plane));
+        assert_eq!(kept(), builds);
+    }
+
+    /// A start with a gimbal the chosen build cannot simulate is refused
+    /// before a link is made, for a build of the person's own and for an
+    /// installed one. A start without one asks nothing of the build.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_with_a_gimbal_its_build_cannot_simulate_is_refused() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let kind = |binary: Option<&Path>, ardupilot_gimbal| LinkKind::Simulator {
+            vehicle: SimVehicle::Multicopter,
+            autopilot: SimAutopilot::Ardupilot,
+            instance: Some(0),
+            latitude_deg: -35.36,
+            longitude_deg: 149.16,
+            altitude_m: 584.0,
+            heading_deg: 0.0,
+            frame: None,
+            speedup: None,
+            in_air_m: None,
+            snapshot_id: None,
+            binary: binary.map(|path| path.display().to_string()),
+            allow_network: false,
+            wipe: false,
+            with_mission: false,
+            traffic: false,
+            camera: false,
+            gimbal: false,
+            ardupilot_gimbal,
+            payload_profile: None,
+        };
+        let simulators = Simulators::new(dir.path());
+
+        // A build of the person's own.
+        let own = dir.path().join("my-build");
+        std::fs::write(&own, b"\x7fELF\0viewpro\0").unwrap();
+        assert_eq!(simulators.check_build(&kind(Some(&own), None)), Ok(()));
+        assert_eq!(
+            simulators.check_build(&kind(Some(&own), Some(ArdupilotGimbal::Viewpro))),
+            Ok(())
+        );
+        let refused = simulators
+            .check_build(&kind(Some(&own), Some(ArdupilotGimbal::AvtCm62)))
+            .unwrap_err();
+        assert!(
+            refused
+                .starts_with("This simulator build cannot simulate ArduPilot's AVT CM62 gimbal."),
+            "{refused}"
+        );
+        // A frame whose model runs no simulated device, whatever the build.
+        let mut single_rotor = kind(Some(&own), Some(ArdupilotGimbal::Viewpro));
+        if let LinkKind::Simulator { frame, .. } = &mut single_rotor {
+            *frame = Some("singlecopter".into());
+        }
+        assert_eq!(
+            simulators.check_build(&single_rotor),
+            Err("ArduPilot's own simulated gimbals do not run on its singlecopter frame. Choose another frame, or start without that gimbal.".into())
+        );
+
+        // An installed build that holds neither device's name.
+        let bin = dir.path().join("simulators/bin");
+        std::fs::create_dir_all(&bin).expect("build directory");
+        let path = bin.join("arducopter");
+        let table = serde_json::json!({
+            "vehicle": {
+                "default_frame": "test",
+                "frames": { "test": { "waf_target": "bin/arducopter" } }
+            }
+        });
+        std::fs::write(description_fixture(&path), table.to_string()).expect("frame table");
+        let installed = simulators.refresh_binaries();
+        assert!(
+            installed
+                .iter()
+                .any(|build| build.path == path.display().to_string()
+                    && build.ardupilot_gimbals.is_empty()),
+            "{installed:?}"
+        );
+        assert_eq!(simulators.check_build(&kind(None, None)), Ok(()));
+        let refused = simulators
+            .check_build(&kind(None, Some(ArdupilotGimbal::Viewpro)))
+            .unwrap_err();
+        assert!(
+            refused.starts_with("This simulator build cannot simulate ArduPilot's Viewpro gimbal."),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn outdated_simulators_cannot_silently_launch_with_network_access() {
         let error = require_local_only("--serial0 device --model model").unwrap_err();
@@ -2182,6 +2635,7 @@ mod tests {
             default_frame: "quadx".into(),
             version: None,
             catalogue_id: None,
+            ardupilot_gimbals: Vec::new(),
         };
         assert_eq!(default_frame(SimVehicle::Multicopter, &build), "quadx");
         assert_eq!(default_frame(SimVehicle::Plane, &build), "airplane");
@@ -2205,6 +2659,7 @@ mod tests {
             default_frame: "plane".into(),
             version: None,
             catalogue_id: None,
+            ardupilot_gimbals: Vec::new(),
         };
         assert_eq!(default_frame(SimVehicle::Jet, &plane), "plane-jet");
         assert_eq!(default_frame(SimVehicle::Plane, &plane), "plane");
@@ -2230,6 +2685,7 @@ mod tests {
             default_frame: "plane".into(),
             version: None,
             catalogue_id: None,
+            ardupilot_gimbals: Vec::new(),
         };
         assert_eq!(launcher_base(&plane, "plane-catapult"), Some("plane"));
         assert_eq!(

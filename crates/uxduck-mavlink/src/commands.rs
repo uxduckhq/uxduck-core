@@ -144,6 +144,12 @@ pub fn encode_listed(
             )),
             Command::SetHome { place: Some(place) } => amsl_place(MAV_CMD_DO_SET_HOME, place),
             Command::SetEkfOrigin { place } => amsl_place(MAV_CMD_DO_SET_GLOBAL_ORIGIN, place),
+            // A place to look at (S406).
+            Command::Gimbal {
+                device_id,
+                action: action @ uxduck_core::domain::gimbal::GimbalAction::LookAt { .. },
+                ..
+            } => crate::gimbal::encode(action, device_id.unwrap_or(0)),
             _ => Err(first),
         })
 }
@@ -425,6 +431,23 @@ fn encode_long(
         Command::GoTo { .. } | Command::SetHome { .. } | Command::SetEkfOrigin { .. } => {
             Err("a place goes as a COMMAND_INT".into())
         }
+        // A camera's (S405). The session puts in its target component and
+        // one photo's sequence number.
+        Command::Camera {
+            device_id, action, ..
+        } => match action.invalid() {
+            Some(why) => Err(why.into()),
+            None => crate::camera_control::encode(action, device_id.unwrap_or(0), 0)
+                .ok_or_else(|| "a camera's setting goes as an extended parameter".into()),
+        },
+        // A gimbal's (S406). The session puts in its manager's component,
+        // and the angles it has now where only its yaw's frame changes.
+        Command::Gimbal {
+            device_id, action, ..
+        } => match crate::gimbal::encode(action, device_id.unwrap_or(0))? {
+            (command, Wire::Long(params)) => Ok((command, params)),
+            (_, Wire::Int { .. }) => Err("a place goes as a COMMAND_INT".into()),
+        },
         Command::Long { command, params } => {
             if params.len() > 7 || !params.iter().all(|p| p.is_finite()) {
                 return Err("a command has at most seven numeric parameters".into());

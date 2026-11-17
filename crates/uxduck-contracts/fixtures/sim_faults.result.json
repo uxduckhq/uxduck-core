@@ -1,0 +1,46 @@
+{
+  "faults": [
+    {
+      "kind": "camera-silent",
+      "on": false
+    },
+    {
+      "kind": "gimbal-silent",
+      "on": false
+    },
+    {
+      "kind": "card-full",
+      "on": true
+    },
+    {
+      "kind": "command-refused",
+      "on": true,
+      "command": 2000
+    },
+    {
+      "kind": "command-in-progress",
+      "on": false
+    },
+    {
+      "kind": "gimbal-error",
+      "on": false
+    },
+    {
+      "kind": "autopilot-holds",
+      "on": false,
+      "unavailable": "ArduPilot manages this gimbal and says who holds it. Only a camera and gimbal in one, which manages its own, can say the autopilot holds it."
+    }
+  ],
+  "commands": [
+    {
+      "command": 2000,
+      "label": "Take a photo",
+      "name": "MAV_CMD_IMAGE_START_CAPTURE"
+    },
+    {
+      "command": 2500,
+      "label": "Start recording",
+      "name": "MAV_CMD_VIDEO_START_CAPTURE"
+    }
+  ]
+}

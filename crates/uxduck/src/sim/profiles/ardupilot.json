@@ -9,10 +9,44 @@
     "SIM_ADSB_COUNT": 5,
     "SIM_ADSB_RADIUS": 3000
   },
+  "camera": {
+    "CAM1_TYPE": 6
+  },
+  "gimbal": {
+    "MNT1_TYPE": 6
+  },
+  "ardupilotGimbals": {
+    "viewpro": {
+      "device": "viewpro",
+      "parameters": {
+        "CAM1_TYPE": 4,
+        "MNT1_TYPE": 11,
+        "SERIAL2_PROTOCOL": 8
+      }
+    },
+    "avt-cm62": {
+      "device": "avt_cm62_gimbal",
+      "mavlink": true,
+      "parameters": {
+        "CAM1_TYPE": 6,
+        "MNT1_TYPE": 6,
+        "SERIAL2_PROTOCOL": 2
+      }
+    }
+  },
+  "ardupilotGimbalsNotOn": [
+    "balancebot",
+    "calibration",
+    "coaxcopter",
+    "motorboat",
+    "sailboat",
+    "singlecopter"
+  ],
   "programs": {
     "arducopter": { "frames": {} },
     "arducopter-heli": { "frames": {} },
     "arduplane": {
+      "gimbal": { "SCHED_LOOP_RATE": 100 },
       "frames": {
         "plane-catapult": { "TKOFF_THR_MINACC": 3 },
         "plane-bungee": { "TKOFF_THR_MINACC": 3 },
@@ -66,6 +100,7 @@
       }
     },
     "ardurover": {
+      "gimbal": { "SCHED_LOOP_RATE": 100 },
       "frames": {
         "rover": {
           "MANUAL_STR_EXPO": 0.35,

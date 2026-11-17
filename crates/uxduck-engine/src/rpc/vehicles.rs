@@ -497,6 +497,7 @@ fn create_link_inner(
         launch: None,
         paused: false,
         scenery_hit: None,
+        faults: Vec::new(),
         created_at_us: engine.clock.now_us(),
         version: 1,
     };

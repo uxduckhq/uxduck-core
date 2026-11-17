@@ -221,6 +221,17 @@ pub fn start_transfer(session: &mut Session, order: TransferOrder, now_us: u64) 
             lat,
             lon,
         } => session.terrain_check(&vehicle_id, lat, lon, now_us),
+        TransferOrder::CameraDefinition {
+            vehicle_id,
+            component_id,
+            from,
+            path,
+        } => session.camera_definition(&vehicle_id, component_id, from, &path, now_us),
+        TransferOrder::CameraSettings {
+            vehicle_id,
+            component_id,
+            names,
+        } => session.camera_settings(&vehicle_id, component_id, names, now_us),
     }
 }
 
@@ -341,6 +352,45 @@ fn transfer_report(effect: Effect) -> Option<Report> {
         } => Box::new(move |e| {
             e.video_stream_announced(&vehicle_id, component_id, stream_id, &uri);
         }),
+        Effect::Camera(seen) => Box::new(move |e| e.camera_observed(*seen)),
+        Effect::CameraRemoved {
+            vehicle_id,
+            component_id,
+            device_id,
+        } => Box::new(move |e| e.camera_removed(&vehicle_id, component_id, device_id)),
+        Effect::Gimbal(seen) => Box::new(move |e| e.gimbal_observed(&seen)),
+        Effect::GimbalRemoved {
+            vehicle_id,
+            component_id,
+            device_id,
+        } => Box::new(move |e| e.gimbal_removed(&vehicle_id, component_id, device_id)),
+        Effect::CameraState {
+            vehicle_id,
+            component_id,
+            device_id,
+            state,
+        } => Box::new(move |e| e.camera_state(&vehicle_id, component_id, device_id, &state)),
+        Effect::CameraImage {
+            vehicle_id,
+            component_id,
+            device_id,
+            image,
+        } => Box::new(move |e| e.camera_image(&vehicle_id, component_id, device_id, *image)),
+        Effect::CommandProgress {
+            receipt_id,
+            progress,
+        } => Box::new(move |e| e.command_progress(&receipt_id, progress)),
+        Effect::CameraDefinition {
+            vehicle_id,
+            component_id,
+            result,
+        } => Box::new(move |e| e.camera_definition_read(&vehicle_id, component_id, result)),
+        Effect::CameraSettings {
+            vehicle_id,
+            component_id,
+            values,
+            read,
+        } => Box::new(move |e| e.camera_settings_said(&vehicle_id, component_id, values, read)),
         Effect::File { event, .. } => {
             let report = file_report(event)?;
             Box::new(move |e| e.file_reported(report))

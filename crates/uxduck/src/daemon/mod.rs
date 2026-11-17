@@ -184,7 +184,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     // A new data directory is a new install (ADR-0016 O6).
     let fresh = !data_dir.join("uxduck.db").exists();
     let (store, loaded, tray) = open_store_with_tray(&options).await?;
-    let engine = start_engine(&options, &ui_url, port, &store, loaded);
+    let (engine, input_end) = start_engine(&options, &ui_url, port, &store, loaded);
     start_analytics(&engine, &options, fresh).await;
     // Photos and recordings live in the app folder's `media` (S150):
     // recordings kept elsewhere before move there before anything reads them.
@@ -200,6 +200,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     // Photos and recordings, together in `media`: the Video storage
     // category (ADR-0007, S150).
     let video = crate::video::start(options.video_port, &engine, media).await;
+    // Simulated cameras' pictures (ADR-0063 Y7): who draws each, and why
+    // none does.
+    crate::sim::picture::socket::start(engine.clone());
     // Copies of vehicles' files (S121): the Vehicle files category.
     let vehicle_files = crate::vehicle_files::Store::new(data_dir);
     let port_files = vehicle_files.clone();
@@ -277,6 +280,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     watch(&engine, options.headless);
     let stop = run_until_stopped(&engine, &options, parent_closed).await;
     tracing::info!("shutting down");
+    // Input is read no more: a gimbal a controller was turning stops (S407).
+    input_end.stop().await;
     // A final checkpoint, so the next start replays nothing (ADR-0007).
     let _ = engine.checkpoint().await;
     store.close();
@@ -439,7 +444,7 @@ async fn take_lock(lock: &std::fs::File) -> bool {
 /// The engine with its ports, in its task, and the agent host beside it.
 #[allow(
     clippy::too_many_lines,
-    reason = "one port after another, in the order they start"
+    reason = "one port after another, in the order they start, and the workers that answer the host"
 )]
 fn start_engine(
     options: &DaemonOptions,
@@ -447,7 +452,7 @@ fn start_engine(
     port: u16,
     store: &store::Store,
     loaded: uxduck_engine::Loaded,
-) -> EngineHandle {
+) -> (EngineHandle, data_plane::InputEnd) {
     let data_dir = &options.data_dir;
     let credentials = FileCredentials::new(data_dir);
     let (agent_channel, agent_inbox) = agent::channel();
@@ -474,6 +479,7 @@ fn start_engine(
     let (plugin_port, plugin_feed): (Box<dyn uxduck_engine::runtime::PluginPort>, _) =
         (Box::new(uxduck_engine::runtime::NoPlugins), None);
     let (replay_work, replay_works) = tokio::sync::mpsc::unbounded_channel();
+    let (camera_definition, camera_definitions) = tokio::sync::mpsc::unbounded_channel();
     let (offload, offloads) = tokio::sync::mpsc::unbounded_channel();
     let engine = Engine::new(
         EngineConfig {
@@ -512,6 +518,7 @@ fn start_engine(
                 catalogue,
                 crate::desktop_app::DesktopApp::new(data_dir, tokio::runtime::Handle::current()),
                 replay_work,
+                camera_definition,
                 offload,
             )),
             plugins: plugin_port,
@@ -520,6 +527,10 @@ fn start_engine(
     );
     let engine = EngineHandle::spawn(engine);
     tokio::spawn(crate::replay::work(replay_works, engine.clone()));
+    tokio::spawn(crate::camera_definitions::work(
+        camera_definitions,
+        engine.clone(),
+    ));
     let places_dir = options.data_dir.clone();
     tokio::spawn(crate::flight_file::work(
         offloads,
@@ -540,6 +551,7 @@ fn start_engine(
         host.start(engine.clone());
     }
     let inputs = data_plane::inputs(&link_inbox);
+    let input_end = data_plane::input_end(&link_inbox);
     if let Some(port) = options.controllers.fake
         && let Err(error) = controllers::fake(port, inputs.clone())
     {
@@ -567,7 +579,7 @@ fn start_engine(
         credentials,
         &options.data_dir,
     );
-    engine
+    (engine, input_end)
 }
 
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -837,6 +849,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.drive_launches();
                 // Plans flown in simulation (S293).
                 e.drive_plan_runs();
+                // Gimbals the mission has, and ones to give back (S406).
+                e.review_gimbals(now);
             })
             .await
             .is_err()

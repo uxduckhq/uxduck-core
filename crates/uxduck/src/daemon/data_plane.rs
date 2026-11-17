@@ -4,7 +4,7 @@
 //! are decoded, checked for loops before anything else sees them, and
 //! forwarded without being changed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -15,11 +15,14 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use uxduck_contracts::dto::inspect::InspectDirection;
-use uxduck_core::domain::link::{Link, LinkCarries, LinkKind, LinkPolicy, LinkStatus};
+use uxduck_core::domain::link::{
+    Link, LinkCarries, LinkKind, LinkPolicy, LinkStatus, SimFaultKind,
+};
 use uxduck_engine::plane as glue;
 use uxduck_engine::runtime::{Clock, ControlRoute, LinkPort, TransferOrder};
 use uxduck_mavlink::framing::{Reassembler, header, split};
 use uxduck_mavlink::links::{self, LinkEvent, LinkHandle, Outgoing};
+use uxduck_mavlink::payload::{Faults, OnLink};
 use uxduck_mavlink::router::{LoopConfig, Role, Routed, Router};
 use uxduck_mavlink::session::{Config, Effect, Session};
 
@@ -47,6 +50,16 @@ enum Command {
     UseConnection(String, String),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
+    /// The faults that are on in a simulation's camera and gimbal
+    /// (`sim/fault`): all of them.
+    Faults(String, Vec<uxduck_core::domain::link::SimFault>),
+    /// Whether someone looks at where a vehicle's gimbals point (S406).
+    WatchGimbals(String, bool),
+    /// The gimbal a controller's inputs may turn, or none any more (S407).
+    SteerGimbal(String, Option<uxduck_engine::runtime::GimbalRoute>),
+    /// The daemon is stopping and reads input no more: what a controller
+    /// was turning is told to stop first. Answers whether anything was.
+    EndInput(tokio::sync::oneshot::Sender<bool>),
     /// A link's host looked up off this task; `lookup` says it is the
     /// link's latest open.
     Resolved {
@@ -118,6 +131,25 @@ impl LinkPort for LinkChannel {
     fn pause_simulation(&mut self, link_id: &str, paused: bool) {
         let _ = self.0.send(Command::Pause(link_id.to_owned(), paused));
     }
+    fn simulation_faults(&mut self, link_id: &str, faults: &[uxduck_core::domain::link::SimFault]) {
+        let _ = self
+            .0
+            .send(Command::Faults(link_id.to_owned(), faults.to_vec()));
+    }
+    fn watch_gimbals(&mut self, vehicle_id: &str, watched: bool) {
+        let _ = self
+            .0
+            .send(Command::WatchGimbals(vehicle_id.to_owned(), watched));
+    }
+    fn steer_gimbal(
+        &mut self,
+        controller_id: &str,
+        gimbal: Option<uxduck_engine::runtime::GimbalRoute>,
+    ) {
+        let _ = self
+            .0
+            .send(Command::SteerGimbal(controller_id.to_owned(), gimbal));
+    }
 }
 
 /// One frame a plugin wants, raw or to decode, as the vehicle sent it.
@@ -153,6 +185,34 @@ pub fn inputs(inbox: &LinkInbox) -> impl Fn(InputEvent) + Send + Clone + 'static
     move |event| {
         let _ = sender.send(Command::Input(event));
     }
+}
+
+/// Tells the data plane that the daemon is stopping, so input is read no
+/// more (S407).
+#[derive(Clone, Debug)]
+pub struct InputEnd(mpsc::UnboundedSender<Command>);
+
+impl InputEnd {
+    /// A gimbal a controller was turning is told to stop while its link
+    /// still takes it: left alone it would keep the last rate it was sent.
+    /// Waits only when there was one, for the stop to be said three times.
+    pub async fn stop(&self) {
+        let (told, answer) = tokio::sync::oneshot::channel();
+        if self.0.send(Command::EndInput(told)).is_err() {
+            return;
+        }
+        if matches!(
+            tokio::time::timeout(Duration::from_millis(500), answer).await,
+            Ok(Ok(true))
+        ) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
+#[must_use]
+pub fn input_end(inbox: &LinkInbox) -> InputEnd {
+    InputEnd(inbox.sender.clone())
 }
 
 #[derive(Debug)]
@@ -207,11 +267,175 @@ struct Open {
     reassemblers: HashMap<String, Reassembler>,
     /// A receiver's traffic, by peer, when the link carries it (S172).
     traffic: Option<TrafficReaders>,
+    /// The camera and gimbal a simulation carries (ADR-0063 Y2).
+    carried: Option<Carried>,
     tlog_path: PathBuf,
     tlog: Option<BufWriter<File>>,
     /// Where the tlog's next record goes, for its index; None once a write
     /// failed, after which its records are no longer indexed.
     tlog_end: Option<u64>,
+}
+
+/// A test seam, never set in use: the mebibytes left on a simulated
+/// camera's card, so a test or a demo sees a full card refuse a recording
+/// without recording for hours (S405). With 0 the card is full.
+pub const CAMERA_CARD_LEFT_ENV: &str = "UXDUCK_SIM_CAMERA_CARD_LEFT_MIB";
+
+/// Test seams, never set in use: what a simulated camera says of its
+/// definition file in place of its own (S411). The first is the address it
+/// names, or `none` for a camera that names no file. The second is the
+/// path of a file it serves over MAVLink FTP where its own would be.
+pub const CAMERA_DEFINITION_ENV: &str = "UXDUCK_SIM_CAMERA_DEFINITION";
+pub const CAMERA_DEFINITION_FILE_ENV: &str = "UXDUCK_SIM_CAMERA_DEFINITION_FILE";
+
+/// What the seams say of a simulated camera's definition file. A file
+/// that is named and cannot be read stops the daemon's link from carrying
+/// the wrong camera: it is said, and the camera keeps its own.
+fn camera_defined() -> Option<uxduck_mavlink::payload::Defined> {
+    let uri = std::env::var(CAMERA_DEFINITION_ENV).ok();
+    let path = std::env::var(CAMERA_DEFINITION_FILE_ENV).ok();
+    if uri.is_none() && path.is_none() {
+        return None;
+    }
+    let file = path.and_then(|path| match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            tracing::error!(%path, %error, "{CAMERA_DEFINITION_FILE_ENV} names a file that cannot be read");
+            None
+        }
+    });
+    Some(uxduck_mavlink::payload::Defined {
+        uri: uri.map(|uri| Some(uri).filter(|uri| uri != "none")),
+        file,
+    })
+}
+
+/// A simulation's camera and gimbal (ADR-0063 Y2). They have no port of
+/// their own: they speak on the simulation's link, beside its autopilot, and
+/// every frame on it passes them, each way.
+struct Carried {
+    payload: OnLink,
+    /// Where the autopilot is heard from, once it has spoken: what the
+    /// payload says is taken as heard from there too.
+    peer: Option<String>,
+    /// The camera's picture (ADR-0063 Y7): the UDP port it is sent to, and
+    /// the ticket it is kept under until the link closes.
+    pictured: Option<(u16, u64)>,
+    /// The faults the engine knows are on (`sim/fault`).
+    faults: Faults,
+}
+
+impl Carried {
+    /// What the camera sees now goes to whoever draws its picture.
+    fn seen(&self) {
+        if let Some((port, _)) = self.pictured {
+            crate::sim::picture::pictures().sees(port, self.payload.view());
+        }
+    }
+
+    /// The faults that ended by what happened on the wire since the engine
+    /// last knew: a full card that was formatted, or a gimbal taken from
+    /// the autopilot that held it.
+    fn mended(&mut self) -> Vec<SimFaultKind> {
+        let now = self.payload.faults();
+        if now == self.faults {
+            return Vec::new();
+        }
+        let before = std::mem::replace(&mut self.faults, now);
+        SimFaultKind::ALL
+            .into_iter()
+            .filter(|kind| before.has(*kind) && !now.has(*kind))
+            .collect()
+    }
+}
+
+impl Drop for Carried {
+    fn drop(&mut self) {
+        if let Some((port, ticket)) = self.pictured {
+            crate::sim::picture::pictures().leave(port, ticket);
+        }
+    }
+}
+
+impl Carried {
+    /// What a link carries, with ArduPilot's simulator, whose defaults
+    /// tell the autopilot of them (`MNT1_TYPE`, `CAM1_TYPE`), and with
+    /// PX4's, whose parameters tell it of the gimbal (`MNT_MODE_IN`,
+    /// `MNT_MODE_OUT`, S413). The engine refuses what neither would
+    /// find. The vehicle's system id is the one its build is started
+    /// with.
+    fn of(kind: &LinkKind) -> Option<Self> {
+        let LinkKind::Simulator {
+            camera,
+            gimbal,
+            payload_profile,
+            instance,
+            ..
+        } = *kind
+        else {
+            return None;
+        };
+        let instance = instance.unwrap_or(0);
+        let mut payload = OnLink::new(crate::sim::system_id(instance), camera, gimbal)?
+            .fitted(payload_profile.into());
+        if let Some(mib) = std::env::var(CAMERA_CARD_LEFT_ENV)
+            .ok()
+            .and_then(|mib| mib.parse().ok())
+        {
+            payload.leave_room(mib);
+        }
+        if let Some(defined) = camera_defined() {
+            payload.define(defined);
+        }
+        if !camera {
+            return Some(Self {
+                payload,
+                peer: None,
+                pictured: None,
+                faults: Faults::default(),
+            });
+        }
+        // The camera names where its picture is sent, a port of its own.
+        let port = crate::sim::picture::port_for(instance);
+        Some(Self {
+            payload: payload.streaming(&crate::sim::picture::uri(port)),
+            peer: None,
+            pictured: Some((port, crate::sim::picture::pictures().carry(port))),
+            faults: Faults::default(),
+        })
+    }
+}
+
+/// What simulated payloads said, each with its link, waiting to be taken as
+/// frames their links received.
+type Said = VecDeque<(String, Vec<u8>)>;
+
+impl Open {
+    /// What a simulated payload says goes down to the autopilot at once,
+    /// whatever the link's policy, since it is the vehicle's own wiring and
+    /// not UXDuck speaking, and waits in `said` for UXDuck to hear.
+    fn payload_says(&self, link_id: &str, frames: Vec<Vec<u8>>, said: &mut Said) {
+        for bytes in frames {
+            self.handle.send(Outgoing {
+                peer: None,
+                bytes: bytes.clone(),
+            });
+            said.push_back((link_id.to_owned(), bytes));
+        }
+    }
+
+    /// A frame on its way to the vehicle passes the payload it carries.
+    /// Returns whether it was the payload's alone, and so is kept from the
+    /// autopilot, which would answer it too (S400).
+    fn payload_hears(&mut self, link_id: &str, frame: &[u8], said: &mut Said) -> bool {
+        let Some(carried) = &mut self.carried else {
+            return false;
+        };
+        let heard = carried.payload.from_ground(frame);
+        carried.seen();
+        self.payload_says(link_id, heard.said, said);
+        heard.kept
+    }
 }
 
 /// Readers of a receiver's traffic, one per peer: each TCP connection or
@@ -315,6 +539,12 @@ pub fn start(
             tokio::select! {
                 command = commands.recv() => match command {
                     None => break,
+                    Some(Command::EndInput(told)) => {
+                        let stops = plane.controls.gimbal_stops_all();
+                        let any = !stops.is_empty();
+                        plane.stop_gimbals(stops).await;
+                        let _ = told.send(any);
+                    }
                     Some(Command::Open(link)) => plane.open(link, &events).await,
                     Some(Command::Close(link_id)) => {
                         plane.close(&link_id).await;
@@ -340,6 +570,8 @@ pub fn start(
                             plane.apply(effects).await;
                         }
                         let reports = plane.controls.input(event);
+                        let stops = plane.controls.gimbal_stops();
+                        plane.stop_gimbals(stops).await;
                         super::controllers::publish(plane.controls.snapshot());
                         plane.report_controls(reports).await;
                     }
@@ -349,7 +581,14 @@ pub fn start(
                             plane.apply(effects).await;
                         }
                         let reports = plane.controls.route(&id, route);
+                        let stops = plane.controls.gimbal_stops();
+                        plane.stop_gimbals(stops).await;
                         plane.report_controls(reports).await;
+                    }
+                    Some(Command::SteerGimbal(id, gimbal)) => {
+                        plane.controls.steer_gimbal(&id, gimbal);
+                        let stops = plane.controls.gimbal_stops();
+                        plane.stop_gimbals(stops).await;
                     }
                     Some(Command::GroundHeartbeat(vehicle_id, on)) => {
                         if on {
@@ -374,6 +613,13 @@ pub fn start(
                         plane.session.set_gcs_system_id(id);
                     }
                     Some(Command::Pause(link_id, paused)) => plane.pause(&link_id, paused).await,
+                    Some(Command::Faults(link_id, faults)) => plane.faults(&link_id, &faults),
+                    Some(Command::WatchGimbals(vehicle_id, watched)) => {
+                        plane.session.watch_gimbals(&vehicle_id, watched);
+                        // Asked for at once, not at the next tick's turn.
+                        let effects = plane.session.tick(SystemClock.now_us());
+                        plane.apply(effects).await;
+                    }
                     Some(Command::Resolved { link, address, lookup }) => {
                         plane.resolved(link, address, &lookup, &events).await;
                     }
@@ -394,6 +640,7 @@ pub fn start(
                     plane.refresh_registration();
                     plane.report_transports().await;
                     plane.send_onboard().await;
+                    plane.announce_payloads();
                 }
                 _ = watch.tick(), if simulating => plane.simulators_stopped().await,
                 _ = tick.tick(), if ticking => {
@@ -402,6 +649,7 @@ pub fn start(
                     plane.apply(effects).await;
                 }
             }
+            plane.payloads_said().await;
         }
     });
 }
@@ -463,6 +711,8 @@ struct Plane {
     /// Says when this computer's network changes, so a UDP client waiting to
     /// retry does so at once.
     network: links::NetworkChanges,
+    /// What simulated payloads said and UXDuck has not heard yet.
+    said: Said,
 }
 
 /// Why a vehicle is not sent MAVLink's ping (S261): exactly where the
@@ -516,6 +766,7 @@ impl Plane {
             commands,
             resolving: HashMap::new(),
             network: links::NetworkChanges::default(),
+            said: Said::new(),
         }
     }
 
@@ -1020,6 +1271,7 @@ impl Plane {
                         socket_generation: 0,
                         reassemblers: HashMap::new(),
                         traffic: TrafficReaders::new(link.carries),
+                        carried: Carried::of(&link.kind),
                         tlog_path: tlog_path.clone(),
                         tlog: None,
                         tlog_end: Some(0),
@@ -1144,6 +1396,94 @@ impl Plane {
         self.session.pause(link_id, paused, SystemClock.now_us());
     }
 
+    /// Switches faults on and off in a simulation's camera and gimbal: what
+    /// is given is all that is on. A link that carries neither has none.
+    fn faults(&mut self, link_id: &str, faults: &[uxduck_core::domain::link::SimFault]) {
+        let Some(carried) = self
+            .open
+            .get_mut(link_id)
+            .and_then(|open| open.carried.as_mut())
+        else {
+            tracing::warn!(link = %link_id, "no simulated camera or gimbal to switch faults in");
+            return;
+        };
+        carried.payload.set_faults(Faults::of(faults));
+        // One that does not fit what it carries is not on, and the engine
+        // hears so with the ones that end by themselves.
+        carried.faults = Faults::of(faults);
+        carried.seen();
+    }
+
+    /// Tells the engine of faults that ended by themselves.
+    async fn faults_mended(&mut self) {
+        let mut mended = Vec::new();
+        for (link_id, open) in &mut self.open {
+            if let Some(carried) = &mut open.carried {
+                mended.extend(
+                    carried
+                        .mended()
+                        .into_iter()
+                        .map(|kind| (link_id.clone(), kind)),
+                );
+            }
+        }
+        for (link_id, kind) in mended {
+            let _ = self
+                .engine
+                .run(move |e| e.simulation_fault_ended(&link_id, kind))
+                .await;
+        }
+    }
+
+    /// A simulated payload's heartbeats on this computer's clock: as its
+    /// link comes up, and once a second after, until the autopilot's clock
+    /// paces them (`Payload::announce`). A paused simulator is sent nothing.
+    fn announce_payload(&mut self, link_id: &str) {
+        if self.session.is_paused(link_id) {
+            return;
+        }
+        if let Some(open) = self.open.get_mut(link_id)
+            && let Some(carried) = &mut open.carried
+        {
+            let heartbeats = carried.payload.announce();
+            open.payload_says(link_id, heartbeats, &mut self.said);
+        }
+    }
+
+    fn announce_payloads(&mut self) {
+        let carrying: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(_, open)| open.carried.is_some())
+            .map(|(link_id, _)| link_id.clone())
+            .collect();
+        for link_id in carrying {
+            self.announce_payload(&link_id);
+        }
+    }
+
+    /// UXDuck hears what simulated payloads said, as frames received on
+    /// their links from where the autopilot is: into the tlog, the session,
+    /// the inspector and the forwards, like any component's (ADR-0063 Y1).
+    /// Before the autopilot has spoken there is nowhere they came from, and
+    /// they are for the autopilot alone. Hearing one may send a frame the
+    /// payload answers, so this runs until nothing more was said.
+    async fn payloads_said(&mut self) {
+        while let Some((link_id, frame)) = self.said.pop_front() {
+            let Some(open) = self.open.get_mut(&link_id) else {
+                continue;
+            };
+            let Some(peer) = open.carried.as_ref().and_then(|c| c.peer.clone()) else {
+                continue;
+            };
+            let at_us = SystemClock.now_us();
+            record(&link_id, open, std::slice::from_ref(&frame), at_us);
+            let forward = open.forward;
+            self.frame(&link_id, &peer, &frame, forward, at_us).await;
+        }
+        self.faults_mended().await;
+    }
+
     async fn close(&mut self, link_id: &str) {
         self.resolving.remove(link_id);
         if self.open.remove(link_id).is_some() {
@@ -1173,6 +1513,9 @@ impl Plane {
         match event {
             LinkEvent::Up => {
                 self.session.transport_restored(link_id);
+                // ArduPilot looks for a camera and a gimbal in its first
+                // minute, or until it is armed (S400): they speak first.
+                self.announce_payload(link_id);
                 self.report(link_id, LinkStatus::Up, None).await;
             }
             LinkEvent::Down(reason) => {
@@ -1217,6 +1560,19 @@ impl Plane {
                         .map(<[u8]>::to_vec)
                         .collect()
                 };
+                // A simulated payload hears its autopilot too: its clock,
+                // its questions and its gimbal's targets (ADR-0063 Y2).
+                for frame in &frames {
+                    let Some(carried) = &mut open.carried else {
+                        break;
+                    };
+                    carried.peer.get_or_insert_with(|| peer.clone());
+                    let answers = carried.payload.from_autopilot(frame);
+                    open.payload_says(link_id, answers, &mut self.said);
+                }
+                if let Some(carried) = &open.carried {
+                    carried.seen();
+                }
                 record(link_id, open, &frames, at_us);
                 let forward = open.forward;
                 for frame in frames {
@@ -1483,7 +1839,7 @@ impl Plane {
     async fn send(&mut self, routed: Routed) {
         let mut sent = Vec::new();
         for send in routed.sends {
-            if let Some(open) = self.open.get(&send.link_id)
+            if let Some(open) = self.open.get_mut(&send.link_id)
                 && (open.forward || open.writable)
                 && !self.session.is_paused(&send.link_id)
                 && open.handle.diagnostics.as_ref().is_none_or(|d| {
@@ -1507,10 +1863,12 @@ impl Plane {
                 // A forward's tlog keeps what it hears; what it carries out
                 // is already in the vehicle's link's.
                 let keep = (!open.forward).then(|| send.bytes.clone());
-                open.handle.send(Outgoing {
-                    peer: send.peer,
-                    bytes: send.bytes,
-                });
+                if !open.payload_hears(&send.link_id, &send.bytes, &mut self.said) {
+                    open.handle.send(Outgoing {
+                        peer: send.peer,
+                        bytes: send.bytes,
+                    });
+                }
                 if let Some(bytes) = keep {
                     sent.push((send.link_id, bytes, at_us));
                 }
@@ -1549,6 +1907,33 @@ impl Plane {
                 &auxiliary,
                 method,
                 buttons,
+            ));
+        }
+        // What the gimbal inputs ask for (S407): the rates beside the
+        // pilot input, and a stop where they ended.
+        let gimbals = self.controls.gimbal_outputs();
+        for (gimbal, rates) in &gimbals.rates {
+            effects.extend(self.session.gimbal_rates(
+                &gimbal.vehicle_id,
+                gimbal.component_id,
+                gimbal.device_id,
+                *rates,
+            ));
+        }
+        self.apply(effects).await;
+        let stops = self.controls.gimbal_stops();
+        self.stop_gimbals(stops).await;
+        self.report_controls(gimbals.reports).await;
+    }
+
+    /// Tells gimbals whose rates ended to stop turning (S407).
+    async fn stop_gimbals(&mut self, stops: Vec<uxduck_engine::runtime::GimbalRoute>) {
+        let mut effects = Vec::new();
+        for gimbal in stops {
+            effects.extend(self.session.gimbal_stop(
+                &gimbal.vehicle_id,
+                gimbal.component_id,
+                gimbal.device_id,
             ));
         }
         self.apply(effects).await;
@@ -1615,6 +2000,16 @@ impl Plane {
                         .await
                 }
                 Report::LetGo { id } => self.engine.run(move |e| e.controller_let_go(&id)).await,
+                Report::GimbalAsked { id } => {
+                    self.engine
+                        .run(move |e| e.controller_gimbal_asked(&id))
+                        .await
+                }
+                Report::GimbalLetGo { id } => {
+                    self.engine
+                        .run(move |e| e.controller_gimbal_let_go(&id))
+                        .await
+                }
             };
         }
     }
@@ -1661,7 +2056,7 @@ impl Plane {
                     bytes,
                 } => {
                     // A paused simulator would read it all at once on resuming.
-                    if let Some(open) = self.open.get(&link_id).filter(|o| {
+                    if let Some(open) = self.open.get_mut(&link_id).filter(|o| {
                         o.writable
                             && !self.session.is_paused(&link_id)
                             && o.handle.diagnostics.as_ref().is_none_or(|d| {
@@ -1678,10 +2073,12 @@ impl Plane {
                             &bytes,
                             at_us,
                         );
-                        open.handle.send(Outgoing {
-                            peer: Some(peer),
-                            bytes: bytes.clone(),
-                        });
+                        if !open.payload_hears(&link_id, &bytes, &mut self.said) {
+                            open.handle.send(Outgoing {
+                                peer: Some(peer),
+                                bytes: bytes.clone(),
+                            });
+                        }
                         if !open.forward {
                             sent.push((link_id, bytes, at_us));
                         }

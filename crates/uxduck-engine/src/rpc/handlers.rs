@@ -44,6 +44,14 @@ pub(crate) fn handle(
         .and_then(|c| c.admitted.as_ref())
         .ok_or_else(|| ApiError::new(ErrorKind::NotInitialized, "call initialize first"))?;
     let operator = admitted.is_operator();
+    // A camera's command is its vehicle's (S405): from here on it is the
+    // `command/send` it stands for, with that method's checks and approval.
+    let request = match request {
+        ClientRequest::CameraCommand(params) => crate::cameras::as_command(engine, &params)?,
+        // And a gimbal's (S406).
+        ClientRequest::GimbalCommand(params) => crate::gimbals::as_command(engine, &params)?,
+        other => other,
+    };
     engine.check_mission_read_request(connection, &request)?;
     // A person flies AutoTune (S332): no approval lets an agent start it.
     if admitted.kind == uxduck_core::domain::client::ClientKind::Agent
@@ -508,7 +516,12 @@ pub(crate) fn handle(
         | ClientRequest::SimFrames(_)
         | ClientRequest::SimCatalogue(_)
         | ClientRequest::SimDownload(_)
-        | ClientRequest::SimDelete(_)) => crate::sim::handle(engine, connection, request, &granted),
+        | ClientRequest::SimDelete(_)
+        | ClientRequest::SimFault(_)
+        | ClientRequest::SimFaults(_)
+        | ClientRequest::SimPictures(_)) => {
+            crate::sim::handle(engine, connection, request, &granted)
+        }
         request @ (ClientRequest::SimSnapshot(_)
         | ClientRequest::SnapshotStart(_)
         | ClientRequest::SnapshotList(_)
@@ -556,6 +569,27 @@ pub(crate) fn handle(
         | ClientRequest::VideoServedBy(_)) => {
             crate::video::handle(engine, connection, request, &granted)
         }
+        ClientRequest::CameraList(_) => crate::cameras::list(engine, &granted),
+        ClientRequest::CameraCommand(_) => Err(ApiError::new(
+            ErrorKind::Internal,
+            "camera/command is handled as command/send",
+        )),
+        ClientRequest::CameraSettings(params) => {
+            crate::camera_settings::settings(engine, &params, &granted)
+        }
+        // A person agrees to the address: no agent or plugin does for them.
+        ClientRequest::CameraDefinitionFetch(params) => {
+            require_operator()?;
+            crate::camera_settings::fetch(engine, &params)
+        }
+        ClientRequest::GimbalList(_) => crate::gimbals::list(engine, &granted),
+        ClientRequest::GimbalWatch(params) => {
+            crate::gimbals::watch(engine, connection, &params, &granted)
+        }
+        ClientRequest::GimbalCommand(_) => Err(ApiError::new(
+            ErrorKind::Internal,
+            "gimbal/command is handled as command/send",
+        )),
         request @ (ClientRequest::ParamSearch(_)
         | ClientRequest::ParamGet(_)
         | ClientRequest::ParamList(_)
@@ -974,6 +1008,12 @@ fn subscribe(
         preflights: types
             .contains(&EntityType::Preflight)
             .then(|| engine.state.preflights.values().map(Into::into).collect()),
+        cameras: types
+            .contains(&EntityType::Camera)
+            .then(|| crate::cameras::listed(engine)),
+        gimbals: types
+            .contains(&EntityType::Gimbal)
+            .then(|| crate::gimbals::listed(engine)),
         setups: types
             .contains(&EntityType::Setup)
             .then(|| engine.state.setups.values().map(Into::into).collect()),

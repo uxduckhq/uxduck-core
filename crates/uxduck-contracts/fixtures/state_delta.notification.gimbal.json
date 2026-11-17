@@ -1,0 +1,56 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 1902,
+    "tsUs": 1790669320000000,
+    "actor": {
+      "clientId": "data-plane"
+    },
+    "changes": [
+      {
+        "entity": "gimbal",
+        "id": "v9b1c2d3e4f5a6b7c/1/1",
+        "op": "upsert",
+        "gimbal": {
+          "id": "v9b1c2d3e4f5a6b7c/1/1",
+          "vehicleId": "v9b1c2d3e4f5a6b7c",
+          "componentId": 1,
+          "deviceId": 1,
+          "deviceComponentId": 154,
+          "present": true,
+          "capabilities": [
+            "retract",
+            "neutral",
+            "roll-axis",
+            "pitch-axis",
+            "yaw-axis",
+            "yaw-follow",
+            "yaw-lock",
+            "point-at-place"
+          ],
+          "flags": 206847,
+          "limits": {
+            "rollMinDeg": -28.0,
+            "rollMaxDeg": 28.0,
+            "pitchMinDeg": -114.0,
+            "pitchMaxDeg": 34.0,
+            "yawMinDeg": -177.0,
+            "yawMaxDeg": 177.0
+          },
+          "holder": "mission",
+          "primary": {
+            "systemId": 255,
+            "componentId": 190
+          },
+          "yawLocked": false,
+          "version": 7
+        }
+      },
+      {
+        "entity": "gimbal",
+        "id": "v9b1c2d3e4f5a6b7c/1/2",
+        "op": "remove"
+      }
+    ]
+  }
+}

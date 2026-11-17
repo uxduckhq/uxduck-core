@@ -77,6 +77,9 @@ pub(crate) struct Live {
     detached: BTreeMap<String, Detached>,
     /// Page-owned keyboards never inherit a physical controller's reload grace.
     pub(crate) keyboards: BTreeMap<ConnectionId, String>,
+    /// Keyboards whose last frame held a gimbal key (S407): a frame that
+    /// says nothing of the gimbal lets it go.
+    keyboard_gimbals: BTreeSet<String>,
     /// Simulator links pressed to start again whose vehicle is not back yet.
     restarting: BTreeSet<String>,
     /// Browser input is missing, but the person has not released activation.
@@ -112,11 +115,12 @@ fn daemon() -> Actor {
     }
 }
 
-/// The built-in mappings, overridden by stored edits.
+/// The built-in mappings, overridden by stored edits. The gamepad
+/// layouts turn the gimbal with the direction pad (S407).
 pub(crate) fn mappings(engine: &Engine) -> Vec<InputMapping> {
     let mut all: BTreeMap<String, InputMapping> = [
-        InputMapping::mode_2(),
-        InputMapping::mode_1(),
+        InputMapping::mode_2().with_gimbal_pad(),
+        InputMapping::mode_1().with_gimbal_pad(),
         InputMapping::radio(),
         InputMapping::radio_taer(),
         InputMapping::expresslrs_bluetooth(),
@@ -131,12 +135,28 @@ pub(crate) fn mappings(engine: &Engine) -> Vec<InputMapping> {
     all.into_values().collect()
 }
 
+/// The keyboard's own mapping. Its gimbal keys (S407) are read as two of
+/// its device's inputs (`KEYBOARD_GIMBAL_AXES`).
 fn keyboard_mapping() -> InputMapping {
+    use uxduck_core::domain::controller::{AxisBinding, GimbalAxis, GimbalAxisBinding};
+    let [pitch, yaw] = crate::controller_input::KEYBOARD_GIMBAL_AXES;
     InputMapping {
         id: "sim-keyboard".into(),
         name: "Keyboard".into(),
         deadzone: 0.0,
         buttons: Vec::new(),
+        gimbal: [(GimbalAxis::Pitch, pitch), (GimbalAxis::Yaw, yaw)]
+            .into_iter()
+            .map(|(control, axis)| GimbalAxisBinding {
+                control,
+                input: AxisBinding {
+                    axis,
+                    code: None,
+                    inverted: false,
+                    calibration: None,
+                },
+            })
+            .collect(),
         ..InputMapping::mode_2()
     }
 }
@@ -229,7 +249,9 @@ pub(crate) fn handle(
             denied("only an operator client may hold a controller")
         }
         ClientRequest::KeyboardStart(params) => keyboard_start(engine, connection, params),
-        ClientRequest::KeyboardInput(params) => keyboard_input(engine, connection, params.axes),
+        ClientRequest::KeyboardInput(params) => {
+            keyboard_input(engine, connection, params.axes, params.gimbal)
+        }
         ClientRequest::KeyboardStop(params) => {
             if params.reason == Some(KeyboardStopReason::AppUnfocused) {
                 engine.say_keyboard_unfocused(connection);
@@ -348,9 +370,11 @@ fn keyboard_input(
     engine: &mut Engine,
     connection: ConnectionId,
     axes: [f64; 4],
+    gimbal: Option<[f64; 2]>,
 ) -> Result<Value, ApiError> {
     if axes
         .iter()
+        .chain(gimbal.iter().flatten())
         .any(|v| !v.is_finite() || !(-1.0..=1.0).contains(v))
     {
         return Err(ApiError::new(
@@ -375,10 +399,34 @@ fn keyboard_input(
     engine
         .links
         .controller_input(crate::controller_input::InputEvent::Keyboard {
-            id,
+            id: id.clone(),
             axes,
             at_us: now,
         });
+    // The gimbal's keys, as two more of the keyboard's inputs (S407). A
+    // frame that says nothing of them holds none: after one that held a
+    // key it lets go, and otherwise nothing more is told.
+    let held = engine.live.keyboard_gimbals.contains(&id);
+    if let Some(keys) = gimbal.or(held.then_some([0.0; 2])) {
+        if keys.iter().any(|key| *key != 0.0) {
+            engine.live.keyboard_gimbals.insert(id.clone());
+        } else {
+            engine.live.keyboard_gimbals.remove(&id);
+        }
+        for (axis, value) in crate::controller_input::KEYBOARD_GIMBAL_AXES
+            .into_iter()
+            .zip(keys)
+        {
+            engine
+                .links
+                .controller_input(crate::controller_input::InputEvent::Axis {
+                    id: id.clone(),
+                    axis: Some(axis),
+                    code: None,
+                    value,
+                });
+        }
+    }
     Ok(json!({}))
 }
 
@@ -818,6 +866,7 @@ fn require_calibrations(params: &MappingUpdateParams) -> Result<(), ApiError> {
     let calibrations = [params.roll, params.pitch, params.yaw, params.throttle]
         .into_iter()
         .chain(params.rc_channels.iter().map(|b| b.input))
+        .chain(params.gimbal.iter().flatten().map(|b| b.input))
         .filter_map(|b| b.calibration);
     if calibrations
         .map(uxduck_core::domain::controller::AxisCalibration::from)
@@ -872,8 +921,43 @@ fn require_position_bindings(
     Ok(())
 }
 
+/// The mapping's gimbal axes (S407), kept when the update names none, as
+/// its held buttons are.
+fn gimbal_bindings(
+    params: &MappingUpdateParams,
+    current: &InputMapping,
+) -> Vec<uxduck_core::domain::controller::GimbalAxisBinding> {
+    params.gimbal.clone().map_or_else(
+        || current.gimbal.clone(),
+        |gimbal| gimbal.into_iter().map(Into::into).collect(),
+    )
+}
+
+/// A gimbal's axis has an input of its own, and pitch and yaw are each
+/// bound once at most (S407).
+fn require_gimbal_bindings(
+    mapping: &InputMapping,
+    inputs: &[InputIdentity],
+) -> Result<(), ApiError> {
+    if mapping
+        .gimbal
+        .iter()
+        .any(|binding| mapping.gimbal_conflicts(binding, inputs))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{} has a conflicting gimbal input. Gimbal pitch and gimbal yaw each take one input, which cannot also be a stick, an RC channel or a switch that sends commands.",
+                mapping.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn require_mapping_positions(engine: &Engine, mapping: &InputMapping) -> Result<(), ApiError> {
     require_position_bindings(mapping, &[])?;
+    require_gimbal_bindings(mapping, &[])?;
     let inputs = engine.system.controller_inputs();
     for controller in engine
         .state
@@ -883,6 +967,7 @@ fn require_mapping_positions(engine: &Engine, mapping: &InputMapping) -> Result<
     {
         let axes = input_identities(&inputs, &controller.id);
         require_position_bindings(mapping, &axes)?;
+        require_gimbal_bindings(mapping, &axes)?;
     }
     Ok(())
 }
@@ -1018,6 +1103,7 @@ fn update_mapping(
         ));
     }
     let mapping = InputMapping {
+        gimbal: gimbal_bindings(&params, &current),
         id: current.id,
         name: params.name.trim().to_owned(),
         roll: params.roll.into(),
@@ -1720,6 +1806,7 @@ impl Engine {
 
     fn stop_keyboard(&mut self, connection: ConnectionId) {
         if let Some(id) = self.live.keyboards.remove(&connection) {
+            self.live.keyboard_gimbals.remove(&id);
             // Releasing a keyboard is not a physical device being unplugged.
             self.release(&id, connection, None);
             self.controller_disconnected(&id);
@@ -2122,6 +2209,7 @@ impl Engine {
             self.controller_presence(id, &controller.name, false);
         }
         self.live.keyboards.retain(|_, keyboard| keyboard != id);
+        self.live.keyboard_gimbals.remove(id);
         let holder = self.live.claimant.get(id).copied().or_else(|| {
             self.live
                 .detached
@@ -2251,7 +2339,7 @@ impl Engine {
 
     /// The client a controller's commands go as, and its target, while a
     /// press or a move would send one: connected, routed, not paused.
-    fn controller_sends(&self, id: &str) -> Option<(Controller, ConnectionId, String)> {
+    pub(crate) fn controller_sends(&self, id: &str) -> Option<(Controller, ConnectionId, String)> {
         let controller = self.state.controllers.get(id)?;
         if !controller.connected
             || self.live.input_lost.contains_key(id)
@@ -2388,7 +2476,7 @@ impl Engine {
     /// still to be answered. A refusal that is no receipt, such as one
     /// asking to confirm, is said in a notice: the pilot pressed a button
     /// and must hear why nothing happened.
-    fn send_for_controller(
+    pub(crate) fn send_for_controller(
         &mut self,
         controller: &Controller,
         connection: ConnectionId,

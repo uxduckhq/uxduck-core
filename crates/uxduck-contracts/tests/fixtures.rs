@@ -241,6 +241,15 @@ fn check(name: &str) {
         ("result", "gripper_status") => {
             round_trip::<uxduck_contracts::dto::gripper::GripperStatus>(name, &json);
         }
+        ("result", "camera_list") => {
+            round_trip::<uxduck_contracts::dto::camera::CameraListResult>(name, &json);
+        }
+        ("result", "camera_settings" | "camera_definition_fetch") => {
+            round_trip::<uxduck_contracts::dto::camera::CameraSettingsResult>(name, &json);
+        }
+        ("result", "gimbal_list") => {
+            round_trip::<uxduck_contracts::dto::gimbal::GimbalListResult>(name, &json);
+        }
         ("result", "link_list") => {
             round_trip::<uxduck_contracts::dto::link::LinkListResult>(name, &json);
         }
@@ -252,7 +261,7 @@ fn check(name: &str) {
                 name, &json,
             );
         }
-        ("result", "command_send") => {
+        ("result", "command_send" | "camera_command" | "gimbal_command") => {
             round_trip::<uxduck_contracts::dto::command::Receipt>(name, &json);
         }
         ("result", "command_list") => {
@@ -694,8 +703,15 @@ fn check(name: &str) {
         ("result", "sim_frames") => {
             round_trip::<uxduck_contracts::dto::sim::SimFramesResult>(name, &json);
         }
-        ("result", "sim_start" | "sim_restart" | "sim_pause" | "sim_crash" | "snapshot_start") => {
+        (
+            "result",
+            "sim_start" | "sim_restart" | "sim_pause" | "sim_crash" | "sim_fault"
+            | "snapshot_start",
+        ) => {
             round_trip::<uxduck_contracts::dto::link::Link>(name, &json);
+        }
+        ("result", "sim_faults") => {
+            round_trip::<uxduck_contracts::dto::sim::SimFaultsResult>(name, &json);
         }
         ("result", "sim_snapshot" | "snapshot_rename") => {
             round_trip::<uxduck_contracts::dto::sim::SimSnapshot>(name, &json);
@@ -842,6 +858,9 @@ fn check(name: &str) {
         ("result", "sim_catalogue") => {
             round_trip::<uxduck_contracts::dto::sim::SimCatalogueResult>(name, &json);
         }
+        ("result", "sim_pictures") => {
+            round_trip::<uxduck_contracts::dto::sim::SimPicturesResult>(name, &json);
+        }
         ("result", "journal_import") => {
             round_trip::<uxduck_contracts::dto::journal::JournalImportResult>(name, &json);
         }
@@ -922,7 +941,8 @@ fn check(name: &str) {
             | "marker_share"
             | "marker_unshare"
             | "mavlink_dialects_remove"
-            | "firmware_remove",
+            | "firmware_remove"
+            | "gimbal_watch",
         ) => {
             round_trip::<Empty>(name, &json);
         }

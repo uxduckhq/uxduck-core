@@ -195,6 +195,7 @@ pub fn router(
         .route("/api/pairing/{id}", get(pairing_poll))
         .route("/rpc", get(rpc))
         .route("/video", get(video_socket))
+        .route("/sim-camera", get(sim_camera_socket))
         .route("/recordings/{file}", get(recording))
         .route("/photos/{file}", get(photo))
         .route("/api/vehicle-files/{file}", get(vehicle_file))
@@ -826,6 +827,18 @@ async fn video_socket(
     upgrade.on_upgrade(move |socket| {
         crate::video::socket::serve(socket, query.token, watcher, hub, engine)
     })
+}
+
+/// Where a window draws simulated cameras' pictures (ADR-0063 Y7). The
+/// token is the session, as a watched camera's is: it came from
+/// `sim/pictures` on a paired connection, opens one socket once, and lapses
+/// after 30 s. On this computer's own listener only: a simulation's camera
+/// is drawn where the simulation runs.
+async fn sim_camera_socket(Query(query): Query<VideoQuery>, upgrade: WebSocketUpgrade) -> Response {
+    if !crate::sim::picture::pictures().admit(&query.token) {
+        return (StatusCode::UNAUTHORIZED, "ask to draw first").into_response();
+    }
+    upgrade.on_upgrade(crate::sim::picture::socket::serve)
 }
 
 /// Recordings converted for playback one at a time (S151).

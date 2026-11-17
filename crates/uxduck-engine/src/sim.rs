@@ -8,13 +8,15 @@ use serde_json::{Value, json};
 use uxduck_contracts::dto::initialize::RunsIn;
 use uxduck_contracts::dto::link::{IdParams, Link as LinkDto, LinkAddParams};
 use uxduck_contracts::dto::sim::{
-    SimBinariesResult, SimBuildParams, SimCrashParams, SimForward, SimPauseParams, SimStartParams,
+    SimBinariesResult, SimBuildParams, SimCrashParams, SimForward, SimPauseParams,
+    SimPicturesResult, SimStartParams,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::link::{
-    JET_FRAME, Link, LinkKind, LinkStatus, SCENERY_CLEAR_M, SimAutopilot, SimVehicle,
+    JET_FRAME, Link, LinkKind, LinkStatus, PayloadProfile, SCENERY_CLEAR_M, SimAutopilot,
+    SimVehicle,
 };
 use uxduck_core::domain::vehicle::Presence;
 use uxduck_core::events::Change;
@@ -61,6 +63,99 @@ fn check_in_air(vehicle: SimVehicle, frame: Option<&str>, height_m: f64) -> Resu
         return Err(invalid(format!(
             "a vehicle starts in the air at {MIN_IN_AIR_M} to {MAX_IN_AIR_M} m"
         )));
+    }
+    Ok(())
+}
+
+/// A simulated camera and gimbal (ADR-0063 Y3, Y9): where UXDuck is
+/// installed, with ArduPilot, whose defaults tell it of them, and with
+/// PX4, whose parameters tell it of the gimbal (S413). An ArduPilot told
+/// of a gimbal that nothing plays would not arm. A gimbal ArduPilot
+/// simulates itself (Y4) runs in the same places, and never beside
+/// UXDuck's own: each wants the autopilot's first mount and first camera.
+/// A kind of camera and gimbal (Y16) is a kind of UXDuck's own, so it
+/// needs them, and has been run with ArduPilot only.
+fn check_payload(runs_in: RunsIn, kind: &LinkKind) -> Result<(), ApiError> {
+    let LinkKind::Simulator {
+        vehicle,
+        autopilot,
+        camera,
+        gimbal,
+        ardupilot_gimbal,
+        payload_profile,
+        ..
+    } = kind
+    else {
+        return Ok(());
+    };
+    if let Some(profile) = payload_profile {
+        if ardupilot_gimbal.is_some() {
+            return Err(invalid(
+                "A kind of camera and gimbal is a kind of UXDuck's simulated camera and gimbal. ArduPilot's own simulated gimbal is what it is. Choose one or the other",
+            ));
+        }
+        match profile {
+            PayloadProfile::Integrated if !(*camera && *gimbal) => {
+                return Err(invalid(
+                    "The integrated kind is a camera and a gimbal in one. Add the simulated camera and the simulated gimbal",
+                ));
+            }
+            PayloadProfile::ThermalTracking if !(*camera && *gimbal) => {
+                return Err(invalid(
+                    "The thermal and tracking kind is a camera and a gimbal in one. Add the simulated camera and the simulated gimbal",
+                ));
+            }
+            PayloadProfile::StreamOnly | PayloadProfile::PhotoVideo if !*camera => {
+                return Err(invalid(
+                    "This kind of camera is a kind of the simulated camera. Add the simulated camera",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !(*camera || *gimbal || ardupilot_gimbal.is_some()) {
+        return Ok(());
+    }
+    if ardupilot_gimbal.is_some() && (*camera || *gimbal) {
+        return Err(invalid(
+            "ArduPilot's own simulated gimbal takes the autopilot's first mount and first camera, and so do UXDuck's simulated camera and gimbal. Choose one or the other",
+        ));
+    }
+    if runs_in == RunsIn::Browser {
+        return Err(invalid(
+            "UXDuck Web simulates no camera or gimbal. UXDuck Desktop does",
+        ));
+    }
+    if *autopilot != SimAutopilot::Ardupilot {
+        if ardupilot_gimbal.is_some() {
+            return Err(invalid(
+                "ArduPilot's own simulated gimbals come with ArduPilot. PX4 has none",
+            ));
+        }
+        // Each kind is what an ArduPilot is told of and leaves alone (Y16).
+        // None has been run with PX4.
+        if payload_profile.is_some() {
+            return Err(invalid(
+                "The other kinds of simulated camera and gimbal come with ArduPilot. PX4 carries the full camera and the separate gimbal",
+            ));
+        }
+        return Ok(());
+    }
+    // ArduPilot's Blimp has no mount or camera library (S403, on its build:
+    // no `MNT1_TYPE`, no `CAM1_TYPE`, and it refuses the gimbal manager's
+    // commands).
+    if *vehicle == SimVehicle::Airship {
+        return Err(invalid("ArduPilot's Blimp has no camera or gimbal"));
+    }
+    // ArduPilot's simulated boat runs no simulated device on a serial port:
+    // `SIM_Sailboat`, which its motorboat is too, never calls
+    // `update_external_payload` (ArduPilot `d5420ff97c84`, and run on the
+    // motorboat and the sailboat, S409). The autopilot would be told of a
+    // mount it cannot find, and would not arm.
+    if ardupilot_gimbal.is_some() && *vehicle == SimVehicle::Boat {
+        return Err(invalid(
+            "ArduPilot's own simulated gimbals do not run on its simulated boat",
+        ));
     }
     Ok(())
 }
@@ -126,6 +221,7 @@ pub(crate) fn check(engine: &Engine, links: &[&Link], kind: &LinkKind) -> Result
             ));
         }
     }
+    check_payload(capabilities.runs_in, kind)?;
     // The jet is ArduPlane's jet frame and its tuning (S143): another
     // frame would fly as something else under the jet's name and model.
     if *vehicle == SimVehicle::Jet && frame.as_deref().is_some_and(|f| f != JET_FRAME) {
@@ -191,6 +287,10 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> Result<LinkKin
         wipe,
         with_mission,
         traffic,
+        camera,
+        gimbal,
+        ardupilot_gimbal,
+        payload_profile,
         ..
     } = kind
     else {
@@ -241,6 +341,10 @@ pub(crate) fn assign_instance(engine: &Engine, kind: LinkKind) -> Result<LinkKin
         wipe,
         with_mission,
         traffic,
+        camera,
+        gimbal,
+        ardupilot_gimbal,
+        payload_profile,
         instance,
     })
 }
@@ -311,6 +415,22 @@ pub(crate) fn handle(
             require(Capability::Config)?;
             engine.system.sim_delete(&id).map_err(invalid)?;
             Ok(json!({}))
+        }
+        ClientRequest::SimFault(params) => {
+            require(Capability::Control)?;
+            crate::sim_faults::switch(engine, connection, &params)
+        }
+        ClientRequest::SimFaults(IdParams { id }) => {
+            require(Capability::Read)?;
+            to_value(&crate::sim_faults::list(engine, &id)?)
+        }
+        ClientRequest::SimPictures(_) => {
+            require(Capability::Read)?;
+            let token = format!("sp{}", &engine.random.token()[..32]);
+            engine.system.sim_pictures(&token).map_err(invalid)?;
+            to_value(&SimPicturesResult {
+                path: format!("/sim-camera?token={token}"),
+            })
         }
         _ => Err(ApiError::new(ErrorKind::Internal, "not a sim method")),
     }
@@ -431,6 +551,8 @@ pub(crate) fn stop(
     link.launch = None;
     link.paused = false;
     link.scenery_hit = None;
+    // Its camera and gimbal went with it, faults and all (ADR-0063 Y16).
+    link.faults.clear();
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link });
     engine.refresh_wake_lock();
@@ -484,8 +606,10 @@ pub(crate) fn restart(
     link.status = LinkStatus::Configured;
     link.status_detail = None;
     link.launch = None;
-    // A new simulator starts running, whatever the last one was doing.
+    // A new simulator starts running, whatever the last one was doing,
+    // with a camera and a gimbal that have nothing wrong with them.
     link.paused = false;
+    link.faults.clear();
     link.scenery_hit = None;
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
@@ -638,6 +762,7 @@ fn crash(
     link.status = LinkStatus::Stopped;
     link.status_detail = Some("Crashed into the 3D scenery. Start again to fly again.".into());
     link.paused = false;
+    link.faults.clear();
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
     engine.scenery_crash_reported(&vehicle, at);
@@ -702,6 +827,10 @@ pub(crate) fn add_params(params: SimStartParams) -> LinkAddParams {
             wipe: params.wipe,
             with_mission: params.with_mission,
             traffic: params.traffic,
+            camera: params.camera,
+            gimbal: params.gimbal,
+            ardupilot_gimbal: params.ardupilot_gimbal,
+            payload_profile: params.payload_profile,
             instance: None,
         },
         policy: None,

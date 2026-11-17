@@ -22,15 +22,6 @@ use crate::rpc::handlers::to_value;
 use crate::runtime::CommandOrder;
 use crate::{Engine, upsert};
 
-/// The MAVLink camera protocol's commands, as the camera plugin sends them
-/// (S145, ADR-0017 V20): every camera (`param1` 0) the vehicle drives.
-/// `MAV_CMD_IMAGE_START_CAPTURE`: no interval, one image.
-pub(crate) const IMAGE_START_CAPTURE: u16 = 2000;
-/// `MAV_CMD_VIDEO_START_CAPTURE`, every stream.
-const VIDEO_START_CAPTURE: u16 = 2500;
-/// `MAV_CMD_VIDEO_STOP_CAPTURE`, every stream.
-const VIDEO_STOP_CAPTURE: u16 = 2501;
-
 /// A recording the uploader may cut into segments for the account (S83).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpoolVideo {
@@ -66,14 +57,17 @@ fn actor() -> Actor {
 }
 
 impl Engine {
-    /// Sends one of the camera protocol's commands to a vehicle, as a
-    /// receipt from UXDuck (S145): its id, or none while the vehicle is not
-    /// heard or its link is read-only.
+    /// Has a vehicle's camera do something, as a receipt from UXDuck (S145,
+    /// ADR-0017 V20): its id, or none while the vehicle is not heard or its
+    /// link is read-only. It is the camera command the Camera tab's own
+    /// controls send (S405). It goes to `camera` when one is named, else to
+    /// the vehicle's only camera that says it can do this, else to every
+    /// camera through the autopilot, as it always did.
     pub(crate) fn tell_vehicle_camera(
         &mut self,
         vehicle_id: &str,
-        command: u16,
-        params: Vec<f32>,
+        camera: Option<(u8, Option<u8>)>,
+        action: uxduck_core::domain::camera::CameraAction,
     ) -> Option<String> {
         use uxduck_core::domain::command::{Command, Receipt, ReceiptStatus};
         use uxduck_core::domain::link::LinkPolicy;
@@ -89,7 +83,14 @@ impl Engine {
         {
             return None;
         }
-        let command = Command::Long { command, params };
+        let command = self.camera_addressed(
+            &vehicle.id,
+            Command::Camera {
+                component_id: camera.map(|(component, _)| component),
+                device_id: camera.and_then(|(_, device)| device),
+                action,
+            },
+        );
         let receipt = Receipt {
             id: format!("rc{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
@@ -106,6 +107,7 @@ impl Engine {
             operator_id: None,
             sent_by: None,
             remote: None,
+            progress: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
             version: 1,
@@ -127,11 +129,13 @@ impl Engine {
     /// arrives, since the camera records what the downlink loses; "always"
     /// while the camera sends, as UXDuck's recording does.
     fn review_vehicle_cameras(&mut self) {
-        use uxduck_core::domain::command::ReceiptStatus;
+        use uxduck_core::domain::camera::CameraAction;
+        use uxduck_core::domain::command::{Command, ReceiptStatus};
 
-        // These commands address every onboard camera, not just this source's
-        // stream. A second stream must neither start them twice nor stop them
-        // while another stream still asks for recording.
+        // These commands are the vehicle's, not one stream's: for its only
+        // camera that records, or every camera it drives. A second stream
+        // must neither start them twice nor stop them while another stream
+        // still asks for recording.
         let wanted: std::collections::BTreeSet<_> = self
             .state
             .video_sources
@@ -147,7 +151,7 @@ impl Engine {
         for vehicle_id in &wanted {
             if !self.video.camera_recording.contains_key(vehicle_id)
                 && let Some(receipt) =
-                    self.tell_vehicle_camera(vehicle_id, VIDEO_START_CAPTURE, vec![0.0, 0.0])
+                    self.tell_vehicle_camera(vehicle_id, None, CameraAction::StartRecording)
             {
                 self.video
                     .camera_recording
@@ -162,14 +166,24 @@ impl Engine {
             // A definitive refusal/not-sent means there is no recording from
             // this start to stop. Unknown or timed-out starts still need Stop:
             // the camera may have acted even when its acknowledgement was lost.
-            let refused = self.state.receipts.get(&receipt_id).is_some_and(|receipt| {
+            let started = self.state.receipts.get(&receipt_id);
+            let refused = started.is_some_and(|receipt| {
                 matches!(
                     receipt.status,
                     ReceiptStatus::Rejected | ReceiptStatus::NotSent
                 )
             });
+            // The stop goes to the camera the start went to.
+            let camera = started.and_then(|receipt| match receipt.command {
+                Command::Camera {
+                    component_id: Some(component),
+                    device_id,
+                    ..
+                } => Some((component, device_id)),
+                _ => None,
+            });
             if !refused {
-                self.tell_vehicle_camera(&vehicle_id, VIDEO_STOP_CAPTURE, vec![0.0]);
+                self.tell_vehicle_camera(&vehicle_id, camera, CameraAction::StopRecording);
             }
         }
     }

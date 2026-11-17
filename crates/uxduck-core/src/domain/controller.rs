@@ -206,6 +206,25 @@ pub struct RcAxisBinding {
     pub input: AxisBinding,
 }
 
+/// A gimbal's pitch or yaw, as an input turns it (S407).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GimbalAxis {
+    Pitch,
+    Yaw,
+}
+
+/// An axis that turns the target vehicle's gimbal (S407): the further it
+/// is pushed the faster the gimbal turns, up and right positive, and at
+/// its centre the gimbal stops. It turns the gimbal only once it has been
+/// at its centre after the controller's current route began.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GimbalAxisBinding {
+    pub control: GimbalAxis,
+    pub input: AxisBinding,
+}
+
 /// A button that sends a command to the target vehicle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -237,26 +256,48 @@ pub struct ActionBinding {
     pub action: HeldAction,
 }
 
-/// What a held button does: holds the gripper open or closed (S263), or
-/// Talk, held to speak to the agent in the window that claimed the
-/// controller and let go to send (S21). The daemon only keeps Talk; the
-/// window reads the button.
+/// What a held button does: holds the gripper open or closed (S263),
+/// turns the target vehicle's gimbal up, down, left or right while it is
+/// held (S407), or Talk, held to speak to the agent in the window that
+/// claimed the controller and let go to send (S21). The daemon only keeps
+/// Talk, and the window reads the button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeldAction {
     Open,
     Close,
     Talk,
+    GimbalUp,
+    GimbalDown,
+    GimbalLeft,
+    GimbalRight,
 }
 
 impl HeldAction {
-    /// The gripper action it asks for; none for Talk.
+    /// The gripper action it asks for, or none for any other.
     #[must_use]
     pub const fn gripper(self) -> Option<GripperAction> {
         match self {
             Self::Open => Some(GripperAction::Open),
             Self::Close => Some(GripperAction::Close),
-            Self::Talk => None,
+            Self::Talk
+            | Self::GimbalUp
+            | Self::GimbalDown
+            | Self::GimbalLeft
+            | Self::GimbalRight => None,
+        }
+    }
+
+    /// Which way it turns a gimbal and how fast, as a full push of an
+    /// axis would: up and right positive. None for any other.
+    #[must_use]
+    pub const fn gimbal(self) -> Option<(GimbalAxis, f64)> {
+        match self {
+            Self::GimbalUp => Some((GimbalAxis::Pitch, 1.0)),
+            Self::GimbalDown => Some((GimbalAxis::Pitch, -1.0)),
+            Self::GimbalLeft => Some((GimbalAxis::Yaw, -1.0)),
+            Self::GimbalRight => Some((GimbalAxis::Yaw, 1.0)),
+            Self::Open | Self::Close | Self::Talk => None,
         }
     }
 }
@@ -383,9 +424,13 @@ pub struct InputMapping {
     /// again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unused: Vec<StickControl>,
-    /// Buttons held for the gripper (S263).
+    /// Buttons held for the gripper (S263) or to turn a gimbal (S407).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionBinding>,
+    /// Axes that turn the target vehicle's gimbal (S407): its pitch and
+    /// its yaw, each at most once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gimbal: Vec<GimbalAxisBinding>,
     pub version: u64,
 }
 
@@ -512,6 +557,7 @@ impl InputMapping {
             || self
                 .stick_bindings()
                 .chain(self.rc_channels.iter().map(|b| &b.input))
+                .chain(self.gimbal.iter().map(|b| &b.input))
                 .any(|b| input.shares_input(b, inputs))
             || self
                 .positions
@@ -562,6 +608,93 @@ impl InputMapping {
         self.actions.iter().find(|b| b.matches(button, code))
     }
 
+    /// Whether a gimbal's axis may be bound as it is (S407): pitch and yaw
+    /// once each at most, on an input no stick, RC channel, command
+    /// position or other gimbal axis reads. `inputs` are a device's own,
+    /// by code and gamepad name, where they are known.
+    #[must_use]
+    pub fn gimbal_conflicts(
+        &self,
+        binding: &GimbalAxisBinding,
+        inputs: &[(Option<u32>, Option<GamepadAxis>)],
+    ) -> bool {
+        self.gimbal
+            .iter()
+            .filter(|other| other.control == binding.control)
+            .count()
+            > 1
+            || self
+                .stick_bindings()
+                .chain(self.rc_channels.iter().map(|b| &b.input))
+                .any(|b| binding.input.shares_input(b, inputs))
+            || self
+                .positions
+                .iter()
+                .any(|p| binding.input.shares_input(&p.binding(), inputs))
+            || self
+                .gimbal
+                .iter()
+                .filter(|other| binding.input.shares_input(&other.input, inputs))
+                .count()
+                > 1
+    }
+
+    /// How fast the gimbal's axes ask it to turn, pitch then yaw, each -1
+    /// to 1 with up and right positive, after the deadzone and inversion.
+    /// `input` reads a binding's raw value. None where it is not known
+    /// yet, which asks for nothing.
+    #[must_use]
+    pub fn gimbal_axes(&self, input: impl Fn(&AxisBinding) -> Option<f64>) -> Vec<f64> {
+        self.gimbal
+            .iter()
+            .map(|binding| {
+                let Some(raw) = input(&binding.input) else {
+                    return 0.0;
+                };
+                let raw = binding.input.calibrated(raw.clamp(-1.0, 1.0));
+                let value = if raw.abs() <= self.deadzone {
+                    0.0
+                } else {
+                    raw.signum() * (raw.abs() - self.deadzone) / (1.0 - self.deadzone)
+                };
+                if binding.input.inverted {
+                    -value
+                } else {
+                    value
+                }
+            })
+            .collect()
+    }
+
+    /// The direction pad as the gimbal's held actions (S407), on each of
+    /// its buttons that does nothing else. The built-in gamepad layouts
+    /// carry it. A radio has no direction pad, and its switches and knobs
+    /// differ from one model to the next, so its pilot binds them.
+    #[must_use]
+    pub fn with_gimbal_pad(mut self) -> Self {
+        for (button, action) in [
+            (GamepadButton::DpadUp, HeldAction::GimbalUp),
+            (GamepadButton::DpadDown, HeldAction::GimbalDown),
+            (GamepadButton::DpadLeft, HeldAction::GimbalLeft),
+            (GamepadButton::DpadRight, HeldAction::GimbalRight),
+        ] {
+            let taken = self
+                .buttons
+                .iter()
+                .map(|b| (b.button, b.code))
+                .chain(self.actions.iter().map(|a| (a.button, a.code)))
+                .any(|bound| bound == (button, None));
+            if !taken {
+                self.actions.push(ActionBinding {
+                    button,
+                    code: None,
+                    action,
+                });
+            }
+        }
+        self
+    }
+
     /// Mode 2, the common one: throttle and yaw on the left stick, pitch
     /// and roll on the right.
     #[must_use]
@@ -602,6 +735,7 @@ impl InputMapping {
             rc_channels: Vec::new(),
             unused: Vec::new(),
             actions: Vec::new(),
+            gimbal: Vec::new(),
             version: 1,
         }
     }
@@ -1186,6 +1320,49 @@ mod tests {
         assert_eq!(
             restored.action(None, Some(7)).map(|b| b.action),
             Some(HeldAction::Close)
+        );
+    }
+
+    #[test]
+    fn the_gimbal_pad_takes_only_the_direction_pad_buttons_that_do_nothing_else() {
+        let held = |mapping: &InputMapping| -> Vec<(GamepadButton, HeldAction)> {
+            mapping
+                .actions
+                .iter()
+                .map(|binding| (binding.button, binding.action))
+                .collect()
+        };
+        assert_eq!(
+            held(&InputMapping::mode_2().with_gimbal_pad()),
+            [
+                (GamepadButton::DpadUp, HeldAction::GimbalUp),
+                (GamepadButton::DpadDown, HeldAction::GimbalDown),
+                (GamepadButton::DpadLeft, HeldAction::GimbalLeft),
+                (GamepadButton::DpadRight, HeldAction::GimbalRight),
+            ]
+        );
+        // Up sends a command and left is held to talk: both stay as they are.
+        let mut taken = InputMapping::mode_2();
+        taken.buttons.push(ButtonBinding {
+            button: GamepadButton::DpadUp,
+            code: None,
+            command: Command::Rtl,
+            hold_ms: None,
+        });
+        taken.actions.push(ActionBinding {
+            button: GamepadButton::DpadLeft,
+            code: None,
+            action: HeldAction::Talk,
+        });
+        let padded = taken.clone().with_gimbal_pad();
+        assert_eq!(padded.buttons, taken.buttons);
+        assert_eq!(
+            held(&padded),
+            [
+                (GamepadButton::DpadLeft, HeldAction::Talk),
+                (GamepadButton::DpadDown, HeldAction::GimbalDown),
+                (GamepadButton::DpadRight, HeldAction::GimbalRight),
+            ]
         );
     }
 

@@ -260,6 +260,42 @@ mod tests {
         }
     }
 
+    /// A camera's controls are found by asking for them (S405): the tool is
+    /// not one of those sent every turn.
+    #[test]
+    fn a_cameras_command_is_found_by_what_it_does() {
+        let catalogue = tools();
+        let found = search(&catalogue, json!({ "query": "camera take photo" })).unwrap();
+        assert!(
+            found["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "camera_command"),
+            "{found}"
+        );
+    }
+
+    /// And a gimbal's (S406): pointing it and reading who has it.
+    #[test]
+    fn a_gimbals_command_is_found_by_what_it_does() {
+        let catalogue = tools();
+        for (query, name) in [
+            ("point the gimbal", "gimbal_command"),
+            ("who controls the gimbal", "gimbal_list"),
+        ] {
+            let found = search(&catalogue, json!({ "query": query })).unwrap();
+            assert!(
+                found["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["name"] == name),
+                "{query}: {found}"
+            );
+        }
+    }
+
     #[test]
     fn calls_cannot_escape_the_vehicle_tool_allowlist_or_hide_invalid_arguments() {
         let catalogue = tools();

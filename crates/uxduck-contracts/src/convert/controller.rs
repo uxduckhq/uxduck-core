@@ -20,7 +20,18 @@ macro_rules! both_ways {
 both_ways!(c::TargetMode, dto::TargetMode, Pinned, FollowsSelection);
 both_ways!(c::StickMode, dto::StickMode, Mode1, Mode2, Mode3, Mode4);
 both_ways!(c::StickControl, dto::StickControl, Roll, Pitch, Yaw);
-both_ways!(c::HeldAction, dto::HeldAction, Open, Close, Talk);
+both_ways!(
+    c::HeldAction,
+    dto::HeldAction,
+    Open,
+    Close,
+    Talk,
+    GimbalUp,
+    GimbalDown,
+    GimbalLeft,
+    GimbalRight
+);
+both_ways!(c::GimbalAxis, dto::GimbalAxis, Pitch, Yaw);
 both_ways!(
     c::ThrottleRange,
     dto::ThrottleRange,
@@ -160,6 +171,7 @@ impl From<&c::InputMapping> for dto::InputMapping {
             rc_channels: v.rc_channels.iter().map(Into::into).collect(),
             unused: v.unused.iter().copied().map(Into::into).collect(),
             actions: v.actions.iter().map(Into::into).collect(),
+            gimbal: v.gimbal.iter().map(Into::into).collect(),
             version: v.version,
         }
     }
@@ -230,6 +242,23 @@ impl From<dto::RcAxisBinding> for c::RcAxisBinding {
     fn from(v: dto::RcAxisBinding) -> Self {
         Self {
             channel: v.channel,
+            input: v.input.into(),
+        }
+    }
+}
+
+impl From<&c::GimbalAxisBinding> for dto::GimbalAxisBinding {
+    fn from(v: &c::GimbalAxisBinding) -> Self {
+        Self {
+            control: v.control.into(),
+            input: v.input.into(),
+        }
+    }
+}
+impl From<dto::GimbalAxisBinding> for c::GimbalAxisBinding {
+    fn from(v: dto::GimbalAxisBinding) -> Self {
+        Self {
+            control: v.control.into(),
             input: v.input.into(),
         }
     }

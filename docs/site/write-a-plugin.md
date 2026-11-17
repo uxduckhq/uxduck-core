@@ -88,7 +88,7 @@ values per vehicle when a calculation needs several keys across batches.
 
 The repository's `plugins/README.md` indexes runnable examples: battery warnings,
 fleet map markers, a persistent session timer, distance from home, clocks and a
-Rust camera controller. Reuse a scaffold's recording with any source folder:
+Rust automation that takes a photo at every waypoint. Reuse a scaffold's recording with any source folder:
 
 ```sh
 uxduck plugin test plugins/fleet-markers-ts --tlog battery-watch/test.tlog
@@ -124,7 +124,7 @@ Effects are commands, messages by name (only those in `sends`), items with a uni
 
 Handlers are synchronous. There is no DOM, Node runtime, filesystem, fetch or
 package loader. The SDK exposes `value`, `text`, `table`, `latest`, `notify`,
-`point`, `circle` and `commandLong`. Its TypeScript types are in
+`point`, `circle`, `commandLong` and `cameraCommand`. Its TypeScript types are in
 `packages/sdk/src/index.ts` in [UXDuck Core](https://github.com/uxduckhq/uxduck-core).
 The package is not on npm. In a checkout, `plugins/tsconfig.json` maps
 `@uxduck/sdk` to those types, so an editor finds them for a plugin in `plugins/`,

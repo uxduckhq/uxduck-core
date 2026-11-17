@@ -36,6 +36,24 @@ impl From<&core::Command> for dto::Command {
                 place: place.into(),
             },
             core::Command::Long { command, params } => Self::Long { command, params },
+            core::Command::Camera {
+                component_id,
+                device_id,
+                action,
+            } => Self::Camera {
+                component_id,
+                device_id,
+                action: action.into(),
+            },
+            core::Command::Gimbal {
+                component_id,
+                device_id,
+                action,
+            } => Self::Gimbal {
+                component_id,
+                device_id,
+                action: action.into(),
+            },
         }
     }
 }
@@ -72,6 +90,24 @@ impl From<dto::Command> for core::Command {
                 place: place.into(),
             },
             dto::Command::Long { command, params } => Self::Long { command, params },
+            dto::Command::Camera {
+                component_id,
+                device_id,
+                action,
+            } => Self::Camera {
+                component_id,
+                device_id,
+                action: action.into(),
+            },
+            dto::Command::Gimbal {
+                component_id,
+                device_id,
+                action,
+            } => Self::Gimbal {
+                component_id,
+                device_id,
+                action: action.into(),
+            },
         }
     }
 }
@@ -165,6 +201,9 @@ impl From<&core::Receipt> for dto::Receipt {
                 user_id: by.user_id.clone(),
                 name: by.name.clone(),
                 command_id: by.command_id.clone(),
+            }),
+            progress: r.progress.map(|progress| dto::CommandProgress {
+                percent: progress.percent,
             }),
             created_at_us: r.created_at_us,
             completed_at_us: r.completed_at_us,

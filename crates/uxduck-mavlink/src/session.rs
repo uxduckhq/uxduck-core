@@ -3,6 +3,7 @@
 //! caller supplies both and carries out the effects.
 
 use std::collections::BTreeMap;
+mod camera_settings;
 mod routes;
 
 use uxduck_core::domain::modes::AvailableMode;
@@ -383,6 +384,65 @@ pub enum Effect {
         /// `VIDEO_STREAM_TYPE`.
         kind: u8,
         uri: String,
+    },
+    /// A camera of a vehicle as it is now known (S404): told when it is
+    /// first heard, when it says what it is, when its streams change and
+    /// when it goes or returns.
+    Camera(Box<crate::camera::Observation>),
+    /// A camera that was listed is no camera of its own: its autopilot was
+    /// passing on a camera component's answer, or its address was let go.
+    CameraRemoved {
+        vehicle_id: String,
+        component_id: u8,
+        device_id: Option<u8>,
+    },
+    /// A gimbal of a vehicle as it is now known (S406): told when its
+    /// manager says what it manages, when who holds it or what its yaw is
+    /// held from changes, and when it goes or returns.
+    Gimbal(Box<crate::gimbal::Observation>),
+    /// A gimbal that was listed is at no address any more.
+    GimbalRemoved {
+        vehicle_id: String,
+        component_id: u8,
+        device_id: u8,
+    },
+    /// What a camera last said of its settings, its card and what it is
+    /// capturing (S405): told when any of it changes.
+    CameraState {
+        vehicle_id: String,
+        component_id: u8,
+        device_id: Option<u8>,
+        state: Box<crate::camera_control::State>,
+    },
+    /// A photo a camera said it took (S405), told once.
+    CameraImage {
+        vehicle_id: String,
+        component_id: u8,
+        device_id: Option<u8>,
+        image: Box<crate::camera_control::Image>,
+    },
+    /// A command still waiting was answered `MAV_RESULT_IN_PROGRESS`
+    /// (S405): the vehicle is working on it, this far in percent when it
+    /// says. Its end comes as `CommandDone`.
+    CommandProgress {
+        receipt_id: String,
+        progress: Option<u8>,
+    },
+    /// A camera's definition file as it was read over MAVLink FTP (S411):
+    /// its bytes, not yet checked, or why there are none.
+    CameraDefinition {
+        vehicle_id: String,
+        /// The camera's own component.
+        component_id: u8,
+        result: Result<Vec<u8>, String>,
+    },
+    /// The settings a camera gave as extended parameters (S411). `read`
+    /// ends a read that was asked for: every value is in, or why not.
+    CameraSettings {
+        vehicle_id: String,
+        component_id: u8,
+        values: Vec<(String, crate::camera_params::Value)>,
+        read: Option<Result<(), String>>,
     },
 }
 
@@ -878,6 +938,17 @@ fn modes_heard(
     effects
 }
 
+/// The component a camera's or a gimbal's command names: a camera that is
+/// its own component and not one its autopilot speaks for (S405), or a
+/// gimbal's manager (S406).
+fn camera_component(command: &uxduck_core::domain::command::Command) -> Option<u8> {
+    match command {
+        uxduck_core::domain::command::Command::Camera { component_id, .. }
+        | uxduck_core::domain::command::Command::Gimbal { component_id, .. } => *component_id,
+        _ => None,
+    }
+}
+
 /// A newer motor test replaces one still waiting for its answer (S188):
 /// the older is done, not sent again.
 fn replace_motor_test(
@@ -973,8 +1044,31 @@ pub struct Session {
     /// Last time each peer was heard, by `(link, peer)`.
     peers: BTreeMap<(String, String), u64>,
     sequence: u8,
-    /// Camera components, asked for their video streams (S39).
+    /// Camera components and autopilots, asked what cameras there are and
+    /// for their video streams (S39, S404).
     cameras: crate::camera::Cameras,
+    /// What was last said of each camera (`Effect::Camera`), by vehicle id,
+    /// component and device id.
+    cameras_said: BTreeMap<(String, u8, u8), crate::camera::Observation>,
+    /// What was last said of each camera's state (`Effect::CameraState`),
+    /// by vehicle id, component and device id.
+    camera_states_said: BTreeMap<(String, u8, u8), crate::camera_control::State>,
+    /// The settings cameras keep themselves, read and written as extended
+    /// parameters (S411).
+    camera_params: crate::camera_params::Params,
+    /// The camera definition files being read over MAVLink FTP (S411).
+    camera_files: crate::camera_file::Reads,
+    /// Autopilots and components, asked what gimbals they manage (S406).
+    gimbals: crate::gimbal::Gimbals,
+    /// What was last said of each gimbal (`Effect::Gimbal`), by vehicle
+    /// id, its manager's component and its device id.
+    gimbals_said: BTreeMap<(String, u8, u8), crate::gimbal::Observation>,
+    /// The vehicles whose gimbals someone is looking at: where they point
+    /// is asked for ten times a second.
+    gimbals_watched: std::collections::BTreeSet<String>,
+    /// The gimbals still to be told to stop turning (S407), by vehicle
+    /// id, manager's component and device id, and how many more times.
+    gimbal_stops: BTreeMap<(String, u8, u8), u8>,
     /// Long messages being put together, by vehicle, component and id:
     /// their parts so far, and when the last came.
     texts: BTreeMap<TextKey, (BTreeMap<u8, String>, u64)>,
@@ -1064,6 +1158,8 @@ impl Session {
         if !self.paused.remove(link_id) {
             return;
         }
+        self.cameras.resumed(link_id, now_us);
+        self.gimbals.resumed(link_id, now_us);
         for vehicle in self
             .vehicles
             .values_mut()
@@ -1176,6 +1272,24 @@ impl Session {
                 // or mission traffic from a different on-board component.
                 continue;
             }
+            // A camera's definition file read from the camera itself is
+            // answered by the camera, not by the autopilot (S411).
+            if let Message::Ftp {
+                target_system,
+                payload,
+                ..
+            } = &decoded.message
+                && let Some(read) = self.camera_file_answer(
+                    key,
+                    decoded.component_id,
+                    *target_system,
+                    payload,
+                    (received_us, processed_us),
+                )
+            {
+                effects.extend(read);
+                continue;
+            }
             if autopilots_own(&decoded.message)
                 && self
                     .vehicles
@@ -1223,6 +1337,8 @@ impl Session {
                     | Message::MissionItem(_)
                     | Message::MissionRequest { .. }
                     | Message::MissionAck { .. }
+                    | Message::ParamExtValue(_)
+                    | Message::ParamExtAck(_)
             );
             if !protocol && !self.accept_telemetry(key, &decoded.message, received_us) {
                 continue;
@@ -1232,7 +1348,7 @@ impl Session {
                     command,
                     result,
                     target_system,
-                    ..
+                    target_component,
                 } => {
                     if target_system == self.config.gcs_system_id || target_system == 0 {
                         effects.extend(self.acknowledged(
@@ -1243,6 +1359,15 @@ impl Session {
                             received_us,
                         ));
                     }
+                    // A camera's answers, and a command still being worked
+                    // on (S405).
+                    effects.extend(self.camera_acknowledged(
+                        key,
+                        (decoded.system_id, decoded.component_id),
+                        (command, result, crate::decode::ack_progress(frame)),
+                        (target_system, target_component),
+                        received_us,
+                    ));
                 }
                 Message::Heartbeat {
                     mav_type,
@@ -1301,20 +1426,68 @@ impl Session {
                         processed_us,
                     ));
                 }
-                Message::VideoStream {
-                    stream_id,
-                    kind,
-                    uri,
-                    ..
-                } => {
-                    effects.extend(self.video_stream(
+                Message::VideoStream(stream) => {
+                    effects.extend(self.video_stream(key, decoded.component_id, *stream));
+                }
+                Message::ParamExtValue(said) => {
+                    self.camera_setting_said(key, decoded.component_id, *said, received_us);
+                }
+                Message::ParamExtAck(acked) => {
+                    effects.extend(self.camera_setting_acked(
                         key,
                         decoded.component_id,
-                        stream_id,
-                        kind,
-                        uri,
+                        *acked,
+                        received_us,
                     ));
                 }
+                Message::VideoStreamStatus(status) => {
+                    self.cameras.stream_status(
+                        &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                        status,
+                    );
+                }
+                Message::CameraInformation(information) => {
+                    self.cameras.information(
+                        &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                        *information,
+                    );
+                    // A camera that has streams is asked for them now.
+                    effects.extend(self.ask_cameras(received_us));
+                }
+                Message::GimbalManagerInformation(information) => {
+                    self.gimbals.information(
+                        &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                        information,
+                        received_us,
+                    );
+                    // A manager is asked at once to say who is in control.
+                    effects.extend(self.ask_gimbals(received_us));
+                }
+                Message::GimbalManagerStatus(status) => self.gimbals.status(
+                    &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                    status,
+                    received_us,
+                ),
+                Message::CameraSettings(said) => self.cameras.settings(
+                    &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                    said,
+                    received_us,
+                ),
+                Message::StorageInformation(said) => self.cameras.storage(
+                    &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                    *said,
+                    received_us,
+                ),
+                Message::CameraCaptureStatus(said) => self.cameras.capture_status(
+                    &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                    said,
+                    received_us,
+                ),
+                Message::CameraImageCaptured(said) => self.cameras.image(
+                    &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                    *said,
+                    received_us,
+                ),
                 Message::Event {
                     id,
                     sequence,
@@ -1498,6 +1671,51 @@ impl Session {
                         vehicle.heading =
                             Some((f64::from(yaw).to_degrees().rem_euclid(360.0), received_us));
                     }
+                    // What a camera tracks and its thermal range are
+                    // telemetry, made below. Here they say what to ask the
+                    // camera for next (ADR-0063 Y5).
+                    match message {
+                        Message::CameraTrackingImage(said) => {
+                            effects.extend(self.camera_tracking_said(
+                                key,
+                                decoded.component_id,
+                                (said.status, true),
+                                received_us,
+                            ));
+                        }
+                        Message::CameraTrackingGeo(said) => {
+                            effects.extend(self.camera_tracking_said(
+                                key,
+                                decoded.component_id,
+                                (said.status, false),
+                                received_us,
+                            ));
+                        }
+                        Message::CameraThermalRange(_) => self.cameras.thermal_range_said(
+                            &(key.0.clone(), key.1.clone(), key.2, decoded.component_id),
+                            received_us,
+                        ),
+                        _ => {}
+                    }
+                    if let Message::GimbalAttitude { flags, q } = message {
+                        // What its yaw is held from, for its gimbal (S406).
+                        let from = (key.0.clone(), key.1.clone(), key.2, decoded.component_id);
+                        let gimbal_device_id = crate::gimbal::attitude_device_id(frame);
+                        self.gimbals.attitude(
+                            &from,
+                            crate::gimbal::Attitude {
+                                flags,
+                                q,
+                                gimbal_device_id,
+                            },
+                        );
+                        // What the device says is wrong with it.
+                        self.gimbals.failures(
+                            &from,
+                            gimbal_device_id,
+                            crate::gimbal::attitude_failure_flags(frame),
+                        );
+                    }
                     self.note_home(key, &message, received_us);
                     if let Some(vehicle) = self.vehicles.get_mut(key) {
                         vehicle.note_terrain(&message, received_us);
@@ -1527,7 +1745,457 @@ impl Session {
         }
         self.reading = (heard, address);
         effects.extend(self.rc_calibrations());
-        self.reconcile(effects, processed_us)
+        let mut effects = self.reconcile(effects, processed_us);
+        // After the vehicles, so that a camera's vehicle is known first.
+        effects.extend(self.cameras_changed());
+        effects.extend(self.camera_states());
+        effects.extend(self.camera_settings_said());
+        effects.extend(self.gimbals_changed());
+        effects
+    }
+
+    /// Says what each camera now is, where that or its vehicle's id
+    /// changed (`Effect::Camera`), and which is no longer a camera of its
+    /// own (`Effect::CameraRemoved`). A camera heard at two addresses of
+    /// one vehicle is one camera.
+    fn cameras_changed(&mut self) -> Vec<Effect> {
+        use std::collections::btree_map::Entry;
+
+        if !self.cameras.take_changed() {
+            return Vec::new();
+        }
+        let mut now: BTreeMap<(String, u8, u8), crate::camera::Observation> = BTreeMap::new();
+        for (key, device, heard, information, streams) in self.cameras.listed() {
+            let Some(vehicle) = self.vehicles.get(&(key.0.clone(), key.1.clone(), key.2)) else {
+                continue;
+            };
+            let seen = crate::camera::Observation {
+                vehicle_id: vehicle.observation.id.clone(),
+                component_id: key.3,
+                device_id: (device != 0).then_some(device),
+                // A camera of a vehicle that is not heard is gone with it.
+                present: heard && vehicle.observation.presence != Presence::Offline,
+                information: information.cloned(),
+                streams,
+            };
+            match now.entry((seen.vehicle_id.clone(), key.3, device)) {
+                Entry::Vacant(entry) => {
+                    entry.insert(seen);
+                }
+                Entry::Occupied(mut entry) => {
+                    if seen.better_than(entry.get()) {
+                        entry.insert(seen);
+                    }
+                }
+            }
+        }
+        let mut effects = Vec::new();
+        let said = std::mem::take(&mut self.cameras_said);
+        for (vehicle_id, component_id, device) in said.keys() {
+            // A vehicle whose id changed takes its cameras with it: they
+            // are told under its new id and nothing is removed.
+            if !now.contains_key(&(vehicle_id.clone(), *component_id, *device))
+                && self
+                    .vehicles
+                    .values()
+                    .any(|vehicle| vehicle.observation.id == *vehicle_id)
+            {
+                effects.push(Effect::CameraRemoved {
+                    vehicle_id: vehicle_id.clone(),
+                    component_id: *component_id,
+                    device_id: (*device != 0).then_some(*device),
+                });
+            }
+        }
+        for (key, seen) in &now {
+            if said.get(key) != Some(seen) {
+                effects.push(Effect::Camera(Box::new(seen.clone())));
+            }
+        }
+        self.cameras_said = now;
+        effects
+    }
+
+    /// Says what each gimbal now is, where that or its vehicle's id
+    /// changed (`Effect::Gimbal`), and which is at no address any more
+    /// (`Effect::GimbalRemoved`). A gimbal heard at two addresses of one
+    /// vehicle is one gimbal.
+    fn gimbals_changed(&mut self) -> Vec<Effect> {
+        use std::collections::btree_map::Entry;
+
+        if !self.gimbals.take_changed() {
+            return Vec::new();
+        }
+        let ours = (self.config.gcs_system_id, crate::GCS_COMPONENT_ID);
+        let seat = |seat: (u8, u8)| (seat != (0, 0)).then_some(seat);
+        let mut now: BTreeMap<(String, u8, u8), crate::gimbal::Observation> = BTreeMap::new();
+        for (key, listed) in self.gimbals.listed() {
+            let Some(vehicle) = self.vehicles.get(&(key.0.clone(), key.1.clone(), key.2)) else {
+                continue;
+            };
+            let seen = crate::gimbal::Observation {
+                vehicle_id: vehicle.observation.id.clone(),
+                component_id: key.3,
+                device_id: listed.device_id,
+                device_component_id: listed.device_component_id,
+                // A gimbal of a vehicle that is not heard is gone with it.
+                present: listed.heard && vehicle.observation.presence != Presence::Offline,
+                cap_flags: listed.cap_flags,
+                limits: listed.limits,
+                primary: listed.status.and_then(|status| seat(status.primary)),
+                secondary: listed.status.and_then(|status| seat(status.secondary)),
+                holder: crate::gimbal::holder(
+                    listed.status,
+                    ours,
+                    (key.2, vehicle.autopilot_component),
+                ),
+                yaw_locked: listed.yaw_locked,
+                retracted: listed.retracted,
+                neutral: listed.neutral,
+                failure_flags: listed.failure_flags,
+            };
+            match now.entry((seen.vehicle_id.clone(), key.3, listed.device_id)) {
+                Entry::Vacant(entry) => {
+                    entry.insert(seen);
+                }
+                Entry::Occupied(mut entry) => {
+                    if seen.present && !entry.get().present {
+                        entry.insert(seen);
+                    }
+                }
+            }
+        }
+        let mut effects = Vec::new();
+        let said = std::mem::take(&mut self.gimbals_said);
+        for (vehicle_id, component_id, device_id) in said.keys() {
+            // A vehicle whose id changed takes its gimbals with it: they
+            // are told under its new id and nothing is removed.
+            if !now.contains_key(&(vehicle_id.clone(), *component_id, *device_id))
+                && self
+                    .vehicles
+                    .values()
+                    .any(|vehicle| vehicle.observation.id == *vehicle_id)
+            {
+                effects.push(Effect::GimbalRemoved {
+                    vehicle_id: vehicle_id.clone(),
+                    component_id: *component_id,
+                    device_id: *device_id,
+                });
+            }
+        }
+        for (key, seen) in &now {
+            if said.get(key) != Some(seen) {
+                effects.push(Effect::Gimbal(Box::new(seen.clone())));
+            }
+        }
+        self.gimbals_said = now;
+        effects
+    }
+
+    /// Whether someone is looking at where a vehicle's gimbals point: a
+    /// Camera tab or the 3D map's Drone camera (S406). While one is, the
+    /// gimbals' managers are asked for it ten times a second, and once a
+    /// second otherwise.
+    pub fn watch_gimbals(&mut self, vehicle_id: &str, watched: bool) {
+        // A vehicle is the same under the id it had before its UID came,
+        // so it is kept under one of its names only.
+        let names: Vec<String> = self
+            .vehicles
+            .values()
+            .find(|vehicle| {
+                vehicle.observation.id == vehicle_id
+                    || vehicle.observation.aliases.iter().any(|a| a == vehicle_id)
+            })
+            .map(|vehicle| {
+                std::iter::once(&vehicle.observation.id)
+                    .chain(&vehicle.observation.aliases)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.gimbals_watched
+            .retain(|id| id != vehicle_id && !names.contains(id));
+        if watched {
+            self.gimbals_watched.insert(vehicle_id.to_owned());
+        }
+    }
+
+    /// Where the gimbal a manager calls `device_id` last said it points:
+    /// pitch and yaw in degrees, and whether the yaw is from north.
+    #[must_use]
+    pub fn gimbal_pointing(
+        &self,
+        manager: &crate::gimbal::Key,
+        device_id: u8,
+    ) -> Option<(f32, f32, bool)> {
+        self.gimbals.pointing(manager, device_id)
+    }
+
+    /// Turns a gimbal at rates (S407): pitch then yaw in radians a second,
+    /// up and right positive, to the gimbal's manager at the vehicle's
+    /// current address. Sent on every pilot tick while a controller's
+    /// inputs ask for it. The gimbal goes on turning at the last rates it
+    /// heard, so whoever sends them ends with [`Session::gimbal_stop`].
+    pub fn gimbal_rates(
+        &mut self,
+        vehicle_id: &str,
+        component_id: u8,
+        device_id: u8,
+        rates: [f32; 2],
+    ) -> Vec<Effect> {
+        let Some(key) = self.find(vehicle_id) else {
+            return Vec::new();
+        };
+        if let Some(vehicle) = self.vehicles.get(&key) {
+            let id = vehicle.observation.id.clone();
+            self.gimbal_stops.remove(&(id, component_id, device_id));
+        }
+        vec![self.gimbal_rates_to(key, component_id, device_id, rates)]
+    }
+
+    /// Tells a gimbal to stop turning (S407): zero rates, now and twice
+    /// more as time goes on, since a zero rate is one message with no
+    /// answer. Nothing is sent on a paused link, and a vehicle that is not
+    /// heard is told again when it is: what is still owed waits for it.
+    pub fn gimbal_stop(
+        &mut self,
+        vehicle_id: &str,
+        component_id: u8,
+        device_id: u8,
+    ) -> Vec<Effect> {
+        let Some(id) = self
+            .vehicles
+            .values()
+            .find(|vehicle| {
+                vehicle.observation.id == vehicle_id
+                    || vehicle.observation.aliases.iter().any(|a| a == vehicle_id)
+            })
+            .map(|vehicle| vehicle.observation.id.clone())
+        else {
+            return Vec::new();
+        };
+        let gimbal = (id, component_id, device_id);
+        // With no address now, as after a long silence, or on a paused
+        // link, all of it waits.
+        let Some(key) = self
+            .find(vehicle_id)
+            .filter(|key| !self.paused.contains(&key.0))
+        else {
+            self.gimbal_stops.insert(gimbal, crate::gimbal::STOP_SENDS);
+            return Vec::new();
+        };
+        self.gimbal_stops
+            .insert(gimbal, crate::gimbal::STOP_SENDS - 1);
+        vec![self.gimbal_rates_to(key, component_id, device_id, [0.0; 2])]
+    }
+
+    /// The stops still owed to gimbals, one more each for the vehicles
+    /// heard lately on a link that is not paused.
+    fn gimbal_stops_due(&mut self, now_us: u64) -> Vec<Effect> {
+        let owed: Vec<(String, u8, u8)> = self.gimbal_stops.keys().cloned().collect();
+        let mut effects = Vec::new();
+        for gimbal in owed {
+            let Some(key) = self.find(&gimbal.0) else {
+                // A vehicle with no address now is told when it has one
+                // again. One that is no more is told nothing.
+                if !self
+                    .vehicles
+                    .values()
+                    .any(|vehicle| vehicle.observation.id == gimbal.0)
+                {
+                    self.gimbal_stops.remove(&gimbal);
+                }
+                continue;
+            };
+            let heard = self.vehicles.get(&key).is_some_and(|vehicle| {
+                now_us.saturating_sub(vehicle.observation.last_heartbeat_us)
+                    <= crate::gimbal::STOP_HEARD_US
+            });
+            if !heard || self.paused.contains(&key.0) {
+                continue;
+            }
+            effects.push(self.gimbal_rates_to(key, gimbal.1, gimbal.2, [0.0; 2]));
+            match self.gimbal_stops.get_mut(&gimbal) {
+                Some(left) if *left > 1 => *left -= 1,
+                _ => {
+                    self.gimbal_stops.remove(&gimbal);
+                }
+            }
+        }
+        effects
+    }
+
+    fn gimbal_rates_to(
+        &mut self,
+        key: (String, String, u8),
+        component_id: u8,
+        device_id: u8,
+        rates: [f32; 2],
+    ) -> Effect {
+        let manager = (key.0.clone(), key.1.clone(), key.2, component_id);
+        let yaw_locked = self.gimbals.yaw_locked(&manager, device_id) == Some(true);
+        // PX4's own manager takes rates in another message (S413).
+        let frame = if self.px4_manages(&key, component_id) {
+            crate::gimbal::px4_rates_frame
+        } else {
+            crate::gimbal::rates_frame
+        };
+        let sequence = self.next_sequence();
+        let (link_id, peer, system_id) = key;
+        Effect::Send {
+            link_id,
+            peer,
+            bytes: frame(
+                (self.config.gcs_system_id, crate::GCS_COMPONENT_ID, sequence),
+                (system_id, component_id),
+                device_id,
+                rates,
+                yaw_locked,
+            ),
+        }
+    }
+
+    /// Asks the autopilots and components that are due what gimbals they
+    /// manage, who is in control of them and where they point. Nothing is
+    /// asked of a vehicle that is not heard now, nor on a paused link.
+    fn ask_gimbals(&mut self, now_us: u64) -> Vec<Effect> {
+        use crate::gimbal::Request;
+
+        let (config, gcs) = (self.config, self.config.gcs_system_id);
+        let (vehicles, paused, watched) = (&self.vehicles, &self.paused, &self.gimbals_watched);
+        let due = self.gimbals.requests(
+            now_us,
+            |(link, peer, system, _)| {
+                !paused.contains(link)
+                    && vehicles
+                        .get(&(link.clone(), peer.clone(), *system))
+                        .is_some_and(|vehicle| {
+                            presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
+                                == Presence::Online
+                        })
+            },
+            |(link, peer, system, _)| {
+                vehicles
+                    .get(&(link.clone(), peer.clone(), *system))
+                    .is_some_and(|vehicle| {
+                        watched.contains(&vehicle.observation.id)
+                            || vehicle
+                                .observation
+                                .aliases
+                                .iter()
+                                .any(|alias| watched.contains(alias))
+                    })
+            },
+        );
+        due.into_iter()
+            .map(|((link_id, peer, system, component), request)| {
+                let sequence = self.next_sequence();
+                let bytes = match request {
+                    Request::Information => crate::sim::request_message_frame(
+                        gcs,
+                        system,
+                        component,
+                        sequence,
+                        crate::gimbal::GIMBAL_MANAGER_INFORMATION,
+                        0.0,
+                    ),
+                    Request::Interval(message, interval_us) => set_message_interval_frame(
+                        gcs,
+                        system,
+                        component,
+                        sequence,
+                        message,
+                        interval_us,
+                    ),
+                };
+                Effect::Send {
+                    link_id,
+                    peer,
+                    bytes,
+                }
+            })
+            .collect()
+    }
+
+    /// Says what each camera last said of itself, where that or its
+    /// vehicle's id changed (`Effect::CameraState`), and each photo
+    /// described since (`Effect::CameraImage`).
+    fn camera_states(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let address = |key: &crate::camera::Key| (key.0.clone(), key.1.clone(), key.2);
+        if self.cameras.take_control_changed() {
+            let mut now = BTreeMap::new();
+            for (key, device, state) in self.cameras.states() {
+                let Some(vehicle) = self.vehicles.get(&address(key)) else {
+                    continue;
+                };
+                now.entry((vehicle.observation.id.clone(), key.3, device))
+                    .or_insert_with(|| state.clone());
+            }
+            for ((vehicle_id, component_id, device), state) in &now {
+                // Only a camera that is listed has a state.
+                let listed = (vehicle_id.clone(), *component_id, *device);
+                if self.cameras_said.contains_key(&listed)
+                    && self.camera_states_said.get(&listed) != Some(state)
+                {
+                    effects.push(Effect::CameraState {
+                        vehicle_id: vehicle_id.clone(),
+                        component_id: *component_id,
+                        device_id: (*device != 0).then_some(*device),
+                        state: Box::new(state.clone()),
+                    });
+                }
+            }
+            now.retain(|listed, _| self.cameras_said.contains_key(listed));
+            self.camera_states_said = now;
+        }
+        for (key, device, image) in self.cameras.take_images() {
+            let Some(vehicle) = self.vehicles.get(&address(&key)) else {
+                continue;
+            };
+            effects.push(Effect::CameraImage {
+                vehicle_id: vehicle.observation.id.clone(),
+                component_id: key.3,
+                device_id: (device != 0).then_some(device),
+                image: Box::new(image),
+            });
+        }
+        effects
+    }
+
+    /// A `COMMAND_ACK`, for the cameras (S405). An answer of in progress
+    /// to a command still waiting is told with how far it is, from the
+    /// component the command was sent to alone ([`Self::answered`]), as
+    /// only that holds its retries off. A camera command that a camera
+    /// accepted, whoever sent it, has what it changes read back.
+    fn camera_acknowledged(
+        &mut self,
+        key: &(String, String, u8),
+        (system, component): (u8, u8),
+        (command, result, progress): (u16, u8, Option<u8>),
+        (target_system, target_component): (u8, u8),
+        now_us: u64,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let ours = (target_system == self.config.gcs_system_id || target_system == 0)
+            && (target_component == crate::GCS_COMPONENT_ID || target_component == 0);
+        if result == 5
+            && ours
+            && let Some(index) = self.answered(key, (system, component), command, now_us)
+        {
+            effects.push(Effect::CommandProgress {
+                receipt_id: self.commands[index].order.receipt_id.clone(),
+                progress,
+            });
+        }
+        self.cameras.acknowledged(
+            &(key.0.clone(), key.1.clone(), key.2, component),
+            command,
+            result,
+            now_us,
+        );
+        effects.extend(self.ask_cameras(now_us));
+        effects
     }
 
     /// Says what each vehicle's RC calibration now is, where that or its
@@ -1610,6 +2278,8 @@ impl Session {
         let Some(gone) = self.vehicles.remove(address) else {
             return;
         };
+        self.cameras
+            .forget(|heard| (&heard.0, &heard.1, heard.2) == (&address.0, &address.1, address.2));
         if let Some(vehicle) = self.vehicles.get_mut(key) {
             for alias in gone.observation.aliases {
                 if alias != vehicle.observation.id && !vehicle.observation.aliases.contains(&alias)
@@ -1862,6 +2532,9 @@ impl Session {
         if !identify(vehicle, uid, uid2, versions, simulation) {
             return Vec::new();
         }
+        // Its cameras are told again, under the id it may have just taken.
+        self.cameras.touch();
+        self.gimbals.touch();
         self.moved(key);
         let Some(vehicle) = self.vehicles.get_mut(key) else {
             return Vec::new();
@@ -1887,10 +2560,23 @@ impl Session {
             self.stations.insert(key.clone(), now_us);
         } else {
             effects.extend(self.companion(key, component_id));
+            // Any component may manage a gimbal (S406).
+            let kind = if mav_type == "Gimbal" {
+                crate::gimbal::Kind::Gimbal
+            } else {
+                crate::gimbal::Kind::Other
+            };
+            self.gimbals.heartbeat(
+                &(key.0.clone(), key.1.clone(), key.2, component_id),
+                kind,
+                now_us,
+            );
+            effects.extend(self.ask_gimbals(now_us));
         }
         if mav_type == "Camera" {
-            self.cameras
-                .heard((key.0.clone(), key.1.clone(), key.2, component_id));
+            let camera = (key.0.clone(), key.1.clone(), key.2, component_id);
+            self.cameras.heartbeat(&camera, false, now_us);
+            self.cameras.heard(camera);
             effects.extend(self.ask_cameras(now_us));
         }
         effects
@@ -2031,43 +2717,197 @@ impl Session {
         &mut self,
         key: &(String, String, u8),
         component_id: u8,
-        stream_id: u8,
-        kind: u8,
-        uri: String,
+        stream: crate::camera::Stream,
     ) -> Option<Effect> {
         let vehicle = self.vehicles.get(key)?;
+        let (stream_id, kind, uri) = (stream.stream_id, stream.kind, stream.uri.clone());
+        // An answer that names no stream, as ArduPilot gives for a camera
+        // with none, ends the asking and is nobody's stream.
         self.cameras
-            .answered(&(key.0.clone(), key.1.clone(), key.2, component_id));
-        Some(Effect::VideoStream {
-            vehicle_id: vehicle.observation.id.clone(),
-            component_id,
-            stream_id,
-            kind,
-            uri,
-        })
+            .stream(&(key.0.clone(), key.1.clone(), key.2, component_id), stream)
+            .then(|| Effect::VideoStream {
+                vehicle_id: vehicle.observation.id.clone(),
+                component_id,
+                stream_id,
+                kind,
+                uri,
+            })
     }
 
-    /// Asks the cameras that are due for their video streams.
+    /// Asks the cameras and autopilots that are due what cameras there are,
+    /// and for their video streams. Nothing is asked of a vehicle that is
+    /// not heard now, as its version is not, nor on a paused link.
     fn ask_cameras(&mut self, now_us: u64) -> Vec<Effect> {
-        let gcs = self.config.gcs_system_id;
-        let vehicles = &self.vehicles;
-        let due = self.cameras.due(now_us, |(link, peer, system, _)| {
-            vehicles.contains_key(&(link.clone(), peer.clone(), *system))
+        use crate::camera::Request;
+
+        let (config, gcs) = (self.config, self.config.gcs_system_id);
+        let (vehicles, paused) = (&self.vehicles, &self.paused);
+        let due = self.cameras.requests(now_us, |(link, peer, system, _)| {
+            !paused.contains(link)
+                && vehicles
+                    .get(&(link.clone(), peer.clone(), *system))
+                    .is_some_and(|vehicle| {
+                        presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
+                            == Presence::Online
+                    })
         });
-        due.into_iter()
-            .map(|(link_id, peer, system, component)| {
+        let mut effects: Vec<Effect> = due
+            .into_iter()
+            .map(|((link_id, peer, system, component), request)| {
                 let sequence = self.next_sequence();
-                Effect::Send {
-                    link_id,
-                    peer,
-                    bytes: crate::sim::request_message_frame(
+                let bytes = match request {
+                    Request::Message(message) => crate::sim::request_message_frame(
+                        gcs, system, component, sequence, message, 0.0,
+                    ),
+                    Request::Superseded(command) => crate::sim::command_long_frame(
                         gcs,
                         system,
                         component,
                         sequence,
-                        crate::camera::VIDEO_STREAM_INFORMATION,
-                        0.0,
+                        command,
+                        [request.first_parameter(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        0,
                     ),
+                };
+                Effect::Send {
+                    link_id,
+                    peer,
+                    bytes,
+                }
+            })
+            .collect();
+        effects.extend(self.read_cameras(now_us));
+        effects.extend(self.watch_cameras(now_us));
+        effects
+    }
+
+    /// A camera's tracking status (ADR-0063 Y5): one that starts or stops
+    /// tracking has its status asked for, or no more, at once.
+    fn camera_tracking_said(
+        &mut self,
+        key: &(String, String, u8),
+        component: u8,
+        (status, image): (u8, bool),
+        now_us: u64,
+    ) -> Vec<Effect> {
+        let heard = (key.0.clone(), key.1.clone(), key.2, component);
+        if self.cameras.tracking_said(&heard, status, image, now_us) {
+            self.watch_cameras(now_us)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Asks the cameras for what they track and for their thermal range
+    /// (ADR-0063 Y5), under the conditions of `ask_cameras`.
+    fn watch_cameras(&mut self, now_us: u64) -> Vec<Effect> {
+        use crate::camera_tracking::Ask;
+
+        let (config, gcs) = (self.config, self.config.gcs_system_id);
+        let (vehicles, paused) = (&self.vehicles, &self.paused);
+        let due = self
+            .cameras
+            .watch_requests(now_us, |(link, peer, system, _)| {
+                !paused.contains(link)
+                    && vehicles
+                        .get(&(link.clone(), peer.clone(), *system))
+                        .is_some_and(|vehicle| {
+                            presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
+                                == Presence::Online
+                        })
+            });
+        due.into_iter()
+            .map(|((link_id, peer, system, component), ask)| {
+                let sequence = self.next_sequence();
+                let bytes = match ask {
+                    Ask::Message(id) => {
+                        crate::sim::request_message_frame(gcs, system, component, sequence, id, 0.0)
+                    }
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "ids and intervals fit f32 exactly enough"
+                    )]
+                    Ask::Every {
+                        message,
+                        interval_us,
+                    } => crate::sim::command_long_frame(
+                        gcs,
+                        system,
+                        component,
+                        sequence,
+                        crate::camera_control::SET_MESSAGE_INTERVAL,
+                        [
+                            message as f32,
+                            // Below zero stops it.
+                            interval_us.map_or(-1.0, |us| us as f32),
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                        0,
+                    ),
+                };
+                Effect::Send {
+                    link_id,
+                    peer,
+                    bytes,
+                }
+            })
+            .collect()
+    }
+
+    /// Asks the cameras that can be worked for what they say of
+    /// themselves (S405), under the conditions of `ask_cameras`.
+    fn read_cameras(&mut self, now_us: u64) -> Vec<Effect> {
+        use crate::camera_control::Send;
+
+        let (config, gcs) = (self.config, self.config.gcs_system_id);
+        let (vehicles, paused) = (&self.vehicles, &self.paused);
+        let due = self
+            .cameras
+            .control_requests(now_us, |(link, peer, system, _)| {
+                !paused.contains(link)
+                    && vehicles
+                        .get(&(link.clone(), peer.clone(), *system))
+                        .is_some_and(|vehicle| {
+                            presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
+                                == Presence::Online
+                        })
+            });
+        due.into_iter()
+            .map(|((link_id, peer, system, component), send)| {
+                let sequence = self.next_sequence();
+                let bytes = match send {
+                    Send::Message { id, param2 } => crate::sim::request_message_frame(
+                        gcs, system, component, sequence, id, param2,
+                    ),
+                    Send::Superseded { command, params } => crate::sim::command_long_frame(
+                        gcs,
+                        system,
+                        component,
+                        sequence,
+                        command,
+                        [params[0], params[1], 0.0, 0.0, 0.0, 0.0, 0.0],
+                        0,
+                    ),
+                    Send::Interval {
+                        message,
+                        interval_us,
+                    } => set_message_interval_frame(
+                        gcs,
+                        system,
+                        component,
+                        sequence,
+                        message,
+                        interval_us,
+                    ),
+                };
+                Effect::Send {
+                    link_id,
+                    peer,
+                    bytes,
                 }
             })
             .collect()
@@ -2341,6 +3181,11 @@ impl Session {
             vehicle.online_since_us = now_us;
         }
         let mut changed = new || vehicle.observation.presence != presence;
+        if changed {
+            // Its cameras and gimbals come and go with it.
+            self.cameras.touch();
+            self.gimbals.touch();
+        }
         vehicle.observation.presence = presence;
         if vehicle.observation.vehicle_type != mav_type
             || vehicle.observation.autopilot != autopilot
@@ -2368,6 +3213,12 @@ impl Session {
         if new {
             effects.extend(first_asks(vehicle, gcs, sequence));
         }
+        // An autopilot may speak for cameras attached to it (S404).
+        self.cameras.heartbeat(
+            &(key.0.clone(), key.1.clone(), key.2, component_id),
+            true,
+            now_us,
+        );
         if vehicle.observation.uid.is_none() && vehicle.version_requests == 0 {
             vehicle.version_requests = 1;
             vehicle.last_request_us = now_us;
@@ -2382,6 +3233,15 @@ impl Session {
                 ),
             });
         }
+        // An autopilot may manage gimbals too (S406).
+        self.gimbals.heartbeat(
+            &(key.0.clone(), key.1.clone(), key.2, component_id),
+            crate::gimbal::Kind::Autopilot,
+            now_us,
+        );
+        // Asked at its first heartbeat, and again when it is back.
+        effects.extend(self.ask_cameras(now_us));
+        effects.extend(self.ask_gimbals(now_us));
         effects
     }
 
@@ -2396,7 +3256,19 @@ impl Session {
             .retain(|_, last| now_us.saturating_sub(*last) <= config.peer_expiry_us);
         self.let_go_of_silent_addresses(now_us);
         let mut effects = Vec::new();
+        let paused = &self.paused;
+        self.cameras
+            .silent(now_us, config.offline_after_us, |link| {
+                paused.contains(link)
+            });
         effects.extend(self.ask_cameras(now_us));
+        let paused = &self.paused;
+        self.gimbals
+            .silent(now_us, config.offline_after_us, |link| {
+                paused.contains(link)
+            });
+        effects.extend(self.ask_gimbals(now_us));
+        effects.extend(self.gimbal_stops_due(now_us));
         let mut sends = Vec::new();
         let mut stream_requests = Vec::new();
         for (address, vehicle) in &mut self.vehicles {
@@ -2409,6 +3281,8 @@ impl Session {
             };
             if presence != vehicle.observation.presence {
                 vehicle.observation.presence = presence;
+                self.cameras.touch();
+                self.gimbals.touch();
                 effects.push(Effect::Vehicle(Box::new(vehicle.observation.clone())));
             }
             let produced = std::mem::take(&mut vehicle.pending);
@@ -2491,6 +3365,9 @@ impl Session {
         effects.extend(self.send_terrain(now_us));
         effects.extend(self.unanswered_checks(now_us));
         effects.extend(self.rc_calibrations());
+        effects.extend(self.cameras_changed());
+        effects.extend(self.tick_camera_settings(now_us));
+        effects.extend(self.gimbals_changed());
         effects
     }
 
@@ -2634,6 +3511,15 @@ impl Session {
     /// acknowledgement, retrying (`tick`) and giving up after the last try.
     /// A vehicle with no address is `NotSent` at once.
     pub fn command(&mut self, order: CommandOrder, now_us: u64) -> Vec<Effect> {
+        // One of a camera's own settings is an extended parameter, not a
+        // command (S411).
+        if camera_settings::is_setting(&order.command) {
+            return self.write_camera_setting(order, now_us);
+        }
+        self.send_command(order, now_us)
+    }
+
+    fn send_command(&mut self, order: CommandOrder, now_us: u64) -> Vec<Effect> {
         let not_sent = |order: CommandOrder, reason: &str| {
             vec![Effect::CommandDone {
                 receipt_id: order.receipt_id,
@@ -2681,6 +3567,15 @@ impl Session {
         } else {
             None
         };
+        // A camera's command goes to the camera: its own component, or its
+        // autopilot's for a camera the autopilot speaks for (S405).
+        // A gimbal's goes to its manager, which may be the gimbal itself
+        // (S406).
+        let component = camera_component(&order.command).unwrap_or(vehicle.autopilot_component);
+        if let Err(why) = self.keep_gimbal_pointing(&order.command, key, component, &mut wire) {
+            return not_sent(order, why);
+        }
+        self.gimbal_for_px4(&order.command, key, component, &mut wire);
         // A motor test replaces its own kind still waiting (S188).
         let mut effects = if motor_test(command) {
             replace_motor_test(&mut self.commands, key)
@@ -2698,10 +3593,13 @@ impl Session {
         }) {
             return not_sent(order, "the same command is still waiting for its answer");
         }
+        let key = key.clone();
+        self.address_camera(&order.command, &key, component, &mut wire);
+        self.number_photo(&order.command, &key, component, &mut wire);
         let pending = PendingCommand {
             order,
             key: key.clone(),
-            component: vehicle.autopilot_component,
+            component,
             command,
             wire,
             attempts: 0,
@@ -2730,6 +3628,117 @@ impl Session {
         let index = self.commands.len() - 1;
         effects.push(self.transmit(index, now_us));
         effects
+    }
+
+    /// A gimbal told only what to hold its yaw from keeps the pitch and
+    /// yaw it has now (S406): they are put into its command.
+    fn keep_gimbal_pointing(
+        &self,
+        command: &uxduck_core::domain::command::Command,
+        key: &(String, String, u8),
+        component: u8,
+        wire: &mut crate::commands::Wire,
+    ) -> Result<(), &'static str> {
+        let uxduck_core::domain::command::Command::Gimbal {
+            device_id, action, ..
+        } = command
+        else {
+            return Ok(());
+        };
+        let manager = (key.0.clone(), key.1.clone(), key.2, component);
+        #[allow(clippy::cast_possible_truncation, reason = "a heading in degrees")]
+        let heading = self
+            .vehicles
+            .get(key)
+            .and_then(|vehicle| vehicle.heading)
+            .map(|(degrees, _)| degrees as f32);
+        let pointing = self.gimbals.pointing(&manager, device_id.unwrap_or(0));
+        crate::gimbal::keep_pointing(action, wire, pointing, heading)
+    }
+
+    /// Whether this component is a PX4's own gimbal manager, which is the
+    /// autopilot itself (S413). A gimbal that manages itself on a PX4 is
+    /// not, and neither is ArduPilot.
+    fn px4_manages(&self, key: &(String, String, u8), component: u8) -> bool {
+        self.vehicles.get(key).is_some_and(|vehicle| {
+            component == vehicle.autopilot_component
+                && crate::modes::Family::for_vehicle(
+                    &vehicle.observation.autopilot,
+                    &vehicle.observation.vehicle_type,
+                ) == Some(crate::modes::Family::Px4)
+        })
+    }
+
+    /// PX4's own manager takes control and a movement's flags its own way
+    /// (S413): its command is changed to what it accepts.
+    fn gimbal_for_px4(
+        &self,
+        command: &uxduck_core::domain::command::Command,
+        key: &(String, String, u8),
+        component: u8,
+        wire: &mut crate::commands::Wire,
+    ) {
+        if let uxduck_core::domain::command::Command::Gimbal { action, .. } = command
+            && self.px4_manages(key, component)
+        {
+            let ours = (self.config.gcs_system_id, crate::GCS_COMPONENT_ID);
+            crate::gimbal::for_px4(action, wire, ours);
+        }
+    }
+
+    /// A camera its autopilot did not number is named as the autopilot can
+    /// be sure to take it (S409).
+    fn address_camera(
+        &self,
+        command: &uxduck_core::domain::command::Command,
+        key: &(String, String, u8),
+        component: u8,
+        wire: &mut crate::commands::Wire,
+    ) {
+        let uxduck_core::domain::command::Command::Camera {
+            device_id: Some(device),
+            action,
+            ..
+        } = command
+        else {
+            return;
+        };
+        let crate::commands::Wire::Long(params) = wire else {
+            return;
+        };
+        let heard = (key.0.clone(), key.1.clone(), key.2, component);
+        let addressed = self.cameras.addressed(&heard, *device);
+        if addressed != *device
+            && let Some((_, renamed)) = crate::camera_control::encode(action, addressed, 0)
+        {
+            *params = renamed;
+        }
+    }
+
+    /// One photo is numbered, so that the command sent again when its
+    /// acknowledgement is lost is not a second photo (S405).
+    fn number_photo(
+        &mut self,
+        command: &uxduck_core::domain::command::Command,
+        key: &(String, String, u8),
+        component: u8,
+        wire: &mut crate::commands::Wire,
+    ) {
+        let uxduck_core::domain::command::Command::Camera {
+            device_id,
+            action: uxduck_core::domain::camera::CameraAction::TakePhoto,
+            ..
+        } = command
+        else {
+            return;
+        };
+        let crate::commands::Wire::Long(params) = wire else {
+            return;
+        };
+        let heard = (key.0.clone(), key.1.clone(), key.2, component);
+        #[allow(clippy::cast_precision_loss, reason = "a count of photos")]
+        let number = self.cameras.photo_sequence(&heard, device_id.unwrap_or(0)) as f32;
+        params[3] = number;
     }
 
     /// Asks for a compass calibration's progress and report (S184), before
@@ -2826,13 +3835,32 @@ impl Session {
         }
     }
 
-    /// An ack answers a pending command only when it comes from the system
-    /// and component the command was sent to. Commands go to the vehicle's
-    /// autopilot component, so a gimbal's or a camera's ack of the same
-    /// command id, or its `IN_PROGRESS`, is not the autopilot's answer: the
-    /// command keeps waiting and retrying as if nothing came. A command
-    /// sent to component 0 goes there only because the autopilot is heard
-    /// at 0, and only its ack from 0 answers it, never another component's.
+    /// The pending command an ack answers. An ack answers one only when it
+    /// comes from the system and component the command was sent to.
+    /// Commands go to the vehicle's autopilot component, so a gimbal's or a
+    /// camera's ack of the same command id, or its `IN_PROGRESS`, is not
+    /// the autopilot's answer: the command keeps waiting and retrying as if
+    /// nothing came. A camera's own command goes to the camera (S405), and
+    /// the autopilot's ack of the same command id is not the camera's
+    /// answer either. A command sent to component 0 goes there only because
+    /// the autopilot is heard at 0, and only its ack from 0 answers it,
+    /// never another component's.
+    fn answered(
+        &self,
+        key: &(String, String, u8),
+        (system, component): (u8, u8),
+        command: u16,
+        now_us: u64,
+    ) -> Option<usize> {
+        self.commands.iter().position(|p| {
+            p.key == *key
+                && p.key.2 == system
+                && p.component == component
+                && p.command == command
+                && now_us >= p.issued_us
+        })
+    }
+
     fn acknowledged(
         &mut self,
         key: &(String, String, u8),
@@ -2841,13 +3869,7 @@ impl Session {
         result: u8,
         now_us: u64,
     ) -> Vec<Effect> {
-        let Some(index) = self.commands.iter().position(|p| {
-            p.key == *key
-                && p.key.2 == system
-                && p.component == component
-                && p.command == command
-                && now_us >= p.issued_us
-        }) else {
+        let Some(index) = self.answered(key, (system, component), command, now_us) else {
             return Vec::new();
         };
         // In progress: the vehicle is working on it; keep waiting.
@@ -3203,6 +4225,14 @@ impl Session {
     ) -> Vec<Effect> {
         if crate::px4_metadata::ours(&event) {
             return self.metadata_read(key, event, now_us);
+        }
+        // A camera's definition file that its autopilot keeps (S411).
+        if crate::camera_file::ours(&event) {
+            let Some(component) = self.vehicles.get(key).map(|v| v.autopilot_component) else {
+                return Vec::new();
+            };
+            let heard = (key.0.clone(), key.1.clone(), key.2, component);
+            return self.camera_file_event(&heard, event, now_us);
         }
         let ardupilot = !self.is_px4(key);
         let Some(vehicle) = self.vehicles.get_mut(key) else {
@@ -4303,6 +5333,11 @@ impl Session {
         !self.commands.is_empty()
             || !self.terrain.is_empty()
             || !self.terrain_checks.is_empty()
+            // A camera or a gimbal heard is found gone only as time goes on.
+            || self.cameras.any_heard()
+            || self.gimbals.any_heard()
+            || self.camera_params.waiting()
+            || self.camera_files.any()
             || self.vehicles.values().any(|v| {
                 v.observation.presence != Presence::Offline
                     || !v.pending.items.is_empty()
@@ -4338,6 +5373,16 @@ impl Session {
                 ids.push(vehicle.observation.id);
             }
         }
+        self.cameras.forget(|heard| heard.0 == link_id);
+        self.forget_camera_settings(|heard| heard.0 == link_id);
+        self.cameras_said
+            .retain(|(vehicle_id, ..), _| !ids.contains(vehicle_id));
+        self.camera_states_said
+            .retain(|(vehicle_id, ..), _| !ids.contains(vehicle_id));
+        self.gimbals.forget(|heard| heard.0 == link_id);
+        self.gimbals_said
+            .retain(|(vehicle_id, ..), _| !ids.contains(vehicle_id));
+        self.gimbals_watched.retain(|id| !ids.contains(id));
         self.peers.retain(|(link, _), _| link != link_id);
         self.stations.retain(|(link, _, _), _| link != link_id);
         self.simulated.remove(link_id);
@@ -8881,10 +9926,13 @@ mod tests {
     fn a_camera_is_asked_for_its_streams_and_its_answer_names_the_vehicle() {
         let mut session = Session::new(Config::default());
         let mut vehicle = crate::sim::FakeVehicle::new(1, 0x1234);
-        vehicle.camera = Some("rtsp://192.168.144.25:8554/main".into());
+        vehicle.payload = Some(
+            crate::payload::Payload::new(1)
+                .with_camera(Some("rtsp://192.168.144.25:8554/main".into())),
+        );
         let heartbeat = vehicle.heartbeat();
         session.ingest("l1", PEER, &heartbeat, 0);
-        let camera = vehicle.camera_heartbeat().expect("a camera");
+        let camera = vehicle.payload_heartbeats().remove(0);
         let effects = session.ingest("l1", PEER, &camera, 10);
         let asks: Vec<&Vec<u8>> = effects
             .iter()
@@ -8920,6 +9968,199 @@ mod tests {
         assert!(!later.iter().any(|e| matches!(e, Effect::Send { bytes, .. }
             if matches!(crate::decode::decode(bytes).map(|d| d.message),
                 Some(Message::CommandLong { command: 512, param1, .. }) if (param1 - 269.0).abs() < 0.5))));
+    }
+
+    /// The cameras told among some effects, in order.
+    fn cameras_told(effects: &[Effect]) -> Vec<&crate::camera::Observation> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Camera(seen) => Some(&**seen),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One second of a fake vehicle: its heartbeat and its payload's reach
+    /// the session, time is told, and the vehicle answers what the session
+    /// sends until neither says more. Returns what the session made of it,
+    /// but for what it sent.
+    fn a_second(session: &mut Session, vehicle: &mut FakeVehicle, second: u64) -> Vec<Effect> {
+        let now_us = second * 1_000_000;
+        let mut frames = vec![vehicle.heartbeat()];
+        frames.extend(vehicle.payload_heartbeats());
+        let mut effects: Vec<Effect> = frames
+            .iter()
+            .flat_map(|frame| session.ingest("l1", PEER, frame, now_us))
+            .collect();
+        effects.extend(session.tick(now_us));
+        converse(session, vehicle, effects, now_us)
+    }
+
+    // S404's demo, without the screen: the simulated camera says what it
+    // is, goes silent, is marked gone, and is identified again.
+    #[test]
+    fn a_fake_vehicles_camera_is_identified_marked_gone_and_identified_again() {
+        let mut session = Session::new(Config::default());
+        let mut vehicle = FakeVehicle::new(1, 0x1234);
+        vehicle.payload = Some(
+            crate::payload::Payload::new(1)
+                .with_camera(Some("udp://127.0.0.1:5600".into()))
+                .with_gimbal(crate::payload::ManagedBy::Itself),
+        );
+        let mut made = Vec::new();
+        for second in 0..3 {
+            made.extend(a_second(&mut session, &mut vehicle, second));
+        }
+        let told = cameras_told(&made);
+        assert!(
+            told.iter().all(|camera| camera.component_id == 100),
+            "its gimbal is no camera, and its autopilot has none of its own"
+        );
+        let camera = told.last().expect("the camera is told");
+        assert!(camera.present);
+        assert_eq!(camera.device_id, None);
+        let said = camera.information.as_ref().expect("it said what it is");
+        assert_eq!(
+            (said.vendor.as_str(), said.model.as_str()),
+            ("UXDuck", "SimCamera")
+        );
+        assert_eq!(said.flags & 0x103, 0x103, "video, images and a stream");
+        assert_eq!(said.gimbal_device_id, 154);
+        assert_eq!(said.resolution_px, Some((5472, 3648)));
+        assert_eq!(camera.streams.len(), 1);
+        let stream = &camera.streams[0];
+        assert_eq!(stream.uri, "udp://127.0.0.1:5600");
+        assert_eq!((stream.width, stream.height), (1280, 720));
+        assert_eq!(stream.flags & 1, 1, "its status says it is running");
+
+        // Its heartbeats stop. Its vehicle's and its gimbal's go on.
+        vehicle.payload.as_mut().expect("a payload").camera_off = true;
+        let mut made = Vec::new();
+        for second in 3..20 {
+            made.extend(a_second(&mut session, &mut vehicle, second));
+        }
+        let told = cameras_told(&made);
+        assert_eq!(told.len(), 1, "told once, when it is gone");
+        assert!(!told[0].present);
+        assert_eq!(
+            told[0].information.as_ref().map(|said| said.model.as_str()),
+            Some("SimCamera"),
+            "what it said is kept"
+        );
+        assert_eq!(told[0].streams.len(), 1);
+
+        // They return: here again, asked again, and identified again.
+        vehicle.payload.as_mut().expect("a payload").camera_off = false;
+        let made = a_second(&mut session, &mut vehicle, 20);
+        let told = cameras_told(&made);
+        let back = told.first().expect("told when it returns");
+        assert!(back.present);
+        assert!(back.information.is_none(), "not taken on trust");
+        let again = told.last().expect("told when it answers");
+        assert_eq!(
+            again.information.as_ref().map(|said| said.model.as_str()),
+            Some("SimCamera")
+        );
+        assert_eq!(again.streams.len(), 1);
+    }
+
+    // What S400 saw ArduPilot 4.7 send with `CAM1_TYPE 6`: asked, component
+    // 1 sends the camera's own CAMERA_INFORMATION, copied, and an all-zero
+    // VIDEO_STREAM_INFORMATION, both with camera_device_id 0.
+    #[test]
+    fn ardupilot_passing_a_camera_components_answer_on_is_not_a_second_camera() {
+        use mavio::dialects::ardupilotmega::Ardupilotmega;
+        use mavio::dialects::ardupilotmega::messages::VideoStreamInformation;
+
+        let mut session = Session::new(Config::default());
+        let mut vehicle = FakeVehicle::new(1, 0x1234);
+        vehicle.payload = Some(crate::payload::Payload::new(1).with_camera(None));
+        let mut made = a_second(&mut session, &mut vehicle, 0);
+        assert_eq!(
+            cameras_told(&made)
+                .last()
+                .and_then(|camera| camera.information.as_ref())
+                .map(|said| said.model.as_str()),
+            Some("SimCamera")
+        );
+        // The camera's own answer, as the autopilot copies it.
+        let own = vehicle
+            .answer(&crate::sim::request_message_frame(255, 1, 100, 0, 259, 0.0))
+            .into_iter()
+            .find_map(|frame| match crate::payload::wire::typed(&frame) {
+                Some((_, Ardupilotmega::CameraInformation(said))) => Some(said),
+                _ => None,
+            })
+            .expect("the camera says what it is");
+        assert_eq!(own.camera_device_id, 0);
+        made.extend(session.ingest("l1", PEER, &crate::sim::frame(1, 1, 7, &own), 10));
+        made.extend(session.ingest(
+            "l1",
+            PEER,
+            &crate::sim::frame(1, 1, 8, &VideoStreamInformation::default()),
+            20,
+        ));
+        made.extend(session.tick(30));
+        assert!(
+            cameras_told(&made)
+                .iter()
+                .all(|camera| camera.component_id == 100 && camera.streams.is_empty()),
+            "one camera, with no stream"
+        );
+        assert!(!made.iter().any(|effect| matches!(
+            effect,
+            Effect::CameraRemoved { .. } | Effect::VideoStream { .. }
+        )));
+    }
+
+    // ArduPilot's own camera, such as `CAM1_TYPE 1`: its autopilot answers
+    // for it. ArduPilot 4.7 sets no camera_device_id and numbers its
+    // cameras from 0 in lens_id.
+    #[test]
+    fn an_autopilots_own_cameras_are_told_as_its_camera_1_and_2() {
+        use mavio::dialects::ardupilotmega::enums::CameraCapFlags;
+        use mavio::dialects::ardupilotmega::messages::CameraInformation;
+
+        let mut session = Session::new(Config::default());
+        let mut vehicle = FakeVehicle::new(1, 0x1234);
+        let mut first = session.ingest("l1", PEER, &vehicle.heartbeat(), 0);
+        first.extend(session.tick(0));
+        assert!(
+            commands(&first)
+                .iter()
+                .any(|(command, param1)| *command == 512 && (*param1 - 259.0).abs() < 0.5),
+            "the autopilot is asked what cameras it has"
+        );
+        let made = converse(&mut session, &mut vehicle, first, 0);
+        assert!(cameras_told(&made).is_empty(), "an autopilot is no camera");
+        let mut told = Vec::new();
+        for (sequence, lens_id) in [(7, 0), (8, 1)] {
+            let said = CameraInformation {
+                flags: CameraCapFlags::CAPTURE_IMAGE,
+                focal_length: f32::NAN,
+                sensor_size_h: f32::NAN,
+                sensor_size_v: f32::NAN,
+                lens_id,
+                ..CameraInformation::default()
+            };
+            told.extend(session.ingest("l1", PEER, &crate::sim::frame(1, 1, sequence, &said), 10));
+        }
+        let cameras: Vec<(u8, Option<u8>, bool, Option<u32>)> = cameras_told(&told)
+            .iter()
+            .map(|camera| {
+                (
+                    camera.component_id,
+                    camera.device_id,
+                    camera.present,
+                    camera.information.as_ref().map(|said| said.flags),
+                )
+            })
+            .collect();
+        assert_eq!(
+            cameras,
+            [(1, Some(1), true, Some(2)), (1, Some(2), true, Some(2))]
+        );
     }
 
     #[test]

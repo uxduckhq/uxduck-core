@@ -1,0 +1,9 @@
+{
+  "method": "sim/fault",
+  "params": {
+    "id": "li4f2a9c1e7b3d5a60",
+    "kind": "command-refused",
+    "command": 2000,
+    "on": true
+  }
+}

@@ -576,7 +576,11 @@ impl Engine {
             Command::GoTo { .. } => CommandName::GoTo,
             Command::SetHome { .. } => CommandName::SetHome,
             Command::SetEkfOrigin { .. } => CommandName::SetEkfOrigin,
-            Command::Long { .. } => CommandName::Long,
+            // A camera's is one of the camera protocol's commands, counted
+            // with them as before it had a name of its own (S405).
+            Command::Long { .. } | Command::Camera { .. } | Command::Gimbal { .. } => {
+                CommandName::Long
+            }
         };
         self.track(DaemonEvent::CommandSent { command, outcome });
     }

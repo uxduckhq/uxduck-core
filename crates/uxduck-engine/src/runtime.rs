@@ -229,6 +229,14 @@ pub trait LinkPort: Send {
     fn pause_simulation(&mut self, link_id: &str, paused: bool) {
         let _ = (link_id, paused);
     }
+    /// The faults that are on in a simulated vehicle's camera and gimbal
+    /// (`sim/fault`, ADR-0063 Y16): all of them each time, so none given
+    /// is none on. A data plane that simulates no camera or gimbal has
+    /// none to fault. One that ends by itself is reported through the
+    /// engine's `simulation_fault_ended`.
+    fn simulation_faults(&mut self, link_id: &str, faults: &[uxduck_core::domain::link::SimFault]) {
+        let _ = (link_id, faults);
+    }
     /// UXDuck's 1 Hz ground station heartbeat to a vehicle (S81): on as it
     /// starts; off when nobody supervises the vehicle, so its own lost
     /// ground station failsafe acts (ADR-0003 C16).
@@ -247,6 +255,27 @@ pub trait LinkPort: Send {
     fn gcs_system_id(&mut self, id: u8) {
         let _ = id;
     }
+    /// Whether someone is looking at where a vehicle's gimbals point: a
+    /// Camera tab or the 3D map's Drone camera (S406). While one is, the
+    /// gimbals say it ten times a second, and once a second otherwise.
+    fn watch_gimbals(&mut self, vehicle_id: &str, watched: bool) {
+        let _ = (vehicle_id, watched);
+    }
+    /// The gimbal a routed controller's inputs may turn while they go on
+    /// asking (S407), in answer to the engine's `controller_gimbal_asked`:
+    /// `None` when it may not any more, and the gimbal is told to stop.
+    fn steer_gimbal(&mut self, controller_id: &str, gimbal: Option<GimbalRoute>) {
+        let _ = (controller_id, gimbal);
+    }
+}
+
+/// The gimbal a controller's inputs turn (S407): its vehicle, its
+/// manager's component and what the manager calls it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GimbalRoute {
+    pub vehicle_id: String,
+    pub component_id: u8,
+    pub device_id: u8,
 }
 
 /// Where a claimed controller's sticks go, and how they are read.
@@ -282,6 +311,22 @@ pub enum TransferOrder {
         order_id: String,
         vehicle_id: String,
         items: Vec<uxduck_core::domain::mission::MissionItem>,
+    },
+    /// A camera's definition file, read over MAVLink FTP (S411): `path` on
+    /// the component `from`, or on the camera's own. Ends in
+    /// `Engine::camera_definition_read`.
+    CameraDefinition {
+        vehicle_id: String,
+        component_id: u8,
+        from: Option<u8>,
+        path: String,
+    },
+    /// The values of a camera's own settings (S411): all of them, or those
+    /// named. Ends in `Engine::camera_settings_said`.
+    CameraSettings {
+        vehicle_id: String,
+        component_id: u8,
+        names: Option<Vec<String>>,
     },
     /// A fence (1) or rally points (2) down from the vehicle (S128), ending
     /// in `Engine::mission_part_downloaded`.
@@ -715,6 +760,29 @@ pub trait System: Send {
         let _ = file;
         Ok(())
     }
+    /// This computer's own copy of a camera's definition file (S411), kept
+    /// under `key` when it was last fetched with this version. None when
+    /// there is none, or on a host that keeps none.
+    fn camera_definition_kept(&mut self, key: &str, version: u16) -> Option<Vec<u8>> {
+        let _ = (key, version);
+        None
+    }
+    /// Keeps a camera's definition file as it was fetched, in place of any
+    /// other version kept under `key`. A host that cannot says so in its
+    /// own log: the file is then fetched again next time.
+    fn camera_definition_keep(&mut self, key: &str, version: u16, bytes: &[u8]) {
+        let _ = (key, version, bytes);
+    }
+    /// Fetches a camera's definition file from an `http` or `https`
+    /// address a person agreed to, off the engine's thread, and gives what
+    /// came of it to `Engine::camera_definition_fetched`.
+    ///
+    /// # Errors
+    /// What a person reads: this host does not fetch from addresses.
+    fn camera_definition_fetch(&mut self, camera_id: &str, uri: &str) -> Result<(), String> {
+        let _ = (camera_id, uri);
+        Err("Fetching a camera's definition file from an address needs UXDuck Desktop.".into())
+    }
     /// Keeps a log opened from elsewhere for the account, under a flight's
     /// id (ADR-0039 R11): sent as that flight's log is. UXDuck Desktop only.
     ///
@@ -1111,6 +1179,15 @@ pub trait System: Send {
     /// When it is not installed, or cannot be deleted.
     fn sim_delete(&mut self, id: &str) -> Result<(), String> {
         Err(format!("no catalogue build {id} installed"))
+    }
+    /// Lets one window open the socket it draws simulated cameras'
+    /// pictures on (S408), with this token, within 30 s.
+    ///
+    /// # Errors
+    /// When this host sends no simulated camera's picture.
+    fn sim_pictures(&mut self, token: &str) -> Result<(), String> {
+        let _ = token;
+        Err("Simulated cameras' pictures need UXDuck Desktop.".into())
     }
 }
 

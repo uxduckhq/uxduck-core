@@ -257,6 +257,15 @@ pub fn ntp_unix_us(ntp: u64) -> Option<u64> {
     Some(seconds * 1_000_000 + fraction)
 }
 
+/// Microseconds since 1970 as an NTP time, for a sender report UXDuck
+/// writes itself (S408).
+#[must_use]
+pub const fn unix_us_ntp(unix_us: u64) -> u64 {
+    let seconds = unix_us / 1_000_000 + NTP_TO_UNIX_S;
+    let fraction = ((unix_us % 1_000_000) << 32) / 1_000_000;
+    (seconds << 32) | fraction
+}
+
 /// When a picture with this RTP timestamp was captured, by the report's
 /// wall clock: microseconds since 1970.
 #[must_use]
@@ -516,9 +525,7 @@ impl ServerClock {
 /// they are less than 68 years apart.
 #[must_use]
 pub fn ntp_minus_unix_us(ntp: u64, unix_us: u64) -> i64 {
-    let seconds = unix_us / 1_000_000 + NTP_TO_UNIX_S;
-    let fraction = ((unix_us % 1_000_000) << 32) / 1_000_000;
-    let unix = (seconds << 32) | fraction;
+    let unix = unix_us_ntp(unix_us);
     #[allow(clippy::cast_possible_wrap, reason = "NTP times compare wrapped")]
     let apart = i128::from(ntp.wrapping_sub(unix) as i64);
     i64::try_from((apart * 1_000_000 + (1 << 31)) >> 32).unwrap_or(i64::MAX)

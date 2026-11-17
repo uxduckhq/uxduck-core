@@ -3,7 +3,9 @@
 //! axis moved into, and the pilot input for the routes the engine grants.
 //! The installed daemon feeds it from gilrs, the browser's daemon from the
 //! page's Gamepad API; both turn [`Report`]s into engine calls and send
-//! [`Controls::pilot_outputs`] at 25 Hz.
+//! [`Controls::pilot_outputs`] at 25 Hz. A routed controller's gimbal
+//! inputs (S407) go the same way: [`Controls::gimbal_outputs`] on every
+//! pilot tick, and [`Controls::gimbal_stops`] after every input and route.
 
 use std::collections::BTreeMap;
 
@@ -12,12 +14,22 @@ use uxduck_contracts::dto::controller::{
 };
 use uxduck_core::domain::command::Command;
 use uxduck_core::domain::controller::{
-    AxisBinding, GamepadAxis, GamepadButton, InputMapping, PositionBinding, Sticks,
+    AxisBinding, GamepadAxis, GamepadButton, GimbalAxis, InputMapping, PositionBinding, Sticks,
 };
 use uxduck_core::domain::gripper::GripperAction;
 use uxduck_core::domain::settings::PilotInputMethod;
 
-use crate::runtime::ControlRoute;
+use crate::runtime::{ControlRoute, GimbalRoute};
+
+/// How fast a gimbal turns at a full push of an axis or with a button
+/// held, in radians a second: 30 degrees a second (S407), so a camera
+/// looking ahead looks straight down in three seconds and a short tap
+/// moves it a few degrees.
+pub const GIMBAL_FULL_RATE_RAD_S: f64 = 0.523_598_775_598_298_8;
+
+/// The keyboard's gimbal keys as its device's inputs (S407): its pitch
+/// and its yaw, each -1, 0 or 1.
+pub const KEYBOARD_GIMBAL_AXES: [GamepadAxis; 2] = [GamepadAxis::RightZ, GamepadAxis::LeftZ];
 
 /// What an input device did. `code` is the platform's own code for the
 /// input (absent for the fake); `axis` and `button` are the gamepad input
@@ -126,6 +138,28 @@ pub enum Report {
     LetGo {
         id: String,
     },
+    /// A routed controller's gimbal inputs began to ask it to turn (S407):
+    /// an axis pushed from its centre, or a button pressed. The engine
+    /// says whether it may (`Controls::steer_gimbal`), and nothing is sent
+    /// until it does.
+    GimbalAsked {
+        id: String,
+    },
+    /// Its gimbal inputs ask for nothing any more: all centred and let go,
+    /// or its route ended or changed.
+    GimbalLetGo {
+        id: String,
+    },
+}
+
+/// What turning gimbals asks of the data plane on a pilot tick.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GimbalOutputs {
+    /// For the engine: who began to ask, and who let go.
+    pub reports: Vec<Report>,
+    /// The rates to send now, pitch then yaw in radians a second, up and
+    /// right positive, one for each gimbal a controller turns.
+    pub rates: Vec<(GimbalRoute, [f32; 2])>,
 }
 
 /// What is being held for its command.
@@ -235,6 +269,24 @@ struct Device {
     opposed: bool,
     /// The gripper action asked for now, after the rules above.
     gripper: Option<GripperAction>,
+    /// What its gimbal inputs are doing (S407).
+    turn: Turn,
+}
+
+/// A device's gimbal inputs: what they ask for and the gimbal they turn.
+#[derive(Debug, Default)]
+struct Turn {
+    /// The route's gimbal axes that were off their centre when the route
+    /// began, in the mapping's order: each turns nothing until it has
+    /// been at its centre once.
+    stale: Vec<bool>,
+    /// Whether the inputs ask for a turn now, as the engine was last told.
+    asking: bool,
+    /// The gimbal the engine lets the device turn, while it asks.
+    gimbal: Option<GimbalRoute>,
+    /// Whether a rate went to that gimbal: it is then told to stop when
+    /// the rates end.
+    sent: bool,
 }
 
 /// The distinct places an axis has read, until it reads between them.
@@ -339,6 +391,61 @@ impl Device {
         };
     }
 
+    /// What the route's gimbal inputs ask for now (S407), pitch then yaw,
+    /// each -1 to 1 with up and right positive: its axes, and its buttons
+    /// held since the route began. An axis that shares its input with a
+    /// stick, an RC channel or a command position asks for nothing, as a
+    /// position that conflicts sends nothing.
+    fn gimbal_demand(&mut self) -> [f64; 2] {
+        let mut stale = std::mem::take(&mut self.turn.stale);
+        let Some(route) = self.route.as_ref() else {
+            return [0.0; 2];
+        };
+        let mapping = &route.mapping;
+        let inputs: Vec<_> = self.axes.keys().copied().collect();
+        let axes = mapping.gimbal_axes(|binding| self.read(binding));
+        stale.resize(axes.len(), false);
+        let mut demand = [0.0; 2];
+        let index = |control| match control {
+            GimbalAxis::Pitch => 0,
+            GimbalAxis::Yaw => 1,
+        };
+        for ((binding, value), stale) in mapping.gimbal.iter().zip(axes).zip(&mut stale) {
+            if *stale {
+                *stale = value != 0.0;
+                continue;
+            }
+            if !mapping.gimbal_conflicts(binding, &inputs) {
+                demand[index(binding.control)] += value;
+            }
+        }
+        for (key, _) in self
+            .buttons
+            .iter()
+            .filter(|(key, state)| state.held && !self.stale_actions.contains(key))
+        {
+            if let Some((control, value)) = mapping
+                .action(key.1, key.0)
+                .and_then(|binding| binding.action.gimbal())
+            {
+                demand[index(control)] += value;
+            }
+        }
+        self.turn.stale = stale;
+        demand.map(|value| value.clamp(-1.0, 1.0))
+    }
+
+    /// The rates stop going to the gimbal it turned, which is told to
+    /// stop if any went.
+    fn gimbal_ended(&mut self) -> Option<GimbalRoute> {
+        let gimbal = self.turn.gimbal.take();
+        if std::mem::take(&mut self.turn.sent) {
+            gimbal
+        } else {
+            None
+        }
+    }
+
     /// Whether the axis is in each position of the route's mapping now.
     fn in_positions(&self) -> Vec<bool> {
         let inputs: Vec<_> = self.axes.keys().copied().collect();
@@ -397,6 +504,9 @@ impl Naming {
 pub struct Controls {
     devices: BTreeMap<String, Device>,
     naming: Naming,
+    /// The gimbals whose rates ended and that are still to be told to
+    /// stop (`Controls::gimbal_stops`).
+    stops: Vec<GimbalRoute>,
 }
 
 impl Controls {
@@ -406,6 +516,7 @@ impl Controls {
         Self {
             devices: BTreeMap::new(),
             naming: Naming::Browser,
+            stops: Vec::new(),
         }
     }
 
@@ -445,8 +556,16 @@ impl Controls {
                 reports
             }
             InputEvent::Disconnected { id } => {
-                self.devices.remove(&id);
-                vec![Report::Disconnected { id }]
+                // A gimbal it was turning stops with it (S407).
+                let mut reports = Vec::new();
+                if let Some(mut device) = self.devices.remove(&id) {
+                    self.stops.extend(device.gimbal_ended());
+                    if device.turn.asking {
+                        reports.push(Report::GimbalLetGo { id: id.clone() });
+                    }
+                }
+                reports.push(Report::Disconnected { id });
+                reports
             }
             InputEvent::SecondUnit {
                 id,
@@ -638,42 +757,58 @@ impl Controls {
 
     /// Centre stale steering without releasing the page's keyboard session.
     /// Throttle stays at its chosen setting until the page changes or releases it.
+    /// The gimbal's keys are let go with the steering (S407).
     #[must_use]
     pub fn stale_keyboard_inputs(&self, now_us: u64) -> Vec<InputEvent> {
-        self.devices
-            .iter()
-            .filter(|(_, device)| {
+        let pushed = |device: &Device, axes: &[GamepadAxis]| {
+            axes.iter().any(|axis| {
                 device
-                    .keyboard_at_us
-                    .is_some_and(|at| now_us.saturating_sub(at) >= 500_000)
-                    && [
-                        GamepadAxis::RightStickX,
-                        GamepadAxis::RightStickY,
-                        GamepadAxis::LeftStickX,
-                    ]
-                    .iter()
-                    .any(|axis| {
+                    .axes
+                    .get(&(None, Some(*axis)))
+                    .is_some_and(|value| *value != 0.0)
+            })
+        };
+        let mut events = Vec::new();
+        for (id, device) in self.devices.iter().filter(|(_, device)| {
+            device
+                .keyboard_at_us
+                .is_some_and(|at| now_us.saturating_sub(at) >= 500_000)
+        }) {
+            if pushed(
+                device,
+                &[
+                    GamepadAxis::RightStickX,
+                    GamepadAxis::RightStickY,
+                    GamepadAxis::LeftStickX,
+                ],
+            ) {
+                events.push(InputEvent::Keyboard {
+                    id: id.clone(),
+                    axes: [
+                        0.0,
+                        0.0,
+                        0.0,
                         device
                             .axes
-                            .get(&(None, Some(*axis)))
-                            .is_some_and(|value| *value != 0.0)
-                    })
-            })
-            .map(|(id, device)| InputEvent::Keyboard {
-                id: id.clone(),
-                axes: [
-                    0.0,
-                    0.0,
-                    0.0,
-                    device
-                        .axes
-                        .get(&(None, Some(GamepadAxis::LeftStickY)))
-                        .copied()
-                        .unwrap_or(-1.0),
-                ],
-                at_us: now_us,
-            })
-            .collect()
+                            .get(&(None, Some(GamepadAxis::LeftStickY)))
+                            .copied()
+                            .unwrap_or(-1.0),
+                    ],
+                    at_us: now_us,
+                });
+            }
+            for axis in KEYBOARD_GIMBAL_AXES {
+                if pushed(device, &[axis]) {
+                    events.push(InputEvent::Axis {
+                        id: id.clone(),
+                        axis: Some(axis),
+                        code: None,
+                        value: 0.0,
+                    });
+                }
+            }
+        }
+        events
     }
 
     /// Every controller's raw input, as `controller/inputs` returns it.
@@ -728,7 +863,19 @@ impl Controls {
     /// The engine's decision: what this controller drives now.
     pub fn route(&mut self, id: &str, route: Option<ControlRoute>) -> Vec<Report> {
         let device = self.devices.entry(id.to_owned()).or_default();
+        // A gimbal it was turning under its last route stops (S407), and
+        // an axis off its centre now turns nothing until centred once.
+        self.stops.extend(device.gimbal_ended());
+        let asked = std::mem::take(&mut device.turn.asking);
         device.route = route;
+        device.turn.stale = device.route.as_ref().map_or_else(Vec::new, |route| {
+            route
+                .mapping
+                .gimbal_axes(|binding| device.read(binding))
+                .into_iter()
+                .map(|value| value != 0.0)
+                .collect()
+        });
         // Where the axes are now is no move: a claim never sends a command.
         device.held = device.in_positions();
         // Nor does a gripper button already down, or a hold the page keeps
@@ -747,9 +894,80 @@ impl Controls {
         if let_go {
             reports.push(Report::LetGo { id: id.to_owned() });
         }
+        if asked {
+            reports.push(Report::GimbalLetGo { id: id.to_owned() });
+        }
         // Neutral is judged through the mapping in use.
         reports.extend(self.neutral_changed(id));
         reports
+    }
+
+    /// The engine's answer to [`Report::GimbalAsked`] (S407): the gimbal a
+    /// controller may turn while its inputs go on asking, or none when it
+    /// may not any more. One it was turning is then told to stop, and its
+    /// inputs turn nothing until all are let go and one is pushed again.
+    pub fn steer_gimbal(&mut self, id: &str, gimbal: Option<GimbalRoute>) {
+        let Some(device) = self.devices.get_mut(id) else {
+            return;
+        };
+        if device.turn.gimbal == gimbal {
+            return;
+        }
+        self.stops.extend(device.gimbal_ended());
+        if device.turn.asking && device.route.is_some() {
+            device.turn.gimbal = gimbal;
+        }
+    }
+
+    /// What the gimbal inputs of the routed controllers ask for now
+    /// (S407). Call on every pilot tick: who began to ask and who let go
+    /// is for the engine, and the rates go to the gimbals the engine let
+    /// them turn. One that lets go stops its gimbal
+    /// ([`Controls::gimbal_stops`]).
+    pub fn gimbal_outputs(&mut self) -> GimbalOutputs {
+        let mut outputs = GimbalOutputs::default();
+        for (id, device) in &mut self.devices {
+            let demand = device.gimbal_demand();
+            let asking = demand.iter().any(|value| value.abs() > 0.0);
+            if asking != device.turn.asking {
+                device.turn.asking = asking;
+                outputs.reports.push(if asking {
+                    Report::GimbalAsked { id: id.clone() }
+                } else {
+                    Report::GimbalLetGo { id: id.clone() }
+                });
+            }
+            if !asking {
+                self.stops.extend(device.gimbal_ended());
+                continue;
+            }
+            if let Some(gimbal) = device.turn.gimbal.clone() {
+                device.turn.sent = true;
+                #[allow(clippy::cast_possible_truncation, reason = "a rate within ±1")]
+                outputs.rates.push((
+                    gimbal,
+                    demand.map(|value| (value * GIMBAL_FULL_RATE_RAD_S) as f32),
+                ));
+            }
+        }
+        outputs
+    }
+
+    /// The gimbals whose rates just ended, each to be told to stop: after
+    /// a pilot tick, an input event, a route and an answer of the
+    /// engine's.
+    pub fn gimbal_stops(&mut self) -> Vec<GimbalRoute> {
+        std::mem::take(&mut self.stops)
+    }
+
+    /// Every gimbal a controller is turning now, to be told to stop when
+    /// input is no longer read at all, such as when the daemon stops.
+    pub fn gimbal_stops_all(&mut self) -> Vec<GimbalRoute> {
+        let mut stops = std::mem::take(&mut self.stops);
+        for device in self.devices.values_mut() {
+            stops.extend(device.gimbal_ended());
+        }
+        stops
     }
 
     /// The sticks through the mapping in use; none while an input it
@@ -2124,5 +2342,364 @@ mod gripper_tests {
             at_us: 0,
         });
         assert_eq!(buttons(&controls), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod gimbal_tests {
+    use uxduck_core::domain::controller::{
+        AxisBinding, GamepadAxis, GamepadButton, GimbalAxis, GimbalAxisBinding, InputMapping,
+    };
+    use uxduck_core::domain::settings::PilotInputMethod;
+
+    use super::{Controls, GIMBAL_FULL_RATE_RAD_S, InputEvent, KEYBOARD_GIMBAL_AXES, Report};
+    use crate::runtime::{ControlRoute, GimbalRoute};
+
+    #[allow(clippy::cast_possible_truncation, reason = "a constant")]
+    const FULL: f32 = GIMBAL_FULL_RATE_RAD_S as f32;
+
+    fn gimbal() -> GimbalRoute {
+        GimbalRoute {
+            vehicle_id: "copter".into(),
+            component_id: 1,
+            device_id: 1,
+        }
+    }
+
+    fn route(mapping: InputMapping) -> ControlRoute {
+        ControlRoute {
+            vehicle_id: "copter".into(),
+            mapping,
+            pilot_input_method: PilotInputMethod::ManualControl,
+            gripper: None,
+        }
+    }
+
+    /// Mode 2 with the right trigger as the gimbal's pitch and the left as
+    /// its yaw, beside the direction pad.
+    fn with_axes() -> InputMapping {
+        let on = |axis| AxisBinding {
+            axis,
+            code: None,
+            inverted: false,
+            calibration: None,
+        };
+        InputMapping {
+            gimbal: vec![
+                GimbalAxisBinding {
+                    control: GimbalAxis::Pitch,
+                    input: on(GamepadAxis::RightZ),
+                },
+                GimbalAxisBinding {
+                    control: GimbalAxis::Yaw,
+                    input: on(GamepadAxis::LeftZ),
+                },
+            ],
+            ..InputMapping::mode_2()
+        }
+    }
+
+    fn pad(controls: &mut Controls, mapping: InputMapping) {
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        controls.route("g", Some(route(mapping)));
+    }
+
+    fn press(button: GamepadButton, pressed: bool) -> InputEvent {
+        InputEvent::Button {
+            id: "g".into(),
+            button: Some(button),
+            code: None,
+            pressed,
+        }
+    }
+
+    fn axis(axis: GamepadAxis, value: f64) -> InputEvent {
+        InputEvent::Axis {
+            id: "g".into(),
+            axis: Some(axis),
+            code: None,
+            value,
+        }
+    }
+
+    fn asked() -> Vec<Report> {
+        vec![Report::GimbalAsked { id: "g".into() }]
+    }
+
+    fn let_go() -> Vec<Report> {
+        vec![Report::GimbalLetGo { id: "g".into() }]
+    }
+
+    /// The rates of a tick, each in hundredths of a full push.
+    fn rates(controls: &mut Controls) -> Vec<[i32; 2]> {
+        #[allow(clippy::cast_possible_truncation, reason = "a rate within ±1")]
+        controls
+            .gimbal_outputs()
+            .rates
+            .into_iter()
+            .map(|(to, rates)| {
+                assert_eq!(to, gimbal());
+                rates.map(|rate| (rate / FULL * 100.0).round() as i32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_held_button_asks_first_and_turns_only_the_gimbal_the_engine_grants() {
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+
+        // A gimbal button asks nothing of the vehicle as a command.
+        assert!(
+            controls
+                .input(press(GamepadButton::DpadUp, true))
+                .is_empty()
+        );
+        let first = controls.gimbal_outputs();
+        assert_eq!(first.reports, asked());
+        assert!(first.rates.is_empty(), "nothing goes until the engine says");
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[100, 0]], "up at the full rate");
+        controls.input(press(GamepadButton::DpadRight, true));
+        assert_eq!(rates(&mut controls), [[100, 100]]);
+        controls.input(press(GamepadButton::DpadUp, false));
+        controls.input(press(GamepadButton::DpadDown, true));
+        assert_eq!(rates(&mut controls), [[-100, 100]]);
+        assert!(controls.gimbal_stops().is_empty(), "still turning");
+
+        // Opposite ways together ask for nothing, which is letting go.
+        controls.input(press(GamepadButton::DpadLeft, true));
+        controls.input(press(GamepadButton::DpadRight, true));
+        controls.input(press(GamepadButton::DpadUp, true));
+        let stopped = controls.gimbal_outputs();
+        assert_eq!(stopped.reports, let_go());
+        assert!(stopped.rates.is_empty());
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+        assert!(controls.gimbal_stops().is_empty(), "told to stop once");
+    }
+
+    #[test]
+    fn letting_go_stops_the_gimbal_and_the_next_push_asks_again() {
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadLeft, true));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[0, -100]]);
+
+        controls.input(press(GamepadButton::DpadLeft, false));
+        let after = controls.gimbal_outputs();
+        assert_eq!(after.reports, let_go());
+        assert!(after.rates.is_empty());
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+
+        // What it may turn ended with the push: the next asks anew.
+        controls.input(press(GamepadButton::DpadLeft, true));
+        let again = controls.gimbal_outputs();
+        assert_eq!(again.reports, asked());
+        assert!(again.rates.is_empty());
+        // Let go before the engine answered: nothing was sent, so there
+        // is nothing to stop, and a late answer turns nothing.
+        controls.input(press(GamepadButton::DpadLeft, false));
+        assert_eq!(controls.gimbal_outputs().reports, let_go());
+        assert!(controls.gimbal_stops().is_empty());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+        assert!(controls.gimbal_stops().is_empty());
+    }
+
+    #[test]
+    fn an_axis_turns_it_as_far_as_it_is_pushed_once_it_has_been_centred() {
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        // Off its centre when the route begins: it turns nothing until it
+        // has been at its centre once, as a held button needs a new press.
+        controls.input(axis(GamepadAxis::RightZ, 0.8));
+        controls.route("g", Some(route(with_axes())));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+        controls.input(axis(GamepadAxis::RightZ, 0.3));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+        controls.input(axis(GamepadAxis::RightZ, 0.0));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+
+        // Half way past the deadzone is half the rate, down negative.
+        controls.input(axis(GamepadAxis::RightZ, -0.525));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[-50, 0]]);
+        controls.input(axis(GamepadAxis::LeftZ, 1.0));
+        assert_eq!(rates(&mut controls), [[-50, 100]]);
+        // Inside the deadzone is the centre.
+        controls.input(axis(GamepadAxis::RightZ, 0.04));
+        assert_eq!(rates(&mut controls), [[0, 100]]);
+        // An axis and a button the same way are no faster than either.
+        controls.input(press(GamepadButton::DpadRight, true));
+        assert_eq!(rates(&mut controls), [[0, 100]]);
+        controls.input(press(GamepadButton::DpadRight, false));
+        controls.input(axis(GamepadAxis::LeftZ, 0.0));
+        assert_eq!(controls.gimbal_outputs().reports, let_go());
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+    }
+
+    #[test]
+    fn a_button_held_through_a_new_route_needs_a_fresh_press() {
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadUp, true));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[100, 0]]);
+
+        // The route changes, as when its mapping is edited or its target
+        // switches: the gimbal stops, and the button still down does
+        // nothing under the new route.
+        let reports = controls.route("g", Some(route(InputMapping::mode_2().with_gimbal_pad())));
+        assert!(reports.contains(&Report::GimbalLetGo { id: "g".into() }));
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+        controls.input(press(GamepadButton::DpadUp, false));
+        controls.input(press(GamepadButton::DpadUp, true));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+    }
+
+    #[test]
+    fn the_gimbal_stops_when_the_route_ends_or_the_controller_goes() {
+        // The lease ends, the window goes or its input stops: no route.
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadDown, true));
+        controls.gimbal_outputs();
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[-100, 0]]);
+        assert_eq!(controls.route("g", None), let_go());
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+
+        // Unplugged while it turns.
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadDown, true));
+        controls.gimbal_outputs();
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[-100, 0]]);
+        assert_eq!(
+            controls.input(InputEvent::Disconnected { id: "g".into() }),
+            [
+                Report::GimbalLetGo { id: "g".into() },
+                Report::Disconnected { id: "g".into() }
+            ]
+        );
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+
+        // Input is read no more at all, as when the daemon stops.
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadDown, true));
+        controls.gimbal_outputs();
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[-100, 0]]);
+        assert_eq!(controls.gimbal_stops_all(), [gimbal()]);
+        assert!(controls.gimbal_stops_all().is_empty());
+    }
+
+    #[test]
+    fn a_gimbal_the_engine_takes_back_stops_and_waits_for_a_fresh_push() {
+        let mut controls = Controls::default();
+        pad(&mut controls, InputMapping::mode_2().with_gimbal_pad());
+        controls.input(press(GamepadButton::DpadRight, true));
+        controls.gimbal_outputs();
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[0, 100]]);
+
+        // Another has the gimbal now, or a command for it goes first.
+        controls.steer_gimbal("g", None);
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+        assert_eq!(
+            controls.gimbal_outputs(),
+            super::GimbalOutputs::default(),
+            "still pushed: nothing is sent and nothing asked"
+        );
+        controls.input(press(GamepadButton::DpadRight, false));
+        assert_eq!(controls.gimbal_outputs().reports, let_go());
+        assert!(controls.gimbal_stops().is_empty(), "it was told already");
+        controls.input(press(GamepadButton::DpadRight, true));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+    }
+
+    #[test]
+    fn the_keyboards_gimbal_keys_are_let_go_when_its_frames_stop() {
+        let [pitch, yaw] = KEYBOARD_GIMBAL_AXES;
+        let on = |axis| AxisBinding {
+            axis,
+            code: None,
+            inverted: false,
+            calibration: None,
+        };
+        let mapping = InputMapping {
+            deadzone: 0.0,
+            actions: Vec::new(),
+            gimbal: vec![
+                GimbalAxisBinding {
+                    control: GimbalAxis::Pitch,
+                    input: on(pitch),
+                },
+                GimbalAxisBinding {
+                    control: GimbalAxis::Yaw,
+                    input: on(yaw),
+                },
+            ],
+            ..InputMapping::mode_2()
+        };
+        let frame = |at_us| InputEvent::Keyboard {
+            id: "g".into(),
+            axes: [0.0, 0.0, 0.0, -1.0],
+            at_us,
+        };
+        let mut controls = Controls::default();
+        controls.input(frame(0));
+        controls.route("g", Some(route(mapping)));
+        controls.input(frame(40_000));
+        controls.input(axis(pitch, 1.0));
+        controls.input(axis(yaw, -1.0));
+        assert_eq!(controls.gimbal_outputs().reports, asked());
+        controls.steer_gimbal("g", Some(gimbal()));
+        assert_eq!(rates(&mut controls), [[100, -100]]);
+
+        // The page stops sending, as a window hidden or closed does.
+        assert!(controls.stale_keyboard_inputs(539_999).is_empty());
+        let centred = controls.stale_keyboard_inputs(540_000);
+        assert_eq!(centred, [axis(pitch, 0.0), axis(yaw, 0.0)]);
+        for event in centred {
+            controls.input(event);
+        }
+        assert_eq!(controls.gimbal_outputs().reports, let_go());
+        assert_eq!(controls.gimbal_stops(), [gimbal()]);
+        assert!(controls.stale_keyboard_inputs(600_000).is_empty());
+    }
+
+    #[test]
+    fn an_axis_shared_with_a_stick_turns_nothing() {
+        // An old or hand-made mapping whose gimbal pitch reads the roll
+        // stick: flying must never turn the gimbal.
+        let mut mapping = with_axes();
+        mapping.gimbal[0].input.axis = GamepadAxis::RightStickX;
+        let mut controls = Controls::default();
+        pad(&mut controls, mapping);
+        controls.input(axis(GamepadAxis::RightStickX, 1.0));
+        assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
     }
 }

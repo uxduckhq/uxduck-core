@@ -5,10 +5,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::dto::camera::Camera;
 use crate::dto::client::{Approval, ClientRecord};
 use crate::dto::command::Receipt;
 use crate::dto::controller::{Controller, InputMapping};
 use crate::dto::files::FileTransfer;
+use crate::dto::gimbal::Gimbal;
 use crate::dto::history::HistoryEntry;
 use crate::dto::link::Link;
 use crate::dto::marker::Marker;
@@ -84,6 +86,12 @@ pub enum EntityType {
     Setup,
     /// A vehicle's preflight checks, keyed by vehicle id (S192).
     Preflight,
+    /// A camera of a vehicle, keyed `<vehicle id>/<component id>`, and
+    /// `/<device id>` after it for one its autopilot speaks for (S404).
+    Camera,
+    /// A gimbal of a vehicle, keyed `<vehicle id>/<its manager's component
+    /// id>/<device id>` (S406).
+    Gimbal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -166,6 +174,12 @@ pub struct Snapshot {
     /// Each vehicle's preflight checks (S192).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflights: Option<Vec<Preflight>>,
+    /// Every vehicle's cameras (S404).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cameras: Option<Vec<Camera>>,
+    /// Every vehicle's gimbals (S406).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gimbals: Option<Vec<Gimbal>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -253,6 +267,10 @@ pub struct EntityChange {
     pub setup: Option<Setup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight: Option<Preflight>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Camera>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gimbal: Option<Gimbal>,
 }
 
 /// Immutable identity at the time an action began.

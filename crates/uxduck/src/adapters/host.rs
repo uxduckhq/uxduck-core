@@ -28,6 +28,9 @@ pub struct Host {
     /// Where work on a replay's log goes to be done off the engine's task
     /// ([`crate::replay::work`]).
     replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
+    /// Where a camera's definition file is fetched from an address, off
+    /// the engine's task ([`crate::camera_definitions::work`]).
+    camera_definitions: tokio::sync::mpsc::UnboundedSender<crate::camera_definitions::Fetch>,
     /// Where flights to write to a disk go (ADR-0062,
     /// [`crate::flight_file::work`]).
     offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
@@ -41,6 +44,7 @@ impl Host {
         catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
         desktop_app: std::sync::Arc<crate::desktop_app::DesktopApp>,
         replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
+        camera_definitions: tokio::sync::mpsc::UnboundedSender<crate::camera_definitions::Fetch>,
         offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
     ) -> Self {
         Self {
@@ -53,6 +57,7 @@ impl Host {
             card_copying: crate::card_logs::Copying::default(),
             found_flights: crate::found_flights::Found::new(data_dir),
             replay_work,
+            camera_definitions,
             offload,
         }
     }
@@ -382,6 +387,26 @@ impl System for Host {
         crate::own_models::remove(&self.data_dir.join("vehicle-models"), file)
     }
 
+    fn camera_definition_kept(&mut self, key: &str, version: u16) -> Option<Vec<u8>> {
+        crate::camera_definitions::kept(&self.data_dir.join("camera-definitions"), key, version)
+    }
+
+    fn camera_definition_keep(&mut self, key: &str, version: u16, bytes: &[u8]) {
+        let root = self.data_dir.join("camera-definitions");
+        if let Err(error) = crate::camera_definitions::keep(&root, key, version, bytes) {
+            tracing::warn!(%error, "cannot keep a camera's definition file");
+        }
+    }
+
+    fn camera_definition_fetch(&mut self, camera_id: &str, uri: &str) -> Result<(), String> {
+        self.camera_definitions
+            .send(crate::camera_definitions::Fetch {
+                camera_id: camera_id.to_owned(),
+                uri: uri.to_owned(),
+            })
+            .map_err(|_| "UXDuck is stopping.".to_owned())
+    }
+
     fn keep_log(&mut self, recording: &str, bytes: &[u8]) -> Result<(), String> {
         let mut spool = crate::spool::Spool::open(&self.data_dir, self.data_dir.join("tlogs"))
             .map_err(|e| e.to_string())?;
@@ -658,6 +683,11 @@ impl System for Host {
 
     fn sim_delete(&mut self, id: &str) -> Result<(), String> {
         self.catalogue.delete(id)
+    }
+
+    fn sim_pictures(&mut self, token: &str) -> Result<(), String> {
+        crate::sim::picture::pictures().allow(token);
+        Ok(())
     }
 
     fn desktop_app(&mut self, refresh: bool) -> uxduck_contracts::dto::app::DesktopAppStatus {

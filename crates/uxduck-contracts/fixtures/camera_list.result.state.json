@@ -1,0 +1,92 @@
+{
+  "cameras": [
+    {
+      "id": "v9b1c2d3e4f5a6b7c/100",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 100,
+      "present": true,
+      "identified": true,
+      "vendor": "UXDuck",
+      "model": "SimCamera",
+      "firmware": "1.0.0",
+      "capabilities": [
+        "capture-video",
+        "capture-image",
+        "modes",
+        "basic-zoom",
+        "basic-focus",
+        "video-stream"
+      ],
+      "flags": 455,
+      "streams": [],
+      "settings": {
+        "mode": "video",
+        "zoomPct": 20.0,
+        "focusPct": 100.0
+      },
+      "capture": {
+        "intervalS": 2.0,
+        "recording": true,
+        "recordingSinceUs": 1790668890000000,
+        "photoCount": 2,
+        "photosLost": 1,
+        "availableMib": 12.0,
+        "cardFull": true
+      },
+      "storage": {
+        "storageId": 1,
+        "count": 1,
+        "status": "ready",
+        "totalMib": 32000.0,
+        "usedMib": 31988.0,
+        "availableMib": 12.0,
+        "name": "SD"
+      },
+      "photos": [
+        {
+          "index": 0,
+          "takenAtUs": 1790668880000000,
+          "place": {
+            "latitudeDeg": 47.397742,
+            "longitudeDeg": 8.545594,
+            "altitudeAmslM": 520.0,
+            "relativeAltitudeM": 32.0
+          },
+          "ok": true,
+          "file": "IMG_0001.JPG"
+        },
+        {
+          "index": 1,
+          "takenAtUs": 1790668882000000,
+          "ok": false
+        }
+      ],
+      "version": 9
+    },
+    {
+      "id": "v9b1c2d3e4f5a6b7c/1/1",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 1,
+      "deviceId": 1,
+      "present": true,
+      "identified": true,
+      "capabilities": ["capture-image"],
+      "flags": 2,
+      "streams": [],
+      "settings": {},
+      "capture": {
+        "recording": false,
+        "photoCount": 0
+      },
+      "storage": {
+        "storageId": 1,
+        "count": 1,
+        "status": "empty",
+        "totalMib": 0.0,
+        "usedMib": 0.0,
+        "availableMib": 0.0
+      },
+      "version": 3
+    }
+  ]
+}

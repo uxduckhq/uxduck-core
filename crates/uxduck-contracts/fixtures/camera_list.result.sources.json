@@ -1,0 +1,47 @@
+{
+  "cameras": [
+    {
+      "id": "v9b1c2d3e4f5a6b7c/100",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 100,
+      "present": true,
+      "identified": true,
+      "vendor": "UXDuck",
+      "model": "SimCamera",
+      "firmware": "1.0.0",
+      "capabilities": [
+        "capture-video",
+        "capture-image",
+        "modes",
+        "image-in-video-mode",
+        "video-in-image-mode",
+        "basic-zoom",
+        "basic-focus",
+        "video-stream",
+        "tracking-point",
+        "tracking-rectangle",
+        "tracking-geo-status",
+        "thermal-range"
+      ],
+      "flags": 8159,
+      "gimbalDeviceId": 100,
+      "streams": [
+        {
+          "streamId": 1,
+          "name": "Main",
+          "uri": "udp://127.0.0.1:5600",
+          "kind": "mpeg-ts-udp",
+          "encoding": "h264",
+          "running": true,
+          "thermal": true,
+          "width": 1280,
+          "height": 720,
+          "frameRateHz": 30.0,
+          "sourceId": "vs4f2a9c1d7e3b5a60"
+        }
+      ],
+      "sources": ["daylight", "thermal"],
+      "version": 6
+    }
+  ]
+}

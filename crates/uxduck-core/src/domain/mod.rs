@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod calculated;
+pub mod camera;
 pub mod checklist;
 pub mod client;
 pub mod command;
@@ -16,6 +17,7 @@ pub mod firmware_profile;
 pub mod flight;
 pub mod formula;
 pub mod frames;
+pub mod gimbal;
 pub mod gripper;
 pub mod history;
 pub mod link;

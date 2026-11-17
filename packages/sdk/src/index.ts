@@ -26,6 +26,7 @@
  */
 
 export type {
+  CameraAction,
   CommandCall,
   DeclaredCheck,
   Description,
@@ -57,6 +58,7 @@ export type {
   Widget,
 } from "@uxduck/protocol";
 export {
+  cameraCommand,
   check,
   circle,
   commandLong,

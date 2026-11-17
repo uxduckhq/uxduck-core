@@ -334,6 +334,7 @@ fn recipe(link: &Link) -> Link {
         launch: None,
         paused: false,
         scenery_hit: None,
+        faults: Vec::new(),
         version: 0,
         ..link.clone()
     }

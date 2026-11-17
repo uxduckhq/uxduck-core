@@ -5,11 +5,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::approval::Approval;
+use crate::domain::camera::Camera;
 use crate::domain::client::ClientRecord;
 use crate::domain::command::Receipt;
 use crate::domain::controller::{Controller, InputMapping};
 use crate::domain::dialect::Dialect;
 use crate::domain::firmware_profile::FirmwareProfile;
+use crate::domain::gimbal::Gimbal;
 use crate::domain::history::HistoryEntry;
 use crate::domain::link::Link;
 use crate::domain::marker::Marker;
@@ -356,6 +358,27 @@ pub enum Change {
     },
     /// A source added by hand was removed (S39).
     VideoSourceRemoved {
+        id: String,
+    },
+    /// A camera of a vehicle was heard, said what it is, changed its
+    /// streams, or went or returned (ADR-0063 Y5, S404).
+    CameraUpserted {
+        camera: Camera,
+    },
+    /// A camera that was listed is no camera of its own, or went with its
+    /// vehicle.
+    CameraRemoved {
+        id: String,
+    },
+    /// A gimbal of a vehicle was found, said what it can do, changed who
+    /// holds it or what its yaw is held from, or went or returned
+    /// (ADR-0063 Y6, S406).
+    GimbalUpserted {
+        gimbal: Gimbal,
+    },
+    /// A gimbal that was listed is at no address any more, or went with
+    /// its vehicle.
+    GimbalRemoved {
         id: String,
     },
     /// A recording started, grew, ended or was recovered (S40).

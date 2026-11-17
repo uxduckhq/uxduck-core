@@ -246,6 +246,8 @@ enum Call {
     UseConnection(String, String),
     /// A simulator frozen or let run again (`sim/pause`).
     Pause(String, bool),
+    /// Whether someone looks at where a vehicle's gimbals point (S406).
+    WatchGimbals(String, bool),
     Journal(Write),
     Turn(TurnRequest),
     CancelTurn(String),
@@ -256,6 +258,8 @@ enum Call {
     /// What a controller drives now, as the engine decided.
     Route(String, Option<ControlRoute>),
     Input(InputEvent),
+    /// The gimbal a controller's inputs may turn, or none any more (S407).
+    SteerGimbal(String, Option<uxduck_engine::runtime::GimbalRoute>),
 }
 
 type Queue = Arc<Mutex<VecDeque<Call>>>;
@@ -329,11 +333,21 @@ impl LinkPort for Links {
     fn pause_simulation(&mut self, link_id: &str, paused: bool) {
         push(&self.0, Call::Pause(link_id.to_owned(), paused));
     }
+    fn watch_gimbals(&mut self, vehicle_id: &str, watched: bool) {
+        push(&self.0, Call::WatchGimbals(vehicle_id.to_owned(), watched));
+    }
     fn controller_input(&mut self, event: InputEvent) {
         push(&self.0, Call::Input(event));
     }
     fn route_controller(&mut self, controller_id: &str, route: Option<ControlRoute>) {
         push(&self.0, Call::Route(controller_id.to_owned(), route));
+    }
+    fn steer_gimbal(
+        &mut self,
+        controller_id: &str,
+        gimbal: Option<uxduck_engine::runtime::GimbalRoute>,
+    ) {
+        push(&self.0, Call::SteerGimbal(controller_id.to_owned(), gimbal));
     }
 }
 
@@ -1331,6 +1345,33 @@ impl Browser {
                     buttons,
                 ));
             }
+            // What the gimbal inputs ask for (S407), as in the daemon.
+            let gimbals = self.controls.gimbal_outputs();
+            for (gimbal, rates) in &gimbals.rates {
+                effects.extend(self.session.gimbal_rates(
+                    &gimbal.vehicle_id,
+                    gimbal.component_id,
+                    gimbal.device_id,
+                    *rates,
+                ));
+            }
+            self.apply(effects, outputs);
+            self.report_controls(gimbals.reports);
+        }
+        self.stop_gimbals(outputs);
+    }
+
+    /// Tells gimbals whose rates ended to stop turning (S407).
+    fn stop_gimbals(&mut self, outputs: &mut Vec<Output>) {
+        let mut effects = Vec::new();
+        for gimbal in self.controls.gimbal_stops() {
+            effects.extend(self.session.gimbal_stop(
+                &gimbal.vehicle_id,
+                gimbal.component_id,
+                gimbal.device_id,
+            ));
+        }
+        if !effects.is_empty() {
             self.apply(effects, outputs);
         }
     }
@@ -1358,6 +1399,7 @@ impl Browser {
                 self.apply(effects, outputs);
             }
             let reports = self.controls.input(event);
+            self.stop_gimbals(outputs);
             // A neutral report can now switch a following controller to
             // its first vehicle. Publish this event's raw readings before
             // the engine checks its mapping and airborne throttle gate.
@@ -1409,6 +1451,8 @@ impl Browser {
                 hold_ms,
             } => self.engine.controller_holding(&id, command, hold_ms),
             Report::LetGo { id } => self.engine.controller_let_go(&id),
+            Report::GimbalAsked { id } => self.engine.controller_gimbal_asked(&id),
+            Report::GimbalLetGo { id } => self.engine.controller_gimbal_let_go(&id),
         }
     }
 
@@ -1488,6 +1532,8 @@ impl Browser {
             self.engine.expire_display_pulls(now);
             self.engine.expire_detached_claims(now);
             self.engine.expire_traffic(now);
+            // Gimbals the mission has, and ones to give back (S406).
+            self.engine.review_gimbals(now);
             // Airspeed checks and ratios, and autocal left on (S190).
             self.engine.expire_airspeed(now);
             // PX4 calibrations gone silent (S191).
@@ -1619,6 +1665,9 @@ impl Browser {
             }
             Call::GcsSystemId(id) => self.session.set_gcs_system_id(id),
             Call::ConnectionOrder(order) => self.session.set_connection_order(order),
+            Call::WatchGimbals(vehicle_id, watched) => {
+                self.session.watch_gimbals(&vehicle_id, watched);
+            }
             Call::UseConnection(vehicle_id, link_id) => {
                 let effects = self.session.use_route(&vehicle_id, &link_id, now);
                 self.apply(effects, outputs);
@@ -1677,7 +1726,12 @@ impl Browser {
                     self.apply(effects, outputs);
                 }
                 let reports = self.controls.route(&id, route);
+                self.stop_gimbals(outputs);
                 self.report_controls(reports);
+            }
+            Call::SteerGimbal(id, gimbal) => {
+                self.controls.steer_gimbal(&id, gimbal);
+                self.stop_gimbals(outputs);
             }
         }
     }

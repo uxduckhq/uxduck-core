@@ -66,6 +66,32 @@ pub enum Command {
         command: u16,
         params: Vec<f32>,
     },
+    /// Has one of the vehicle's cameras do something, with the MAVLink
+    /// camera protocol's command for it, which the camera acknowledges.
+    /// `componentId` and `deviceId` are the camera's in `camera/list`. With
+    /// neither it is the vehicle's first camera that takes images or
+    /// records, or, when none has said what it is, every camera through
+    /// the autopilot. Offline: `warn`.
+    Camera {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<u8>,
+        action: crate::dto::camera::CameraAction,
+    },
+    /// Has one of the vehicle's gimbals do something, with the MAVLink
+    /// gimbal protocol's command for it, which its manager acknowledges.
+    /// `componentId` and `deviceId` are the gimbal's in `gimbal/list`.
+    /// With neither it is the vehicle's first gimbal. UXDuck takes
+    /// control before the first movement. When another holds the gimbal,
+    /// `confirm` takes it from them. Offline: `warn`.
+    Gimbal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<u8>,
+        action: crate::dto::gimbal::GimbalAction,
+    },
 }
 
 /// A place and its height above mean sea level.
@@ -223,6 +249,11 @@ pub struct Receipt {
     /// from before remote control was removed (ADR-0048).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteBy>,
+    /// The vehicle answered that it is still working on it: how far it
+    /// last said it is. A receipt that is `sent` with this is waiting for
+    /// the work to end, not for a first answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CommandProgress>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub created_at_us: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,6 +261,16 @@ pub struct Receipt {
     pub completed_at_us: Option<u64>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// How far a command is that the vehicle is still working on
+/// (`MAV_RESULT_IN_PROGRESS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandProgress {
+    /// From 0 to 100. Absent when the vehicle did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
 }
 
 /// How much an operator's own command can change (ADR-0020 A5): `none` is

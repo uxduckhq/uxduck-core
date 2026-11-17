@@ -5,7 +5,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::dto::link::{LinkPolicy, SimAutopilot, SimVehicle};
+use crate::dto::link::{
+    ArdupilotGimbal, LinkPolicy, PayloadProfile, SimAutopilot, SimFaultKind, SimVehicle,
+};
 
 /// Starts a simulated vehicle at a place. The daemon picks the build for
 /// the vehicle unless `binary` names one, allocates its instance, and
@@ -63,6 +65,33 @@ pub struct SimStartParams {
     /// confuse. ArduPilot only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub traffic: bool,
+    /// Carries a simulated camera: component 100 of the vehicle, which
+    /// answers MAVLink's camera protocol and which the autopilot speaks for
+    /// (ADR-0063). Off unless asked for. UXDuck Desktop and ArduPilot only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
+    /// Carries a simulated gimbal: component 154 of the vehicle, a gimbal
+    /// device that the autopilot manages (ADR-0063). Off unless asked for.
+    /// UXDuck Desktop and ArduPilot only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gimbal: bool,
+    /// Carries a gimbal that ArduPilot simulates itself, with the camera it
+    /// carries, in place of UXDuck's simulated camera and gimbal: never
+    /// together with `camera` or `gimbal`, since each wants the autopilot's
+    /// first mount and first camera (ADR-0063). The autopilot's own driver
+    /// speaks for it, and it sends no video. UXDuck Desktop and ArduPilot
+    /// only, on a build that has it (`sim/binaries`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ardupilot_gimbal: Option<ArdupilotGimbal>,
+    /// What kind of camera and gimbal the simulated payload is, to see what
+    /// UXDuck does with hardware that can do less or is put together
+    /// another way (ADR-0063). Absent for a camera that takes photos,
+    /// records, zooms and focuses, with a gimbal apart from it.
+    /// `stream-only` and `photo-video` need `camera`, and `integrated`
+    /// needs `camera` and `gimbal` both. It is the simulation's for as
+    /// long as it runs. UXDuck Desktop and ArduPilot only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_profile: Option<PayloadProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Also sends the vehicle's traffic to another program, such as another
@@ -107,6 +136,11 @@ pub struct SimBinary {
     /// The catalogue build it came from (`sim/download`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalogue_id: Option<String>,
+    /// The gimbals of ArduPilot's own that this build can simulate
+    /// (`ardupilotGimbal` of `sim/start`). Empty for PX4 and for a build
+    /// that has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ardupilot_gimbals: Vec<ArdupilotGimbal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -189,6 +223,16 @@ pub struct CatalogueFile {
     /// `zstd`: the download is decompressed into `name` as it arrives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+}
+
+/// Where a window draws the pictures of this computer's simulated cameras.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimPicturesResult {
+    /// Open a WebSocket on this path of the daemon's origin on this
+    /// computer within 30 s. UXDuck says on it which cameras this window
+    /// draws and what each sees, and takes the pictures it draws.
+    pub path: String,
 }
 
 /// How much of the start of a Windows program or library
@@ -282,6 +326,10 @@ pub struct SimBuildParams {
 /// height and in its mode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a saved vehicle on the wire"
+)]
 pub struct SimSnapshot {
     pub id: String,
     pub name: String,
@@ -290,6 +338,22 @@ pub struct SimSnapshot {
     pub autopilot: SimAutopilot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// It carried a simulated camera, and a simulation started from it does
+    /// too (ADR-0063).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
+    /// It carried a simulated gimbal, and a simulation started from it does
+    /// too (ADR-0063).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gimbal: bool,
+    /// It carried a gimbal that ArduPilot simulates itself, and a
+    /// simulation started from it does too (ADR-0063).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ardupilot_gimbal: Option<ArdupilotGimbal>,
+    /// The kind of camera and gimbal it carried, and a simulation started
+    /// from it carries (ADR-0063).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_profile: Option<PayloadProfile>,
     /// Such as `ArduCopter 4.7.0`, when the vehicle said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
@@ -363,6 +427,60 @@ pub struct SimPauseParams {
     /// The simulated vehicle's link.
     pub id: String,
     pub paused: bool,
+}
+
+/// Switches a fault on or off in a simulated vehicle's camera or gimbal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFaultParams {
+    /// The simulated vehicle's link, never a real vehicle's connection.
+    pub id: String,
+    pub kind: SimFaultKind,
+    /// The `MAV_CMD` number a `command-refused` or
+    /// `command-in-progress` fault is about, one of `commands` of
+    /// `sim/faults`. Needed to switch such a fault on. Naming another
+    /// while one is on moves the fault to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<u16>,
+    /// True switches the fault on, false off.
+    pub on: bool,
+}
+
+/// The faults a simulated vehicle's camera and gimbal can have.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFaultsResult {
+    /// Every fault, in the order they are shown.
+    pub faults: Vec<SimFaultState>,
+    /// The commands a `command-refused` or `command-in-progress` fault can
+    /// name in this simulation: the ones its camera and gimbal have.
+    pub commands: Vec<SimFaultCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFaultState {
+    pub kind: SimFaultKind,
+    pub on: bool,
+    /// The command it is about, while it is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<u16>,
+    /// Why this simulation cannot have the fault, when it cannot: a
+    /// sentence to show beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+/// A command a fault can name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFaultCommand {
+    /// Its `MAV_CMD` number.
+    pub command: u16,
+    /// What it does, in a few words, such as `Take a photo`.
+    pub label: String,
+    /// Its MAVLink name, such as `MAV_CMD_IMAGE_START_CAPTURE`.
+    pub name: String,
 }
 
 /// Contact with loaded 3D scenery: pauses a simulation where it touched.

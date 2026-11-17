@@ -1,0 +1,10 @@
+{
+  "method": "camera/command",
+  "params": {
+    "cameraId": "v9b1c2d3e4f5a6b7c/100",
+    "action": {
+      "type": "set-source",
+      "source": "thermal"
+    }
+  }
+}

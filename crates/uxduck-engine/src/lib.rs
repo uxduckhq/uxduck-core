@@ -22,6 +22,8 @@ pub mod approvals;
 mod attachments;
 mod battery_alerts;
 mod calculated;
+mod camera_settings;
+mod cameras;
 mod checklist;
 mod checklist_runs;
 pub mod commands;
@@ -41,6 +43,7 @@ mod firmware_profiles;
 mod flight_time;
 mod flight_usage;
 mod forwarding;
+pub mod gimbals;
 mod gripper;
 mod grounded;
 mod history;
@@ -92,6 +95,7 @@ pub mod firmware {
 }
 mod autotune;
 pub mod sim;
+mod sim_faults;
 mod snapshots;
 mod spoken;
 pub mod state;
@@ -339,6 +343,12 @@ pub struct Engine {
     awaiting: BTreeMap<String, (ConnectionId, Value)>,
     /// Take-offs waiting on the command before their next step, by its receipt id.
     take_offs: BTreeMap<String, commands::TakeOff>,
+    /// Who has each gimbal, the ones UXDuck took, and who looks at them
+    /// (S406).
+    gimbals: gimbals::Gimbals,
+    /// Each camera's definition file and the values of the settings it
+    /// names (S411).
+    camera_settings: camera_settings::Book,
     /// Requests held for an approval, by approval id.
     held: BTreeMap<String, approvals::Held>,
     /// A capability allowed once, for the replay of one held request.
@@ -600,6 +610,8 @@ impl Engine {
             replying_to: None,
             awaiting: BTreeMap::new(),
             take_offs: BTreeMap::new(),
+            gimbals: gimbals::Gimbals::default(),
+            camera_settings: camera_settings::Book::default(),
             held: BTreeMap::new(),
             one_shot: None,
             running_approved: false,
@@ -845,6 +857,7 @@ impl Engine {
         self.abandon_approvals(id);
         self.release_claims_of(id);
         self.drop_video_watches(id);
+        self.gimbals_unwatched_by(id);
         self.stop_finding_for(id);
         self.feature_watchers.remove(&id);
         self.item_watchers.remove(&id);
@@ -957,6 +970,9 @@ impl Engine {
         self.gripper_after(&event.change);
         self.plan_run_after(&event.change);
         self.calculated_after(&event.change);
+        self.cameras_after(&event.change);
+        self.camera_settings_after(&event.change);
+        self.gimbals_after(&event.change);
         self.since_checkpoint += 1;
         if self.since_checkpoint >= self.config.checkpoint_every {
             self.checkpoint();
@@ -1383,6 +1399,8 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         file_transfer: None,
         setup: None,
         preflight: None,
+        camera: None,
+        gimbal: None,
     }
 }
 
@@ -1481,6 +1499,12 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         }
         change @ (Change::VideoSourceUpserted { .. } | Change::VideoSourceRemoved { .. }) => {
             video::entity_changes(change)
+        }
+        change @ (Change::CameraUpserted { .. } | Change::CameraRemoved { .. }) => {
+            cameras::entity_changes(change)
+        }
+        change @ (Change::GimbalUpserted { .. } | Change::GimbalRemoved { .. }) => {
+            gimbals::entity_changes(change)
         }
         change @ (Change::VideoRecordingUpserted { .. } | Change::VideoRecordingRemoved { .. }) => {
             recordings::entity_changes(change)

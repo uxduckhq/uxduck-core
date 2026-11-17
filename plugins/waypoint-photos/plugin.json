@@ -1,0 +1,24 @@
+{
+  "abi": 2,
+  "id": "waypoint-photos",
+  "name": "Waypoint photos",
+  "version": "0.1.0",
+  "description": "An automation: a photo at every waypoint a vehicle reaches, taken with UXDuck's own camera command.",
+  "wasm": "waypoint_photos.wasm",
+  "capabilities": ["read", "control"],
+  "subscribe": {
+    "messages": {
+      "names": ["MISSION_ITEM_REACHED", "COMMAND_ACK"],
+      "cadenceMs": 200
+    }
+  },
+  "commands": [
+    {
+      "name": "test-photo",
+      "title": "Take a test photo",
+      "description": "One photo now, to check the camera answers before the mission.",
+      "risk": "none",
+      "shortcut": "Alt+C"
+    }
+  ]
+}

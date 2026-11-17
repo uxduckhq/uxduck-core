@@ -47,6 +47,17 @@ export function commandLong(vehicleId, command, params) {
   return { vehicleId, command: { type: "long", command, params } };
 }
 
+/**
+ * Has a vehicle's camera do something, with UXDuck's own camera command,
+ * such as `{ type: "take-photo" }`, which the camera acknowledges. No
+ * camera is named: it is the vehicle's first camera that takes images or
+ * records, or, when none has said what it is, every camera through the
+ * autopilot.
+ */
+export function cameraCommand(vehicleId, action) {
+  return { vehicleId, command: { type: "camera", action } };
+}
+
 /** A point on the map, at a latitude and longitude in degrees. */
 export function point(id, latitudeDeg, longitudeDeg) {
   return { id, geometry: { type: "Point", coordinates: [longitudeDeg, latitudeDeg] } };

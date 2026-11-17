@@ -1,0 +1,7 @@
+{
+  "method": "camera/definition/fetch",
+  "params": {
+    "cameraId": "v9b1c2d3e4f5a6b7c/100",
+    "uri": "http://192.168.144.25/camera.xml"
+  }
+}

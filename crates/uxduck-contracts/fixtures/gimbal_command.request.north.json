@@ -1,0 +1,9 @@
+{
+  "method": "gimbal/command",
+  "params": {
+    "gimbalId": "v2c4e6a8b0d1f3a5c7/154/1",
+    "action": {
+      "type": "hold-north"
+    }
+  }
+}

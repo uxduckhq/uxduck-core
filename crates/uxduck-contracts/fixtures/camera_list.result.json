@@ -1,0 +1,99 @@
+{
+  "cameras": [
+    {
+      "id": "v9b1c2d3e4f5a6b7c/100",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 100,
+      "present": true,
+      "identified": true,
+      "vendor": "UXDuck",
+      "model": "SimCamera",
+      "firmware": "1.0.0",
+      "capabilities": [
+        "capture-video",
+        "capture-image",
+        "modes",
+        "image-in-video-mode",
+        "video-in-image-mode",
+        "basic-zoom",
+        "basic-focus",
+        "video-stream"
+      ],
+      "flags": 479,
+      "sensor": {
+        "widthMm": 13.2,
+        "heightMm": 8.8,
+        "widthPx": 5472,
+        "heightPx": 3648
+      },
+      "lens": {
+        "id": 0,
+        "focalLengthMm": 16.0
+      },
+      "gimbalDeviceId": 154,
+      "streams": [
+        {
+          "streamId": 1,
+          "name": "Main",
+          "uri": "udp://127.0.0.1:5600",
+          "kind": "mpeg-ts-udp",
+          "encoding": "h264",
+          "running": true,
+          "width": 1280,
+          "height": 720,
+          "frameRateHz": 30.0,
+          "sourceId": "vs4f2a9c1d7e3b5a60"
+        }
+      ],
+      "version": 4
+    },
+    {
+      "id": "v9b1c2d3e4f5a6b7c/1/1",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 1,
+      "deviceId": 1,
+      "present": true,
+      "identified": true,
+      "capabilities": ["capture-image"],
+      "flags": 2,
+      "streams": [],
+      "version": 1
+    },
+    {
+      "id": "v2a3b4c5d6e7f8091/101",
+      "vehicleId": "v2a3b4c5d6e7f8091",
+      "componentId": 101,
+      "present": false,
+      "identified": true,
+      "vendor": "Acme",
+      "model": "Encoder",
+      "capabilities": ["video-stream"],
+      "flags": 256,
+      "videoOnly": true,
+      "definition": {
+        "uri": "mftp://[;comp=101]camera.xml",
+        "version": 2
+      },
+      "streams": [
+        {
+          "streamId": 1,
+          "uri": "rtsp://admin@192.168.144.25:8554/main",
+          "kind": "rtsp",
+          "running": false
+        }
+      ],
+      "version": 7
+    },
+    {
+      "id": "v2a3b4c5d6e7f8091/100",
+      "vehicleId": "v2a3b4c5d6e7f8091",
+      "componentId": 100,
+      "present": true,
+      "identified": false,
+      "capabilities": [],
+      "flags": 0,
+      "streams": [],
+      "version": 1
+    }
+  ]
+}

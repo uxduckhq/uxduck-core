@@ -14,7 +14,7 @@ daemon includes the script host. Browser-only UXDuck does not run plugins.
 | [wind-check-ts](wind-check-ts)           | A preflight check that can hold the launch       | Wind estimate, set by hand    | "Wind under 8 m/s" in each vehicle's checks |
 | [adsb-lol-ts](adsb-lol-ts)               | A traffic source from a web service              | Vehicle positions, a timer    | Aircraft from adsb.lol around the vehicles  |
 | [traffic-example-ts](traffic-example-ts) | A traffic source on this computer                | A readsb `aircraft.json`      | Aircraft every 5 seconds                    |
-| [camera-manager](camera-manager)         | Rust/WebAssembly and commanding hardware         | Camera acknowledgement, Photo | Camera command and count                    |
+| [waypoint-photos](waypoint-photos)       | Rust/WebAssembly and an automation that commands | Waypoints reached, Test photo | A photo at each waypoint, and its answer    |
 | [home-distance](home-distance)           | The Rust SDK and richer widgets                  | Positions, battery, commands  | Distance, chart, table, map                 |
 
 Create a deterministic recording without a connected vehicle:

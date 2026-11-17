@@ -1017,6 +1017,7 @@ impl Engine {
             operator_id: None,
             sent_by: None,
             remote: None,
+            progress: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
             version: 1,

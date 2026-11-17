@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use uxduck_core::domain::approval::{Approval, ApprovalState};
+use uxduck_core::domain::camera::Camera;
 use uxduck_core::domain::client::ClientRecord;
 use uxduck_core::domain::command::Receipt;
 use uxduck_core::domain::controller::{Controller, InputMapping};
@@ -124,6 +125,12 @@ pub struct State {
     /// (S192).
     #[serde(default)]
     pub preflights: BTreeMap<String, uxduck_core::domain::preflight::Preflight>,
+    /// Each vehicle's cameras, by camera id (S404).
+    #[serde(default)]
+    pub cameras: BTreeMap<String, Camera>,
+    /// Each vehicle's gimbals, by gimbal id (S406).
+    #[serde(default)]
+    pub gimbals: BTreeMap<String, uxduck_core::domain::gimbal::Gimbal>,
     /// Each vehicle's checklist, by vehicle id (S193): kept with the
     /// vehicle, removed with it.
     #[serde(default)]
@@ -421,6 +428,18 @@ impl State {
             }
             Change::VideoSourceRemoved { id } => {
                 self.video_sources.remove(id);
+            }
+            Change::CameraUpserted { camera } => {
+                self.cameras.insert(camera.id.clone(), camera.clone());
+            }
+            Change::CameraRemoved { id } => {
+                self.cameras.remove(id);
+            }
+            Change::GimbalUpserted { gimbal } => {
+                self.gimbals.insert(gimbal.id.clone(), gimbal.clone());
+            }
+            Change::GimbalRemoved { id } => {
+                self.gimbals.remove(id);
             }
             Change::VideoRecordingUpserted { recording } => {
                 self.video_recordings

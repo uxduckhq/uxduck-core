@@ -751,12 +751,75 @@ pub enum SimCommand {
         /// Forget its stored parameters each time it starts.
         #[arg(long)]
         wipe: bool,
+        /// Carries a simulated camera, MAVLink component 100 (ArduPilot
+        /// and PX4).
+        #[arg(long)]
+        camera: bool,
+        /// Carries a simulated gimbal, MAVLink component 154, which the
+        /// autopilot manages (ArduPilot and PX4).
+        #[arg(long)]
+        gimbal: bool,
+        /// Carries a gimbal that ArduPilot simulates itself, with its
+        /// camera, in place of `--camera` and `--gimbal`: `viewpro`, which
+        /// only the autopilot speaks for, or `avt-cm62`, a MAVLink gimbal
+        /// behind the autopilot. It sends no video.
+        #[arg(
+            long,
+            value_name = "MODEL",
+            value_parser = ["viewpro", "avt-cm62"],
+            conflicts_with_all = ["camera", "gimbal"]
+        )]
+        ardupilot_gimbal: Option<String>,
+        /// What kind the simulated camera and gimbal are, in place of a
+        /// camera that takes photos, records, zooms and focuses with a
+        /// gimbal apart from it: `stream-only` for a camera that only
+        /// sends video, `photo-video` for one that takes photos in one
+        /// mode and records in the other, `integrated` for a camera and
+        /// gimbal that are one component, or `thermal-tracking` for such
+        /// a unit with a thermal picture and tracking. The last two need
+        /// `--gimbal` too.
+        #[arg(
+            long,
+            value_name = "KIND",
+            value_parser = ["stream-only", "photo-video", "integrated", "thermal-tracking"],
+            requires = "camera"
+        )]
+        payload_profile: Option<String>,
         #[arg(long)]
         name: Option<String>,
     },
     /// Stops a simulated vehicle, by its link's id. It is kept, stopped,
     /// until it is started again or its link is removed.
     Stop { id: String },
+    /// Switches a fault on or off in a simulated vehicle's camera or
+    /// gimbal, by its link's id, to see what UXDuck does with it. It lasts
+    /// until it is switched off or the simulation stops.
+    Fault {
+        id: String,
+        /// `camera-silent`, `gimbal-silent`, `card-full`, `gimbal-error`
+        /// or `autopilot-holds`, or with `--command` `command-refused` or
+        /// `command-in-progress`.
+        #[arg(value_parser = [
+            "camera-silent",
+            "gimbal-silent",
+            "card-full",
+            "command-refused",
+            "command-in-progress",
+            "gimbal-error",
+            "autopilot-holds",
+        ])]
+        fault: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        /// The `MAV_CMD` number a refused or slow command fault is about,
+        /// such as 2000 to take a photo. `uxduck sim faults` lists them.
+        #[arg(long, value_name = "MAV_CMD")]
+        command: Option<u16>,
+    },
+    /// The faults a simulated vehicle's camera and gimbal can have, by its
+    /// link's id: which are on, which it cannot have and why, and the
+    /// commands one can name.
+    Faults { id: String },
     /// Starts a simulated vehicle again from where it started, by its
     /// link's id: after a crash, or to begin afresh. It keeps its name.
     Restart { id: String },
@@ -828,6 +891,10 @@ pub enum ServiceCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a command line is parsed once, and each flag of the fake vehicle is a field of its variant"
+)]
 pub enum DevCommand {
     /// A fake vehicle on a serial port of its own (a pseudo-terminal whose
     /// path it prints) that restarts into a fake bootloader when asked and
@@ -865,6 +932,18 @@ pub enum DevCommand {
         #[arg(long, default_value_t = 0)]
         pace_ms: u64,
     },
+    /// A gimbal device alone on component 154, with no autopilot and no
+    /// manager of its own. Whoever speaks as component 1 of its
+    /// system is its autopilot and its manager, and it reports its yaw from
+    /// north. MAVSDK's gimbal device tester expects exactly this, with
+    /// `--system-id 33`.
+    FakeGimbal {
+        /// Where to send, such as the tester's `udpin` address.
+        #[arg(long, default_value = "127.0.0.1:14550")]
+        to: String,
+        #[arg(long, default_value_t = 1)]
+        system_id: u8,
+    },
     /// A vehicle that sends heartbeats over UDP, answers the request for its
     /// UID like an autopilot, and flies a circle at SITL's default home so
     /// there is telemetry to show. Not a flight simulator.
@@ -888,10 +967,68 @@ pub enum DevCommand {
         /// are sent.
         #[arg(long)]
         commit: Option<String>,
-        /// A camera component that names this video stream when asked, such
-        /// as `rtsp://127.0.0.1:8554/main` or `udp://127.0.0.1:5600`.
-        #[arg(long)]
+        /// A camera on component 100. With an address, such as
+        /// `rtsp://127.0.0.1:8554/main` or `udp://127.0.0.1:5600`, it names
+        /// that video stream when asked.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
         camera: Option<String>,
+        /// Its camera only sends video: it names its stream and
+        /// says it takes no images, records nothing and has no settings.
+        #[arg(long, requires = "camera")]
+        camera_video_only: bool,
+        /// Its camera loses power this many seconds in: no
+        /// heartbeats and no answers from then on.
+        #[arg(long, requires = "camera")]
+        camera_silent_at: Option<f64>,
+        /// Its camera has power again this many seconds in.
+        #[arg(long, requires = "camera_silent_at")]
+        camera_back_at: Option<f64>,
+        /// Its camera's card has only this many mebibytes left:
+        /// with 0 the card is full, and the camera refuses photos and
+        /// recordings until the card is formatted.
+        #[arg(long, requires = "camera")]
+        camera_card_left: Option<f32>,
+        /// What kind its camera and gimbal are: `stream-only` for a camera
+        /// that only sends video, `photo-video` for one that takes photos
+        /// in one mode and records in the other with no zoom or focus,
+        /// `integrated` for a camera and gimbal that are one component,
+        /// the camera's, or `thermal-tracking` for such a unit with a
+        /// thermal picture and tracking. The last two need `--gimbal` too.
+        #[arg(
+            long,
+            value_name = "KIND",
+            value_parser = ["stream-only", "photo-video", "integrated", "thermal-tracking"],
+            requires = "camera"
+        )]
+        payload_profile: Option<String>,
+        /// A fault its camera or gimbal has from the start, and may be
+        /// given more than once: `camera-silent`, `gimbal-silent`,
+        /// `card-full`, `gimbal-error`, `autopilot-holds`, or with a
+        /// `MAV_CMD` number `command-refused=2000` or
+        /// `command-in-progress=2000`.
+        #[arg(long, value_name = "FAULT")]
+        payload_fault: Vec<String>,
+        /// Its camera names this address for its definition file in place
+        /// of its own, or `none` for a camera that names no file.
+        #[arg(long, requires = "camera")]
+        camera_definition: Option<String>,
+        /// Its camera serves this file over MAVLink FTP where its own
+        /// definition file would be.
+        #[arg(long, requires = "camera")]
+        camera_definition_file: Option<PathBuf>,
+        /// A gimbal on component 154 that manages itself.
+        #[arg(long)]
+        gimbal: bool,
+        /// Its gimbal starts in another's control: `autopilot` for the
+        /// vehicle's own, or a MAVLink system and component such as
+        /// `254/190` for another ground station.
+        #[arg(long, requires = "gimbal")]
+        gimbal_held_by: Option<String>,
+        /// Its autopilot drives a camera of its own, as ArduPilot does with
+        /// `CAM1_TYPE 1`: asked what cameras it has, it names one
+        /// that takes images, as ArduPilot 4.7 does.
+        #[arg(long)]
+        autopilot_camera: bool,
         /// Send ArduPilot's start-up messages, two of them warnings.
         #[arg(long)]
         startup_burst: bool,
@@ -1396,6 +1533,7 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                 .await
                 .map_err(|e| CliError::Usage(e.to_string()))?
         }
+        DevCommand::FakeGimbal { to, system_id } => fake_gimbal(&to, system_id).await,
         DevCommand::FakeVehicle {
             to,
             system_id,
@@ -1404,6 +1542,17 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             firmware,
             commit,
             camera,
+            camera_video_only,
+            camera_silent_at,
+            camera_back_at,
+            camera_card_left,
+            payload_profile,
+            payload_fault,
+            camera_definition,
+            camera_definition_file,
+            gimbal,
+            gimbal_held_by,
+            autopilot_camera,
             refuse_arm,
             refuse_disarm,
             startup_burst,
@@ -1440,6 +1589,30 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             let options = FakeOptions {
                 no_uid,
                 camera,
+                camera_video_only,
+                camera_silent_s: camera_silent_at
+                    .map(|from| (from, camera_back_at.unwrap_or(f64::INFINITY))),
+                camera_card_left_mib: camera_card_left,
+                payload: fake_payload(payload_profile.as_deref(), &payload_fault, gimbal)?,
+                camera_defined: uxduck_mavlink::payload::Defined {
+                    uri: camera_definition.map(|uri| Some(uri).filter(|uri| uri != "none")),
+                    file: camera_definition_file
+                        .map(|path| {
+                            std::fs::read(&path).map_err(|e| {
+                                CliError::Usage(format!(
+                                    "--camera-definition-file: cannot read {}: {e}",
+                                    path.display()
+                                ))
+                            })
+                        })
+                        .transpose()?,
+                },
+                gimbal,
+                gimbal_held_by: gimbal_held_by
+                    .as_deref()
+                    .map(|who| gimbal_holder(who, system_id))
+                    .transpose()?,
+                autopilot_camera,
                 refuse_arm,
                 refuse_disarm,
                 startup_burst,
@@ -1935,6 +2108,7 @@ async fn logout(data_dir: &std::path::Path) -> Result<(), CliError> {
 }
 
 /// `uxduck sim`: the simulation manager through the API.
+#[expect(clippy::too_many_lines, reason = "one arm per subcommand")]
 async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliError> {
     match command {
         SimCommand::Start {
@@ -1947,6 +2121,10 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
             binary,
             allow_network,
             wipe,
+            camera,
+            gimbal,
+            ardupilot_gimbal,
+            payload_profile,
             name,
         } => {
             let numbers: Vec<f64> = at
@@ -1970,6 +2148,10 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
                 "binary": binary.as_ref().map(|b| b.display().to_string()),
                 "allowNetwork": allow_network,
                 "wipe": wipe,
+                "camera": camera,
+                "gimbal": gimbal,
+                "ardupilotGimbal": ardupilot_gimbal,
+                "payloadProfile": payload_profile,
                 "name": name,
             });
             if binary.is_none() {
@@ -1985,6 +2167,22 @@ async fn sim(data_dir: &std::path::Path, command: SimCommand) -> Result<(), CliE
         SimCommand::Restart { id } => {
             let params = serde_json::json!({ "id": id }).to_string();
             rpc_call(data_dir, "sim/restart", Some(&params)).await
+        }
+        SimCommand::Fault {
+            id,
+            fault,
+            state,
+            command,
+        } => {
+            let params = serde_json::json!({
+                "id": id, "kind": fault, "command": command, "on": state == "on",
+            });
+            let params = strip_nulls(params).to_string();
+            rpc_call(data_dir, "sim/fault", Some(&params)).await
+        }
+        SimCommand::Faults { id } => {
+            let params = serde_json::json!({ "id": id }).to_string();
+            rpc_call(data_dir, "sim/faults", Some(&params)).await
         }
         SimCommand::Snapshot { vehicle_id, name } => {
             let params = serde_json::json!({ "vehicleId": vehicle_id, "name": name });
@@ -3216,6 +3414,80 @@ impl FakeVersion {
     }
 }
 
+/// `--gimbal-held-by`: `autopilot` for the vehicle's own, or a MAVLink
+/// system and component such as `254/190`.
+fn gimbal_holder(who: &str, system_id: u8) -> Result<(u8, u8), CliError> {
+    if who == "autopilot" {
+        return Ok((system_id, 1));
+    }
+    who.split_once('/')
+        .and_then(|(system, component)| Some((system.parse().ok()?, component.parse().ok()?)))
+        .ok_or_else(|| {
+            CliError::Usage(
+                "--gimbal-held-by is autopilot, or a system and component such as 254/190".into(),
+            )
+        })
+}
+
+/// `--payload-profile` and each `--payload-fault` of `dev fake-vehicle`:
+/// the kind its camera and gimbal are, and the faults they start with.
+fn fake_payload(
+    profile: Option<&str>,
+    faults: &[String],
+    gimbal: bool,
+) -> Result<
+    (
+        uxduck_mavlink::payload::Profile,
+        uxduck_mavlink::payload::Faults,
+    ),
+    CliError,
+> {
+    use uxduck_core::domain::link::{PayloadProfile, SimFault, SimFaultKind};
+    let named = |name: &str| serde_json::Value::String(name.to_owned());
+    let name = profile;
+    let profile: Option<PayloadProfile> = profile
+        .map(|name| serde_json::from_value(named(name)))
+        .transpose()
+        .map_err(|e| CliError::Usage(format!("--payload-profile: {e}")))?;
+    if let Some((_, name)) = profile
+        .zip(name)
+        .filter(|(profile, _)| profile.integrated() && !gimbal)
+    {
+        return Err(CliError::Usage(format!(
+            "--payload-profile {name} is a camera and a gimbal in one, and needs --gimbal"
+        )));
+    }
+    let faults = faults
+        .iter()
+        .map(|fault| {
+            let (name, command) = fault
+                .split_once('=')
+                .map_or((fault.as_str(), None), |(name, command)| {
+                    (name, Some(command))
+                });
+            let kind: SimFaultKind = serde_json::from_value(named(name)).map_err(|_| {
+                CliError::Usage(format!("--payload-fault: no fault is called {name}"))
+            })?;
+            let command = command
+                .map(str::parse::<u16>)
+                .transpose()
+                .map_err(|e| CliError::Usage(format!("--payload-fault {fault}: {e}")))?;
+            if kind.names_a_command() != command.is_some() {
+                return Err(CliError::Usage(format!(
+                    "--payload-fault {name} is written {}",
+                    if kind.names_a_command() {
+                        "with its MAV_CMD number, such as command-refused=2000"
+                    } else {
+                        "without a number"
+                    }
+                )));
+            }
+            Ok(SimFault { kind, command })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    Ok((profile.into(), uxduck_mavlink::payload::Faults::of(&faults)))
+}
+
 /// How `dev fake-vehicle` behaves beyond its identity.
 #[allow(
     clippy::struct_excessive_bools,
@@ -3223,7 +3495,24 @@ impl FakeVersion {
 )]
 struct FakeOptions {
     no_uid: bool,
+    /// A camera, and the video stream it names if it names one.
     camera: Option<String>,
+    camera_video_only: bool,
+    /// From when until when its camera is silent, in seconds.
+    camera_silent_s: Option<(f64, f64)>,
+    /// The room left on its camera's card, when not a whole empty card.
+    camera_card_left_mib: Option<f32>,
+    /// What kind its camera and gimbal are, and the faults they start with.
+    payload: (
+        uxduck_mavlink::payload::Profile,
+        uxduck_mavlink::payload::Faults,
+    ),
+    /// What its camera says of its definition file, when not its own.
+    camera_defined: uxduck_mavlink::payload::Defined,
+    gimbal: bool,
+    /// The system and component its gimbal starts in the control of.
+    gimbal_held_by: Option<(u8, u8)>,
+    autopilot_camera: bool,
     refuse_arm: bool,
     refuse_disarm: bool,
     startup_burst: bool,
@@ -3290,6 +3579,63 @@ fn fake_sensors(
     vehicle.accel.fails = accel_fails;
 }
 
+/// How often a fake payload is stepped.
+const PAYLOAD_STEP: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `uxduck dev fake-gimbal`: the simulated gimbal device with nothing
+/// else, on its own clock.
+async fn fake_gimbal(to: &str, system_id: u8) -> Result<(), CliError> {
+    use uxduck_mavlink::payload::{ManagedBy, Payload};
+
+    let target: std::net::SocketAddr = to
+        .parse()
+        .map_err(|e| CliError::Usage(format!("--to: {e}")))?;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| CliError::Usage(format!("cannot open a UDP socket: {e}")))?;
+    let mut payload = Payload::new(system_id).with_gimbal(ManagedBy::Autopilot);
+    if let Some(gimbal) = payload.gimbal.as_mut() {
+        gimbal.reports_from_north = true;
+    }
+    eprintln!("fake gimbal {system_id}/154 sending to {target}; Ctrl-C to stop");
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut step = tokio::time::interval(PAYLOAD_STEP);
+    let started = std::time::Instant::now();
+    let mut buffer = vec![0u8; 2048];
+    loop {
+        let frames = tokio::select! {
+            _ = heartbeat.tick() => payload.announce(),
+            _ = step.tick() => {
+                let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                payload.step(now_ms)
+            }
+            received = socket.recv_from(&mut buffer) => {
+                let len = match received {
+                    Ok((len, _)) => len,
+                    // Windows reports an earlier datagram's port unreachable
+                    // here when nothing listens at --to yet. Keep sending.
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Err(error) => {
+                        return Err(CliError::Usage(format!("cannot receive replies: {error}")));
+                    }
+                };
+                uxduck_mavlink::framing::split(&buffer[..len])
+                    .frames
+                    .into_iter()
+                    .flat_map(|frame| payload.receive(frame))
+                    .collect()
+            }
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        for frame in frames {
+            socket
+                .send_to(&frame, target)
+                .await
+                .map_err(|e| CliError::Usage(format!("cannot send to {target}: {e}")))?;
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines, reason = "one line per fake-vehicle option")]
 async fn fake_vehicle(
     to: &str,
@@ -3301,6 +3647,14 @@ async fn fake_vehicle(
     let FakeOptions {
         no_uid,
         camera,
+        camera_video_only,
+        camera_silent_s,
+        camera_card_left_mib,
+        payload: (profile, faults),
+        camera_defined,
+        gimbal,
+        gimbal_held_by,
+        autopilot_camera,
         refuse_arm,
         refuse_disarm,
         startup_burst,
@@ -3337,7 +3691,40 @@ async fn fake_vehicle(
     vehicle.answers_version = !no_uid;
     vehicle.flight_sw_version = version.flight_sw_version;
     vehicle.commit = version.commit;
-    vehicle.camera = camera;
+    if camera.is_some() || gimbal {
+        use uxduck_mavlink::payload::Profile;
+        let mut payload = uxduck_mavlink::payload::Payload::new(system_id);
+        // One unit that is both, on the camera's component.
+        let unit = profile.unit() && gimbal;
+        if let Some(stream) = camera {
+            let stream = Some(stream).filter(|stream| !stream.is_empty());
+            payload = if unit {
+                payload.with_unit(stream)
+            } else {
+                payload.with_camera(stream)
+            };
+            if let Some(camera) = &mut payload.camera {
+                camera.video_only = camera_video_only || profile == Profile::StreamOnly;
+                camera.mode_bound = profile == Profile::PhotoVideo;
+                camera.thermal_sensor = unit && profile == Profile::ThermalTracking;
+                camera.tracks = unit && profile == Profile::ThermalTracking;
+                if let Some(mib) = camera_card_left_mib {
+                    camera.leave_room(mib);
+                }
+                camera_defined.apply(camera);
+            }
+        }
+        if gimbal && !unit {
+            payload = payload.with_gimbal(uxduck_mavlink::payload::ManagedBy::Itself);
+        }
+        if let (Some(gimbal), Some(who)) = (&mut payload.gimbal, gimbal_held_by) {
+            gimbal.held_by(who);
+        }
+        payload.set_faults(faults);
+        vehicle.payload = Some(payload);
+        vehicle.camera_silent_s = camera_silent_s;
+    }
+    vehicle.own_camera = autopilot_camera;
     vehicle.refuses_arm = refuse_arm;
     vehicle.refuses_disarm = refuse_disarm;
     vehicle.startup_burst = startup_burst;
@@ -3384,6 +3771,9 @@ async fn fake_vehicle(
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
     // Telemetry at 5 Hz, one datagram per frame as an autopilot sends them.
     let mut telemetry = tokio::time::interval(std::time::Duration::from_millis(200));
+    // The payload moves at 50 Hz, so its gimbal turns smoothly and reports
+    // ten times a second.
+    let mut payload = tokio::time::interval(PAYLOAD_STEP);
     let started = std::time::Instant::now();
     let mut buffer = vec![0u8; 2048];
     let unsent = |e: std::io::Error| CliError::Usage(format!("cannot send to {target}: {e}"));
@@ -3391,8 +3781,13 @@ async fn fake_vehicle(
         tokio::select! {
             _ = heartbeat.tick() => {
                 socket.send_to(&vehicle.heartbeat(), target).await.map_err(unsent)?;
-                if let Some(camera) = vehicle.camera_heartbeat() {
-                    socket.send_to(&camera, target).await.map_err(unsent)?;
+                for frame in vehicle.payload_heartbeats() {
+                    socket.send_to(&frame, target).await.map_err(unsent)?;
+                }
+            }
+            _ = payload.tick(), if vehicle.payload.is_some() => {
+                for frame in vehicle.payload_step(started.elapsed().as_secs_f64()) {
+                    socket.send_to(&frame, target).await.map_err(unsent)?;
                 }
             }
             _ = telemetry.tick() => {
@@ -3752,6 +4147,85 @@ mod plugin_test_checks {
             .into_iter()
             .collect();
         assert!(own_test(dir.path(), &produced).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod fake_payload_arguments {
+    use uxduck_mavlink::payload::{Faults, Profile};
+
+    use super::fake_payload;
+
+    fn faults(asked: &[&str]) -> Result<Faults, String> {
+        let asked: Vec<String> = asked.iter().map(|&fault| fault.to_owned()).collect();
+        fake_payload(None, &asked, true)
+            .map(|(_, faults)| faults)
+            .map_err(|refused| refused.to_string())
+    }
+
+    /// ADR-0063 Y16: `dev fake-vehicle` starts as the kind of camera and
+    /// gimbal asked for, with the faults named, each written as its kind is.
+    #[test]
+    fn a_fake_vehicles_kind_and_faults_are_read_and_a_fault_written_wrong_is_refused() {
+        let kind = |name, gimbal| fake_payload(name, &[], gimbal).map(|(kind, _)| kind);
+        assert_eq!(kind(None, false).ok(), Some(Profile::Standard));
+        assert_eq!(
+            kind(Some("stream-only"), false).ok(),
+            Some(Profile::StreamOnly)
+        );
+        assert_eq!(
+            kind(Some("photo-video"), true).ok(),
+            Some(Profile::PhotoVideo)
+        );
+        assert_eq!(
+            kind(Some("integrated"), true).ok(),
+            Some(Profile::Integrated)
+        );
+        assert_eq!(
+            kind(Some("thermal-tracking"), true).ok(),
+            Some(Profile::ThermalTracking)
+        );
+        // One unit is a camera and a gimbal, so it needs both.
+        let alone = kind(Some("integrated"), false).expect_err("needs a gimbal");
+        assert!(alone.to_string().contains("needs --gimbal"), "{alone}");
+        let alone = kind(Some("thermal-tracking"), false).expect_err("needs a gimbal");
+        assert!(
+            alone
+                .to_string()
+                .contains("--payload-profile thermal-tracking is a camera and a gimbal in one"),
+            "{alone}"
+        );
+        assert!(kind(Some("thermal"), true).is_err());
+
+        assert_eq!(faults(&[]), Ok(Faults::default()));
+        assert_eq!(
+            faults(&["card-full", "gimbal-error", "command-refused=2000"]),
+            Ok(Faults {
+                card_full: true,
+                gimbal_error: true,
+                refused: Some(2000),
+                ..Faults::default()
+            })
+        );
+        assert_eq!(
+            faults(&["command-in-progress=2500"]),
+            Ok(Faults {
+                slow: Some(2500),
+                ..Faults::default()
+            })
+        );
+        for (wrong, why) in [
+            ("card-empty", "no fault is called card-empty"),
+            ("command-refused", "with its MAV_CMD number"),
+            ("card-full=1", "without a number"),
+            (
+                "command-refused=photo",
+                "--payload-fault command-refused=photo",
+            ),
+        ] {
+            let refused = faults(&[wrong]).expect_err(wrong);
+            assert!(refused.contains(why), "{wrong}: {refused}");
+        }
     }
 }
 

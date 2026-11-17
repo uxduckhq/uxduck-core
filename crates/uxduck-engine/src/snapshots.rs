@@ -134,6 +134,10 @@ fn save(
         vehicle: kind,
         autopilot,
         frame,
+        camera,
+        gimbal,
+        ardupilot_gimbal,
+        payload_profile,
         ..
     }) = engine
         .state
@@ -185,6 +189,10 @@ fn save(
         vehicle: kind,
         autopilot,
         frame,
+        camera,
+        gimbal,
+        ardupilot_gimbal,
+        payload_profile,
         firmware: vehicle.firmware.clone(),
         latitude_deg: fused.latitude_deg,
         longitude_deg: fused.longitude_deg,
@@ -270,6 +278,12 @@ fn start(
             // A snapshot brings its own mission.
             with_mission: false,
             traffic: false,
+            // Its parameters hold their set-up, which ArduPilot reads only
+            // as it starts, so it carries what it carried (ADR-0063 Y11).
+            camera: snapshot.camera,
+            gimbal: snapshot.gimbal,
+            ardupilot_gimbal: snapshot.ardupilot_gimbal.map(Into::into),
+            payload_profile: snapshot.payload_profile.map(Into::into),
             instance: None,
         },
         policy: None,

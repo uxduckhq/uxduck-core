@@ -1,0 +1,14 @@
+{
+  "cameraId": "v9b1c2d3e4f5a6b7c/100",
+  "status": "loaded",
+  "uri": "mftp:///camera.xml",
+  "reading": true,
+  "readFailure": "The camera did not answer.",
+  "settings": [
+    {
+      "name": "CAM_IRLOCK",
+      "description": "Enable IR lock",
+      "kind": "bool"
+    }
+  ]
+}

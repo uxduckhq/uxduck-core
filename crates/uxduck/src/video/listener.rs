@@ -9,10 +9,10 @@
 //! sends from; a new port while a stream from that address has gone quiet
 //! is that stream back.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uxduck_core::domain::video::{
@@ -60,6 +60,21 @@ pub fn bind(port: u16) -> Result<UdpSocket, String> {
     })
 }
 
+/// The ports this UXDuck listens on for video, so a port another program
+/// holds is told from one of its own (S408).
+static HELD: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+
+fn held() -> std::sync::MutexGuard<'static, BTreeSet<u16>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether this UXDuck is the one listening on the port.
+#[must_use]
+pub fn holds(port: u16) -> bool {
+    held().contains(&port)
+}
+
 /// Runs the listener on its own thread until `stop` is set.
 ///
 /// # Errors
@@ -74,11 +89,16 @@ pub fn spawn(
 ) -> Result<(), String> {
     let port = socket.local_addr().map_or(0, |a| a.port());
     let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
+    held().insert(port);
     std::thread::Builder::new()
         .name("video-udp".into())
-        .spawn(move || run(&socket, port, &hub, &engine, &stop))
+        .spawn(move || {
+            run(&socket, port, &hub, &engine, &stop);
+            held().remove(&port);
+        })
         .map(|_| ())
         .map_err(|error| {
+            held().remove(&port);
             tracing::error!(%error, port, "the video listener could not start");
             format!("UXDuck can't listen on UDP port {port}: {error}")
         })

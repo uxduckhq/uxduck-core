@@ -1,0 +1,21 @@
+{
+  "id": "sn9c1e7b3d5a604f2a",
+  "name": "Over the ridge",
+  "vehicle": "multicopter",
+  "frame": "X",
+  "firmware": "ArduCopter V4.8.0-dev",
+  "latitudeDeg": -35.3591,
+  "longitudeDeg": 149.1712,
+  "groundAltitudeM": 584.0,
+  "heightM": 30.0,
+  "headingDeg": 90.0,
+  "groundSpeedMps": 0.2,
+  "mode": "GUIDED",
+  "armed": true,
+  "flying": true,
+  "parameterCount": 1389,
+  "missionCount": 0,
+  "ardupilotGimbal": "avt-cm62",
+  "createdAtUs": 1790668800000000,
+  "version": 1
+}

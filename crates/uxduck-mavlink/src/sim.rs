@@ -6,14 +6,13 @@
 use mavio::dialects::ardupilotmega::enums::GpsFixType;
 use mavio::dialects::ardupilotmega::enums::{
     EkfStatusFlags, MavAutopilot, MavCmd, MavFrame, MavModeFlag, MavSensorOrientation, MavState,
-    MavSysStatusSensor, MavType, PositionTargetTypemask, VideoStreamType,
+    MavSysStatusSensor, MavType, PositionTargetTypemask,
 };
 use mavio::dialects::ardupilotmega::messages::{
     Attitude, AutopilotVersion, AvailableModes, AvailableModesMonitor, BatteryStatus, CommandLong,
     ComponentMetadata, DistanceSensor, EkfStatusReport, GlobalPositionInt, GpsRawInt, Heartbeat,
     HomePosition, MissionCurrent, NavControllerOutput, PositionTargetGlobalInt, RadioStatus,
-    RcChannels, ServoOutputRaw, SysStatus, TerrainReport, Timesync, VfrHud, Vibration,
-    VideoStreamInformation, Wind,
+    RcChannels, ServoOutputRaw, SysStatus, TerrainReport, Timesync, VfrHud, Vibration, Wind,
 };
 use mavio::protocol::{V2, Versionless};
 use mavio::{Frame, Message};
@@ -435,56 +434,6 @@ pub fn available_modes_monitor_frame(
     )
 }
 
-/// A camera component's heartbeat (MAVLink camera protocol).
-#[must_use]
-pub fn camera_heartbeat_frame(system_id: u8, component_id: u8, sequence: u8) -> Vec<u8> {
-    let heartbeat = Heartbeat {
-        type_: MavType::Camera,
-        autopilot: MavAutopilot::Invalid,
-        base_mode: MavModeFlag::empty(),
-        custom_mode: 0,
-        system_status: MavState::Active,
-        mavlink_version: 3,
-    };
-    frame(system_id, component_id, sequence, &heartbeat)
-}
-
-/// `VIDEO_STREAM_INFORMATION` for one stream at `uri`: RTSP for an
-/// `rtsp://` address, MPEG-TS over UDP otherwise.
-#[must_use]
-pub fn video_stream_information_frame(
-    system_id: u8,
-    component_id: u8,
-    sequence: u8,
-    stream_id: u8,
-    uri: &str,
-) -> Vec<u8> {
-    let mut uri_bytes = [0u8; 160];
-    for (to, from) in uri_bytes.iter_mut().zip(uri.bytes()) {
-        *to = from;
-    }
-    let mut name = [0u8; 32];
-    for (to, from) in name.iter_mut().zip(b"Main".iter()) {
-        *to = *from;
-    }
-    let message = VideoStreamInformation {
-        stream_id,
-        count: 1,
-        type_: if uri.starts_with("rtsp://") {
-            VideoStreamType::Rtsp
-        } else {
-            VideoStreamType::MpegTs
-        },
-        framerate: 30.0,
-        resolution_h: 1280,
-        resolution_v: 720,
-        uri: uri_bytes,
-        name,
-        ..VideoStreamInformation::default()
-    };
-    frame(system_id, component_id, sequence, &message)
-}
-
 /// Where the fake PX4 keeps its general metadata, when it has any, as PX4
 /// 1.17 does.
 pub const PX4_GENERAL_METADATA: &str = "/etc/extras/component_general.json.xz";
@@ -848,6 +797,85 @@ pub fn ftp_frame(from: (u8, u8), target: (u8, u8), sequence: u8, payload: [u8; 2
     frame(from.0, from.1, sequence, &message)
 }
 
+/// A request to a camera about its own settings (S411): the whole list, one
+/// by name or by its place in the list, or one written.
+#[must_use]
+pub fn param_ext_frame(
+    from: (u8, u8),
+    target: (u8, u8),
+    sequence: u8,
+    out: &crate::camera_params::Out,
+) -> Vec<u8> {
+    use crate::camera_params::Out;
+    use mavio::dialects::ardupilotmega::messages::{
+        ParamExtRequestList, ParamExtRequestRead, ParamExtSet,
+    };
+    let (target_system, target_component) = target;
+    match out {
+        Out::List => frame(
+            from.0,
+            from.1,
+            sequence,
+            &ParamExtRequestList {
+                target_system,
+                target_component,
+            },
+        ),
+        Out::Read(name) => frame(
+            from.0,
+            from.1,
+            sequence,
+            &ParamExtRequestRead {
+                target_system,
+                target_component,
+                param_id: crate::payload::wire::text(name),
+                param_index: -1,
+            },
+        ),
+        Out::ReadIndex(index) => frame(
+            from.0,
+            from.1,
+            sequence,
+            &ParamExtRequestRead {
+                target_system,
+                target_component,
+                param_id: [0; 16],
+                param_index: i16::try_from(*index).unwrap_or(i16::MAX),
+            },
+        ),
+        Out::Set { name, value } => frame(
+            from.0,
+            from.1,
+            sequence,
+            &ParamExtSet {
+                target_system,
+                target_component,
+                param_id: crate::payload::wire::text(name),
+                param_value: value.bytes(),
+                param_type: ext_type(value.kind()),
+            },
+        ),
+    }
+}
+
+/// A `MAV_PARAM_EXT_TYPE` by its number: one of the protocol's eleven.
+pub(crate) fn ext_type(kind: u8) -> mavio::dialects::ardupilotmega::enums::MavParamExtType {
+    use mavio::dialects::ardupilotmega::enums::MavParamExtType as Type;
+    match kind {
+        2 => Type::Int8,
+        3 => Type::Uint16,
+        4 => Type::Int16,
+        5 => Type::Uint32,
+        6 => Type::Int32,
+        7 => Type::Uint64,
+        8 => Type::Int64,
+        9 => Type::Real32,
+        10 => Type::Real64,
+        11 => Type::Custom,
+        _ => Type::Uint8,
+    }
+}
+
 #[must_use]
 pub fn param_set_frame(
     gcs: u8,
@@ -1203,8 +1231,17 @@ pub fn home_item() -> crate::decode::MissionItemInt {
     }
 }
 
-/// `MAV_COMP_ID_CAMERA`.
-pub const CAMERA_COMPONENT: u8 = 100;
+/// The camera commands the autopilot accepts for a camera of its own:
+/// `IMAGE_START_CAPTURE`, `IMAGE_STOP_CAPTURE`, `VIDEO_START_CAPTURE`,
+/// `VIDEO_STOP_CAPTURE` and `SET_CAMERA_ZOOM`.
+const CAMERA_COMMANDS: [u16; 5] = [2000, 2001, 2500, 2501, 531];
+
+/// The messages a payload sends when asked, which its autopilot does not
+/// have: the camera's (259 to 263 and 269 to 271) and the gimbal's (280,
+/// 281, 283 and 285).
+const PAYLOAD_MESSAGES: [f32; 12] = [
+    259.0, 260.0, 261.0, 262.0, 263.0, 269.0, 270.0, 271.0, 280.0, 281.0, 283.0, 285.0,
+];
 
 /// A vehicle that heartbeats and answers `AUTOPILOT_VERSION` requests.
 #[allow(clippy::struct_excessive_bools, reason = "a test double's switches")]
@@ -1277,9 +1314,18 @@ pub struct FakeVehicle {
     /// The latest `MANUAL_CONTROL` sticks, and when (in `telemetry` time).
     pub manual: Option<[i16; 4]>,
     manual_at_s: Option<f64>,
-    /// A camera component (100) with one stream at this address, which it
-    /// names when asked (S39).
-    pub camera: Option<String>,
+    /// Its camera on component 100, its gimbal on 154, or both (S402). Its
+    /// system id is the vehicle's, and the gimbal manages itself, since
+    /// this autopilot does not.
+    pub payload: Option<crate::payload::Payload>,
+    /// From when until when its camera has no power (S404), in the time
+    /// `payload_step` is given: it is silent then, and back after.
+    pub camera_silent_s: Option<(f64, f64)>,
+    /// Its autopilot drives a camera of its own, as ArduPilot does with
+    /// `CAM1_TYPE 1` (S404). Asked what cameras it has, it answers as
+    /// ArduPilot 4.7 does (`AP_Camera_Backend::send_camera_information`):
+    /// one that takes images, with no name, numbered 0 in `lens_id`.
+    pub own_camera: bool,
     /// Sends ArduPilot's start-up messages as it boots, two of them
     /// warnings and one long enough to come in two parts (S26).
     pub startup_burst: bool,
@@ -1630,7 +1676,9 @@ impl FakeVehicle {
             prearm_from_s: None,
             manual: None,
             manual_at_s: None,
-            camera: None,
+            payload: None,
+            camera_silent_s: None,
+            own_camera: false,
             startup_burst: false,
             prearm_failure: false,
             repeat_warning: false,
@@ -3028,15 +3076,90 @@ impl FakeVehicle {
         )
     }
 
-    /// The camera component's heartbeat, when it has a camera.
-    pub fn camera_heartbeat(&mut self) -> Option<Vec<u8>> {
-        self.camera.as_ref()?;
-        let sequence = self.next_of(CAMERA_COMPONENT);
-        Some(camera_heartbeat_frame(
-            self.system_id,
-            CAMERA_COMPONENT,
-            sequence,
-        ))
+    /// The payload's heartbeats, to send with the vehicle's own. None once
+    /// `payload_step` sends them on the vehicle's clock.
+    pub fn payload_heartbeats(&mut self) -> Vec<Vec<u8>> {
+        self.payload
+            .as_mut()
+            .map(crate::payload::Payload::announce)
+            .unwrap_or_default()
+    }
+
+    /// What the payload sends by `t_s`, on the clock `telemetry` keeps.
+    /// The gimbal reports ten times a second, so step it more often than
+    /// that.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a time since it booted, not below zero"
+    )]
+    pub fn payload_step(&mut self, t_s: f64) -> Vec<Vec<u8>> {
+        let boot_ms = ((t_s - self.booted_at_s).max(0.0) * 1000.0) as u64;
+        // A camera made silent as a fault stays so: only a camera given
+        // its times has its power switched by them.
+        let silent = self
+            .camera_silent_s
+            .map(|(from, until)| (from..until).contains(&t_s));
+        self.payload
+            .as_mut()
+            .map(|payload| {
+                if let Some(silent) = silent {
+                    payload.camera_off = silent;
+                }
+                payload.step(boot_ms)
+            })
+            .unwrap_or_default()
+    }
+
+    /// What the payload makes of a frame that did not name it. A camera
+    /// command for the autopilot is passed on to the camera as the
+    /// autopilot's own, as ArduPilot does with `CAM1_TYPE 6` (S400), and
+    /// the camera's acknowledgement to the autopilot stays inside the
+    /// vehicle. The fake passes the command on as it came, where ArduPilot
+    /// counts intervals itself. Anything else the payload hears as it came.
+    fn payload_hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let (system, mute) = (self.system_id, self.ignores_commands);
+        if self.payload.is_none() {
+            return Vec::new();
+        }
+        let command = crate::payload::wire::command(frame);
+        // The payload's messages are not the autopilot's to send. Asked for
+        // one by name, it says so at once. MAVSDK asks every component for
+        // GIMBAL_MANAGER_INFORMATION one request at a time, and its
+        // requests to the payload waited behind an autopilot that said
+        // nothing.
+        if let Some(asked) = &command
+            && asked.command == crate::payload::wire::REQUEST_MESSAGE
+            && asked.to == (system, 1)
+            && PAYLOAD_MESSAGES.contains(&asked.params[0].round())
+            && !mute
+        {
+            let sequence = self.next();
+            let failed = crate::payload::wire::FAILED;
+            return vec![command_ack_frame(
+                system, 1, asked.from, sequence, 512, failed,
+            )];
+        }
+        let Some(payload) = self.payload.as_mut() else {
+            return Vec::new();
+        };
+        let command = command.filter(|command| CAMERA_COMMANDS.contains(&command.command));
+        let powered = !payload.camera_off;
+        let (Some(command), Some(camera)) = (command, payload.camera.as_mut().filter(|_| powered))
+        else {
+            return payload.receive(frame);
+        };
+        if mute {
+            return Vec::new();
+        }
+        let passed_on = crate::payload::wire::Command {
+            from: (system, 1),
+            to: (system, camera.component),
+            ..command
+        };
+        let mut frames = camera.command(&passed_on);
+        frames.retain(|frame| crate::framing::header(frame).is_some_and(|h| h.message_id != 77));
+        frames
     }
 
     /// Carries out a command as `ArduCopter` would and returns `MAV_RESULT`,
@@ -3104,7 +3227,7 @@ impl FakeVehicle {
                 None
             }
             // The camera protocol: take photos, start and stop video, zoom.
-            2000 | 2001 | 2500 | 2501 | 531 => Some(0),
+            command if CAMERA_COMMANDS.contains(&command) => Some(0),
             // MAV_CMD_DO_START_MAG_CAL (S184): refused armed, as ArduPilot
             // does, and unsupported with no compass.
             42424 => {
@@ -3223,6 +3346,14 @@ impl FakeVehicle {
     pub fn answer(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut replies = Vec::new();
         for frame in crate::framing::split(bytes).frames {
+            // What names the camera or the gimbal is theirs alone to answer
+            // (S400).
+            if let Some(payload) = self.payload.as_mut()
+                && payload.takes(frame)
+            {
+                replies.extend(payload.receive(frame));
+                continue;
+            }
             if let Some(decoded) = decode(frame)
                 && decoded.system_id != self.system_id
             {
@@ -3298,23 +3429,6 @@ impl FakeVehicle {
                 param1,
                 ..
             }) = decode(frame).map(|d| d.message)
-                && (param1 - 269.0).abs() < f32::EPSILON
-                && let Some(uri) = self.camera.clone()
-            {
-                let sequence = self.next_of(CAMERA_COMPONENT);
-                replies.push(video_stream_information_frame(
-                    self.system_id,
-                    CAMERA_COMPONENT,
-                    sequence,
-                    1,
-                    &uri,
-                ));
-            }
-            if let Some(Decoded::CommandLong {
-                command: 512,
-                param1,
-                ..
-            }) = decode(frame).map(|d| d.message)
                 && (param1 - 397.0).abs() < f32::EPSILON
                 && self.px4.is_some()
                 && self.files.files.contains_key(PX4_GENERAL_METADATA)
@@ -3346,6 +3460,40 @@ impl FakeVehicle {
                     self.commit,
                 ));
             }
+            if self.own_camera
+                && !self.ignores_commands
+                && let Some(asked) = crate::payload::wire::command(frame)
+                && asked.command == crate::payload::wire::REQUEST_MESSAGE
+                && asked.to == (self.system_id, 1)
+                && (asked.params[0] - 259.0).abs() < 0.5
+            {
+                use mavio::dialects::ardupilotmega::enums::CameraCapFlags;
+                use mavio::dialects::ardupilotmega::messages::CameraInformation;
+
+                let (acknowledged, said) = (self.next(), self.next());
+                replies.push(command_ack_frame(
+                    self.system_id,
+                    1,
+                    asked.from,
+                    acknowledged,
+                    512,
+                    0,
+                ));
+                replies.push(self::frame(
+                    self.system_id,
+                    1,
+                    said,
+                    &CameraInformation {
+                        flags: CameraCapFlags::CAPTURE_IMAGE,
+                        focal_length: f32::NAN,
+                        sensor_size_h: f32::NAN,
+                        sensor_size_v: f32::NAN,
+                        ..CameraInformation::default()
+                    },
+                ));
+                continue;
+            }
+            replies.extend(self.payload_hears(frame));
         }
         replies
     }
@@ -3396,6 +3544,7 @@ impl FakeVehicle {
         clippy::cast_sign_loss,
         reason = "values are bounded by construction"
     )]
+    #[allow(clippy::too_many_lines, reason = "one message after another")]
     pub fn telemetry(&mut self, t_s: f64) -> Vec<Vec<u8>> {
         const RADIUS_M: f64 = 80.0;
         const PERIOD_S: f64 = 60.0;
@@ -3436,6 +3585,20 @@ impl FakeVehicle {
                 0
             }
         };
+        let attitude = [
+            12f32.to_radians(),
+            (-3f32).to_radians(),
+            heading.to_radians() as f32,
+        ];
+        if let Some(payload) = self.payload.as_mut() {
+            let place = fix.then(|| crate::payload::Place {
+                lat: e7(lat),
+                lon: e7(lon),
+                alt_mm: mm(HOME.2 + height),
+                relative_alt_mm: mm(height),
+            });
+            payload.vehicle(attitude, place);
+        }
         let mut frames = Vec::new();
         frames.extend(self.stream(
             id,
@@ -3475,9 +3638,9 @@ impl FakeVehicle {
             id,
             &Attitude {
                 time_boot_ms,
-                roll: 12f32.to_radians(),
-                pitch: (-3f32).to_radians(),
-                yaw: heading.to_radians() as f32,
+                roll: attitude[0],
+                pitch: attitude[1],
+                yaw: attitude[2],
                 ..Attitude::default()
             },
         ));

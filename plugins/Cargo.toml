@@ -2,7 +2,7 @@
 # and install them.
 [workspace]
 resolver = "3"
-members = ["camera-manager", "home-distance", "script-host"]
+members = ["home-distance", "script-host", "waypoint-photos"]
 
 [profile.release]
 opt-level = "s"

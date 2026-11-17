@@ -352,6 +352,10 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::HistoryCleared { .. }
             | Change::VideoSourceUpserted { .. }
             | Change::VideoSourceRemoved { .. }
+            | Change::CameraUpserted { .. }
+            | Change::CameraRemoved { .. }
+            | Change::GimbalUpserted { .. }
+            | Change::GimbalRemoved { .. }
             | Change::VideoRecordingUpserted { .. }
             | Change::VideoPhotoUpserted { .. }
             | Change::VideoRecordingRemoved { .. }

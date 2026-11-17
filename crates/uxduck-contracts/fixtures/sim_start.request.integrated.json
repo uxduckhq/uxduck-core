@@ -1,0 +1,14 @@
+{
+  "method": "sim/start",
+  "params": {
+    "vehicle": "multicopter",
+    "latitudeDeg": -35.363261,
+    "longitudeDeg": 149.16523,
+    "altitudeM": 584.0,
+    "headingDeg": 353.0,
+    "inAirM": 30.0,
+    "camera": true,
+    "gimbal": true,
+    "payloadProfile": "integrated"
+  }
+}

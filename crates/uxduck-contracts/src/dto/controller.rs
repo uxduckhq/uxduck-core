@@ -147,6 +147,24 @@ pub struct RcAxisBinding {
     pub input: AxisBinding,
 }
 
+/// A gimbal's pitch or yaw, as an input turns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum GimbalAxis {
+    Pitch,
+    Yaw,
+}
+
+/// An axis that turns the target vehicle's gimbal: the further it is
+/// pushed the faster the gimbal turns, up and right positive, and at its
+/// centre the gimbal stops.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GimbalAxisBinding {
+    pub control: GimbalAxis,
+    pub input: AxisBinding,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtonBinding {
@@ -177,16 +195,21 @@ pub struct ActionBinding {
     pub action: HeldAction,
 }
 
-/// What a held button does: `open` and `close` hold the gripper; `talk`
-/// is held to speak to the agent in the window that claimed the controller,
-/// and let go to send (S21), which that window reads from
-/// `controller/inputs`.
+/// What a held button does. `open` and `close` hold the gripper.
+/// `gimbal-up`, `gimbal-down`, `gimbal-left` and `gimbal-right` turn the
+/// target vehicle's gimbal while held. `talk` is held to speak to the
+/// agent in the window that claimed the controller, and let go to send
+/// (S21), which that window reads from `controller/inputs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeldAction {
     Open,
     Close,
     Talk,
+    GimbalUp,
+    GimbalDown,
+    GimbalLeft,
+    GimbalRight,
 }
 
 /// A position of an axis, such as a switch's, that sends a command when the
@@ -277,9 +300,14 @@ pub struct InputMapping {
     /// again. Only for a daemon with `unusedControls`; an older one ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unused: Vec<StickControl>,
-    /// Buttons held for the gripper (S263). Absent when there are none.
+    /// Buttons held for the gripper (S263) or to turn a gimbal. Absent
+    /// when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionBinding>,
+    /// Axes that turn the target vehicle's gimbal: its pitch and its yaw,
+    /// each at most once. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gimbal: Vec<GimbalAxisBinding>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -357,6 +385,10 @@ pub struct MappingUpdateParams {
     /// client that knows nothing of them never drops them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<ActionBinding>>,
+    /// As for `InputMapping::gimbal`. Absent keeps the mapping's own, as
+    /// for `actions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gimbal: Option<Vec<GimbalAxisBinding>>,
 }
 
 /// Makes a mapping of its own for a controller: a copy of `from` (Mode 2
@@ -500,4 +532,8 @@ pub struct KeyboardStopParams {
 pub struct KeyboardInputParams {
     /// Roll, pitch, yaw and throttle, each -1 to 1.
     pub axes: [f64; 4],
+    /// The gimbal's pitch and yaw keys, each -1, 0 or 1 with up and right
+    /// positive. Absent turns nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gimbal: Option<[f64; 2]>,
 }

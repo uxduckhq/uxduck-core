@@ -1038,6 +1038,13 @@ export type ApprovalResolveParams = {
 export type ApprovalState = 'pending' | 'allowed' | 'denied' | 'expired';
 
 /**
+ * A gimbal that ArduPilot's simulator plays itself (ADR-0063), with the
+ * camera it carries. The autopilot's own driver speaks for it, as it would
+ * for hardware on a serial port. It sends no video.
+ */
+export type ArdupilotGimbal = 'viewpro' | 'avt-cm62';
+
+/**
  * A file attached to a message (S246), kept by UXDuck under its id.
  */
 export type AttachedFile = {
@@ -1524,13 +1531,259 @@ export type CalculatedItem = {
 };
 
 /**
+ * A camera of a vehicle.
+ */
+export type Camera = {
+    /**
+     * What it can do. Empty until it is identified.
+     */
+    capabilities: Array<CameraCapability>;
+    /**
+     * What it is capturing, once it has said: an interval, a recording
+     * and since when, its count of photos and the room on its card.
+     */
+    capture?: CameraCapture | null;
+    /**
+     * The camera's own MAVLink component id, or its autopilot's when the
+     * autopilot speaks for it.
+     */
+    componentId: number;
+    definition?: CameraDefinition | null;
+    /**
+     * 1 to 6 for a camera its autopilot speaks for (`camera_device_id`).
+     * Absent for a camera that is a MAVLink component itself.
+     */
+    deviceId?: number | null;
+    /**
+     * Its firmware version, such as `1.2.3`.
+     */
+    firmware?: string | null;
+    /**
+     * Its `CAMERA_CAP_FLAGS` as sent, for a bit UXDuck has no name for.
+     */
+    flags: number;
+    /**
+     * The gimbal it sits on: a gimbal device's component id, or 1 to 6
+     * for one its autopilot speaks for. Absent for a camera fixed to the
+     * airframe.
+     */
+    gimbalDeviceId?: number | null;
+    /**
+     * `<vehicle id>/<component id>`, and `/<device id>` after it for a
+     * camera its autopilot speaks for.
+     */
+    id: string;
+    /**
+     * Whether it has said what it is. One that has not is a camera
+     * component that sends heartbeats and has not answered yet, or does
+     * not answer.
+     */
+    identified: boolean;
+    lens?: CameraLens | null;
+    model?: string | null;
+    /**
+     * The photos it said it took while UXDuck listened, oldest first: the
+     * last 20 of them, each with where it was taken.
+     */
+    photos?: Array<CameraPhoto>;
+    /**
+     * Whether its heartbeats, or its autopilot's, are heard now. A camera
+     * that is gone is kept, and identified again when it returns.
+     */
+    present: boolean;
+    sensor?: CameraSensor | null;
+    /**
+     * Its mode, zoom and focus, once it has said them.
+     */
+    settings?: CameraSettings | null;
+    /**
+     * The sensors it has said it has since UXDuck first heard it:
+     * `thermal` from a thermal range it can give or a stream that is
+     * thermal, and `daylight` from a stream that is not. A camera with
+     * both can be switched with `set-source`. Absent until it names a
+     * stream.
+     */
+    sources?: Array<CameraSource>;
+    /**
+     * Its card, once it has said.
+     */
+    storage?: CameraStorage | null;
+    streams: Array<CameraStream>;
+    vehicleId: string;
+    vendor?: string | null;
+    version: number;
+    /**
+     * It only sends video: it has a video stream and nothing to control.
+     */
+    videoOnly?: boolean;
+};
+
+/**
+ * What to have a camera do: one command of the MAVLink camera protocol,
+ * which the camera acknowledges, or one of its own settings written.
+ */
+export type CameraAction = {
+    mode: CameraMode;
+    type: 'set-mode';
+} | {
+    type: 'take-photo';
+} | {
+    count?: number | null;
+    intervalS: number;
+    type: 'start-interval';
+} | {
+    type: 'stop-interval';
+} | {
+    type: 'start-recording';
+} | {
+    type: 'stop-recording';
+} | {
+    steps: number;
+    type: 'zoom-step';
+} | {
+    percent: number;
+    type: 'zoom-to';
+} | {
+    steps: number;
+    type: 'focus-step';
+} | {
+    percent: number;
+    type: 'focus-to';
+} | {
+    type: 'focus-auto';
+} | {
+    storageId?: number | null;
+    type: 'format';
+} | {
+    type: 'reset';
+} | {
+    /**
+     * The setting's `name`, such as `CAM_ISO`.
+     */
+    name: string;
+    type: 'set-setting';
+    value: number;
+} | {
+    source: CameraSource;
+    type: 'set-source';
+} | {
+    type: 'track-point';
+    x: number;
+    y: number;
+} | {
+    bottom: number;
+    left: number;
+    right: number;
+    top: number;
+    type: 'track-rectangle';
+} | {
+    type: 'stop-tracking';
+};
+
+/**
+ * Something a camera can do, as its `CAMERA_CAP_FLAGS` say.
+ */
+export type CameraCapability = 'capture-video' | 'capture-image' | 'modes' | 'image-in-video-mode' | 'video-in-image-mode' | 'image-survey-mode' | 'basic-zoom' | 'basic-focus' | 'video-stream' | 'tracking-point' | 'tracking-rectangle' | 'tracking-geo-status' | 'thermal-range';
+
+/**
+ * What a camera is capturing, as it last said.
+ */
+export type CameraCapture = {
+    /**
+     * Room left on its card, in mebibytes, in coarse steps.
+     */
+    availableMib?: number | null;
+    /**
+     * The card is known to have no room for another capture.
+     */
+    cardFull?: boolean;
+    /**
+     * Seconds between photos while it takes them at an interval.
+     */
+    intervalS?: number | null;
+    /**
+     * The photos in the camera's list, which a format empties.
+     */
+    photoCount: number;
+    /**
+     * Photos it counted and never described, though asked again.
+     */
+    photosLost?: number;
+    recording: boolean;
+    /**
+     * When the recording began by the camera's own count of it, in
+     * microseconds since 1970 on this computer's clock.
+     */
+    recordingSinceUs?: number | null;
+};
+
+/**
  * Where a camera says when it captured a picture (S262).
  */
 export type CameraClock = 'sender-reports' | 'klv';
 
+/**
+ * `camera/command`: has a camera do something.
+ */
+export type CameraCommandParams = {
+    action: CameraAction;
+    /**
+     * The camera's `id` from `camera/list`.
+     */
+    cameraId: string;
+    /**
+     * Confirms the command for a vehicle that is not online.
+     */
+    confirm?: boolean;
+};
+
+/**
+ * Where a camera's definition file is: the settings it has beyond the
+ * protocol's own.
+ */
+export type CameraDefinition = {
+    /**
+     * An address, without its password. `mftp://` or `mavlinkftp://` is
+     * a file on the vehicle, read over MAVLink FTP.
+     */
+    uri: string;
+    version: number;
+};
+
+/**
+ * `camera/definition/fetch`: which camera's definition file to fetch.
+ */
+export type CameraDefinitionFetchParams = {
+    /**
+     * The camera's `id` from `camera/list`.
+     */
+    cameraId: string;
+    /**
+     * The address agreed to, as `camera/settings` gave it. Refused when
+     * the camera has named another since.
+     */
+    uri: string;
+};
+
+/**
+ * Where UXDuck is with a camera's definition file.
+ */
+export type CameraDefinitionStatus = 'none' | 'ask' | 'fetching' | 'failed' | 'refused' | 'loaded';
+
 export type CameraInternet = {
     localUrls: Array<string>;
     lowDataUrl?: string | null;
+};
+
+/**
+ * A camera's lens.
+ */
+export type CameraLens = {
+    focalLengthMm?: number | null;
+    /**
+     * Which of its lenses, from 0.
+     */
+    id: number;
 };
 
 /**
@@ -1552,6 +1805,270 @@ export type CameraLinger = {
     removeIpc: boolean;
     user: string;
 };
+
+/**
+ * `camera/list`: every camera of every vehicle.
+ */
+export type CameraListResult = {
+    cameras: Array<Camera>;
+};
+
+/**
+ * A camera's mode.
+ */
+export type CameraMode = 'photo' | 'video' | 'survey';
+
+/**
+ * A photo a camera said it took.
+ */
+export type CameraPhoto = {
+    /**
+     * The file's name or address on the camera, without its password.
+     */
+    file?: string | null;
+    /**
+     * Its place in the camera's list, from 0.
+     */
+    index: number;
+    /**
+     * False when the camera said the capture failed.
+     */
+    ok: boolean;
+    /**
+     * Absent when the camera did not know where it was.
+     */
+    place?: CameraPhotoPlace | null;
+    /**
+     * When it was taken by the camera's clock when that is set, else when
+     * UXDuck heard of it: microseconds since 1970.
+     */
+    takenAtUs: number;
+};
+
+/**
+ * Where a photo was taken.
+ */
+export type CameraPhotoPlace = {
+    altitudeAmslM: number;
+    latitudeDeg: number;
+    longitudeDeg: number;
+    /**
+     * Its height above home.
+     */
+    relativeAltitudeM: number;
+};
+
+/**
+ * A camera's sensor. Each measure is absent when the camera did not say.
+ */
+export type CameraSensor = {
+    heightMm?: number | null;
+    heightPx?: number | null;
+    widthMm?: number | null;
+    widthPx?: number | null;
+};
+
+/**
+ * One of a camera's own settings: what its definition file says of it,
+ * and the value the camera last gave.
+ */
+export type CameraSetting = {
+    /**
+     * What the file calls it, for people.
+     */
+    description: string;
+    /**
+     * The setting whose present value rules this one out, by name: it
+     * does not apply as the camera is set now. Absent when it applies.
+     */
+    excludedBy?: string | null;
+    /**
+     * The file asks that it is given no control of its own, as it does
+     * for the camera's mode, which `set-mode` sets.
+     */
+    hidden?: boolean;
+    kind: CameraSettingKind;
+    max?: number | null;
+    min?: number | null;
+    /**
+     * Its name on the camera, such as `CAM_ISO`.
+     */
+    name: string;
+    /**
+     * The values it can take as the camera is set now: fewer than the
+     * file lists when another setting's value limits them. Empty for a
+     * setting that takes a number in a range, and for `bool`.
+     */
+    options?: Array<CameraSettingOption>;
+    /**
+     * The camera sets it itself, and it can only be read.
+     */
+    readOnly?: boolean;
+    step?: number | null;
+    unit?: string | null;
+    /**
+     * The value the camera last gave. Absent until it has, and for a
+     * `custom` setting.
+     */
+    value?: number | null;
+};
+
+/**
+ * The type of one of a camera's own settings, as its definition file
+ * names it.
+ */
+export type CameraSettingKind = 'uint8' | 'int8' | 'uint16' | 'int16' | 'uint32' | 'int32' | 'uint64' | 'int64' | 'float' | 'double' | 'bool' | 'custom';
+
+/**
+ * One value a setting can take, with the name the definition file gives
+ * it.
+ */
+export type CameraSettingOption = {
+    name: string;
+    value: number;
+};
+
+/**
+ * A camera's mode, zoom and focus as it last said them. Each is absent
+ * when the camera does not say.
+ */
+export type CameraSettings = {
+    /**
+     * From 0 (nearest) to 100.
+     */
+    focusPct?: number | null;
+    mode?: CameraMode | null;
+    /**
+     * From 0 (widest) to 100.
+     */
+    zoomPct?: number | null;
+};
+
+/**
+ * `camera/settings`: which camera.
+ */
+export type CameraSettingsParams = {
+    /**
+     * The camera's `id` from `camera/list`.
+     */
+    cameraId: string;
+    /**
+     * Asks the camera for every value again. The answer comes at once
+     * with the values it had, and `reading` says they are being read.
+     */
+    refresh?: boolean;
+};
+
+/**
+ * `camera/settings`: a camera's own settings, from its definition file.
+ */
+export type CameraSettingsResult = {
+    cameraId: string;
+    /**
+     * The file is UXDuck's own copy, kept from when it was last fetched
+     * for this maker, model and version.
+     */
+    kept?: boolean;
+    /**
+     * Why the camera's values could not all be read, when they could not.
+     */
+    readFailure?: string | null;
+    /**
+     * The camera is being asked for its values now.
+     */
+    reading?: boolean;
+    /**
+     * Why it could not be fetched, was refused or is not read, as a
+     * sentence.
+     */
+    reason?: string | null;
+    /**
+     * The settings the file names, in its order.
+     */
+    settings?: Array<CameraSetting>;
+    status: CameraDefinitionStatus;
+    /**
+     * Where the camera says the file is, without its password. Absent
+     * when it names none.
+     */
+    uri?: string | null;
+};
+
+/**
+ * One of a camera's sensors, which its picture comes from.
+ */
+export type CameraSource = 'daylight' | 'thermal';
+
+/**
+ * A camera's card as it last said. Sizes are in mebibytes, and 0 unless
+ * the card is `ready`.
+ */
+export type CameraStorage = {
+    availableMib: number;
+    /**
+     * How many cards it has.
+     */
+    count: number;
+    name?: string | null;
+    status: CameraStorageStatus;
+    /**
+     * 1 for the first card.
+     */
+    storageId: number;
+    totalMib: number;
+    usedMib: number;
+};
+
+export type CameraStorageStatus = 'unformatted' | 'ready' | 'empty' | 'not-supported';
+
+/**
+ * One of a camera's video streams, as the camera describes it. What
+ * arrives at UXDuck is the video source `sourceId` names.
+ */
+export type CameraStream = {
+    bitrateBps?: number | null;
+    encoding?: CameraStreamEncoding | null;
+    frameRateHz?: number | null;
+    height?: number | null;
+    /**
+     * Its horizontal field of view, in degrees.
+     */
+    hfovDeg?: number | null;
+    kind: CameraStreamKind;
+    name?: string | null;
+    /**
+     * How far the picture is turned clockwise, in degrees.
+     */
+    rotationDeg?: number | null;
+    /**
+     * The camera says it is sending it now.
+     */
+    running: boolean;
+    /**
+     * The video source it arrives as (`video/list`), once it does.
+     */
+    sourceId?: string | null;
+    /**
+     * The camera's own number for it, from 1.
+     */
+    streamId: number;
+    /**
+     * A thermal picture.
+     */
+    thermal?: boolean;
+    /**
+     * Where it is fetched or sent, without its password.
+     */
+    uri: string;
+    width?: number | null;
+};
+
+export type CameraStreamEncoding = 'h264' | 'h265';
+
+/**
+ * How a camera's video stream is sent.
+ */
+export type CameraStreamKind = 'rtsp' | 'rtp-udp' | 'mpeg-ts-tcp' | 'mpeg-ts-udp' | 'other';
 
 /**
  * How a Camera tab shows its vehicle's cameras (2026-10-30).
@@ -3064,6 +3581,15 @@ export type ClientRequest = {
     method: 'sim/delete';
     params: SimBuildParams;
 } | {
+    method: 'sim/pictures';
+    params: Empty;
+} | {
+    method: 'sim/fault';
+    params: SimFaultParams;
+} | {
+    method: 'sim/faults';
+    params: IdParams;
+} | {
     method: 'account/get';
     params: Empty;
 } | {
@@ -3318,6 +3844,27 @@ export type ClientRequest = {
 } | {
     method: 'video/list';
     params: Empty;
+} | {
+    method: 'camera/list';
+    params: Empty;
+} | {
+    method: 'camera/command';
+    params: CameraCommandParams;
+} | {
+    method: 'camera/settings';
+    params: CameraSettingsParams;
+} | {
+    method: 'camera/definition/fetch';
+    params: CameraDefinitionFetchParams;
+} | {
+    method: 'gimbal/list';
+    params: Empty;
+} | {
+    method: 'gimbal/command';
+    params: GimbalCommandParams;
+} | {
+    method: 'gimbal/watch';
+    params: GimbalWatchParams;
 } | {
     method: 'video/assign';
     params: VideoAssignParams;
@@ -3677,6 +4224,16 @@ export type Command = {
     command: number;
     params: Array<number>;
     type: 'long';
+} | {
+    action: CameraAction;
+    componentId?: number | null;
+    deviceId?: number | null;
+    type: 'camera';
+} | {
+    action: GimbalAction;
+    componentId?: number | null;
+    deviceId?: number | null;
+    type: 'gimbal';
 };
 
 /**
@@ -3759,6 +4316,17 @@ export type CommandListResult = {
      * `riskInFlight`.
      */
     flyingAboveHomeM: number;
+};
+
+/**
+ * How far a command is that the vehicle is still working on
+ * (`MAV_RESULT_IN_PROGRESS`).
+ */
+export type CommandProgress = {
+    /**
+     * From 0 to 100. Absent when the vehicle did not say.
+     */
+    percent?: number | null;
 };
 
 /**
@@ -5501,11 +6069,13 @@ export type EngagementUsage = {
  */
 export type EntityChange = {
     approval?: Approval | null;
+    camera?: Camera | null;
     client?: ClientRecord | null;
     controller?: Controller | null;
     entity: EntityType;
     fileTransfer?: FileTransfer | null;
     folder?: Folder | null;
+    gimbal?: Gimbal | null;
     historyEntry?: HistoryEntry | null;
     id: string;
     inputMapping?: InputMapping | null;
@@ -5541,7 +6111,7 @@ export type EntityChange = {
 /**
  * The entity types a client can subscribe to.
  */
-export type EntityType = 'operator' | 'thread' | 'item' | 'folder' | 'link' | 'vehicle' | 'receipt' | 'notification' | 'client' | 'approval' | 'controller' | 'input-mapping' | 'plugin' | 'parameter-set' | 'parameter' | 'mission' | 'settings' | 'place' | 'marker' | 'plan' | 'snapshot' | 'param-definitions' | 'history-entry' | 'video-source' | 'video-recording' | 'video-photo' | 'practice-attempt' | 'file-transfer' | 'setup' | 'preflight';
+export type EntityType = 'operator' | 'thread' | 'item' | 'folder' | 'link' | 'vehicle' | 'receipt' | 'notification' | 'client' | 'approval' | 'controller' | 'input-mapping' | 'plugin' | 'parameter-set' | 'parameter' | 'mission' | 'settings' | 'place' | 'marker' | 'plan' | 'snapshot' | 'param-definitions' | 'history-entry' | 'video-source' | 'video-recording' | 'video-photo' | 'practice-attempt' | 'file-transfer' | 'setup' | 'preflight' | 'camera' | 'gimbal';
 
 export type EntryKind = {
     category?: NoteCategory | null;
@@ -7439,6 +8009,192 @@ export type GamepadAxis = 'left-stick-x' | 'left-stick-y' | 'right-stick-x' | 'r
 export type GamepadButton = 'south' | 'east' | 'north' | 'west' | 'right-trigger' | 'right-trigger-2' | 'select' | 'start' | 'right-thumb' | 'dpad-up' | 'dpad-down' | 'dpad-left' | 'dpad-right' | 'left-trigger' | 'left-trigger-2' | 'mode' | 'left-thumb';
 
 /**
+ * A gimbal of a vehicle.
+ */
+export type Gimbal = {
+    /**
+     * What it can do.
+     */
+    capabilities: Array<GimbalCapability>;
+    /**
+     * The MAVLink component of its manager: the autopilot's, or the
+     * gimbal's own when it manages itself.
+     */
+    componentId: number;
+    /**
+     * The gimbal device's own MAVLink component, when it has one that is
+     * heard: a camera's `gimbalDeviceId` names it.
+     */
+    deviceComponentId?: number | null;
+    /**
+     * What its manager calls it: 1 to 6 for one the manager drives
+     * itself, or the gimbal device's MAVLink component.
+     */
+    deviceId: number;
+    /**
+     * What the gimbal says is wrong with it, in the order MAVLink's
+     * `GIMBAL_DEVICE_ERROR_FLAGS` has them. Empty for nothing. A limit it
+     * was sent past is not a failure and is left out.
+     */
+    failures?: Array<GimbalFailure>;
+    /**
+     * Its `GIMBAL_MANAGER_CAP_FLAGS` as sent, for a bit UXDuck has no
+     * name for.
+     */
+    flags: number;
+    /**
+     * Who has it. Pointing it takes it from them, so a person is asked
+     * first when it is the autopilot, a mission or another.
+     */
+    holder: GimbalHolder;
+    /**
+     * `<vehicle id>/<manager's component id>/<device id>`.
+     */
+    id: string;
+    limits: GimbalLimits;
+    /**
+     * It is at its neutral position.
+     */
+    neutral?: boolean;
+    /**
+     * Whether its manager's heartbeats are heard now. A gimbal that is
+     * gone is kept, and asked again when it returns.
+     */
+    present: boolean;
+    /**
+     * Who its manager says is in control, and who may also move it.
+     * Absent for no one, and before the manager has said.
+     */
+    primary?: GimbalController | null;
+    /**
+     * It is tucked away.
+     */
+    retracted?: boolean;
+    secondary?: GimbalController | null;
+    vehicleId: string;
+    version: number;
+    /**
+     * Whether its yaw is held from north while the vehicle turns, and
+     * not from the nose. Absent until the gimbal has said.
+     */
+    yawLocked?: boolean | null;
+};
+
+/**
+ * What to have a gimbal do: one command of the MAVLink gimbal protocol,
+ * which its manager acknowledges.
+ */
+export type GimbalAction = {
+    type: 'take-control';
+} | {
+    type: 'release-control';
+} | {
+    lock?: boolean;
+    pitchDeg: number;
+    type: 'point';
+    yawDeg: number;
+} | {
+    type: 'centre';
+} | {
+    type: 'follow';
+} | {
+    type: 'hold-north';
+} | {
+    altitudeAmslM?: number | null;
+    latitudeDeg: number;
+    longitudeDeg: number;
+    type: 'look-at';
+};
+
+/**
+ * A gimbal's pitch or yaw, as an input turns it.
+ */
+export type GimbalAxis = 'pitch' | 'yaw';
+
+/**
+ * An axis that turns the target vehicle's gimbal: the further it is
+ * pushed the faster the gimbal turns, up and right positive, and at its
+ * centre the gimbal stops.
+ */
+export type GimbalAxisBinding = {
+    control: GimbalAxis;
+    input: AxisBinding;
+};
+
+/**
+ * Something a gimbal can do, as its manager's `GIMBAL_MANAGER_CAP_FLAGS`
+ * say.
+ */
+export type GimbalCapability = 'retract' | 'neutral' | 'roll-axis' | 'pitch-axis' | 'yaw-axis' | 'yaw-follow' | 'yaw-lock' | 'infinite-yaw' | 'point-at-place';
+
+/**
+ * `gimbal/command`: has a gimbal do something.
+ */
+export type GimbalCommandParams = {
+    action: GimbalAction;
+    /**
+     * Confirms the command for a vehicle that is not online, and taking
+     * the gimbal from whoever holds it.
+     */
+    confirm?: boolean;
+    /**
+     * The gimbal's `id` from `gimbal/list`.
+     */
+    gimbalId: string;
+};
+
+/**
+ * A MAVLink system and component in control of a gimbal.
+ */
+export type GimbalController = {
+    componentId: number;
+    systemId: number;
+};
+
+/**
+ * Something a gimbal says is wrong with it (`GIMBAL_DEVICE_ERROR_FLAGS`).
+ */
+export type GimbalFailure = 'encoder' | 'power' | 'motor' | 'software' | 'comms' | 'calibrating' | 'no-manager';
+
+/**
+ * Who has a gimbal.
+ */
+export type GimbalHolder = 'unknown' | 'no-one' | 'uxduck' | 'autopilot' | 'mission' | 'other';
+
+/**
+ * How far a gimbal turns, in degrees: roll, pitch from the horizon with
+ * down negative, and yaw from the nose with right positive. Each is
+ * absent where its manager does not say.
+ */
+export type GimbalLimits = {
+    pitchMaxDeg?: number | null;
+    pitchMinDeg?: number | null;
+    rollMaxDeg?: number | null;
+    rollMinDeg?: number | null;
+    yawMaxDeg?: number | null;
+    yawMinDeg?: number | null;
+};
+
+/**
+ * `gimbal/list`: every gimbal of every vehicle.
+ */
+export type GimbalListResult = {
+    gimbals: Array<Gimbal>;
+};
+
+/**
+ * `gimbal/watch`: whether this connection is looking at where a
+ * vehicle's gimbals point.
+ */
+export type GimbalWatchParams = {
+    vehicleId: string;
+    /**
+     * False when it stops looking.
+     */
+    watch: boolean;
+};
+
+/**
  * How a submarine faces on the way: `degrees` clockwise from true north.
  */
 export type GoToHeading = {
@@ -7584,12 +8340,13 @@ export type HeadingParams = {
 };
 
 /**
- * What a held button does: `open` and `close` hold the gripper; `talk`
- * is held to speak to the agent in the window that claimed the controller,
- * and let go to send (S21), which that window reads from
- * `controller/inputs`.
+ * What a held button does. `open` and `close` hold the gripper.
+ * `gimbal-up`, `gimbal-down`, `gimbal-left` and `gimbal-right` turn the
+ * target vehicle's gimbal while held. `talk` is held to speak to the
+ * agent in the window that claimed the controller, and let go to send
+ * (S21), which that window reads from `controller/inputs`.
  */
-export type HeldAction = 'open' | 'close' | 'talk';
+export type HeldAction = 'open' | 'close' | 'talk' | 'gimbal-up' | 'gimbal-down' | 'gimbal-left' | 'gimbal-right';
 
 /**
  * What UXDuck holds of a vehicle's parameters, so an answer is never
@@ -7782,7 +8539,8 @@ export type InputKind = 'continuous' | 'switch';
  */
 export type InputMapping = {
     /**
-     * Buttons held for the gripper (S263). Absent when there are none.
+     * Buttons held for the gripper (S263) or to turn a gimbal. Absent
+     * when there are none.
      */
     actions?: Array<ActionBinding>;
     buttons: Array<ButtonBinding>;
@@ -7790,6 +8548,11 @@ export type InputMapping = {
      * Around the centre, as a fraction of full travel, read as zero.
      */
     deadzone: number;
+    /**
+     * Axes that turn the target vehicle's gimbal: its pitch and its yaw,
+     * each at most once. Absent when there are none.
+     */
+    gimbal?: Array<GimbalAxisBinding>;
     id: string;
     name: string;
     pitch: AxisBinding;
@@ -8057,6 +8820,14 @@ export type KeyboardInputParams = {
         number,
         number
     ];
+    /**
+     * The gimbal's pitch and yaw keys, each -1, 0 or 1 with up and right
+     * positive. Absent turns nothing.
+     */
+    gimbal?: [
+        number,
+        number
+    ] | null;
 };
 
 /**
@@ -8286,6 +9057,12 @@ export type Link = {
     carries?: LinkCarries;
     createdAtUs: number;
     /**
+     * The faults that are on in a simulated vehicle's camera and gimbal
+     * (`sim/fault`). They last until they are switched off or the
+     * simulation stops.
+     */
+    faults?: Array<SimFault>;
+    /**
      * For a forward a simulation start made: the simulated vehicle's link,
      * whose traffic alone it carries. It is removed with that link.
      */
@@ -8464,6 +9241,12 @@ export type LinkKind = {
      */
     altitudeM: number;
     /**
+     * Carries a gimbal that ArduPilot simulates itself, in place of
+     * UXDuck's simulated camera and gimbal (ADR-0063). UXDuck Desktop
+     * and ArduPilot only.
+     */
+    ardupilotGimbal?: ArdupilotGimbal | null;
+    /**
      * Which autopilot flies it; ArduPilot if absent.
      */
     autopilot?: SimAutopilot;
@@ -8473,10 +9256,22 @@ export type LinkKind = {
      */
     binary?: string | null;
     /**
+     * Carries a simulated camera: component 100 of the vehicle, which
+     * answers MAVLink's camera protocol and which the autopilot speaks
+     * for (ADR-0063). UXDuck Desktop and ArduPilot only.
+     */
+    camera?: boolean;
+    /**
      * ArduPilot's frame, such as `X` or `quadplane-tilt`; absent for
      * the vehicle's default.
      */
     frame?: string | null;
+    /**
+     * Carries a simulated gimbal: component 154 of the vehicle, a
+     * gimbal device that the autopilot manages (ADR-0063). UXDuck
+     * Desktop and ArduPilot only.
+     */
+    gimbal?: boolean;
     headingDeg: number;
     /**
      * Starts flying at this height above the ground in metres,
@@ -8490,6 +9285,12 @@ export type LinkKind = {
     instance?: number | null;
     latitudeDeg: number;
     longitudeDeg: number;
+    /**
+     * What kind of camera and gimbal its simulated payload is
+     * (ADR-0063). Absent for a camera that takes photos, records,
+     * zooms and focuses, with a gimbal apart from it.
+     */
+    payloadProfile?: PayloadProfile | null;
     /**
      * Started from this simulation snapshot (S34): its parameters and
      * mission are written back, and its mode restored.
@@ -8748,6 +9549,11 @@ export type MappingUpdateParams = {
     buttons: Array<ButtonBinding>;
     deadzone: number;
     expectedVersion: number;
+    /**
+     * As for `InputMapping::gimbal`. Absent keeps the mapping's own, as
+     * for `actions`.
+     */
+    gimbal?: Array<GimbalAxisBinding> | null;
     id: string;
     name: string;
     pitch: AxisBinding;
@@ -10906,6 +11712,14 @@ export type PatternShape = {
 };
 
 /**
+ * What kind of camera and gimbal a simulation's payload is (ADR-0063), to
+ * see what UXDuck does with hardware that can do less or is put together
+ * another way. Each needs the simulated camera, and `integrated` and
+ * `thermal-tracking` the gimbal too.
+ */
+export type PayloadProfile = 'stream-only' | 'photo-video' | 'integrated' | 'thermal-tracking';
+
+/**
  * A visible map's trail choice, or differing choices across visible 3D maps.
  */
 export type PerformanceTrails = 'off' | 'recent' | 'whole' | 'mixed';
@@ -12475,6 +13289,12 @@ export type Receipt = {
      * Sent although checks set to hold the launch did not pass: by whom.
      */
     preflightOverride?: PreflightOverride | null;
+    /**
+     * The vehicle answered that it is still working on it: how far it
+     * last said it is. A receipt that is `sent` with this is waiting for
+     * the work to end, not for a first answer.
+     */
+    progress?: CommandProgress | null;
     /**
      * Set when the daemon refused it for a reason a client can act on.
      */
@@ -14278,6 +15098,12 @@ export type SimBinariesResult = {
  * A SITL build the daemon found and probed.
  */
 export type SimBinary = {
+    /**
+     * The gimbals of ArduPilot's own that this build can simulate
+     * (`ardupilotGimbal` of `sim/start`). Empty for PX4 and for a build
+     * that has none.
+     */
+    ardupilotGimbals?: Array<ArdupilotGimbal>;
     autopilot: SimAutopilot;
     /**
      * The catalogue build it came from (`sim/download`), if any.
@@ -14346,6 +15172,96 @@ export type SimCrashParams = {
 };
 
 /**
+ * A fault of a simulation's camera or gimbal.
+ */
+export type SimFault = {
+    /**
+     * The `MAV_CMD` number a `command-refused` or
+     * `command-in-progress` fault is about, such as 2000 for
+     * `MAV_CMD_IMAGE_START_CAPTURE`. `sim/faults` lists the ones a
+     * simulation's camera and gimbal have.
+     */
+    command?: number | null;
+    kind: SimFaultKind;
+};
+
+/**
+ * A command a fault can name.
+ */
+export type SimFaultCommand = {
+    /**
+     * Its `MAV_CMD` number.
+     */
+    command: number;
+    /**
+     * What it does, in a few words, such as `Take a photo`.
+     */
+    label: string;
+    /**
+     * Its MAVLink name, such as `MAV_CMD_IMAGE_START_CAPTURE`.
+     */
+    name: string;
+};
+
+/**
+ * What can go wrong with a simulation's camera or gimbal when it is asked
+ * to (`sim/fault`, ADR-0063). Each is what hardware with that fault says
+ * on the wire. Nothing else tells UXDuck of it.
+ */
+export type SimFaultKind = 'camera-silent' | 'gimbal-silent' | 'card-full' | 'command-refused' | 'command-in-progress' | 'gimbal-error' | 'autopilot-holds';
+
+/**
+ * Switches a fault on or off in a simulated vehicle's camera or gimbal.
+ */
+export type SimFaultParams = {
+    /**
+     * The `MAV_CMD` number a `command-refused` or
+     * `command-in-progress` fault is about, one of `commands` of
+     * `sim/faults`. Needed to switch such a fault on. Naming another
+     * while one is on moves the fault to it.
+     */
+    command?: number | null;
+    /**
+     * The simulated vehicle's link, never a real vehicle's connection.
+     */
+    id: string;
+    kind: SimFaultKind;
+    /**
+     * True switches the fault on, false off.
+     */
+    on: boolean;
+};
+
+export type SimFaultState = {
+    /**
+     * The command it is about, while it is on.
+     */
+    command?: number | null;
+    kind: SimFaultKind;
+    on: boolean;
+    /**
+     * Why this simulation cannot have the fault, when it cannot: a
+     * sentence to show beside it.
+     */
+    unavailable?: string | null;
+};
+
+/**
+ * The faults a simulated vehicle's camera and gimbal can have.
+ */
+export type SimFaultsResult = {
+    /**
+     * The commands a `command-refused` or `command-in-progress` fault can
+     * name in this simulation: the ones its camera and gimbal have.
+     */
+    commands: Array<SimFaultCommand>;
+    /**
+     * Every fault, in the order they are shown.
+     */
+    faults: Array<SimFaultState>;
+};
+
+/**
  * A forward a simulation start adds beside its vehicle: a `udp-forward`
  * link that carries only that vehicle's traffic and is removed with it.
  * Checked as `link/add` checks a forward, before the vehicle starts.
@@ -14394,14 +15310,36 @@ export type SimPauseParams = {
 };
 
 /**
+ * Where a window draws the pictures of this computer's simulated cameras.
+ */
+export type SimPicturesResult = {
+    /**
+     * Open a WebSocket on this path of the daemon's origin on this
+     * computer within 30 s. UXDuck says on it which cameras this window
+     * draws and what each sees, and takes the pictures it draws.
+     */
+    path: string;
+};
+
+/**
  * A simulation snapshot (S34, ADR-0011 M14): a simulated vehicle as it was
  * when saved, to start a new simulation from. Close, not exact: a new
  * vehicle is put back where it was, with its parameters and mission, at its
  * height and in its mode.
  */
 export type SimSnapshot = {
+    /**
+     * It carried a gimbal that ArduPilot simulates itself, and a
+     * simulation started from it does too (ADR-0063).
+     */
+    ardupilotGimbal?: ArdupilotGimbal | null;
     armed: boolean;
     autopilot?: SimAutopilot;
+    /**
+     * It carried a simulated camera, and a simulation started from it does
+     * too (ADR-0063).
+     */
+    camera?: boolean;
     createdAtUs: number;
     currentItem?: number | null;
     /**
@@ -14413,6 +15351,11 @@ export type SimSnapshot = {
      */
     flying: boolean;
     frame?: string | null;
+    /**
+     * It carried a simulated gimbal, and a simulation started from it does
+     * too (ADR-0063).
+     */
+    gimbal?: boolean;
     /**
      * Ground level there, above mean sea level.
      */
@@ -14437,6 +15380,11 @@ export type SimSnapshot = {
      * How many parameters it keeps.
      */
     parameterCount: number;
+    /**
+     * The kind of camera and gimbal it carried, and a simulation started
+     * from it carries (ADR-0063).
+     */
+    payloadProfile?: PayloadProfile | null;
     vehicle: SimVehicle;
     version: number;
 };
@@ -14469,6 +15417,15 @@ export type SimStartParams = {
      */
     altitudeM?: number | null;
     /**
+     * Carries a gimbal that ArduPilot simulates itself, with the camera it
+     * carries, in place of UXDuck's simulated camera and gimbal: never
+     * together with `camera` or `gimbal`, since each wants the autopilot's
+     * first mount and first camera (ADR-0063). The autopilot's own driver
+     * speaks for it, and it sends no video. UXDuck Desktop and ArduPilot
+     * only, on a build that has it (`sim/binaries`).
+     */
+    ardupilotGimbal?: ArdupilotGimbal | null;
+    /**
      * ArduPilot if absent. PX4 runs on an installed UXDuck on macOS and
      * Linux, and flies a multicopter, plane, VTOL or rover.
      */
@@ -14477,6 +15434,12 @@ export type SimStartParams = {
      * The path of a SITL build of the user's own.
      */
     binary?: string | null;
+    /**
+     * Carries a simulated camera: component 100 of the vehicle, which
+     * answers MAVLink's camera protocol and which the autopilot speaks for
+     * (ADR-0063). Off unless asked for. UXDuck Desktop and ArduPilot only.
+     */
+    camera?: boolean;
     /**
      * Also sends the vehicle's traffic to another program, such as another
      * ground station on this computer (S102). Installed daemons only.
@@ -14487,6 +15450,12 @@ export type SimStartParams = {
      * PX4's `quadx`, from `sim/binaries`; the vehicle's default if absent.
      */
     frame?: string | null;
+    /**
+     * Carries a simulated gimbal: component 154 of the vehicle, a gimbal
+     * device that the autopilot manages (ADR-0063). Off unless asked for.
+     * UXDuck Desktop and ArduPilot only.
+     */
+    gimbal?: boolean;
     /**
      * Which way it faces, in degrees from north; 0 if absent.
      */
@@ -14501,6 +15470,16 @@ export type SimStartParams = {
     latitudeDeg: number;
     longitudeDeg: number;
     name?: string | null;
+    /**
+     * What kind of camera and gimbal the simulated payload is, to see what
+     * UXDuck does with hardware that can do less or is put together
+     * another way (ADR-0063). Absent for a camera that takes photos,
+     * records, zooms and focuses, with a gimbal apart from it.
+     * `stream-only` and `photo-video` need `camera`, and `integrated`
+     * needs `camera` and `gimbal` both. It is the simulation's for as
+     * long as it runs. UXDuck Desktop and ArduPilot only.
+     */
+    payloadProfile?: PayloadProfile | null;
     /**
      * Times real time, 1 to 10.
      */
@@ -14657,6 +15636,10 @@ export type Snapshot = {
      * Approvals still pending.
      */
     approvals?: Array<Approval> | null;
+    /**
+     * Every vehicle's cameras (S404).
+     */
+    cameras?: Array<Camera> | null;
     clients?: Array<ClientRecord> | null;
     controllers?: Array<Controller> | null;
     fileTransfers?: Array<FileTransfer> | null;
@@ -14664,6 +15647,10 @@ export type Snapshot = {
      * Every folder, including tombstones.
      */
     folders?: Array<Folder> | null;
+    /**
+     * Every vehicle's gimbals (S406).
+     */
+    gimbals?: Array<Gimbal> | null;
     /**
      * Every vehicle's history, deleted notes included.
      */

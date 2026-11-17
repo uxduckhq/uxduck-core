@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::link::{SimAutopilot, SimVehicle};
+use crate::domain::link::{ArdupilotGimbal, PayloadProfile, SimAutopilot, SimVehicle};
 use crate::domain::mission::MissionItem;
 use crate::domain::parameter::ParamKind;
 
@@ -23,6 +23,24 @@ pub struct Snapshot {
     /// for the vehicle's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// It carried a simulated camera, and a simulation started from it
+    /// does too (ADR-0063 Y11). Its parameters hold the camera's set-up,
+    /// which ArduPilot reads only as it starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
+    /// It carried a simulated gimbal, and a simulation started from it
+    /// does too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gimbal: bool,
+    /// It carried a gimbal that ArduPilot simulates itself, and a
+    /// simulation started from it does too (ADR-0063 Y4): its parameters
+    /// name a mount that only that simulated device answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ardupilot_gimbal: Option<ArdupilotGimbal>,
+    /// The kind of camera and gimbal it carried, and a simulation started
+    /// from it carries (ADR-0063 Y16): its parameters fit that kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_profile: Option<PayloadProfile>,
     /// The firmware and its version, such as `ArduCopter 4.7.0`, when the
     /// vehicle said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +107,10 @@ mod tests {
             vehicle,
             autopilot: SimAutopilot::default(),
             frame: None,
+            camera: false,
+            gimbal: false,
+            ardupilot_gimbal: None,
+            payload_profile: None,
             firmware: None,
             latitude_deg: 0.0,
             longitude_deg: 0.0,

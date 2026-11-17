@@ -70,9 +70,14 @@ impl Engine {
         if link.status == status && link.status_detail == detail {
             return;
         }
-        // A simulator that stopped or lost its link is no longer paused.
+        // A simulator that stopped or lost its link is no longer paused,
+        // and its camera and gimbal have no faults when it is back.
         if status != LinkStatus::Up {
             link.paused = false;
+            if !link.faults.is_empty() {
+                link.faults.clear();
+                self.links.simulation_faults(link_id, &[]);
+            }
         }
         link.status = status;
         link.status_detail = detail;
@@ -671,6 +676,8 @@ impl Engine {
             vehicle.version += 1;
             self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });
         }
+        self.cameras_unheard();
+        self.gimbals_unheard();
         // Who UXDuck is on MAVLink, before anything is sent.
         self.links.gcs_system_id(self.state.settings.gcs_system_id);
         self.links

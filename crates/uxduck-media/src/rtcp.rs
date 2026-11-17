@@ -16,6 +16,27 @@ pub struct SenderReport {
     pub rtp: u32,
 }
 
+impl SenderReport {
+    /// The report as an RTCP packet with no reception reports (RFC 3550
+    /// section 6.4.1), with how many packets and bytes of payload its
+    /// stream has sent: what a camera sends beside its pictures. UXDuck
+    /// sends it for a simulation's camera, whose pictures it sends itself
+    /// (S408).
+    #[must_use]
+    pub fn packet(&self, packets: u32, octets: u32) -> [u8; 28] {
+        let mut packet = [0u8; 28];
+        // Version 2, no padding, no reception reports. Sender report, six
+        // more words.
+        packet[..4].copy_from_slice(&[0x80, 200, 0, 6]);
+        packet[4..8].copy_from_slice(&self.ssrc.to_be_bytes());
+        packet[8..16].copy_from_slice(&self.ntp.to_be_bytes());
+        packet[16..20].copy_from_slice(&self.rtp.to_be_bytes());
+        packet[20..24].copy_from_slice(&packets.to_be_bytes());
+        packet[24..28].copy_from_slice(&octets.to_be_bytes());
+        packet
+    }
+}
+
 /// The sender report in a compound RTCP packet, if it has one.
 #[must_use]
 pub fn sender_report(mut packet: &[u8]) -> Option<SenderReport> {
@@ -178,6 +199,24 @@ mod tests {
         assert_eq!(sender_report(&[&rr[..], &packet].concat()), Some(sr));
         assert_eq!(sender_report(&rr), None);
         assert_eq!(sender_report(&packet[..10]), None);
+    }
+
+    #[test]
+    fn a_sender_report_written_is_read_back() {
+        let sent = SenderReport {
+            ssrc: 0x5337_6001,
+            ntp: (0xee7f_da34 << 32) | 0x8000_0000,
+            rtp: 90_000,
+        };
+        let packet = sent.packet(31, 40_000);
+        assert_eq!(sender_report(&packet), Some(sent));
+        // Its length in words less one, and the counts after the times.
+        assert_eq!(packet[..4], [0x80, 200, 0, 6]);
+        assert_eq!(packet[20..], [0, 0, 0, 31, 0, 0, 0x9c, 0x40]);
+        // It reaches a listener as RTP's version with RTCP's packet type,
+        // which the video's own port takes (RFC 5761).
+        assert_eq!(packet[0] >> 6, 2);
+        assert!((200..=204).contains(&packet[1]));
     }
 
     #[test]

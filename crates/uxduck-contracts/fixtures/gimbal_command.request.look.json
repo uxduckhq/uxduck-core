@@ -1,0 +1,13 @@
+{
+  "method": "gimbal/command",
+  "params": {
+    "gimbalId": "v9b1c2d3e4f5a6b7c/1/1",
+    "action": {
+      "type": "look-at",
+      "latitudeDeg": 51.4779,
+      "longitudeDeg": -0.0015,
+      "altitudeAmslM": 46.5
+    },
+    "confirm": true
+  }
+}

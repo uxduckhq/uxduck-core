@@ -461,14 +461,34 @@ pub enum Message {
         data: [i16; 16],
     },
     /// A camera's stream (`VIDEO_STREAM_INFORMATION`, S39).
-    VideoStream {
-        stream_id: u8,
-        /// `VIDEO_STREAM_TYPE`: 0 RTSP, 1 RTP over UDP, 2 MPEG-TS over TCP,
-        /// 3 MPEG-TS over UDP.
-        kind: u8,
-        uri: String,
-        name: String,
-    },
+    VideoStream(Box<crate::camera::Stream>),
+    /// How a camera's stream is now (`VIDEO_STREAM_STATUS`, S404).
+    VideoStreamStatus(crate::camera::StreamStatus),
+    /// What a camera is and can do (`CAMERA_INFORMATION`, S404), from the
+    /// camera itself or from the autopilot that speaks for it.
+    CameraInformation(Box<crate::camera::Information>),
+    /// A camera's mode, zoom and focus (`CAMERA_SETTINGS`, S405).
+    CameraSettings(crate::camera_control::SettingsSaid),
+    /// A camera's card (`STORAGE_INFORMATION`, S405).
+    StorageInformation(Box<crate::camera_control::StorageSaid>),
+    /// What a camera is capturing (`CAMERA_CAPTURE_STATUS`, S405).
+    CameraCaptureStatus(crate::camera_control::CaptureSaid),
+    /// A photo a camera took (`CAMERA_IMAGE_CAPTURED`, S405).
+    CameraImageCaptured(Box<crate::camera_control::ImageSaid>),
+    /// What a camera tracks in its picture
+    /// (`CAMERA_TRACKING_IMAGE_STATUS`, ADR-0063 Y5).
+    CameraTrackingImage(crate::camera_tracking::ImageSaid),
+    /// Where what a camera tracks is on the ground
+    /// (`CAMERA_TRACKING_GEO_STATUS`).
+    CameraTrackingGeo(crate::camera_tracking::GeoSaid),
+    /// The coldest and the warmest in a camera's thermal picture
+    /// (`CAMERA_THERMAL_RANGE`).
+    CameraThermalRange(crate::camera_tracking::RangeSaid),
+    /// One of a camera's own settings as it is now (`PARAM_EXT_VALUE`,
+    /// S411).
+    ParamExtValue(Box<crate::camera_params::Said>),
+    /// A camera's answer to a setting written (`PARAM_EXT_ACK`, S411).
+    ParamExtAck(Box<crate::camera_params::Acked>),
     /// Where a gimbal points (`GIMBAL_DEVICE_ATTITUDE_STATUS`): its
     /// attitude as a quaternion, w x y z (NaN when it has none), and
     /// `GIMBAL_DEVICE_FLAGS`, which say whether the yaw in it is from the
@@ -477,6 +497,12 @@ pub enum Message {
         flags: u16,
         q: [f32; 4],
     },
+    /// What a gimbal's manager manages (`GIMBAL_MANAGER_INFORMATION`,
+    /// S406).
+    GimbalManagerInformation(crate::gimbal::Information),
+    /// Who a gimbal's manager says is in control
+    /// (`GIMBAL_MANAGER_STATUS`, S406).
+    GimbalManagerStatus(crate::gimbal::Status),
     /// The older `MOUNT_STATUS`: pitch and yaw from the nose, centidegrees.
     MountStatus {
         pitch_cdeg: i32,
@@ -603,6 +629,17 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+/// How far a command is that its `COMMAND_ACK` says is in progress, in
+/// percent. None when the acknowledgement does not say: 255, or a frame
+/// from before the field.
+#[must_use]
+pub fn ack_progress(frame: &[u8]) -> Option<u8> {
+    let payload = crate::framing::payload(frame)?;
+    // MAVLink 2 leaves trailing zeros out: a short payload says 0.
+    let progress = payload.get(3).copied().unwrap_or(0);
+    (payload.len() >= 3 && frame.first() == Some(&0xFD) && progress <= 100).then_some(progress)
+}
+
 // How many frames `decode` was given on this thread, for tests that count
 // a reader's work.
 #[cfg(test)]
@@ -692,6 +729,17 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
         bytes[..length].copy_from_slice(&payload[..length]);
         return Some(raw_command(system_id, component_id, message_id, &bytes));
     }
+    // A camera's tracking status may carry flags newer than mavio's
+    // dialect, which then does not decode it: these are read from their
+    // bytes (ADR-0063 Y5).
+    if let Some(message) = crate::camera_tracking::read(message_id, frame.payload().bytes()) {
+        return Some(Decoded {
+            system_id,
+            component_id,
+            mission_target: None,
+            message,
+        });
+    }
     let mission_target = packet.as_ref().ok().and_then(|packet| match packet {
         Ardupilotmega::MissionCount(m) => Some((m.target_system, m.target_component)),
         Ardupilotmega::MissionItemInt(m) => Some((m.target_system, m.target_component)),
@@ -745,17 +793,137 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             flags: m.flags.bits(),
             q: m.q,
         },
+        Ok(Ardupilotmega::GimbalManagerInformation(m)) => {
+            Message::GimbalManagerInformation(crate::gimbal::Information {
+                cap_flags: m.cap_flags.bits(),
+                gimbal_device_id: m.gimbal_device_id,
+                limits: [
+                    (m.roll_min, m.roll_max),
+                    (m.pitch_min, m.pitch_max),
+                    (m.yaw_min, m.yaw_max),
+                ],
+            })
+        }
+        Ok(Ardupilotmega::GimbalManagerStatus(m)) => {
+            Message::GimbalManagerStatus(crate::gimbal::Status {
+                gimbal_device_id: m.gimbal_device_id,
+                primary: (m.primary_control_sysid, m.primary_control_compid),
+                secondary: (m.secondary_control_sysid, m.secondary_control_compid),
+            })
+        }
         Ok(Ardupilotmega::MountStatus(m)) => Message::MountStatus {
             pitch_cdeg: m.pointing_a,
             yaw_cdeg: m.pointing_c,
         },
         Ok(Ardupilotmega::ComponentMetadata(m)) => Message::ComponentMetadata { uri: text(&m.uri) },
-        Ok(Ardupilotmega::VideoStreamInformation(m)) => Message::VideoStream {
-            stream_id: m.stream_id,
-            kind: m.type_ as u8,
-            uri: text(&m.uri),
-            name: text(&m.name),
-        },
+        Ok(Ardupilotmega::VideoStreamInformation(m)) => {
+            Message::VideoStream(Box::new(crate::camera::Stream {
+                stream_id: m.stream_id,
+                kind: m.type_ as u8,
+                flags: crate::camera_tracking::stream_flags(frame.payload().bytes()),
+                frame_rate_hz: m.framerate,
+                width: m.resolution_h,
+                height: m.resolution_v,
+                bitrate: m.bitrate,
+                rotation: m.rotation,
+                hfov: m.hfov,
+                name: text(&m.name),
+                uri: text(&m.uri),
+                encoding: m.encoding as u8,
+                camera_device_id: m.camera_device_id,
+            }))
+        }
+        Ok(Ardupilotmega::VideoStreamStatus(m)) => {
+            Message::VideoStreamStatus(crate::camera::StreamStatus {
+                stream_id: m.stream_id,
+                flags: crate::camera_tracking::stream_flags(frame.payload().bytes()),
+                frame_rate_hz: m.framerate,
+                width: m.resolution_h,
+                height: m.resolution_v,
+                bitrate: m.bitrate,
+                rotation: m.rotation,
+                hfov: m.hfov,
+                camera_device_id: m.camera_device_id,
+            })
+        }
+        Ok(Ardupilotmega::CameraInformation(m)) => {
+            Message::CameraInformation(Box::new(crate::camera::Information {
+                vendor: text(&m.vendor_name),
+                model: text(&m.model_name),
+                firmware_version: m.firmware_version,
+                focal_length_mm: Some(m.focal_length).filter(|mm| mm.is_finite() && *mm > 0.0),
+                sensor_size_mm: Some((m.sensor_size_h, m.sensor_size_v))
+                    .filter(|(h, v)| h.is_finite() && v.is_finite() && *h > 0.0 && *v > 0.0),
+                resolution_px: Some((m.resolution_h, m.resolution_v))
+                    .filter(|(h, v)| *h > 0 && *v > 0),
+                lens_id: m.lens_id,
+                flags: u32::from(m.flags.bits()),
+                definition_version: m.cam_definition_version,
+                definition_uri: text(&m.cam_definition_uri),
+                gimbal_device_id: m.gimbal_device_id,
+                camera_device_id: m.camera_device_id,
+            }))
+        }
+        Ok(Ardupilotmega::ParamExtValue(m)) => {
+            let value = crate::camera_params::Value::read(m.param_type as u8, &m.param_value)?;
+            Message::ParamExtValue(Box::new(crate::camera_params::Said {
+                name: param_name(&m.param_id),
+                value,
+                count: m.param_count,
+                index: m.param_index,
+            }))
+        }
+        Ok(Ardupilotmega::ParamExtAck(m)) => {
+            let value = crate::camera_params::Value::read(m.param_type as u8, &m.param_value)?;
+            Message::ParamExtAck(Box::new(crate::camera_params::Acked {
+                name: param_name(&m.param_id),
+                value,
+                result: m.param_result as u8,
+            }))
+        }
+        Ok(Ardupilotmega::CameraSettings(m)) => {
+            Message::CameraSettings(crate::camera_control::SettingsSaid {
+                mode: m.mode_id as u8,
+                zoom_level: m.zoom_level,
+                focus_level: m.focus_level,
+                camera_device_id: m.camera_device_id,
+            })
+        }
+        Ok(Ardupilotmega::StorageInformation(m)) => {
+            Message::StorageInformation(Box::new(crate::camera_control::StorageSaid {
+                storage_id: m.storage_id,
+                storage_count: m.storage_count,
+                status: m.status as u8,
+                total_mib: m.total_capacity,
+                used_mib: m.used_capacity,
+                available_mib: m.available_capacity,
+                name: text(&m.name),
+            }))
+        }
+        Ok(Ardupilotmega::CameraCaptureStatus(m)) => {
+            Message::CameraCaptureStatus(crate::camera_control::CaptureSaid {
+                image_status: m.image_status,
+                video_status: m.video_status,
+                image_interval_s: m.image_interval,
+                recording_time_ms: m.recording_time_ms,
+                available_mib: m.available_capacity,
+                image_count: m.image_count,
+                camera_device_id: m.camera_device_id,
+            })
+        }
+        Ok(Ardupilotmega::CameraImageCaptured(m)) => {
+            Message::CameraImageCaptured(Box::new(crate::camera_control::ImageSaid {
+                time_utc_us: m.time_utc,
+                camera_id: m.camera_id,
+                lat: m.lat,
+                lon: m.lon,
+                alt_mm: m.alt,
+                relative_alt_mm: m.relative_alt,
+                image_index: m.image_index,
+                ok: m.capture_result == 1,
+                file_url: text(&m.file_url),
+            }))
+        }
         Ok(Ardupilotmega::GlobalPositionInt(m)) => Message::GlobalPositionInt {
             time_boot_ms: m.time_boot_ms,
             lat: m.lat,

@@ -3,6 +3,7 @@
 pub mod account;
 pub mod analytics;
 pub mod app;
+pub mod camera;
 pub mod checklist;
 pub mod client;
 pub mod command;
@@ -17,6 +18,7 @@ pub mod files;
 pub mod find;
 pub mod firmware_profile;
 pub mod flight;
+pub mod gimbal;
 pub mod gripper;
 pub mod history;
 pub mod initialize;

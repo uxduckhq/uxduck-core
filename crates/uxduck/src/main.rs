@@ -7,6 +7,7 @@ mod api;
 mod app_update;
 mod attachments;
 mod build;
+mod camera_definitions;
 mod card_logs;
 mod cli;
 mod companions;

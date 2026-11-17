@@ -1,0 +1,6 @@
+{
+  "cameraId": "v9b1c2d3e4f5a6b7c/100",
+  "status": "refused",
+  "uri": "mftp:///camera.xml",
+  "reason": "It declares a document type, which UXDuck does not read."
+}

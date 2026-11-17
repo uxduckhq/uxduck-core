@@ -299,14 +299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "camera-manager"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "uxduck-sdk",
-]
-
-[[package]]
 name = "cargo-manifest"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,6 +2137,14 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "waypoint-photos"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "uxduck-sdk",
+]
 
 [[package]]
 name = "windows-link"

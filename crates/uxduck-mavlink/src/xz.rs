@@ -1,9 +1,10 @@
-//! xz files unpacked within a limit (ADR-0021 P12).
+//! xz files unpacked within a limit (ADR-0021 P12, ADR-0063 Y5).
 //!
-//! PX4's metadata comes from the vehicle, so a packed file is hostile input:
-//! a few kilobytes can say they unpack to gigabytes. A file is measured
-//! before it is unpacked. Each of its chunks states what it unpacks to, and
-//! a file whose chunks add up to more than the limit is refused with nothing
+//! PX4's metadata and a camera's definition file come from the vehicle, or
+//! from an address a camera named, so a packed file is hostile input: a few
+//! kilobytes can say they unpack to gigabytes. A file is measured before it
+//! is unpacked. Each of its chunks states what it unpacks to, and a file
+//! whose chunks add up to more than the limit is refused with nothing
 //! unpacked.
 //!
 //! The same walk that measures then drives the unpacking, chunk by chunk. A

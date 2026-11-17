@@ -1,0 +1,23 @@
+{
+  "id": "rc8d2e3f4a5b6c7d8e",
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "command": {
+    "type": "gimbal",
+    "componentId": 1,
+    "deviceId": 1,
+    "action": {
+      "type": "point",
+      "pitchDeg": -30.0,
+      "yawDeg": 45.0
+    }
+  },
+  "status": "accepted",
+  "sentWithoutRecentHeartbeat": false,
+  "forced": false,
+  "attempts": 1,
+  "clientId": "c1a2b3c4d5e6f7a8b",
+  "operatorId": "op5f1c0a91b2d3e4f5",
+  "createdAtUs": 1790668900000000,
+  "completedAtUs": 1790668900120000,
+  "version": 2
+}

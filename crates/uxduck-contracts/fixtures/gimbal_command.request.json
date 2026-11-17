@@ -1,0 +1,11 @@
+{
+  "method": "gimbal/command",
+  "params": {
+    "gimbalId": "v9b1c2d3e4f5a6b7c/1/1",
+    "action": {
+      "type": "point",
+      "pitchDeg": -30.0,
+      "yawDeg": 45.0
+    }
+  }
+}

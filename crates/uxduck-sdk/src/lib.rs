@@ -45,6 +45,7 @@ use serde_json::{Map, Value};
 
 #[cfg(target_arch = "wasm32")]
 pub use extism_pdk;
+pub use uxduck_contracts::dto::camera::{CameraAction, CameraMode};
 pub use uxduck_contracts::dto::command::{Command, Risk};
 pub use uxduck_contracts::dto::notification::Severity;
 pub use uxduck_contracts::dto::plugin::{
@@ -163,6 +164,22 @@ pub fn command_long(vehicle_id: &str, command: u16, params: &[f32]) -> SendComma
         command: Command::Long {
             command,
             params: params.to_vec(),
+        },
+    }
+}
+
+/// Has a vehicle's camera do something, with UXDuck's own camera command,
+/// which the camera acknowledges. No camera is named: it is the vehicle's
+/// first camera that takes images or records, or, when none has said what
+/// it is, every camera through the autopilot.
+#[must_use]
+pub fn camera_command(vehicle_id: &str, action: CameraAction) -> SendCommand {
+    SendCommand {
+        vehicle_id: vehicle_id.to_owned(),
+        command: Command::Camera {
+            component_id: None,
+            device_id: None,
+            action,
         },
     }
 }
@@ -378,6 +395,18 @@ mod tests {
                 payload: "0Ac=".into(),
             }),
             vec![0xD0, 0x07]
+        );
+    }
+
+    #[test]
+    fn a_camera_command_names_no_camera_and_reads_as_the_contracts_say() {
+        let sent = camera_command("v", CameraAction::TakePhoto);
+        assert_eq!(
+            serde_json::to_value(&sent).expect("JSON"),
+            serde_json::json!({
+                "vehicleId": "v",
+                "command": { "type": "camera", "action": { "type": "take-photo" } }
+            })
         );
     }
 }

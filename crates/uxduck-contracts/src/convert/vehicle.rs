@@ -231,6 +231,10 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 wipe,
                 with_mission,
                 traffic,
+                camera,
+                gimbal,
+                ardupilot_gimbal,
+                payload_profile,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -248,6 +252,10 @@ impl From<&core_link::LinkKind> for link::LinkKind {
                 wipe,
                 with_mission,
                 traffic,
+                camera,
+                gimbal,
+                ardupilot_gimbal: ardupilot_gimbal.map(Into::into),
+                payload_profile: payload_profile.map(Into::into),
                 instance,
             },
         }
@@ -284,6 +292,10 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 wipe,
                 with_mission,
                 traffic,
+                camera,
+                gimbal,
+                ardupilot_gimbal,
+                payload_profile,
                 instance,
             } => Self::Simulator {
                 vehicle: vehicle.into(),
@@ -301,6 +313,10 @@ impl From<link::LinkKind> for core_link::LinkKind {
                 wipe,
                 with_mission,
                 traffic,
+                camera,
+                gimbal,
+                ardupilot_gimbal: ardupilot_gimbal.map(Into::into),
+                payload_profile: payload_profile.map(Into::into),
                 instance,
             },
         }
@@ -333,6 +349,92 @@ impl From<link::SimVehicle> for core_link::SimVehicle {
             link::SimVehicle::Submarine => Self::Submarine,
             link::SimVehicle::Airship => Self::Airship,
             link::SimVehicle::Jet => Self::Jet,
+        }
+    }
+}
+
+impl From<core_link::ArdupilotGimbal> for link::ArdupilotGimbal {
+    fn from(value: core_link::ArdupilotGimbal) -> Self {
+        match value {
+            core_link::ArdupilotGimbal::Viewpro => Self::Viewpro,
+            core_link::ArdupilotGimbal::AvtCm62 => Self::AvtCm62,
+        }
+    }
+}
+
+impl From<link::ArdupilotGimbal> for core_link::ArdupilotGimbal {
+    fn from(value: link::ArdupilotGimbal) -> Self {
+        match value {
+            link::ArdupilotGimbal::Viewpro => Self::Viewpro,
+            link::ArdupilotGimbal::AvtCm62 => Self::AvtCm62,
+        }
+    }
+}
+
+impl From<core_link::PayloadProfile> for link::PayloadProfile {
+    fn from(value: core_link::PayloadProfile) -> Self {
+        match value {
+            core_link::PayloadProfile::StreamOnly => Self::StreamOnly,
+            core_link::PayloadProfile::PhotoVideo => Self::PhotoVideo,
+            core_link::PayloadProfile::Integrated => Self::Integrated,
+            core_link::PayloadProfile::ThermalTracking => Self::ThermalTracking,
+        }
+    }
+}
+
+impl From<link::PayloadProfile> for core_link::PayloadProfile {
+    fn from(value: link::PayloadProfile) -> Self {
+        match value {
+            link::PayloadProfile::StreamOnly => Self::StreamOnly,
+            link::PayloadProfile::PhotoVideo => Self::PhotoVideo,
+            link::PayloadProfile::Integrated => Self::Integrated,
+            link::PayloadProfile::ThermalTracking => Self::ThermalTracking,
+        }
+    }
+}
+
+impl From<core_link::SimFaultKind> for link::SimFaultKind {
+    fn from(value: core_link::SimFaultKind) -> Self {
+        match value {
+            core_link::SimFaultKind::CameraSilent => Self::CameraSilent,
+            core_link::SimFaultKind::GimbalSilent => Self::GimbalSilent,
+            core_link::SimFaultKind::CardFull => Self::CardFull,
+            core_link::SimFaultKind::CommandRefused => Self::CommandRefused,
+            core_link::SimFaultKind::CommandInProgress => Self::CommandInProgress,
+            core_link::SimFaultKind::GimbalError => Self::GimbalError,
+            core_link::SimFaultKind::AutopilotHolds => Self::AutopilotHolds,
+        }
+    }
+}
+
+impl From<link::SimFaultKind> for core_link::SimFaultKind {
+    fn from(value: link::SimFaultKind) -> Self {
+        match value {
+            link::SimFaultKind::CameraSilent => Self::CameraSilent,
+            link::SimFaultKind::GimbalSilent => Self::GimbalSilent,
+            link::SimFaultKind::CardFull => Self::CardFull,
+            link::SimFaultKind::CommandRefused => Self::CommandRefused,
+            link::SimFaultKind::CommandInProgress => Self::CommandInProgress,
+            link::SimFaultKind::GimbalError => Self::GimbalError,
+            link::SimFaultKind::AutopilotHolds => Self::AutopilotHolds,
+        }
+    }
+}
+
+impl From<core_link::SimFault> for link::SimFault {
+    fn from(value: core_link::SimFault) -> Self {
+        Self {
+            kind: value.kind.into(),
+            command: value.command,
+        }
+    }
+}
+
+impl From<link::SimFault> for core_link::SimFault {
+    fn from(value: link::SimFault) -> Self {
+        Self {
+            kind: value.kind.into(),
+            command: value.command,
         }
     }
 }
@@ -456,6 +558,7 @@ impl From<&core_link::Link> for link::Link {
                 latitude_e7: hit.latitude_e7,
                 longitude_e7: hit.longitude_e7,
             }),
+            faults: l.faults.iter().copied().map(Into::into).collect(),
             version: l.version,
         }
     }

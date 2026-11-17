@@ -1,6 +1,7 @@
 //! Conversions between `uxduck-core` and the wire DTOs; the only place both
 //! are imported.
 
+mod camera;
 pub mod checklist;
 mod client;
 mod command;
@@ -12,6 +13,7 @@ mod feedback;
 mod files;
 mod find;
 mod firmware_profile;
+mod gimbal;
 mod gripper;
 mod history;
 mod marker;

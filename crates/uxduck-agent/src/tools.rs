@@ -73,6 +73,10 @@ pub const AGENT_METHODS: &[&str] = &[
     // Starting one again after a crash asks too, and so does pausing one.
     "sim/restart",
     "sim/pause",
+    // Faults in a simulated vehicle's camera and gimbal (ADR-0063 Y16):
+    // reading them is free, and switching one asks first, as pausing does.
+    "sim/faults",
+    "sim/fault",
     // Practice (S100, ADR-0024 X12): listing and reading attempts; starting
     // one asks first; the agent never flies an exercise for the person.
     "practice/list",
@@ -205,6 +209,23 @@ pub const AGENT_METHODS: &[&str] = &[
     // Camera video (S38, ADR-0017 V15): what is arriving and why it plays
     // badly; assigning or naming a camera asks the operator first.
     "video/list",
+    // A vehicle's cameras and what each can do (S404, ADR-0063 Y5), freely.
+    "camera/list",
+    // Having one take a photo, record, zoom, focus or format its card
+    // (S405) is a command to its vehicle: it needs control, as
+    // command/send does.
+    "camera/command",
+    // A camera's own settings, from its definition file (S411), freely.
+    // Setting one is a camera/command.
+    "camera/settings",
+    // A vehicle's gimbals, what each can do and who has it (S406,
+    // ADR-0063 Y6), freely.
+    "gimbal/list",
+    // Pointing one, centring it, having it hold north or look at a place
+    // is a command to its vehicle: it needs control, as command/send
+    // does, and taking it from the autopilot, a mission or another asks
+    // a person.
+    "gimbal/command",
     "video/devices",
     "video/capture",
     "video/capture/enable",
@@ -250,6 +271,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "vehicle/connectionHistory",
     // Only the renderer can observe scenery contact; agents can stop/restart simulations.
     "sim/crash",
+    // Only a window draws a simulated camera's picture (S408): an agent
+    // watches it as any camera's, with `video_frame`.
+    "sim/pictures",
     // Companion computers are reached over SSH with the person's own keys
     // and agent (S296, ADR-0049 O8): adding one, signing in to it and
     // forgetting it are the person's.
@@ -315,6 +339,13 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "app/focus",
     "app/open",
     "video/watch",
+    // Where a gimbal points ten times a second follows a Camera tab or
+    // the Drone camera being open (S406): an agent reads it from the
+    // vehicle's telemetry.
+    "gimbal/watch",
+    // Fetching a camera's definition file from an address is a person's
+    // to agree to (S411): the address is the camera's to name.
+    "camera/definition/fetch",
     "video/metadata/watch",
     "video/unwatch",
     "tray/menu",
@@ -548,6 +579,11 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "marker/add",
     "marker/update",
     "marker/remove",
+    "camera/list",
+    "camera/command",
+    "camera/settings",
+    "gimbal/list",
+    "gimbal/command",
     "video/devices",
     "video/capture",
     "video/capture/enable",
@@ -588,6 +624,8 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "sim/stop",
     "sim/restart",
     "sim/pause",
+    "sim/faults",
+    "sim/fault",
     "sim/snapshot",
     "snapshot/list",
     "snapshot/start",
@@ -988,6 +1026,20 @@ pub fn tools() -> Vec<Tool> {
             {
                 properties.remove("subscribe");
             }
+            // A camera's commands have a tool of their own (S405,
+            // `camera/command`), found with `tool_search`, and so have a
+            // gimbal's (S406, `gimbal/command`). Their schemas are left
+            // out here, where they would be sent with every request.
+            if *method == "command/send"
+                && let Some(commands) = parameters
+                    .pointer_mut("/properties/command/oneOf")
+                    .and_then(Value::as_array_mut)
+            {
+                commands.retain(|command| {
+                    let kind = command.pointer("/properties/type/const");
+                    kind != Some(&json!("camera")) && kind != Some(&json!("gimbal"))
+                });
+            }
             // The turn names the chat itself; the chat is always open, and
             // the duck and Get started are no one's request. The method's
             // doc says the rest.
@@ -1384,6 +1436,169 @@ mod tests {
         );
         // MCP and the tools found by search keep the docs as they are written.
         assert!(words(&tools()).contains("(S65)"));
+    }
+
+    /// A camera's commands are a tool of their own, found by words, and
+    /// their schema is not sent each turn inside `command_send` (S405).
+    #[test]
+    fn a_cameras_commands_are_their_own_deferred_tool() {
+        let all = tools();
+        let camera = all
+            .iter()
+            .find(|tool| tool.name == "camera_command")
+            .unwrap_or_else(|| panic!("camera/command is an agent tool"));
+        assert_eq!(
+            camera.parameters["required"],
+            serde_json::json!(["cameraId", "action"])
+        );
+        let actions: Vec<&str> = camera.parameters["properties"]["action"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action.pointer("/properties/type/const")?.as_str())
+            .collect();
+        for action in ["take-photo", "start-recording", "zoom-step", "format"] {
+            assert!(actions.contains(&action), "{action} of {actions:?}");
+        }
+        assert!(camera.description.contains("Needs `control`"));
+        assert!(DEFERRED_METHODS.contains(&"camera/command"));
+        assert!(
+            model_tools()
+                .iter()
+                .all(|tool| tool.name != "camera_command")
+        );
+        let found: Vec<String> = find_deferred("have the camera take a photo", 3)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            found.first().map(String::as_str),
+            Some("camera_command"),
+            "{found:?}"
+        );
+
+        let send = all.iter().find(|tool| tool.name == "command_send").unwrap();
+        let commands: Vec<&str> = send.parameters["properties"]["command"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|command| command.pointer("/properties/type/const")?.as_str())
+            .collect();
+        assert!(commands.contains(&"long") && commands.contains(&"arm"));
+        assert!(!commands.contains(&"camera"), "{commands:?}");
+    }
+
+    /// A camera's own settings are read with a tool found by words and
+    /// set with the camera's commands, and its definition file is fetched
+    /// from an address only by a person (S411).
+    #[test]
+    fn a_cameras_own_settings_are_read_by_a_deferred_tool_and_set_as_a_command() {
+        let all = tools();
+        let settings = all
+            .iter()
+            .find(|tool| tool.name == "camera_settings")
+            .unwrap_or_else(|| panic!("camera/settings is an agent tool"));
+        assert_eq!(
+            settings.parameters["required"],
+            serde_json::json!(["cameraId"])
+        );
+        assert!(settings.description.contains("Needs `read`"));
+        assert!(DEFERRED_METHODS.contains(&"camera/settings"));
+        assert!(
+            model_tools()
+                .iter()
+                .all(|tool| tool.name != "camera_settings")
+        );
+        let found: Vec<String> = find_deferred("what ISO is the camera set to", 3)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(
+            found.iter().any(|name| name == "camera_settings"),
+            "{found:?}"
+        );
+        let camera = all
+            .iter()
+            .find(|tool| tool.name == "camera_command")
+            .unwrap();
+        let setting = camera.parameters["properties"]["action"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action.pointer("/properties/type/const") == Some(&"set-setting".into()))
+            .unwrap_or_else(|| panic!("set-setting is an action"));
+        assert_eq!(
+            setting["required"],
+            serde_json::json!(["type", "name", "value"])
+        );
+        assert!(KEPT_FROM_AGENTS.contains(&"camera/definition/fetch"));
+        assert!(
+            all.iter()
+                .all(|tool| tool.name != "camera_definition_fetch")
+        );
+    }
+
+    /// A gimbal's commands are a tool of their own too, found by words,
+    /// and their schema is not sent each turn inside `command_send`
+    /// (S406).
+    #[test]
+    fn a_gimbals_commands_are_their_own_deferred_tool() {
+        let all = tools();
+        let gimbal = all
+            .iter()
+            .find(|tool| tool.name == "gimbal_command")
+            .unwrap_or_else(|| panic!("gimbal/command is an agent tool"));
+        assert_eq!(
+            gimbal.parameters["required"],
+            serde_json::json!(["gimbalId", "action"])
+        );
+        let actions: Vec<&str> = gimbal.parameters["properties"]["action"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|action| action.pointer("/properties/type/const")?.as_str())
+            .collect();
+        for action in [
+            "take-control",
+            "release-control",
+            "point",
+            "centre",
+            "follow",
+            "hold-north",
+            "look-at",
+        ] {
+            assert!(actions.contains(&action), "{action} of {actions:?}");
+        }
+        assert!(gimbal.description.contains("Needs `control`"));
+        for method in ["gimbal/list", "gimbal/command"] {
+            assert!(DEFERRED_METHODS.contains(&method), "{method}");
+        }
+        assert!(KEPT_FROM_AGENTS.contains(&"gimbal/watch"));
+        assert!(
+            model_tools()
+                .iter()
+                .all(|tool| !tool.name.starts_with("gimbal_"))
+        );
+        for (words, tool) in [
+            ("point the gimbal down", "gimbal_command"),
+            ("who is in control of the gimbal", "gimbal_list"),
+        ] {
+            let found: Vec<String> = find_deferred(words, 3)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            assert_eq!(found.first().map(String::as_str), Some(tool), "{found:?}");
+        }
+
+        let send = all.iter().find(|tool| tool.name == "command_send").unwrap();
+        let commands: Vec<&str> = send.parameters["properties"]["command"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|command| command.pointer("/properties/type/const")?.as_str())
+            .collect();
+        assert!(commands.contains(&"long") && commands.contains(&"arm"));
+        assert!(!commands.contains(&"gimbal"), "{commands:?}");
     }
 
     #[test]

@@ -95,6 +95,26 @@ pub enum LinkKind {
         /// would confuse.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         traffic: bool,
+        /// Carries a simulated camera: component 100 of the vehicle, which
+        /// answers MAVLink's camera protocol and which the autopilot speaks
+        /// for (ADR-0063). UXDuck Desktop and ArduPilot only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        camera: bool,
+        /// Carries a simulated gimbal: component 154 of the vehicle, a
+        /// gimbal device that the autopilot manages (ADR-0063). UXDuck
+        /// Desktop and ArduPilot only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        gimbal: bool,
+        /// Carries a gimbal that ArduPilot simulates itself, in place of
+        /// UXDuck's simulated camera and gimbal (ADR-0063). UXDuck Desktop
+        /// and ArduPilot only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ardupilot_gimbal: Option<ArdupilotGimbal>,
+        /// What kind of camera and gimbal its simulated payload is
+        /// (ADR-0063). Absent for a camera that takes photos, records,
+        /// zooms and focuses, with a gimbal apart from it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload_profile: Option<PayloadProfile>,
         /// Which instance it is, for its ports and system id. The daemon
         /// assigns it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +161,87 @@ impl SimAutopilot {
     pub fn is_ardupilot(&self) -> bool {
         *self == Self::Ardupilot
     }
+}
+
+/// A gimbal that ArduPilot's simulator plays itself (ADR-0063), with the
+/// camera it carries. The autopilot's own driver speaks for it, as it would
+/// for hardware on a serial port. It sends no video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArdupilotGimbal {
+    /// A Viewpro gimbal and camera on ArduPilot's serial driver. Only the
+    /// autopilot speaks MAVLink for them.
+    Viewpro,
+    /// An AVT CM62: a MAVLink gimbal and camera, components 154 and 100 of
+    /// the vehicle, behind the autopilot.
+    AvtCm62,
+}
+
+/// What kind of camera and gimbal a simulation's payload is (ADR-0063), to
+/// see what UXDuck does with hardware that can do less or is put together
+/// another way. Each needs the simulated camera, and `integrated` and
+/// `thermal-tracking` the gimbal too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PayloadProfile {
+    /// A camera that only sends video. It takes no photos, records
+    /// nothing, and has no modes, lens or card.
+    StreamOnly,
+    /// A camera that takes photos in its photo mode and records in its
+    /// video mode, never both at once, with no zoom or focus to drive.
+    PhotoVideo,
+    /// A camera and a gimbal that are one MAVLink component, the
+    /// camera's, which manages its gimbal itself. The autopilot has no
+    /// mount.
+    Integrated,
+    /// Such a unit with a thermal sensor beside its daylight one, which
+    /// tracks a point or a box in its picture and keeps its gimbal on it.
+    /// Its thermal picture is the daylight one in false colour, and the
+    /// range it gives for it is a scale from 0 to 100 and no temperature.
+    ThermalTracking,
+}
+
+/// What can go wrong with a simulation's camera or gimbal when it is asked
+/// to (`sim/fault`, ADR-0063). Each is what hardware with that fault says
+/// on the wire. Nothing else tells UXDuck of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SimFaultKind {
+    /// The camera stops talking: no heartbeats and no answers. An
+    /// integrated camera and gimbal stop together.
+    CameraSilent,
+    /// The gimbal stops talking: no heartbeats, no attitude and no
+    /// answers.
+    GimbalSilent,
+    /// The camera's card is full. Photos and recordings fail until the
+    /// card is formatted or the fault is switched off.
+    CardFull,
+    /// One command, named by `command`, is answered `MAV_RESULT_DENIED`
+    /// and not carried out.
+    CommandRefused,
+    /// One command, named by `command`, takes five seconds: it is
+    /// answered `MAV_RESULT_IN_PROGRESS` with its progress, and carried
+    /// out at the end.
+    CommandInProgress,
+    /// The gimbal reports that its motors have failed, and stays where it
+    /// is.
+    GimbalError,
+    /// The vehicle's autopilot is in primary control of the gimbal, until
+    /// another takes control.
+    AutopilotHolds,
+}
+
+/// A fault of a simulation's camera or gimbal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFault {
+    pub kind: SimFaultKind,
+    /// The `MAV_CMD` number a `command-refused` or
+    /// `command-in-progress` fault is about, such as 2000 for
+    /// `MAV_CMD_IMAGE_START_CAPTURE`. `sim/faults` lists the ones a
+    /// simulation's camera and gimbal have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<u16>,
 }
 
 /// What a link's bytes are (S172, ADR-0034): MAVLink from vehicles, or
@@ -234,6 +335,11 @@ pub struct Link {
     /// the ground is not reported, until the vehicle has flown clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenery_hit: Option<SceneryHit>,
+    /// The faults that are on in a simulated vehicle's camera and gimbal
+    /// (`sim/fault`). They last until they are switched off or the
+    /// simulation stops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faults: Vec<SimFault>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }

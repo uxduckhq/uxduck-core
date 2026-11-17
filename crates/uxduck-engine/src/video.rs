@@ -628,10 +628,12 @@ impl Engine {
                 })
                 .cloned()
                 .collect();
+            // Unless its cameras say none of them takes images or records (S404).
+            let captures = self.vehicle_captures(vehicle_id);
             for mut source in unclaimed {
                 source.vehicle_id = Some(vehicle_id.to_owned());
                 // The vehicle's own camera named this port (V20).
-                source.vehicle_camera |= !source.vehicle_camera_by_hand;
+                source.vehicle_camera |= !source.vehicle_camera_by_hand && captures;
                 source.version += 1;
                 self.commit_as(actor(), Change::VideoSourceUpserted { source });
             }
@@ -673,8 +675,9 @@ impl Engine {
                 )),
                 vehicle_id: Some(vehicle_id.to_owned()),
                 assigned_by_hand: false,
-                // The vehicle's own camera announced it: it can be told to shoot (V20).
-                vehicle_camera: true,
+                // The vehicle's own camera announced it: it can be told to
+                // shoot (V20), unless its cameras say none of them does (S404).
+                vehicle_camera: self.vehicle_captures(vehicle_id),
                 vehicle_camera_by_hand: false,
                 served_by: None,
                 record_alone: false,
@@ -891,8 +894,13 @@ impl Engine {
                 .or_else(|| before.as_ref().and_then(|b| b.vehicle_id.clone()));
             // On a port the vehicle's own camera named, the stream is that
             // camera's (V20).
-            if !source.vehicle_camera_by_hand && announced.is_some() {
-                source.vehicle_camera = source.vehicle_id == announced;
+            // Unless its cameras say none of them takes images or
+            // records (S404).
+            if !source.vehicle_camera_by_hand
+                && let Some(announced) = &announced
+            {
+                source.vehicle_camera = source.vehicle_id.as_deref() == Some(announced)
+                    && self.vehicle_captures(announced);
             }
         }
         if was_stopped {

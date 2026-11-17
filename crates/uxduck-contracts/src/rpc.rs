@@ -15,6 +15,7 @@ use crate::dto::analytics::{
 use crate::dto::app::{
     AppOpenParams, ClientVisibilityParams, DesktopAppChooseParams, DesktopAppStatusParams,
 };
+use crate::dto::camera::{CameraCommandParams, CameraDefinitionFetchParams, CameraSettingsParams};
 use crate::dto::client::{
     Approval, ApprovalResolveParams, CapabilitiesChanged, ClientForgetParams,
     ClientSetCapabilitiesParams, DisplayPullParams, DisplayRegisterParams, DisplayReplyParams,
@@ -32,6 +33,7 @@ use crate::dto::feedback::{
     FeedbackAddParams, FeedbackFileParams, FeedbackSendParams, FeedbackSuggestParams,
 };
 use crate::dto::find::{FindResult, FindStartParams};
+use crate::dto::gimbal::{GimbalCommandParams, GimbalWatchParams};
 use crate::dto::history::{
     AddNoteParams, EditNoteParams, ParamHistoryParams, VehicleHistoryParams,
 };
@@ -67,8 +69,8 @@ use crate::dto::search::{
 };
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams, StorageRevealParams};
 use crate::dto::sim::{
-    SimBuildParams, SimCatalogueParams, SimCrashParams, SimFramesParams, SimPauseParams,
-    SimSnapshotParams, SimStartParams, SnapshotRenameParams, SnapshotStartParams,
+    SimBuildParams, SimCatalogueParams, SimCrashParams, SimFaultParams, SimFramesParams,
+    SimPauseParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams, SnapshotStartParams,
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
@@ -1300,6 +1302,31 @@ pub enum ClientRequest {
     /// Result: `Empty`.
     #[serde(rename = "sim/delete")]
     SimDelete(SimBuildParams),
+    /// Offers this window to draw the pictures of this computer's simulated
+    /// cameras (ADR-0063 Y7): a simulated camera's video is a 3D scene one
+    /// open window draws, encodes and gives UXDuck, which sends it on as the
+    /// camera's stream. Open a WebSocket on the path returned. Needs
+    /// `read`. Result: `SimPicturesResult`.
+    #[serde(rename = "sim/pictures")]
+    SimPictures(Empty),
+    /// Switches a fault on or off in a simulated vehicle's camera or gimbal
+    /// (ADR-0063), to see what UXDuck does with it: the camera or the
+    /// gimbal stops talking, the card is full, one command is refused or
+    /// takes five seconds, the gimbal's motors fail, or the autopilot holds
+    /// the gimbal. A fault is what hardware with it says on the wire, so
+    /// UXDuck shows it as it would on a real vehicle. It lasts until it is
+    /// switched off or the simulation stops or starts again, and a card
+    /// that is formatted or a gimbal that is taken from the autopilot ends
+    /// its own. `sim/faults` says which a simulation can have. Never a
+    /// real vehicle's link. Control capability, and an agent asks first.
+    /// Result: `Link`, with the faults that are on in `faults`.
+    #[serde(rename = "sim/fault")]
+    SimFault(SimFaultParams),
+    /// The faults a simulated vehicle's camera and gimbal can have
+    /// (`sim/fault`): which are on, which this simulation cannot have and
+    /// why, and the commands one can name. Result: `SimFaultsResult`.
+    #[serde(rename = "sim/faults")]
+    SimFaults(IdParams),
     /// Whether this UXDuck is signed in to a UXDuck account, and as whom
     /// (ADR-0013 P9). Result: `AccountState`.
     #[serde(rename = "account/get")]
@@ -1754,6 +1781,79 @@ pub enum ClientRequest {
     /// if it cannot. Needs `read`. Result: `VideoListResult`.
     #[serde(rename = "video/list")]
     VideoList(Empty),
+    /// Every camera of every vehicle (S404): its maker and model, what it
+    /// can do, its sensor, lens and gimbal, its video streams, and whether
+    /// it is heard now. A camera is a MAVLink component of its own, or one
+    /// its autopilot speaks for (`deviceId` 1 to 6). Needs `read`. Result:
+    /// `CameraListResult`.
+    #[serde(rename = "camera/list")]
+    CameraList(Empty),
+    /// Has a camera do something (S405): photo or video mode, one photo,
+    /// photos at an interval, a recording on its own card, zoom, focus,
+    /// a format of its card, its settings put back, the sensor its
+    /// picture comes from, or a point or a box in its picture to track.
+    /// Answers when the
+    /// camera has acknowledged it or every retry has timed out, with the
+    /// receipt: `accepted`, or `rejected` with the camera's answer and,
+    /// when its card is full, that. It is `command/send` with a `camera`
+    /// command for the camera's vehicle, and `camera/list` then says what
+    /// changed: the mode, the zoom, the count of photos, the recording,
+    /// whether a stream is thermal. What a camera tracks is in its
+    /// vehicle's telemetry, as the `track-point` action says.
+    /// Needs `control`. Result: `Receipt`.
+    #[serde(rename = "camera/command")]
+    CameraCommand(CameraCommandParams),
+    /// A camera's own settings (S411): the ones its camera definition file
+    /// names, such as its ISO or its video's size, each with the value the
+    /// camera last gave, the values it can take as the camera is set now,
+    /// and the setting that rules it out when one does. `status` says
+    /// where UXDuck is with the file: `none` when the camera names none,
+    /// `ask` when it is at an `http` address a person has not agreed to
+    /// fetch from, `fetching`, `failed` or `refused` with the reason, or
+    /// `loaded`. Set one with `camera/command` and a `set-setting`
+    /// action. A camera's `version` in `camera/list` moves when any of
+    /// this changes. Needs `read`. Result: `CameraSettingsResult`.
+    #[serde(rename = "camera/settings")]
+    CameraSettings(CameraSettingsParams),
+    /// Fetches a camera's definition file from where the camera says it
+    /// is, again when it was fetched before (S411). This is how a person
+    /// agrees to a file at an `http` or `https` address, which UXDuck
+    /// does not fetch by itself. A file on the vehicle (`mftp` or
+    /// `mavlinkftp`) is read without asking. `uri` is the address agreed to, as
+    /// `camera/settings` gave it. Only from an operator client: an agent
+    /// or a plugin does not agree for a person. Result:
+    /// `CameraSettingsResult`.
+    #[serde(rename = "camera/definition/fetch")]
+    CameraDefinitionFetch(CameraDefinitionFetchParams),
+    /// Every gimbal of every vehicle (S406): the component that manages
+    /// it, what it can do, how far it turns, who is in control of it, and
+    /// whether it is heard now. Where it points is in the vehicle's
+    /// telemetry: `gimbal.pitch_deg`, and `gimbal.yaw_deg` from the nose
+    /// or `gimbal.heading_deg` from north. Needs `read`. Result:
+    /// `GimbalListResult`.
+    #[serde(rename = "gimbal/list")]
+    GimbalList(Empty),
+    /// Has a gimbal do something (S406): point by pitch and yaw, centre,
+    /// follow the nose or hold north, look at a place, or take or give
+    /// back control. UXDuck takes control by itself before the first
+    /// movement and gives it back a while after the last. When the
+    /// gimbal's `holder` is the autopilot, a mission or another, the
+    /// answer is `confirmation-required` naming who, and the same call
+    /// with `confirm` takes it. An agent's is put to a person instead.
+    /// Answers when the gimbal's manager has acknowledged it or every
+    /// retry has timed out, with the receipt. It is `command/send` with a
+    /// `gimbal` command for the gimbal's vehicle. Needs `control`. Result:
+    /// `Receipt`.
+    #[serde(rename = "gimbal/command")]
+    GimbalCommand(GimbalCommandParams),
+    /// Says whether this connection is looking at where a vehicle's
+    /// gimbals point, as a Camera tab or the 3D map's Drone camera does
+    /// (S406). While any connection is, the gimbals say it ten times a
+    /// second, and once a second otherwise to spare a telemetry radio. A
+    /// connection that closes stops looking. Needs `read`. Result:
+    /// `Empty`.
+    #[serde(rename = "gimbal/watch")]
+    GimbalWatch(GimbalWatchParams),
     /// Says which vehicle a camera stream belongs to, or with no vehicle
     /// goes back to matching it by the sender's address. Needs `config`.
     /// Result: `VideoSource`.
@@ -2147,7 +2247,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 392] = [
+    pub const METHODS: [&'static str; 402] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2362,6 +2462,9 @@ impl ClientRequest {
         "sim/catalogue",
         "sim/download",
         "sim/delete",
+        "sim/pictures",
+        "sim/fault",
+        "sim/faults",
         "account/get",
         "account/flights",
         "account/versions",
@@ -2434,6 +2537,13 @@ impl ClientRequest {
         "video/demos",
         "video/capture/enable",
         "video/list",
+        "camera/list",
+        "camera/command",
+        "camera/settings",
+        "camera/definition/fetch",
+        "gimbal/list",
+        "gimbal/command",
+        "gimbal/watch",
         "video/assign",
         "video/watch",
         "video/metadata/watch",

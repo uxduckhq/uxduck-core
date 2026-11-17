@@ -1,0 +1,61 @@
+{
+  "cameraId": "v9b1c2d3e4f5a6b7c/100",
+  "status": "loaded",
+  "uri": "mftp:///camera.xml",
+  "kept": true,
+  "settings": [
+    {
+      "name": "CAM_MODE",
+      "description": "Camera mode",
+      "kind": "uint32",
+      "value": 0.0,
+      "options": [
+        { "name": "Photo", "value": 0.0 },
+        { "name": "Video", "value": 1.0 }
+      ],
+      "hidden": true
+    },
+    {
+      "name": "CAM_EXPMODE",
+      "description": "Exposure mode",
+      "kind": "uint32",
+      "value": 0.0,
+      "options": [
+        { "name": "Auto", "value": 0.0 },
+        { "name": "Manual", "value": 1.0 }
+      ]
+    },
+    {
+      "name": "CAM_EV",
+      "description": "Exposure compensation",
+      "kind": "float",
+      "value": 0.5,
+      "unit": "EV",
+      "min": -3.0,
+      "max": 3.0,
+      "step": 0.5
+    },
+    {
+      "name": "CAM_ISO",
+      "description": "ISO",
+      "kind": "uint32",
+      "value": 400.0,
+      "options": [
+        { "name": "100", "value": 100.0 },
+        { "name": "200", "value": 200.0 },
+        { "name": "400", "value": 400.0 },
+        { "name": "800", "value": 800.0 },
+        { "name": "1600", "value": 1600.0 },
+        { "name": "3200", "value": 3200.0 }
+      ],
+      "excludedBy": "CAM_EXPMODE"
+    },
+    {
+      "name": "CAM_SHUTTERCNT",
+      "description": "Photos taken since it was switched on",
+      "kind": "uint32",
+      "value": 7.0,
+      "readOnly": true
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import type {
+  CameraAction,
   Command,
   ItemBatch,
   ItemInput,
@@ -48,6 +49,10 @@ export declare function commandLong(
   command: number,
   params: number[],
 ): SendCommand & { command: Extract<Command, { type: "long" }> };
+export declare function cameraCommand(
+  vehicleId: string,
+  action: CameraAction,
+): SendCommand & { command: Extract<Command, { type: "camera" }> };
 export declare function point(id: string, latitudeDeg: number, longitudeDeg: number): MapFeature;
 export declare function circle(
   id: string,

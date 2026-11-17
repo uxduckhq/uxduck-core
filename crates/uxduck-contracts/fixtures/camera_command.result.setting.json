@@ -1,0 +1,23 @@
+{
+  "id": "rc8d2e3f4a5b6c7d8e",
+  "vehicleId": "v9b1c2d3e4f5a6b7c",
+  "command": {
+    "type": "camera",
+    "componentId": 100,
+    "action": {
+      "type": "set-setting",
+      "name": "CAM_VIDRES",
+      "value": 0.0
+    }
+  },
+  "status": "rejected",
+  "detail": "The camera said: Failed.",
+  "sentWithoutRecentHeartbeat": false,
+  "forced": false,
+  "attempts": 1,
+  "clientId": "c1a2b3c4d5e6f7a8b",
+  "operatorId": "op5f1c0a91b2d3e4f5",
+  "createdAtUs": 1790668900000000,
+  "completedAtUs": 1790668900090000,
+  "version": 2
+}

@@ -61,6 +61,7 @@ pub fn record_id(kind: ClientKind, name: &str, executable: Option<&str>) -> Stri
 
 /// The capability a request needs that can be asked for, if any. Methods
 /// only operators may call (pairing, the trace) are not escalated.
+#[expect(clippy::too_many_lines, reason = "one arm per method that can ask")]
 fn escalatable(request: &ClientRequest) -> Option<Capability> {
     match request {
         ClientRequest::SimFrames(params) if !params.refresh => None,
@@ -72,6 +73,7 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::PluginCommand(_)
         | ClientRequest::PracticeGuide(_)
         | ClientRequest::SimPause(_)
+        | ClientRequest::SimFault(_)
         | ClientRequest::SimCrash(_) => Some(Capability::Control),
         ClientRequest::ParamSet(_)
         // Applying a saved parameter set is a parameter write (S217).
@@ -253,9 +255,12 @@ impl Engine {
         // Launching past failing checks set to hold always asks (ADR-0038
         // K24), listing them: a client never overrides them on its own.
         let preflight = self.preflight_asks(request);
+        // Taking a gimbal from whoever has it always asks (S406), as a
+        // person's own is confirmed.
         let always = install
             || self.dangerous_plugin_command(request)
             || self.spoken_turn_asks(connection, request)
+            || self.gimbal_asks(request)
             || !preflight.is_empty();
         if (always && self.running_approved) || (!always && granted.contains(&capability)) {
             return false;
@@ -587,7 +592,36 @@ impl Engine {
                 let name = self
                     .vehicle(&params.vehicle_id)
                     .map_or_else(|| params.vehicle_id.clone(), |v| v.name.clone());
-                format!("{} {name}", command.label().to_lowercase())
+                // "take a photo on Copter 1" (S405), "point the gimbal on
+                // Copter 1" (S406).
+                let on = if matches!(
+                    command,
+                    uxduck_core::domain::command::Command::Camera { .. }
+                        | uxduck_core::domain::command::Command::Gimbal { .. }
+                ) {
+                    " on"
+                } else {
+                    ""
+                };
+                let command = self.gimbal_addressed(&params.vehicle_id, command);
+                let taking = self
+                    .gimbal_held_elsewhere(&params.vehicle_id, &command)
+                    .map_or_else(String::new, |holder| format!(", taking it from {holder}"));
+                // A camera's own setting keeps its name as the camera
+                // spells it: "set the camera's CAM_ISO to 800" (S411).
+                let label = command.label();
+                let said = match &command {
+                    uxduck_core::domain::command::Command::Camera { action, .. }
+                        if action.setting().is_some() =>
+                    {
+                        let mut letters = label.chars();
+                        letters.next().map_or_else(String::new, |first| {
+                            first.to_lowercase().chain(letters).collect()
+                        })
+                    }
+                    _ => label.to_lowercase(),
+                };
+                format!("{said}{on} {name}{taking}")
             }
             ClientRequest::ParamSet(params) => {
                 let name = self
@@ -783,6 +817,10 @@ impl Engine {
                 "resume a paused simulated vehicle"
             }
             .into(),
+            ClientRequest::SimFault(params) => format!(
+                "switch {} a fault in a simulated vehicle's camera or gimbal",
+                if params.on { "on" } else { "off" }
+            ),
             ClientRequest::SimSnapshot(_) => "save a snapshot of a simulated vehicle".into(),
             ClientRequest::SimCrash(_) => "end a simulated flight after a scenery collision".into(),
             ClientRequest::SnapshotStart(params) => format!(

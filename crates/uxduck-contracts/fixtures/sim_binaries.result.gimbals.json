@@ -1,0 +1,14 @@
+{
+  "binaries": [
+    {
+      "path": "/Users/ana/Library/Application Support/UXDuck/simulators/bin/arducopter",
+      "autopilot": "ardupilot",
+      "program": "arducopter",
+      "vehicles": ["multicopter"],
+      "frames": ["quad", "X", "hexa"],
+      "defaultFrame": "quad",
+      "version": "4.8.0-dev",
+      "ardupilotGimbals": ["viewpro", "avt-cm62"]
+    }
+  ]
+}

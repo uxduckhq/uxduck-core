@@ -14,9 +14,9 @@ use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::command::{
-    Command, GoToHeading, MAV_CMD_DO_PAUSE_CONTINUE, MAV_CMD_DO_SET_MISSION_CURRENT,
-    MAV_CMD_MISSION_START, MAV_CMD_SCRIPTING, OfflineBehaviour, PlaceAmsl, Receipt, ReceiptStatus,
-    RefusalReason,
+    Command, CommandProgress, GoToHeading, MAV_CMD_DO_PAUSE_CONTINUE,
+    MAV_CMD_DO_SET_MISSION_CURRENT, MAV_CMD_MISSION_START, MAV_CMD_SCRIPTING, OfflineBehaviour,
+    PlaceAmsl, Receipt, ReceiptStatus, RefusalReason,
 };
 use uxduck_core::domain::modes::{self, AvailableMode, Family, is_vtol};
 use uxduck_core::domain::notification::{
@@ -145,6 +145,17 @@ pub(crate) fn send_checked(
         ));
     }
     let params = home_under_an_armed_vehicle(engine, params)?;
+    if let Command::Camera { action, .. } = Command::from(params.command.clone())
+        && let Some(why) = action.invalid()
+    {
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
+    }
+    if let Command::Gimbal { action, .. } = Command::from(params.command.clone())
+        && let Some(why) = action.invalid()
+    {
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
+    }
+    let params = crate::gimbals::look_at_the_ground(engine, params)?;
     if let Some(vehicle) = engine.vehicle(&params.vehicle_id)
         && let Some(why) = unsafe_place(&params.command.clone().into(), flies(vehicle))
     {
@@ -415,6 +426,10 @@ fn unsafe_amsl_place(place: &PlaceAmsl) -> Option<String> {
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one gate after another, each a few lines"
+)]
 fn send(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -429,10 +444,24 @@ fn send(
     })?;
     // A toggle goes, and is receipted, as what the vehicle needs.
     let command = Command::from(params.command).resolved(vehicle.armed);
+    // A camera command that names no camera goes to the vehicle's only
+    // one that can do it (S405).
+    let command = engine.camera_addressed(&vehicle.id, command);
+    // One of a camera's own settings goes with the type its definition
+    // file gives it, or not at all (S411).
+    let command = engine.camera_setting_typed(&vehicle.id, command)?;
+    // And a gimbal command that names no gimbal to its first (S406).
+    let command = engine.gimbal_addressed(&vehicle.id, command);
     // A disarmed vehicle's take-off goes after the steps it needs, the
     // first of them now (`TakeOff`).
     let mut steps = take_off_steps(engine, &vehicle, &command).unwrap_or_default();
     let arms = command.arms_on_the_ground() || !steps.is_empty();
+    // A gimbal UXDuck does not have is taken before it is moved (S406):
+    // the take goes first, as a command of its own.
+    let takes_gimbal = engine.gimbal_take_first(&command, &vehicle);
+    if let Some(take) = &takes_gimbal {
+        steps = vec![take.clone(), command.clone()];
+    }
     // A launch (ADR-0038 K23): a take-off or a mission's start asked of a
     // vehicle that has not launched yet, armed or not.
     let launches = command.launches() && !engine.launched(&vehicle);
@@ -460,6 +489,7 @@ fn send(
         operator_id: actor.operator_id.clone(),
         sent_by: engine.sender(connection),
         remote: None,
+        progress: None,
         created_at_us: now,
         completed_at_us: None,
         version: 1,
@@ -487,6 +517,10 @@ fn send(
         (params.confirm, params.force),
         &mut receipt,
     )?;
+    // Taking a gimbal from whoever has it is asked first (S406).
+    if receipt.status == ReceiptStatus::Sent {
+        engine.gimbal_confirmed(&vehicle.id, &asked, operator && params.confirm)?;
+    }
     // A real vehicle arms only for an operator who agreed to the terms
     // (ADR-0047), asked before the preflight checks.
     engine.terms_gate(&vehicle, arms, &mut receipt);
@@ -517,6 +551,12 @@ fn send(
         return Ok((to_value(&result)?, None));
     }
     engine.plan_run_command_sent(connection, &vehicle, &command, &id);
+    if takes_gimbal.is_some() {
+        engine.gimbal_taken_by_itself(&id);
+    }
+    // A controller turning the gimbal stops before a command for it goes
+    // (S407).
+    engine.sticks_before(&vehicle.id, &command);
     engine.links.command(CommandOrder {
         receipt_id: id.clone(),
         vehicle_id: vehicle.id,
@@ -1237,7 +1277,26 @@ impl Engine {
     fn refusal(&self, receipt: &Receipt, why: String) -> String {
         self.take_off_refusal(receipt)
             .or_else(|| self.stick_mode_refusal(receipt, &why))
+            .or_else(|| self.camera_refusal(receipt, &why))
             .unwrap_or(why)
+    }
+
+    /// The vehicle answered that it is still working on a command (S405):
+    /// its receipt, still sent, says how far it is. Its end comes as any
+    /// command's does (`command_result`).
+    pub fn command_progress(&mut self, receipt_id: &str, percent: Option<u8>) {
+        let Some(mut receipt) = self.state.receipts.get(receipt_id).cloned() else {
+            return;
+        };
+        let progress = Some(CommandProgress {
+            percent: percent.filter(|percent| *percent <= 100),
+        });
+        if receipt.status != ReceiptStatus::Sent || receipt.progress == progress {
+            return;
+        }
+        receipt.progress = progress;
+        receipt.version += 1;
+        self.commit_as(daemon(), Change::ReceiptUpserted { receipt });
     }
 
     /// The data plane finished a command: complete its receipt, answer the
@@ -1295,6 +1354,7 @@ impl Engine {
             self.plan_run_command_done(&receipt);
         }
         self.position_answered(receipt_id);
+        self.payload_command_done(&receipt);
         // A take-off's next step, which answers in its place.
         if let Some(take_off) = self.take_offs.remove(receipt_id)
             && status == ReceiptStatus::Accepted
@@ -1317,7 +1377,11 @@ impl Engine {
         }
         // Someone else's command: a simulated take-off leaves it be. The
         // simulation start's own, such as a rover's HOLD, is not.
-        if status == ReceiptStatus::Accepted && receipt.client_id != crate::launch::ACTOR {
+        // Nor does turning its gimbal, which leaves its flight alone.
+        if status == ReceiptStatus::Accepted
+            && receipt.client_id != crate::launch::ACTOR
+            && !matches!(receipt.command, Command::Gimbal { .. })
+        {
             self.hand_over_launch(&receipt.vehicle_id);
         }
         if !matches!(status, ReceiptStatus::Accepted) {
@@ -1365,6 +1429,7 @@ impl Engine {
             sent_without_recent_heartbeat: !online,
             forced: false,
             attempts: 0,
+            progress: None,
             created_at_us: self.clock.now_us(),
             completed_at_us: None,
             version: 1,

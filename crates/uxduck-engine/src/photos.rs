@@ -155,11 +155,10 @@ impl Engine {
             .as_deref()
             .filter(|_| source.vehicle_camera)
             .and_then(|vehicle_id| {
-                self.tell_vehicle_camera(
-                    vehicle_id,
-                    crate::recordings::IMAGE_START_CAPTURE,
-                    vec![0.0, 0.0, 1.0, 0.0],
-                )
+                use uxduck_core::domain::camera::CameraAction;
+                // The camera this picture comes from, when it is known.
+                let camera = self.camera_of_source(&source.id, &CameraAction::TakePhoto);
+                self.tell_vehicle_camera(vehicle_id, camera, CameraAction::TakePhoto)
             });
         let photo = VideoPhoto {
             id: format!("vp{}", &self.random.token()[..16]),

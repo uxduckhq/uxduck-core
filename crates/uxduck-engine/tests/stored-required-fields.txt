@@ -444,6 +444,7 @@ LinkKind::Simulator.heading_deg
 LinkKind::Simulator.latitude_deg
 LinkKind::Simulator.longitude_deg
 LinkKind::Simulator.vehicle
+SimFault.kind
 LinkKind::TcpClient.host
 LinkKind::TcpClient.port
 LinkKind::TcpServer.host
@@ -931,3 +932,69 @@ FlightCopy.path
 PackedVideo.entry
 PackedVideo.path
 PackedVideo.playable
+
+# A vehicle's cameras (S404, 2026-11-14).
+Camera.component_id
+Camera.id
+Camera.present
+Camera.vehicle_id
+Camera.version
+CameraInformation.flags
+CameraStream.kind
+CameraStream.stream_id
+CameraStream.uri
+Change::CameraRemoved.id
+Change::CameraUpserted.camera
+# A camera's own controls and what it says back (S405, 2026-11-14).
+CameraAction::FocusStep.steps
+CameraAction::FocusTo.percent
+CameraAction::SetMode.mode
+CameraAction::StartInterval.interval_s
+CameraAction::ZoomStep.steps
+CameraAction::ZoomTo.percent
+CameraCapture.recording
+CameraPhoto.index
+CameraPhoto.ok
+CameraPhoto.taken_at_us
+CameraPhotoPlace.altitude_amsl_m
+CameraPhotoPlace.latitude_deg
+CameraPhotoPlace.longitude_deg
+CameraPhotoPlace.relative_altitude_m
+CameraStorage.status
+CameraStorage.storage_id
+Command::Camera.action
+# A vehicle's gimbals and what they are told (S406, 2026-11-14).
+Change::GimbalRemoved.id
+Change::GimbalUpserted.gimbal
+Command::Gimbal.action
+Gimbal.capabilities
+Gimbal.component_id
+Gimbal.device_id
+Gimbal.holder
+Gimbal.id
+Gimbal.limits
+Gimbal.present
+Gimbal.vehicle_id
+Gimbal.version
+GimbalAction::LookAt.latitude_deg
+GimbalAction::LookAt.longitude_deg
+GimbalAction::Point.pitch_deg
+GimbalAction::Point.yaw_deg
+GimbalController.component_id
+GimbalController.system_id
+# An axis that turns a gimbal (S407, 2026-11-15).
+GimbalAxisBinding.control
+GimbalAxisBinding.input
+# A camera's own setting written (S411, 2026-11-15): a new action of
+# the camera commands S405 added, which no release has stored.
+CameraAction::SetSetting.name
+CameraAction::SetSetting.value
+# Another sensor's picture and tracking (S412, 2026-11-15): new actions
+# of the camera commands S405 added, which no release has stored.
+CameraAction::SetSource.source
+CameraAction::TrackPoint.x
+CameraAction::TrackPoint.y
+CameraAction::TrackRectangle.bottom
+CameraAction::TrackRectangle.left
+CameraAction::TrackRectangle.right
+CameraAction::TrackRectangle.top

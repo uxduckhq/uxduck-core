@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::camera::CameraAction;
+use crate::domain::gimbal::GimbalAction;
 use crate::domain::telemetry::AltitudeFrame;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -70,6 +72,32 @@ pub enum Command {
     Long {
         command: u16,
         params: Vec<f32>,
+    },
+    /// Has one of the vehicle's cameras do something (ADR-0063 Y5, S405):
+    /// the MAVLink camera protocol's command for it, sent to the camera
+    /// and acknowledged by it. `component_id` is the camera's own MAVLink
+    /// component, or its autopilot's with a `device_id` from 1 to 6 for a
+    /// camera the autopilot speaks for. With neither, the engine names the
+    /// vehicle's first camera that takes images or records, or, when none
+    /// has said what it is, sends it to the autopilot for every camera.
+    Camera {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<u8>,
+        action: CameraAction,
+    },
+    /// Has one of the vehicle's gimbals do something (ADR-0063 Y6, S406):
+    /// the MAVLink gimbal protocol's command for it, sent to the gimbal's
+    /// manager and acknowledged by it. `component_id` is the manager's
+    /// MAVLink component and `device_id` what the manager calls the
+    /// gimbal. With neither, the engine names the vehicle's first gimbal.
+    Gimbal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<u8>,
+        action: GimbalAction,
     },
 }
 
@@ -155,6 +183,7 @@ const DISARM_IN_FLIGHT: &str = "Disarming in flight stops the motors, and the ve
 const REBOOT_IN_FLIGHT: &str =
     "Rebooting in flight stops the flight controller, and the vehicle falls.";
 const TERMINATE: &str = "Flight termination stops the vehicle at once, and it falls.";
+const FORMAT_CARD: &str = "Formatting erases every photo and video on the camera's card, and they cannot be brought back.";
 const SCRIPTS_IN_FLIGHT: &str =
     "Restarting scripts in flight stops whatever they control until they start again.";
 const HOME_IN_FLIGHT: &str = "Moving home in flight changes where it returns to and lands, and what its height is measured from.";
@@ -215,11 +244,14 @@ pub enum CommandClass {
     Critical,
 }
 
-/// `MAV_CMD`s for cameras and gimbals: `DO_DIGICAM_CONTROL`,
-/// `DO_MOUNT_CONTROL`, `SET_CAMERA_ZOOM`, `SET_CAMERA_FOCUS`,
-/// `DO_GIMBAL_MANAGER_PITCHYAW`, `IMAGE_START_CAPTURE`,
+/// `MAV_CMD`s for cameras and gimbals: `DO_SET_ROI_LOCATION`,
+/// `DO_SET_ROI_NONE`, `DO_DIGICAM_CONTROL`, `DO_MOUNT_CONTROL`,
+/// `SET_CAMERA_ZOOM`, `SET_CAMERA_FOCUS`, `DO_GIMBAL_MANAGER_PITCHYAW`,
+/// `DO_GIMBAL_MANAGER_CONFIGURE`, `IMAGE_START_CAPTURE`,
 /// `IMAGE_STOP_CAPTURE`, `VIDEO_START_CAPTURE`, `VIDEO_STOP_CAPTURE`.
-const PAYLOAD_COMMANDS: [u16; 9] = [203, 205, 531, 532, 1000, 2000, 2001, 2500, 2501];
+const PAYLOAD_COMMANDS: [u16; 12] = [
+    195, 197, 203, 205, 531, 532, 1000, 1001, 2000, 2001, 2500, 2501,
+];
 /// `MAV_CMD`s that send a vehicle somewhere now: `NAV_WAYPOINT`,
 /// `DO_CHANGE_ALTITUDE`, `DO_REPOSITION`. They go stale fastest.
 const TARGET_COMMANDS: [u16; 3] = [16, 186, 192];
@@ -271,6 +303,8 @@ impl Command {
             | Self::GoTo { .. }
             | Self::SetHome { .. }
             | Self::SetEkfOrigin { .. }
+            | Self::Camera { .. }
+            | Self::Gimbal { .. }
             | Self::Long { .. } => OfflineBehaviour::Warn,
             Self::Arm | Self::ArmToggle | Self::Reboot => OfflineBehaviour::Block,
         }
@@ -302,7 +336,12 @@ impl Command {
             Self::Disarm => disarm(forced),
             Self::ArmToggle if flying => disarm(forced),
             Self::Arm | Self::ArmToggle => arm(forced),
-            Self::Rtl | Self::Land => RiskOf::NONE,
+            // What is on a card cannot be brought back.
+            Self::Camera { action, .. } if action.erases() => RiskOf::dangerous(FORMAT_CARD),
+            // Nothing stands between the operator and landing. A camera's
+            // shutter, lens and settings move nothing (ADR-0017 V20): sent
+            // at once too, as is where its gimbal points.
+            Self::Rtl | Self::Land | Self::Camera { .. } | Self::Gimbal { .. } => RiskOf::NONE,
             Self::SetMode { mode } if SAFE_MODES.iter().any(|m| m.eq_ignore_ascii_case(mode)) => {
                 RiskOf::NONE
             }
@@ -353,6 +392,7 @@ impl Command {
             | Self::SetHome { .. }
             | Self::SetEkfOrigin { .. } => CommandClass::Mission,
             Self::Arm | Self::Disarm | Self::ArmToggle | Self::Reboot => CommandClass::Critical,
+            Self::Camera { .. } | Self::Gimbal { .. } => CommandClass::Payload,
             Self::Long { command, .. } => match *command {
                 c if PAYLOAD_COMMANDS.contains(&c) => CommandClass::Payload,
                 c if TARGET_COMMANDS.contains(&c) => CommandClass::Mission,
@@ -617,6 +657,8 @@ impl Command {
             Self::GoTo { .. } => "Go to".into(),
             Self::SetHome { .. } => "Set home".into(),
             Self::SetEkfOrigin { .. } => "Set the EKF origin".into(),
+            Self::Camera { action, .. } => action.label(),
+            Self::Gimbal { action, .. } => action.label(),
             Self::Long {
                 command: MAV_CMD_NAV_TAKEOFF,
                 ..
@@ -839,10 +881,23 @@ pub struct Receipt {
     /// removed (ADR-0048).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteBy>,
+    /// The vehicle answered that it is still working on it
+    /// (`MAV_RESULT_IN_PROGRESS`, S405): how far it last said it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CommandProgress>,
     pub created_at_us: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_us: Option<u64>,
     pub version: u64,
+}
+
+/// How far a command is that the vehicle is still working on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandProgress {
+    /// From 0 to 100. None when the vehicle did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
 }
 
 /// A person who sent a command from away (ADR-0003 C9): their account, as
@@ -1197,6 +1252,114 @@ mod tests {
             }
             .offline_behaviour(),
             OfflineBehaviour::Warn
+        );
+    }
+
+    // S405: a camera's shutter, lens and settings are sent at once, and
+    // only erasing its card is held.
+    #[test]
+    fn a_camera_command_is_the_payloads_and_only_a_format_is_dangerous() {
+        use crate::domain::camera::CameraAction;
+        let camera = |action| Command::Camera {
+            component_id: Some(100),
+            device_id: None,
+            action,
+        };
+        let photo = camera(CameraAction::TakePhoto);
+        assert_eq!(photo.label(), "Take a photo");
+        assert_eq!(photo.class(), CommandClass::Payload);
+        for flying in [false, true] {
+            assert_eq!(photo.risk(flying, false).level, Risk::None);
+            assert_eq!(
+                camera(CameraAction::StartRecording)
+                    .risk(flying, false)
+                    .level,
+                Risk::None
+            );
+            let format = camera(CameraAction::Format { storage_id: None }).risk(flying, false);
+            assert_eq!(format.level, Risk::Dangerous);
+            assert!(format.reason.is_some());
+        }
+        assert_eq!(photo.offline_behaviour(), OfflineBehaviour::Warn);
+    }
+
+    // S406: where a gimbal points moves no vehicle, so it is sent at once.
+    #[test]
+    fn a_gimbal_command_is_the_payloads_and_asks_nothing() {
+        use crate::domain::gimbal::GimbalAction;
+        let gimbal = |action| Command::Gimbal {
+            component_id: Some(1),
+            device_id: Some(1),
+            action,
+        };
+        let point = gimbal(GimbalAction::Point {
+            pitch_deg: -45.0,
+            yaw_deg: 10.0,
+            lock: false,
+        });
+        assert_eq!(point.label(), "Point the gimbal");
+        assert_eq!(point.class(), CommandClass::Payload);
+        assert_eq!(point.offline_behaviour(), OfflineBehaviour::Warn);
+        for flying in [false, true] {
+            for action in [
+                GimbalAction::TakeControl,
+                GimbalAction::ReleaseControl,
+                GimbalAction::Centre,
+                GimbalAction::HoldNorth,
+            ] {
+                assert_eq!(gimbal(action).risk(flying, false).level, Risk::None);
+            }
+        }
+        let read: Command = serde_json::from_str(
+            r#"{"type":"gimbal","componentId":1,"deviceId":1,"action":{"type":"centre"}}"#,
+        )
+        .expect("a gimbal command");
+        assert_eq!(read, gimbal(GimbalAction::Centre));
+        // The gimbal protocol's own commands by number are the payload's too.
+        for command in [195, 197, 1000, 1001] {
+            let long = Command::Long {
+                command,
+                params: vec![],
+            };
+            assert_eq!(long.class(), CommandClass::Payload, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_camera_command_and_a_receipts_progress_read_as_the_wire_says() {
+        use crate::domain::camera::CameraAction;
+        let command: Command = serde_json::from_str(
+            r#"{"type":"camera","componentId":100,"action":{"type":"start-interval","intervalS":2.0,"count":10}}"#,
+        )
+        .expect("a camera command");
+        assert_eq!(
+            command,
+            Command::Camera {
+                component_id: Some(100),
+                device_id: None,
+                action: CameraAction::StartInterval {
+                    interval_s: 2.0,
+                    count: Some(10)
+                },
+            }
+        );
+        // With no camera named, neither address is written.
+        let any = Command::Camera {
+            component_id: None,
+            device_id: None,
+            action: CameraAction::TakePhoto,
+        };
+        assert_eq!(
+            serde_json::to_string(&any).expect("JSON"),
+            r#"{"type":"camera","action":{"type":"take-photo"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CommandProgress { percent: Some(40) }).expect("JSON"),
+            r#"{"percent":40}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CommandProgress>("{}").expect("progress"),
+            CommandProgress { percent: None }
         );
     }
 }

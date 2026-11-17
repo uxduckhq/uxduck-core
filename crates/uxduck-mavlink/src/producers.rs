@@ -76,6 +76,7 @@ pub fn core_producers() -> Vec<Box<dyn Producer>> {
         Box::new(Health),
         Box::new(Terrain),
         Box::new(Gimbal),
+        Box::new(CameraTracking),
     ]
 }
 
@@ -1247,9 +1248,11 @@ fn vibration(axes: [f32; 3], clipping: [u32; 3], from: (&str, u8, u64), out: &mu
 pub struct Gimbal;
 
 /// `GIMBAL_DEVICE_FLAGS`: yaw held to north, and which frame the yaw is in.
+/// 128 and 256 are other flags (`ACCEPTS_YAW_IN_EARTH_FRAME` and
+/// `RC_EXCLUSIVE`) and say nothing of the frame.
 const GIMBAL_YAW_LOCK: u16 = 16;
-const GIMBAL_YAW_IN_VEHICLE_FRAME: u16 = 128;
-const GIMBAL_YAW_IN_EARTH_FRAME: u16 = 256;
+const GIMBAL_YAW_IN_VEHICLE_FRAME: u16 = 32;
+const GIMBAL_YAW_IN_EARTH_FRAME: u16 = 64;
 
 impl Producer for Gimbal {
     fn id(&self) -> &'static str {
@@ -1313,6 +1316,184 @@ impl Producer for Gimbal {
             }
             _ => {}
         }
+    }
+}
+
+/// What a camera tracks and the range of its thermal picture (ADR-0063
+/// Y5), as the camera says them: where the target is in the picture, from
+/// 0 at its left and top to 1, where it is on the ground, and the coldest
+/// and the warmest. They change many times a second, so they are items
+/// and no part of the camera that is kept. A status says whether the rest
+/// said with it stands: what a camera left unknown is not said again, and
+/// an older item of it is of another moment.
+#[derive(Debug)]
+pub struct CameraTracking;
+
+impl Producer for CameraTracking {
+    fn id(&self) -> &'static str {
+        "camera"
+    }
+
+    fn consume(&self, component_id: u8, message: &Message, now_us: u64, out: &mut Produced) {
+        let from = (self.id(), component_id, now_us);
+        match *message {
+            Message::CameraTrackingImage(said) => tracking_in_the_picture(said, from, out),
+            Message::CameraTrackingGeo(said) => tracking_on_the_ground(said, from, out),
+            Message::CameraThermalRange(said) => thermal_range(said, from, out),
+            _ => {}
+        }
+    }
+}
+
+/// `CAMERA_TRACKING_IMAGE_STATUS`: whether it tracks, and the point or
+/// the box in its picture.
+fn tracking_in_the_picture(
+    said: crate::camera_tracking::ImageSaid,
+    from: (&str, u8, u64),
+    out: &mut Produced,
+) {
+    let none = Unit::None;
+    let status = f64::from(said.status);
+    out.item(
+        "camera.tracking",
+        "Camera tracking status",
+        none,
+        status,
+        from,
+    );
+    let mode = f64::from(said.mode);
+    out.item(
+        "camera.tracking_mode",
+        "Camera tracking mode",
+        none,
+        mode,
+        from,
+    );
+    if let Some((x, y)) = said.point {
+        out.item(
+            "camera.tracking_x",
+            "Tracked point across",
+            none,
+            x.into(),
+            from,
+        );
+        out.item(
+            "camera.tracking_y",
+            "Tracked point down",
+            none,
+            y.into(),
+            from,
+        );
+    }
+    if let Some(radius) = said.radius {
+        let label = "Tracked point radius";
+        out.item("camera.tracking_radius", label, none, radius.into(), from);
+    }
+    if let Some(sides) = said.rectangle {
+        for (side, value) in ["left", "top", "right", "bottom"].into_iter().zip(sides) {
+            out.item(
+                &format!("camera.tracking_{side}"),
+                &format!("Tracked box {side}"),
+                none,
+                value.into(),
+                from,
+            );
+        }
+    }
+}
+
+/// `CAMERA_TRACKING_GEO_STATUS`: where what it tracks is.
+fn tracking_on_the_ground(
+    said: crate::camera_tracking::GeoSaid,
+    from: (&str, u8, u64),
+    out: &mut Produced,
+) {
+    let none = Unit::None;
+    let status = f64::from(said.status);
+    out.item("camera.target", "Camera target status", none, status, from);
+    let degree = Unit::Degree;
+    let (lat, lon) = (said.latitude_deg, said.longitude_deg);
+    out.item(
+        "camera.target_latitude_deg",
+        "Camera target latitude",
+        degree,
+        lat,
+        from,
+    );
+    out.item(
+        "camera.target_longitude_deg",
+        "Camera target longitude",
+        degree,
+        lon,
+        from,
+    );
+    if let Some(altitude) = said.altitude_m {
+        let label = "Camera target altitude";
+        out.item(
+            "camera.target_altitude_msl_m",
+            label,
+            Unit::Meter,
+            altitude.into(),
+            from,
+        );
+    }
+    if let Some(distance) = said.distance_m {
+        let label = "Camera target distance";
+        out.item(
+            "camera.target_distance_m",
+            label,
+            Unit::Meter,
+            distance.into(),
+            from,
+        );
+    }
+}
+
+/// `CAMERA_THERMAL_RANGE`: the coldest and the warmest of its thermal
+/// picture, and where in it each is when the camera says.
+fn thermal_range(
+    said: crate::camera_tracking::RangeSaid,
+    from: (&str, u8, u64),
+    out: &mut Produced,
+) {
+    let none = Unit::None;
+    let celsius = Unit::DegreeCelsius;
+    let (min, max) = (said.min_c, said.max_c);
+    if min.is_finite() {
+        out.item(
+            "camera.thermal_min_degc",
+            "Thermal coldest",
+            celsius,
+            min.into(),
+            from,
+        );
+    }
+    if max.is_finite() {
+        out.item(
+            "camera.thermal_max_degc",
+            "Thermal warmest",
+            celsius,
+            max.into(),
+            from,
+        );
+    }
+    for (which, at) in [("min", said.min_at), ("max", said.max_at)] {
+        let Some((x, y)) = at else { continue };
+        let name = if which == "min" { "coldest" } else { "warmest" };
+        out.item(
+            &format!("camera.thermal_{which}_x"),
+            &format!("Thermal {name} across"),
+            none,
+            x.into(),
+            from,
+        );
+        out.item(
+            &format!("camera.thermal_{which}_y"),
+            &format!("Thermal {name} down"),
+            none,
+            y.into(),
+            from,
+        );
     }
 }
 
@@ -1984,13 +2165,36 @@ mod tests {
                 "{key}: {got:?}"
             );
         };
-        let nose = produced(&Message::GimbalAttitude { flags: 128, q });
+        // The dialect's values: `YAW_IN_VEHICLE_FRAME` is 32 and
+        // `YAW_IN_EARTH_FRAME` is 64.
+        let nose = produced(&Message::GimbalAttitude { flags: 32, q });
         near(&nose, "gimbal.pitch_deg", -30.0);
         near(&nose, "gimbal.yaw_deg", 45.0);
         assert!(!nose.iter().any(|(k, _)| k == "gimbal.heading_deg"));
-        let north = produced(&Message::GimbalAttitude { flags: 256, q });
+        let north = produced(&Message::GimbalAttitude { flags: 64, q });
         near(&north, "gimbal.heading_deg", 45.0);
         assert!(!north.iter().any(|(k, _)| k == "gimbal.yaw_deg"));
+        // What ArduPilot's gimbal says while it holds its yaw to north and
+        // reports it from the nose (S403, on real ArduCopter): the frame it
+        // names wins over the lock.
+        let held = produced(&Message::GimbalAttitude {
+            flags: 4 | 8 | 16 | 32,
+            q,
+        });
+        near(&held, "gimbal.yaw_deg", 45.0);
+        assert!(!held.iter().any(|(k, _)| k == "gimbal.heading_deg"));
+        // 128 (it accepts a yaw from north) and 256 (only RC moves it) name
+        // no frame.
+        near(
+            &produced(&Message::GimbalAttitude { flags: 128, q }),
+            "gimbal.yaw_deg",
+            45.0,
+        );
+        near(
+            &produced(&Message::GimbalAttitude { flags: 256 | 16, q }),
+            "gimbal.heading_deg",
+            45.0,
+        );
         // Older flags: north only while the yaw is locked there.
         near(
             &produced(&Message::GimbalAttitude { flags: 16, q }),
@@ -2006,7 +2210,7 @@ mod tests {
         let unknown = [f32::NAN; 4];
         assert!(
             produced(&Message::GimbalAttitude {
-                flags: 128,
+                flags: 32,
                 q: unknown
             })
             .is_empty()

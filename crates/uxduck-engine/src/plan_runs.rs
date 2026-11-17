@@ -420,6 +420,10 @@ impl Engine {
                 wipe: true,
                 with_mission: false,
                 traffic: false,
+                camera: false,
+                gimbal: false,
+                ardupilot_gimbal: None,
+                payload_profile: None,
                 name: Some(vehicle_name.clone()),
                 forward: None,
             };
