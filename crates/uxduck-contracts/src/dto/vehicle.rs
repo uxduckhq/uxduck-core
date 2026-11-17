@@ -377,6 +377,76 @@ pub struct VehicleUseConnectionParams {
     pub link_id: String,
 }
 
+/// `vehicle/connectionHistory`: how a vehicle's connections have done.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnectionHistoryParams {
+    /// The vehicle, by id or an earlier alias.
+    pub id: String,
+    /// Only samples after this time, the daemon's clock in Unix
+    /// microseconds. Without it, every sample kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub after_us: Option<u64>,
+}
+
+/// `vehicle/connectionHistory`'s result (ADR-0004 2026-11-16): each of a
+/// vehicle's connections a second at a time, oldest first, kept in memory
+/// for `keptS` while UXDuck runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VehicleConnectionHistory {
+    pub vehicle_id: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub now_us: u64,
+    /// How far back samples go: the last 30 minutes.
+    pub kept_s: u32,
+    pub connections: Vec<ConnectionHistory>,
+}
+
+/// One connection's samples, by its link id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionHistory {
+    pub link_id: String,
+    pub samples: Vec<ConnectionSample>,
+}
+
+/// One second of a connection. A value it did not have then is absent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionSample {
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub time_us: u64,
+    /// It carried the vehicle's commands, or its telemetry while none
+    /// could carry commands.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_use: bool,
+    /// MAVLink's round trip on it, the median of the last 5 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_trip_ms: Option<f64>,
+    /// The share of the vehicle's messages lost on it over the last 10 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_percent: Option<f64>,
+    /// Since the vehicle was last heard on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub age_ms: Option<u64>,
+    /// What the vehicle's open cameras received over it, in bits a second:
+    /// 0 while a camera with an address on it plays on another. Absent
+    /// when no open camera has an address on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub camera_bps: Option<u64>,
+    /// Its telemetry radio's signal (`RADIO_STATUS`), as a share of the
+    /// radio's own scale, while the radio reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rssi_percent: Option<f64>,
+    /// The signal at the radio on the other end, the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_rssi_percent: Option<f64>,
+}
+
 /// Discovered connections only. Configuring a link is never vehicle evidence.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

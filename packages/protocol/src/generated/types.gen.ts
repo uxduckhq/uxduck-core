@@ -2491,6 +2491,9 @@ export type ClientRequest = {
     method: 'vehicle/useConnection';
     params: VehicleUseConnectionParams;
 } | {
+    method: 'vehicle/connectionHistory';
+    params: VehicleConnectionHistoryParams;
+} | {
     method: 'link/add';
     params: LinkAddParams;
 } | {
@@ -4188,6 +4191,53 @@ export type ConnectedModel = {
 };
 
 export type ConnectionAction = 'refresh' | 'connect' | 'disconnect';
+
+/**
+ * One connection's samples, by its link id.
+ */
+export type ConnectionHistory = {
+    linkId: string;
+    samples: Array<ConnectionSample>;
+};
+
+/**
+ * One second of a connection. A value it did not have then is absent.
+ */
+export type ConnectionSample = {
+    /**
+     * Since the vehicle was last heard on it.
+     */
+    ageMs?: number | null;
+    /**
+     * What the vehicle's open cameras received over it, in bits a second:
+     * 0 while a camera with an address on it plays on another. Absent
+     * when no open camera has an address on it.
+     */
+    cameraBps?: number | null;
+    /**
+     * It carried the vehicle's commands, or its telemetry while none
+     * could carry commands.
+     */
+    inUse?: boolean;
+    /**
+     * The share of the vehicle's messages lost on it over the last 10 s.
+     */
+    lossPercent?: number | null;
+    /**
+     * The signal at the radio on the other end, the same way.
+     */
+    remoteRssiPercent?: number | null;
+    /**
+     * MAVLink's round trip on it, the median of the last 5 s.
+     */
+    roundTripMs?: number | null;
+    /**
+     * Its telemetry radio's signal (`RADIO_STATUS`), as a share of the
+     * radio's own scale, while the radio reports it.
+     */
+    rssiPercent?: number | null;
+    timeUs: number;
+};
 
 export type ConnectionStatus = 'unavailable' | 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -17360,6 +17410,36 @@ export type VehicleColour = 'blue' | 'pink' | 'teal' | 'purple' | 'lilac' | 'orc
  */
 export type VehicleColourParams = {
     colour: VehicleColour;
+    /**
+     * The vehicle, by id or an earlier alias.
+     */
+    id: string;
+};
+
+/**
+ * `vehicle/connectionHistory`'s result (ADR-0004 2026-11-16): each of a
+ * vehicle's connections a second at a time, oldest first, kept in memory
+ * for `keptS` while UXDuck runs.
+ */
+export type VehicleConnectionHistory = {
+    connections: Array<ConnectionHistory>;
+    /**
+     * How far back samples go: the last 30 minutes.
+     */
+    keptS: number;
+    nowUs: number;
+    vehicleId: string;
+};
+
+/**
+ * `vehicle/connectionHistory`: how a vehicle's connections have done.
+ */
+export type VehicleConnectionHistoryParams = {
+    /**
+     * Only samples after this time, the daemon's clock in Unix
+     * microseconds. Without it, every sample kept.
+     */
+    afterUs?: number | null;
     /**
      * The vehicle, by id or an earlier alias.
      */

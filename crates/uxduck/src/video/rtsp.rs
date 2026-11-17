@@ -1217,19 +1217,24 @@ async fn probe(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Wait for a preferred address to answer twice. Playback continues during
-/// these small control-only probes. The delay also limits flapping when a
-/// server answers DESCRIBE but its video still cannot play. `next` hears
-/// how long until each round of probes.
-async fn preferred(urls: &[String], next: impl Fn(Duration)) -> usize {
-    next(Duration::from_secs(30));
+/// Wait for a preferred address, one of those at the places `to`, to
+/// answer twice. Playback continues during these small control-only probes.
+/// The delay also limits flapping when a server answers DESCRIBE but its
+/// video still cannot play. `next` hears how long until each round of
+/// probes, or, with nothing to go back to on its own, that there is none.
+async fn preferred(urls: &[String], to: Vec<usize>, next: impl Fn(Option<Duration>)) -> usize {
+    if to.is_empty() {
+        next(None);
+        return std::future::pending().await;
+    }
+    next(Some(Duration::from_secs(30)));
     tokio::time::sleep(Duration::from_secs(30)).await;
     let mut previous = None;
     loop {
         let mut healthy = None;
-        for (index, url) in urls.iter().enumerate() {
+        for &index in &to {
             if matches!(
-                tokio::time::timeout(SILENT_FOR, probe(url)).await,
+                tokio::time::timeout(SILENT_FOR, probe(&urls[index])).await,
                 Ok(Ok(()))
             ) {
                 healthy = Some(index);
@@ -1240,7 +1245,7 @@ async fn preferred(urls: &[String], next: impl Fn(Duration)) -> usize {
             return healthy.unwrap_or(0);
         }
         previous = healthy;
-        next(Duration::from_secs(15));
+        next(Some(Duration::from_secs(15)));
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
@@ -1252,6 +1257,7 @@ pub struct Worker {
     pub task: tokio::task::JoinHandle<()>,
     gate: Arc<tokio::sync::Mutex<()>>,
     steer: tokio::sync::watch::Sender<Option<usize>>,
+    may_return: tokio::sync::watch::Sender<Option<Vec<usize>>>,
 }
 
 impl Worker {
@@ -1263,6 +1269,12 @@ impl Worker {
     /// (ADR-0057 D10). Only the latest move counts.
     pub fn steer(&self, index: usize) {
         self.steer.send_replace(Some(index));
+    }
+
+    /// The earlier addresses, by place, it may go back to on its own
+    /// (ADR-0057 D10, amended 2026-11-16). Only the latest counts.
+    pub fn may_return(&self, to: &[usize]) {
+        self.may_return.send_replace(Some(to.to_vec()));
     }
 }
 
@@ -1297,6 +1309,7 @@ pub fn spawn(
     );
     let held = gate.clone();
     let (steer, mut steered) = tokio::sync::watch::channel(None);
+    let (may_return, mut allowed) = tokio::sync::watch::channel(None::<Vec<usize>>);
     let task = runtime.spawn(async move {
         let _session = held.lock().await;
         if urls.is_empty() {
@@ -1329,11 +1342,19 @@ pub fn spawn(
             let outcome = {
                 let playing = play(&source_id, url, &hub, &engine, &mut connection_log, epoch);
                 tokio::pin!(playing);
-                let recovered = preferred(&urls[..current], |wait| {
+                let next = |wait: Option<Duration>| {
                     let id = source_id.clone();
-                    let in_us = u64::try_from(wait.as_micros()).unwrap_or(u64::MAX);
+                    let in_us = wait.map(|w| u64::try_from(w.as_micros()).unwrap_or(u64::MAX));
                     engine.post(move |e| e.rtsp_event(&id, epoch, |e| e.rtsp_next_check(&id, in_us)));
-                });
+                };
+                let earlier = |allowed: &tokio::sync::watch::Receiver<Option<Vec<usize>>>| -> Vec<usize> {
+                    allowed.borrow().as_ref().map_or_else(
+                        || (0..current).collect(),
+                        |to| to.iter().copied().filter(|index| *index < current).collect(),
+                    )
+                };
+                let mut returning = earlier(&allowed);
+                let recovered = preferred(&urls, returning.clone(), &next);
                 tokio::pin!(recovered);
                 // A return to the first address waits for one DESCRIBE, and
                 // the current address keeps playing meanwhile.
@@ -1363,6 +1384,13 @@ pub fn spawn(
                             probing = None;
                             if matches!(answered, Ok(Ok(()))) {
                                 break Move::Steered(0, AddressReason::ReturnedWithVehicle);
+                            }
+                        }
+                        Ok(()) = allowed.changed() => {
+                            let now = earlier(&allowed);
+                            if now != returning {
+                                returning = now;
+                                recovered.set(preferred(&urls, returning.clone(), &next));
                             }
                         }
                         result = &mut playing => break Move::Failed(result.err().unwrap_or_default()),
@@ -1415,7 +1443,12 @@ pub fn spawn(
             }
         }
     });
-    Worker { task, gate, steer }
+    Worker {
+        task,
+        gate,
+        steer,
+        may_return,
+    }
 }
 
 #[cfg(test)]
@@ -1494,6 +1527,23 @@ mod tests {
             "{output}"
         );
         assert!(lines[6].contains("source=other"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn with_nothing_to_go_back_to_a_camera_waits_for_its_vehicle() {
+        let told = std::sync::Mutex::new(Vec::new());
+        let urls = vec!["rtsp://127.0.0.1:9/radio".to_owned()];
+        let waited = tokio::time::timeout(
+            Duration::from_millis(100),
+            preferred(&urls, Vec::new(), |next| told.lock().unwrap().push(next)),
+        )
+        .await;
+        assert!(waited.is_err(), "it never goes back on its own");
+        assert_eq!(
+            *told.lock().unwrap(),
+            [None],
+            "and says there is no next check, not one in 30 s"
+        );
     }
 
     #[test]

@@ -605,6 +605,9 @@ fn check(name: &str) {
         ("result", "tuning_response") => {
             round_trip::<uxduck_contracts::dto::tuning::TuningResponse>(name, &json);
         }
+        ("result", "vehicle_connectionHistory") => {
+            round_trip::<uxduck_contracts::dto::vehicle::VehicleConnectionHistory>(name, &json);
+        }
         ("result", "tuning_live") => {
             round_trip::<uxduck_contracts::dto::tuning::TuningLiveResult>(name, &json);
         }

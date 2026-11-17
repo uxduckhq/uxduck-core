@@ -149,6 +149,12 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         }
     }
 
+    fn rtsp_may_return(&mut self, source_id: &str, to: &[usize]) {
+        if let Some(worker) = self.rtsp.get(source_id) {
+            worker.may_return(to);
+        }
+    }
+
     fn devices(&mut self) -> uxduck_contracts::dto::video::VideoDevicesResult {
         self.devices.list(&self.runtime)
     }

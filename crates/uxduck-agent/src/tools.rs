@@ -245,6 +245,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     // The graph's samples, 25 a second, are more than a tool answer holds;
     // `tuning/state` has their summaries (S333).
     "tuning/response",
+    // A connection's last 30 minutes a second at a time are more than a tool
+    // answer holds. `vehicle/get` has how each connection is doing now.
+    "vehicle/connectionHistory",
     // Only the renderer can observe scenery contact; agents can stop/restart simulations.
     "sim/crash",
     // Companion computers are reached over SSH with the person's own keys

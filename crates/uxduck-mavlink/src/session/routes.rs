@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use uxduck_core::domain::link::{Link, LinkPolicy};
 use uxduck_core::domain::vehicle::{RouteHold, VehicleConnections, VehicleRoute};
 
+use crate::link_health::Uplink;
+
 type Address = (String, String, u8);
 const RECOVERED_US: u64 = 10_000_000;
 
@@ -22,6 +24,7 @@ pub(super) struct Routing {
     send_failed_peers: BTreeSet<(String, String)>,
     healthy_since: BTreeMap<Address, u64>,
     health: BTreeMap<Address, uxduck_core::domain::telemetry::LinkHealth>,
+    uplink: BTreeMap<Address, Uplink>,
     published: BTreeMap<String, Observation>,
     epochs: BTreeMap<String, u64>,
     reasons: BTreeMap<String, String>,
@@ -151,6 +154,29 @@ impl Session {
     ) {
         self.routing.health.insert(address, health);
     }
+    /// Whether what is sent on a route arrives, from the link health
+    /// tracker once a second (ADR-0004 2026-11-16).
+    pub fn route_uplink(&mut self, address: Address, uplink: Uplink) {
+        self.routing.uplink.insert(address, uplink);
+    }
+
+    /// A route the vehicle is still heard on whose uplink has gone silent
+    /// while another of its routes answers: what is sent there does not
+    /// arrive, so it carries no commands. With no other route answering, a
+    /// silent ping alone does not cost a vehicle the route it has.
+    fn one_way(&self, key: &Address) -> bool {
+        if self.routing.uplink.get(key) != Some(&Uplink::Silent) {
+            return false;
+        }
+        let Some(id) = self.vehicles.get(key).map(|v| &v.observation.id) else {
+            return false;
+        };
+        self.vehicles.iter().any(|(other, v)| {
+            other != key
+                && v.observation.id == *id
+                && self.routing.uplink.get(other) == Some(&Uplink::Answering)
+        })
+    }
     #[must_use]
     pub fn telemetry_address(&self, id: &str) -> Option<&Address> {
         self.routing.telemetry.get(id)
@@ -213,6 +239,7 @@ impl Session {
     }
     fn writable(&self, key: &Address) -> bool {
         !self.send_failed(key)
+            && !self.one_way(key)
             && self
                 .routing
                 .links
@@ -317,10 +344,14 @@ impl Session {
         self.routing
             .telemetry
             .retain(|id, _| grouped.contains_key(id));
+        let vehicles = &self.vehicles;
+        self.routing
+            .uplink
+            .retain(|key, _| vehicles.contains_key(key));
         for (id, mut keys) in grouped {
             keys.sort_by_key(|key| (self.priority(&key.0), key.1.clone(), key.2));
             for key in &keys {
-                if self.reachable(key, now_us) && !self.send_failed(key) {
+                if self.reachable(key, now_us) && !self.send_failed(key) && !self.one_way(key) {
                     self.routing
                         .healthy_since
                         .entry(key.clone())
@@ -800,6 +831,56 @@ mod tests {
                 .command_available
         );
         assert!(s.send_to(&id, |_, _| vec![1]).is_empty());
+    }
+
+    #[test]
+    fn a_route_heard_but_not_answering_carries_no_commands_while_another_answers() {
+        let mut s = Session::default();
+        s.set_connection_order(vec!["radio".into(), "4g".into()]);
+        for id in ["radio", "4g"] {
+            s.configure_link(&link(id, true));
+        }
+        let mut fake = FakeVehicle::new(1, 100);
+        let id = discover(&mut s, &mut fake, "radio", 1);
+        discover(&mut s, &mut fake, "4g", 1);
+        let address = |link: &str| -> Address { (link.into(), "peer".into(), 1) };
+        assert_eq!(selected(&s, &id).as_deref(), Some("radio"));
+        s.route_uplink(address("radio"), Uplink::Silent);
+        s.route_uplink(address("4g"), Uplink::Unknown);
+        s.tick(2);
+        assert_eq!(
+            selected(&s, &id).as_deref(),
+            Some("radio"),
+            "with nothing else answering, a silent ping keeps the route"
+        );
+        s.route_uplink(address("4g"), Uplink::Answering);
+        s.tick(3);
+        assert_eq!(selected(&s, &id).as_deref(), Some("4g"));
+        let view = s.routing.published[&id].connections.as_ref().unwrap();
+        let radio = view.routes.iter().find(|r| r.link_id == "radio").unwrap();
+        assert!(radio.reachable && !radio.writable);
+        assert_eq!(radio.reason, "Receiving only");
+        s.use_route(&id, "radio", 4);
+        assert_eq!(
+            selected(&s, &id).as_deref(),
+            Some("4g"),
+            "a switch by hand to it is refused"
+        );
+        s.route_uplink(address("radio"), Uplink::Answering);
+        for second in 5..=17 {
+            let now = second * 1_000_000;
+            for l in ["4g", "radio"] {
+                s.ingest(l, "peer", &fake.heartbeat(), now);
+            }
+            if second < 15 {
+                assert_eq!(selected(&s, &id).as_deref(), Some("4g"), "at {second} s");
+            }
+        }
+        assert_eq!(
+            selected(&s, &id).as_deref(),
+            Some("radio"),
+            "back once it has answered for ten seconds"
+        );
     }
 
     #[test]

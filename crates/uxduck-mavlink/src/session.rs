@@ -988,6 +988,9 @@ pub struct Session {
     paused: std::collections::BTreeSet<String>,
     /// Terrain answers waiting to go, paced per vehicle (S118).
     terrain: crate::terrain::Outbox,
+    /// Each link's telemetry radio as it last said in `RADIO_STATUS`: its
+    /// signal, the remote radio's, and when.
+    radios: BTreeMap<String, (u8, u8, u64)>,
     /// `TERRAIN_CHECK`s waiting for their report (S119), by vehicle: the
     /// point and when it was asked.
     terrain_checks: BTreeMap<String, Vec<(i32, i32, u64)>>,
@@ -1003,6 +1006,11 @@ pub struct Session {
 /// which comes once a second.
 const STATION_US: u64 = 10_000_000;
 
+/// A telemetry radio reports `RADIO_STATUS` about once a second. One silent
+/// this long, the time after which a vehicle not heard is not responding,
+/// says nothing of the link now.
+const RADIO_SILENT_US: u64 = 3_000_000;
+
 impl Session {
     #[must_use]
     pub fn new(config: Config) -> Self {
@@ -1011,6 +1019,23 @@ impl Session {
             producers: core_producers().into_iter().map(Into::into).collect(),
             ..Self::default()
         }
+    }
+
+    /// The signal of a link's telemetry radio and of the radio at the other
+    /// end, each as a share of the radio's own scale (0 to 254), while it
+    /// reports them (`RADIO_STATUS`, S72). A radio that says 255 does not
+    /// know, and one silent for [`RADIO_SILENT_US`] says nothing now.
+    #[must_use]
+    pub fn radio_signal(&self, link_id: &str, now_us: u64) -> (Option<f64>, Option<f64>) {
+        let Some(&(rssi, remrssi, _)) = self
+            .radios
+            .get(link_id)
+            .filter(|(_, _, at_us)| now_us.saturating_sub(*at_us) < RADIO_SILENT_US)
+        else {
+            return (None, None);
+        };
+        let percent = |v: u8| (v != u8::MAX).then(|| f64::from(v) * 100.0 / 254.0);
+        (percent(rssi), percent(remrssi))
     }
 
     /// The system id to send as from now on, and to take replies for.
@@ -1175,8 +1200,16 @@ impl Session {
                     ..Stream::default()
                 };
             }
-            if let Message::RadioStatus { txbuf, .. } = decoded.message {
+            if let Message::RadioStatus {
+                txbuf,
+                rssi,
+                remrssi,
+                ..
+            } = decoded.message
+            {
                 self.terrain.radio_status(link_id, txbuf, received_us);
+                self.radios
+                    .insert(link_id.to_owned(), (rssi, remrssi, received_us));
             }
             let protocol = matches!(
                 decoded.message,
@@ -5521,6 +5554,41 @@ mod tests {
             count += sent(session.tick(tick * 100_000));
         }
         assert!(count <= 7, "{count} in a second: half of twelve");
+    }
+
+    #[test]
+    fn a_links_radio_signal_is_its_last_radio_status_while_the_radio_reports() {
+        let mut session = Session::new(Config::default());
+        assert_eq!(session.radio_signal("l1", 0), (None, None));
+        let status = |rssi, remrssi| {
+            crate::sim::frame(
+                51,
+                68,
+                0,
+                &mavio::dialects::ardupilotmega::messages::RadioStatus {
+                    rssi,
+                    remrssi,
+                    ..Default::default()
+                },
+            )
+        };
+        session.ingest("l1", PEER, &status(127, 254), 1_000_000);
+        assert_eq!(
+            session.radio_signal("l1", 1_500_000),
+            (Some(50.0), Some(100.0))
+        );
+        assert_eq!(session.radio_signal("l2", 1_500_000), (None, None));
+        session.ingest("l1", PEER, &status(254, u8::MAX), 2_000_000);
+        assert_eq!(
+            session.radio_signal("l1", 2_000_000),
+            (Some(100.0), None),
+            "255 is a radio that does not know"
+        );
+        assert_eq!(
+            session.radio_signal("l1", 5_000_000),
+            (None, None),
+            "silent for 3 s, it says nothing now"
+        );
     }
 
     #[test]

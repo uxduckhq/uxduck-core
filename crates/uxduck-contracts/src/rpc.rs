@@ -318,6 +318,14 @@ pub enum ClientRequest {
     /// now. Needs `control`. Result: `Vehicle`, before the switch.
     #[serde(rename = "vehicle/useConnection")]
     VehicleUseConnection(crate::dto::vehicle::VehicleUseConnectionParams),
+    /// How each of a vehicle's connections has done, a second at a time
+    /// for the last 30 minutes, kept in memory while UXDuck runs (ADR-0004
+    /// 2026-11-16): round trip, loss, since last heard, what its open
+    /// cameras received over it and its telemetry radio's signal. With
+    /// `afterUs`, only the samples since. Needs `read`. Result:
+    /// `VehicleConnectionHistory`.
+    #[serde(rename = "vehicle/connectionHistory")]
+    VehicleConnectionHistory(crate::dto::vehicle::VehicleConnectionHistoryParams),
     /// Adds a link and opens it, for a vehicle with `forVehicle`. Needs
     /// `config`. Result: `Link`.
     #[serde(rename = "link/add")]
@@ -2139,7 +2147,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 391] = [
+    pub const METHODS: [&'static str; 392] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2190,6 +2198,7 @@ impl ClientRequest {
         "vehicle/hide",
         "vehicle/forgetConnection",
         "vehicle/useConnection",
+        "vehicle/connectionHistory",
         "link/add",
         "link/remove",
         "telemetry/subscribe",

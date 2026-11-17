@@ -152,6 +152,10 @@ pub fn handle(
             require(Capability::Control)?;
             use_connection(engine, &params)
         }
+        ClientRequest::VehicleConnectionHistory(params) => {
+            require(Capability::Read)?;
+            to_value(&engine.connection_history(found(engine, &params.id)?, params.after_us))
+        }
         ClientRequest::LinkAdd(params) => {
             require(Capability::Config)?;
             add_link(engine, connection, params)

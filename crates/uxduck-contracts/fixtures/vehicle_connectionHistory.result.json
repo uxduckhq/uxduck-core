@@ -1,0 +1,48 @@
+{
+  "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+  "nowUs": 1763290002000000,
+  "keptS": 1800,
+  "connections": [
+    {
+      "linkId": "radio",
+      "samples": [
+        {
+          "timeUs": 1763290001000000,
+          "inUse": true,
+          "roundTripMs": 38.5,
+          "lossPercent": 0.4,
+          "ageMs": 12,
+          "cameraBps": 1480000,
+          "rssiPercent": 71.6,
+          "remoteRssiPercent": 66.9
+        },
+        {
+          "timeUs": 1763290002000000,
+          "lossPercent": 12.5,
+          "ageMs": 1900,
+          "cameraBps": 0
+        }
+      ]
+    },
+    {
+      "linkId": "internet",
+      "samples": [
+        {
+          "timeUs": 1763290001000000,
+          "roundTripMs": 412.3,
+          "lossPercent": 0.2,
+          "ageMs": 40,
+          "cameraBps": 0
+        },
+        {
+          "timeUs": 1763290002000000,
+          "inUse": true,
+          "roundTripMs": 398.6,
+          "lossPercent": 0.1,
+          "ageMs": 35,
+          "cameraBps": 1510000
+        }
+      ]
+    }
+  ]
+}

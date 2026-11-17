@@ -808,14 +808,30 @@ impl Plane {
                 (!addresses.values().any(|known| known == id)).then(|| (id.clone(), last))
             })
             .collect();
+        let mut readings = Vec::new();
+        let wall_us = SystemClock.now_us();
         for (address, id) in &addresses {
             let health = self.health.report(address, now_us);
             self.session.route_health(address.clone(), health.clone());
+            self.session
+                .route_uplink(address.clone(), self.health.uplink(address, now_us));
             if self.session.telemetry_address(id) == Some(address) {
-                reports.push((id.clone(), health));
+                reports.push((id.clone(), health.clone()));
             }
+            readings.push(uxduck_engine::connection_history::ConnectionReading {
+                vehicle_id: id.clone(),
+                link_id: address.0.clone(),
+                health,
+                radio: self.session.radio_signal(&address.0, wall_us),
+            });
         }
         self.reported = addresses;
+        if !readings.is_empty() {
+            let _ = self
+                .engine
+                .run(move |e| e.connections_sampled(readings))
+                .await;
+        }
         if reports.is_empty() {
             return;
         }

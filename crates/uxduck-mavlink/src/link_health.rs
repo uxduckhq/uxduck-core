@@ -25,6 +25,10 @@
 //!   fills the gap it left. A sender silent for [`SILENCE_US`] starts again
 //!   without a gap: the silence is the telemetry's age, not a loss.
 //! - **Age**: since anything was last heard from the vehicle's address.
+//! - **Uplink**: whether what UXDuck sends still arrives ([`Tracker::uplink`]).
+//!   A link that has answered `TIMESYNC` and is asked for
+//!   [`UPLINK_SILENT_US`] with no reply is silent one way, even while the
+//!   vehicle is still heard on it.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -46,12 +50,29 @@ pub const OUTSTANDING_US: u64 = 5_000_000;
 pub const OUTSTANDING: usize = 8;
 /// A sender silent this long starts its sequence again without a gap.
 pub const SILENCE_US: u64 = 3_000_000;
+/// How long a link that has answered `TIMESYNC` may go on being asked with
+/// no reply before its uplink is silent: the three seconds after which a
+/// vehicle whose heartbeat stops is not responding, applied the other way.
+pub const UPLINK_SILENT_US: u64 = 3_000_000;
 /// How far behind the newest a frame may arrive and still fill its gap.
 pub const REORDER: u8 = 64;
 /// The message id of `TIMESYNC`.
 pub const TIMESYNC: u32 = 111;
 
 const BUCKET_US: u64 = 1_000_000;
+
+/// Whether what UXDuck sends to an address still arrives there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Uplink {
+    /// Not known: it is not asked, has never answered `TIMESYNC`, or was
+    /// asked again too recently to tell.
+    Unknown,
+    /// A reply came in the last [`UPLINK_SILENT_US`].
+    Answering,
+    /// It has answered before, and has been asked for
+    /// [`UPLINK_SILENT_US`] with no reply.
+    Silent,
+}
 
 #[derive(Debug, Default)]
 pub struct Tracker {
@@ -71,6 +92,8 @@ struct Health {
     round_trips: VecDeque<(u64, u64)>,
     /// When asking began, since it was last not asked.
     asked_since_us: Option<u64>,
+    /// When the last reply to one of UXDuck's requests came.
+    last_reply_us: Option<u64>,
     /// Why it is not asked now.
     not_asked: Option<RoundTripMissing>,
 }
@@ -198,6 +221,30 @@ impl Tracker {
         }
     }
 
+    /// Whether what UXDuck sends to `address` still arrives (ADR-0004
+    /// 2026-11-16). A vehicle that never answers `TIMESYNC` says nothing
+    /// about its uplink, so it stays `Unknown` rather than silent.
+    #[must_use]
+    pub fn uplink(&self, address: &Address, now_us: u64) -> Uplink {
+        let Some(health) = self.addresses.get(address) else {
+            return Uplink::Unknown;
+        };
+        let (Some(replied), Some(asked), None) = (
+            health.last_reply_us,
+            health.asked_since_us,
+            health.not_asked,
+        ) else {
+            return Uplink::Unknown;
+        };
+        if now_us.saturating_sub(replied) < UPLINK_SILENT_US {
+            Uplink::Answering
+        } else if now_us.saturating_sub(replied.max(asked)) >= UPLINK_SILENT_US {
+            Uplink::Silent
+        } else {
+            Uplink::Unknown
+        }
+    }
+
     /// Forgets every address `keep` does not keep, such as those of
     /// vehicles no longer known, with how each was last: nothing goes there
     /// now, and only the age of what was heard remains.
@@ -304,6 +351,7 @@ impl Health {
         if let Some((_, sent_us)) = self.outstanding.remove(at) {
             self.round_trips
                 .push_back((now_us, now_us.saturating_sub(sent_us)));
+            self.last_reply_us = Some(now_us);
         }
     }
 
@@ -437,6 +485,41 @@ mod tests {
             "its own request is unanswered"
         );
         assert_eq!(internet.round_trip_missing, Some(RoundTripMissing::Waiting));
+    }
+
+    #[test]
+    fn an_uplink_that_stops_answering_is_silent_and_one_that_never_answered_is_unknown() {
+        let mut tracker = Tracker::default();
+        let a = address();
+        let quiet: Address = ("l2".into(), "10.0.0.1:15010".into(), 1);
+        for second in 1..=5 {
+            tracker.asked(&quiet, second * 1_000_000);
+        }
+        assert_eq!(
+            tracker.uplink(&quiet, 5_000_000),
+            Uplink::Unknown,
+            "a vehicle that never answers says nothing about its uplink"
+        );
+        let ts1 = tracker.asked(&a, 1_000_000);
+        tracker.heard(&a, &reply(ts1, 1, GCS), GCS, 1_050_000);
+        assert_eq!(tracker.uplink(&a, 1_050_000), Uplink::Answering);
+        for second in 2..=4 {
+            tracker.asked(&a, second * 1_000_000);
+        }
+        assert_eq!(tracker.uplink(&a, 4_000_000), Uplink::Answering);
+        assert_eq!(tracker.uplink(&a, 4_050_000), Uplink::Silent);
+        tracker.not_asked(&a, RoundTripMissing::Unsupervised);
+        assert_eq!(tracker.uplink(&a, 5_000_000), Uplink::Unknown);
+        tracker.asked(&a, 6_000_000);
+        assert_eq!(
+            tracker.uplink(&a, 8_000_000),
+            Uplink::Unknown,
+            "asked again: three seconds pass before it is judged"
+        );
+        assert_eq!(tracker.uplink(&a, 9_000_000), Uplink::Silent);
+        let ts1 = tracker.asked(&a, 9_000_000);
+        tracker.heard(&a, &reply(ts1, 9, GCS), GCS, 9_400_000);
+        assert_eq!(tracker.uplink(&a, 9_400_000), Uplink::Answering);
     }
 
     #[test]

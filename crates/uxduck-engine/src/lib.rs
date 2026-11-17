@@ -26,6 +26,7 @@ mod checklist;
 mod checklist_runs;
 pub mod commands;
 pub mod companions;
+pub mod connection_history;
 mod controller_cleanup;
 pub mod controller_input;
 pub mod controllers;
@@ -527,6 +528,9 @@ pub struct Engine {
     /// How each vehicle's link is doing, by vehicle id, and when the data
     /// plane said so (S261); not journaled.
     link_health: BTreeMap<String, (uxduck_core::domain::telemetry::LinkHealth, u64)>,
+    /// Each vehicle connection's last 30 minutes, a second at a time
+    /// (ADR-0004 2026-11-16); not journaled.
+    connection_history: connection_history::Histories,
     /// Each battery's fault and `ArduPilot`'s word on its battery failsafe,
     /// by vehicle and battery (UXD-253).
     batteries: battery_alerts::Batteries,
@@ -688,6 +692,7 @@ impl Engine {
             tracers: BTreeSet::new(),
             telemetry: BTreeMap::new(),
             link_health: BTreeMap::new(),
+            connection_history: connection_history::Histories::default(),
             batteries: battery_alerts::Batteries::default(),
             computer_clocks: BTreeMap::new(),
             telemetry_history: telemetry_window::Window::default(),
