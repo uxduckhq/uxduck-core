@@ -872,9 +872,20 @@ impl Browser {
             Some(Fetching::Place(order)) => {
                 let result = result
                     .map_err(|error| {
-                        uxduck_engine::places::failed(
-                            error.strip_prefix("http:").and_then(|s| s.parse().ok()),
-                        )
+                        let mut parts = error.strip_prefix("http:").map(|s| s.splitn(3, ':'));
+                        let mut next = || parts.as_mut().and_then(Iterator::next);
+                        let (status, second, third) = (next(), next(), next());
+                        let (limit, retry) = match second {
+                            Some(s) if s.trim().parse::<u64>().is_ok() => (None, second),
+                            _ => (second, third),
+                        };
+                        match status.and_then(|s| s.parse().ok()) {
+                            Some(429) => uxduck_engine::places::too_many(
+                                retry.and_then(uxduck_engine::places::retry_after),
+                                limit.and_then(uxduck_engine::places::Limit::from_header),
+                            ),
+                            status => uxduck_engine::places::failed(status),
+                        }
                     })
                     .and_then(|bytes| uxduck_engine::places::response(&order.action, &bytes));
                 self.engine.place_lookup_done(&order.id, result);

@@ -56,6 +56,13 @@ async fn lookup(api: Option<&str>, order: &Order) -> Result<Value, ApiError> {
         .send()
         .await
         .map_err(|_| places::failed(None))?;
+    if result.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let header = |name| result.headers().get(name).and_then(|v| v.to_str().ok());
+        return Err(places::too_many(
+            header(reqwest::header::RETRY_AFTER.as_str()).and_then(places::retry_after),
+            header("x-uxduck-limit").and_then(places::Limit::from_header),
+        ));
+    }
     if !result.status().is_success() {
         return Err(places::failed(Some(result.status().as_u16())));
     }

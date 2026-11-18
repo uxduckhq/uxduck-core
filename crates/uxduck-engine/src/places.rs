@@ -207,14 +207,81 @@ impl Engine {
     }
 }
 
+/// Cloudflare's per-address window at the UXDuck API, the shortest wait a 429 asks for.
+const EDGE_PERIOD_S: u64 = 60;
+/// The longest a UXDuck API limit lasts: the shared Esri allowance renews on the first of
+/// each month, so a longer `Retry-After` is not believed.
+const LONGEST_WAIT_S: u64 = 31 * 86_400;
+
+/// A `Retry-After` in seconds, as the UXDuck API sends it with a 429.
+#[must_use]
+pub fn retry_after(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse()
+        .ok()
+        .filter(|s| (1..=LONGEST_WAIT_S).contains(s))
+}
+
+fn wait_words(seconds: u64) -> String {
+    if seconds <= 60 {
+        return "a minute".into();
+    }
+    let minutes = seconds.div_ceil(60);
+    if minutes < 90 {
+        return format!("{minutes} minutes");
+    }
+    let hours = seconds.div_ceil(3600);
+    if hours < 36 {
+        return format!("about {hours} hours");
+    }
+    format!("{} days", seconds.div_ceil(86_400))
+}
+
+/// The limit a 429 from the UXDuck API hit, as its `X-UXDuck-Limit` header names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// A client address's minute at Cloudflare.
+    Address,
+    /// The shared Esri allowance, for a day or a month.
+    Shared,
+}
+
+impl Limit {
+    /// An `X-UXDuck-Limit` value, or none for a value this build does not know.
+    #[must_use]
+    pub fn from_header(value: &str) -> Option<Self> {
+        match value.trim() {
+            "address" => Some(Self::Address),
+            "shared" => Some(Self::Shared),
+            _ => None,
+        }
+    }
+}
+
+/// A 429 from the UXDuck API, in the words the app shows, so the assistant reads the same.
+/// An older API names no limit, and then a wait past a minute means the shared allowance.
+#[must_use]
+pub fn too_many(retry_after_s: Option<u64>, limit: Option<Limit>) -> ApiError {
+    let limit = limit.unwrap_or(match retry_after_s {
+        Some(seconds) if seconds > EDGE_PERIOD_S => Limit::Shared,
+        _ => Limit::Address,
+    });
+    let message = match limit {
+        Limit::Shared => format!(
+            "UXDuck's shared place lookups from Esri are used up. Try again in {}, or enter coordinates.",
+            wait_words(retry_after_s.unwrap_or(EDGE_PERIOD_S))
+        ),
+        Limit::Address => "Too many place lookups from this network in the last minute. Try again in a minute, or enter coordinates.".into(),
+    };
+    ApiError::new(ErrorKind::Busy, message)
+}
+
 /// Map only the HTTP status; neither provider errors nor queried text enter logs.
 #[must_use]
 pub fn failed(status: Option<u16>) -> ApiError {
     match status {
-        Some(429) => ApiError::new(
-            ErrorKind::Busy,
-            "Too many place searches. Try again in a minute.",
-        ),
+        Some(429) => too_many(None, None),
         Some(404) => ApiError::new(
             ErrorKind::NotFound,
             "That place could not be located. Search again and choose another result.",
@@ -292,6 +359,7 @@ mod tests {
             assert!(response(&search, bytes).is_err());
         }
         assert_eq!(failed(Some(429)).kind(), ErrorKind::Busy);
+        assert_eq!(failed(Some(429)).message, too_many(None, None).message);
         assert_eq!(failed(Some(404)).kind(), ErrorKind::NotFound);
         assert_eq!(search.body(), json!({"q":"Queenstown","limit":5}));
         let locate = Action::Locate(PlaceLocateParams {
@@ -300,5 +368,27 @@ mod tests {
             near: None,
         });
         assert!(response(&locate, br#"{"place":{"name":"Nowhere","detail":"","latitudeDeg":91,"longitudeDeg":0},"attribution":"Powered by Esri"}"#).is_err());
+    }
+
+    #[test]
+    fn a_limit_says_when_to_try_again() {
+        let words = |retry: &str| too_many(retry_after(retry), None).message;
+        assert!(words("60").contains("in a minute"));
+        assert!(words("61").contains("in 2 minutes"));
+        assert!(words("18000").contains("in about 5 hours"));
+        assert!(words("1166400").contains("in 14 days"));
+        for unbelievable in ["0", "-5", "soon", "2678401"] {
+            assert_eq!(retry_after(unbelievable), None, "{unbelievable}");
+        }
+        assert_eq!(too_many(None, None).kind(), ErrorKind::Busy);
+        assert_eq!(
+            too_many(Some(30), Limit::from_header("shared")).message,
+            "UXDuck's shared place lookups from Esri are used up. Try again in a minute, or enter coordinates."
+        );
+        assert_eq!(
+            too_many(Some(464), Limit::from_header("address")).message,
+            "Too many place lookups from this network in the last minute. Try again in a minute, or enter coordinates."
+        );
+        assert_eq!(Limit::from_header("elsewhere"), None);
     }
 }
