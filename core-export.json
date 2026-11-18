@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "d5d60f59b9364e60b741ced64c269fbda0ffb6d4",
+  "sourceCommit": "2347bb5f26c9835ceeddeb245e28e0460d13c44f",
   "licenseReady": true,
   "files": [
     {
@@ -5756,7 +5756,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/flight.rs",
-      "sha256": "ba3039d48ecb52ea72a8dd3302c293e8527895187124dd3e372660e787049955",
+      "sha256": "24dc3ffa84f65f4fd32cfab0612dd02a4be3e82b361e68518c1ff6e280157c63",
       "executable": false
     },
     {
@@ -6491,7 +6491,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/flight_time.rs",
-      "sha256": "5b4a5988aa8a0faaf255278b37c265b4963da7d79ccbde154570e0a5845c040f",
+      "sha256": "e9ebce27d9ca35b05061f9433716ed16362bef612d0f3027f6590dec5fc74f4a",
       "executable": false
     },
     {
@@ -9021,7 +9021,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "c641862e1993131a4c0b2afd2c08f4c69647422e2b117e764ee99261587ac152",
+      "sha256": "aae717cce4e903f45e9038db3809e4e6286d16c7a45aa20dd353a7a73075c5b0",
       "executable": false
     },
     {

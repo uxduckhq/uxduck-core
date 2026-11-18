@@ -417,6 +417,26 @@ pub struct FlightListParams {
     /// Log folder, and totals over them (S379).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub under: Option<String>,
+    /// Only the entries armed at or after this time, such as the start of
+    /// a day, and totals over them (FB-226).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub armed_since_us: Option<u64>,
+    /// Only the entries armed before this time, and totals over them
+    /// (FB-226).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub armed_before_us: Option<u64>,
+    /// Only the entries armed for longer than this, arm to disarm, and
+    /// totals over them (FB-226). One still armed counts its time so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub longer_than_us: Option<u64>,
+    /// Only the entries armed for less time than this, arm to disarm, and
+    /// totals over them (FB-226). One still armed counts its time so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub shorter_than_us: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

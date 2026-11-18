@@ -549,6 +549,24 @@ impl Engine {
                     .any(|c| crate::offload::inside(folder, &c.path))
             });
         }
+        // When and how long (FB-226), over every entry, so each page and
+        // the totals hold only the entries that match.
+        flights.retain(|f| {
+            params.armed_since_us.is_none_or(|us| f.armed_at_us >= us)
+                && params.armed_before_us.is_none_or(|us| f.armed_at_us < us)
+        });
+        if params.longer_than_us.is_some() || params.shorter_than_us.is_some() {
+            let now = self.clock.now_us();
+            flights.retain(|f| {
+                let armed = if f.end == FlightEnd::Open {
+                    now.saturating_sub(f.armed_at_us)
+                } else {
+                    armed_for_us(f)
+                };
+                params.longer_than_us.is_none_or(|us| armed > us)
+                    && params.shorter_than_us.is_none_or(|us| armed < us)
+            });
+        }
         // Newest first, and the same order every time, so a page ends where
         // the next begins even when two flights armed together.
         flights.sort_by(|a, b| (b.armed_at_us, &b.id).cmp(&(a.armed_at_us, &a.id)));

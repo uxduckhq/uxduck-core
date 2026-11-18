@@ -7508,6 +7508,16 @@ export type FlightListOperator = {
  */
 export type FlightListParams = {
     /**
+     * Only the entries armed before this time, and totals over them
+     * (FB-226).
+     */
+    armedBeforeUs?: number | null;
+    /**
+     * Only the entries armed at or after this time, such as the start of
+     * a day, and totals over them (FB-226).
+     */
+    armedSinceUs?: number | null;
+    /**
      * The page after the one that gave this `older`.
      */
     before?: string | null;
@@ -7527,6 +7537,11 @@ export type FlightListParams = {
      */
     limit?: number | null;
     /**
+     * Only the entries armed for longer than this, arm to disarm, and
+     * totals over them (FB-226). One still armed counts its time so far.
+     */
+    longerThanUs?: number | null;
+    /**
      * Only the entries this operator acted on, and totals over them.
      */
     operatorId?: string | null;
@@ -7535,6 +7550,11 @@ export type FlightListParams = {
      * `place` (ADR-0062, S379), and totals over them.
      */
     place?: string | null;
+    /**
+     * Only the entries armed for less time than this, arm to disarm, and
+     * totals over them (FB-226). One still armed counts its time so far.
+     */
+    shorterThanUs?: number | null;
     /**
      * Also totals since this time, such as the start of the month where
      * the page is.
