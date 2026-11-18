@@ -259,6 +259,11 @@ async fn look(program: &Path, watcher: &Watcher, order: &LookOrder) -> Result<Lo
                     for jpeg in take_jpegs(&mut pending) {
                         bytes += jpeg.len() as u64;
                         jpegs.push(jpeg);
+                        // The frame that passes the room is the last one
+                        // counted, however many more one read brought.
+                        if bytes > room {
+                            break;
+                        }
                     }
                 }
                 _ => break,
@@ -522,6 +527,7 @@ mod tests {
     }
 
     /// A picture of `bytes`, more than a pipe holds.
+    #[cfg(unix)]
     fn large(timestamp_us: u64) -> Arc<uxduck_media::au::AccessUnit> {
         Arc::new(uxduck_media::au::AccessUnit {
             arrived: None,

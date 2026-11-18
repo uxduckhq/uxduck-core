@@ -262,7 +262,22 @@ fn the_install_waits_for_the_desktop_window_to_close() {
         .unwrap();
     std::fs::copy(String::from_utf8(sleep.stdout).unwrap().trim(), &window).unwrap();
     std::fs::set_permissions(&window, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut closing = Command::new(&window).arg("2").spawn().unwrap();
+    // A thread of another test that starts a program at this moment forks
+    // with this copy still open for writing. Until its child has started
+    // its own program, Linux refuses to run the copy as busy. That passes
+    // in milliseconds, so the start is tried again for a few seconds.
+    let began = std::time::Instant::now();
+    let mut closing = loop {
+        match Command::new(&window).arg("2").spawn() {
+            Err(busy)
+                if busy.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && began.elapsed() < std::time::Duration::from_secs(5) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            started => break started.unwrap(),
+        }
+    };
     let seen = data.path().join("window-at-install");
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then s=$(ps -p {} -o stat= 2>/dev/null); case \"$s\" in ''|Z*) echo closed;; *) echo open;; esac > '{}'; echo 'uxduck 0.3.1'; fi\n",
