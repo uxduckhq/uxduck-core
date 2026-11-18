@@ -117,6 +117,44 @@ pub fn body(request: &ProviderRequest) -> Value {
     body
 }
 
+/// Whether `model` reads top-level `instructions` after `input` and bills
+/// them uncached on every request, as OpenAI's models from GPT-6.2 do
+/// (<https://developers.openai.com/api/docs/guides/prompt-caching>, read
+/// 2026-11-18). Mirrors `instructionsInInput` in the hosted model's
+/// `models.ts`.
+#[must_use]
+pub fn instructions_in_input(model: &str) -> bool {
+    let Some((version, _)) = model
+        .strip_prefix("gpt-")
+        .and_then(|rest| rest.split_once('-'))
+    else {
+        return false;
+    };
+    let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
+    match (major.parse::<u32>(), minor.parse::<u32>()) {
+        (Ok(major), Ok(minor)) => major > 6 || (major == 6 && minor >= 2),
+        _ => false,
+    }
+}
+
+/// The body sent to OpenAI itself, with a developer's own key: from GPT-6.2
+/// the instructions go first in `input`, as a developer message, where they
+/// stay cached. The hosted model sets its own instructions (`models.ts`).
+#[must_use]
+pub fn direct_body(request: &ProviderRequest) -> Value {
+    let mut body = body(request);
+    if instructions_in_input(&request.model)
+        && let Some(instructions) = body
+            .as_object_mut()
+            .and_then(|fields| fields.remove("instructions"))
+        && instructions.as_str().is_some_and(|text| !text.is_empty())
+        && let Some(input) = body["input"].as_array_mut()
+    {
+        input.insert(0, json!({ "role": "developer", "content": instructions }));
+    }
+    body
+}
+
 fn usage(value: &Value) -> Usage {
     let count = |pointer: &str| value.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
     let cached = count("/input_tokens_details/cached_tokens");
@@ -306,7 +344,11 @@ impl Provider for OpenAiProvider {
             headers.insert(HeaderName::from_static("x-uxduck-continues"), previous);
         }
         let url = format!("{}/responses", self.api_base);
-        let body = body(&request);
+        let body = if self.hosted {
+            body(&request)
+        } else {
+            direct_body(&request)
+        };
         stream::once(async move { http::post(&client, &url, headers, &body).await })
             .flat_map(|opened| match opened {
                 Err(error) => stream::once(async move { Err(error) }).boxed(),
@@ -369,6 +411,43 @@ mod tests {
             ..request
         });
         assert_eq!(chosen["reasoning"], json!({ "effort": "xhigh" }));
+    }
+
+    #[test]
+    fn from_gpt_6_2_the_instructions_go_first_in_the_input_where_they_stay_cached() {
+        let request = |model: &str| ProviderRequest {
+            model: model.into(),
+            instructions: "be brief".into(),
+            conversation: vec![json!({ "role": "user", "content": "hi" })],
+            tools: Vec::new(),
+            max_output_tokens: 128_000,
+            effort: None,
+            continues: None,
+            cache_key: None,
+        };
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let direct = direct_body(&request(model));
+            assert!(direct.get("instructions").is_none(), "{model}");
+            assert_eq!(
+                direct["input"],
+                json!([
+                    { "role": "developer", "content": "be brief" },
+                    { "role": "user", "content": "hi" },
+                ]),
+                "{model}"
+            );
+            // The hosted model replaces the instructions with its own.
+            assert_eq!(body(&request(model))["instructions"], "be brief");
+        }
+        for model in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"] {
+            assert_eq!(
+                direct_body(&request(model)),
+                body(&request(model)),
+                "{model}"
+            );
+        }
+        assert!(instructions_in_input("gpt-6.10-sol") && instructions_in_input("gpt-7-sol"));
+        assert!(!instructions_in_input("gpt-5.6-sol") && !instructions_in_input("claude-opus-5-5"));
     }
 
     #[test]

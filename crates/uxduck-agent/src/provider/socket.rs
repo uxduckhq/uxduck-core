@@ -185,8 +185,10 @@ impl SocketRound {
         events
     }
 }
+/// The `response.create` a direct socket sends. The hosted model builds its
+/// own from the first one it is sent, so this is sent whole only to OpenAI.
 fn create(request: &ProviderRequest) -> Value {
-    let Value::Object(mut body) = openai::body(request) else {
+    let Value::Object(mut body) = openai::direct_body(request) else {
         unreachable!("The Responses body is always an object")
     };
     body.remove("stream");

@@ -11,8 +11,8 @@ use crate::conversation::Wire;
 /// The models a development build offers with a developer's own keys or
 /// the fake, comma-separated; the first is the default. The hosted model
 /// offers only what the server says.
-pub const DEFAULT_MODELS: &str =
-    "gpt-6.1-sol,gpt-6-sol,gpt-6-luna,claude-opus-5-5,claude-sonnet-5-5";
+pub const DEFAULT_MODELS: &str = "gpt-6.2-sol,gpt-6.1-sol,gpt-6-sol,gpt-6-luna,gpt-6.2-astra,\
+     claude-opus-5-5,claude-sonnet-5-5";
 
 /// Past this many tokens a Claude chat is summarised. The hour-long cache
 /// keeps a longer chat cheap to send again (maintainer, 2026-11-14).
@@ -93,16 +93,20 @@ pub fn settings(model: &str) -> ModelSettings {
             compact_at_tokens: CLAUDE_COMPACT_AT_TOKENS,
             fallback: None,
         },
-        // https://developers.openai.com/api/docs/models/gpt-6.1-sol,
+        // https://developers.openai.com/api/docs/models/gpt-6.2-sol,
+        // https://developers.openai.com/api/docs/models/gpt-6.2-astra (read
+        // 2026-11-18), https://developers.openai.com/api/docs/models/gpt-6.1-sol,
         // https://developers.openai.com/api/docs/models/gpt-6-sol and
         // https://developers.openai.com/api/docs/models/gpt-6-luna:
         // "128,000 max output tokens" each (read 2026-11-14).
-        "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna" => ModelSettings {
-            max_output_tokens: 128_000,
-            effort: None,
-            compact_at_tokens: 100_000,
-            fallback: None,
-        },
+        "gpt-6.2-sol" | "gpt-6.2-astra" | "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna" => {
+            ModelSettings {
+                max_output_tokens: 128_000,
+                effort: None,
+                compact_at_tokens: 100_000,
+                fallback: None,
+            }
+        }
         // Every other model, as `models.ts` has it. That includes the ones
         // OpenRouter serves (Kimi K3.1 Pro, GLM-5.3, DeepSeek V4-Pro and
         // V4.1-Flash): each OpenRouter endpoint sets its own output limit,
@@ -119,7 +123,20 @@ pub fn settings(model: &str) -> ModelSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::cannot_see;
+    use super::{DEFAULT_MODELS, cannot_see, settings};
+
+    #[test]
+    fn own_keys_start_on_gpt_6_2_sol_and_keep_the_models_before_it() {
+        let models: Vec<&str> = DEFAULT_MODELS.split(',').collect();
+        assert_eq!(models.first(), Some(&"gpt-6.2-sol"));
+        for model in ["gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
+            assert!(models.contains(&model), "{model}");
+        }
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            assert_eq!(settings(model).max_output_tokens, 128_000, "{model}");
+            assert_eq!(cannot_see(model), None, "{model}");
+        }
+    }
 
     #[test]
     fn a_model_by_its_own_key_that_takes_no_images_is_told_which_can() {

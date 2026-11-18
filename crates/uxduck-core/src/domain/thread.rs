@@ -71,9 +71,8 @@ pub enum TitleState {
 pub fn efforts(model: &str) -> Option<(&'static [&'static str], &'static str)> {
     const ALL: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
     match model {
-        "gpt-6.1-sol" | "gpt-6-astra" | "claude-opus-5-5" | "claude-sonnet-5-5" => {
-            Some((&ALL[1..], "medium"))
-        }
+        "gpt-6.2-sol" | "gpt-6.2-astra" | "gpt-6.1-sol" | "gpt-6-astra" | "claude-opus-5-5"
+        | "claude-sonnet-5-5" => Some((&ALL[1..], "medium")),
         "gpt-6-sol" | "gpt-6-luna" | "gpt-6.1-terra" => Some((ALL, "medium")),
         _ => None,
     }

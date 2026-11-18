@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "2e9dcf8866a1ab897d236cd1087ca54242678e7b",
+  "sourceCommit": "2d081577a74b7145ba5bfa805b58682b0c01a312",
   "licenseReady": true,
   "files": [
     {
@@ -116,7 +116,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/models.rs",
-      "sha256": "b0ec549590f962719b1d3c79f195f186e0cb1834892f70e380636b89b2970e2f",
+      "sha256": "05ad8b003a950c018eb2bdc842b995d9c44122c1d313de38ecea06788e15435f",
       "executable": false
     },
     {
@@ -156,7 +156,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/provider/openai.rs",
-      "sha256": "e0d90072a1a7f614af119d8eec01338dc47d898aa69439d6a33ea6c3c4569c29",
+      "sha256": "789e29c968d1aff519d117c8ebb8c0d1f0d4f9813e88432ee4245721e24fff8e",
       "executable": false
     },
     {
@@ -171,7 +171,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/provider/socket.rs",
-      "sha256": "945442e0a7e6c2ef3964d4a7f04a1723666dc189dd8aad7dd8ae9281e09226a1",
+      "sha256": "c14c68726223716eb4526bb9d6568176b34c844c5186fb21269aa1889f86d5ad",
       "executable": false
     },
     {
@@ -6266,7 +6266,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/thread.rs",
-      "sha256": "dd74bd3c8097fa1a4ab12e264512b043a33a5fb0510482ad50d422c03a97da22",
+      "sha256": "7521612392e39907fa6ce25aeeae117b04238c66237d4c0b3584de5e3d856e96",
       "executable": false
     },
     {
