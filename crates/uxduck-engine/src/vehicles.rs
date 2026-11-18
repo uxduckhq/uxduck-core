@@ -17,8 +17,8 @@ use uxduck_core::events::{Actor, Change};
 use crate::commands::Raise;
 use crate::{Engine, NO_CONNECTION};
 
-/// The notice that macOS Low Power Mode is on while a vehicle is connected.
-const LOW_POWER_MODE: &str = "low-power-mode";
+/// The notice that a power-saving mode is on while a vehicle is connected.
+const POWER_SAVING: &str = "power-saving";
 
 /// The condition an older UXDuck gave a real vehicle's ground-testing
 /// notice, before its id.
@@ -163,7 +163,7 @@ impl Engine {
         if connected != self.awake {
             self.awake = connected;
             self.system.wake_lock(connected);
-            self.review_low_power_mode();
+            self.review_power_saving();
         }
         let flying = self
             .state
@@ -176,30 +176,49 @@ impl Engine {
         }
     }
 
-    /// Says while a vehicle is connected that macOS Low Power Mode is on:
-    /// it slows the whole computer, which the wake lock cannot lift
-    /// (FB-254). Checked when a vehicle connects and once a second after.
-    pub fn review_low_power_mode(&mut self) {
-        let slowed = self.awake && self.system.low_power_mode();
-        if slowed == self.low_power {
+    /// Says while a vehicle is connected that the operating system's
+    /// power-saving mode is on: it slows the whole computer, which the wake
+    /// lock cannot lift (FB-254). Checked when a vehicle connects and once
+    /// a second after.
+    pub fn review_power_saving(&mut self) {
+        use crate::runtime::PowerSaving;
+        let saving = if self.awake {
+            self.system.power_saving()
+        } else {
+            None
+        };
+        if saving == self.power_saving {
             return;
         }
-        self.low_power = slowed;
-        if !slowed {
-            self.resolve(LOW_POWER_MODE);
-            return;
+        if self.power_saving.is_some() {
+            self.resolve(POWER_SAVING);
         }
+        self.power_saving = saving;
+        let Some(saving) = saving else {
+            return;
+        };
+        let (title, body) = match saving {
+            PowerSaving::LowPowerMode => (
+                "Low Power Mode is on",
+                "macOS may slow the ground station. Turn it off in System Settings while flying.",
+            ),
+            PowerSaving::EnergySaver => (
+                "Windows is saving power",
+                "Energy saver or battery saver may slow the ground station. Turn it off while flying.",
+            ),
+            PowerSaving::PowerSaver => (
+                "Power Saver is on",
+                "It may slow the ground station. Choose Balanced in the power settings while flying.",
+            ),
+        };
         self.raise(Raise {
             severity: Severity::Warning,
             kind: NotificationKind::Transient,
             subject: Subject::System,
-            title: "Low Power Mode is on".into(),
-            body: Some(
-                "macOS may slow the ground station. Turn it off in System Settings while flying."
-                    .into(),
-            ),
+            title: title.into(),
+            body: Some(body.into()),
             actions: Vec::new(),
-            condition: Some(LOW_POWER_MODE.into()),
+            condition: Some(POWER_SAVING.into()),
             report: None,
         });
     }

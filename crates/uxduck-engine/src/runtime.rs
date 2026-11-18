@@ -996,10 +996,10 @@ pub trait System: Send {
     fn serial_ports(&self) -> Vec<SerialPortInfo>;
     /// Holds or releases the system wake lock.
     fn wake_lock(&mut self, hold: bool);
-    /// Whether the computer trades speed for battery: macOS Low Power Mode,
-    /// which slows UXDuck and no wake lock lifts (FB-254).
-    fn low_power_mode(&self) -> bool {
-        false
+    /// The operating system's mode that trades speed for battery, while it
+    /// is on: it slows UXDuck and no wake lock lifts it (FB-254).
+    fn power_saving(&self) -> Option<PowerSaving> {
+        None
     }
     /// Keeps the display on, or lets it sleep again, while a vehicle is
     /// armed, so the screen does not dim or lock in flight.
@@ -1233,6 +1233,17 @@ pub struct Deleted {
     pub bytes: u64,
     /// The simulations whose logs went, by id.
     pub simulations: std::collections::BTreeSet<String>,
+}
+
+/// An operating system's power-saving mode (FB-254).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerSaving {
+    /// macOS Low Power Mode.
+    LowPowerMode,
+    /// Windows energy saver, battery saver before Windows 11 24H2.
+    EnergySaver,
+    /// power-profiles-daemon's Power Saver profile on Linux.
+    PowerSaver,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

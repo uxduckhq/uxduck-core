@@ -333,8 +333,9 @@ pub struct Engine {
     system: Box<dyn runtime::System>,
     /// Whether the wake lock is held.
     awake: bool,
-    /// Low Power Mode is on while the wake lock is held (FB-254).
-    low_power: bool,
+    /// The power-saving mode said to be on while the wake lock is held
+    /// (FB-254).
+    power_saving: Option<runtime::PowerSaving>,
     /// The display is held on: a vehicle is armed.
     display_awake: bool,
     shutdown: Shutdown,
@@ -607,7 +608,7 @@ impl Engine {
             links: ports.links,
             system: ports.system,
             awake: false,
-            low_power: false,
+            power_saving: None,
             display_awake: false,
             shutdown: Shutdown::default(),
             opened: Opened::default(),

@@ -851,8 +851,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.drive_plan_runs();
                 // Gimbals the mission has, and ones to give back (S406).
                 e.review_gimbals(now);
-                // Low Power Mode turned on or off while connected (FB-254).
-                e.review_low_power_mode();
+                // A power-saving mode turned on or off while connected (FB-254).
+                e.review_power_saving();
             })
             .await
             .is_err()

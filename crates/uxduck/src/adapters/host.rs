@@ -3,7 +3,7 @@
 
 use std::process::{Child, Command, Stdio};
 
-use uxduck_engine::runtime::{SerialPortInfo, System};
+use uxduck_engine::runtime::{PowerSaving, SerialPortInfo, System};
 
 use crate::ports;
 
@@ -12,13 +12,17 @@ use crate::ports;
 /// activity, so the system stays awake and the daemon is neither napped nor
 /// has its timers coalesced (FB-254), on Linux a child process holds
 /// `systemd-inhibit` around `tail --pid`, on Windows a thread holds
-/// `SetThreadExecutionState`. The display is held the same way while a
+/// `SetThreadExecutionState` and keeps the daemon out of power throttling. The display is held the same way while a
 /// vehicle is armed: `caffeinate -d` on macOS, `ES_DISPLAY_REQUIRED` on
 /// Windows; Linux desktops keep their own screen lock.
 #[derive(Debug)]
 pub struct Host {
     wake: Option<Hold>,
     display: Option<Hold>,
+    /// power-profiles-daemon's Power Saver profile is on, for each of its
+    /// names (FB-254).
+    #[cfg(target_os = "linux")]
+    power_saver: std::sync::Arc<[std::sync::atomic::AtomicBool; 2]>,
     data_dir: std::path::PathBuf,
     simulators: std::sync::Arc<crate::sim::Simulators>,
     catalogue: std::sync::Arc<crate::sim::catalogue::Catalogue>,
@@ -52,6 +56,8 @@ impl Host {
         Self {
             wake: None,
             display: None,
+            #[cfg(target_os = "linux")]
+            power_saver: watch_power_saver(),
             data_dir: data_dir.to_owned(),
             simulators,
             catalogue,
@@ -78,7 +84,7 @@ enum Hold {
     Child(Child),
     /// The thread that holds the execution state; dropping the sender ends it.
     #[cfg(windows)]
-    Thread(std::sync::mpsc::Sender<()>),
+    Thread(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>),
     /// The thread that holds the activity; dropping the sender ends it, and
     /// it has ended once the thread has.
     #[cfg(target_os = "macos")]
@@ -93,7 +99,10 @@ impl Hold {
                 let _ = child.wait();
             }
             #[cfg(windows)]
-            Self::Thread(stop) => drop(stop),
+            Self::Thread(stop, thread) => {
+                drop(stop);
+                let _ = thread.join();
+            }
             #[cfg(target_os = "macos")]
             Self::Activity(stop, thread) => {
                 drop(stop);
@@ -132,25 +141,97 @@ fn hold_activity() -> std::io::Result<Hold> {
             // SAFETY: ends the activity this thread began, once.
             unsafe { info.endActivity(&activity) };
         })?;
-    let _ = wait_begun.recv();
+    if wait_begun.recv().is_err() {
+        let _ = thread.join();
+        return Err(std::io::Error::other(
+            "the wake lock's thread stopped before it began the activity",
+        ));
+    }
     Ok(Hold::Activity(stop, thread))
 }
 
-/// Holds `flags` on a thread of its own until the returned sender drops:
-/// `SetThreadExecutionState` lasts while its thread does.
+/// Holds `flags` on a thread of its own until it is released, and has let
+/// go once released: `SetThreadExecutionState` lasts while its thread does. With
+/// `full_speed`, the daemon is also kept out of power throttling meanwhile.
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "SetThreadExecutionState is a plain Win32 call")]
-fn hold_execution_state(flags: u32) -> Hold {
+fn hold_execution_state(flags: u32, full_speed: bool) -> Hold {
     use windows_sys::Win32::System::Power::{ES_CONTINUOUS, SetThreadExecutionState};
     let (stop, stopped) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         // SAFETY: sets and clears this thread's own execution state.
         unsafe { SetThreadExecutionState(ES_CONTINUOUS | flags) };
+        if full_speed {
+            power_throttling(false);
+        }
         let _ = stopped.recv();
+        if full_speed {
+            power_throttling(true);
+        }
         // SAFETY: as above.
         unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
     });
-    Hold::Thread(stop)
+    Hold::Thread(stop, thread)
+}
+
+/// Whether Windows may throttle the daemon. Unless told otherwise, it runs
+/// a process with no visible window as `EcoQoS` on battery: at the CPU's most
+/// efficient frequency, on its efficient cores (FB-254). Naming execution
+/// speed in the control mask and leaving it off in the state mask asks for
+/// full speed, and an empty control mask hands the choice back to Windows.
+/// Timer resolution is left alone: the daemon never raises it.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "SetProcessInformation is a plain Win32 call on a structure on the stack"
+)]
+#[allow(clippy::cast_possible_truncation, reason = "the structure is 12 bytes")]
+fn power_throttling(allowed: bool) {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: if allowed {
+            0
+        } else {
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        },
+        StateMask: 0,
+    };
+    // SAFETY: the structure outlives the call, which only reads it.
+    let set = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if set == 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            allowed,
+            "could not change whether Windows may slow UXDuck down"
+        );
+    }
+}
+
+/// Whether Windows energy saver is on, battery saver before Windows 11
+/// 24H2: `GetSystemPowerStatus` says so in `SystemStatusFlag`.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "GetSystemPowerStatus fills a structure on the stack"
+)]
+fn energy_saver() -> bool {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut status = SYSTEM_POWER_STATUS::default();
+    // SAFETY: fills the structure it is given, which outlives the call.
+    let read = unsafe { GetSystemPowerStatus(&raw mut status) } != 0;
+    read && status.SystemStatusFlag == 1
 }
 
 /// Starts `command` as a hold, quietly.
@@ -288,7 +369,7 @@ fn wake_hold() -> Option<std::io::Result<Hold>> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Power::ES_SYSTEM_REQUIRED;
-        return Some(Ok(hold_execution_state(ES_SYSTEM_REQUIRED)));
+        return Some(Ok(hold_execution_state(ES_SYSTEM_REQUIRED, true)));
     }
     #[cfg(target_os = "macos")]
     return Some(hold_activity());
@@ -303,6 +384,7 @@ fn display_hold() -> Option<std::io::Result<Hold>> {
         use windows_sys::Win32::System::Power::{ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
         return Some(Ok(hold_execution_state(
             ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED,
+            false,
         )));
     }
     #[allow(unreachable_code, reason = "Windows returns above")]
@@ -315,6 +397,119 @@ fn display_hold() -> Option<std::io::Result<Hold>> {
     }
 }
 
+/// Whether power-profiles-daemon's Power Saver profile is on, one flag for
+/// each of its D-Bus names, kept up to date by a thread that is told when
+/// the profile changes and when the service comes or goes (FB-254), so it
+/// never wakes to ask. Version 0.20 and later answer on both names, earlier
+/// ones only on the second. Where nothing offers power profiles, both stay
+/// off until something does.
+#[cfg(target_os = "linux")]
+fn watch_power_saver() -> std::sync::Arc<[std::sync::atomic::AtomicBool; 2]> {
+    use std::sync::atomic::AtomicBool;
+
+    const SERVICES: [(&str, &str); 2] = [
+        (
+            "org.freedesktop.UPower.PowerProfiles",
+            "/org/freedesktop/UPower/PowerProfiles",
+        ),
+        ("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles"),
+    ];
+    let saving = std::sync::Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+    let kept = saving.clone();
+    let watch = move || {
+        futures::executor::block_on(async {
+            let Ok(connection) = zbus::Connection::system().await else {
+                tracing::debug!("no system bus, so no power profiles");
+                return;
+            };
+            let watches = SERVICES
+                .iter()
+                .zip(kept.iter())
+                .map(|(&(name, path), on)| watch_profile(&connection, name, path, on));
+            futures::future::join_all(watches).await;
+        });
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("power profile".into())
+        .spawn(watch)
+    {
+        tracing::warn!(%error, "could not watch the power profile");
+    }
+    saving
+}
+
+/// Follows one power-profiles-daemon name into `on`. Its profile is read
+/// at the start, when the service says it changed and when a service takes
+/// the name, since a restarted one announces no change. It is off while
+/// nobody holds the name, and after the bus connection drops. Nothing is
+/// cached, so nothing read goes stale.
+#[cfg(target_os = "linux")]
+async fn watch_profile(
+    connection: &zbus::Connection,
+    name: &str,
+    path: &str,
+    on: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
+
+    use futures::StreamExt as _;
+
+    enum Heard {
+        Owner(bool),
+        Changed,
+    }
+    let Ok(interface) = zbus::names::InterfaceName::try_from(name) else {
+        return;
+    };
+    let built = zbus::fdo::PropertiesProxy::builder(connection)
+        .destination(name)
+        .path(path)
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await;
+    let Ok(properties) = built else {
+        tracing::debug!(service = name, "cannot ask about power profiles");
+        return;
+    };
+    let (Ok(owners), Ok(changes)) = (
+        properties.inner().receive_owner_changed().await,
+        properties.receive_properties_changed().await,
+    ) else {
+        tracing::debug!(service = name, "cannot follow power profiles");
+        return;
+    };
+    // Never starts the service: a name nobody holds is not D-Bus-activated,
+    // so a power-profiles-daemon the person stopped stays stopped.
+    let saver = async || {
+        properties
+            .inner()
+            .call_with_flags::<_, _, zbus::zvariant::OwnedVariant>(
+                "Get",
+                zbus::proxy::MethodFlags::NO_AUTO_START,
+                &(interface.clone(), "ActiveProfile"),
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|profile| String::try_from(profile).ok())
+            .is_some_and(|profile| profile == "power-saver")
+    };
+    on.store(saver().await, Ordering::Relaxed);
+    let heard = futures::stream::select(
+        owners.map(|owner| Heard::Owner(owner.is_some())),
+        changes.map(|_| Heard::Changed),
+    );
+    let mut heard = std::pin::pin!(heard);
+    while let Some(event) = heard.next().await {
+        let saving = match event {
+            Heard::Owner(false) => false,
+            Heard::Owner(true) | Heard::Changed => saver().await,
+        };
+        on.store(saving, Ordering::Relaxed);
+    }
+    on.store(false, Ordering::Relaxed);
+}
+
 fn wake_command() -> Option<Command> {
     let pid = std::process::id().to_string();
     if cfg!(target_os = "linux") {
@@ -322,7 +517,7 @@ fn wake_command() -> Option<Command> {
         command.args([
             "--what=idle:sleep",
             "--who=UXDuck",
-            "--why=A vehicle is online",
+            "--why=A vehicle is connected to UXDuck",
             "--mode=block",
             "tail",
             &format!("--pid={pid}"),
@@ -670,11 +865,23 @@ impl System for Host {
             .collect()
     }
 
-    fn low_power_mode(&self) -> bool {
+    fn power_saving(&self) -> Option<PowerSaving> {
         #[cfg(target_os = "macos")]
-        return objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled();
-        #[allow(unreachable_code, reason = "macOS returns above")]
-        false
+        let on = objc2::rc::autoreleasepool(|_| {
+            objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled()
+        });
+        #[cfg(target_os = "macos")]
+        return on.then_some(PowerSaving::LowPowerMode);
+        #[cfg(windows)]
+        return energy_saver().then_some(PowerSaving::EnergySaver);
+        #[cfg(target_os = "linux")]
+        return self
+            .power_saver
+            .iter()
+            .any(|on| on.load(std::sync::atomic::Ordering::Relaxed))
+            .then_some(PowerSaving::PowerSaver);
+        #[allow(unreachable_code, reason = "macOS, Windows and Linux return above")]
+        None
     }
 
     fn wake_lock(&mut self, hold: bool) {

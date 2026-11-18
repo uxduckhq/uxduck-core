@@ -98,7 +98,9 @@ block2 = "0.6"
 libc = "0.2"
 # The wake lock as a latency-critical activity, so macOS neither naps the
 # daemon nor coalesces its timers while a vehicle is connected, and whether
-# Low Power Mode is on (FB-254). The versions the tray uses.
+# Low Power Mode is on (FB-254), read in an autorelease pool. The versions
+# the tray uses.
+objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "NSProcessInfo",
