@@ -40,10 +40,17 @@ pub struct Host {
     /// Where flights to write to a disk go (ADR-0062,
     /// [`crate::flight_file::work`]).
     offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
+    /// Where attached pictures go to be made into the AI model's JPEGs
+    /// (FB-248, [`crate::pictures::work`]).
+    pictures: tokio::sync::mpsc::UnboundedSender<(
+        uxduck_engine::runtime::PictureOrder,
+        std::path::PathBuf,
+    )>,
 }
 
 impl Host {
     #[must_use]
+    #[allow(clippy::too_many_arguments, reason = "the daemon's work channels")]
     pub fn new(
         data_dir: &std::path::Path,
         simulators: std::sync::Arc<crate::sim::Simulators>,
@@ -52,6 +59,10 @@ impl Host {
         replay_work: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::ReplayWork>,
         camera_definitions: tokio::sync::mpsc::UnboundedSender<crate::camera_definitions::Fetch>,
         offload: tokio::sync::mpsc::UnboundedSender<uxduck_engine::runtime::OffloadJob>,
+        pictures: tokio::sync::mpsc::UnboundedSender<(
+            uxduck_engine::runtime::PictureOrder,
+            std::path::PathBuf,
+        )>,
     ) -> Self {
         Self {
             wake: None,
@@ -67,6 +78,7 @@ impl Host {
             replay_work,
             camera_definitions,
             offload,
+            pictures,
         }
     }
 }
@@ -674,6 +686,16 @@ impl System for Host {
 
     fn attachment_path(&self, id: &str) -> Result<String, String> {
         crate::attachments::path(&self.data_dir.join("attachments"), id)
+    }
+
+    fn attachment_picture(
+        &mut self,
+        order: uxduck_engine::runtime::PictureOrder,
+    ) -> Result<(), String> {
+        let path = crate::attachments::path(&self.data_dir.join("attachments"), &order.attachment)?;
+        self.pictures
+            .send((order, path.into()))
+            .map_err(|_| "UXDuck is stopping.".to_owned())
     }
 
     fn own_model_keep(&mut self, file: &str, bytes: &[u8]) -> Result<(), String> {

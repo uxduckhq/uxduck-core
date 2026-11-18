@@ -433,8 +433,32 @@ impl FakeProvider {
                 continue;
             };
             let answer: Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
-            let failed = answer["message"].as_str();
+            let failed = answer["message"].as_str().or(answer["error"].as_str());
             let text = match (call_id.as_str(), failed) {
+                (SEE_FILE, Some(why)) => format!("I could not see the picture: {why}"),
+                (SEE_FILE, None) => {
+                    let mut seen = format!(
+                        "I see {} at {} × {}.",
+                        answer["name"].as_str().unwrap_or("the picture"),
+                        answer["width"],
+                        answer["height"]
+                    );
+                    if let Some(map) = answer["map"].as_str() {
+                        let shows = map
+                            .lines()
+                            .find(|l| l.starts_with("It shows"))
+                            .unwrap_or(map);
+                        seen.push_str(" It is UXDuck's map. ");
+                        seen.push_str(shows);
+                    }
+                    if answer["placement"].is_string() {
+                        seen.push_str(
+                            " Before I propose waypoints from it, please place or confirm its \
+                             outline on the map, such as by drawing it as an area marker.",
+                        );
+                    }
+                    seen
+                }
                 (REPLAY_FILE | READ_FILE, Some(why)) => format!("I could not use the file: {why}"),
                 (REPLAY_FILE, None) => format!(
                     "I opened {} as a replay, paused at its start.",
@@ -463,7 +487,9 @@ impl FakeProvider {
         }) else {
             return Ok(None);
         };
-        let (call_id, name) = if asked.contains("replay") {
+        let (call_id, name) = if asked.contains("trace") || asked.contains("see") {
+            (SEE_FILE, "attachment_image")
+        } else if asked.contains("replay") {
             (REPLAY_FILE, "replay_open")
         } else if asked.contains("read") {
             (READ_FILE, "attachment_read")
@@ -905,6 +931,8 @@ const FILE: &str = "call_feedback_file";
 /// Tool call ids for an attached file replayed or read (S246).
 const REPLAY_FILE: &str = "call_replay_file";
 const READ_FILE: &str = "call_read_file";
+/// The tool call id of seeing an attached picture (FB-248).
+const SEE_FILE: &str = "call_see_file";
 
 /// Deferred tools run through this one.
 const TOOL_CALL_NAME: &str = crate::tools::TOOL_CALL;
@@ -1136,5 +1164,59 @@ mod tests {
             &events[..],
             [ProviderEvent::TextDelta(text)] if text == "I looked through the camera."
         ));
+    }
+
+    #[test]
+    fn asked_to_trace_an_attached_picture_it_sees_it_and_says_where_it_is_or_asks_first() {
+        let asked = [
+            json!({ "role": "user", "content": "Trace this outline\n\nAttached by the operator:\n- The picture \"Map.png\", 120.0 KB, attachment `at1`: see it with tool_call attachment_image, giving it as `id`" }),
+        ];
+        let events = FakeProvider::answer(&latest(&asked)).unwrap();
+        assert!(
+            matches!(
+                &events[..],
+                [ProviderEvent::ToolCall { arguments, .. }]
+                    if arguments.contains("attachment_image") && arguments.contains("at1")
+            ),
+            "{events:?}"
+        );
+        let seen = |result: Value| {
+            let conversation = [
+                asked[0].clone(),
+                json!({ "type": "function_call", "call_id": SEE_FILE, "name": "tool_call", "arguments": "{}" }),
+                json!({
+                    "type": "function_call_output",
+                    "call_id": SEE_FILE,
+                    "output": [
+                        { "type": "input_text", "text": result.to_string() },
+                        { "type": "input_text", "text": "The attached picture \"Map.png\":" },
+                        { "type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AQ==" },
+                    ],
+                }),
+            ];
+            match &FakeProvider::answer(&latest(&conversation)).unwrap()[..] {
+                [ProviderEvent::TextDelta(text)] => text.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let map = seen(
+            json!({ "name": "Map.png", "width": 1024, "height": 640, "map": "This picture is UXDuck's flat map.\nIt shows from latitude -35.37 to -35.36." }),
+        );
+        assert_eq!(
+            map,
+            "I see Map.png at 1024 × 640. It is UXDuck's map. It shows from latitude -35.37 to -35.36."
+        );
+        let other = seen(
+            json!({ "name": "sketch.png", "width": 640, "height": 400, "placement": "Ask first." }),
+        );
+        assert!(
+            other.contains("please place or confirm its outline on the map"),
+            "{other}"
+        );
+        let refused = seen(json!({ "error": "This chat's AI model can't take images." }));
+        assert_eq!(
+            refused,
+            "I could not see the picture: This chat's AI model can't take images."
+        );
     }
 }

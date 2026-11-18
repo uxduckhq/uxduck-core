@@ -486,7 +486,8 @@ pub(crate) fn handle(
         request @ (ClientRequest::AttachmentBegin(_)
         | ClientRequest::AttachmentAppend(_)
         | ClientRequest::AttachmentFinish(_)
-        | ClientRequest::AttachmentRead(_)) => {
+        | ClientRequest::AttachmentRead(_)
+        | ClientRequest::AttachmentImage(_)) => {
             crate::attachments::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::ReplayOpen(_)

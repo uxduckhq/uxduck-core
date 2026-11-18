@@ -27,7 +27,7 @@ pub fn takes_images(model: &str) -> bool {
 }
 
 /// Why `model`, through its company's own API, can't take a camera's
-/// frames, in words for the model. None: it can.
+/// frames or an attached picture, in words for the model. None: it can.
 #[must_use]
 pub fn cannot_see(model: &str) -> Option<String> {
     let family = match Wire::for_model(model) {
@@ -36,8 +36,9 @@ pub fn cannot_see(model: &str) -> Option<String> {
     };
     (!takes_images(model)).then(|| {
         format!(
-            "This chat's AI model, {model}, can't take images, so the assistant can't see the \
-             camera in this chat. A person can choose a {family} model for this chat."
+            "This chat's AI model, {model}, can't take images, so the assistant can't see \
+             cameras or attached pictures in this chat. A person can choose a {family} model for \
+             this chat."
         )
     })
 }

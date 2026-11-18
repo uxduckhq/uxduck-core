@@ -328,6 +328,32 @@ mod tests {
         );
     }
 
+    /// An attached picture (FB-248) reaches an MCP client as an image too,
+    /// with where it is on the map as text.
+    #[test]
+    fn an_attached_picture_is_an_mcp_image() {
+        let result = tool_result(json!({
+            "id": "att_field",
+            "name": "field.png",
+            "width": 1024,
+            "height": 512,
+            "map": "Web Mercator, north up.",
+            "jpegBase64": "/9j/AQ==",
+        }));
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("jpegBase64") && text.contains("Web Mercator"),
+            "{text}"
+        );
+        assert_eq!(
+            content[1],
+            json!({ "type": "image", "data": "/9j/AQ==", "mimeType": "image/jpeg" })
+        );
+        assert!(result["structuredContent"].get("jpegBase64").is_none());
+    }
+
     /// An MCP client files reports itself: the instructions give the call
     /// whole, so it needs no search, and the card only UXDuck's chat can
     /// show is not offered.

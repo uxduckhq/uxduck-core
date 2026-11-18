@@ -9,24 +9,41 @@ use base64::Engine as _;
 use serde_json::Value;
 use uxduck_contracts::dto::thread::{
     ATTACHMENT_CHUNK, ATTACHMENT_MAX, AttachedFile, AttachmentAppendParams, AttachmentAppendResult,
-    AttachmentBeginParams, AttachmentBeginResult, AttachmentFinishParams, AttachmentReadParams,
-    AttachmentReadResult,
+    AttachmentBeginParams, AttachmentBeginResult, AttachmentFinishParams, AttachmentImageParams,
+    AttachmentImageResult, AttachmentReadParams, AttachmentReadResult, PICTURE_LONG_EDGE,
 };
+use uxduck_contracts::dto::video::LOOK_REPLY_BYTES;
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::thread::{self, Attachment, ItemKind, ItemStatus};
 
 use crate::rpc::handlers::to_value;
+use crate::runtime::{Picture, PictureOrder};
 use crate::{ConnectionId, Engine};
+
+mod json_rpc {
+    use serde::Serialize;
+    use serde_json::Value;
+    use uxduck_contracts::dto::thread::AttachmentImageResult;
+
+    #[derive(Serialize)]
+    pub(super) struct Reply<'a> {
+        pub(super) jsonrpc: &'static str,
+        pub(super) id: &'a Value,
+        pub(super) result: &'a AttachmentImageResult,
+    }
+}
 
 /// The most `attachment/read` returns at once.
 const READ_MAX: usize = 64 * 1024;
 
-/// Uploads begun and not yet sent with a message.
+/// Uploads begun and not yet sent with a message, and pictures being made
+/// for the AI model (FB-248).
 #[derive(Debug, Default)]
 pub(crate) struct Uploads {
     open: BTreeMap<String, Upload>,
+    pictures: BTreeMap<String, Picturing>,
 }
 
 #[derive(Debug)]
@@ -36,6 +53,20 @@ struct Upload {
     bytes: u64,
     received: u64,
     done: bool,
+    map: Option<thread::MapFrame>,
+}
+
+/// An `attachment/image` waiting for the host to make its picture.
+#[derive(Debug)]
+struct Picturing {
+    connection: ConnectionId,
+    request_id: Value,
+    id: String,
+    found: Found,
+    /// The format the file's bytes say it is, in words.
+    format: &'static str,
+    /// Why the picture was given less room than asked for, for the note.
+    held: Option<String>,
 }
 
 /// A file as the agent and the features that take one know it.
@@ -43,7 +74,31 @@ struct Upload {
 pub(crate) struct Found {
     pub name: String,
     pub bytes: u64,
+    /// Where on the ground a picture of UXDuck's map shows (FB-248).
+    pub map: Option<thread::MapFrame>,
 }
+
+/// What a picture's first bytes say it is: PNG, JPEG or WebP, the
+/// pictures UXDuck shows the AI model (FB-248).
+fn picture_format(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("PNG")
+    } else if head.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("JPEG")
+    } else if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+        Some("WebP")
+    } else {
+        None
+    }
+}
+
+/// What the AI model is told of a picture that is not of UXDuck's map,
+/// before it takes positions from it (FB-248).
+pub const PLACE_IT_FIRST: &str = "This picture carries no map coordinates from UXDuck. Before \
+    proposing waypoints or a plan from an outline in it, ask the person to place or confirm the \
+    outline on the map, such as by drawing it as an area marker or by moving the corners of an \
+    area marker you add as your guess, then use the marker's corners. Never guess its position \
+    or scale from the picture alone.";
 
 /// A file's name with no folders and nothing a file system minds.
 fn file_name(name: &str) -> Result<String, ApiError> {
@@ -101,6 +156,7 @@ impl Engine {
                 Ok(Found {
                     name: upload.name.clone(),
                     bytes: upload.bytes,
+                    map: upload.map.clone(),
                 })
             } else {
                 Err(gone(id))
@@ -116,6 +172,7 @@ impl Engine {
                 Some(Found {
                     name: a.title.clone(),
                     bytes: file.bytes,
+                    map: file.map.clone(),
                 })
             })
             .ok_or_else(|| gone(id))
@@ -208,6 +265,7 @@ impl Engine {
             attachment.file = Some(thread::AttachedFile {
                 id: file.id.clone(),
                 bytes: upload.bytes,
+                map: upload.map.clone(),
             });
         }
         for attachment in attachments.iter() {
@@ -248,6 +306,91 @@ impl Engine {
             self.uploads.open.remove(&id);
             let _ = self.system.attachment_finish(&id, &name, false);
         }
+        self.uploads
+            .pictures
+            .retain(|_, p| p.connection != connection);
+    }
+
+    /// The host's picture for an `attachment/image` (FB-248), answered to
+    /// the request that asked, serialised once from its base64. The trace
+    /// and MCP's analytics see it with the JPEG left out.
+    pub fn attachment_pictured(&mut self, key: &str, made: Result<Picture, String>) {
+        let Some(waiting) = self.uploads.pictures.remove(key) else {
+            return;
+        };
+        let picture = match made {
+            Ok(picture) => picture,
+            Err(why) => {
+                let frame = crate::rpc::router::error(
+                    &waiting.request_id,
+                    &ApiError::new(ErrorKind::InvalidValue, why),
+                );
+                self.send(waiting.connection, &frame);
+                return;
+            }
+        };
+        let scaled =
+            (picture.source_width, picture.source_height) != (picture.width, picture.height);
+        let misshapen = waiting.found.map.as_ref().filter(|map| {
+            let framed = f64::from(map.width) * f64::from(picture.source_height);
+            let seen = f64::from(map.height) * f64::from(picture.source_width);
+            (framed - seen).abs() > framed.max(seen) / 100.0
+        });
+        let map = waiting
+            .found
+            .map
+            .as_ref()
+            .filter(|_| misshapen.is_none())
+            .map(|map| map.describe(picture.width, picture.height));
+        let note = [
+            (waiting.format != "JPEG").then(|| format!("Made a JPEG of the {}.", waiting.format)),
+            scaled.then(|| {
+                format!(
+                    "Scaled from the picture's {} × {} to {} × {}.",
+                    picture.source_width, picture.source_height, picture.width, picture.height
+                )
+            }),
+            waiting.held,
+            misshapen.map(|map| {
+                format!(
+                    "Its map coordinates were left out. They are for a {} × {} picture, and this \
+                     one is {} × {}, another shape, so they don't say where it is.",
+                    map.width, map.height, picture.source_width, picture.source_height
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let result = AttachmentImageResult {
+            id: waiting.id,
+            name: waiting.found.name,
+            bytes: waiting.found.bytes,
+            source_width: picture.source_width,
+            source_height: picture.source_height,
+            width: picture.width,
+            height: picture.height,
+            placement: map.is_none().then(|| PLACE_IT_FIRST.to_owned()),
+            map,
+            note: (!note.is_empty()).then(|| note.join(" ")),
+            jpeg_base64: picture.jpeg_base64,
+        };
+        let text = serde_json::to_string(&json_rpc::Reply {
+            jsonrpc: "2.0",
+            id: &waiting.request_id,
+            result: &result,
+        })
+        .unwrap_or_default();
+        let mut traced = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": waiting.request_id,
+            "result": to_value(&AttachmentImageResult { jpeg_base64: String::new(), ..result.clone() }).unwrap_or_default(),
+        });
+        traced["result"]["jpegBase64"] = Value::String(format!(
+            "({} characters of JPEG left out)",
+            result.jpeg_base64.len()
+        ));
+        self.send_text(waiting.connection, text, &traced);
     }
 
     /// The whole of an attached file, for a replay.
@@ -288,7 +431,10 @@ pub(crate) fn handle(
     request: ClientRequest,
     granted: &[Capability],
 ) -> Result<Value, ApiError> {
-    let needs = if matches!(request, ClientRequest::AttachmentRead(_)) {
+    let needs = if matches!(
+        request,
+        ClientRequest::AttachmentRead(_) | ClientRequest::AttachmentImage(_)
+    ) {
         Capability::Read
     } else {
         Capability::Control
@@ -304,6 +450,7 @@ pub(crate) fn handle(
         ClientRequest::AttachmentAppend(params) => append(engine, connection, &params),
         ClientRequest::AttachmentFinish(params) => finish(engine, connection, params),
         ClientRequest::AttachmentRead(params) => read(engine, connection, &params),
+        ClientRequest::AttachmentImage(params) => image(engine, connection, &params),
         _ => Err(ApiError::new(
             ErrorKind::Internal,
             "not an attachment method",
@@ -317,6 +464,11 @@ fn begin(
     params: &AttachmentBeginParams,
 ) -> Result<Value, ApiError> {
     let name = file_name(&params.name)?;
+    let map = params.map.as_ref().map(thread::MapFrame::from);
+    if let Some(map) = &map {
+        map.check()
+            .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+    }
     if params.bytes > ATTACHMENT_MAX {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
@@ -339,6 +491,7 @@ fn begin(
             bytes: params.bytes,
             received: 0,
             done: false,
+            map,
         },
     );
     to_value(&AttachmentBeginResult { id })
@@ -412,6 +565,7 @@ fn finish(
         return to_value(&AttachedFile {
             id: params.id,
             bytes,
+            map: None,
         });
     }
     if upload.received != bytes {
@@ -430,6 +584,7 @@ fn finish(
     to_value(&AttachedFile {
         id: params.id,
         bytes,
+        map: None,
     })
 }
 
@@ -466,11 +621,98 @@ fn read(
     })
 }
 
+/// `attachment/image` (FB-248): checked here, answered when the host has
+/// made the picture.
+fn image(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    params: &AttachmentImageParams,
+) -> Result<Value, ApiError> {
+    let found = engine.attached_file(Some(connection), &params.id)?;
+    let head = engine
+        .system
+        .attachment_read(&params.id, 0, 16)
+        .map_err(|why| ApiError::new(ErrorKind::NotFound, why))?;
+    let Some(format) = picture_format(&head) else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{} is not a PNG, JPEG or WebP picture, so UXDuck can't show it to the AI model. \
+                 Read it with attachment_read if it is text.",
+                found.name
+            ),
+        ));
+    };
+    let Some((_, request_id)) = engine.replying_to.take() else {
+        return Err(ApiError::new(
+            ErrorKind::InvalidRequest,
+            "attachment/image is answered as a request",
+        ));
+    };
+    let key = format!("pc{}", &engine.random.token()[..16]);
+    let max_bytes = params.max_bytes.unwrap_or(LOOK_REPLY_BYTES);
+    let order = PictureOrder {
+        key: key.clone(),
+        attachment: params.id.clone(),
+        long_edge: PICTURE_LONG_EDGE,
+        max_bytes: max_bytes.min(LOOK_REPLY_BYTES),
+    };
+    if let Err(why) = engine.system.attachment_picture(order) {
+        engine.replying_to = Some((connection, request_id));
+        return Err(ApiError::new(ErrorKind::InvalidValue, why));
+    }
+    engine.uploads.pictures.insert(
+        key,
+        Picturing {
+            connection,
+            request_id,
+            id: params.id.clone(),
+            found,
+            format,
+            held: kept_to(max_bytes),
+        },
+    );
+    Ok(Value::Null)
+}
+
+/// What the note says when a picture was asked for with more room than
+/// UXDuck holds, with what was asked in whole MB or, if it isn't, in bytes.
+fn kept_to(max_bytes: u64) -> Option<String> {
+    const MB: u64 = 1024 * 1024;
+    (max_bytes > LOOK_REPLY_BYTES).then(|| {
+        let asked = if max_bytes.is_multiple_of(MB) {
+            format!("{} MB", max_bytes / MB)
+        } else {
+            format!("{max_bytes} bytes")
+        };
+        format!(
+            "Kept to {} MB of picture, not the {asked} asked for: UXDuck holds a picture in memory \
+             while it answers.",
+            LOOK_REPLY_BYTES / MB
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
 
-    use super::{binary, file_name};
+    use super::{binary, file_name, kept_to};
+
+    #[test]
+    fn a_picture_held_to_8_mb_says_exactly_what_was_asked() {
+        assert_eq!(kept_to(8 * 1024 * 1024), None);
+        assert_eq!(
+            kept_to(100 * 1024 * 1024).unwrap(),
+            "Kept to 8 MB of picture, not the 100 MB asked for: UXDuck holds a picture in memory \
+             while it answers."
+        );
+        assert!(
+            kept_to(8 * 1024 * 1024 + 1)
+                .unwrap()
+                .contains("not the 8388609 bytes asked for"),
+        );
+    }
 
     #[test]
     fn a_name_keeps_no_folders_or_hidden_dot() {

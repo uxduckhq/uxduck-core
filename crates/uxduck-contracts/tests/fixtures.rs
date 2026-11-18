@@ -764,6 +764,9 @@ fn check(name: &str) {
         ("result", "attachment_read") => {
             round_trip::<uxduck_contracts::dto::thread::AttachmentReadResult>(name, &json);
         }
+        ("result", "attachment_image") => {
+            round_trip::<uxduck_contracts::dto::thread::AttachmentImageResult>(name, &json);
+        }
         ("result", "files_list") => {
             round_trip::<uxduck_contracts::dto::files::FilesListResult>(name, &json);
         }

@@ -36,6 +36,7 @@ mod own_models;
 mod params;
 mod parent;
 mod paths;
+mod pictures;
 mod places;
 mod plugin_bundle;
 mod ports;

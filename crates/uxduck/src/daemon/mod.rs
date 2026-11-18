@@ -481,6 +481,7 @@ fn start_engine(
     let (replay_work, replay_works) = tokio::sync::mpsc::unbounded_channel();
     let (camera_definition, camera_definitions) = tokio::sync::mpsc::unbounded_channel();
     let (offload, offloads) = tokio::sync::mpsc::unbounded_channel();
+    let (picture, pictures) = tokio::sync::mpsc::unbounded_channel();
     let engine = Engine::new(
         EngineConfig {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -520,6 +521,7 @@ fn start_engine(
                 replay_work,
                 camera_definition,
                 offload,
+                picture,
             )),
             plugins: plugin_port,
         },
@@ -527,6 +529,7 @@ fn start_engine(
     );
     let engine = EngineHandle::spawn(engine);
     tokio::spawn(crate::replay::work(replay_works, engine.clone()));
+    tokio::spawn(crate::pictures::work(pictures, engine.clone()));
     tokio::spawn(crate::camera_definitions::work(
         camera_definitions,
         engine.clone(),

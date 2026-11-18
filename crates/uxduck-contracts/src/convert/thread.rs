@@ -110,6 +110,7 @@ impl From<&core::Attachment> for dto::Attachment {
             file: value.file.as_ref().map(|f| dto::AttachedFile {
                 id: f.id.clone(),
                 bytes: f.bytes,
+                map: f.map.as_ref().map(Into::into),
             }),
         }
     }
@@ -127,7 +128,58 @@ impl From<&dto::Attachment> for core::Attachment {
             file: value.file.as_ref().map(|f| core::AttachedFile {
                 id: f.id.clone(),
                 bytes: f.bytes,
+                map: f.map.as_ref().map(Into::into),
             }),
+        }
+    }
+}
+
+impl From<&core::MapFrame> for dto::MapFrame {
+    fn from(value: &core::MapFrame) -> Self {
+        Self {
+            projection: match value.projection {
+                core::MapProjection::WebMercator => dto::MapProjection::WebMercator,
+                core::MapProjection::Perspective => dto::MapProjection::Perspective,
+            },
+            width: value.width,
+            height: value.height,
+            bearing_deg: value.bearing_deg,
+            pitch_deg: value.pitch_deg,
+            points: value
+                .points
+                .iter()
+                .map(|p| dto::MapFramePoint {
+                    x: p.x,
+                    y: p.y,
+                    latitude_deg: p.latitude_deg,
+                    longitude_deg: p.longitude_deg,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&dto::MapFrame> for core::MapFrame {
+    fn from(value: &dto::MapFrame) -> Self {
+        Self {
+            projection: match value.projection {
+                dto::MapProjection::WebMercator => core::MapProjection::WebMercator,
+                dto::MapProjection::Perspective => core::MapProjection::Perspective,
+            },
+            width: value.width,
+            height: value.height,
+            bearing_deg: value.bearing_deg,
+            pitch_deg: value.pitch_deg,
+            points: value
+                .points
+                .iter()
+                .map(|p| core::MapFramePoint {
+                    x: p.x,
+                    y: p.y,
+                    latitude_deg: p.latitude_deg,
+                    longitude_deg: p.longitude_deg,
+                })
+                .collect(),
         }
     }
 }

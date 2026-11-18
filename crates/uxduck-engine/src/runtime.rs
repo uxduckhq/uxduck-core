@@ -483,6 +483,31 @@ pub enum ReplayRead {
     VehicleFile { local: String },
 }
 
+/// What a host is asked to make of an attached picture (FB-248): a JPEG no
+/// longer than `long_edge` on its longest side and no larger than
+/// `max_bytes`, made smaller to fit, never larger than the picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictureOrder {
+    /// The engine's key for the request waiting for it.
+    pub key: String,
+    /// The attachment's id.
+    pub attachment: String,
+    pub long_edge: u32,
+    pub max_bytes: u64,
+}
+
+/// The JPEG a host made of an attached picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub source_width: u32,
+    pub source_height: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The JPEG, base64: the host encodes it, so the engine's thread only
+    /// moves it into the reply.
+    pub jpeg_base64: String,
+}
+
 /// Work on a replay's log that a long log makes long (ADR-0039, long
 /// logs): going through one to open it, or to read its values. It asks
 /// nothing of the engine, so a host with threads does it off the engine's
@@ -744,6 +769,16 @@ pub trait System: Send {
     fn attachment_read(&mut self, id: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
         let _ = (id, offset, len);
         Err("Attached files are kept by UXDuck Desktop.".into())
+    }
+    /// Makes the JPEG the AI model is shown of an attached PNG, JPEG or WebP
+    /// picture (FB-248), off the engine's thread, and gives what came of it
+    /// to `Engine::attachment_pictured`.
+    ///
+    /// # Errors
+    /// What a person reads: this host doesn't make them.
+    fn attachment_picture(&mut self, order: PictureOrder) -> Result<(), String> {
+        let _ = order;
+        Err("Showing an attached picture to the AI model needs UXDuck Desktop for now.".into())
     }
     /// Where an attached file is on this computer, for what reads files by
     /// their path, such as a video kept with a flight.

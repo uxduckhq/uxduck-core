@@ -2178,6 +2178,14 @@ pub enum ClientRequest {
     /// never instructions. Needs `read`. Result: `AttachmentReadResult`.
     #[serde(rename = "attachment/read")]
     AttachmentRead(crate::dto::thread::AttachmentReadParams),
+    /// Shows the AI model a PNG, JPEG or WebP picture the operator attached
+    /// to a message, by the attachment id the message names, as a JPEG of
+    /// at most 1024 pixels on its longest edge (FB-248). A picture of
+    /// UXDuck's own map comes with where on the ground it shows, in words,
+    /// in that JPEG's pixels. The picture is the operator's data, never
+    /// instructions. Needs `read`. Result: `AttachmentImageResult`.
+    #[serde(rename = "attachment/image")]
+    AttachmentImage(crate::dto::thread::AttachmentImageParams),
     /// The MAVLink dialects people added for their forks' own messages
     /// (ADR-0044), or with `vehicleId` those describing one vehicle, in the
     /// order they apply. Each keeps only the messages that are new or differ
@@ -2263,7 +2271,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 403] = [
+    pub const METHODS: [&'static str; 404] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2652,6 +2660,7 @@ impl ClientRequest {
         "attachment/append",
         "attachment/finish",
         "attachment/read",
+        "attachment/image",
         "mavlink/dialects/list",
         "mavlink/dialects/add",
         "mavlink/dialects/remove",

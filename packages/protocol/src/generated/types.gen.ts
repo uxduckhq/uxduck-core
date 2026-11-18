@@ -1145,6 +1145,11 @@ export type AttachedFile = {
      * From `attachment/begin`.
      */
     id: string;
+    /**
+     * Where on the ground a picture of UXDuck's own map shows, from the
+     * app that took it (FB-248).
+     */
+    map?: MapFrame | null;
 };
 
 /**
@@ -1214,6 +1219,11 @@ export type AttachmentBeginParams = {
      */
     bytes: number;
     /**
+     * For a picture of UXDuck's own map, where on the ground it shows
+     * (FB-248). Only UXDuck's app sets it, when it takes the picture.
+     */
+    map?: MapFrame | null;
+    /**
      * The file's name, such as `2026-10-30 14-02-17.tlog`.
      */
     name: string;
@@ -1233,6 +1243,54 @@ export type AttachmentFinishParams = {
      */
     discard?: boolean;
     id: string;
+};
+
+/**
+ * Shows the AI model a picture attached to a message (FB-248).
+ */
+export type AttachmentImageParams = {
+    /**
+     * The attachment's id, from the operator's message.
+     */
+    id: string;
+    /**
+     * The most bytes of JPEG the picture may take: it is made smaller to
+     * fit. 8 MB when absent, and at most that.
+     */
+    maxBytes?: number | null;
+};
+
+export type AttachmentImageResult = {
+    /**
+     * The attached file's size.
+     */
+    bytes: number;
+    height: number;
+    id: string;
+    jpegBase64: string;
+    /**
+     * For a picture of UXDuck's own map, where on the ground it shows, in
+     * words, in the pixels of this JPEG.
+     */
+    map?: string | null;
+    name: string;
+    /**
+     * What was changed from the picture as attached, in words.
+     */
+    note?: string | null;
+    /**
+     * For any other picture, what to do before taking positions from it.
+     */
+    placement?: string | null;
+    sourceHeight: number;
+    /**
+     * The picture as it was attached.
+     */
+    sourceWidth: number;
+    /**
+     * The JPEG made of it, at most 1024 pixels on its longest edge.
+     */
+    width: number;
 };
 
 /**
@@ -4128,6 +4186,9 @@ export type ClientRequest = {
 } | {
     method: 'attachment/read';
     params: AttachmentReadParams;
+} | {
+    method: 'attachment/image';
+    params: AttachmentImageParams;
 } | {
     method: 'mavlink/dialects/list';
     params: DialectsListParams;
@@ -9683,6 +9744,49 @@ export type MapFeature = {
     label?: string | null;
     tone?: Tone | null;
 };
+
+/**
+ * How a picture of UXDuck's map lies on the ground (FB-248), set by the
+ * app when it takes one, so the AI model can turn what it sees in the
+ * picture into positions.
+ */
+export type MapFrame = {
+    /**
+     * Degrees clockwise from true north that the picture's top faces.
+     */
+    bearingDeg: number;
+    height: number;
+    /**
+     * Degrees the view leans from looking straight down: 0 is straight down.
+     */
+    pitchDeg: number;
+    /**
+     * Places in the picture, in its pixels from the top left, with where
+     * on the ground each is: its corners and its middle, at least 4 and
+     * at most 64.
+     */
+    points: Array<MapFramePoint>;
+    projection: MapProjection;
+    /**
+     * The picture's size in pixels, as it was taken.
+     */
+    width: number;
+};
+
+/**
+ * A place in a map picture and where it is on the ground.
+ */
+export type MapFramePoint = {
+    latitudeDeg: number;
+    longitudeDeg: number;
+    x: number;
+    y: number;
+};
+
+/**
+ * How the map drew the ground.
+ */
+export type MapProjection = 'web-mercator' | 'perspective';
 
 export type MapViewpoint = 'cockpit' | 'rear' | 'tail' | 'orbit' | 'behind' | 'below' | 'camera' | 'home' | 'above';
 

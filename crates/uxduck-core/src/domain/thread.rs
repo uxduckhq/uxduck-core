@@ -228,6 +228,215 @@ pub struct Attachment {
 pub struct AttachedFile {
     pub id: String,
     pub bytes: u64,
+    /// Where on the ground a picture of UXDuck's own map shows (FB-248).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapFrame>,
+}
+
+/// How a picture of UXDuck's map lies on the ground (FB-248), set by the
+/// app that took it: its size, the projection, the way it faces and
+/// places in it with where on the ground each is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapFrame {
+    pub projection: MapProjection,
+    pub width: u32,
+    pub height: u32,
+    pub bearing_deg: f64,
+    pub pitch_deg: f64,
+    pub points: Vec<MapFramePoint>,
+}
+
+// `MapFrame::check` keeps only finite numbers, which equal themselves.
+impl Eq for MapFrame {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapProjection {
+    /// The flat map, in Web Mercator (EPSG:3857).
+    WebMercator,
+    /// The 3D map, seen through a camera.
+    Perspective,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapFramePoint {
+    pub x: f64,
+    pub y: f64,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+}
+
+/// The fewest places a map picture names: its four corners.
+pub const MAP_FRAME_LEAST_POINTS: usize = 4;
+
+impl MapFrame {
+    /// Whether it describes a picture: a size, finite angles and at least
+    /// its corners' worth of places in the picture on the ground.
+    ///
+    /// # Errors
+    /// What is wrong, in words.
+    pub fn check(&self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("A map picture has a width and a height.".into());
+        }
+        if !self.bearing_deg.is_finite() || !(0.0..=90.0).contains(&self.pitch_deg) {
+            return Err(
+                "A map picture's bearing is a number of degrees, and its pitch is 0 to 90 degrees."
+                    .into(),
+            );
+        }
+        if self.points.len() < MAP_FRAME_LEAST_POINTS {
+            return Err(format!(
+                "A map picture names at least {MAP_FRAME_LEAST_POINTS} places in it, as many as \
+                 its corners. This one names {}.",
+                self.points.len()
+            ));
+        }
+        let inside = |p: &MapFramePoint| {
+            (0.0..=f64::from(self.width)).contains(&p.x)
+                && (0.0..=f64::from(self.height)).contains(&p.y)
+                && (-90.0..=90.0).contains(&p.latitude_deg)
+                && (-180.0..=180.0).contains(&p.longitude_deg)
+        };
+        if !self.points.iter().all(inside) {
+            return Err(
+                "Each place in a map picture is inside the picture, at a latitude and longitude."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The westmost and eastmost longitudes it shows, the west one greater
+    /// when it crosses the 180° meridian. Each place is taken as the way
+    /// round the world nearest the place closest to the picture's middle.
+    /// That holds when every place is within 180° of longitude of it: for
+    /// any picture narrower than the world when its middle is named, as the
+    /// app's nine places name it, but only for one narrower than half the
+    /// world when only its corners are.
+    fn longitudes(&self) -> (f64, f64) {
+        let (cx, cy) = (f64::from(self.width) / 2.0, f64::from(self.height) / 2.0);
+        let Some(middle) = self
+            .points
+            .iter()
+            .min_by(|a, b| {
+                ((a.x - cx).powi(2) + (a.y - cy).powi(2))
+                    .total_cmp(&((b.x - cx).powi(2) + (b.y - cy).powi(2)))
+            })
+            .map(|p| p.longitude_deg)
+        else {
+            return (0.0, 0.0);
+        };
+        let unwrapped = self
+            .points
+            .iter()
+            .map(|p| middle + (p.longitude_deg - middle + 540.0).rem_euclid(360.0) - 180.0);
+        let west = unwrapped.clone().fold(f64::INFINITY, f64::min);
+        let east = unwrapped.fold(f64::NEG_INFINITY, f64::max);
+        let wrap = |l: f64| (l + 540.0).rem_euclid(360.0) - 180.0;
+        if west < -180.0 || east > 180.0 {
+            (wrap(west), wrap(east))
+        } else {
+            (west, east)
+        }
+    }
+
+    /// Where on the ground the picture shows, in words for the AI model, in
+    /// the pixels of the `width` × `height` copy it is shown.
+    #[must_use]
+    pub fn describe(&self, width: u32, height: u32) -> String {
+        use std::fmt::Write as _;
+        let sx = f64::from(width) / f64::from(self.width);
+        let sy = f64::from(height) / f64::from(self.height);
+        let flat = self.projection == MapProjection::WebMercator;
+        let straight_down = self.pitch_deg.abs() < 0.5;
+        let north_up = self
+            .bearing_deg
+            .rem_euclid(360.0)
+            .min(360.0 - self.bearing_deg.rem_euclid(360.0))
+            < 0.5;
+        let mut out = String::from(if flat {
+            "This picture is UXDuck's flat map as it was shown, in Web Mercator (EPSG:3857)"
+        } else {
+            "This picture is UXDuck's 3D map as it was shown, seen through its camera in perspective"
+        });
+        if north_up {
+            out.push_str(", north up");
+        } else {
+            let _ = write!(
+                out,
+                ", its top facing {:.1}° from true north",
+                self.bearing_deg.rem_euclid(360.0)
+            );
+        }
+        if straight_down {
+            out.push_str(", looking straight down.");
+        } else {
+            let _ = write!(
+                out,
+                ", leaning {:.1}° from looking straight down.",
+                self.pitch_deg
+            );
+        }
+        let _ = write!(
+            out,
+            " In this {width} × {height} picture, in pixels from its top left:"
+        );
+        for p in &self.points {
+            let _ = write!(
+                out,
+                "\n- ({:.0}, {:.0}) is latitude {:.7}, longitude {:.7}",
+                p.x * sx,
+                p.y * sy,
+                p.latitude_deg,
+                p.longitude_deg
+            );
+        }
+        let fold = |pick: fn(&MapFramePoint) -> f64, max: bool| {
+            self.points
+                .iter()
+                .map(pick)
+                .reduce(if max { f64::max } else { f64::min })
+                .unwrap_or_default()
+        };
+        let _ = write!(
+            out,
+            "\nIt shows from latitude {:.7} to {:.7}",
+            fold(|p| p.latitude_deg, false),
+            fold(|p| p.latitude_deg, true),
+        );
+        let (west, east) = self.longitudes();
+        if west <= east {
+            let _ = write!(out, " and from longitude {west:.7} to {east:.7}.");
+        } else {
+            let _ = write!(
+                out,
+                " and from longitude {west:.7} east across the 180° meridian to {east:.7}. \
+                 Longitudes jump from 180 to -180 there, so add 360 to the negative ones before \
+                 working between places."
+            );
+        }
+        out.push_str(match (flat && straight_down, north_up) {
+            (true, true) => {
+                " A pixel's longitude is linear in x between the left and right edges. Its \
+                 latitude is linear in y in Web Mercator's y, ln(tan(45° + latitude / 2)), \
+                 between the top and bottom edges, not in degrees."
+            }
+            (true, false) => {
+                " Web Mercator's x and y are an affine function of a pixel's x and y, which \
+                 three of these places fix. Web Mercator's x is the longitude, and its y is \
+                 ln(tan(45° + latitude / 2))."
+            }
+            (false, _) => {
+                " The view is in perspective or leaning, so places between these are not in \
+                 proportion. Take a position from the nearest of them, say it is approximate, \
+                 and ask the person to confirm it on the map."
+            }
+        });
+        out
+    }
 }
 
 // A message has no fixed number of attachments (maintainer, 2026-11-15).
@@ -279,6 +488,24 @@ pub fn for_agent(text: &str, attachments: &[Attachment]) -> String {
     let mut out = format!("{text}\n\nAttached by the operator:");
     for attachment in attachments {
         // A file's name is the operator's data, quoted as the plugin's words are.
+        if let Some(file) = &attachment.file
+            && is_picture(&attachment.title)
+        {
+            let _ = write!(
+                out,
+                "\n- The picture {}, {}, attachment `{}`: see it with tool_call attachment_image, \
+                 giving it as `id`",
+                quote(&attachment.title),
+                size(file.bytes),
+                file.id
+            );
+            if file.map.is_some() {
+                out.push_str(
+                    ". It is a picture of UXDuck's map, and comes with where on the ground it shows",
+                );
+            }
+            continue;
+        }
         if let Some(file) = &attachment.file {
             let _ = write!(
                 out,
@@ -323,6 +550,16 @@ pub fn for_agent(text: &str, attachments: &[Attachment]) -> String {
         }
     }
     out
+}
+
+/// Whether a file is a picture the AI model can be shown, by its name: a
+/// PNG, a JPEG or a WebP (FB-248). Its bytes decide in the end.
+#[must_use]
+pub fn is_picture(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".webp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// "12.3 MB", "512 bytes": a file's size as the agent reads it.
@@ -404,6 +641,7 @@ mod tests {
             file: Some(AttachedFile {
                 id: "at0123456789abcdef".into(),
                 bytes: 12_345_678,
+                map: None,
             }),
         };
         assert!(file.fits());
@@ -417,6 +655,180 @@ mod tests {
         );
         assert_eq!(super::size(512), "512 bytes");
         assert_eq!(super::size(2_500_000_000), "2.50 GB");
+    }
+
+    fn map_frame() -> super::MapFrame {
+        let point = |x: f64, y: f64, latitude_deg: f64, longitude_deg: f64| super::MapFramePoint {
+            x,
+            y,
+            latitude_deg,
+            longitude_deg,
+        };
+        super::MapFrame {
+            projection: super::MapProjection::WebMercator,
+            width: 2048,
+            height: 1280,
+            bearing_deg: 0.0,
+            pitch_deg: 0.0,
+            points: vec![
+                point(0.0, 0.0, -35.36, 149.16),
+                point(2048.0, 0.0, -35.36, 149.17),
+                point(2048.0, 1280.0, -35.37, 149.17),
+                point(0.0, 1280.0, -35.37, 149.16),
+                point(1024.0, 640.0, -35.365, 149.165),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_picture_is_seen_with_its_tool_and_a_map_picture_says_it_has_its_place() {
+        let picture = |name: &str, map: Option<super::MapFrame>| Attachment {
+            title: name.into(),
+            key: None,
+            value: None,
+            unit: None,
+            plugin: None,
+            help: None,
+            file: Some(AttachedFile {
+                id: "at1".into(),
+                bytes: 120_000,
+                map,
+            }),
+        };
+        assert_eq!(
+            for_agent("trace this", &[picture("field outline.PNG", None)]),
+            "trace this\n\nAttached by the operator:\n\
+             - The picture \"field outline.PNG\", 120.0 KB, attachment `at1`: see it with \
+             tool_call attachment_image, giving it as `id`"
+        );
+        let map = for_agent("trace this", &[picture("Map.png", Some(map_frame()))]);
+        assert!(
+            map.ends_with(
+                "It is a picture of UXDuck's map, and comes with where on the ground it shows"
+            ),
+            "{map}"
+        );
+        assert!(!map.contains(';'));
+        // A file that is not a picture keeps its other tools.
+        assert!(for_agent("x", &[picture("outline.svg", None)]).contains("attachment_read"));
+    }
+
+    #[test]
+    fn a_map_picture_says_where_it_is_in_the_pixels_the_model_sees() {
+        let frame = map_frame();
+        assert_eq!(frame.check(), Ok(()));
+        let said = frame.describe(1024, 640);
+        assert!(
+            said.starts_with(
+                "This picture is UXDuck's flat map as it was shown, in Web Mercator (EPSG:3857), \
+             north up, looking straight down. In this 1024 × 640 picture"
+            ),
+            "{said}"
+        );
+        // Scaled to the copy the model sees.
+        assert!(
+            said.contains("- (1024, 640) is latitude -35.3700000, longitude 149.1700000"),
+            "{said}"
+        );
+        assert!(
+            said.contains("- (512, 320) is latitude -35.3650000"),
+            "{said}"
+        );
+        assert!(said.contains("from latitude -35.3700000 to -35.3600000 and from longitude 149.1600000 to 149.1700000"), "{said}");
+        assert!(said.contains("ln(tan(45° + latitude / 2))"), "{said}");
+        assert!(!said.contains(';'), "{said}");
+
+        let turned = super::MapFrame {
+            bearing_deg: 30.0,
+            ..map_frame()
+        };
+        assert!(
+            turned
+                .describe(1024, 640)
+                .contains("its top facing 30.0° from true north")
+        );
+        assert!(turned.describe(1024, 640).contains("affine"));
+        let tilted = super::MapFrame {
+            projection: super::MapProjection::Perspective,
+            pitch_deg: 40.0,
+            ..map_frame()
+        };
+        let said = tilted.describe(1024, 640);
+        assert!(
+            said.contains("leaning 40.0°")
+                && said.contains("ask the person to confirm it on the map"),
+            "{said}"
+        );
+
+        let mut few = map_frame();
+        few.points.truncate(3);
+        assert!(few.check().unwrap_err().contains("at least 4 places"));
+        // No most: a client may name as many places as its frame carries.
+        let mut many = map_frame();
+        many.points = (0..200)
+            .map(|i| super::MapFramePoint {
+                x: f64::from(i % 20) * 100.0,
+                y: f64::from(i / 20) * 100.0,
+                latitude_deg: -35.36,
+                longitude_deg: 149.16,
+            })
+            .collect();
+        assert_eq!(many.check(), Ok(()));
+        let mut outside = map_frame();
+        outside.points[0].x = 5000.0;
+        assert!(outside.check().is_err());
+        let mut nan = map_frame();
+        nan.bearing_deg = f64::NAN;
+        assert!(nan.check().is_err());
+    }
+
+    #[test]
+    fn a_map_picture_across_the_180th_meridian_says_so_and_its_span_is_the_short_way_round() {
+        let point = |x: f64, y: f64, longitude_deg: f64| super::MapFramePoint {
+            x,
+            y,
+            latitude_deg: -17.0,
+            longitude_deg,
+        };
+        let fiji = super::MapFrame {
+            points: vec![
+                point(0.0, 0.0, 179.5),
+                point(2048.0, 0.0, -179.5),
+                point(2048.0, 1280.0, -179.5),
+                point(0.0, 1280.0, 179.5),
+                point(1024.0, 640.0, 180.0),
+            ],
+            ..map_frame()
+        };
+        assert_eq!(fiji.check(), Ok(()));
+        let said = fiji.describe(1024, 640);
+        assert!(
+            said.contains(
+                "from longitude 179.5000000 east across the 180° meridian to -179.5000000. \
+                 Longitudes jump from 180 to -180 there"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains(';'), "{said}");
+
+        // A wide view that doesn't cross keeps its west and east.
+        let wide = super::MapFrame {
+            points: vec![
+                point(0.0, 0.0, -170.0),
+                point(1024.0, 0.0, 0.0),
+                point(2048.0, 0.0, 170.0),
+                point(0.0, 1280.0, -170.0),
+                point(1024.0, 640.0, 0.0),
+                point(2048.0, 1280.0, 170.0),
+            ],
+            ..map_frame()
+        };
+        let said = wide.describe(1024, 640);
+        assert!(
+            said.contains("and from longitude -170.0000000 to 170.0000000."),
+            "{said}"
+        );
+        assert!(!said.contains("180° meridian"), "{said}");
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "id": "at9a8b7c6d5e4f3021",
+  "name": "Map 14-02-07.png",
+  "bytes": 418204,
+  "sourceWidth": 2400,
+  "sourceHeight": 1500,
+  "width": 1024,
+  "height": 640,
+  "jpegBase64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q==",
+  "map": "This picture is UXDuck's flat map as it was shown, in Web Mercator (EPSG:3857), north up, looking straight down. In this 1024 × 640 picture, in pixels from its top left:\n- (0, 0) is latitude -35.3600000, longitude 149.1600000\n- (1024, 0) is latitude -35.3600000, longitude 149.1700000\n- (0, 640) is latitude -35.3650000, longitude 149.1600000\n- (1024, 640) is latitude -35.3650000, longitude 149.1700000\nIt shows from latitude -35.3650000 to -35.3600000 and from longitude 149.1600000 to 149.1700000. A pixel's longitude is linear in x between the left and right edges. Its latitude is linear in y in Web Mercator's y, ln(tan(45° + latitude / 2)), between the top and bottom edges, not in degrees.",
+  "note": "Made a JPEG of the PNG. Scaled from the picture's 2400 × 1500 to 1024 × 640."
+}

@@ -254,6 +254,54 @@ pub struct AttachedFile {
     pub id: String,
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
+    /// Where on the ground a picture of UXDuck's own map shows, from the
+    /// app that took it (FB-248).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapFrame>,
+}
+
+/// How a picture of UXDuck's map lies on the ground (FB-248), set by the
+/// app when it takes one, so the AI model can turn what it sees in the
+/// picture into positions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MapFrame {
+    pub projection: MapProjection,
+    /// The picture's size in pixels, as it was taken.
+    pub width: u32,
+    pub height: u32,
+    /// Degrees clockwise from true north that the picture's top faces.
+    pub bearing_deg: f64,
+    /// Degrees the view leans from looking straight down: 0 is straight down.
+    pub pitch_deg: f64,
+    /// Places in the picture, in its pixels from the top left, with where
+    /// on the ground each is: its corners and its middle, at least 4 and
+    /// at most 64.
+    pub points: Vec<MapFramePoint>,
+}
+
+// Its numbers are checked to be finite before UXDuck keeps one, so they
+// equal themselves.
+impl Eq for MapFrame {}
+
+/// How the map drew the ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapProjection {
+    /// The flat map: Web Mercator (EPSG:3857).
+    WebMercator,
+    /// The 3D map: seen through a camera, in perspective.
+    Perspective,
+}
+
+/// A place in a map picture and where it is on the ground.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MapFramePoint {
+    pub x: f64,
+    pub y: f64,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
 }
 
 /// The largest file `attachment/begin` takes: a long flight's video.
@@ -272,6 +320,10 @@ pub struct AttachmentBeginParams {
     /// Its size, up to 8 GiB.
     #[schemars(schema_with = "crate::safe::integer")]
     pub bytes: u64,
+    /// For a picture of UXDuck's own map, where on the ground it shows
+    /// (FB-248). Only UXDuck's app sets it, when it takes the picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapFrame>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -336,6 +388,50 @@ pub struct AttachmentReadResult {
     pub truncated: bool,
     /// It is not text, such as a tlog or a video: `text` is empty.
     pub binary: bool,
+}
+
+/// The longest edge of the picture the AI model is shown of an attached
+/// one, in pixels: what UXDuck's AI service takes (FB-244, FB-248).
+pub const PICTURE_LONG_EDGE: u32 = 1024;
+
+/// Shows the AI model a picture attached to a message (FB-248).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentImageParams {
+    /// The attachment's id, from the operator's message.
+    pub id: String,
+    /// The most bytes of JPEG the picture may take: it is made smaller to
+    /// fit. 8 MB when absent, and at most that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentImageResult {
+    pub id: String,
+    pub name: String,
+    /// The attached file's size.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub bytes: u64,
+    /// The picture as it was attached.
+    pub source_width: u32,
+    pub source_height: u32,
+    /// The JPEG made of it, at most 1024 pixels on its longest edge.
+    pub width: u32,
+    pub height: u32,
+    pub jpeg_base64: String,
+    /// For a picture of UXDuck's own map, where on the ground it shows, in
+    /// words, in the pixels of this JPEG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<String>,
+    /// For any other picture, what to do before taking positions from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    /// What was changed from the picture as attached, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

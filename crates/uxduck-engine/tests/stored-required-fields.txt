@@ -1007,3 +1007,15 @@ CameraAction::TrackRectangle.bottom
 CameraAction::TrackRectangle.left
 CameraAction::TrackRectangle.right
 CameraAction::TrackRectangle.top
+# Where a picture of UXDuck's map shows (FB-248, 2026-11-18): an optional
+# field of an attached file, a type no release has stored.
+MapFrame.bearing_deg
+MapFrame.height
+MapFrame.pitch_deg
+MapFrame.points
+MapFrame.projection
+MapFrame.width
+MapFramePoint.latitude_deg
+MapFramePoint.longitude_deg
+MapFramePoint.x
+MapFramePoint.y

@@ -131,7 +131,9 @@ pub const AGENT_METHODS: &[&str] = &[
     "replay/add",
     // Files the operator attached to a message (S246): text read freely; a
     // log replayed, or a video kept with a flight after asking, by its id.
+    // A picture is shown to the model freely, as they attached it (FB-248).
     "attachment/read",
+    "attachment/image",
     "flight/addVideo",
     // Operations (ADR-0039 R16): reading freely, gathering after asking.
     "operation/list",
@@ -644,6 +646,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "replay/logFields",
     "replay/add",
     "attachment/read",
+    "attachment/image",
     "flight/addVideo",
     "operation/list",
     "operation/create",

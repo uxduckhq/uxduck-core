@@ -9,11 +9,21 @@ use serde_json::{Map, Value, json};
 
 use crate::conversation::Shown;
 
-/// Takes a camera look's frames (`video/frame`, FB-244) out of its result,
-/// to be shown as images, each told as the camera and the time it was
-/// seen: the result keeps when and how large each was. Nothing for any
-/// other result.
+/// Takes a camera look's frames (`video/frame`, FB-244) or an attached
+/// picture (`attachment/image`, FB-248) out of its result, to be shown as
+/// images, each told as the camera and the time it was seen, or as the
+/// picture's name: the result keeps when and how large each was. Nothing
+/// for any other result.
 pub fn take_images(value: &mut Value) -> Vec<Shown> {
+    if let Some(Value::String(jpeg)) = value.as_object_mut().and_then(|v| v.remove("jpegBase64")) {
+        let name = value["name"].as_str().unwrap_or("the picture");
+        let shown = Shown {
+            label: format!("The attached picture {name:?}"),
+            jpeg,
+        };
+        value["shown"] = json!("The picture follows as an image.");
+        return vec![shown];
+    }
     let camera = value["camera"].as_str().unwrap_or("the camera").to_owned();
     let Some(frames) = value.get_mut("frames").and_then(Value::as_array_mut) else {
         return Vec::new();

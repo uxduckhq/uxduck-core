@@ -1293,8 +1293,8 @@ impl Sessions {
         if self.frames_within_budget(model) == Some(0) {
             return Some(format!(
                 "An account's daily budget for UXDuck's AI service doesn't pay for even one \
-                 camera image in a request to {model}, so the assistant can't see the camera \
-                 with this model."
+                 camera image in a request to {model}, so the assistant can't see cameras or \
+                 attached pictures with this model."
             ));
         }
         let models = self
@@ -1304,18 +1304,19 @@ impl Sessions {
         match models.as_deref() {
             None => Some(
                 "UXDuck's AI service doesn't say yet which of its models can take images, so the \
-                 assistant can't see the camera in this chat."
+                 assistant can't see cameras or attached pictures in this chat."
                     .to_owned(),
             ),
             Some(models) if models.iter().any(|m| m == model) => None,
             Some([]) => Some(
                 "None of the AI models UXDuck's AI service offers can take images, so the \
-                 assistant can't see the camera."
+                 assistant can't see cameras or attached pictures."
                     .to_owned(),
             ),
             Some(models) => Some(format!(
-                "This chat's AI model, {model}, can't take images, so the assistant can't see the \
-                 camera in this chat. A person can choose a model that can for this chat: {}.",
+                "This chat's AI model, {model}, can't take images, so the assistant can't see \
+                 cameras or attached pictures in this chat. A person can choose a model that can \
+                 for this chat: {}.",
                 models.join(", ")
             )),
         }
