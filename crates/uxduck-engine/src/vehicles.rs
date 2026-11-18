@@ -17,6 +17,9 @@ use uxduck_core::events::{Actor, Change};
 use crate::commands::Raise;
 use crate::{Engine, NO_CONNECTION};
 
+/// The notice that macOS Low Power Mode is on while a vehicle is connected.
+const LOW_POWER_MODE: &str = "low-power-mode";
+
 /// The condition an older UXDuck gave a real vehicle's ground-testing
 /// notice, before its id.
 const GROUND_TESTING: &str = "ground-testing:";
@@ -144,19 +147,23 @@ impl Engine {
         self.loop_detected(link_id, &name, &detail);
     }
 
-    /// Holds the wake lock while any vehicle is online (ADR-0004), so a
-    /// closed lid or an idle timer does not drop a link, and keeps the
-    /// display on while a real one is armed, so the screen does not lock in
-    /// flight; a simulated one never keeps it on (maintainer, 2026-10-16).
+    /// Holds the wake lock while any vehicle is connected, online or late
+    /// with its heartbeat (ADR-0004), so a closed lid or an idle timer does
+    /// not drop a link and macOS does not slow UXDuck down (FB-254). A late
+    /// heartbeat keeps it held: letting go then slows UXDuck just when the
+    /// link needs it. Keeps the display on while a real one is armed, so the
+    /// screen does not lock in flight; a simulated one never keeps it on
+    /// (maintainer, 2026-10-16).
     pub(crate) fn refresh_wake_lock(&mut self) {
-        let online = self
+        let connected = self
             .state
             .vehicles
             .values()
-            .any(|v| v.presence == Presence::Online);
-        if online != self.awake {
-            self.awake = online;
-            self.system.wake_lock(online);
+            .any(|v| v.presence != Presence::Offline);
+        if connected != self.awake {
+            self.awake = connected;
+            self.system.wake_lock(connected);
+            self.review_low_power_mode();
         }
         let flying = self
             .state
@@ -167,6 +174,34 @@ impl Engine {
             self.display_awake = flying;
             self.system.display_awake(flying);
         }
+    }
+
+    /// Says while a vehicle is connected that macOS Low Power Mode is on:
+    /// it slows the whole computer, which the wake lock cannot lift
+    /// (FB-254). Checked when a vehicle connects and once a second after.
+    pub fn review_low_power_mode(&mut self) {
+        let slowed = self.awake && self.system.low_power_mode();
+        if slowed == self.low_power {
+            return;
+        }
+        self.low_power = slowed;
+        if !slowed {
+            self.resolve(LOW_POWER_MODE);
+            return;
+        }
+        self.raise(Raise {
+            severity: Severity::Warning,
+            kind: NotificationKind::Transient,
+            subject: Subject::System,
+            title: "Low Power Mode is on".into(),
+            body: Some(
+                "macOS may slow the ground station. Turn it off in System Settings while flying."
+                    .into(),
+            ),
+            actions: Vec::new(),
+            condition: Some(LOW_POWER_MODE.into()),
+            report: None,
+        });
     }
 
     /// Merges what the data plane saw. A vehicle seen under a new id (its

@@ -7,9 +7,11 @@ use uxduck_engine::runtime::{SerialPortInfo, System};
 
 use crate::ports;
 
-/// The wake lock is a child process that holds the platform's own
-/// assertion and exits with the daemon: `caffeinate -i -w <pid>` on macOS,
-/// `systemd-inhibit` around `tail --pid` on Linux; on Windows a thread holds
+/// The wake lock is the platform's own assertion, which ends with the
+/// daemon: on macOS a thread holds a user-initiated, latency-critical
+/// activity, so the system stays awake and the daemon is neither napped nor
+/// has its timers coalesced (FB-254), on Linux a child process holds
+/// `systemd-inhibit` around `tail --pid`, on Windows a thread holds
 /// `SetThreadExecutionState`. The display is held the same way while a
 /// vehicle is armed: `caffeinate -d` on macOS, `ES_DISPLAY_REQUIRED` on
 /// Windows; Linux desktops keep their own screen lock.
@@ -77,6 +79,10 @@ enum Hold {
     /// The thread that holds the execution state; dropping the sender ends it.
     #[cfg(windows)]
     Thread(std::sync::mpsc::Sender<()>),
+    /// The thread that holds the activity; dropping the sender ends it, and
+    /// it has ended once the thread has.
+    #[cfg(target_os = "macos")]
+    Activity(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>),
 }
 
 impl Hold {
@@ -88,8 +94,46 @@ impl Hold {
             }
             #[cfg(windows)]
             Self::Thread(stop) => drop(stop),
+            #[cfg(target_os = "macos")]
+            Self::Activity(stop, thread) => {
+                drop(stop);
+                let _ = thread.join();
+            }
         }
     }
+}
+
+/// What the activity says it is for, in `pmset -g assertions` and
+/// Activity Monitor.
+#[cfg(target_os = "macos")]
+const ACTIVITY_REASON: &str = "A vehicle is connected to UXDuck";
+
+/// Holds a user-initiated, latency-critical activity until the returned
+/// hold is released: macOS then keeps the system from idle sleep and does
+/// not nap the daemon or coalesce its timers, which heartbeats, links and
+/// controllers need (FB-254). The activity stays on the thread that began
+/// it, and this returns once it has begun.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code, reason = "objc2 marks NSProcessInfo's endActivity unsafe")]
+fn hold_activity() -> std::io::Result<Hold> {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let (begun, wait_begun) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("wake lock".into())
+        .spawn(move || {
+            let info = NSProcessInfo::processInfo();
+            let activity = info.beginActivityWithOptions_reason(
+                NSActivityOptions::UserInteractive,
+                &NSString::from_str(ACTIVITY_REASON),
+            );
+            let _ = begun.send(());
+            let _ = stopped.recv();
+            // SAFETY: ends the activity this thread began, once.
+            unsafe { info.endActivity(&activity) };
+        })?;
+    let _ = wait_begun.recv();
+    Ok(Hold::Activity(stop, thread))
 }
 
 /// Holds `flags` on a thread of its own until the returned sender drops:
@@ -246,7 +290,9 @@ fn wake_hold() -> Option<std::io::Result<Hold>> {
         use windows_sys::Win32::System::Power::ES_SYSTEM_REQUIRED;
         return Some(Ok(hold_execution_state(ES_SYSTEM_REQUIRED)));
     }
-    #[allow(unreachable_code, reason = "Windows returns above")]
+    #[cfg(target_os = "macos")]
+    return Some(hold_activity());
+    #[allow(unreachable_code, reason = "Windows and macOS return above")]
     wake_command().map(spawn_hold)
 }
 
@@ -271,12 +317,7 @@ fn display_hold() -> Option<std::io::Result<Hold>> {
 
 fn wake_command() -> Option<Command> {
     let pid = std::process::id().to_string();
-    if cfg!(target_os = "macos") {
-        let mut command = Command::new("caffeinate");
-        // Idle sleep only: a closed lid on battery still sleeps, as macOS insists.
-        command.args(["-i", "-w", &pid]);
-        Some(command)
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         let mut command = Command::new("systemd-inhibit");
         command.args([
             "--what=idle:sleep",
@@ -629,11 +670,18 @@ impl System for Host {
             .collect()
     }
 
+    fn low_power_mode(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled();
+        #[allow(unreachable_code, reason = "macOS returns above")]
+        false
+    }
+
     fn wake_lock(&mut self, hold: bool) {
         if hold && self.wake.is_none() {
             match wake_hold() {
                 Some(Ok(assertion)) => {
-                    tracing::info!("holding the wake lock while a vehicle is online");
+                    tracing::info!("holding the wake lock while a vehicle is connected");
                     self.wake = Some(assertion);
                 }
                 Some(Err(error)) => tracing::warn!(%error, "cannot hold the wake lock"),
@@ -773,5 +821,35 @@ impl System for Host {
 
     fn desktop_app_open(&mut self, path: &str, args: &[String]) -> Result<(), String> {
         self.desktop_app.open(path, args)
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    use super::*;
+
+    /// Whether `pmset` lists this process holding the activity.
+    fn activity_listed() -> bool {
+        let output = Command::new("pmset")
+            .args(["-g", "assertions"])
+            .output()
+            .expect("pmset runs");
+        let this = format!("pid {}(", std::process::id());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim_start().starts_with(&this) && line.contains(ACTIVITY_REASON))
+    }
+
+    #[test]
+    fn the_wake_lock_is_an_activity_macos_lists_until_it_is_released() {
+        assert!(!activity_listed());
+        let hold = wake_hold()
+            .expect("macOS has a wake lock")
+            .expect("it holds");
+        assert!(matches!(hold, Hold::Activity(..)), "{hold:?}");
+        assert!(activity_listed());
+        hold.release();
+        assert!(!activity_listed());
     }
 }

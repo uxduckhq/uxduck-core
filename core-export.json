@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "1e659c5aa76fd04143da96e44d2436a7ff2904a8",
+  "sourceCommit": "2e9dcf8866a1ab897d236cd1087ca54242678e7b",
   "licenseReady": true,
   "files": [
     {
@@ -51,7 +51,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "148f52c075733e9d46929b52cfb46b6834b7818d2cca7c49f6723251791ff3f6",
+      "sha256": "e050cd46c086162d0ed4f4d9553df98b07effb4f6827bc240e06ee9d6f95ab49",
       "executable": false
     },
     {
@@ -6556,7 +6556,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/lib.rs",
-      "sha256": "02b47afc189c59ba9a37d1809518e633eb673b462adb1736e8d0e678496d5303",
+      "sha256": "7719edcab8570a7af0c91ca80525ac05a1ca3c3d7536e8176fdd05439e660ac6",
       "executable": false
     },
     {
@@ -6931,7 +6931,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/runtime.rs",
-      "sha256": "915b0d57b147dce1e96090581771b1784851755dc2582e1a0da93328e5d62e1f",
+      "sha256": "da97470bc3393e1ec0c4f514dcdf855e7f47175dec5804c79e1820ab66c591b1",
       "executable": false
     },
     {
@@ -7096,7 +7096,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/vehicles.rs",
-      "sha256": "dd47520d67eef02f7993f649aa3465c9fa302d8f13af97521d384d33d5ebebaa",
+      "sha256": "e4258d4ab4a0da87c67533e17b690ddfc46fbe9b65d2b5b25b70c11ff60509d1",
       "executable": false
     },
     {
@@ -7926,7 +7926,7 @@
     },
     {
       "path": "crates/uxduck/Cargo.toml",
-      "sha256": "b555731080b871be75f2d7575fcc4288880f3cf1011d979e9c6dde38a9cc8cbb",
+      "sha256": "d589b6d23cb56011ba72da4f1c74a62f8deabdd2cb4c6edbf8e3fb67404bdb7d",
       "executable": false
     },
     {
@@ -7971,7 +7971,7 @@
     },
     {
       "path": "crates/uxduck/src/adapters/host.rs",
-      "sha256": "3f09056dc17d29ad193d4b0ef0dd39aac5ec43fb5819ab6df42d3b53c7f6512b",
+      "sha256": "a7417170d031d9918214c9aed8b8554e3617fa8e94f1f112f72122d77193f6e1",
       "executable": false
     },
     {
@@ -8326,7 +8326,7 @@
     },
     {
       "path": "crates/uxduck/src/daemon/mod.rs",
-      "sha256": "8fd3eec42fd9eef2c103cebd72bb5c8f4cedb27777d7d2f928c72e3194194b45",
+      "sha256": "b3bcc0a5bc099265ca5a34f4279bf81c350adad2457670d390f8d18d8ad69b41",
       "executable": false
     },
     {

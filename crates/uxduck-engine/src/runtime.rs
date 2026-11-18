@@ -996,6 +996,11 @@ pub trait System: Send {
     fn serial_ports(&self) -> Vec<SerialPortInfo>;
     /// Holds or releases the system wake lock.
     fn wake_lock(&mut self, hold: bool);
+    /// Whether the computer trades speed for battery: macOS Low Power Mode,
+    /// which slows UXDuck and no wake lock lifts (FB-254).
+    fn low_power_mode(&self) -> bool {
+        false
+    }
     /// Keeps the display on, or lets it sleep again, while a vehicle is
     /// armed, so the screen does not dim or lock in flight.
     fn display_awake(&mut self, _hold: bool) {}
