@@ -257,10 +257,15 @@ pub fn event(value: &Value) -> Result<Option<ProviderEvent>, ProviderError> {
                 .or_else(|| value.get("code"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            let hosted = value.pointer("/error/type").and_then(Value::as_str) == Some("uxduck");
             return Err(if code == "uxduck-upstream" {
                 ProviderError::Transport(message(value))
-            } else if code == "uxduck-socket" && message(value) == "The AI request is too large." {
+            } else if (hosted && code == "too-large")
+                || (code == "uxduck-socket" && message(value) == "The AI request is too large.")
+            {
                 ProviderError::Account(super::TOO_LARGE.into())
+            } else if hosted {
+                ProviderError::Account(message(value))
             } else if matches!(
                 code,
                 "rate_limit_exceeded" | "server_error" | "server_is_overloaded"
@@ -547,6 +552,28 @@ mod tests {
             event(&other),
             Err(ProviderError::Refused(
                 "Too many pending AI messages.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_hosted_budgets_refusal_over_the_socket_is_uxducks_own() {
+        let message = "This request needs a $0.51 safety reservation. $0.49 remains in your $1.00 daily hosted AI budget.";
+        let refused = json!({
+            "type": "error",
+            "error": { "message": message, "type": "uxduck", "code": "daily-cap" }
+        });
+        let error = event(&refused).unwrap_err();
+        assert_eq!(error, ProviderError::Account(message.into()));
+        assert_eq!(error.to_string(), message);
+        let provider = json!({
+            "type": "error",
+            "error": { "message": "Project does not have access to model", "type": "invalid_request_error", "code": "model_not_found" }
+        });
+        assert_eq!(
+            event(&provider),
+            Err(ProviderError::Refused(
+                "Project does not have access to model".into()
             ))
         );
     }

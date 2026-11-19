@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "cf2eaddc5b97fe174d3935054bf469e7ac18d079",
+  "sourceCommit": "ae1f51bedba90f3df0ea9ff8fc883ea41ee1d46c",
   "licenseReady": true,
   "files": [
     {
@@ -156,7 +156,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/provider/openai.rs",
-      "sha256": "789e29c968d1aff519d117c8ebb8c0d1f0d4f9813e88432ee4245721e24fff8e",
+      "sha256": "3719947ab37007a0a302d83f25037579383458a9616a9156d4153b99ba56b3ba",
       "executable": false
     },
     {
