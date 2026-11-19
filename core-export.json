@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "0dd84cd4563b5c2c08f6c21d46db8b1563deb744",
+  "sourceCommit": "93aa09d795f8ae99c1cc06ff37465d23643449ed",
   "licenseReady": true,
   "files": [
     {
@@ -5826,7 +5826,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/flight.rs",
-      "sha256": "24dc3ffa84f65f4fd32cfab0612dd02a4be3e82b361e68518c1ff6e280157c63",
+      "sha256": "866d871b2de58263d4521ad2b5d880514c758eb30170fb9b0826f9be6f921aac",
       "executable": false
     },
     {
@@ -6206,7 +6206,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/flight.rs",
-      "sha256": "4c7d00326b014e4b6f5ed56672dd2bc32438da3ead28902e250e59b7ab574f57",
+      "sha256": "1ee5b20b202cffc4c8cf859b5820e86922d2b41a3db0d3c6390438a3c7efdc93",
       "executable": false
     },
     {
@@ -6581,7 +6581,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/flight_time.rs",
-      "sha256": "e9ebce27d9ca35b05061f9433716ed16362bef612d0f3027f6590dec5fc74f4a",
+      "sha256": "d9de5a1cc764924a5154b5dd85eb6d737cdc32e6d61dc0fb9c8824c3848691ec",
       "executable": false
     },
     {
@@ -6701,7 +6701,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/offload.rs",
-      "sha256": "838391f4c857594ea0b4dcedc23de3796a3fa2cd437008244f194116f8b454c1",
+      "sha256": "302572d12c12818646a0f24bb54c6c028fc26fd1659ea86cad2babf999f96fff",
       "executable": false
     },
     {
@@ -6981,7 +6981,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/replay.rs",
-      "sha256": "3571b7ec1d10264f809fe8e493a886783c3c54ae72ae2b14221002300f651c4d",
+      "sha256": "3aa8c6bb08c9d98fd1b1c35974f2b565ac57ea99522de456790fe96f96cf2a3d",
       "executable": false
     },
     {
@@ -9141,7 +9141,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "2e61f60c35c32c2200c3f8899ae8d66c8edf1570248ab17824101fd3b5ed83bf",
+      "sha256": "4384b7344caa2686c1e12f2aecac4442ea35c42c7e33f77ebad44d2314ca9ff0",
       "executable": false
     },
     {

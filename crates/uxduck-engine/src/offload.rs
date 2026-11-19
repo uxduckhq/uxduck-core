@@ -720,6 +720,7 @@ impl Engine {
                 left_account: false,
                 link_id: None,
                 tlog: None,
+                tlog_end: None,
                 log: uxduck_core::domain::flight::FlightLog::None,
                 sync_video: false,
                 copies: vec![FlightCopy {

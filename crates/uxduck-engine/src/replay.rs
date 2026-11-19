@@ -2668,6 +2668,114 @@ impl Engine {
         (freed, kept)
     }
 
+    /// What a flight's recordings take on this computer (FB-148): its part
+    /// of its connection's tlogs and UXDuck's videos of it, those on a disk
+    /// not counted, and apart the videos added to it from elsewhere, as
+    /// large as each was when added. `logs` keeps each link's files
+    /// once read, for a page of entries.
+    pub(crate) fn flight_size(
+        &self,
+        flight: &uxduck_core::domain::flight::Flight,
+        logs: &mut BTreeMap<String, Vec<crate::runtime::LinkLog>>,
+    ) -> uxduck_contracts::dto::flight::FlightSize {
+        let (mut video_bytes, mut added_video_bytes) = (0u64, 0u64);
+        for recording in self.flight_videos(flight) {
+            if recording.packed.is_some() {
+                continue;
+            }
+            let total = if recording.alignment.is_some() {
+                &mut added_video_bytes
+            } else {
+                &mut video_bytes
+            };
+            *total = total.saturating_add(recording.bytes);
+        }
+        let (telemetry_bytes, telemetry_gone) = self.telemetry_here(flight, logs);
+        uxduck_contracts::dto::flight::FlightSize {
+            telemetry_bytes,
+            telemetry_gone,
+            video_bytes,
+            added_video_bytes,
+        }
+    }
+
+    /// A flight's part of its connection's tlogs here (FB-148): from where
+    /// it began to where it ended. Without its end, to where it is writing
+    /// now while it is open, else where the connection's next entry after
+    /// it began, else the end of the last file begun by the time it ended.
+    /// None when where it began is not known, and with true when the file
+    /// it began in is gone.
+    fn telemetry_here(
+        &self,
+        flight: &uxduck_core::domain::flight::Flight,
+        logs: &mut BTreeMap<String, Vec<crate::runtime::LinkLog>>,
+    ) -> (Option<u64>, bool) {
+        use uxduck_core::domain::flight::{FlightEnd, FlightTlog};
+        // Had from the account, or opened from a `.uxflight`: its
+        // telemetry is not on this computer.
+        let Some(link) = flight.link_id.as_deref().filter(|_| flight.recorded_here) else {
+            return (Some(0), false);
+        };
+        let Some(start) = flight.tlog.as_ref() else {
+            return (None, false);
+        };
+        let files: &Vec<crate::runtime::LinkLog> = logs
+            .entry(link.to_owned())
+            .or_insert_with(|| self.system.link_logs(link));
+        let at = |mark: &FlightTlog| {
+            files
+                .iter()
+                .position(|f| f.name == mark.file)
+                .map(|i| (i, mark.offset))
+        };
+        let Some(from) = at(start) else {
+            return (None, true);
+        };
+        let ended = flight.ended_at_us.unwrap_or(u64::MAX);
+        let last = files
+            .iter()
+            .rposition(|f| f.start_us <= ended)
+            .unwrap_or(from.0)
+            .max(from.0);
+        let to = flight
+            .tlog_end
+            .as_ref()
+            .and_then(at)
+            .or_else(|| {
+                (flight.end == FlightEnd::Open)
+                    .then(|| self.system.tlog_position(link))
+                    .flatten()
+                    .and_then(|(file, offset)| at(&FlightTlog { file, offset }))
+            })
+            .or_else(|| {
+                self.state
+                    .flights
+                    .values()
+                    .filter(|f| {
+                        f.id != flight.id
+                            && f.recorded_here
+                            && f.link_id.as_deref() == Some(link)
+                            && f.armed_at_us >= ended
+                    })
+                    .filter_map(|f| f.tlog.as_ref().and_then(at))
+                    .filter(|next| *next > from && next.0 <= last)
+                    .min()
+            })
+            .unwrap_or((last, files[last].bytes));
+        if to < from {
+            return (Some(0), false);
+        }
+        let bytes = (from.0..=to.0)
+            .map(|i| {
+                let bytes = files[i].bytes;
+                let lo = if i == from.0 { from.1 } else { 0 };
+                let hi = if i == to.0 { to.1.min(bytes) } else { bytes };
+                hi.saturating_sub(lo)
+            })
+            .sum();
+        (Some(bytes), false)
+    }
+
     /// UXDuck's own video recordings deleting the flights `ids` frees
     /// (S348): ended ones in the media folder that one of them reaches, by
     /// the flight or its vehicle over its time as the Logbook counts its
@@ -3983,6 +4091,7 @@ impl Engine {
                 contact_lost_at_us: None,
                 link_id: None,
                 tlog: None,
+                tlog_end: None,
                 // Its log with it unless "What to sync" keeps summaries only
                 // (ADR-0046 B11).
                 log: if self.state.settings.sync_content

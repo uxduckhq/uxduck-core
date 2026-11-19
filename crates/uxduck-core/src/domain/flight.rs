@@ -163,6 +163,11 @@ pub struct Flight {
     /// files' names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tlog: Option<FlightTlog>,
+    /// Where its log ended in that connection's tlogs, as it ended, so its
+    /// size is its own (FB-148). Absent for one still armed, one ended
+    /// when UXDuck stopped, and flights from before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tlog_end: Option<FlightTlog>,
     /// Its flight log in the account on its own (2026-10-24): asked for
     /// while "Store flight logs and videos" is off, then stored.
     #[serde(default, skip_serializing_if = "FlightLog::is_none")]

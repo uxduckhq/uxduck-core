@@ -370,6 +370,7 @@ impl Engine {
                 .system
                 .tlog_position(&vehicle.link_id)
                 .map(|(file, offset)| uxduck_core::domain::flight::FlightTlog { file, offset }),
+            tlog_end: None,
             log: uxduck_core::domain::flight::FlightLog::None,
             sync_video: false,
             mission: None,
@@ -450,6 +451,15 @@ impl Engine {
         };
         flight.ended_at_us = Some(at_us);
         flight.end = end;
+        // Where its log ends, so its size is its own (FB-148). One ended
+        // after contact was lost ends when it was last heard, and where the
+        // link wrote then is not kept, so it has no mark.
+        flight.tlog_end = flight
+            .link_id
+            .as_deref()
+            .filter(|_| end != FlightEnd::ContactLost)
+            .and_then(|link| self.system.tlog_position(link))
+            .map(|(file, offset)| uxduck_core::domain::flight::FlightTlog { file, offset });
         flight.contact_lost_at_us = None;
         flight.air_us = air_us;
         flight.moving_us = Some(moving_us);
@@ -549,10 +559,13 @@ impl Engine {
                     .any(|c| crate::offload::inside(folder, &c.path))
             });
         }
-        // When and how long (FB-226), over every entry, so each page and
-        // the totals hold only the entries that match.
+        // Real or simulated (FB-148), and when and how long (FB-226), over
+        // every entry, so each page and the totals hold only the matches.
         flights.retain(|f| {
-            params.armed_since_us.is_none_or(|us| f.armed_at_us >= us)
+            params
+                .simulated
+                .is_none_or(|simulated| f.simulated == simulated)
+                && params.armed_since_us.is_none_or(|us| f.armed_at_us >= us)
                 && params.armed_before_us.is_none_or(|us| f.armed_at_us < us)
         });
         if params.longer_than_us.is_some() || params.shorter_than_us.is_some() {
@@ -593,10 +606,15 @@ impl Engine {
                 .collect();
             (found, None)
         };
+        // What each takes here (FB-148), each link's files read once.
+        let mut logs = BTreeMap::new();
         Ok(uxduck_contracts::dto::flight::FlightListResult {
             flights: page
                 .into_iter()
-                .map(|flight| self.flight_dto(flight))
+                .map(|flight| uxduck_contracts::dto::flight::Flight {
+                    size: Some(self.flight_size(flight, &mut logs)),
+                    ..self.flight_dto(flight)
+                })
                 .collect(),
             older,
             totals,

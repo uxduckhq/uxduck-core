@@ -114,6 +114,39 @@ pub struct Flight {
     /// A `flight/offload` under way, or the last one that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload: Option<FlightOffload>,
+    /// What its recordings take on this computer (FB-148), as
+    /// `flight/list` measures them. Omitted by other methods and by a
+    /// UXDuck from before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<FlightSize>,
+}
+
+/// What a flight's recordings take on this computer (FB-148), in bytes.
+/// Its `.uxflight` files on other disks are not counted, nor are the videos
+/// added to it from elsewhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightSize {
+    /// Its part of its connection's tlogs, from where it began to where it
+    /// ended. For one whose end UXDuck did not mark (recorded before, ended
+    /// when UXDuck stopped or after contact was lost), up to where the
+    /// connection's next entry began, else to the end of its files. Omitted
+    /// when where it began is not known, or its log is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub telemetry_bytes: Option<u64>,
+    /// Its telemetry was recorded here, and the file it began in has been
+    /// deleted since, so the size leaves it out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub telemetry_gone: bool,
+    /// UXDuck's own video recordings of it.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub video_bytes: u64,
+    /// Videos added to it from elsewhere, as large as each was when added.
+    /// They stay where they were added from, which may be another disk or
+    /// gone since, so they are not part of what is on this computer.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub added_video_bytes: u64,
 }
 
 /// A flight's `.uxflight` file (ADR-0062).
@@ -437,6 +470,10 @@ pub struct FlightListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::safe::optional_integer")]
     pub shorter_than_us: Option<u64>,
+    /// Only the simulated entries (true) or only the real ones (false),
+    /// and totals over them (FB-148).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulated: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -608,6 +645,7 @@ impl From<&uxduck_core::domain::flight::Flight> for Flight {
                 })
                 .collect(),
             offload: None,
+            size: None,
         }
     }
 }

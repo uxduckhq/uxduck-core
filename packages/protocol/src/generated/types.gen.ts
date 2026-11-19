@@ -7546,6 +7546,12 @@ export type Flight = {
     seenArmed?: boolean;
     simulated?: boolean;
     /**
+     * What its recordings take on this computer (FB-148), as
+     * `flight/list` measures them. Omitted by other methods and by a
+     * UXDuck from before.
+     */
+    size?: FlightSize | null;
+    /**
      * Its camera video goes to the account with it (ADR-0046 B11).
      */
     syncVideo?: boolean;
@@ -7814,6 +7820,11 @@ export type FlightListParams = {
      * totals over them (FB-226). One still armed counts its time so far.
      */
     shorterThanUs?: number | null;
+    /**
+     * Only the simulated entries (true) or only the real ones (false),
+     * and totals over them (FB-148).
+     */
+    simulated?: boolean | null;
     /**
      * Also totals since this time, such as the start of the month where
      * the page is.
@@ -8143,6 +8154,37 @@ export type FlightSeriesResult = {
     missingKeys?: Array<string>;
     series: Array<FlightSeries>;
     startUs: number;
+};
+
+/**
+ * What a flight's recordings take on this computer (FB-148), in bytes.
+ * Its `.uxflight` files on other disks are not counted, nor are the videos
+ * added to it from elsewhere.
+ */
+export type FlightSize = {
+    /**
+     * Videos added to it from elsewhere, as large as each was when added.
+     * They stay where they were added from, which may be another disk or
+     * gone since, so they are not part of what is on this computer.
+     */
+    addedVideoBytes: number;
+    /**
+     * Its part of its connection's tlogs, from where it began to where it
+     * ended. For one whose end UXDuck did not mark (recorded before, ended
+     * when UXDuck stopped or after contact was lost), up to where the
+     * connection's next entry began, else to the end of its files. Omitted
+     * when where it began is not known, or its log is gone.
+     */
+    telemetryBytes?: number | null;
+    /**
+     * Its telemetry was recorded here, and the file it began in has been
+     * deleted since, so the size leaves it out.
+     */
+    telemetryGone?: boolean;
+    /**
+     * UXDuck's own video recordings of it.
+     */
+    videoBytes: number;
 };
 
 /**
