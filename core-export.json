@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "381ac341aec9281e64df0a83bfbfe9c72d436856",
+  "sourceCommit": "c8da87b0047b89ed4dd2c51ad9f28df51fafcf4f",
   "licenseReady": true,
   "files": [
     {
@@ -51,7 +51,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a51ac378aa89b03432496917f5c8e2429ecf706900ce6da305ca569299fdd9ab",
+      "sha256": "07a6fbeaae07bd5f34fc1fbec5b50cde3334e5a23870c6e11a06870399d48767",
       "executable": false
     },
     {
