@@ -308,7 +308,7 @@ impl uxduck_engine::video::VideoPort for VideoHost {
             _ => {}
         }
         let _ = std::fs::remove_file(recorder::index_path(dir, file));
-        let _ = std::fs::remove_file(playback::cached(&playback::cache_dir(dir), recording_id));
+        playback::remove_copies(&playback::cache_dir(dir), recording_id);
         Ok(())
     }
 
@@ -321,8 +321,10 @@ impl uxduck_engine::video::VideoPort for VideoHost {
         token: &str,
         recording_id: &str,
         at: &uxduck_engine::runtime::VideoAt,
+        still_written: bool,
     ) {
-        self.hub.allow_playback(token, recording_id, at.clone());
+        self.hub
+            .allow_playback(token, recording_id, at.clone(), still_written);
     }
 
     fn reveal(&mut self, file: Option<&str>) -> Result<String, String> {
@@ -447,6 +449,26 @@ pub async fn start(
         let freed = playback::clean(&cache, playback::UNUSED_FOR);
         if freed > 0 {
             tracing::info!(freed, "old playback copies removed");
+        }
+    });
+    // Tokens' copies of recordings still being written (FB-243) go once
+    // they are not needed, from the start too: no token outlives the
+    // daemon, and a copy given since start belongs to a token it knows.
+    let (cache, pins) = (playback::cache_dir(hub.dir()), hub.clone());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(playback::PIN_SWEEP_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let (cache, pins) = (cache.clone(), pins.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                playback::sweep_pins(
+                    &cache,
+                    |token| pins.playback_asked(token),
+                    playback::PIN_IDLE,
+                )
+            })
+            .await;
         }
     });
     let host = VideoHost {

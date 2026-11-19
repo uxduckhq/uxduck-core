@@ -914,9 +914,17 @@ async fn recording(
     request: Request,
 ) -> Response {
     use uxduck_engine::runtime::VideoAt;
-    let Some((id, at)) = state.video.playback(&query.token) else {
+    let Some(crate::video::hub::Playing {
+        recording_id: id,
+        at,
+        still_written,
+        had_copy,
+    }) = state.video.playback(&query.token)
+    else {
         return (StatusCode::UNAUTHORIZED, "ask for the recording first").into_response();
     };
+    // While it is being sent, the token's copy is in use (FB-243).
+    let mut sending = None;
     let dir = state.video.dir().to_owned();
     let name = match at {
         VideoAt::Media { file } => file,
@@ -981,30 +989,78 @@ async fn recording(
     } else if file != format!("{id}.mp4") {
         return StatusCode::NOT_FOUND.into_response();
     } else if kept_as_ts {
-        // Played as MP4: the copy in the cache, made now if it isn't there.
-        let mp4 = crate::video::playback::cached(&crate::video::playback::cache_dir(&dir), &id);
-        let _one_at_a_time = CONVERTING.lock().await;
-        let (ts, to) = (dir.join(&name), mp4.clone());
-        let made = tokio::task::spawn_blocking(move || {
-            crate::video::playback::convert(&ts, &to)?;
-            crate::video::playback::mark_used(&to);
-            Ok::<(), std::io::Error>(())
-        })
-        .await;
-        if !matches!(made, Ok(Ok(()))) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "the recording could not be prepared to play",
-            )
-                .into_response();
+        sending = Some(state.video.sending(&query.token));
+        let ts = dir.join(&name);
+        match ts_copy(&state, &ts, &id, &query.token, still_written, had_copy).await {
+            Ok(path) => path,
+            Err(refused) => return refused.into_response(),
         }
-        mp4
     } else {
         dir.join(&name)
     };
     match ServeFile::new(path).try_call(request).await {
-        Ok(response) => response.map(Body::new).into_response(),
+        Ok(response) => response
+            .map(|body| holding(Body::new(body), sending))
+            .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `body`, holding `sending` until it is sent or the player went away
+/// (FB-243).
+fn holding(body: Body, sending: Option<crate::video::hub::Sending>) -> Body {
+    use futures::StreamExt;
+    let Some(sending) = sending else {
+        return body;
+    };
+    Body::from_stream(body.into_data_stream().map(move |chunk| {
+        let _held = &sending;
+        chunk
+    }))
+}
+
+/// A recording kept as MPEG-TS played as MP4 (S151): the copy in the
+/// cache, made now if it isn't there. One still being written when the
+/// token was given keeps the copy the token was first given, for every
+/// request, and once that copy is gone the token is answered 410, never
+/// other bytes, so the player asks for the recording again (FB-243).
+async fn ts_copy(
+    state: &AppState,
+    ts: &std::path::Path,
+    id: &str,
+    token: &str,
+    still_written: bool,
+    had_copy: bool,
+) -> Result<std::path::PathBuf, (StatusCode, &'static str)> {
+    let cache = crate::video::playback::cache_dir(state.video.dir());
+    let mp4 = crate::video::playback::cached(&cache, id);
+    let pinned = crate::video::playback::pinned(&cache, id, token);
+    let _one_at_a_time = CONVERTING.lock().await;
+    let ts = ts.to_owned();
+    let made = tokio::task::spawn_blocking(move || {
+        if still_written {
+            return crate::video::playback::pin(&ts, &mp4, &pinned, had_copy);
+        }
+        crate::video::playback::convert(&ts, &mp4)?;
+        crate::video::playback::mark_used(&mp4);
+        Ok(Some(mp4))
+    })
+    .await;
+    match made {
+        Ok(Ok(Some(path))) => {
+            if still_written {
+                state.video.had_copy(token);
+            }
+            Ok(path)
+        }
+        Ok(Ok(None)) => Err((
+            StatusCode::GONE,
+            "This player's copy of the recording has gone. Ask for the recording again.",
+        )),
+        _ => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the recording could not be prepared to play",
+        )),
     }
 }
 

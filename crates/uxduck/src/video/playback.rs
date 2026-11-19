@@ -31,6 +31,178 @@ pub fn cached(cache: &Path, recording_id: &str) -> PathBuf {
     cache.join(format!("{recording_id}.mp4"))
 }
 
+/// How long a token's copy of a recording still being written is kept
+/// unasked for while a newer token of the same recording has been asked
+/// for since (FB-243). Each Camera tab opened gets a token, and on a
+/// recording still being written each token holds a whole copy, so the
+/// copies of tabs since closed would fill the disk over a long armed
+/// session. The newest token's copy stays for as long as the token lasts.
+pub const PIN_IDLE: Duration = Duration::from_mins(5);
+
+/// How often tokens' copies are looked over (FB-243).
+pub const PIN_SWEEP_EVERY: Duration = Duration::from_mins(1);
+
+/// The name a playback token plays a recording's copy by (FB-243): a
+/// second name for the copy it was first given. A recording still being
+/// written is copied again as it grows, and a `<video>` reading its ranges
+/// from two different copies cannot decode them.
+#[must_use]
+pub fn pinned(cache: &Path, recording_id: &str, token: &str) -> PathBuf {
+    cache.join(format!("{recording_id}.{token}.mp4"))
+}
+
+/// The recording and token a file in the cache is a token's copy for:
+/// exactly `<id>.vp<32 hex>.mp4`, as [`pinned`] names it.
+fn pin_of(name: &str) -> Option<(&str, &str)> {
+    let (id, token) = name.strip_suffix(".mp4")?.split_once('.')?;
+    let hex = token.strip_prefix("vp")?;
+    let exact = !id.is_empty()
+        && !id.contains('.')
+        && hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    exact.then_some((id, token))
+}
+
+/// The copy of `ts` a playback token plays, by its name `pinned`: made
+/// as [`convert`] makes it on the token's first request, then the same
+/// bytes for every later one, however much the recording has grown since.
+/// A second name for the shared copy, or a copy of it on a disk that
+/// cannot give a file a second name, such as exFAT, said once in the log.
+///
+/// `had_copy`: the token was given its copy before. When that copy is
+/// gone, swept as unneeded, `None`: never other bytes under the same
+/// token, which a `<video>` could not play on from, so the player asks
+/// for the recording again. Never at once with [`sweep_pins`].
+///
+/// # Errors
+/// The recording cannot be read or the copy written, or the disk refused
+/// the second name for another reason than having none, such as being full.
+pub fn pin(
+    ts: &Path,
+    mp4: &Path,
+    pinned: &Path,
+    had_copy: bool,
+) -> std::io::Result<Option<PathBuf>> {
+    let _one_at_a_time = PINS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Not marked used again: the copy's time says when it was made, and a
+    // token's later requests must not make it look newer than the
+    // recording it was made from.
+    if pinned.is_file() {
+        return Ok(Some(pinned.to_owned()));
+    }
+    if had_copy {
+        return Ok(None);
+    }
+    convert(ts, mp4)?;
+    if let Err(e) = std::fs::hard_link(mp4, pinned) {
+        if !copied_instead(&e) {
+            return Err(e);
+        }
+        COPIED_SAID.call_once(|| {
+            tracing::warn!(
+                cache = %pinned.parent().unwrap_or(pinned).display(),
+                "this disk cannot give a playback copy a second name, so a recording still being written is copied for each player instead: {e}"
+            );
+        });
+        let partial = partial(pinned);
+        if let Err(e) = std::fs::copy(mp4, &partial).and_then(|_| std::fs::rename(&partial, pinned))
+        {
+            let _ = std::fs::remove_file(&partial);
+            return Err(e);
+        }
+    }
+    mark_used(pinned);
+    Ok(Some(pinned.to_owned()))
+}
+
+/// Tokens' copies given or swept one at a time (FB-243), so a sweep never
+/// removes a copy between a request finding it and serving it.
+static PINS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Said once in the log: tokens' copies are copied, not linked.
+static COPIED_SAID: std::sync::Once = std::sync::Once::new();
+
+/// Whether a disk that refused a second name for a copy has none to give:
+/// exFAT and FAT say so as not supported (`ENOTSUP`, errno 45 on macOS,
+/// or `EOPNOTSUPP`, which the standard library calls uncategorized, and
+/// `ERROR_INVALID_FUNCTION` or `ERROR_NOT_SUPPORTED` on Windows), another
+/// volume as crossing devices, and some file systems as not permitted. A
+/// full disk or any other error is passed on.
+fn copied_instead(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{CrossesDevices, PermissionDenied, Unsupported};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let none = [libc::ENOTSUP, libc::EOPNOTSUPP];
+    #[cfg(windows)]
+    let none = [1, 50];
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let none: [i32; 0] = [];
+    matches!(e.kind(), Unsupported | CrossesDevices | PermissionDenied)
+        || e.raw_os_error().is_some_and(|code| none.contains(&code))
+}
+
+/// A name beside `path` to write a copy under before it is renamed into
+/// place: its own for each writer, so two copies made at once, by the
+/// recorder as a recording ends, a player and the uploader, never write
+/// into one file. `.part`, so one left half-made is removed.
+fn partial(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}-{n}.part", std::process::id()));
+    PathBuf::from(name)
+}
+
+/// Removes tokens' copies that are not needed (FB-243): a token's that
+/// `asked` no longer knows, and one unasked for over `idle` while a newer
+/// token of the same recording has been asked for since. What it removed.
+pub fn sweep_pins(
+    cache: &Path,
+    asked: impl Fn(&str) -> Option<std::time::Instant>,
+    idle: Duration,
+) -> usize {
+    let _one_at_a_time = PINS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut kept: Vec<(String, PathBuf, std::time::Instant)> = Vec::new();
+    let mut removed = 0;
+    for entry in std::fs::read_dir(cache).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some((id, token)) = name.to_str().and_then(pin_of) else {
+            continue;
+        };
+        match asked(token) {
+            Some(at) => kept.push((id.to_owned(), entry.path(), at)),
+            None => removed += usize::from(std::fs::remove_file(entry.path()).is_ok()),
+        }
+    }
+    for (id, path, at) in &kept {
+        let newer = kept.iter().any(|(other, _, then)| other == id && then > at);
+        if newer && at.elapsed() > idle {
+            removed += usize::from(std::fs::remove_file(path).is_ok());
+        }
+    }
+    removed
+}
+
+/// Removes a recording's copies: its own and its tokens' (FB-243).
+pub fn remove_copies(cache: &Path, recording_id: &str) {
+    let _ = std::fs::remove_file(cached(cache, recording_id));
+    for entry in std::fs::read_dir(cache).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .and_then(pin_of)
+            .is_some_and(|(id, _)| id == recording_id)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Converts `ts` into `mp4`, unless a copy newer than it is there: the
 /// pictures and sound into MP4 without re-encoding, written beside and
 /// renamed into place, so a half-made copy is never played.
@@ -44,10 +216,21 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
     {
         return Ok(());
     }
+    if let Some((at, why)) = NOT_IN_PLACE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(mp4)
+        .filter(|(at, _)| at.elapsed() < PUT_IN_PLACE_AGAIN_AFTER)
+    {
+        return Err(std::io::Error::other(format!(
+            "the playback copy could not be put in place {} s ago: {why}",
+            at.elapsed().as_secs()
+        )));
+    }
     if let Some(dir) = mp4.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let partial = mp4.with_extension("mp4.part");
+    let partial = partial(mp4);
     let written = std::fs::File::create(&partial).and_then(|file| {
         let mut out = std::io::BufWriter::new(file);
         convert_into(ts, &mut out)?;
@@ -59,8 +242,29 @@ pub fn convert(ts: &Path, mp4: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&partial);
         return Err(e);
     }
-    std::fs::rename(&partial, mp4)
+    let mut failed = NOT_IN_PLACE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(e) = std::fs::rename(&partial, mp4) {
+        let _ = std::fs::remove_file(&partial);
+        tracing::warn!(copy = %mp4.display(), "a playback copy could not be put in place: {e}");
+        failed.insert(mp4.to_owned(), (std::time::Instant::now(), e.to_string()));
+        return Err(e);
+    }
+    failed.remove(mp4);
+    Ok(())
 }
+
+/// How long a copy that could not be renamed into place, as on Windows
+/// while a player still has the old one open, is not made again: each
+/// try writes a whole copy, gigabytes for a recording of hours, and
+/// players ask for one on every range they read.
+pub const PUT_IN_PLACE_AGAIN_AFTER: Duration = Duration::from_secs(30);
+
+/// Copies that could not be put in place lately: when, and why.
+static NOT_IN_PLACE: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (std::time::Instant, String)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Converts `ts` into MP4 written to `out` as it is made, so none of it
 /// is held in memory: a flight's file (ADR-0062) takes it straight into
@@ -361,6 +565,214 @@ pub(crate) mod tests {
         let made = std::fs::metadata(&mp4).unwrap().modified().unwrap();
         convert(&ts, &mp4).unwrap();
         assert_eq!(std::fs::metadata(&mp4).unwrap().modified().unwrap(), made);
+    }
+
+    /// A playback token as the engine makes one: `vp` and 32 hex digits.
+    fn token(digit: char) -> String {
+        format!("vp{}", digit.to_string().repeat(32))
+    }
+
+    #[test]
+    fn a_token_plays_the_copy_it_was_first_given_while_the_recording_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("media/r.ts");
+        std::fs::create_dir_all(ts.parent().unwrap()).unwrap();
+        let whole = three_seconds();
+        let packets = whole.len() / PACKET_SIZE;
+        std::fs::write(&ts, &whole[..packets / 2 * PACKET_SIZE]).unwrap();
+        let cache = cache_dir(&dir.path().join("media"));
+        let mp4 = cached(&cache, "vr1");
+        let (a, b) = (token('a'), token('b'));
+        let first = pin(&ts, &mp4, &pinned(&cache, "vr1", &a), false)
+            .unwrap()
+            .unwrap();
+        let given = std::fs::read(&first).unwrap();
+        // Still being written: the recording grows past its copy.
+        std::fs::write(&ts, &whole).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&ts)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        let again = pin(&ts, &mp4, &pinned(&cache, "vr1", &a), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&again).unwrap(), given);
+        let second = pin(&ts, &mp4, &pinned(&cache, "vr1", &b), false)
+            .unwrap()
+            .unwrap();
+        let grown = std::fs::read(&second).unwrap();
+        assert!(grown.len() > given.len(), "{} {}", grown.len(), given.len());
+        // The first token's bytes stay as they were.
+        assert_eq!(std::fs::read(&first).unwrap(), given);
+        // Swept: the token is not given other bytes, so its player asks again.
+        let kept = std::fs::read(&second).unwrap();
+        std::fs::remove_file(&second).unwrap();
+        assert_eq!(
+            pin(&ts, &mp4, &pinned(&cache, "vr1", &b), true).unwrap(),
+            None
+        );
+        assert!(!second.exists());
+        std::fs::write(&second, kept).unwrap();
+        // Deleted: the recording's copy and its tokens' go together.
+        let other = pinned(&cache, "vr2", &a);
+        std::fs::write(&other, b"x").unwrap();
+        remove_copies(&cache, "vr1");
+        assert!(!mp4.exists() && !first.exists() && !second.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn tokens_copies_go_once_their_token_is_gone_or_a_newer_one_plays_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path();
+        let now = std::time::Instant::now();
+        let ago = |minutes: u64| now.checked_sub(Duration::from_mins(minutes)).unwrap();
+        let (gone, closed, open, paused, newest) =
+            (token('0'), token('1'), token('2'), token('3'), token('4'));
+        let path = |id: &str, t: &str| pinned(cache, id, t);
+        for (id, t) in [
+            ("vr1", &gone),
+            ("vr1", &closed),
+            ("vr1", &open),
+            ("vr1", &newest),
+            ("vr2", &paused),
+        ] {
+            std::fs::write(path(id, t), b"x").unwrap();
+        }
+        // Not tokens' copies: left alone, as clean leaves them.
+        let others = [
+            cache.join("vr1.mp4"),
+            cache.join("added-0123.mp4"),
+            cache.join("vr1.vpzz.mp4"),
+            cache.join("a.b.mp4"),
+        ];
+        for other in &others {
+            std::fs::write(other, b"x").unwrap();
+        }
+        let asked = |t: &str| {
+            [
+                (closed.as_str(), ago(10)),
+                (open.as_str(), ago(1)),
+                (newest.as_str(), ago(0)),
+                (paused.as_str(), ago(30)),
+            ]
+            .into_iter()
+            .find_map(|(k, at)| (k == t).then_some(at))
+        };
+        assert_eq!(sweep_pins(cache, asked, PIN_IDLE), 2);
+        // An expired token's, and a closed tab's once a newer one plays on.
+        assert!(!path("vr1", &gone).exists() && !path("vr1", &closed).exists());
+        // Asked for lately, the newest, and the only one of its recording.
+        assert!(path("vr1", &open).exists() && path("vr1", &newest).exists());
+        assert!(path("vr2", &paused).exists());
+        assert!(others.iter().all(|o| o.exists()));
+        assert_eq!(clean(cache, UNUSED_FOR), 0);
+        assert!(others.iter().all(|o| o.exists()) && path("vr2", &paused).exists());
+    }
+
+    #[test]
+    fn copies_made_at_once_never_write_into_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("r.ts");
+        std::fs::write(&ts, three_seconds()).unwrap();
+        let alone = dir.path().join("alone.mp4");
+        convert(&ts, &alone).unwrap();
+        let want = std::fs::read(&alone).unwrap();
+        let mp4 = dir.path().join("cache/vr1.mp4");
+        for round in 0..10 {
+            // Newer than any copy, so each writer makes it again.
+            std::fs::File::options()
+                .write(true)
+                .open(&ts)
+                .unwrap()
+                .set_modified(SystemTime::now() + Duration::from_hours(round + 1))
+                .unwrap();
+            let writers: Vec<_> = (0..4)
+                .map(|_| {
+                    let (ts, mp4) = (ts.clone(), mp4.clone());
+                    std::thread::spawn(move || convert(&ts, &mp4))
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+            assert!(std::fs::read(&mp4).unwrap() == want, "round {round}");
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path().join("cache"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, ["vr1.mp4"]);
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_put_in_place_leaves_nothing_and_waits_before_trying_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("r.ts");
+        std::fs::write(&ts, three_seconds()).unwrap();
+        // A folder where the copy goes, with a file in it: renaming onto it
+        // fails, as renaming over a copy a player holds open does on Windows.
+        let mp4 = dir.path().join("cache/vr1.mp4");
+        std::fs::create_dir_all(&mp4).unwrap();
+        std::fs::write(mp4.join("held"), b"x").unwrap();
+        // The recording newer than what is in the way, so a copy is made.
+        std::fs::File::options()
+            .write(true)
+            .open(&ts)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_hours(1))
+            .unwrap();
+        let first = convert(&ts, &mp4).unwrap_err();
+        let left = || {
+            std::fs::read_dir(dir.path().join("cache"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(left(), ["vr1.mp4"], "{first}");
+        // Asked again at once: no second copy is written.
+        let again = convert(&ts, &mp4).unwrap_err();
+        assert!(
+            again.to_string().contains("could not be put in place"),
+            "{again}"
+        );
+        assert_eq!(left(), ["vr1.mp4"]);
+        // Once it can be, it is.
+        std::fs::remove_dir_all(&mp4).unwrap();
+        NOT_IN_PLACE.lock().unwrap().remove(&mp4);
+        convert(&ts, &mp4).unwrap();
+        assert!(mp4.is_file());
+    }
+
+    #[test]
+    fn only_a_disk_with_no_second_names_gets_a_copy_instead() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::Unsupported,
+            ErrorKind::CrossesDevices,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(copied_instead(&Error::from(kind)), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::StorageFull,
+            ErrorKind::NotFound,
+            ErrorKind::AlreadyExists,
+        ] {
+            assert!(!copied_instead(&Error::from(kind)), "{kind:?}");
+        }
+        // exFAT on macOS.
+        #[cfg(target_os = "macos")]
+        assert!(copied_instead(&Error::from_raw_os_error(45)));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert!(copied_instead(&Error::from_raw_os_error(libc::EOPNOTSUPP)));
+            assert!(!copied_instead(&Error::from_raw_os_error(libc::ENOSPC)));
+        }
     }
 
     #[test]

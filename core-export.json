@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "d8dfc09c5d5b7c4ababcec29058ea735d97a3e76",
+  "sourceCommit": "4ec5e91be084091d73e82bb68877f3a2ca9d236c",
   "licenseReady": true,
   "files": [
     {
@@ -176,7 +176,7 @@
     },
     {
       "path": "crates/uxduck-agent/src/tools.rs",
-      "sha256": "cc543fd0f4f524839203de7bf513863181f2f29399789385f5ec8446e4331185",
+      "sha256": "a217d03d9b92b124c035d5d0d2c66e5bee44db3bc62ec0553f3d694dbab0187b",
       "executable": false
     },
     {
@@ -5961,7 +5961,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/dto/replay.rs",
-      "sha256": "e9ac165061a48318e5ef694160420d7cc9b9503341c0b224137d6ee91d7d18da",
+      "sha256": "6bbf617ad63b16389c0cf4221f855929d898f8f6d298ce1d0698cbc65f343512",
       "executable": false
     },
     {
@@ -6076,7 +6076,7 @@
     },
     {
       "path": "crates/uxduck-contracts/src/rpc.rs",
-      "sha256": "e446dd535d2d5f0232a4aa00e3ca2fc2b741466677b7c8ff135990d73af6713f",
+      "sha256": "ee5b036eb192555a28ec914841af491f3bd00f9fa7e1ce11bbc176cf4f169003",
       "executable": false
     },
     {
@@ -6976,7 +6976,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/recordings.rs",
-      "sha256": "08677bacef40417224583424a497de4517656925218917eb619cdb6180ef9e91",
+      "sha256": "6a9e9cab59d5aede86c767cdfd73b5983367b6aa717f58aafe3dcf3b00976e1f",
       "executable": false
     },
     {
@@ -7216,7 +7216,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/video.rs",
-      "sha256": "c916ec6ad72d6fe2f011b7bdf04863c99864cb237ccd9e2d385e9fd434c50ed4",
+      "sha256": "15482531b4450baf7da575609ce7898a286f1f847cfad95b48771d0ba156b5eb",
       "executable": false
     },
     {
@@ -8126,7 +8126,7 @@
     },
     {
       "path": "crates/uxduck/src/api/listeners/http.rs",
-      "sha256": "267042ffc229f0084ce60f4c686b0207be8b5181cc0374a9a8bfa87e62e1a876",
+      "sha256": "b614cff0a353a3920da4c8f5a2077b7166134f0c18deb9762f5bfd64324b0d41",
       "executable": false
     },
     {
@@ -8896,12 +8896,12 @@
     },
     {
       "path": "crates/uxduck/src/video/folder.rs",
-      "sha256": "1343cbcd3728053cf9d7d61b7630e48d8ac28a32b326d0555b8ca5735023d0fd",
+      "sha256": "506bf112c7da8969ac4175f23c58ea04ca97f650d4e642fc1437d6555c22b015",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/video/hub.rs",
-      "sha256": "b0d648c90a3bb2420bca86363a956bf3aadf1921e320806c5d101514180e07f0",
+      "sha256": "c9b7d23b8dde8116fbc02ac6bb8fbb5eee32526eaad0aa1b1293be0233d4dbdb",
       "executable": false
     },
     {
@@ -8916,7 +8916,7 @@
     },
     {
       "path": "crates/uxduck/src/video/mod.rs",
-      "sha256": "9daeb1555e2252ae47512fb2cbf92507d264ecd7c0c737618a4089eb0593d890",
+      "sha256": "a122b528f8d6fcd88bec7bcd736d54a0ad64146eb7c4293d928a9522c75cb035",
       "executable": false
     },
     {
@@ -8926,7 +8926,7 @@
     },
     {
       "path": "crates/uxduck/src/video/playback.rs",
-      "sha256": "92fa87fdc7940bcb8f7bd917a58e547b6a8b9cf6ee99e964c23e0c5642d67e23",
+      "sha256": "92c535cb05a293617df56af6b3cfd7241878efd63d1324248f76f3447497fa7b",
       "executable": false
     },
     {
@@ -9141,7 +9141,7 @@
     },
     {
       "path": "packages/protocol/src/generated/types.gen.ts",
-      "sha256": "69db763886070cf76ad4b1af4cca8b13edca53ee996605ef1f3c5b2b2bf34d7d",
+      "sha256": "ef028969f862596ed07c36c85bd5b9de85010347c4abf3d0d9947c59e3db0afb",
       "executable": false
     },
     {

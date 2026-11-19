@@ -789,11 +789,13 @@ pub struct ReplayState {
     pub start_us: u64,
     #[schemars(schema_with = "crate::safe::integer")]
     pub end_us: u64,
-    /// The clock, T: everything shows each vehicle as it was then.
+    /// The clock, T: where the replay is, between `startUs` and `endUs`.
+    /// Everything shows each vehicle as it was then.
     #[schemars(schema_with = "crate::safe::integer")]
     pub time_us: u64,
     /// When T was read, on this computer's clock, so a client runs the
-    /// clock on between pushes.
+    /// clock on between pushes. Never a time in the replay: that is
+    /// `timeUs` (FB-141).
     #[schemars(schema_with = "crate::safe::integer")]
     pub at_us: u64,
     pub speed: f64,

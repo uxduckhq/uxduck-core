@@ -1311,6 +1311,32 @@ mod tests {
         }
     }
 
+    /// FB-141, FB-168: an agent read a replay result's `atUs`, this
+    /// computer's clock, as where the replay was, and so reported a seek
+    /// as landing near the end, or past it, when the replay was where it
+    /// was asked to be.
+    #[test]
+    fn replay_tools_say_where_the_replay_is_and_what_at_us_is() {
+        let tools = tools();
+        for name in ["replay_open", "replay_seek"] {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            let description = tool
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for words in [
+                "the result's `timeUs`",
+                "Its `atUs` is this computer's clock when that was read, never a time in the replay",
+            ] {
+                assert!(
+                    description.contains(words),
+                    "{name}: {words}: {description}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn names_are_lowercase_with_underscores() {
         assert_eq!(tool_name("vehicle/list"), "vehicle_list");

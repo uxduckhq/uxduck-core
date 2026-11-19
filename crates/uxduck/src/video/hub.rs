@@ -205,8 +205,8 @@ struct Inner {
     open: HashMap<String, (String, Arc<Watcher>)>,
     /// Recordings by id: their source, and their writer's end (S40).
     recorders: HashMap<String, (String, std::sync::mpsc::Sender<Item>)>,
-    /// Playback tokens: the recording, where its bytes are, and when given.
-    playback: HashMap<String, (String, uxduck_engine::runtime::VideoAt, Instant)>,
+    /// Playback tokens by token.
+    playback: HashMap<String, Playback>,
     /// Photo tokens (S144): the photo's id and file, and when given.
     photos: HashMap<String, (String, String, Instant)>,
     /// Sources re-encoded for browsers now, and those whose re-encode
@@ -217,6 +217,50 @@ struct Inner {
 
 /// How long a playback token lasts.
 const PLAYBACK_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// A playback token: the recording, where its bytes are, whether it was
+/// still being written when the token was given and whether the token has
+/// had its own copy of it (FB-243), when it was given, when a response
+/// with its bytes last finished, and how many are being sent now.
+#[derive(Debug)]
+struct Playback {
+    recording_id: String,
+    at: uxduck_engine::runtime::VideoAt,
+    still_written: bool,
+    had_copy: bool,
+    given: Instant,
+    asked: Instant,
+    sending: usize,
+}
+
+/// What a playback token is for, while it lasts (S40, FB-243).
+#[derive(Clone, Debug)]
+pub struct Playing {
+    pub recording_id: String,
+    /// Where its bytes are: in the media folder, where it was added from,
+    /// or in a `.uxflight` (ADR-0062).
+    pub at: uxduck_engine::runtime::VideoAt,
+    /// Still being written when the token was given.
+    pub still_written: bool,
+    /// The token has had its own copy of it.
+    pub had_copy: bool,
+}
+
+/// A response with a playback token's bytes, while it is being sent: the
+/// token's copy is in use until it is dropped (FB-243).
+pub struct Sending {
+    hub: Arc<Hub>,
+    token: String,
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        if let Some(p) = self.hub.lock().playback.get_mut(&self.token) {
+            p.sending = p.sending.saturating_sub(1);
+            p.asked = Instant::now();
+        }
+    }
+}
 
 /// Shared by the listener, the `/video` route and the engine's port.
 #[derive(Debug, Default)]
@@ -311,24 +355,74 @@ impl Hub {
         token: &str,
         recording_id: &str,
         bytes: uxduck_engine::runtime::VideoAt,
+        still_written: bool,
     ) {
         let mut inner = self.lock();
         let now = Instant::now();
         inner
             .playback
-            .retain(|_, (_, _, at)| now.duration_since(*at) < PLAYBACK_LIFETIME);
-        inner
-            .playback
-            .insert(token.to_owned(), (recording_id.to_owned(), bytes, now));
+            .retain(|_, p| now.duration_since(p.given) < PLAYBACK_LIFETIME);
+        inner.playback.insert(
+            token.to_owned(),
+            Playback {
+                recording_id: recording_id.to_owned(),
+                at: bytes,
+                still_written,
+                had_copy: false,
+                given: now,
+                asked: now,
+                sending: 0,
+            },
+        );
     }
 
-    /// The recording a playback token is for, while it lasts: its id and
-    /// where its bytes are, in the media folder, where it was added from,
-    /// or in a `.uxflight` (ADR-0062).
-    pub fn playback(&self, token: &str) -> Option<(String, uxduck_engine::runtime::VideoAt)> {
+    /// The recording a playback token is for, while it lasts.
+    pub fn playback(&self, token: &str) -> Option<Playing> {
         let inner = self.lock();
-        let (id, bytes, at) = inner.playback.get(token)?;
-        (at.elapsed() < PLAYBACK_LIFETIME).then(|| (id.clone(), bytes.clone()))
+        let p = inner.playback.get(token)?;
+        (p.given.elapsed() < PLAYBACK_LIFETIME).then(|| Playing {
+            recording_id: p.recording_id.clone(),
+            at: p.at.clone(),
+            still_written: p.still_written,
+            had_copy: p.had_copy,
+        })
+    }
+
+    /// A response with a token's bytes begins: its copy is in use until
+    /// the returned guard is dropped, when the response has been sent or
+    /// the player went away.
+    pub fn sending(self: &Arc<Self>, token: &str) -> Sending {
+        if let Some(p) = self.lock().playback.get_mut(token) {
+            p.sending += 1;
+        }
+        Sending {
+            hub: self.clone(),
+            token: token.to_owned(),
+        }
+    }
+
+    /// The token has its own copy now (FB-243).
+    pub fn had_copy(&self, token: &str) {
+        if let Some(p) = self.lock().playback.get_mut(token) {
+            p.had_copy = true;
+        }
+    }
+
+    /// When a playback token's copy was last in use, while the token
+    /// lasts: now while a response is being sent, else when the last one
+    /// finished. Idle time counts from there, as a `<video>` can play over
+    /// one long response.
+    pub fn playback_asked(&self, token: &str) -> Option<Instant> {
+        let inner = self.lock();
+        let p = inner.playback.get(token)?;
+        if p.given.elapsed() >= PLAYBACK_LIFETIME {
+            return None;
+        }
+        Some(if p.sending > 0 {
+            Instant::now()
+        } else {
+            p.asked
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -868,5 +962,31 @@ mod tests {
         assert_eq!(hub.hold_us("other"), None);
         hub.close("slow");
         assert_eq!(hub.hold_us("camera"), Some(5_000));
+    }
+
+    /// FB-243: a token's copy is in use while a response is still being
+    /// sent, so a `<video>` playing over one long request never looks idle.
+    #[test]
+    fn a_tokens_copy_is_in_use_until_its_response_is_sent() {
+        let hub = Arc::new(Hub::new(std::path::PathBuf::from("/media")));
+        let at = uxduck_engine::runtime::VideoAt::Media {
+            file: "r.ts".into(),
+        };
+        hub.allow_playback("vp1", "vr1", at, true);
+        let given = hub.playback_asked("vp1").unwrap();
+        let playing = hub.playback("vp1").unwrap();
+        assert!(playing.still_written && !playing.had_copy);
+        let sending = hub.sending("vp1");
+        hub.had_copy("vp1");
+        assert!(hub.playback("vp1").unwrap().had_copy);
+        std::thread::sleep(Duration::from_millis(20));
+        let during = hub.playback_asked("vp1").unwrap();
+        assert!(during.duration_since(given) >= Duration::from_millis(20));
+        drop(sending);
+        let sent = hub.playback_asked("vp1").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        // Idle from when it was sent, not from now.
+        assert_eq!(hub.playback_asked("vp1"), Some(sent));
+        assert_eq!(hub.playback_asked("vp2"), None);
     }
 }

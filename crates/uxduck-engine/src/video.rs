@@ -180,8 +180,16 @@ pub trait VideoPort: Send + std::fmt::Debug {
         None
     }
     /// `/recordings/<id>.mp4?token=` answers with the recording's bytes
-    /// for an hour, from where they are `at`.
-    fn allow_playback(&mut self, _token: &str, _recording_id: &str, _at: &crate::runtime::VideoAt) {
+    /// for an hour, from where they are `at`. `still_written`: the
+    /// recording is still being written, so the token keeps the copy it is
+    /// first given (FB-243).
+    fn allow_playback(
+        &mut self,
+        _token: &str,
+        _recording_id: &str,
+        _at: &crate::runtime::VideoAt,
+        _still_written: bool,
+    ) {
     }
     /// Shows the media folder in the file manager, with a recording's file
     /// selected if one is named: the folder.

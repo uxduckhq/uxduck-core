@@ -57,7 +57,7 @@ pub fn watch(dir: PathBuf, cache: PathBuf, engine: EngineHandle) {
                     let _ = std::fs::remove_file(path);
                 }
                 for id in &gone {
-                    let _ = std::fs::remove_file(super::playback::cached(&cache, id));
+                    super::playback::remove_copies(&cache, id);
                 }
                 if !gone.is_empty() {
                     tracing::info!(recordings = gone.len(), "recordings deleted outside UXDuck");

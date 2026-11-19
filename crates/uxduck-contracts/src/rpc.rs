@@ -2031,6 +2031,9 @@ pub enum ClientRequest {
     /// appear under their own names with `replay: true`, as they were then;
     /// call one "<name> (replay)". A tlog, `.bin` or `.ulg` the operator
     /// attached to a message opens by its `attachment` id. Nothing is sent to a vehicle.
+    /// Where it is shows in the result's `timeUs`, on its clock from
+    /// `startUs` to `endUs`. Its `atUs` is this computer's clock when
+    /// that was read, never a time in the replay.
     /// Needs `read`. Result: `ReplayState`.
     #[serde(rename = "replay/open")]
     ReplayOpen(crate::dto::replay::ReplayOpenParams),
@@ -2052,7 +2055,9 @@ pub enum ClientRequest {
     #[serde(rename = "replay/speed")]
     ReplaySpeed(crate::dto::replay::ReplaySpeedParams),
     /// Moves the replay's clock to a time in its range: every vehicle as it
-    /// was then. Needs `read`. Result: `ReplayState`.
+    /// was then. Where it went shows in the result's `timeUs`. Its `atUs`
+    /// is this computer's clock when that was read, never a time in the
+    /// replay. Needs `read`. Result: `ReplayState`.
     #[serde(rename = "replay/seek")]
     ReplaySeek(crate::dto::replay::ReplaySeekParams),
     /// Closes the replay; its vehicles go and live is shown. Needs `read`.

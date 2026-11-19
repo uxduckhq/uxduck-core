@@ -733,7 +733,12 @@ impl Engine {
                 "video needs UXDuck Desktop",
             ));
         };
-        port.allow_playback(&token, &recording.id, &at);
+        port.allow_playback(
+            &token,
+            &recording.id,
+            &at,
+            recording.state == RecordingState::Recording,
+        );
         // A video added from elsewhere (S208) is offered as it is played.
         let kept_as_ts = match &at {
             crate::runtime::VideoAt::Packed(packed) => packed.entry != packed.playable,

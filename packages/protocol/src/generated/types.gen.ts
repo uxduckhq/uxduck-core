@@ -14552,7 +14552,8 @@ export type ReplaySpeedParams = {
 export type ReplayState = {
     /**
      * When T was read, on this computer's clock, so a client runs the
-     * clock on between pushes.
+     * clock on between pushes. Never a time in the replay: that is
+     * `timeUs` (FB-141).
      */
     atUs: number;
     clock?: ReplayClock;
@@ -14599,7 +14600,8 @@ export type ReplayState = {
      */
     startUs: number;
     /**
-     * The clock, T: everything shows each vehicle as it was then.
+     * The clock, T: where the replay is, between `startUs` and `endUs`.
+     * Everything shows each vehicle as it was then.
      */
     timeUs: number;
     vehicles: Array<ReplayVehicle>;
