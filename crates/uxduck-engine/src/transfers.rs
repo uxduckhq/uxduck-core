@@ -71,14 +71,33 @@ fn part_words(kind: u8, count: usize) -> String {
 /// (`MISSION_COUNT.count`), and a larger count sent as 65,535 would stall
 /// with part of it on the vehicle. None when it can be counted.
 pub(crate) fn too_many(kind: u8, count: usize) -> Option<String> {
+    too_many_with(kind, count, 0)
+}
+
+/// As [`too_many`], for a mission that `gimbal_handovers` of its items
+/// were added to for PX4 (`plans::px4_gimbal_handovers`): the count is
+/// more than the plan's, so it says why.
+fn too_many_with(kind: u8, count: usize, gimbal_handovers: usize) -> Option<String> {
     let most = crate::plan_patterns::MOST_ITEMS;
     (count > most).then(|| {
         format!(
             "it has {}. One transfer carries {} at most, as MAVLink counts them in 16 bits",
-            part_words(kind, count),
+            sent_words(kind, count, gimbal_handovers),
             crate::plan_patterns::grouped(f64::from(u16::MAX)),
         )
     })
+}
+
+/// What was to be sent, with the commands added for PX4 named among them.
+fn sent_words(kind: u8, count: usize, gimbal_handovers: usize) -> String {
+    let sent = part_words(kind, count);
+    if gimbal_handovers == 0 {
+        return sent;
+    }
+    format!(
+        "{sent}, {}",
+        crate::plans::px4_gimbal_handover_words(gimbal_handovers)
+    )
 }
 
 /// MAVLink's `MAV_MISSION_NO_SPACE`, as `uxduck_mavlink` words it.
@@ -87,8 +106,13 @@ const NO_SPACE: &str = "No space for that many items";
 /// Why an upload failed, in words. "No space" is the one thing an autopilot
 /// says of its size: MAVLink has no message to ask how many items it holds,
 /// so the count it refused is said with it.
-fn upload_failure(failure: &Failure, kind: u8, count: usize) -> String {
+fn upload_failure(failure: &Failure, kind: u8, count: usize, gimbal_handovers: usize) -> String {
     match failure {
+        Failure::Rejected(why) if why == NO_SPACE && gimbal_handovers > 0 => format!(
+            "No space for the {} sent, {}. The autopilot holds fewer than that",
+            part_words(kind, count),
+            crate::plans::px4_gimbal_handover_words(gimbal_handovers)
+        ),
         Failure::Rejected(why) if why == NO_SPACE => format!(
             "No space for the {} sent. The autopilot holds fewer than that",
             part_words(kind, count)
@@ -1393,6 +1417,17 @@ impl Engine {
         self.reread_if_changed(&id);
     }
 
+    /// Why an upload failed, in words, with the mission items that were
+    /// added for PX4 (`plans::px4_gimbal_handovers`) counted among those
+    /// sent. A fence and rally points have none added.
+    fn upload_failed(&self, order_id: &str, upload: &Upload, failure: &Failure) -> String {
+        let added = match self.transfers.plan_jobs.get(order_id) {
+            Some(job) if upload.kind == 0 => job.gimbal_handovers,
+            _ => 0,
+        };
+        upload_failure(failure, upload.kind, upload.items.len(), added)
+    }
+
     /// A mission upload ended: on success the mission is the uploaded one,
     /// at the next version, journaled as the client that asked.
     pub fn mission_uploaded(&mut self, order_id: &str, result: Result<(), Failure>) {
@@ -1466,7 +1501,7 @@ impl Engine {
                 (WriteStatus::Accepted, None, upload.actor)
             }
             Err(failure) => {
-                let detail = upload_failure(&failure, upload.kind, upload.items.len());
+                let detail = self.upload_failed(order_id, &upload, &failure);
                 // What the vehicle holds after a failed upload is unknown.
                 mission.status = TransferStatus::Failed;
                 mission.detail = Some(format!("upload failed: {detail}"));
@@ -1573,6 +1608,10 @@ pub(crate) struct PlanJob {
     /// The commands the plan's dialects declared without a place when the
     /// upload started, so the readback is checked against those.
     pub(crate) placeless: Vec<u16>,
+    /// How many of `items` are not the plan's: the commands that give a
+    /// PX4's mission the gimbal (`plans::px4_gimbal_handovers`). Said with
+    /// the answer, as the vehicle then holds more items than the plan has.
+    pub(crate) gimbal_handovers: usize,
 }
 
 impl Engine {
@@ -1596,7 +1635,7 @@ impl Engine {
     ) -> Result<(), ApiError> {
         job.placeless = self.placeless_commands(&job.plan_id);
         // Before any of it goes: the mission, then the fence and rally points.
-        if let Some(why) = too_many(0, job.items.len()).or_else(|| {
+        if let Some(why) = too_many_with(0, job.items.len(), job.gimbal_handovers).or_else(|| {
             job.parts
                 .iter()
                 .find_map(|(kind, items)| too_many(*kind, items.len()))
@@ -1733,6 +1772,20 @@ impl Engine {
         let read = self.mission(vehicle_id);
         let (mut same, mut notes) =
             compare_missions_with(&job.items, &read.items, job.home_first, &job.placeless);
+        // The vehicle was sent more than the plan has: said, not silent.
+        match job.gimbal_handovers {
+            0 => {}
+            1 => notes.insert(
+                0,
+                "was sent 1 more item than the plan has, a Set gimbal control command ahead of a Point gimbal step: PX4 turns the gimbal for a mission only once the mission is given it".into(),
+            ),
+            added => notes.insert(
+                0,
+                format!(
+                    "was sent {added} more items than the plan has, each a Set gimbal control command ahead of a Point gimbal step: PX4 turns the gimbal for a mission only once the mission is given it"
+                ),
+            ),
+        }
         for (name, sent, back) in [
             ("fence", &job.fence, &read.fence),
             ("rally points", &job.rally, &read.rally),
@@ -1996,6 +2049,8 @@ fn restore(
         items,
         home_first: ardupilot,
         placeless: Vec::new(),
+        // A mission from history goes back as it was held.
+        gimbal_handovers: 0,
     };
     engine.upload_plan_mission(connection, job)?;
     Ok(Value::Null)
@@ -2077,6 +2132,7 @@ mod mission_read_tests {
                     items: vec![],
                     home_first: false,
                     placeless: Vec::new(),
+                    gimbal_handovers: 0,
                 };
                 engine.answer_plan_job(job, PlanUploadStatus::Verified, None, vec![]);
                 let replies = fixtures::frames(&mut peer);

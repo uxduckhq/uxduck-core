@@ -112,14 +112,29 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
     // What one mission carries, counted in 16 bits (`MOST_ITEMS`): more
     // could not be sent whole. ArduPilot keeps home as item 0 of them.
     let home = usize::from(body.autopilot == PlanAutopilot::Ardupilot);
-    if body.items.len() + home > crate::plan_patterns::MOST_ITEMS {
+    // A PX4 is sent a command more ahead of each Point gimbal step
+    // (`plans::px4_gimbal_handovers`), which its mission carries too.
+    let handovers = if body.autopilot == PlanAutopilot::Px4 {
+        crate::plans::px4_gimbal_handover_count(body.items.iter().map(|item| item.command))
+    } else {
+        0
+    };
+    if body.items.len() + home + handovers > crate::plan_patterns::MOST_ITEMS {
         #[allow(clippy::cast_precision_loss, reason = "counts said in words")]
         let said = |count: usize| crate::plan_patterns::grouped(count as f64);
+        let more = if handovers == 0 {
+            String::new()
+        } else {
+            format!(
+                " and PX4 is sent {} more, a Set gimbal control command ahead of each Point gimbal step",
+                said(handovers)
+            )
+        };
         checks.push(error(
             "too-many-items",
             None,
             format!(
-                "it has {} items: one mission carries {} at most{}, as MAVLink counts them in 16 bits",
+                "it has {} items{more}: one mission carries {} at most{}, as MAVLink counts them in 16 bits",
                 said(body.items.len()),
                 said(crate::plan_patterns::MOST_ITEMS - home),
                 if home == 1 { " besides home" } else { "" }
@@ -773,6 +788,35 @@ mod tests {
         );
         // PX4 has no home among them.
         plan.autopilot = PlanAutopilot::Px4;
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
+    }
+
+    #[test]
+    fn a_px4_plans_point_gimbal_steps_count_with_the_command_sent_ahead_of_each() {
+        // 65,534 items go to a PX4 as they are, which has no home among
+        // them. A Point gimbal step is sent with a command ahead of it.
+        let mut items = vec![item(22, 0.0, 0.0, 30.0, 3)];
+        items.extend((0..65_533).map(|i| item(16, 0.0001, f64::from(i) * 1e-5, 30.0, 3)));
+        let mut plan = body(items);
+        plan.autopilot = PlanAutopilot::Px4;
+        assert_eq!(plan.items.len(), 65_534);
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
+        plan.items[2] = item(1000, 0.0, 0.0, 0.0, 2);
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
+        plan.items[4] = item(1000, 0.0, 0.0, 0.0, 2);
+        let checks = check(&plan, &mut hill);
+        let too_many = checks.iter().find(|c| c.code == "too-many-items").unwrap();
+        assert_eq!(too_many.severity, Severity::Error);
+        assert_eq!(
+            too_many.message,
+            "it has 65,534 items and PX4 is sent 2 more, a Set gimbal control command ahead of each Point gimbal step: one mission carries 65,535 at most, as MAVLink counts them in 16 bits"
+        );
+        // A step with the command ahead of it already is sent no second one.
+        plan.items[3] = item(1001, 0.0, 0.0, 0.0, 2);
+        assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
+        // ArduPilot is sent the plan as it is, after home.
+        plan.items[3] = item(16, 0.0001, 0.0, 30.0, 3);
+        plan.autopilot = PlanAutopilot::Ardupilot;
         assert!(!codes(&check(&plan, &mut hill)).contains(&"too-many-items"));
     }
 

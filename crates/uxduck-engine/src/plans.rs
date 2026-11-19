@@ -406,6 +406,14 @@ pub(crate) fn plan_job(
     });
     let items = mission_items(body, ardupilot, fused)
         .map_err(|why| ApiError::new(ErrorKind::InvalidValue, why))?;
+    let px4 = engine
+        .vehicle(&vehicle_id)
+        .is_some_and(|v| v.autopilot.to_lowercase().contains("px4"));
+    let (items, gimbal_handovers) = if px4 {
+        px4_gimbal_handovers(items)
+    } else {
+        (items, 0)
+    };
     Ok(crate::transfers::PlanJob {
         reply: None,
         parts: if blimp {
@@ -422,6 +430,7 @@ pub(crate) fn plan_job(
         items,
         home_first: ardupilot,
         placeless: Vec::new(),
+        gimbal_handovers,
     })
 }
 
@@ -910,6 +919,90 @@ pub fn mission_items(
     Ok(items)
 }
 
+/// `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW`: a plan's Point gimbal step.
+const POINT_GIMBAL: u16 = 1000;
+/// `MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE`: who a gimbal's manager obeys.
+pub const SET_GIMBAL_CONTROL: u16 = 1001;
+
+/// A mission as a PX4 turns its gimbal for it: the command that gives the
+/// mission the gimbal ahead of each Point gimbal step, and how many were
+/// added.
+///
+/// PX4's gimbal manager acts on a mission's `DO_GIMBAL_MANAGER_PITCHYAW`
+/// only while the autopilot is the gimbal's primary controller, and
+/// refuses it otherwise ("`GIMBAL_MANAGER_PITCHYAW` from 1/1 denied, in
+/// control: 0/0", seen on PX4 1.17's SITL). Nothing makes the autopilot
+/// that by itself: PX4 takes the gimbal for a mission's
+/// `DO_MOUNT_CONTROL` only (`MissionBlock::issue_command`).
+/// `DO_GIMBAL_MANAGER_CONFIGURE` with -2 and -2 does, which MAVLink
+/// defines as "set itself in control (for missions where the own sysid is
+/// still unknown)". -1 and -1 leave the secondary controller as it is, and
+/// param7 names the gimbal the step turns.
+///
+/// One goes ahead of each step, not one ahead of the first. A person or a
+/// companion computer that takes the gimbal during the mission then has it
+/// until the plan's next Point gimbal step, which turns the gimbal as the
+/// plan says and as ArduPilot does. With one command for the whole mission
+/// PX4 would refuse every step after the gimbal was taken. A step that has
+/// the command just ahead of it already, as a mission read from a vehicle
+/// has, gets no second one.
+#[must_use]
+pub fn px4_gimbal_handovers(items: Vec<MissionItem>) -> (Vec<MissionItem>, usize) {
+    let mut handed = Vec::with_capacity(items.len());
+    let mut added = 0;
+    for item in items {
+        let has_one = handed
+            .last()
+            .is_some_and(|before: &MissionItem| before.command == SET_GIMBAL_CONTROL);
+        if item.command == POINT_GIMBAL && !has_one {
+            handed.push(MissionItem {
+                command: SET_GIMBAL_CONTROL,
+                // `MAV_FRAME_MISSION`, as `px4_frame` gives the step.
+                frame: 2,
+                param1: -2.0,
+                param2: -2.0,
+                param3: -1.0,
+                param4: -1.0,
+                latitude_deg: 0.0,
+                longitude_deg: 0.0,
+                altitude_m: item.altitude_m,
+                autocontinue: item.autocontinue,
+            });
+            added += 1;
+        }
+        handed.push(item);
+    }
+    (handed, added)
+}
+
+/// How many commands `px4_gimbal_handovers` adds to a mission of these
+/// commands, for what counts a plan's items before it is uploaded.
+pub(crate) fn px4_gimbal_handover_count(commands: impl IntoIterator<Item = u16>) -> usize {
+    let mut before = 0;
+    let mut count = 0;
+    for command in commands {
+        if command == POINT_GIMBAL && before != SET_GIMBAL_CONTROL {
+            count += 1;
+        }
+        before = command;
+    }
+    count
+}
+
+/// What an upload says of the commands `px4_gimbal_handovers` added: the
+/// vehicle is sent more items than the plan has, so the count is named.
+pub(crate) fn px4_gimbal_handover_words(added: usize) -> String {
+    #[allow(clippy::cast_precision_loss, reason = "a count said in words")]
+    let counted = crate::plan_patterns::grouped(added as f64);
+    if added == 1 {
+        "1 of them the Set gimbal control command PX4 needs ahead of a Point gimbal step".into()
+    } else {
+        format!(
+            "{counted} of them the Set gimbal control commands PX4 needs ahead of Point gimbal steps"
+        )
+    }
+}
+
 fn as_mission_item(item: &uxduck_core::domain::plan::PlanItem) -> MissionItem {
     let [p1, p2, p3, p4] = item.params.map(|p| p.unwrap_or(0.0));
     MissionItem {
@@ -1157,4 +1250,57 @@ fn checks_of(engine: &mut Engine, body: &PlanBody, vehicle_id: Option<&str>) -> 
     let checks = crate::plan_checks::check(&targeted, &mut ground);
     engine.terrain_flush();
     checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(command: u16, gimbal: f64) -> MissionItem {
+        MissionItem {
+            command,
+            frame: 2,
+            param1: 0.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            altitude_m: gimbal,
+            autocontinue: true,
+        }
+    }
+
+    /// One command ahead of each Point gimbal step, for the gimbal the step
+    /// names, unless the step has one already. The count made before an
+    /// upload is the count added.
+    #[test]
+    fn a_px4_gimbal_handover_goes_ahead_of_each_point_gimbal_step_without_one() {
+        for (plan, sent) in [
+            (vec![16, 1000, 16], vec![16, 1001, 1000, 16]),
+            (vec![1000, 1000], vec![1001, 1000, 1001, 1000]),
+            (vec![1001, 1000, 16, 1000], vec![1001, 1000, 16, 1001, 1000]),
+            (vec![1001, 16, 1000], vec![1001, 16, 1001, 1000]),
+            (vec![16, 205, 197], vec![16, 205, 197]),
+            (vec![], vec![]),
+        ] {
+            let items: Vec<MissionItem> = plan.iter().map(|command| item(*command, 0.0)).collect();
+            let (handed, added) = px4_gimbal_handovers(items);
+            let commands: Vec<u16> = handed.iter().map(|item| item.command).collect();
+            assert_eq!(commands, sent, "{plan:?}");
+            assert_eq!(added, sent.len() - plan.len(), "{plan:?}");
+            assert_eq!(px4_gimbal_handover_count(plan.clone()), added, "{plan:?}");
+        }
+        let (handed, _) = px4_gimbal_handovers(vec![item(1000, 154.0)]);
+        assert_eq!(
+            (
+                handed[0].param1,
+                handed[0].param2,
+                handed[0].param3,
+                handed[0].param4
+            ),
+            (-2.0, -2.0, -1.0, -1.0)
+        );
+        assert_eq!((handed[0].frame, handed[0].altitude_m), (2, 154.0));
+    }
 }

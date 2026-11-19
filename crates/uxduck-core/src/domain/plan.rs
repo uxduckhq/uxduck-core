@@ -565,6 +565,7 @@ pub fn command_label(command: u16) -> Option<&'static str> {
         600 => "Jump tag",
         601 => "Repeat from tag",
         1000 => "Point gimbal",
+        1001 => "Set gimbal control",
         2000 => "Take photos",
         2001 => "Stop photos",
         2500 => "Start video",

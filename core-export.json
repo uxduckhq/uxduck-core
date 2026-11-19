@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "36aca9bc752fd3292ce15fceec906a0689a12a9b",
+  "sourceCommit": "381ac341aec9281e64df0a83bfbfe9c72d436856",
   "licenseReady": true,
   "files": [
     {
@@ -6491,7 +6491,7 @@
     },
     {
       "path": "crates/uxduck-core/src/domain/plan.rs",
-      "sha256": "fd97969320c08f0b7f1284d5c1c7066bdee61ce2e6a09ff698af588c2cdc36c9",
+      "sha256": "51e80c6e800bbdda67c8deb0705d388f122adf2fc70ab744264c751bfb4ee580",
       "executable": false
     },
     {
@@ -6956,7 +6956,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/plan_checks.rs",
-      "sha256": "8048727c6958b0de070b9ef5e0016e027d76d328ddf271371ea48703b8773f79",
+      "sha256": "b6116b134a804201048b95781609ba190c6127aeded488f9a15584205a2db03d",
       "executable": false
     },
     {
@@ -6991,7 +6991,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/plans.rs",
-      "sha256": "79f677799164966c2d2ca9e72b8f753e98672819822dbaddcde75c3bbf621b7d",
+      "sha256": "8919d40eb1ca56470286d048049425e166e74981eebfb9040ec8b283542a5dee",
       "executable": false
     },
     {
@@ -7391,7 +7391,7 @@
     },
     {
       "path": "crates/uxduck-engine/src/transfers.rs",
-      "sha256": "6b53c7c13c66b9c051de0d4140b7f3d11b34da577ee07dca2c8bed40415f1307",
+      "sha256": "9e5eec19292d02e7d111eadc24fd43344108aa305c70cf8a5a0f76b6b74cc55a",
       "executable": false
     },
     {
@@ -9266,7 +9266,7 @@
     },
     {
       "path": "docs/site/camera-video.md",
-      "sha256": "45bef67d5063a6814c2f2edab99a695aa2085c2fdb38df1b2666e45a8f43ba19",
+      "sha256": "433080484dfd6044b826de53996dc5303c1b528eb6b72565fbaf1f69de4752c9",
       "executable": false
     },
     {
