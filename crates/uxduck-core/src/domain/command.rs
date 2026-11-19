@@ -99,6 +99,30 @@ pub enum Command {
         device_id: Option<u8>,
         action: GimbalAction,
     },
+    /// Pauses the mission, or continues it once the vehicle says it is
+    /// paused (`MISSION_STATE_PAUSED`): one controller button for both
+    /// (S417). Never sent as such: the engine sends `DO_PAUSE_CONTINUE` 0
+    /// or 1, so receipts say which.
+    PauseOrContinue,
+    /// Moves the mission on, or back with a negative `steps`, by that many
+    /// navigation items from the one it flies to (S417). Never sent as
+    /// such: the engine sends `DO_SET_MISSION_CURRENT` for the item it
+    /// comes to.
+    MissionStep {
+        steps: i16,
+    },
+    /// Changes the speed by `by_mps` from the one it was last told, or
+    /// from its cruise speed parameter (S417). Never sent as such: the
+    /// engine sends `DO_CHANGE_SPEED` at the speed it comes to.
+    SpeedStep {
+        by_mps: f64,
+    },
+    /// The next of `modes` after the one the vehicle is in, or the first
+    /// when it is in none of them (S417). Never sent as such: the engine
+    /// sends the mode it comes to.
+    ModeCycle {
+        modes: Vec<String>,
+    },
 }
 
 /// A place with its height above mean sea level, as home and the EKF
@@ -289,6 +313,21 @@ const MAV_CMD_DO_SET_MODE: u16 = 176;
 const MAV_CMD_COMPONENT_ARM_DISARM: u16 = 400;
 
 impl Command {
+    /// Whether a controller's button may send it again and again while
+    /// held (S418): a step, which moves a little each time it goes. A
+    /// command that changes state, such as arming, a mode or a photo,
+    /// never repeats.
+    #[must_use]
+    pub const fn repeats_while_held(&self) -> bool {
+        matches!(
+            self,
+            Self::Camera {
+                action: CameraAction::ZoomStep { .. } | CameraAction::FocusStep { .. },
+                ..
+            }
+        )
+    }
+
     #[must_use]
     pub fn offline_behaviour(&self) -> OfflineBehaviour {
         match self {
@@ -300,6 +339,10 @@ impl Command {
                 OfflineBehaviour::Allow
             }
             Self::SetMode { .. }
+            | Self::PauseOrContinue
+            | Self::MissionStep { .. }
+            | Self::SpeedStep { .. }
+            | Self::ModeCycle { .. }
             | Self::GoTo { .. }
             | Self::SetHome { .. }
             | Self::SetEkfOrigin { .. }
@@ -352,6 +395,10 @@ impl Command {
             | Self::SetEkfOrigin { .. }
             | Self::SetMode { .. }
             | Self::GoTo { .. }
+            | Self::PauseOrContinue
+            | Self::MissionStep { .. }
+            | Self::SpeedStep { .. }
+            | Self::ModeCycle { .. }
             | Self::Reboot => RiskOf::CONFIRM,
             Self::Long { command, params } => {
                 let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
@@ -390,7 +437,11 @@ impl Command {
             Self::SetMode { .. }
             | Self::GoTo { .. }
             | Self::SetHome { .. }
-            | Self::SetEkfOrigin { .. } => CommandClass::Mission,
+            | Self::SetEkfOrigin { .. }
+            | Self::PauseOrContinue
+            | Self::MissionStep { .. }
+            | Self::SpeedStep { .. }
+            | Self::ModeCycle { .. } => CommandClass::Mission,
             Self::Arm | Self::Disarm | Self::ArmToggle | Self::Reboot => CommandClass::Critical,
             Self::Camera { .. } | Self::Gimbal { .. } => CommandClass::Payload,
             Self::Long { command, .. } => match *command {
@@ -430,6 +481,54 @@ impl Command {
             Self::ArmToggle => Self::Arm,
             other => other,
         }
+    }
+
+    /// The emergency motor stop (S417): `COMPONENT_ARM_DISARM` forced, with
+    /// param 2 at 21196, which ArduPilot and PX4 both read as disarm now,
+    /// in the air too.
+    #[must_use]
+    pub fn emergency_stop() -> Self {
+        Self::Long {
+            command: MAV_CMD_COMPONENT_ARM_DISARM,
+            params: vec![0.0, FORCE_MAGIC],
+        }
+    }
+
+    /// Whether it is the emergency motor stop: a forced disarm.
+    #[must_use]
+    pub fn is_emergency_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::Long { command: MAV_CMD_COMPONENT_ARM_DISARM, params }
+                if params.first().copied().unwrap_or(0.0) < 0.5
+                    && params.get(1).is_some_and(|p| (*p - FORCE_MAGIC).abs() < 0.5)
+        )
+    }
+
+    /// Why a controller must hold its input for this command before it
+    /// goes (S417, ADR-0005 A4): a command whose risk is dangerous, on the
+    /// ground or in the air, so a bumped button never sends it. None for
+    /// any other, and for arming and disarming unforced, which a pilot may
+    /// set to the press (maintainer, 2026-10-26).
+    #[must_use]
+    pub fn controller_hold_reason(&self) -> Option<&'static str> {
+        let plain_arm_or_disarm = match self {
+            Self::Arm | Self::Disarm | Self::ArmToggle => true,
+            Self::Long {
+                command: MAV_CMD_COMPONENT_ARM_DISARM,
+                params,
+            } => !params
+                .get(1)
+                .is_some_and(|p| (*p - FORCE_MAGIC).abs() < 0.5),
+            _ => false,
+        };
+        if plain_arm_or_disarm {
+            return None;
+        }
+        [self.risk(false, false), self.risk(true, false)]
+            .into_iter()
+            .find(|risk| risk.level == Risk::Dangerous)
+            .and_then(|risk| risk.reason)
     }
 
     /// Take-off to `height_m` above home: `NAV_TAKEOFF`, its height in `param7`.
@@ -659,6 +758,19 @@ impl Command {
             Self::SetEkfOrigin { .. } => "Set the EKF origin".into(),
             Self::Camera { action, .. } => action.label(),
             Self::Gimbal { action, .. } => action.label(),
+            Self::PauseOrContinue => "Pause or continue the mission".into(),
+            Self::MissionStep { steps: 1 } => "Next waypoint".into(),
+            Self::MissionStep { steps: -1 } => "Previous waypoint".into(),
+            Self::MissionStep { steps } if *steps < 0 => {
+                format!("Back {} waypoints", steps.unsigned_abs())
+            }
+            Self::MissionStep { steps } => format!("On {steps} waypoints"),
+            Self::SpeedStep { by_mps } if *by_mps < 0.0 => {
+                format!("Slower by {} m/s", by_mps.abs())
+            }
+            Self::SpeedStep { by_mps } => format!("Faster by {by_mps} m/s"),
+            Self::ModeCycle { modes } => format!("Cycle modes {}", modes.join(", ")),
+            Self::Long { .. } if self.is_emergency_stop() => "Emergency motor stop".into(),
             Self::Long {
                 command: MAV_CMD_NAV_TAKEOFF,
                 ..

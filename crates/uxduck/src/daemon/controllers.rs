@@ -37,6 +37,9 @@ pub fn inputs() -> ControllerInputsResult {
 /// `id` is optional, and `"connected":false` unplugs it. A device whose
 /// layout is not known, such as a radio, is `"layoutKnown":false` with its
 /// inputs by code: `"codes":{"65587":0.4}`, `"buttonCodes":{"589825":true}`.
+/// Its power is `"power":{"state":"discharging","percent":15}` (S419), and
+/// each rumble is answered to the address that last spoke for it, as
+/// `{"id":"fake","rumble":"refused"}`.
 ///
 /// # Errors
 /// When the port cannot be bound.
@@ -44,15 +47,37 @@ pub fn fake(port: u16, events: impl Fn(InputEvent) + Send + 'static) -> std::io:
     let socket = std::net::UdpSocket::bind(("127.0.0.1", port))?;
     socket.set_nonblocking(true)?;
     let socket = tokio::net::UdpSocket::from_std(socket)?;
+    let (told, mut rumbles) = tokio::sync::mpsc::unbounded_channel();
+    super::controller_feedback::rumbled(move |id, rumble| {
+        let _ = told.send((id.to_owned(), rumble));
+    });
     tokio::spawn(async move {
         let mut buffer = vec![0u8; 4096];
         let mut known = BTreeSet::new();
-        while let Ok((len, _)) = socket.recv_from(&mut buffer).await {
-            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&buffer[..len]) else {
-                continue;
-            };
-            for event in fake_events(&message, &mut known) {
-                events(event);
+        let mut peers = std::collections::HashMap::new();
+        loop {
+            tokio::select! {
+                received = socket.recv_from(&mut buffer) => {
+                    let Ok((len, peer)) = received else {
+                        return;
+                    };
+                    let Ok(message) = serde_json::from_slice::<serde_json::Value>(&buffer[..len])
+                    else {
+                        continue;
+                    };
+                    if let Some(id) = message["id"].as_str() {
+                        peers.insert(id.to_owned(), peer);
+                    }
+                    for event in fake_events(&message, &mut known) {
+                        events(event);
+                    }
+                }
+                Some((id, rumble)) = rumbles.recv() => {
+                    if let Some(peer) = peers.get(&id) {
+                        let said = serde_json::json!({ "id": id, "rumble": rumble }).to_string();
+                        let _ = socket.send_to(said.as_bytes(), peer).await;
+                    }
+                }
             }
         }
     });
@@ -117,6 +142,12 @@ fn fake_events(message: &serde_json::Value, known: &mut BTreeSet<String>) -> Vec
                 });
             }
         }
+    }
+    if let Ok(power) = serde_json::from_value(message["power"].clone()) {
+        events.push(InputEvent::Power {
+            id: id.clone(),
+            power,
+        });
     }
     if let Some(buttons) = message["buttons"].as_object() {
         for (name, pressed) in buttons {
@@ -227,6 +258,27 @@ impl Owners {
     }
 }
 
+/// Each connected pad that has an id, by the id its slot was given.
+#[cfg(feature = "gamepad")]
+fn known_pads(
+    gilrs: &gilrs::Gilrs,
+    id_of: impl Fn(usize, Option<u64>) -> Option<String>,
+) -> Vec<(String, gilrs::GamepadId)> {
+    gilrs
+        .gamepads()
+        .filter_map(|(pad, gamepad)| {
+            #[cfg(target_os = "macos")]
+            let entry = gilrs::MacOSGamepadExt::registry_entry_id(&gamepad);
+            #[cfg(not(target_os = "macos"))]
+            let entry = {
+                let _ = gamepad;
+                None
+            };
+            id_of(usize::from(pad), entry).map(|id| (id, pad))
+        })
+        .collect()
+}
+
 #[cfg(feature = "gamepad")]
 fn gamepad_connected(gilrs: &gilrs::Gilrs, pad: gilrs::GamepadId, id: String) -> InputEvent {
     let gamepad = gilrs.gamepad(pad);
@@ -316,11 +368,25 @@ pub fn gamepads(events: impl Fn(InputEvent) + Send + Clone + 'static) {
                 }
             }
             let mut steady = Steady::default();
+            let mut feedback = super::controller_feedback::Feedback::new();
             loop {
+                #[cfg(not(target_os = "macos"))]
+                let pads = known_pads(&gilrs, |slot, _| {
+                    owners
+                        .owner
+                        .iter()
+                        .find(|(_, owner)| **owner == slot)
+                        .map(|(id, _)| id.clone())
+                });
+                #[cfg(target_os = "macos")]
+                let pads = known_pads(&gilrs, |slot, entry| identities.get(slot, entry));
                 let event = super::gamepad_events::next(
-                    || gilrs.next_event_blocking(None),
+                    || feedback.next_event(&mut gilrs, &pads, &events),
                     std::thread::sleep,
                 );
+                if matches!(event.event, gilrs::EventType::Connected) {
+                    feedback.connected();
+                }
                 #[cfg(not(target_os = "macos"))]
                 let id = gamepad_id(&gilrs, event.id);
                 #[cfg(not(target_os = "macos"))]
@@ -1223,5 +1289,33 @@ mod tests {
             &mut known,
         );
         assert_eq!(gone, [InputEvent::Disconnected { id: "f".into() }]);
+    }
+
+    #[test]
+    fn the_fake_says_its_power() {
+        use uxduck_core::domain::controller::ControllerPower;
+        let mut known = BTreeSet::new();
+        let events = fake_events(
+            &serde_json::json!({ "id": "f", "power": { "state": "discharging", "percent": 15 } }),
+            &mut known,
+        );
+        assert_eq!(
+            events[1],
+            InputEvent::Power {
+                id: "f".into(),
+                power: ControllerPower::Discharging { percent: 15 },
+            }
+        );
+        let wired = fake_events(
+            &serde_json::json!({ "id": "f", "power": { "state": "wired" } }),
+            &mut known,
+        );
+        assert_eq!(
+            wired,
+            [InputEvent::Power {
+                id: "f".into(),
+                power: ControllerPower::Wired,
+            }]
+        );
     }
 }

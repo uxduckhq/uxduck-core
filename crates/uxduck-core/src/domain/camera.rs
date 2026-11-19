@@ -390,6 +390,22 @@ pub enum CameraAction {
     },
     /// `MAV_CMD_CAMERA_STOP_TRACKING`.
     StopTracking,
+    /// Starts or stops recording, as the camera last said it was not or
+    /// was (S416). Never sent as such: the engine resolves it to
+    /// `StartRecording` or `StopRecording`, as `ArmToggle` is.
+    ToggleRecording,
+    /// Video mode from photo mode, and photo mode otherwise (S416),
+    /// resolved to `SetMode`.
+    ToggleMode,
+    /// The daylight picture from the thermal one, and the thermal one
+    /// otherwise (S416), resolved to `SetSource`.
+    ToggleSource,
+    /// Zooms on at a rate from -1 to 1 until told otherwise, 0 stopping it
+    /// (`MAV_CMD_SET_CAMERA_ZOOM`, `ZOOM_TYPE_CONTINUOUS`, S416).
+    ZoomRate { rate: f32 },
+    /// Focuses on at a rate from -1 to 1 until told otherwise, 0 stopping
+    /// it (`MAV_CMD_SET_CAMERA_FOCUS`, `FOCUS_TYPE_CONTINUOUS`, S416).
+    FocusRate { rate: f32 },
 }
 
 impl CameraAction {
@@ -439,6 +455,15 @@ impl CameraAction {
             Self::TrackPoint { .. } => "Track a point in the camera's picture".into(),
             Self::TrackRectangle { .. } => "Track a box in the camera's picture".into(),
             Self::StopTracking => "Stop the camera's tracking".into(),
+            Self::ToggleRecording => "Record or stop".into(),
+            Self::ToggleMode => "Swap photo and video".into(),
+            Self::ToggleSource => "Swap Daylight and Thermal".into(),
+            Self::ZoomRate { rate } if rate > 0.0 => "Zoom in".into(),
+            Self::ZoomRate { rate } if rate < 0.0 => "Zoom out".into(),
+            Self::ZoomRate { .. } => "Stop zooming".into(),
+            Self::FocusRate { rate } if rate > 0.0 => "Focus farther".into(),
+            Self::FocusRate { rate } if rate < 0.0 => "Focus nearer".into(),
+            Self::FocusRate { .. } => "Stop focusing".into(),
         }
     }
 
@@ -447,21 +472,27 @@ impl CameraAction {
     #[must_use]
     pub fn needs(&self) -> Option<CameraCapability> {
         match self {
-            Self::SetMode { .. } => Some(CameraCapability::Modes),
+            Self::SetMode { .. } | Self::ToggleMode => Some(CameraCapability::Modes),
             Self::TakePhoto | Self::StartInterval { .. } | Self::StopInterval => {
                 Some(CameraCapability::CaptureImage)
             }
-            Self::StartRecording | Self::StopRecording => Some(CameraCapability::CaptureVideo),
-            Self::ZoomStep { .. } | Self::ZoomTo { .. } => Some(CameraCapability::BasicZoom),
-            Self::FocusStep { .. } | Self::FocusTo { .. } | Self::FocusAuto => {
-                Some(CameraCapability::BasicFocus)
+            Self::StartRecording | Self::StopRecording | Self::ToggleRecording => {
+                Some(CameraCapability::CaptureVideo)
             }
+            Self::ZoomStep { .. } | Self::ZoomTo { .. } | Self::ZoomRate { .. } => {
+                Some(CameraCapability::BasicZoom)
+            }
+            Self::FocusStep { .. }
+            | Self::FocusTo { .. }
+            | Self::FocusAuto
+            | Self::FocusRate { .. } => Some(CameraCapability::BasicFocus),
             Self::TrackPoint { .. } => Some(CameraCapability::TrackingPoint),
             Self::TrackRectangle { .. } => Some(CameraCapability::TrackingRectangle),
             Self::Format { .. }
             | Self::Reset
             | Self::SetSetting { .. }
             | Self::SetSource { .. }
+            | Self::ToggleSource
             | Self::StopTracking => None,
         }
     }
@@ -474,6 +505,16 @@ impl CameraAction {
             Self::SetSetting { name, value, kind } => Some((name, *value, *kind)),
             _ => None,
         }
+    }
+
+    /// Whether it is a toggle, which goes as what the camera needs from
+    /// what it last said (`Camera::toggled`).
+    #[must_use]
+    pub fn toggles(&self) -> bool {
+        matches!(
+            self,
+            Self::ToggleRecording | Self::ToggleMode | Self::ToggleSource
+        )
     }
 
     /// Whether it erases what the camera holds.
@@ -520,6 +561,9 @@ impl CameraAction {
             }
             Self::ZoomTo { percent: p } | Self::FocusTo { percent: p } if percent(p) => {
                 Some("a place in the range is from 0 to 100")
+            }
+            Self::ZoomRate { rate } | Self::FocusRate { rate } if !(-1.0..=1.0).contains(&rate) => {
+                Some("a rate is from -1 to 1, and 0 stops")
             }
             Self::Format {
                 storage_id: Some(0),
@@ -751,7 +795,7 @@ impl Camera {
         match action {
             // No flag says a camera has more than one sensor. Its answer
             // says whether it has the one asked for.
-            CameraAction::SetSource { .. } => return true,
+            CameraAction::SetSource { .. } | CameraAction::ToggleSource => return true,
             CameraAction::StopTracking => {
                 return can.contains(&CameraCapability::TrackingPoint)
                     || can.contains(&CameraCapability::TrackingRectangle);
@@ -807,6 +851,49 @@ impl Camera {
         sources.sort_unstable();
         sources.dedup();
         sources
+    }
+
+    /// What a toggle comes to for this camera, from what it last said
+    /// (S416): the opposite of its recording, its mode or its picture. Any
+    /// other action is itself. Why not, while it has not said, as words
+    /// that follow "the camera".
+    ///
+    /// # Errors
+    ///
+    /// When the camera has not said what the toggle turns over.
+    pub fn toggled(&self, action: CameraAction) -> Result<CameraAction, &'static str> {
+        match action {
+            CameraAction::ToggleRecording => match self.capture {
+                Some(capture) if capture.recording => Ok(CameraAction::StopRecording),
+                Some(_) => Ok(CameraAction::StartRecording),
+                None => Err("has not said yet whether it is recording"),
+            },
+            CameraAction::ToggleMode => match self.settings.and_then(|s| s.mode) {
+                Some(CameraMode::Photo) => Ok(CameraAction::SetMode {
+                    mode: CameraMode::Video,
+                }),
+                Some(CameraMode::Video | CameraMode::Survey) => Ok(CameraAction::SetMode {
+                    mode: CameraMode::Photo,
+                }),
+                None => Err("has not said yet whether it is in photo or video mode"),
+            },
+            CameraAction::ToggleSource => {
+                // `VIDEO_STREAM_STATUS_FLAGS_THERMAL`.
+                const THERMAL: u16 = 2;
+                if self.streams.is_empty() {
+                    return Err("has not said yet which picture it shows");
+                }
+                let thermal = self.streams.iter().any(|s| s.flags & THERMAL != 0);
+                Ok(CameraAction::SetSource {
+                    source: if thermal {
+                        CameraSource::Daylight
+                    } else {
+                        CameraSource::Thermal
+                    },
+                })
+            }
+            other => Ok(other),
+        }
     }
 
     /// The id of a vehicle's camera.
@@ -919,6 +1006,70 @@ mod tests {
             sources: Vec::new(),
             version: 1,
         }
+    }
+
+    // S416: a controller's toggle is what the camera last said, turned
+    // over, and nothing while it has not said.
+    #[test]
+    fn a_toggle_is_the_opposite_of_what_the_camera_last_said() {
+        let mut camera = camera(1 | 2 | 256);
+        assert!(camera.toggled(CameraAction::ToggleRecording).is_err());
+        assert!(camera.toggled(CameraAction::ToggleMode).is_err());
+        assert!(camera.toggled(CameraAction::ToggleSource).is_err());
+        assert_eq!(
+            camera.toggled(CameraAction::TakePhoto),
+            Ok(CameraAction::TakePhoto)
+        );
+
+        camera.capture = Some(CameraCapture::default());
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleRecording),
+            Ok(CameraAction::StartRecording)
+        );
+        camera.capture = Some(CameraCapture {
+            recording: true,
+            ..CameraCapture::default()
+        });
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleRecording),
+            Ok(CameraAction::StopRecording)
+        );
+
+        camera.settings = Some(CameraSettings {
+            mode: Some(CameraMode::Photo),
+            ..CameraSettings::default()
+        });
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleMode),
+            Ok(CameraAction::SetMode {
+                mode: CameraMode::Video
+            })
+        );
+        camera.settings = Some(CameraSettings {
+            mode: Some(CameraMode::Survey),
+            ..CameraSettings::default()
+        });
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleMode),
+            Ok(CameraAction::SetMode {
+                mode: CameraMode::Photo
+            })
+        );
+
+        camera.streams = vec![CameraStream::default()];
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleSource),
+            Ok(CameraAction::SetSource {
+                source: CameraSource::Thermal
+            })
+        );
+        camera.streams[0].flags = 2;
+        assert_eq!(
+            camera.toggled(CameraAction::ToggleSource),
+            Ok(CameraAction::SetSource {
+                source: CameraSource::Daylight
+            })
+        );
     }
 
     // S405: the Camera tab, the agent and "Also save on the vehicle" all

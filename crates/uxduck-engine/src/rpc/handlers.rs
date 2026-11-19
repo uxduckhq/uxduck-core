@@ -783,6 +783,7 @@ pub(crate) fn handle(
         | ClientRequest::ControllerSetTarget(_)
         | ClientRequest::ControllerChooseMapping(_)
         | ClientRequest::ControllerInputs(_)
+        | ClientRequest::ControllerNavigate(_)
         | ClientRequest::ClientSelect(_)
         | ClientRequest::MappingUpdate(_)
         | ClientRequest::MappingRemove(_)

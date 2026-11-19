@@ -61,7 +61,120 @@ pub struct Controller {
     /// is let go. Never kept over a restart.
     #[serde(skip)]
     pub holding: Option<Hold>,
+    /// The last photo a camera said it took after this controller's Take
+    /// photo (S416). Never kept over a restart.
+    #[serde(skip)]
+    pub photo: Option<ControllerPhoto>,
+    /// Its charge, as the platform last said (S419). Never kept over a
+    /// restart: it is read again.
+    #[serde(skip)]
+    pub power: ControllerPower,
     pub version: u64,
+}
+
+/// A photo a camera said it took after a controller's Take photo (S416).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControllerPhoto {
+    pub vehicle_id: String,
+    pub camera_id: String,
+    /// Its place in the camera's list, from 0.
+    pub index: u32,
+    pub ok: bool,
+    pub heard_at_us: u64,
+}
+
+/// A controller's power, as the platform reports it (S419, ADR-0005 A7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "state")]
+pub enum ControllerPower {
+    /// The platform said nothing of its power.
+    #[default]
+    Unknown,
+    /// The platform has no way to say: the browser's Gamepad API.
+    Unavailable,
+    /// On a cable with no battery to tell of.
+    Wired,
+    /// On its battery, with this much left.
+    Discharging { percent: u8 },
+    /// Charging, with this much so far.
+    Charging { percent: u8 },
+    /// Full, on its charger.
+    Charged,
+}
+
+/// How low a controller's battery is (S419). The levels are `UPower`'s
+/// defaults, which Linux desktops warn of a peripheral's battery at
+/// (`PercentageLow=20`, `PercentageCritical=5`, both inclusive), so a
+/// controller is called low where its platform would call it low.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PowerLevel {
+    Low,
+    Critical,
+}
+
+/// `UPower`'s default `PercentageLow`.
+pub const POWER_LOW_PERCENT: u8 = 20;
+/// `UPower`'s default `PercentageCritical`.
+pub const POWER_CRITICAL_PERCENT: u8 = 5;
+
+impl ControllerPower {
+    /// How low it is while on its battery; never while charging or wired.
+    #[must_use]
+    pub const fn level(self) -> Option<PowerLevel> {
+        match self {
+            Self::Discharging { percent } if percent <= POWER_CRITICAL_PERCENT => {
+                Some(PowerLevel::Critical)
+            }
+            Self::Discharging { percent } if percent <= POWER_LOW_PERCENT => Some(PowerLevel::Low),
+            _ => None,
+        }
+    }
+}
+
+/// A rumble that tells the pilot something without looking (S419,
+/// ADR-0005 A7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Rumble {
+    /// A hold completed and its command went: one short pulse.
+    Done,
+    /// A command was held back or refused: two short pulses.
+    Refused,
+    /// The route paused or the vehicle's link was lost: one long pulse.
+    Lost,
+}
+
+/// One pulse of a rumble: how long it buzzes, then how long it rests
+/// before the next, and how strongly, 0 to 1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pulse {
+    pub on_ms: u32,
+    pub off_ms: u32,
+    pub strength: f32,
+}
+
+impl Rumble {
+    /// Its pulses, the same on every platform. Short enough to tell apart
+    /// by count and long enough to feel through a grip, in steps of 50 ms,
+    /// the step gilrs plays force feedback in.
+    #[must_use]
+    pub const fn pulses(self) -> &'static [Pulse] {
+        const SHORT: Pulse = Pulse {
+            on_ms: 150,
+            off_ms: 150,
+            strength: 0.6,
+        };
+        match self {
+            Self::Done => &[SHORT],
+            Self::Refused => &[SHORT, SHORT],
+            Self::Lost => &[Pulse {
+                on_ms: 600,
+                off_ms: 0,
+                strength: 1.0,
+            }],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +230,33 @@ pub enum GamepadButton {
     DpadDown,
     DpadLeft,
     DpadRight,
+}
+
+impl GamepadButton {
+    /// What the mapping editor calls it (`BUTTONS` in its `inputs.ts`),
+    /// for a refusal that names it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::South => "A / Cross (bottom)",
+            Self::East => "B / Circle (right)",
+            Self::West => "X / Square (left)",
+            Self::North => "Y / Triangle (top)",
+            Self::LeftTrigger => "LB / L1",
+            Self::LeftTrigger2 => "LT / L2",
+            Self::RightTrigger => "RB / R1",
+            Self::RightTrigger2 => "RT / R2",
+            Self::DpadUp => "D-pad up",
+            Self::DpadDown => "D-pad down",
+            Self::DpadLeft => "D-pad left",
+            Self::DpadRight => "D-pad right",
+            Self::Select => "Back / Share",
+            Self::Start => "Start / Options",
+            Self::Mode => "Home",
+            Self::LeftThumb => "Left stick press (L3)",
+            Self::RightThumb => "Right stick press (R3)",
+        }
+    }
 }
 
 /// Which axis drives a stick, and which way round.
@@ -225,6 +365,24 @@ pub struct GimbalAxisBinding {
     pub input: AxisBinding,
 }
 
+/// What an axis does to the target vehicle's camera (S416).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraAxis {
+    Zoom,
+}
+
+/// An axis that zooms the target vehicle's camera (S416): up or squeezed
+/// zooms in, the further the faster, down zooms out, and at its centre
+/// the zoom stops. It zooms only once it has been at its centre after the
+/// controller's current route began, as a gimbal's axis turns (S407).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraAxisBinding {
+    pub control: CameraAxis,
+    pub input: AxisBinding,
+}
+
 /// A button that sends a command to the target vehicle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -237,9 +395,95 @@ pub struct ButtonBinding {
     pub code: Option<u32>,
     pub command: Command,
     /// How long it must be held before the command goes; none: on the
-    /// press itself.
+    /// press itself. With a hold it is the input's long press (S418).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_ms: Option<u32>,
+    /// A press, or two quick presses (S418). Absent: a press.
+    #[serde(default, skip_serializing_if = "ButtonGesture::is_press")]
+    pub gesture: ButtonGesture,
+    /// The Shift button held for it (S418): it goes only while that Shift
+    /// is held, and one without goes only while no Shift is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<ShiftButton>,
+    /// Sent again every this many milliseconds while the button stays
+    /// down (S418), for a step such as a zoom step. Absent: once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_ms: Option<u32>,
+}
+
+/// How an input is pressed for its binding (S418). A long press is a
+/// press with a hold (`ButtonBinding::hold_ms`).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ButtonGesture {
+    #[default]
+    Press,
+    /// Two presses, the second within `DOUBLE_PRESS_MS` of letting go of
+    /// the first.
+    DoublePress,
+}
+
+impl ButtonGesture {
+    #[must_use]
+    pub fn is_press(&self) -> bool {
+        *self == Self::Press
+    }
+}
+
+/// A button bound as a Shift (`HeldAction::Shift`), named as a binding
+/// on its layer names it (S418).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftButton {
+    pub button: GamepadButton,
+    /// As for `ButtonBinding::code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<u32>,
+}
+
+impl ShiftButton {
+    /// Whether it is this input, by code when it has one.
+    #[must_use]
+    pub fn matches(&self, button: Option<GamepadButton>, code: Option<u32>) -> bool {
+        match self.code {
+            Some(wanted) => code == Some(wanted),
+            None => button == Some(self.button),
+        }
+    }
+}
+
+/// How long a press waits for a second one before it goes, on an input
+/// with a double press bound (S418). 300 ms is about the slowest a
+/// pilot's deliberate double tap on a gamepad takes, and short enough
+/// that a single press still feels prompt. An input with no double press
+/// bound never waits.
+pub const DOUBLE_PRESS_MS: u32 = 300;
+
+/// The quickest a held button may repeat its command (S418): the engine
+/// looks at held buttons on each pilot tick, 25 times a second, so it
+/// cannot repeat any faster.
+pub const REPEAT_MIN_MS: u32 = 40;
+
+impl ButtonBinding {
+    /// Whether it is this input, by code when it has one.
+    #[must_use]
+    pub fn matches(&self, button: Option<GamepadButton>, code: Option<u32>) -> bool {
+        match self.code {
+            Some(wanted) => code == Some(wanted),
+            None => button == Some(self.button),
+        }
+    }
+
+    /// Whether it is on the same input as `other`, compared as stored.
+    fn same_input(&self, button: GamepadButton, code: Option<u32>) -> bool {
+        match (self.code, code) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.button == button,
+            _ => false,
+        }
+    }
 }
 
 /// A button held for an action that lasts while it is held, such as the
@@ -254,13 +498,20 @@ pub struct ActionBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<u32>,
     pub action: HeldAction,
+    /// The Shift button held for it (S418), as for `ButtonBinding::shift`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<ShiftButton>,
 }
 
 /// What a held button does: holds the gripper open or closed (S263),
 /// turns the target vehicle's gimbal up, down, left or right while it is
 /// held (S407), or Talk, held to speak to the agent in the window that
 /// claimed the controller and let go to send (S21). The daemon only keeps
-/// Talk, and the window reads the button.
+/// Talk, and the window reads the button. The app's actions (S420), from
+/// `NextVehicle` to `Navigate`, are kept the same way: pressed, the window
+/// that claimed the controller acts, and no vehicle hears of it.
+/// `Shift` sends nothing: while it is held the other buttons do what their
+/// Shift layer says (S418).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeldAction {
@@ -271,7 +522,34 @@ pub enum HeldAction {
     GimbalDown,
     GimbalLeft,
     GimbalRight,
+    ZoomIn,
+    ZoomOut,
+    FocusNear,
+    FocusFar,
+    NextVehicle,
+    PreviousVehicle,
+    CockpitTab,
+    CameraTab,
+    MapTab,
+    NextCamera,
+    CameraFullWindow,
+    ShowOnMap,
+    Navigate,
+    Shift,
 }
+
+/// The buttons Navigate (S420) moves focus with, presses and goes back
+/// with: the direction pad, South and East. While a window navigates with
+/// a controller these send nothing to its vehicle, and every other input
+/// flies as before.
+pub const NAVIGATE_BUTTONS: [GamepadButton; 6] = [
+    GamepadButton::DpadUp,
+    GamepadButton::DpadDown,
+    GamepadButton::DpadLeft,
+    GamepadButton::DpadRight,
+    GamepadButton::South,
+    GamepadButton::East,
+];
 
 impl HeldAction {
     /// The gripper action it asks for, or none for any other.
@@ -284,7 +562,51 @@ impl HeldAction {
             | Self::GimbalUp
             | Self::GimbalDown
             | Self::GimbalLeft
-            | Self::GimbalRight => None,
+            | Self::GimbalRight
+            | Self::ZoomIn
+            | Self::ZoomOut
+            | Self::FocusNear
+            | Self::FocusFar
+            | Self::NextVehicle
+            | Self::PreviousVehicle
+            | Self::CockpitTab
+            | Self::CameraTab
+            | Self::MapTab
+            | Self::NextCamera
+            | Self::CameraFullWindow
+            | Self::ShowOnMap
+            | Self::Navigate
+            | Self::Shift => None,
+        }
+    }
+
+    /// What it asks of a camera while held (S416): its zoom (index 0) or
+    /// its focus (index 1), and which way, zooming in and focusing farther
+    /// positive. None for any other.
+    #[must_use]
+    pub const fn camera(self) -> Option<(usize, f64)> {
+        match self {
+            Self::ZoomIn => Some((0, 1.0)),
+            Self::ZoomOut => Some((0, -1.0)),
+            Self::FocusFar => Some((1, 1.0)),
+            Self::FocusNear => Some((1, -1.0)),
+            Self::Open
+            | Self::Close
+            | Self::Talk
+            | Self::GimbalUp
+            | Self::GimbalDown
+            | Self::GimbalLeft
+            | Self::GimbalRight
+            | Self::NextVehicle
+            | Self::PreviousVehicle
+            | Self::CockpitTab
+            | Self::CameraTab
+            | Self::MapTab
+            | Self::NextCamera
+            | Self::CameraFullWindow
+            | Self::ShowOnMap
+            | Self::Navigate
+            | Self::Shift => None,
         }
     }
 
@@ -297,8 +619,43 @@ impl HeldAction {
             Self::GimbalDown => Some((GimbalAxis::Pitch, -1.0)),
             Self::GimbalLeft => Some((GimbalAxis::Yaw, -1.0)),
             Self::GimbalRight => Some((GimbalAxis::Yaw, 1.0)),
-            Self::Open | Self::Close | Self::Talk => None,
+            Self::Open
+            | Self::Close
+            | Self::Talk
+            | Self::ZoomIn
+            | Self::ZoomOut
+            | Self::FocusNear
+            | Self::FocusFar
+            | Self::NextVehicle
+            | Self::PreviousVehicle
+            | Self::CockpitTab
+            | Self::CameraTab
+            | Self::MapTab
+            | Self::NextCamera
+            | Self::CameraFullWindow
+            | Self::ShowOnMap
+            | Self::Navigate
+            | Self::Shift => None,
         }
+    }
+
+    /// Whether the window that claimed the controller does it, not the
+    /// vehicle: Talk (S21) and the app's actions (S420).
+    #[must_use]
+    pub const fn for_window(self) -> bool {
+        matches!(
+            self,
+            Self::Talk
+                | Self::NextVehicle
+                | Self::PreviousVehicle
+                | Self::CockpitTab
+                | Self::CameraTab
+                | Self::MapTab
+                | Self::NextCamera
+                | Self::CameraFullWindow
+                | Self::ShowOnMap
+                | Self::Navigate
+        )
     }
 }
 
@@ -314,6 +671,11 @@ impl ActionBinding {
 
 /// The shortest and longest hold a button or position may ask for.
 pub const HOLD_MS: std::ops::RangeInclusive<u32> = 100..=10_000;
+
+/// The shortest hold a dangerous command takes on a controller
+/// (`Command::controller_hold_reason`, S417): the shortest hold the
+/// mapping's editor offers, longer than a button is down when it is bumped.
+pub const DANGEROUS_HOLD_MS: u32 = 1_000;
 
 /// A position of an axis, such as a switch's or a six-way button group's,
 /// that sends a command when the axis moves into it.
@@ -394,6 +756,65 @@ pub enum StickControl {
     Yaw,
 }
 
+/// An axis whose feel a mapping sets (S418): the four sticks and the
+/// gimbal's two axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeelAxis {
+    Roll,
+    Pitch,
+    Yaw,
+    Throttle,
+    GimbalPitch,
+    GimbalYaw,
+}
+
+/// How an axis feels after its deadzone (S418): `expo` softens it
+/// around the centre, and `rate` scales its full push.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AxisFeel {
+    pub axis: FeelAxis,
+    /// 0 is linear, 1 the softest: `(1 - expo) * x + expo * x³`. Above 1
+    /// the curve turns back on itself, so a push further would send less.
+    #[serde(default)]
+    pub expo: f64,
+    /// What a full push sends, above 0 and up to 1, a fraction of the
+    /// stick's full travel or of the gimbal's full rate: `MANUAL_CONTROL`
+    /// carries nothing past a full push. The throttle's stays 1, so it
+    /// still reaches idle and full.
+    #[serde(default = "full_rate")]
+    pub rate: f64,
+}
+
+const fn full_rate() -> f64 {
+    1.0
+}
+
+impl AxisFeel {
+    /// A value from -1 to 1, after the deadzone, through the curve.
+    #[must_use]
+    pub fn apply(&self, value: f64) -> f64 {
+        let curved = (1.0 - self.expo) * value + self.expo * value.powi(3);
+        curved * self.rate
+    }
+
+    /// Why it cannot be used as it is, if it cannot.
+    #[must_use]
+    pub fn problem(&self) -> Option<&'static str> {
+        if !(0.0..=1.0).contains(&self.expo) {
+            return Some("Expo is from 0 to 100%.");
+        }
+        if !(self.rate > 0.0 && self.rate <= 1.0) {
+            return Some("Rate is above 0 and up to 100%.");
+        }
+        if self.axis == FeelAxis::Throttle && (self.rate - 1.0).abs() > f64::EPSILON {
+            return Some("The throttle's rate stays 100%, so it still reaches idle and full.");
+        }
+        None
+    }
+}
+
 /// Controller inputs to the four pilot axes, additional ArduPilot RC
 /// channels, and buttons and axis positions to commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -431,6 +852,14 @@ pub struct InputMapping {
     /// its yaw, each at most once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gimbal: Vec<GimbalAxisBinding>,
+    /// Axes that work the target vehicle's camera (S416): its zoom, at
+    /// most once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera: Vec<CameraAxisBinding>,
+    /// Expo and rate for the sticks and the gimbal's axes (S418), each
+    /// axis at most once. An axis not listed is linear at full rate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feel: Vec<AxisFeel>,
     pub version: u64,
 }
 
@@ -558,6 +987,7 @@ impl InputMapping {
                 .stick_bindings()
                 .chain(self.rc_channels.iter().map(|b| &b.input))
                 .chain(self.gimbal.iter().map(|b| &b.input))
+                .chain(self.camera.iter().map(|b| &b.input))
                 .any(|b| input.shares_input(b, inputs))
             || self
                 .positions
@@ -584,28 +1014,181 @@ impl InputMapping {
         .map(|(_, binding)| binding)
     }
 
-    /// What a button does: matched by its code when the binding has one,
-    /// else by its gamepad name.
+    /// What a button does when pressed with no Shift held: its first
+    /// binding without a Shift that is not a double press. Matched by its
+    /// code when the binding has one, else by its gamepad name.
     #[must_use]
     pub fn button(
         &self,
         button: Option<GamepadButton>,
         code: Option<u32>,
     ) -> Option<&ButtonBinding> {
-        self.buttons.iter().find(|b| match b.code {
-            Some(wanted) => code == Some(wanted),
-            None => button == Some(b.button),
-        })
+        self.buttons
+            .iter()
+            .find(|b| b.matches(button, code) && b.shift.is_none() && b.gesture.is_press())
     }
 
-    /// The held action a button is bound to, if any.
+    /// The held action a button is bound to with no Shift held, if any.
     #[must_use]
     pub fn action(
         &self,
         button: Option<GamepadButton>,
         code: Option<u32>,
     ) -> Option<&ActionBinding> {
-        self.actions.iter().find(|b| b.matches(button, code))
+        self.action_in(button, code, None)
+    }
+
+    /// The held action a button is bound to on a Shift's layer, or with
+    /// none (S418). A Shift button is one on any layer.
+    #[must_use]
+    pub fn action_in(
+        &self,
+        button: Option<GamepadButton>,
+        code: Option<u32>,
+        shift: Option<ShiftButton>,
+    ) -> Option<&ActionBinding> {
+        self.actions.iter().find(|b| {
+            b.matches(button, code) && (b.shift == shift || b.action == HeldAction::Shift)
+        })
+    }
+
+    /// The buttons bound as a Shift (S418).
+    pub fn shifts(&self) -> impl Iterator<Item = ShiftButton> + '_ {
+        self.actions
+            .iter()
+            .filter(|b| b.action == HeldAction::Shift && b.shift.is_none())
+            .map(|b| ShiftButton {
+                button: b.button,
+                code: b.code,
+            })
+    }
+
+    /// Why the buttons' bindings cannot all be used as they are (S418,
+    /// extending S12): two actions for one gesture of one input on one
+    /// layer, a command and a held action together there, a Shift that
+    /// does anything else, a layer of a button that is no Shift, a double
+    /// press held, or a repeat that cannot be. None when they can.
+    #[must_use]
+    pub fn button_problem(&self) -> Option<String> {
+        let shifts: Vec<ShiftButton> = self.shifts().collect();
+        let is_shift = |button: GamepadButton, code: Option<u32>| {
+            shifts.iter().any(|s| s.button == button && s.code == code)
+        };
+        let named = |button: GamepadButton, code: Option<u32>| {
+            code.map_or_else(
+                || button.label().to_owned(),
+                |code| format!("Button {code:#x}"),
+            )
+        };
+        for b in &self.buttons {
+            let name = named(b.button, b.code);
+            if is_shift(b.button, b.code) {
+                return Some(format!(
+                    "{name} is a Shift, so it sends nothing of its own. Remove its other actions."
+                ));
+            }
+            if let Some(shift) = b.shift
+                && !is_shift(shift.button, shift.code)
+            {
+                return Some(format!(
+                    "{name} has an action for {}, which is not a Shift.",
+                    named(shift.button, shift.code)
+                ));
+            }
+            if b.gesture == ButtonGesture::DoublePress && b.hold_ms.is_some() {
+                return Some(format!("{name}'s double press can't also be held."));
+            }
+            let same = |other: &&ButtonBinding| {
+                other.same_input(b.button, b.code) && other.shift == b.shift
+            };
+            let kind = |other: &ButtonBinding| (other.gesture, other.hold_ms.is_some());
+            if self
+                .buttons
+                .iter()
+                .filter(same)
+                .filter(|other| kind(other) == kind(b))
+                .count()
+                > 1
+            {
+                return Some(format!("{name} has two actions for the same press."));
+            }
+            if self
+                .actions
+                .iter()
+                .any(|a| a.shift == b.shift && b.same_input(a.button, a.code))
+            {
+                return Some(format!(
+                    "{name} either sends a command or is held for an action, on each layer."
+                ));
+            }
+            if let Some(problem) = self.repeat_problem(b, &name) {
+                return Some(problem);
+            }
+        }
+        for a in &self.actions {
+            let name = named(a.button, a.code);
+            if a.action == HeldAction::Shift && a.shift.is_some() {
+                return Some(format!(
+                    "{name} is a Shift, so it can't be on another Shift."
+                ));
+            }
+            if a.action.for_window() && a.shift.is_some() {
+                return Some(format!(
+                    "{name} has Talk or an app action on a Shift's layer. The window does those only with no Shift held, so bind it to {name} without a Shift."
+                ));
+            }
+            if let Some(shift) = a.shift
+                && !is_shift(shift.button, shift.code)
+            {
+                return Some(format!(
+                    "{name} has an action for {}, which is not a Shift.",
+                    named(shift.button, shift.code)
+                ));
+            }
+            let alike = |other: &&ActionBinding| {
+                other.button == a.button
+                    && other.code == a.code
+                    && (other.shift == a.shift
+                        || other.action == HeldAction::Shift
+                        || a.action == HeldAction::Shift)
+            };
+            if self.actions.iter().filter(alike).count() > 1 {
+                return Some(if is_shift(a.button, a.code) {
+                    format!("{name} is a Shift, so it does nothing else.")
+                } else {
+                    format!("{name} is held for two actions on one layer.")
+                });
+            }
+        }
+        None
+    }
+
+    /// Why a button's repeat while held cannot be (S418): not a step, not
+    /// its input's only press on its layer, or faster than a pilot tick.
+    fn repeat_problem(&self, b: &ButtonBinding, name: &str) -> Option<String> {
+        let repeat = b.repeat_ms?;
+        if !b.command.repeats_while_held() {
+            return Some(format!(
+                "{name} repeats {}, which is not a step. Only steps, such as a zoom step, repeat.",
+                b.command.label()
+            ));
+        }
+        let presses = self
+            .buttons
+            .iter()
+            .filter(|other| other.same_input(b.button, b.code) && other.shift == b.shift)
+            .count();
+        if b.hold_ms.is_some() || !b.gesture.is_press() || presses > 1 {
+            return Some(format!(
+                "{name} repeats while held, so it goes on the press and can't also have a long or double press."
+            ));
+        }
+        if repeat < REPEAT_MIN_MS {
+            return Some(format!(
+                "{name} repeats every {repeat} ms. UXDuck repeats at most every {REPEAT_MIN_MS} ms, 25 times a second."
+            ));
+        }
+        None
     }
 
     /// Whether a gimbal's axis may be bound as it is (S407): pitch and yaw
@@ -637,6 +1220,67 @@ impl InputMapping {
                 .filter(|other| binding.input.shares_input(&other.input, inputs))
                 .count()
                 > 1
+            || self
+                .camera
+                .iter()
+                .any(|other| binding.input.shares_input(&other.input, inputs))
+    }
+
+    /// Whether a camera's axis may be bound as it is (S416): zoom once at
+    /// most, on an input no stick, RC channel, command position, gimbal
+    /// axis or other camera axis reads.
+    #[must_use]
+    pub fn camera_conflicts(
+        &self,
+        binding: &CameraAxisBinding,
+        inputs: &[(Option<u32>, Option<GamepadAxis>)],
+    ) -> bool {
+        self.camera
+            .iter()
+            .filter(|other| other.control == binding.control)
+            .count()
+            > 1
+            || self
+                .stick_bindings()
+                .chain(self.rc_channels.iter().map(|b| &b.input))
+                .chain(self.gimbal.iter().map(|b| &b.input))
+                .any(|b| binding.input.shares_input(b, inputs))
+            || self
+                .positions
+                .iter()
+                .any(|p| binding.input.shares_input(&p.binding(), inputs))
+            || self
+                .camera
+                .iter()
+                .filter(|other| binding.input.shares_input(&other.input, inputs))
+                .count()
+                > 1
+    }
+
+    /// What the camera's axes ask for, each -1 to 1 after the deadzone and
+    /// inversion, in the order of `camera` (S416). None where an input is
+    /// not known yet, which asks for nothing.
+    #[must_use]
+    pub fn camera_axes(&self, input: impl Fn(&AxisBinding) -> Option<f64>) -> Vec<f64> {
+        self.camera
+            .iter()
+            .map(|binding| self.past_deadzone(&binding.input, input(&binding.input)))
+            .collect()
+    }
+
+    /// A raw reading after the binding's calibration, the deadzone and
+    /// inversion: 0 for one not known.
+    fn past_deadzone(&self, binding: &AxisBinding, raw: Option<f64>) -> f64 {
+        let Some(raw) = raw else {
+            return 0.0;
+        };
+        let raw = binding.calibrated(raw.clamp(-1.0, 1.0));
+        let value = if raw.abs() <= self.deadzone {
+            0.0
+        } else {
+            raw.signum() * (raw.abs() - self.deadzone) / (1.0 - self.deadzone)
+        };
+        if binding.inverted { -value } else { value }
     }
 
     /// How fast the gimbal's axes ask it to turn, pitch then yaw, each -1
@@ -657,11 +1301,18 @@ impl InputMapping {
                 } else {
                     raw.signum() * (raw.abs() - self.deadzone) / (1.0 - self.deadzone)
                 };
-                if binding.input.inverted {
+                let value = if binding.input.inverted {
                     -value
                 } else {
                     value
-                }
+                };
+                self.felt(
+                    match binding.control {
+                        GimbalAxis::Pitch => FeelAxis::GimbalPitch,
+                        GimbalAxis::Yaw => FeelAxis::GimbalYaw,
+                    },
+                    value,
+                )
             })
             .collect()
     }
@@ -689,6 +1340,7 @@ impl InputMapping {
                     button,
                     code: None,
                     action,
+                    shift: None,
                 });
             }
         }
@@ -721,6 +1373,9 @@ impl InputMapping {
                     code: None,
                     command: Command::Rtl,
                     hold_ms: None,
+                    gesture: ButtonGesture::Press,
+                    shift: None,
+                    repeat_ms: None,
                 },
                 ButtonBinding {
                     button: GamepadButton::North,
@@ -729,6 +1384,9 @@ impl InputMapping {
                         mode: "LOITER".into(),
                     },
                     hold_ms: None,
+                    gesture: ButtonGesture::Press,
+                    shift: None,
+                    repeat_ms: None,
                 },
             ],
             positions: Vec::new(),
@@ -736,6 +1394,8 @@ impl InputMapping {
             unused: Vec::new(),
             actions: Vec::new(),
             gimbal: Vec::new(),
+            camera: Vec::new(),
+            feel: Vec::new(),
             version: 1,
         }
     }
@@ -887,22 +1547,34 @@ impl InputMapping {
             };
             if binding.inverted { -value } else { value }
         };
-        let control = |control: StickControl, binding: &AxisBinding| {
+        let control = |control: StickControl, binding: &AxisBinding, axis: FeelAxis| {
             if self.unused.contains(&control) {
                 0.0
             } else {
-                read(binding)
+                self.felt(axis, read(binding))
             }
         };
+        let throttle = self.felt(FeelAxis::Throttle, read(&self.throttle));
         Sticks {
-            roll: control(StickControl::Roll, &self.roll),
-            pitch: control(StickControl::Pitch, &self.pitch),
-            yaw: control(StickControl::Yaw, &self.yaw),
+            roll: control(StickControl::Roll, &self.roll, FeelAxis::Roll),
+            pitch: control(StickControl::Pitch, &self.pitch, FeelAxis::Pitch),
+            yaw: control(StickControl::Yaw, &self.yaw, FeelAxis::Yaw),
             throttle: match self.throttle_range {
-                ThrottleRange::FullTravel => read(&self.throttle),
-                ThrottleRange::CentreToTop => read(&self.throttle).max(0.0) * 2.0 - 1.0,
+                ThrottleRange::FullTravel => throttle,
+                ThrottleRange::CentreToTop => throttle.max(0.0) * 2.0 - 1.0,
             },
         }
+    }
+
+    /// A value after the deadzone and inversion through its axis's feel
+    /// (S418): unchanged where the mapping sets none, or one it cannot use.
+    #[must_use]
+    pub fn felt(&self, axis: FeelAxis, value: f64) -> f64 {
+        self.feel
+            .iter()
+            .find(|feel| feel.axis == axis)
+            .filter(|feel| feel.problem().is_none())
+            .map_or(value, |feel| feel.apply(value))
     }
 }
 
@@ -1282,16 +1954,19 @@ mod tests {
                 button: GamepadButton::RightTrigger,
                 code: None,
                 action: HeldAction::Open,
+                shift: None,
             },
             ActionBinding {
                 button: GamepadButton::LeftTrigger,
                 code: Some(7),
                 action: HeldAction::Close,
+                shift: None,
             },
             ActionBinding {
                 button: GamepadButton::North,
                 code: None,
                 action: HeldAction::Talk,
+                shift: None,
             },
         ];
         let stored = serde_json::to_value(&mapping).expect("mapping");
@@ -1348,11 +2023,15 @@ mod tests {
             code: None,
             command: Command::Rtl,
             hold_ms: None,
+            gesture: ButtonGesture::Press,
+            shift: None,
+            repeat_ms: None,
         });
         taken.actions.push(ActionBinding {
             button: GamepadButton::DpadLeft,
             code: None,
             action: HeldAction::Talk,
+            shift: None,
         });
         let padded = taken.clone().with_gimbal_pad();
         assert_eq!(padded.buttons, taken.buttons);
@@ -1494,5 +2173,343 @@ mod tests {
         assert_eq!(stored["unused"], serde_json::json!(["pitch", "yaw"]));
         let restored: InputMapping = serde_json::from_value(stored).expect("stored");
         assert_eq!(restored, mapping);
+    }
+
+    fn press(button: GamepadButton, command: Command) -> ButtonBinding {
+        ButtonBinding {
+            button,
+            code: None,
+            command,
+            hold_ms: None,
+            gesture: ButtonGesture::Press,
+            shift: None,
+            repeat_ms: None,
+        }
+    }
+
+    const LB: ShiftButton = ShiftButton {
+        button: GamepadButton::LeftTrigger,
+        code: None,
+    };
+
+    fn shift_held(button: GamepadButton) -> ActionBinding {
+        ActionBinding {
+            button,
+            code: None,
+            action: HeldAction::Shift,
+            shift: None,
+        }
+    }
+
+    fn zoom_in() -> Command {
+        Command::Camera {
+            component_id: None,
+            device_id: None,
+            action: crate::domain::camera::CameraAction::ZoomStep { steps: 1 },
+        }
+    }
+
+    /// A mapping stored before S418 loads as it was and is stored again
+    /// the same: no gesture, Shift, repeat or feel appears in it.
+    #[test]
+    #[allow(clippy::expect_used, reason = "test round trips")]
+    fn mappings_stored_before_gestures_and_feel_load_and_store_as_they_were() {
+        let mut mapping = InputMapping::mode_2().with_gimbal_pad();
+        mapping.buttons[0].hold_ms = Some(1_000);
+        let old = serde_json::to_value(&mapping).expect("mapping");
+        assert!(old.get("feel").is_none(), "feel absent");
+        for binding in old["buttons"].as_array().expect("buttons") {
+            for key in ["gesture", "shift", "repeatMs"] {
+                assert!(binding.get(key).is_none(), "{key} absent from {binding}");
+            }
+        }
+        for binding in old["actions"].as_array().expect("actions") {
+            assert!(binding.get("shift").is_none(), "{binding}");
+        }
+        let restored: InputMapping = serde_json::from_value(old.clone()).expect("old mapping");
+        assert_eq!(restored, mapping);
+        assert_eq!(serde_json::to_value(&restored).expect("again"), old);
+        assert!(restored.button_problem().is_none());
+        // And new ones round trip.
+        mapping.buttons.push(ButtonBinding {
+            gesture: ButtonGesture::DoublePress,
+            shift: Some(LB),
+            ..press(GamepadButton::South, Command::Rtl)
+        });
+        mapping.buttons.push(ButtonBinding {
+            repeat_ms: Some(250),
+            ..press(GamepadButton::West, zoom_in())
+        });
+        mapping.actions.push(shift_held(GamepadButton::LeftTrigger));
+        mapping.feel = vec![AxisFeel {
+            axis: FeelAxis::Roll,
+            expo: 0.4,
+            rate: 0.8,
+        }];
+        let stored = serde_json::to_value(&mapping).expect("mapping");
+        assert_eq!(
+            stored["buttons"][2],
+            serde_json::json!({
+                "button": "south",
+                "command": { "type": "rtl" },
+                "gesture": "double-press",
+                "shift": { "button": "left-trigger" },
+            })
+        );
+        assert_eq!(stored["buttons"][3]["repeatMs"], 250);
+        assert_eq!(
+            stored["feel"],
+            serde_json::json!([{ "axis": "roll", "expo": 0.4, "rate": 0.8 }])
+        );
+        let restored: InputMapping = serde_json::from_value(stored).expect("new mapping");
+        assert_eq!(restored, mapping);
+        // A feel written without its rate is at full rate.
+        let feel: AxisFeel =
+            serde_json::from_value(serde_json::json!({ "axis": "yaw", "expo": 0.2 }))
+                .expect("feel");
+        assert!((feel.rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// Expo softens the sticks around the centre after the deadzone, and
+    /// rate scales a full push; the ends and the centre stay where they are.
+    #[test]
+    fn expo_and_rate_shape_the_sticks_and_the_gimbal_after_the_deadzone() {
+        let mut mapping = InputMapping::mode_2();
+        mapping.deadzone = 0.0;
+        mapping.feel = vec![
+            AxisFeel {
+                axis: FeelAxis::Roll,
+                expo: 0.4,
+                rate: 1.0,
+            },
+            AxisFeel {
+                axis: FeelAxis::Pitch,
+                expo: 0.0,
+                rate: 0.5,
+            },
+        ];
+        let at = |mapping: &InputMapping, value: f64| {
+            mapping.sticks(|b| {
+                if matches!(b.axis, GamepadAxis::RightStickX | GamepadAxis::RightStickY) {
+                    value
+                } else {
+                    0.0
+                }
+            })
+        };
+        // Half a push of roll sends 0.6 * 0.5 + 0.4 * 0.125 = 0.35.
+        assert_eq!(at(&mapping, 0.5).manual_control()[1], 350);
+        assert_eq!(
+            at(&mapping, -0.5).manual_control()[1],
+            -350,
+            "the same either way"
+        );
+        assert_eq!(
+            at(&mapping, 1.0).manual_control()[1],
+            1000,
+            "a full push is still full"
+        );
+        assert_eq!(at(&mapping, 0.0).manual_control()[1], 0);
+        // Pitch at half rate: a full push sends half.
+        assert_eq!(at(&mapping, 1.0).manual_control()[0], 500);
+        // After the deadzone: its edge is still zero, not a step.
+        mapping.deadzone = 0.1;
+        assert_eq!(at(&mapping, 0.1).manual_control()[1], 0);
+        // The gimbal's axes too.
+        mapping.gimbal = vec![GimbalAxisBinding {
+            control: GimbalAxis::Yaw,
+            input: AxisBinding {
+                axis: GamepadAxis::RightZ,
+                code: None,
+                inverted: false,
+                calibration: None,
+            },
+        }];
+        mapping.deadzone = 0.0;
+        mapping.feel.push(AxisFeel {
+            axis: FeelAxis::GimbalYaw,
+            expo: 1.0,
+            rate: 0.5,
+        });
+        let yaw = mapping.gimbal_axes(|_| Some(0.5))[0];
+        assert!((yaw - 0.0625).abs() < 1e-9, "{yaw}");
+        // One it cannot use changes nothing.
+        mapping.feel = vec![AxisFeel {
+            axis: FeelAxis::Roll,
+            expo: 2.0,
+            rate: 1.0,
+        }];
+        assert_eq!(at(&mapping, 0.5).manual_control()[1], 500);
+    }
+
+    #[test]
+    fn expo_and_rate_out_of_their_range_or_a_throttle_below_full_rate_are_refused() {
+        let feel = |axis, expo, rate| AxisFeel { axis, expo, rate }.problem();
+        assert!(feel(FeelAxis::Roll, 0.0, 1.0).is_none());
+        assert!(feel(FeelAxis::GimbalPitch, 1.0, 0.1).is_none());
+        assert!(feel(FeelAxis::Throttle, 0.5, 1.0).is_none());
+        for (axis, expo, rate) in [
+            (FeelAxis::Roll, -0.1, 1.0),
+            (FeelAxis::Roll, 1.1, 1.0),
+            (FeelAxis::Roll, f64::NAN, 1.0),
+            (FeelAxis::Yaw, 0.0, 0.0),
+            (FeelAxis::Yaw, 0.0, 1.5),
+            (FeelAxis::Throttle, 0.0, 0.8),
+        ] {
+            assert!(feel(axis, expo, rate).is_some(), "{axis:?} {expo} {rate}");
+        }
+    }
+
+    /// S12's checks reach gestures and Shift layers: one action for each
+    /// gesture of an input on a layer, a Shift that does nothing else, a
+    /// layer only of a Shift, and a repeat only of a lone step.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refusal for each way a binding can clash"
+    )]
+    fn gestures_and_shift_layers_are_checked_as_s12_checks_bindings() {
+        let mut mapping = InputMapping::mode_2();
+        mapping.actions.push(shift_held(GamepadButton::LeftTrigger));
+        let long = |command| ButtonBinding {
+            hold_ms: Some(1_000),
+            ..press(GamepadButton::South, command)
+        };
+        let double = |command| ButtonBinding {
+            gesture: ButtonGesture::DoublePress,
+            ..press(GamepadButton::South, command)
+        };
+        mapping.buttons.extend([
+            press(GamepadButton::South, Command::Land),
+            long(Command::Rtl),
+            double(Command::Arm),
+            ButtonBinding {
+                shift: Some(LB),
+                ..press(GamepadButton::South, Command::Rtl)
+            },
+            ButtonBinding {
+                repeat_ms: Some(REPEAT_MIN_MS),
+                ..press(GamepadButton::West, zoom_in())
+            },
+        ]);
+        mapping.actions.push(ActionBinding {
+            shift: Some(LB),
+            ..shift_held(GamepadButton::DpadUp)
+        });
+        mapping.actions.last_mut().expect("added").action = HeldAction::GimbalUp;
+        assert_eq!(mapping.button_problem(), None);
+        assert_eq!(
+            mapping.button(Some(GamepadButton::South), None),
+            Some(&press(GamepadButton::South, Command::Land)),
+            "a plain press is its press without a Shift"
+        );
+        assert_eq!(
+            mapping
+                .action_in(Some(GamepadButton::DpadUp), None, Some(LB))
+                .map(|a| a.action),
+            Some(HeldAction::GimbalUp)
+        );
+        assert!(
+            mapping.action(Some(GamepadButton::DpadUp), None).is_none(),
+            "Up's held action is on the Shift's layer only"
+        );
+
+        let refused = |change: &dyn Fn(&mut InputMapping)| {
+            let mut wrong = mapping.clone();
+            change(&mut wrong);
+            wrong.button_problem()
+        };
+        for (why, change) in [
+            (
+                "two long presses",
+                &(|m: &mut InputMapping| m.buttons.push(long(Command::Land)))
+                    as &dyn Fn(&mut InputMapping),
+            ),
+            ("two double presses", &|m| {
+                m.buttons.push(double(Command::Rtl));
+            }),
+            ("Talk on a Shift's layer, which the window reads", &|m| {
+                m.actions.push(ActionBinding {
+                    action: HeldAction::Talk,
+                    shift: Some(LB),
+                    ..shift_held(GamepadButton::North)
+                });
+            }),
+            ("Navigate on a Shift's layer", &|m| {
+                m.actions.push(ActionBinding {
+                    action: HeldAction::Navigate,
+                    shift: Some(LB),
+                    ..shift_held(GamepadButton::Start)
+                });
+            }),
+            ("a held double press", &|m| {
+                m.buttons.push(ButtonBinding {
+                    hold_ms: Some(1_000),
+                    ..double(Command::Rtl)
+                });
+            }),
+            ("a Shift with a command", &|m| {
+                m.buttons
+                    .push(press(GamepadButton::LeftTrigger, Command::Rtl));
+            }),
+            ("a Shift held for something else", &|m| {
+                m.actions.push(ActionBinding {
+                    action: HeldAction::Talk,
+                    ..shift_held(GamepadButton::LeftTrigger)
+                });
+            }),
+            ("a Shift on a Shift", &|m| {
+                m.actions.push(ActionBinding {
+                    shift: Some(LB),
+                    ..shift_held(GamepadButton::RightTrigger)
+                });
+            }),
+            ("a layer of a button that is no Shift", &|m| {
+                m.buttons.push(ButtonBinding {
+                    shift: Some(ShiftButton {
+                        button: GamepadButton::RightTrigger,
+                        code: None,
+                    }),
+                    ..press(GamepadButton::North, Command::Rtl)
+                });
+            }),
+            ("a command and a held action on one layer", &|m| {
+                m.buttons.push(ButtonBinding {
+                    shift: Some(LB),
+                    ..press(GamepadButton::DpadUp, Command::Rtl)
+                });
+            }),
+            ("a repeat of what is not a step", &|m| {
+                m.buttons.push(ButtonBinding {
+                    repeat_ms: Some(250),
+                    ..press(GamepadButton::North, Command::Arm)
+                });
+                m.buttons
+                    .retain(|b| !(b.button == GamepadButton::North && b.command != Command::Arm));
+            }),
+            ("a repeat faster than the pilot tick", &|m| {
+                m.buttons.iter_mut().for_each(|b| {
+                    if b.repeat_ms.is_some() {
+                        b.repeat_ms = Some(REPEAT_MIN_MS - 1);
+                    }
+                });
+            }),
+            ("a repeat beside a long press", &|m| {
+                m.buttons.push(ButtonBinding {
+                    hold_ms: Some(1_000),
+                    ..press(GamepadButton::West, Command::Rtl)
+                });
+            }),
+        ] {
+            assert!(refused(change).is_some(), "{why}");
+        }
+        // The same gestures on another layer, or on another button, are fine.
+        assert_eq!(
+            refused(&|m| m.buttons.push(ButtonBinding {
+                shift: Some(LB),
+                ..long(Command::Land)
+            })),
+            None
+        );
     }
 }

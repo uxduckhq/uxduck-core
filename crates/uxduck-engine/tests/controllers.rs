@@ -59,6 +59,7 @@ struct Orders(
     Arc<Mutex<Vec<String>>>,
     Arc<Mutex<Vec<ControlRoute>>>,
     Arc<Mutex<Vec<[f64; 4]>>>,
+    Arc<Mutex<Vec<(String, uxduck_core::domain::controller::Rumble)>>>,
 );
 
 impl Orders {
@@ -67,6 +68,9 @@ impl Orders {
     }
     fn keyboard_frames(&self) -> Vec<[f64; 4]> {
         std::mem::take(&mut *self.2.lock().unwrap())
+    }
+    fn rumbles(&self) -> Vec<(String, uxduck_core::domain::controller::Rumble)> {
+        std::mem::take(&mut *self.3.lock().unwrap())
     }
 }
 
@@ -82,6 +86,8 @@ impl LinkPort for Orders {
     fn controller_input(&mut self, event: InputEvent) {
         if let InputEvent::Keyboard { axes, .. } = event {
             self.2.lock().unwrap().push(axes);
+        } else if let InputEvent::Navigate { id, on, .. } = event {
+            self.0.lock().unwrap().push(format!("navigate {id} {on}"));
         }
     }
     fn route_controller(&mut self, id: &str, route: Option<ControlRoute>) {
@@ -92,6 +98,9 @@ impl LinkPort for Orders {
             }
             None => format!("route {id} none"),
         });
+    }
+    fn rumble(&mut self, id: &str, rumble: uxduck_core::domain::controller::Rumble) {
+        self.3.lock().unwrap().push((id.to_owned(), rumble));
     }
 }
 
@@ -4941,4 +4950,441 @@ fn agreed(mut state: uxduck_engine::state::State) -> uxduck_engine::state::State
     .unwrap();
     state.operators.insert("op-agreed".into(), operator);
     state
+}
+
+#[test]
+fn only_the_window_that_claimed_a_controller_navigates_with_it_and_navigate_is_never_on_its_own_buttons()
+ {
+    let (mut engine, mut ui, orders) = setup();
+    let navigate = |on: bool| json!({ "id": "g1", "on": on });
+    let unclaimed = call(&mut engine, &mut ui, "controller/navigate", navigate(true));
+    assert_eq!(error_kind(&unclaimed), "invalid-value", "{unclaimed}");
+    engine.controller_neutral("g1", true);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v1" }),
+    );
+    orders.take();
+    let on = call(&mut engine, &mut ui, "controller/navigate", navigate(true));
+    assert!(on.get("result").is_some(), "{on}");
+    assert_eq!(orders.take(), ["navigate g1 true"]);
+
+    // Another window, or an agent, may not.
+    let mut other = connect(&mut engine, "operator-ui");
+    let refused = call(
+        &mut engine,
+        &mut other,
+        "controller/navigate",
+        navigate(true),
+    );
+    assert_eq!(error_kind(&refused), "invalid-value", "{refused}");
+    let mut agent = connect(&mut engine, "agent");
+    let agent_refused = call(
+        &mut engine,
+        &mut agent,
+        "controller/navigate",
+        navigate(true),
+    );
+    assert_eq!(
+        error_kind(&agent_refused),
+        "capability-denied",
+        "{agent_refused}"
+    );
+    assert!(orders.take().is_empty());
+    // Ending it gives the buttons back, so it is always accepted.
+    let off = call(&mut engine, &mut ui, "controller/navigate", navigate(false));
+    assert!(off.get("result").is_some(), "{off}");
+    assert_eq!(orders.take(), ["navigate g1 false"]);
+
+    let edit = |button: &str| {
+        json!({
+            "id": "mode-2", "expectedVersion": 1, "name": "Mode 2",
+            "roll": { "axis": "right-stick-x", "inverted": false },
+            "pitch": { "axis": "right-stick-y", "inverted": false },
+            "yaw": { "axis": "left-stick-x", "inverted": false },
+            "throttle": { "axis": "left-stick-y", "inverted": false },
+            "deadzone": 0.05,
+            "buttons": [],
+            "actions": [{ "button": button, "action": "navigate" }]
+        })
+    };
+    for button in ["south", "east", "dpad-up", "dpad-left"] {
+        let refused = call(&mut engine, &mut ui, "mapping/update", edit(button));
+        assert_eq!(error_kind(&refused), "invalid-value", "{button}: {refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Navigate can't be on the D-pad"),
+            "{refused}"
+        );
+    }
+    let saved = call(&mut engine, &mut ui, "mapping/update", edit("select"));
+    assert_eq!(
+        saved["result"]["actions"][0]["action"], "navigate",
+        "{saved}"
+    );
+}
+
+/// Gestures, Shift layers and feel are saved, checked as S12 checks
+/// bindings, and a gesture's command goes through the press's path
+/// (S418).
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one mapping saved, refused and used, step by step"
+)]
+fn gestures_shift_layers_and_feel_are_saved_checked_and_sent() {
+    let (mut engine, mut ui, orders) = setup();
+    let edit = |version: u64, buttons: Value, actions: Value, feel: Value| {
+        json!({
+            "id": "mode-2", "expectedVersion": version, "name": "Mode 2",
+            "roll": { "axis": "right-stick-x", "inverted": false },
+            "pitch": { "axis": "right-stick-y", "inverted": false },
+            "yaw": { "axis": "left-stick-x", "inverted": false },
+            "throttle": { "axis": "left-stick-y", "inverted": false },
+            "deadzone": 0.05,
+            "buttons": buttons,
+            "actions": actions,
+            "feel": feel,
+        })
+    };
+    let buttons = json!([
+        { "button": "south", "command": { "type": "land" } },
+        { "button": "south", "command": { "type": "rtl" }, "holdMs": 1000 },
+        { "button": "south", "command": { "type": "arm" }, "gesture": "double-press", "holdMs": 1000 },
+    ]);
+    let shift = json!([{ "button": "left-trigger", "action": "shift" }]);
+    let held_double = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(1, buttons, shift.clone(), json!([])),
+    );
+    assert_eq!(error_kind(&held_double), "invalid-value", "{held_double}");
+    let shifted = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(
+            1,
+            json!([{ "button": "left-trigger", "command": { "type": "rtl" } }]),
+            shift.clone(),
+            json!([]),
+        ),
+    );
+    assert!(
+        shifted["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("LB / L1 is a Shift, so it sends nothing of its own"),
+        "{shifted}"
+    );
+    let throttle_rate = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(
+            1,
+            json!([]),
+            json!([]),
+            json!([{ "axis": "throttle", "rate": 0.5 }]),
+        ),
+    );
+    assert_eq!(
+        error_kind(&throttle_rate),
+        "invalid-value",
+        "{throttle_rate}"
+    );
+
+    let buttons = json!([
+        { "button": "south", "command": { "type": "land" } },
+        { "button": "south", "command": { "type": "rtl" }, "gesture": "double-press" },
+        { "button": "south", "command": { "type": "rtl" }, "shift": { "button": "left-trigger" } },
+    ]);
+    let feel = json!([{ "axis": "roll", "expo": 0.4 }]);
+    let saved = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(1, buttons.clone(), shift.clone(), feel.clone()),
+    );
+    assert_eq!(saved["result"]["version"], 2, "{saved}");
+    assert_eq!(
+        saved["result"]["feel"],
+        json!([{ "axis": "roll", "expo": 0.4, "rate": 1.0 }])
+    );
+    assert_eq!(saved["result"]["buttons"][1]["gesture"], "double-press");
+
+    engine.controller_neutral("g1", true);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v1" }),
+    );
+    orders.take();
+    // The sticks' feel waits for the controller to be released, as their
+    // deadzone does, and the gimbal's may change while flying.
+    let sticks = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(
+            2,
+            buttons.clone(),
+            shift.clone(),
+            json!([{ "axis": "roll", "expo": 0.6 }]),
+        ),
+    );
+    assert!(
+        sticks["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expo"),
+        "{sticks}"
+    );
+    let gimbal = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        edit(
+            2,
+            buttons,
+            shift,
+            json!([{ "axis": "roll", "expo": 0.4 }, { "axis": "gimbal-yaw", "expo": 0.5, "rate": 0.5 }]),
+        ),
+    );
+    assert_eq!(gimbal["result"]["version"], 3, "{gimbal}");
+    orders.take();
+
+    // A double press sends its own command, and one the mapping no longer
+    // has sends nothing.
+    let mapping = engine.state().input_mappings["mode-2"].clone();
+    engine.controller_gesture("g1", &mapping.buttons[1]);
+    let mut gone = mapping.buttons[1].clone();
+    gone.command = Command::Land;
+    engine.controller_gesture("g1", &gone);
+    assert_eq!(orders.take(), [format!("command v1 {:?}", Command::Rtl)]);
+}
+
+/// S419: a hold that completes is one pulse, a refusal two, a lost
+/// vehicle one long, only for a claimed controller and only while
+/// Settings › Controllers › Rumble is on.
+#[test]
+fn a_controller_rumbles_for_a_completed_hold_a_refusal_and_a_lost_vehicle() {
+    use uxduck_core::domain::controller::Rumble;
+    use uxduck_engine::commands::Outcome;
+    let (mut engine, mut ui, orders) = setup();
+    engine.controller_neutral("g1", true);
+    let saved = call(
+        &mut engine,
+        &mut ui,
+        "mapping/update",
+        json!({
+            "id": "mode-2", "expectedVersion": 1, "name": "Mode 2",
+            "roll": { "axis": "right-stick-x", "inverted": false },
+            "pitch": { "axis": "right-stick-y", "inverted": false },
+            "yaw": { "axis": "left-stick-x", "inverted": false },
+            "throttle": { "axis": "left-stick-y", "inverted": false },
+            "deadzone": 0.05,
+            "buttons": [
+                { "button": "south", "command": { "type": "arm" }, "holdMs": 1_000 },
+                { "button": "north", "command": { "type": "disarm" } },
+                { "button": "west", "command": { "type": "set-mode", "mode": "GUIDED" } }
+            ]
+        }),
+    );
+    assert!(saved.get("result").is_some(), "{saved}");
+
+    // Not claimed: nothing rumbles.
+    engine.controller_pressed("g1", Some(GamepadButton::South), None);
+    assert!(orders.rumbles().is_empty());
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v1" }),
+    );
+    orders.take();
+
+    // The hold completed and Arm went: one pulse. A press without a hold
+    // is felt as nothing.
+    engine.controller_pressed("g1", Some(GamepadButton::South), None);
+    engine.controller_pressed("g1", Some(GamepadButton::North), None);
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Done)]);
+
+    // The vehicle refuses Disarm: two pulses. Arm accepted: nothing.
+    let receipt = |engine: &Engine, command: Command| {
+        engine
+            .state()
+            .receipts
+            .values()
+            .find(|r| r.command == command)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let arm = receipt(&engine, Command::Arm);
+    let disarm = receipt(&engine, Command::Disarm);
+    engine.command_result(&arm, Outcome::Accepted, 1);
+    engine.command_result(&disarm, Outcome::Rejected("denied".into()), 1);
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Refused)]);
+
+    // Held back here, never sent: two pulses.
+    observe_v1(&mut engine, false, Presence::Stale);
+    engine.controller_pressed("g1", Some(GamepadButton::West), None);
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Refused)]);
+
+    // The vehicle it flies is lost: one long pulse, once.
+    observe_v1(&mut engine, false, Presence::Offline);
+    observe_v1(&mut engine, false, Presence::Offline);
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Lost)]);
+    observe_v1(&mut engine, false, Presence::Online);
+    assert!(orders.rumbles().is_empty());
+
+    // Rumble off: nothing, whatever happens.
+    let version = engine.state().settings.version;
+    let off = call(
+        &mut engine,
+        &mut ui,
+        "settings/update",
+        json!({ "expectedVersion": version, "controllerRumble": false }),
+    );
+    assert_eq!(off["result"]["controllerRumble"], false, "{off}");
+    engine.controller_pressed("g1", Some(GamepadButton::South), None);
+    observe_v1(&mut engine, false, Presence::Offline);
+    assert!(orders.rumbles().is_empty());
+}
+
+/// S419: a controller's charge is on the controller, and one flying a
+/// vehicle warns once per level, from what the platform reported.
+#[test]
+fn a_flying_controllers_battery_is_shown_and_warned_once_per_level() {
+    use uxduck_core::domain::controller::ControllerPower as P;
+    use uxduck_core::domain::notification::NotificationState;
+    let (mut engine, mut ui, _orders) = setup();
+    let active = |engine: &Engine| {
+        let mut titles: Vec<String> = engine
+            .state()
+            .notifications
+            .values()
+            .filter(|n| n.state == NotificationState::Active && n.title.contains("battery"))
+            .map(|n| n.title.clone())
+            .collect();
+        titles.sort();
+        titles
+    };
+    let said = |engine: &Engine, title: &str| {
+        engine
+            .state()
+            .notifications
+            .values()
+            .filter(|n| n.title == title)
+            .count()
+    };
+    engine.controller_power("g1", P::Discharging { percent: 15 });
+    assert!(active(&engine).is_empty(), "not flying a vehicle");
+    let shown = call(
+        &mut engine,
+        &mut ui,
+        "state/subscribe",
+        json!({ "entities": ["controller"] }),
+    );
+    assert_eq!(
+        shown["result"]["snapshot"]["controllers"][0]["power"],
+        json!({ "state": "discharging", "percent": 15 }),
+        "{shown}"
+    );
+
+    engine.controller_neutral("g1", true);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v1" }),
+    );
+    assert_eq!(active(&engine), ["Xbox's battery is low"]);
+    let low = engine
+        .state()
+        .notifications
+        .values()
+        .find(|n| n.title == "Xbox's battery is low")
+        .unwrap();
+    assert_eq!(
+        low.body.as_deref(),
+        Some(
+            "Xbox reports 15% left while it flies Alpha. Charge it or plug it in before it runs out and stops flying Alpha."
+        )
+    );
+
+    engine.controller_power("g1", P::Discharging { percent: 12 });
+    assert_eq!(said(&engine, "Xbox's battery is low"), 1, "once per level");
+    engine.controller_power("g1", P::Discharging { percent: 5 });
+    assert_eq!(active(&engine), ["Xbox's battery is critical"]);
+    engine.controller_power("g1", P::Discharging { percent: 4 });
+    assert_eq!(said(&engine, "Xbox's battery is critical"), 1);
+
+    // Charging clears both, and a later low battery is said again.
+    engine.controller_power("g1", P::Charging { percent: 6 });
+    assert!(active(&engine).is_empty());
+    assert_eq!(
+        engine.state().controllers["g1"].power,
+        P::Charging { percent: 6 }
+    );
+    engine.controller_power("g1", P::Discharging { percent: 20 });
+    assert_eq!(active(&engine), ["Xbox's battery is low"]);
+    engine.controller_power("g1", P::Discharging { percent: 21 });
+    assert!(active(&engine).is_empty(), "above the level again");
+}
+
+/// S419 with S417 and S418: a gesture's command is felt as a press's is.
+/// A long press that completes is one pulse, and a stored double press of
+/// a dangerous command, which the hold rule holds back, is two.
+#[test]
+fn a_gesture_rumbles_as_a_press_does_and_one_the_hold_rule_holds_back_is_a_refusal() {
+    use uxduck_core::domain::controller::{ButtonBinding, ButtonGesture, InputMapping, Rumble};
+    let long = ButtonBinding {
+        button: GamepadButton::West,
+        code: None,
+        command: Command::Rtl,
+        hold_ms: Some(1_000),
+        gesture: ButtonGesture::Press,
+        shift: None,
+        repeat_ms: None,
+    };
+    let double = ButtonBinding {
+        button: GamepadButton::South,
+        code: None,
+        command: Command::emergency_stop(),
+        hold_ms: None,
+        gesture: ButtonGesture::DoublePress,
+        shift: None,
+        repeat_ms: None,
+    };
+    let mut mapping = InputMapping::mode_2();
+    mapping.buttons.extend([long.clone(), double.clone()]);
+    let mut state = uxduck_engine::state::State::default();
+    state.input_mappings.insert(mapping.id.clone(), mapping);
+    let (mut engine, mut ui, orders) = setup_with_state(NoSystem::default(), state);
+    engine.controller_neutral("g1", true);
+    let claimed = call(
+        &mut engine,
+        &mut ui,
+        "controller/claim",
+        json!({ "id": "g1", "mode": "pinned", "vehicleId": "v1" }),
+    );
+    assert!(claimed.get("result").is_some(), "{claimed}");
+    orders.take();
+    orders.rumbles();
+
+    engine.controller_gesture("g1", &long);
+    assert_eq!(orders.take(), [format!("command v1 {:?}", Command::Rtl)]);
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Done)]);
+
+    engine.controller_gesture("g1", &double);
+    assert!(orders.take().is_empty());
+    assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Refused)]);
 }

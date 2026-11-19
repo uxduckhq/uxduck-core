@@ -402,6 +402,13 @@ fn encode_long(
         Command::Disarm => Ok((400, [0.0, force, 0.0, 0.0, 0.0, 0.0, 0.0])),
         // The engine sends it as Arm or Disarm (`Command::resolved`).
         Command::ArmToggle => Err("a toggle goes as Arm or Disarm".into()),
+        // The engine sends each as the command it comes to (S417).
+        Command::PauseOrContinue
+        | Command::MissionStep { .. }
+        | Command::SpeedStep { .. }
+        | Command::ModeCycle { .. } => {
+            Err("a controller's flight action goes as the command it comes to".into())
+        }
         // PX4 takes Orbit as Position unless it is given a place and a
         // radius, which Go to's circle sends (`DO_ORBIT`).
         Command::SetMode { mode }
@@ -433,6 +440,10 @@ fn encode_long(
         }
         // A camera's (S405). The session puts in its target component and
         // one photo's sequence number.
+        // The engine sends a toggle as what the camera needs (S416).
+        Command::Camera { action, .. } if action.toggles() => {
+            Err("a camera's toggle goes as what the camera needs".into())
+        }
         Command::Camera {
             device_id, action, ..
         } => match action.invalid() {

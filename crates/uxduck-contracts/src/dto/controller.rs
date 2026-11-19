@@ -52,8 +52,48 @@ pub struct Controller {
     /// the hold is complete, and nothing goes if it is let go before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holding: Option<ControllerHold>,
+    /// The last photo a camera said it took after this controller's Take
+    /// photo (S416), while UXDuck has run. Absent until there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo: Option<ControllerPhoto>,
+    /// Its charge, as the platform last said (S419). Unknown where the
+    /// platform says nothing, unavailable where it has no way to.
+    #[serde(default)]
+    pub power: ControllerPower,
+    /// How low its battery is, at the levels the daemon warns of: none
+    /// while it is above them, charging or wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_level: Option<PowerLevel>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
+}
+
+/// A controller's power, as the platform reports it (S419).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", tag = "state")]
+pub enum ControllerPower {
+    /// The platform said nothing of its power.
+    #[default]
+    Unknown,
+    /// The platform has no way to say, as in the browser.
+    Unavailable,
+    /// On a cable, with no battery to tell of.
+    Wired,
+    /// On its battery, with `percent` left.
+    Discharging { percent: u8 },
+    /// Charging, with `percent` so far.
+    Charging { percent: u8 },
+    /// Full, on its charger.
+    Charged,
+}
+
+/// How low a controller's battery is (S419): `UPower`'s default levels,
+/// 20 % and 5 % left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerLevel {
+    Low,
+    Critical,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -72,6 +112,23 @@ pub struct ControllerHold {
     pub command: Command,
     /// How long the hold takes in all.
     pub hold_ms: u32,
+}
+
+/// A photo a camera said it took after a controller's Take photo (S416),
+/// for the Cockpit's row to say where the pilot is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerPhoto {
+    pub vehicle_id: String,
+    /// The camera's `id` from `camera/list`.
+    pub camera_id: String,
+    /// Its place in the camera's list, from 0, as `CameraPhoto::index`.
+    pub index: u32,
+    /// False when the camera said the capture failed.
+    pub ok: bool,
+    /// When UXDuck heard of it: microseconds since 1970.
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub heard_at_us: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -165,6 +222,23 @@ pub struct GimbalAxisBinding {
     pub input: AxisBinding,
 }
 
+/// What an axis does to the target vehicle's camera (S416).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraAxis {
+    Zoom,
+}
+
+/// An axis that zooms the target vehicle's camera (S416): pushed up or
+/// squeezed it zooms in, the further the faster, down it zooms out, and at
+/// its centre the zoom stops.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraAxisBinding {
+    pub control: CameraAxis,
+    pub input: AxisBinding,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtonBinding {
@@ -176,9 +250,53 @@ pub struct ButtonBinding {
     pub code: Option<u32>,
     pub command: Command,
     /// How long it must be held before the command goes, 100 to 10000 ms;
-    /// absent: on the press itself.
+    /// absent: on the press itself. With a hold it is the input's long
+    /// press (S418).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_ms: Option<u32>,
+    /// A press, or two quick presses (S418). Absent: a press. One input
+    /// may have a press, a long press and a double press on each layer.
+    #[serde(default, skip_serializing_if = "ButtonGesture::is_press")]
+    pub gesture: ButtonGesture,
+    /// The Shift button held for it (S418): it goes only while that Shift
+    /// is held, and a binding without one only while no Shift is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<ShiftButton>,
+    /// Sent again every this many milliseconds while the button stays
+    /// down, at least 40 (S418): only for a step, such as a zoom step, on
+    /// a press that is its input's only command on its layer. Absent: once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_ms: Option<u32>,
+}
+
+/// How an input is pressed for its binding (S418). A long press is a
+/// press with `holdMs`. A press on an input that also has a long or a
+/// double press goes when it is let go, and with a double press only once
+/// no second press came within 300 ms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ButtonGesture {
+    #[default]
+    Press,
+    DoublePress,
+}
+
+impl ButtonGesture {
+    #[must_use]
+    pub fn is_press(&self) -> bool {
+        *self == Self::Press
+    }
+}
+
+/// A button bound as a Shift (`HeldAction::Shift`), as a binding on its
+/// layer names it (S418).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftButton {
+    pub button: GamepadButton,
+    /// As for `ButtonBinding::code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<u32>,
 }
 
 /// A button held for an action (S263, S21): it never sends a command. The
@@ -193,13 +311,27 @@ pub struct ActionBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<u32>,
     pub action: HeldAction,
+    /// The Shift button held for it (S418), as for `ButtonBinding::shift`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<ShiftButton>,
 }
 
 /// What a held button does. `open` and `close` hold the gripper.
 /// `gimbal-up`, `gimbal-down`, `gimbal-left` and `gimbal-right` turn the
-/// target vehicle's gimbal while held. `talk` is held to speak to the
+/// target vehicle's gimbal while held. `zoom-in`, `zoom-out`,
+/// `focus-near` and `focus-far` zoom or focus its camera while held, and
+/// stop when let go (S416). `talk` is held to speak to the
 /// agent in the window that claimed the controller, and let go to send
-/// (S21), which that window reads from `controller/inputs`.
+/// (S21), which that window reads from `controller/inputs`. The app's
+/// actions (S420) are read the same way and never reach a vehicle:
+/// `next-vehicle` and `previous-vehicle` move the window's selection,
+/// `cockpit-tab`, `camera-tab` and `map-tab` show that tab,
+/// `next-camera` shows the vehicle's next camera, `camera-full-window`
+/// fills the window with the Camera tab or puts it back, `show-on-map`
+/// centres the map on the vehicle, and `navigate` starts or ends moving
+/// focus with the direction pad (`controller/navigate`).
+/// `shift` sends nothing: while it is held, the other buttons do what
+/// their bindings with this Shift say (S418). A Shift has no other binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeldAction {
@@ -210,6 +342,20 @@ pub enum HeldAction {
     GimbalDown,
     GimbalLeft,
     GimbalRight,
+    ZoomIn,
+    ZoomOut,
+    FocusNear,
+    FocusFar,
+    NextVehicle,
+    PreviousVehicle,
+    CockpitTab,
+    CameraTab,
+    MapTab,
+    NextCamera,
+    CameraFullWindow,
+    ShowOnMap,
+    Navigate,
+    Shift,
 }
 
 /// A position of an axis, such as a switch's, that sends a command when the
@@ -271,6 +417,38 @@ pub enum StickControl {
     Yaw,
 }
 
+/// An axis whose feel a mapping sets (S418): the four sticks and the
+/// gimbal's two axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeelAxis {
+    Roll,
+    Pitch,
+    Yaw,
+    Throttle,
+    GimbalPitch,
+    GimbalYaw,
+}
+
+/// How an axis feels after its deadzone and inversion (S418): the value
+/// sent is `((1 - expo) * x + expo * x³) * rate`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AxisFeel {
+    pub axis: FeelAxis,
+    /// 0 (linear) to 1 (softest around the centre). Absent: 0.
+    #[serde(default)]
+    pub expo: f64,
+    /// What a full push sends, above 0 and up to 1: a fraction of full
+    /// travel, or of the gimbal's full rate. The throttle's is 1. Absent: 1.
+    #[serde(default = "full_rate")]
+    pub rate: f64,
+}
+
+const fn full_rate() -> f64 {
+    1.0
+}
+
 /// Controller axes to the four sticks, and buttons to commands.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +486,15 @@ pub struct InputMapping {
     /// each at most once. Absent when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gimbal: Vec<GimbalAxisBinding>,
+    /// Axes that work the target vehicle's camera (S416): its zoom, at most
+    /// once. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera: Vec<CameraAxisBinding>,
+    /// Expo and rate for the sticks and the gimbal's axes (S418), each
+    /// axis at most once. An axis not listed is linear at full rate.
+    /// Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feel: Vec<AxisFeel>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }
@@ -389,6 +576,15 @@ pub struct MappingUpdateParams {
     /// for `actions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gimbal: Option<Vec<GimbalAxisBinding>>,
+    /// As for `InputMapping::camera`. Absent keeps the mapping's own, as
+    /// for `actions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Vec<CameraAxisBinding>>,
+    /// As for `InputMapping::feel`. Absent keeps the mapping's own, as for
+    /// `actions`. The sticks' feel changes only while no controller using
+    /// the mapping is claimed, as their deadzone does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feel: Option<Vec<AxisFeel>>,
 }
 
 /// Makes a mapping of its own for a controller: a copy of `from` (Mode 2
@@ -491,6 +687,22 @@ pub struct ControllerInputs {
     /// not confirmed by the vehicle. Absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gripper: Option<GripperAction>,
+    /// A window navigates with it (S420): its direction pad, South and East
+    /// send nothing to its vehicle. Absent when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub navigating: bool,
+}
+
+/// Starts, refreshes or ends Navigate (S420) for a controller this client
+/// claimed: while on, its direction pad, South and East move focus in the
+/// window and send nothing to its vehicle, and its sticks still fly. It
+/// ends two seconds after the last refresh, so a window that goes quiet
+/// gives those buttons back to the vehicle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerNavigateParams {
+    pub id: String,
+    pub on: bool,
 }
 
 /// Every plugged-in controller's raw input, for testing a gamepad and a

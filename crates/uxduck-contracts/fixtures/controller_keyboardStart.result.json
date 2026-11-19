@@ -9,5 +9,6 @@
   "mode": "pinned",
   "target": "sim-1",
   "mappingId": "sim-keyboard",
+  "power": { "state": "unknown" },
   "version": 2
 }

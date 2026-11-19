@@ -150,6 +150,9 @@ impl LinkPort for LinkChannel {
             .0
             .send(Command::SteerGimbal(controller_id.to_owned(), gimbal));
     }
+    fn rumble(&mut self, controller_id: &str, rumble: uxduck_core::domain::controller::Rumble) {
+        super::controller_feedback::rumble(controller_id, rumble);
+    }
 }
 
 /// One frame a plugin wants, raw or to decode, as the vehicle sent it.
@@ -1924,6 +1927,9 @@ impl Plane {
         let stops = self.controls.gimbal_stops();
         self.stop_gimbals(stops).await;
         self.report_controls(gimbals.reports).await;
+        // What the camera inputs ask for (S416), for the engine to send.
+        let cameras = self.controls.camera_outputs(SystemClock.now_us());
+        self.report_controls(cameras).await;
     }
 
     /// Tells gimbals whose rates ended to stop turning (S407).
@@ -2008,6 +2014,21 @@ impl Plane {
                 Report::GimbalLetGo { id } => {
                     self.engine
                         .run(move |e| e.controller_gimbal_let_go(&id))
+                        .await
+                }
+                Report::CameraDrive { id, drive } => {
+                    self.engine
+                        .run(move |e| e.controller_camera_drive(&id, drive))
+                        .await
+                }
+                Report::Gesture { id, binding } => {
+                    self.engine
+                        .run(move |e| e.controller_gesture(&id, &binding))
+                        .await
+                }
+                Report::Power { id, power } => {
+                    self.engine
+                        .run(move |e| e.controller_power(&id, power))
                         .await
                 }
             };

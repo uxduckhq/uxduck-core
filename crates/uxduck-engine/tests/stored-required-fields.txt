@@ -1023,3 +1023,20 @@ MapFramePoint.latitude_deg
 MapFramePoint.longitude_deg
 MapFramePoint.x
 MapFramePoint.y
+
+# The camera from a controller (S416, 2026-11-18): new actions of the
+# camera commands S405 added and a new axis, which no release has stored.
+CameraAction::FocusRate.rate
+CameraAction::ZoomRate.rate
+CameraAxisBinding.control
+CameraAxisBinding.input
+
+# Flight actions from a controller (S417, 2026-11-18): new commands,
+# which no release has stored.
+Command::MissionStep.steps
+Command::ModeCycle.modes
+Command::SpeedStep.by_mps
+
+# A button's Shift and an axis's feel (S418, 2026-11-18).
+AxisFeel.axis
+ShiftButton.button

@@ -730,6 +730,14 @@ pub enum ClientRequest {
     /// it is shown. Needs `read`. Result: `ControllerInputsResult`.
     #[serde(rename = "controller/inputs")]
     ControllerInputs(Empty),
+    /// Starts, refreshes or ends Navigate (S420) for a controller this
+    /// client claimed: its direction pad, South and East move focus in the
+    /// window and send nothing to its vehicle, and its sticks still fly.
+    /// Refresh it within two seconds to keep it on. Only the claiming
+    /// client may start it, and ending it is always accepted. Operator
+    /// with control; never for agents. Result: `Empty`.
+    #[serde(rename = "controller/navigate")]
+    ControllerNavigate(crate::dto::controller::ControllerNavigateParams),
     /// Says which vehicle this client has selected, for its controllers
     /// that follow the selection. Needs `read`. Result: `Empty`.
     #[serde(rename = "client/select")]
@@ -2283,7 +2291,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 405] = [
+    pub const METHODS: [&'static str; 406] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2407,6 +2415,7 @@ impl ClientRequest {
         "controller/setTarget",
         "controller/chooseMapping",
         "controller/inputs",
+        "controller/navigate",
         "client/select",
         "mapping/update",
         "mapping/create",

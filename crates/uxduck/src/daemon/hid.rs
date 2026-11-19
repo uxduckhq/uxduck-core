@@ -29,6 +29,7 @@ use objc2_io_kit::{
     kIOHIDOptionsTypeNone, kIOHIDProductIDKey, kIOHIDSerialNumberKey, kIOHIDTransportKey,
     kIOHIDVendorIDKey, kIOReturnSuccess,
 };
+use uxduck_core::domain::controller::ControllerPower;
 use uxduck_engine::controller_input::{InputEvent, macos_hid_axis_code};
 
 /// One input element: a legacy usage code or an additional axis code, and
@@ -72,6 +73,32 @@ impl Element {
 /// when `IOKit` cannot be opened or the device is not found.
 #[must_use]
 pub fn elements(vendor: u16, product: u16, entry: u64) -> Vec<Element> {
+    with_device(vendor, product, entry, read).unwrap_or_default()
+}
+
+/// The device's battery, as the system says it (S419): the `BatteryPercent`
+/// macOS puts on a Bluetooth HID device that tells its battery. It says
+/// neither charging nor wired, so a device without one is Unknown.
+#[must_use]
+pub fn power(vendor: u16, product: u16, entry: u64) -> ControllerPower {
+    with_device(vendor, product, entry, |device| {
+        number(device, c"BatteryPercent")
+    })
+    .flatten()
+    .and_then(|percent| u8::try_from(percent).ok())
+    .map_or(ControllerPower::Unknown, |percent| {
+        ControllerPower::Discharging { percent }
+    })
+}
+
+/// `what` of the plugged-in device with this vendor, product and registry
+/// entry. None when `IOKit` cannot be opened or the device is not found.
+fn with_device<T>(
+    vendor: u16,
+    product: u16,
+    entry: u64,
+    what: impl Fn(&IOHIDDevice) -> T,
+) -> Option<T> {
     let manager = IOHIDManager::new(None, kIOHIDOptionsTypeNone);
     let matchers = CFArray::from_retained_objects(&[
         matcher(kHIDUsage_GD_Joystick),
@@ -81,10 +108,10 @@ pub fn elements(vendor: u16, product: u16, entry: u64) -> Vec<Element> {
     // SAFETY: the matchers are dictionaries of usage page and usage.
     unsafe { manager.set_device_matching_multiple(Some(matchers.as_opaque())) };
     if manager.open(kIOHIDOptionsTypeNone) != kIOReturnSuccess {
-        return Vec::new();
+        return None;
     }
     let Some(devices) = manager.devices() else {
-        return Vec::new();
+        return None;
     };
     let count = usize::try_from(devices.count()).unwrap_or(0);
     let mut values: Vec<*const c_void> = vec![std::ptr::null(); count];
@@ -97,10 +124,10 @@ pub fn elements(vendor: u16, product: u16, entry: u64) -> Vec<Element> {
         (number(device, kIOHIDVendorIDKey) == Some(i64::from(vendor))
             && number(device, kIOHIDProductIDKey) == Some(i64::from(product))
             && registry_entry_id(device) == Some(entry))
-        .then(|| read(device))
+        .then(|| what(device))
     });
     manager.close(kIOHIDOptionsTypeNone);
-    found.unwrap_or_default()
+    found
 }
 
 fn matcher(usage: u32) -> CFRetained<CFDictionary<CFString, CFNumber>> {

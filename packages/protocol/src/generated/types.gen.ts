@@ -354,6 +354,10 @@ export type ActionBinding = {
      * As for `ButtonBinding::code`.
      */
     code?: number | null;
+    /**
+     * The Shift button held for it (S418), as for `ButtonBinding::shift`.
+     */
+    shift?: ShiftButton | null;
 };
 
 /**
@@ -1372,6 +1376,23 @@ export type AxisCalibration = {
 };
 
 /**
+ * How an axis feels after its deadzone and inversion (S418): the value
+ * sent is `((1 - expo) * x + expo * x³) * rate`.
+ */
+export type AxisFeel = {
+    axis: FeelAxis;
+    /**
+     * 0 (linear) to 1 (softest around the centre). Absent: 0.
+     */
+    expo?: number;
+    /**
+     * What a full push sends, above 0 and up to 1: a fraction of full
+     * travel, or of the gimbal's full rate. The throttle's is 1. Absent: 1.
+     */
+    rate?: number;
+};
+
+/**
  * One axis as the device reports it, before any mapping: -1 to 1.
  */
 export type AxisValue = {
@@ -1597,11 +1618,36 @@ export type ButtonBinding = {
     code?: number | null;
     command: Command;
     /**
+     * A press, or two quick presses (S418). Absent: a press. One input
+     * may have a press, a long press and a double press on each layer.
+     */
+    gesture?: ButtonGesture;
+    /**
      * How long it must be held before the command goes, 100 to 10000 ms;
-     * absent: on the press itself.
+     * absent: on the press itself. With a hold it is the input's long
+     * press (S418).
      */
     holdMs?: number | null;
+    /**
+     * Sent again every this many milliseconds while the button stays
+     * down, at least 40 (S418): only for a step, such as a zoom step, on
+     * a press that is its input's only command on its layer. Absent: once.
+     */
+    repeatMs?: number | null;
+    /**
+     * The Shift button held for it (S418): it goes only while that Shift
+     * is held, and a binding without one only while no Shift is.
+     */
+    shift?: ShiftButton | null;
 };
+
+/**
+ * How an input is pressed for its binding (S418). A long press is a
+ * press with `holdMs`. A press on an input that also has a long or a
+ * double press goes when it is let go, and with a double press only once
+ * no second press came within 300 ms.
+ */
+export type ButtonGesture = 'press' | 'double-press';
 
 /**
  * A button the device has, where the platform can list them (macOS), or
@@ -1828,6 +1874,33 @@ export type CameraAction = {
     type: 'track-rectangle';
 } | {
     type: 'stop-tracking';
+} | {
+    type: 'toggle-recording';
+} | {
+    type: 'toggle-mode';
+} | {
+    type: 'toggle-source';
+} | {
+    rate: number;
+    type: 'zoom-rate';
+} | {
+    rate: number;
+    type: 'focus-rate';
+};
+
+/**
+ * What an axis does to the target vehicle's camera (S416).
+ */
+export type CameraAxis = 'zoom';
+
+/**
+ * An axis that zooms the target vehicle's camera (S416): pushed up or
+ * squeezed it zooms in, the further the faster, down it zooms out, and at
+ * its centre the zoom stops.
+ */
+export type CameraAxisBinding = {
+    control: CameraAxis;
+    input: AxisBinding;
 };
 
 /**
@@ -3380,6 +3453,9 @@ export type ClientRequest = {
     method: 'controller/inputs';
     params: Empty;
 } | {
+    method: 'controller/navigate';
+    params: ControllerNavigateParams;
+} | {
     method: 'client/select';
     params: ClientSelectParams;
 } | {
@@ -4393,6 +4469,17 @@ export type Command = {
     componentId?: number | null;
     deviceId?: number | null;
     type: 'gimbal';
+} | {
+    type: 'pause-or-continue';
+} | {
+    steps: number;
+    type: 'mission-step';
+} | {
+    byMps: number;
+    type: 'speed-step';
+} | {
+    modes: Array<string>;
+    type: 'mode-cycle';
 };
 
 /**
@@ -5020,6 +5107,21 @@ export type Controller = {
      */
     pendingTarget?: string | null;
     /**
+     * The last photo a camera said it took after this controller's Take
+     * photo (S416), while UXDuck has run. Absent until there is one.
+     */
+    photo?: ControllerPhoto | null;
+    /**
+     * Its charge, as the platform last said (S419). Unknown where the
+     * platform says nothing, unavailable where it has no way to.
+     */
+    power?: ControllerPower;
+    /**
+     * How low its battery is, at the levels the daemon warns of: none
+     * while it is above them, charging or wired.
+     */
+    powerLevel?: PowerLevel | null;
+    /**
      * The vehicle it drives while claimed.
      */
     target?: string | null;
@@ -5101,6 +5203,11 @@ export type ControllerInputs = {
      * only the device's names, numbers and codes, and are mapped by code.
      */
     layoutKnown: boolean;
+    /**
+     * A window navigates with it (S420): its direction pad, South and East
+     * send nothing to its vehicle. Absent when not.
+     */
+    navigating?: boolean;
 };
 
 /**
@@ -5131,6 +5238,61 @@ export type ControllerMapping = {
      * for a vehicle without its own.
      */
     vehicleId?: string | null;
+};
+
+/**
+ * Starts, refreshes or ends Navigate (S420) for a controller this client
+ * claimed: while on, its direction pad, South and East move focus in the
+ * window and send nothing to its vehicle, and its sticks still fly. It
+ * ends two seconds after the last refresh, so a window that goes quiet
+ * gives those buttons back to the vehicle.
+ */
+export type ControllerNavigateParams = {
+    id: string;
+    on: boolean;
+};
+
+/**
+ * A photo a camera said it took after a controller's Take photo (S416),
+ * for the Cockpit's row to say where the pilot is.
+ */
+export type ControllerPhoto = {
+    /**
+     * The camera's `id` from `camera/list`.
+     */
+    cameraId: string;
+    /**
+     * When UXDuck heard of it: microseconds since 1970.
+     */
+    heardAtUs: number;
+    /**
+     * Its place in the camera's list, from 0, as `CameraPhoto::index`.
+     */
+    index: number;
+    /**
+     * False when the camera said the capture failed.
+     */
+    ok: boolean;
+    vehicleId: string;
+};
+
+/**
+ * A controller's power, as the platform reports it (S419).
+ */
+export type ControllerPower = {
+    state: 'unknown';
+} | {
+    state: 'unavailable';
+} | {
+    state: 'wired';
+} | {
+    percent: number;
+    state: 'discharging';
+} | {
+    percent: number;
+    state: 'charging';
+} | {
+    state: 'charged';
 };
 
 /**
@@ -6781,6 +6943,12 @@ export type FeedbackVoiceNote = {
      */
     transcript?: string | null;
 };
+
+/**
+ * An axis whose feel a mapping sets (S418): the four sticks and the
+ * gimbal's two axes.
+ */
+export type FeelAxis = 'roll' | 'pitch' | 'yaw' | 'throttle' | 'gimbal-pitch' | 'gimbal-yaw';
 
 export type Fence = {
     circles: Array<FenceCircle>;
@@ -8584,11 +8752,22 @@ export type HeadingParams = {
 /**
  * What a held button does. `open` and `close` hold the gripper.
  * `gimbal-up`, `gimbal-down`, `gimbal-left` and `gimbal-right` turn the
- * target vehicle's gimbal while held. `talk` is held to speak to the
+ * target vehicle's gimbal while held. `zoom-in`, `zoom-out`,
+ * `focus-near` and `focus-far` zoom or focus its camera while held, and
+ * stop when let go (S416). `talk` is held to speak to the
  * agent in the window that claimed the controller, and let go to send
- * (S21), which that window reads from `controller/inputs`.
+ * (S21), which that window reads from `controller/inputs`. The app's
+ * actions (S420) are read the same way and never reach a vehicle:
+ * `next-vehicle` and `previous-vehicle` move the window's selection,
+ * `cockpit-tab`, `camera-tab` and `map-tab` show that tab,
+ * `next-camera` shows the vehicle's next camera, `camera-full-window`
+ * fills the window with the Camera tab or puts it back, `show-on-map`
+ * centres the map on the vehicle, and `navigate` starts or ends moving
+ * focus with the direction pad (`controller/navigate`).
+ * `shift` sends nothing: while it is held, the other buttons do what
+ * their bindings with this Shift say (S418). A Shift has no other binding.
  */
-export type HeldAction = 'open' | 'close' | 'talk' | 'gimbal-up' | 'gimbal-down' | 'gimbal-left' | 'gimbal-right';
+export type HeldAction = 'open' | 'close' | 'talk' | 'gimbal-up' | 'gimbal-down' | 'gimbal-left' | 'gimbal-right' | 'zoom-in' | 'zoom-out' | 'focus-near' | 'focus-far' | 'next-vehicle' | 'previous-vehicle' | 'cockpit-tab' | 'camera-tab' | 'map-tab' | 'next-camera' | 'camera-full-window' | 'show-on-map' | 'navigate' | 'shift';
 
 /**
  * What UXDuck holds of a vehicle's parameters, so an answer is never
@@ -8787,9 +8966,20 @@ export type InputMapping = {
     actions?: Array<ActionBinding>;
     buttons: Array<ButtonBinding>;
     /**
+     * Axes that work the target vehicle's camera (S416): its zoom, at most
+     * once. Absent when there are none.
+     */
+    camera?: Array<CameraAxisBinding>;
+    /**
      * Around the centre, as a fraction of full travel, read as zero.
      */
     deadzone: number;
+    /**
+     * Expo and rate for the sticks and the gimbal's axes (S418), each
+     * axis at most once. An axis not listed is linear at full rate.
+     * Absent when there are none.
+     */
+    feel?: Array<AxisFeel>;
     /**
      * Axes that turn the target vehicle's gimbal: its pitch and its yaw,
      * each at most once. Absent when there are none.
@@ -9832,8 +10022,19 @@ export type MappingUpdateParams = {
      */
     actions?: Array<ActionBinding> | null;
     buttons: Array<ButtonBinding>;
+    /**
+     * As for `InputMapping::camera`. Absent keeps the mapping's own, as
+     * for `actions`.
+     */
+    camera?: Array<CameraAxisBinding> | null;
     deadzone: number;
     expectedVersion: number;
+    /**
+     * As for `InputMapping::feel`. Absent keeps the mapping's own, as for
+     * `actions`. The sticks' feel changes only while no controller using
+     * the mapping is claimed, as their deadzone does.
+     */
+    feel?: Array<AxisFeel> | null;
     /**
      * As for `InputMapping::gimbal`. Absent keeps the mapping's own, as
      * for `actions`.
@@ -13212,6 +13413,12 @@ export type PositionWindowSeries = {
 };
 
 /**
+ * How low a controller's battery is (S419): `UPower`'s default levels,
+ * 20 % and 5 % left.
+ */
+export type PowerLevel = 'low' | 'critical';
+
+/**
  * `practice/answer`: an answer to one of "Read the panel"'s questions.
  */
 export type PracticeAnswerParams = {
@@ -14839,6 +15046,12 @@ export type Settings = {
     closePolicySet: boolean;
     connectionOrder?: Array<string>;
     /**
+     * Settings › Controllers (S419): a controller that can rumble does,
+     * to confirm a hold and mark a refusal or a lost link. On when an
+     * older daemon left it out.
+     */
+    controllerRumble?: boolean;
+    /**
      * The MAVLink system id UXDuck sends as, 1 to 255; 255 by default. A
      * vehicle's `SYSID_MYGCS` counts only this id's heartbeats.
      */
@@ -15005,6 +15218,7 @@ export type SettingsUpdateParams = {
      * Shared preference for all vehicles. Connections not listed follow in creation order.
      */
     connectionOrder?: Array<string> | null;
+    controllerRumble?: boolean | null;
     expectedVersion: number;
     /**
      * 1 to 255.
@@ -15428,6 +15642,18 @@ export type SharedTurn = {
 export type ShellInfo = {
     capabilities: Array<string>;
     version: string;
+};
+
+/**
+ * A button bound as a Shift (`HeldAction::Shift`), as a binding on its
+ * layer names it (S418).
+ */
+export type ShiftButton = {
+    button: GamepadButton;
+    /**
+     * As for `ButtonBinding::code`.
+     */
+    code?: number | null;
 };
 
 /**

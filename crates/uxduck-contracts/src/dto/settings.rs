@@ -209,6 +209,11 @@ pub struct Settings {
     /// And this share or less "Battery critical": 10 when left out.
     #[serde(default = "battery_critical_pct")]
     pub battery_critical_pct: u8,
+    /// Settings › Controllers (S419): a controller that can rumble does,
+    /// to confirm a hold and mark a refusal or a lost link. On when an
+    /// older daemon left it out.
+    #[serde(default = "controller_rumble")]
+    pub controller_rumble: bool,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain: the dataset the map reads and vehicles are
@@ -338,6 +343,8 @@ pub struct SettingsUpdateParams {
     /// 0 (off) to 90, below the low level when both are on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_critical_pct: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_rumble: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_controls: Option<TrafficControls>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -628,6 +635,10 @@ const fn battery_low_pct() -> u8 {
 
 const fn battery_critical_pct() -> u8 {
     10
+}
+
+const fn controller_rumble() -> bool {
+    true
 }
 
 /// Traffic choices are explicit and never depend on arming.

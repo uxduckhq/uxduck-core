@@ -524,6 +524,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "controller/setTarget",
     "controller/chooseMapping",
     "controller/inputs",
+    // Navigate is the window's hand on its controller (S420).
+    "controller/navigate",
     "mapping/update",
     "mapping/create",
     "mapping/remove",

@@ -92,6 +92,30 @@ pub enum Command {
         device_id: Option<u8>,
         action: crate::dto::gimbal::GimbalAction,
     },
+    /// Pauses the mission, or continues it once the vehicle says it is
+    /// paused, for a controller's one button. Sent and receipted as
+    /// `DO_PAUSE_CONTINUE` 0 or 1. `ArduCopter` only.
+    PauseOrContinue,
+    /// Moves the mission on by `steps` navigation items from the one it
+    /// flies to, back when negative. Sent and receipted as
+    /// `DO_SET_MISSION_CURRENT` for the item it comes to. Refused when the
+    /// mission or the item it flies to is not known, or there is no item
+    /// that far.
+    MissionStep {
+        steps: i16,
+    },
+    /// Changes the speed by `byMps` from the one UXDuck last told it, or
+    /// from its cruise speed parameter. Sent and receipted as
+    /// `DO_CHANGE_SPEED`. Refused when neither is known or the speed would
+    /// be 0 or less.
+    SpeedStep {
+        by_mps: f64,
+    },
+    /// The next of `modes` after the vehicle's mode, or the first when it is
+    /// in none of them. Sent and receipted as `setMode`.
+    ModeCycle {
+        modes: Vec<String>,
+    },
 }
 
 /// A place and its height above mean sea level.

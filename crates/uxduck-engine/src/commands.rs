@@ -444,9 +444,15 @@ fn send(
     })?;
     // A toggle goes, and is receipted, as what the vehicle needs.
     let command = Command::from(params.command).resolved(vehicle.armed);
+    // A controller's flight action goes as the command it comes to now
+    // (S417), or is refused saying why.
+    let command = engine.flight_action_resolved(&vehicle, command)?;
     // A camera command that names no camera goes to the vehicle's only
     // one that can do it (S405).
     let command = engine.camera_addressed(&vehicle.id, command);
+    // A camera toggle goes, and is receipted, as what the camera needs
+    // from what it last said (S416).
+    let command = engine.camera_toggled(&vehicle.id, command)?;
     // One of a camera's own settings goes with the type its definition
     // file gives it, or not at all (S411).
     let command = engine.camera_setting_typed(&vehicle.id, command)?;
@@ -1301,6 +1307,10 @@ impl Engine {
 
     /// The data plane finished a command: complete its receipt, answer the
     /// request that sent it, and tell people when it did not go through.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each kind of command waiting on an answer hears it here"
+    )]
     pub fn command_result(&mut self, receipt_id: &str, outcome: Outcome, attempts: u8) {
         // A motor test's renewal, which has no receipt (S188).
         if self.renewal_done(receipt_id, &outcome) {
@@ -1354,6 +1364,7 @@ impl Engine {
             self.plan_run_command_done(&receipt);
         }
         self.position_answered(receipt_id);
+        self.camera_drive_answered(&receipt);
         self.payload_command_done(&receipt);
         // A take-off's next step, which answers in its place.
         if let Some(take_off) = self.take_offs.remove(receipt_id)

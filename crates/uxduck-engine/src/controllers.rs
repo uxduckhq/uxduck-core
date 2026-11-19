@@ -34,9 +34,11 @@ use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::command::{Command, ReceiptStatus};
 use uxduck_core::domain::controller::{
-    ActionBinding, CONTROLLER_UNIT_ID_PREFIX, Claim, Controller, GamepadButton, HOLD_MS, Hold,
-    InputMapping, NEUTRAL, PositionBinding, StickControl, Sticks, TargetMode, centred_throttle,
+    ActionBinding, ButtonBinding, CONTROLLER_UNIT_ID_PREFIX, Claim, Controller, GamepadButton,
+    HOLD_MS, Hold, InputMapping, NEUTRAL, PositionBinding, StickControl, Sticks, TargetMode,
+    centred_throttle,
 };
+use uxduck_core::domain::controller::{ControllerPower, Rumble};
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, NotificationState, Severity, Subject,
 };
@@ -260,6 +262,7 @@ pub(crate) fn handle(
             Ok(json!({}))
         }
         ClientRequest::GripperHold(params) => crate::gripper::hold(engine, connection, params),
+        ClientRequest::ControllerNavigate(params) => navigate(engine, connection, params),
         ClientRequest::ControllerClaim(params) if params.id.starts_with("keyboard:") => {
             denied("Start keyboard control from the vehicle's Cockpit tab")
         }
@@ -290,6 +293,27 @@ pub(crate) fn handle(
             "not a controller method",
         )),
     }
+}
+
+/// `controller/navigate` (S420): only the window that claimed a controller
+/// navigates with it. Ending it gives the buttons back to the vehicle, so
+/// it is always accepted.
+fn navigate(
+    engine: &mut Engine,
+    connection: ConnectionId,
+    uxduck_contracts::dto::controller::ControllerNavigateParams { id, on }: uxduck_contracts::dto::controller::ControllerNavigateParams,
+) -> Result<Value, ApiError> {
+    if on && (id.starts_with("keyboard:") || engine.live.claimant.get(&id) != Some(&connection)) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Use this controller in this window before navigating with it.",
+        ));
+    }
+    let at_us = engine.clock.now_us();
+    engine
+        .links
+        .controller_input(crate::controller_input::InputEvent::Navigate { id, on, at_us });
+    Ok(json!({}))
 }
 
 /// One page, one explicitly pinned vehicle. Ordinary claims decide exclusivity.
@@ -867,6 +891,7 @@ fn require_calibrations(params: &MappingUpdateParams) -> Result<(), ApiError> {
         .into_iter()
         .chain(params.rc_channels.iter().map(|b| b.input))
         .chain(params.gimbal.iter().flatten().map(|b| b.input))
+        .chain(params.camera.iter().flatten().map(|b| b.input))
         .filter_map(|b| b.calibration);
     if calibrations
         .map(uxduck_core::domain::controller::AxisCalibration::from)
@@ -955,9 +980,45 @@ fn require_gimbal_bindings(
     Ok(())
 }
 
+/// The mapping's camera axes (S416), kept when the update names none, as
+/// its gimbal axes are.
+fn camera_bindings(
+    params: &MappingUpdateParams,
+    current: &InputMapping,
+) -> Vec<uxduck_core::domain::controller::CameraAxisBinding> {
+    params.camera.clone().map_or_else(
+        || current.camera.clone(),
+        |camera| camera.into_iter().map(Into::into).collect(),
+    )
+}
+
+/// A camera's axis has an input of its own, and zoom is bound once at
+/// most (S416).
+fn require_camera_bindings(
+    mapping: &InputMapping,
+    inputs: &[InputIdentity],
+) -> Result<(), ApiError> {
+    if mapping
+        .camera
+        .iter()
+        .any(|binding| mapping.camera_conflicts(binding, inputs))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "{} has a conflicting camera input. Zoom takes one input, which cannot also be a stick, an RC channel, a gimbal input or a switch that sends commands.",
+                mapping.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn require_mapping_positions(engine: &Engine, mapping: &InputMapping) -> Result<(), ApiError> {
+    crate::flight_actions::require_flight_actions(mapping)?;
     require_position_bindings(mapping, &[])?;
     require_gimbal_bindings(mapping, &[])?;
+    require_camera_bindings(mapping, &[])?;
     let inputs = engine.system.controller_inputs();
     for controller in engine
         .state
@@ -968,6 +1029,7 @@ fn require_mapping_positions(engine: &Engine, mapping: &InputMapping) -> Result<
         let axes = input_identities(&inputs, &controller.id);
         require_position_bindings(mapping, &axes)?;
         require_gimbal_bindings(mapping, &axes)?;
+        require_camera_bindings(mapping, &axes)?;
     }
     Ok(())
 }
@@ -983,14 +1045,20 @@ fn require_actions(
         || current.actions.clone(),
         |actions| actions.into_iter().map(Into::into).collect(),
     );
+    // On each Shift's layer (S418): a held action and a command on one
+    // layer of a button are refused here as before, and the rest by
+    // `InputMapping::button_problem`.
+    let shift = |s: Option<uxduck_contracts::dto::controller::ShiftButton>| s.map(Into::into);
     if actions.iter().any(|action| {
-        params
-            .buttons
-            .iter()
-            .any(|b| action.matches(Some(b.button.into()), b.code))
+        (action.action != uxduck_core::domain::controller::HeldAction::Shift
+            && params.buttons.iter().any(|b| {
+                action.matches(Some(b.button.into()), b.code) && shift(b.shift) == action.shift
+            }))
             || actions
                 .iter()
-                .filter(|other| other.matches(Some(action.button), action.code))
+                .filter(|other| {
+                    other.matches(Some(action.button), action.code) && other.shift == action.shift
+                })
                 .count()
                 > 1
     }) {
@@ -999,7 +1067,24 @@ fn require_actions(
             "A button either sends a command or is held for an action, once.",
         ));
     }
+    require_navigate(&actions)?;
     Ok(actions)
+}
+
+/// Navigate (S420) moves with the direction pad, presses with South and goes
+/// back with East, so it cannot be one of those: pressed again it must end.
+fn require_navigate(actions: &[ActionBinding]) -> Result<(), ApiError> {
+    if actions.iter().any(|action| {
+        action.action == uxduck_core::domain::controller::HeldAction::Navigate
+            && action.code.is_none()
+            && uxduck_core::domain::controller::NAVIGATE_BUTTONS.contains(&action.button)
+    }) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Navigate can't be on the D-pad, A / Cross or B / Circle, because it moves, presses and goes back with them. Give it another button.",
+        ));
+    }
+    Ok(())
 }
 
 fn require_holds(params: &MappingUpdateParams) -> Result<(), ApiError> {
@@ -1018,6 +1103,30 @@ fn require_holds(params: &MappingUpdateParams) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The mapping's feel (S418), kept when the update names none: each axis
+/// once at most, with an expo and a rate it can use.
+fn require_feel(
+    params: &MappingUpdateParams,
+    current: &InputMapping,
+) -> Result<Vec<uxduck_core::domain::controller::AxisFeel>, ApiError> {
+    let feel: Vec<uxduck_core::domain::controller::AxisFeel> = params.feel.clone().map_or_else(
+        || current.feel.clone(),
+        |feel| feel.into_iter().map(Into::into).collect(),
+    );
+    for one in &feel {
+        if feel.iter().filter(|other| other.axis == one.axis).count() > 1 {
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                "Each axis has one expo and rate.",
+            ));
+        }
+        if let Some(problem) = one.problem() {
+            return Err(ApiError::new(ErrorKind::InvalidValue, problem));
+        }
+    }
+    Ok(feel)
+}
+
 /// Each RC channel is passed on once, on a channel ArduPilot reads as one.
 fn require_rc_channels(params: &MappingUpdateParams) -> Result<(), ApiError> {
     let channels: std::collections::BTreeSet<_> =
@@ -1032,6 +1141,7 @@ fn require_rc_channels(params: &MappingUpdateParams) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines, reason = "one check per kind of binding")]
 fn update_mapping(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -1060,7 +1170,17 @@ fn update_mapping(
     let mut unused: Vec<StickControl> = params.unused.iter().copied().map(Into::into).collect();
     unused.sort_unstable();
     unused.dedup();
+    let feel = require_feel(&params, &current)?;
+    // The sticks' expo and rate change what a held stick sends (S418).
+    let stick_feel = |feel: &[uxduck_core::domain::controller::AxisFeel]| -> Vec<_> {
+        use uxduck_core::domain::controller::FeelAxis;
+        feel.iter()
+            .filter(|f| !matches!(f.axis, FeelAxis::GimbalPitch | FeelAxis::GimbalYaw))
+            .copied()
+            .collect()
+    };
     if (current.throttle_range != params.throttle_range.into()
+        || stick_feel(&feel) != stick_feel(&current.feel)
         || sticks != [current.roll, current.pitch, current.yaw, current.throttle]
         || unused != current.unused
         || (current.deadzone - params.deadzone).abs() > f64::EPSILON
@@ -1079,7 +1199,7 @@ fn update_mapping(
     {
         return Err(ApiError::new(
             ErrorKind::InvalidValue,
-            "Release every controller using this mapping before changing its sticks, deadzone, throttle range or RC channels.",
+            "Release every controller using this mapping before changing its sticks, deadzone, expo, rate, throttle range or RC channels.",
         ));
     }
     require_calibrations(&params)?;
@@ -1104,6 +1224,8 @@ fn update_mapping(
     }
     let mapping = InputMapping {
         gimbal: gimbal_bindings(&params, &current),
+        camera: camera_bindings(&params, &current),
+        feel,
         id: current.id,
         name: params.name.trim().to_owned(),
         roll: params.roll.into(),
@@ -1121,6 +1243,9 @@ fn update_mapping(
         version: current.version + 1,
     };
     require_mapping_positions(engine, &mapping)?;
+    if let Some(problem) = mapping.button_problem() {
+        return Err(ApiError::new(ErrorKind::InvalidValue, problem));
+    }
     engine.commit(
         connection,
         Change::InputMappingUpserted {
@@ -1210,7 +1335,7 @@ impl Engine {
             .map(str::to_owned)
     }
 
-    fn target_name(&self, vehicle_id: &str) -> String {
+    pub(crate) fn target_name(&self, vehicle_id: &str) -> String {
         self.vehicle(vehicle_id)
             .map_or_else(|| "an unavailable vehicle".to_owned(), |v| v.name.clone())
     }
@@ -2064,6 +2189,8 @@ impl Engine {
                 target: None,
                 input_pause: None,
                 holding: None,
+                photo: None,
+                power: ControllerPower::default(),
                 pending_target: None,
                 mapping_id: fitting,
                 version: 1,
@@ -2394,7 +2521,38 @@ impl Engine {
         else {
             return;
         };
-        self.send_for_controller(&controller, connection, target, &binding.command);
+        if !self.controller_hold_kept(&controller, &target, &binding.command, binding.hold_ms) {
+            return;
+        }
+        let sent = self.send_for_controller(&controller, connection, target, &binding.command);
+        if sent.is_some() && binding.hold_ms.is_some() {
+            self.controller_rumble(id, Rumble::Done);
+        }
+    }
+
+    /// A button's gesture went (S418): a long press, a double press, a
+    /// press on a Shift's layer or a repeat. Its command goes as a press's
+    /// does, if the controller's mapping still has the binding and its
+    /// buttons can all be used, as the mapping is checked again here.
+    pub fn controller_gesture(&mut self, id: &str, binding: &ButtonBinding) {
+        let Some((controller, connection, target)) = self.controller_sends(id) else {
+            return;
+        };
+        let Some(mapping) = mapping(self, &controller.mapping_id) else {
+            return;
+        };
+        if !mapping.buttons.contains(binding) || mapping.button_problem().is_some() {
+            return;
+        }
+        // A double press or a layer's press of a dangerous command has no
+        // hold, so it is held back here as a press would be (S417).
+        if !self.controller_hold_kept(&controller, &target, &binding.command, binding.hold_ms) {
+            return;
+        }
+        let sent = self.send_for_controller(&controller, connection, target, &binding.command);
+        if sent.is_some() && binding.hold_ms.is_some() {
+            self.controller_rumble(id, Rumble::Done);
+        }
     }
 
     /// An axis settled in a position: its command goes to the target, as
@@ -2430,6 +2588,9 @@ impl Engine {
         let Some(found) = mapping.positions.into_iter().find(|p| p == position) else {
             return;
         };
+        if !self.controller_hold_kept(&controller, &target, &found.command, found.hold_ms) {
+            return;
+        }
         if let Some(waiting) = self.live.position_sends.get_mut(id)
             && self
                 .state
@@ -2441,9 +2602,13 @@ impl Engine {
             return;
         }
         self.live.position_sends.remove(id);
+        let held = found.hold_ms.is_some();
         if let Some(receipt_id) =
             self.send_for_controller(&controller, connection, target, &found.command)
         {
+            if held {
+                self.controller_rumble(id, Rumble::Done);
+            }
             self.live.position_sends.insert(
                 id.to_owned(),
                 PositionSend {
@@ -2497,9 +2662,18 @@ impl Engine {
             &[Capability::Control],
             true,
         ) {
-            Ok((_, sent)) => return sent,
+            Ok((_, Some(receipt_id))) => {
+                self.controller_photo_asked(&controller.id, &receipt_id);
+                self.controller_command_sent(&controller.id, &receipt_id);
+                return Some(receipt_id);
+            }
+            Ok((_, None)) => {
+                self.controller_rumble(&controller.id, Rumble::Refused);
+                return None;
+            }
             Err(error) => error,
         };
+        self.controller_rumble(&controller.id, Rumble::Refused);
         let name = self.target_name(&target);
         // Held back here, never refused by the vehicle: that is a receipt.
         let body = if error.data.kind == ErrorKind::ConfirmationRequired {

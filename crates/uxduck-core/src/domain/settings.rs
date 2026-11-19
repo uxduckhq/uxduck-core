@@ -295,6 +295,10 @@ pub struct Settings {
     /// And this share or less "Battery critical"; 0 is off.
     #[serde(default = "battery_critical_pct")]
     pub battery_critical_pct: u8,
+    /// Settings › Controllers (S419): a controller that can rumble does,
+    /// to confirm a hold and mark a refusal or a lost link.
+    #[serde(default = "controller_rumble")]
+    pub controller_rumble: bool,
     #[serde(default)]
     pub traffic_controls: TrafficControls,
     /// Settings › Terrain (S23, ADR-0026 T4): the dataset the map reads
@@ -495,6 +499,7 @@ impl Default for Settings {
             traffic_alert_up_m: traffic_alert_up_m(),
             battery_low_pct: battery_low_pct(),
             battery_critical_pct: battery_critical_pct(),
+            controller_rumble: controller_rumble(),
             traffic_controls: TrafficControls::default(),
             terrain_dataset: TerrainDataset::Alos,
             vehicle_terrain_datasets: BTreeMap::new(),
@@ -568,6 +573,11 @@ const fn battery_low_pct() -> u8 {
 /// 10 % left.
 const fn battery_critical_pct() -> u8 {
     10
+}
+
+/// On, so a controller that can rumble does (S419).
+const fn controller_rumble() -> bool {
+    true
 }
 
 /// 2 km across (S174).

@@ -29,9 +29,73 @@ both_ways!(
     GimbalUp,
     GimbalDown,
     GimbalLeft,
-    GimbalRight
+    GimbalRight,
+    ZoomIn,
+    ZoomOut,
+    FocusNear,
+    FocusFar,
+    NextVehicle,
+    PreviousVehicle,
+    CockpitTab,
+    CameraTab,
+    MapTab,
+    NextCamera,
+    CameraFullWindow,
+    ShowOnMap,
+    Navigate,
+    Shift
 );
+both_ways!(c::ButtonGesture, dto::ButtonGesture, Press, DoublePress);
+both_ways!(
+    c::FeelAxis,
+    dto::FeelAxis,
+    Roll,
+    Pitch,
+    Yaw,
+    Throttle,
+    GimbalPitch,
+    GimbalYaw
+);
+
+impl From<c::ShiftButton> for dto::ShiftButton {
+    fn from(v: c::ShiftButton) -> Self {
+        Self {
+            button: v.button.into(),
+            code: v.code,
+        }
+    }
+}
+
+impl From<dto::ShiftButton> for c::ShiftButton {
+    fn from(v: dto::ShiftButton) -> Self {
+        Self {
+            button: v.button.into(),
+            code: v.code,
+        }
+    }
+}
+
+impl From<c::AxisFeel> for dto::AxisFeel {
+    fn from(v: c::AxisFeel) -> Self {
+        Self {
+            axis: v.axis.into(),
+            expo: v.expo,
+            rate: v.rate,
+        }
+    }
+}
+
+impl From<dto::AxisFeel> for c::AxisFeel {
+    fn from(v: dto::AxisFeel) -> Self {
+        Self {
+            axis: v.axis.into(),
+            expo: v.expo,
+            rate: v.rate,
+        }
+    }
+}
 both_ways!(c::GimbalAxis, dto::GimbalAxis, Pitch, Yaw);
+both_ways!(c::CameraAxis, dto::CameraAxis, Zoom);
 both_ways!(
     c::ThrottleRange,
     dto::ThrottleRange,
@@ -119,6 +183,9 @@ impl From<&c::ButtonBinding> for dto::ButtonBinding {
             code: v.code,
             command: (&v.command).into(),
             hold_ms: v.hold_ms,
+            gesture: v.gesture.into(),
+            shift: v.shift.map(Into::into),
+            repeat_ms: v.repeat_ms,
         }
     }
 }
@@ -130,6 +197,9 @@ impl From<dto::ButtonBinding> for c::ButtonBinding {
             code: v.code,
             command: v.command.into(),
             hold_ms: v.hold_ms,
+            gesture: v.gesture.into(),
+            shift: v.shift.map(Into::into),
+            repeat_ms: v.repeat_ms,
         }
     }
 }
@@ -140,6 +210,7 @@ impl From<&c::ActionBinding> for dto::ActionBinding {
             button: v.button.into(),
             code: v.code,
             action: v.action.into(),
+            shift: v.shift.map(Into::into),
         }
     }
 }
@@ -150,6 +221,7 @@ impl From<dto::ActionBinding> for c::ActionBinding {
             button: v.button.into(),
             code: v.code,
             action: v.action.into(),
+            shift: v.shift.map(Into::into),
         }
     }
 }
@@ -172,6 +244,8 @@ impl From<&c::InputMapping> for dto::InputMapping {
             unused: v.unused.iter().copied().map(Into::into).collect(),
             actions: v.actions.iter().map(Into::into).collect(),
             gimbal: v.gimbal.iter().map(Into::into).collect(),
+            camera: v.camera.iter().map(Into::into).collect(),
+            feel: v.feel.iter().copied().map(Into::into).collect(),
             version: v.version,
         }
     }
@@ -225,7 +299,32 @@ impl From<&c::Controller> for dto::Controller {
                 command: (&hold.command).into(),
                 hold_ms: hold.hold_ms,
             }),
+            photo: v.photo.as_ref().map(|photo| dto::ControllerPhoto {
+                vehicle_id: photo.vehicle_id.clone(),
+                camera_id: photo.camera_id.clone(),
+                index: photo.index,
+                ok: photo.ok,
+                heard_at_us: photo.heard_at_us,
+            }),
+            power: v.power.into(),
+            power_level: v.power.level().map(|level| match level {
+                c::PowerLevel::Low => dto::PowerLevel::Low,
+                c::PowerLevel::Critical => dto::PowerLevel::Critical,
+            }),
             version: v.version,
+        }
+    }
+}
+
+impl From<c::ControllerPower> for dto::ControllerPower {
+    fn from(v: c::ControllerPower) -> Self {
+        match v {
+            c::ControllerPower::Unknown => Self::Unknown,
+            c::ControllerPower::Unavailable => Self::Unavailable,
+            c::ControllerPower::Wired => Self::Wired,
+            c::ControllerPower::Discharging { percent } => Self::Discharging { percent },
+            c::ControllerPower::Charging { percent } => Self::Charging { percent },
+            c::ControllerPower::Charged => Self::Charged,
         }
     }
 }
@@ -257,6 +356,23 @@ impl From<&c::GimbalAxisBinding> for dto::GimbalAxisBinding {
 }
 impl From<dto::GimbalAxisBinding> for c::GimbalAxisBinding {
     fn from(v: dto::GimbalAxisBinding) -> Self {
+        Self {
+            control: v.control.into(),
+            input: v.input.into(),
+        }
+    }
+}
+
+impl From<&c::CameraAxisBinding> for dto::CameraAxisBinding {
+    fn from(v: &c::CameraAxisBinding) -> Self {
+        Self {
+            control: v.control.into(),
+            input: v.input.into(),
+        }
+    }
+}
+impl From<dto::CameraAxisBinding> for c::CameraAxisBinding {
+    fn from(v: dto::CameraAxisBinding) -> Self {
         Self {
             control: v.control.into(),
             input: v.input.into(),

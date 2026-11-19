@@ -46,7 +46,8 @@
           "seen": false,
           "presses": 0
         }
-      ]
+      ],
+      "navigating": true
     }
   ]
 }

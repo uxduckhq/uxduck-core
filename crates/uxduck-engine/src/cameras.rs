@@ -252,7 +252,10 @@ impl Engine {
             return;
         }
         camera.version += 1;
+        let heard = camera.clone();
         self.commit_as(data_plane(), Change::CameraUpserted { camera });
+        // A controller's photo is said where its pilot is (S416).
+        self.controller_photo_heard(&heard, image.index, image.ok);
     }
 
     /// A camera command that names no camera, for the vehicle's only
@@ -282,6 +285,87 @@ impl Engine {
             device_id,
             action,
         }
+    }
+
+    /// A camera toggle as what the camera needs, from what it last said
+    /// (S416), as `ArmToggle` goes as Arm or Disarm: so it is sent and
+    /// receipted as that. Cameras named by no component are all those of
+    /// the vehicle that can do it, and must agree, except that a recording
+    /// one stops them all. Refused while the camera has not said.
+    pub(crate) fn camera_toggled(
+        &self,
+        vehicle_id: &str,
+        command: Command,
+    ) -> Result<Command, ApiError> {
+        let Command::Camera {
+            component_id,
+            device_id,
+            action,
+        } = command
+        else {
+            return Ok(command);
+        };
+        if !action.toggles() {
+            return Ok(Command::Camera {
+                component_id,
+                device_id,
+                action,
+            });
+        }
+        let name = self
+            .vehicle(vehicle_id)
+            .map_or_else(|| vehicle_id.to_owned(), |vehicle| vehicle.name.clone());
+        let refused = |why: &str| {
+            ApiError::new(
+                ErrorKind::InvalidValue,
+                format!("{name}'s camera {why}, so nothing was sent."),
+            )
+        };
+        let mut said = self
+            .state
+            .cameras
+            .values()
+            .filter(|camera| camera.vehicle_id == vehicle_id && camera.present)
+            .filter(|camera| {
+                component_id.is_none_or(|id| camera.component_id == id)
+                    && (component_id.is_none() || camera.device_id == device_id)
+            })
+            .filter(|camera| camera.allows(&action))
+            .map(|camera| camera.toggled(action.clone()));
+        let Some(first) = said.next() else {
+            let label = action.label();
+            let mut asked = label.chars();
+            let asked: String = asked
+                .next()
+                .map(|first| first.to_lowercase().chain(asked).collect())
+                .unwrap_or_default();
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!("None of {name}'s cameras can {asked}, so nothing was sent."),
+            ));
+        };
+        let mut resolved = first.map_err(refused)?;
+        for other in said {
+            let other = other.map_err(refused)?;
+            if other == resolved {
+                continue;
+            }
+            if action == CameraAction::ToggleRecording {
+                resolved = CameraAction::StopRecording;
+                continue;
+            }
+            return Err(ApiError::new(
+                ErrorKind::InvalidValue,
+                format!(
+                    "{name}'s cameras are not set alike, so nothing was sent. Swap them one at a time in the Camera tab."
+                ),
+            ));
+        }
+        Ok(Command::Camera {
+            component_id,
+            device_id,
+            action: resolved,
+        })
     }
 
     /// The camera a video source's picture comes from, when it has said

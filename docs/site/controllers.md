@@ -55,6 +55,29 @@ Use UXDuck connected to **Computer** for this support, including when opening it
 
 After updating Desktop, repeat controller setup for CH8. Existing CH7 mappings retain their input code, but check which physical switch now drives any action previously learned while both switches were merged.
 
+## Battery and rumble
+
+A wireless controller's charge shows on its card under **Controllers** and on its row in the Cockpit's **Controls**, as the computer reports it: a percentage, **Charging**, **Charged** or **Wired**. A controller flying a vehicle raises a notice once when its battery is low, at 20% or less, and again once it is critical, at 5% or less. These are the levels UPower, the battery service on Linux desktops, warns of a device's battery at by default. The notice clears once the controller charges or reports more than the level.
+
+A controller that can rumble confirms what it did without you looking at the screen:
+
+- One short pulse when a held command, such as Arm, completes and goes to the vehicle.
+- Two short pulses when UXDuck holds back a command from the controller, cannot send it, or the vehicle refuses it.
+- One long pulse when the vehicle it flies is no longer heard, or its control pauses.
+
+Only the controller flying a vehicle rumbles. Turn rumble off in **Settings** › **Controllers** › **Rumble**, which every window and the agent share.
+
+What each computer reports:
+
+| Where UXDuck runs | Battery                                                                                                                                                                                               | Rumble                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Linux             | The charge and whether it is charging, where the controller's kernel driver reports it, such as hid-playstation, hid-nintendo, hid-steam or xpadneo. A Bluetooth controller without one says nothing. | Where the driver supports force feedback and UXDuck can write to the controller's device. |
+| Windows           | The charge, charging or wired, as Windows reports it for the controller.                                                                                                                              | Xbox-compatible controllers.                                                              |
+| macOS             | The percentage alone, where the controller reports one to macOS. macOS does not say whether it is charging or wired.                                                                                  | Not available.                                                                            |
+| Browser           | Not available: the browser's Gamepad API has no battery, and the card says so.                                                                                                                        | Controllers the browser can rumble, through its Gamepad API, while UXDuck's tab is open.  |
+
+Where a computer reports nothing, the card says **Not reported by this computer** and no battery notice comes, so check the controller's charge yourself before you fly.
+
 ## Check the result
 
 1. Confirm the intended model is selected and its channel monitor changes for each control.

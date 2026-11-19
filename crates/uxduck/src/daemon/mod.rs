@@ -4,6 +4,7 @@
 pub mod agent;
 #[cfg(any(all(feature = "gamepad", target_os = "linux"), test))]
 mod bluetooth;
+mod controller_feedback;
 #[cfg(any(all(feature = "gamepad", target_os = "macos"), test))]
 mod controller_identity;
 pub mod controllers;
@@ -280,6 +281,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     watch(&engine, options.headless);
     let stop = run_until_stopped(&engine, &options, parent_closed).await;
     tracing::info!("shutting down");
+    // A zoom or focus a controller keeps running is told to stop while
+    // the links still take it (S416).
+    if engine
+        .run(uxduck_engine::Engine::camera_drives_end)
+        .await
+        .unwrap_or(false)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
     // Input is read no more: a gimbal a controller was turning stops (S407).
     input_end.stop().await;
     // A final checkpoint, so the next start replays nothing (ADR-0007).
@@ -856,6 +866,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.review_gimbals(now);
                 // A power-saving mode turned on or off while connected (FB-254).
                 e.review_power_saving();
+                // Zoom and focus stops owed to a camera (S416).
+                e.review_camera_drives();
             })
             .await
             .is_err()

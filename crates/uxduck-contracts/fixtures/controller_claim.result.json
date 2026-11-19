@@ -11,5 +11,6 @@
   "target": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
   "mappingId": "mode-2",
   "version": 7,
+  "power": { "state": "discharging", "percent": 64 },
   "inputPause": "Controller paused while the simulation restarts."
 }

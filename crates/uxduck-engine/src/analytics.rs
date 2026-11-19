@@ -569,7 +569,7 @@ impl Engine {
             // A toggle is sent, and so counted, as Arm or Disarm.
             Command::Arm | Command::ArmToggle => CommandName::Arm,
             Command::Disarm => CommandName::Disarm,
-            Command::SetMode { .. } => CommandName::SetMode,
+            Command::SetMode { .. } | Command::ModeCycle { .. } => CommandName::SetMode,
             Command::Rtl => CommandName::Rtl,
             Command::Land => CommandName::Land,
             Command::Reboot => CommandName::Reboot,
@@ -578,9 +578,12 @@ impl Engine {
             Command::SetEkfOrigin { .. } => CommandName::SetEkfOrigin,
             // A camera's is one of the camera protocol's commands, counted
             // with them as before it had a name of its own (S405).
-            Command::Long { .. } | Command::Camera { .. } | Command::Gimbal { .. } => {
-                CommandName::Long
-            }
+            Command::Long { .. }
+            | Command::Camera { .. }
+            | Command::Gimbal { .. }
+            | Command::PauseOrContinue
+            | Command::MissionStep { .. }
+            | Command::SpeedStep { .. } => CommandName::Long,
         };
         self.track(DaemonEvent::CommandSent { command, outcome });
     }

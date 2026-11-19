@@ -25,6 +25,7 @@
           "target": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
           "pendingTarget": "7a1e0c2d-9b3f-5e4d-8c21-0f6a3b9d2e17",
           "mappingId": "mode-2",
+          "power": { "state": "unknown" },
           "version": 7
         }
       },

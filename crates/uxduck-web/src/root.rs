@@ -260,6 +260,8 @@ enum Call {
     Input(InputEvent),
     /// The gimbal a controller's inputs may turn, or none any more (S407).
     SteerGimbal(String, Option<uxduck_engine::runtime::GimbalRoute>),
+    /// A rumble for a pad a page reads (S419).
+    Rumble(String, uxduck_core::domain::controller::Rumble),
 }
 
 type Queue = Arc<Mutex<VecDeque<Call>>>;
@@ -348,6 +350,9 @@ impl LinkPort for Links {
         gimbal: Option<uxduck_engine::runtime::GimbalRoute>,
     ) {
         push(&self.0, Call::SteerGimbal(controller_id.to_owned(), gimbal));
+    }
+    fn rumble(&mut self, controller_id: &str, rumble: uxduck_core::domain::controller::Rumble) {
+        push(&self.0, Call::Rumble(controller_id.to_owned(), rumble));
     }
 }
 
@@ -1368,6 +1373,9 @@ impl Browser {
             }
             self.apply(effects, outputs);
             self.report_controls(gimbals.reports);
+            // And the camera inputs (S416).
+            let cameras = self.controls.camera_outputs(now);
+            self.report_controls(cameras);
         }
         self.stop_gimbals(outputs);
     }
@@ -1442,7 +1450,14 @@ impl Browser {
                 id,
                 name,
                 layout_known,
-            } => self.engine.controller_connected(&id, &name, layout_known),
+            } => {
+                self.engine.controller_connected(&id, &name, layout_known);
+                // The Gamepad API tells of no battery (S419).
+                self.engine.controller_power(
+                    &id,
+                    uxduck_core::domain::controller::ControllerPower::Unavailable,
+                );
+            }
             Report::Disconnected { id } => self.engine.controller_disconnected(&id),
             Report::SecondUnit {
                 id,
@@ -1464,6 +1479,9 @@ impl Browser {
             Report::LetGo { id } => self.engine.controller_let_go(&id),
             Report::GimbalAsked { id } => self.engine.controller_gimbal_asked(&id),
             Report::GimbalLetGo { id } => self.engine.controller_gimbal_let_go(&id),
+            Report::CameraDrive { id, drive } => self.engine.controller_camera_drive(&id, drive),
+            Report::Gesture { id, binding } => self.engine.controller_gesture(&id, &binding),
+            Report::Power { id, power } => self.engine.controller_power(&id, power),
         }
     }
 
@@ -1545,6 +1563,8 @@ impl Browser {
             self.engine.expire_traffic(now);
             // Gimbals the mission has, and ones to give back (S406).
             self.engine.review_gimbals(now);
+            // Zoom and focus stops owed to a camera (S416).
+            self.engine.review_camera_drives();
             // Airspeed checks and ratios, and autocal left on (S190).
             self.engine.expire_airspeed(now);
             // PX4 calibrations gone silent (S191).
@@ -1744,7 +1764,30 @@ impl Browser {
                 self.controls.steer_gimbal(&id, gimbal);
                 self.stop_gimbals(outputs);
             }
+            Call::Rumble(id, rumble) => self.rumble(&id, rumble, outputs),
         }
+    }
+
+    /// A rumble for a pad, posted to the page that reads it, which plays it
+    /// through the pad's `vibrationActuator` (S419).
+    fn rumble(
+        &self,
+        id: &str,
+        rumble: uxduck_core::domain::controller::Rumble,
+        outputs: &mut Vec<Output>,
+    ) {
+        let Some(connection) = self.pads.page_of(id) else {
+            return;
+        };
+        outputs.push(Output::Post {
+            connection,
+            text: serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": gamepads::RUMBLE,
+                "params": { "id": id, "rumble": rumble, "pulses": rumble.pulses() },
+            })
+            .to_string(),
+        });
     }
 }
 

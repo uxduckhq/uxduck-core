@@ -93,7 +93,8 @@ const FULL_BELOW_MIB: f32 = uxduck_core::domain::camera::CARD_FULL_BELOW_MIB;
 /// component's own or for every camera. `sequence` numbers one photo, so
 /// that the command sent again is not a second photo. 0 leaves it out.
 /// None for one of the camera's own settings, which is no command: it goes
-/// as an extended parameter (`camera_params`, S411).
+/// as an extended parameter (`camera_params`, S411), and for a toggle,
+/// which the engine sends as what the camera needs (S416).
 #[must_use]
 #[allow(
     clippy::cast_precision_loss,
@@ -103,7 +104,10 @@ pub fn encode(action: &CameraAction, device: u8, sequence: u32) -> Option<(u16, 
     let id = f32::from(device);
     let nan = f32::NAN;
     Some(match *action {
-        CameraAction::SetSetting { .. } => return None,
+        CameraAction::SetSetting { .. }
+        | CameraAction::ToggleRecording
+        | CameraAction::ToggleMode
+        | CameraAction::ToggleSource => return None,
         // The definition asks for NaN in what this command leaves unused.
         CameraAction::SetMode { mode } => (
             SET_CAMERA_MODE,
@@ -146,6 +150,9 @@ pub fn encode(action: &CameraAction, device: u8, sequence: u32) -> Option<(u16, 
             (SET_CAMERA_FOCUS, [2.0, percent, id, 0.0, 0.0, 0.0, 0.0])
         }
         CameraAction::FocusAuto => (SET_CAMERA_FOCUS, [4.0, 0.0, id, 0.0, 0.0, 0.0, 0.0]),
+        // `ZOOM_TYPE_CONTINUOUS` and `FOCUS_TYPE_CONTINUOUS` (S416).
+        CameraAction::ZoomRate { rate } => (SET_CAMERA_ZOOM, [1.0, rate, id, 0.0, 0.0, 0.0, 0.0]),
+        CameraAction::FocusRate { rate } => (SET_CAMERA_FOCUS, [1.0, rate, id, 0.0, 0.0, 0.0, 0.0]),
         // The card and its list of photos.
         CameraAction::Format { storage_id } => (
             STORAGE_FORMAT,
@@ -1401,6 +1408,49 @@ mod tests {
         // The camera said so itself each time: nothing was asked again.
         rig.second();
         assert_eq!(rig.asked(CAMERA_SETTINGS), 1);
+    }
+
+    // A held zoom or focus runs at a rate until a rate of 0 stops it, and
+    // a toggle the engine did not resolve is never sent (S416).
+    #[test]
+    fn a_zoom_or_focus_at_a_rate_runs_until_stopped_and_a_toggle_is_not_sent() {
+        let mut rig = Rig::new();
+        rig.act("in", CameraAction::ZoomRate { rate: 1.0 });
+        assert_eq!(rig.done("in"), Some((CommandOutcome::Accepted, 1)));
+        assert_eq!(
+            rig.commands(SET_CAMERA_ZOOM),
+            [(100, [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])]
+        );
+        rig.second();
+        rig.act("stop", CameraAction::ZoomRate { rate: 0.0 });
+        assert_eq!(rig.done("stop"), Some((CommandOutcome::Accepted, 1)));
+        rig.second();
+        let zoomed = rig
+            .state()
+            .settings
+            .and_then(|s| s.zoom_pct)
+            .expect("a zoom");
+        assert!(
+            (20.0..=30.0).contains(&zoomed),
+            "about a second's run, {zoomed}"
+        );
+        rig.second();
+        assert_eq!(rig.state().settings.and_then(|s| s.zoom_pct), Some(zoomed));
+
+        rig.act("near", CameraAction::FocusRate { rate: -0.5 });
+        assert_eq!(rig.done("near"), Some((CommandOutcome::Accepted, 1)));
+        assert_eq!(
+            rig.commands(SET_CAMERA_FOCUS),
+            [(100, [1.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0])]
+        );
+
+        let sent = rig.sent.len();
+        rig.act("toggle", CameraAction::ToggleRecording);
+        assert!(!matches!(
+            rig.done("toggle"),
+            Some((CommandOutcome::Accepted, _))
+        ));
+        assert_eq!(rig.sent.len(), sent, "nothing went to the camera");
     }
 
     // A camera that does not say what a command changed is asked.

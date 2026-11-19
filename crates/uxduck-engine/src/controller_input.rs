@@ -13,8 +13,11 @@ use uxduck_contracts::dto::controller::{
     AxisValue, ButtonState, ControllerInputs, ControllerInputsResult, InputKind,
 };
 use uxduck_core::domain::command::Command;
+use uxduck_core::domain::controller::ControllerPower;
+use uxduck_core::domain::controller::NAVIGATE_BUTTONS;
 use uxduck_core::domain::controller::{
-    AxisBinding, GamepadAxis, GamepadButton, GimbalAxis, InputMapping, PositionBinding, Sticks,
+    ActionBinding, AxisBinding, ButtonBinding, ButtonGesture, DOUBLE_PRESS_MS, GamepadAxis,
+    GamepadButton, GimbalAxis, InputMapping, PositionBinding, ShiftButton, Sticks,
 };
 use uxduck_core::domain::gripper::GripperAction;
 use uxduck_core::domain::settings::PilotInputMethod;
@@ -86,7 +89,26 @@ pub enum InputEvent {
         action: Option<GripperAction>,
         at_us: u64,
     },
+    /// The window that claimed controller `id` starts, refreshes or ends
+    /// Navigate (S420): while on, `NAVIGATE_BUTTONS` send nothing to its
+    /// vehicle. It ends `NAVIGATE_LEASE_US` after `at_us` unless refreshed.
+    Navigate {
+        id: String,
+        on: bool,
+        at_us: u64,
+    },
+    /// A controller's power as the platform reports it now (S419): when it
+    /// connects and whenever it changes.
+    Power {
+        id: String,
+        power: ControllerPower,
+    },
 }
+
+/// How long Navigate lasts without a refresh: the window refreshes it well
+/// inside this, so a window that hangs or goes gives the direction pad,
+/// South and East back to the vehicle within this and one pilot tick.
+pub const NAVIGATE_LEASE_US: u64 = 2_000_000;
 
 /// How long an on-screen gripper hold lasts without a refresh: the page
 /// refreshes it well inside this, so a page that disappears stops the
@@ -150,7 +172,35 @@ pub enum Report {
     GimbalLetGo {
         id: String,
     },
+    /// What a routed controller's camera inputs ask of its vehicle's
+    /// camera now (S416): zoom then focus, each -1 to 1 with zooming in
+    /// and focusing farther positive, and 0 to stop. Said when it changes,
+    /// with zeros when the route ends or the controller goes, and again
+    /// every [`CAMERA_REPEAT_MS`] while either is not 0, for a camera
+    /// that zooms only by steps.
+    CameraDrive {
+        id: String,
+        drive: [f32; 2],
+    },
+    /// A gesture of a button's went (S418): a long press, a double press,
+    /// a press decided once neither came, a binding on a Shift's layer or
+    /// a repeat. `binding` goes, if the controller's mapping still has
+    /// it. A button's plain press (`InputMapping::button`) goes as
+    /// `Pressed`, as before.
+    Gesture {
+        id: String,
+        binding: ButtonBinding,
+    },
+    /// A connected controller's power changed (S419).
+    Power {
+        id: String,
+        power: ControllerPower,
+    },
 }
+
+/// How often a held zoom or focus is said again (S416), so a camera that
+/// zooms only by steps takes four a second while it is held.
+pub const CAMERA_REPEAT_MS: u64 = 250;
 
 /// What turning gimbals asks of the data plane on a pilot tick.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -168,19 +218,131 @@ enum Held {
     Button {
         button: Option<GamepadButton>,
         code: Option<u32>,
+        binding: ButtonBinding,
     },
     Position(PositionBinding),
 }
 
 impl Held {
-    /// What goes once it has been held.
-    fn report(self, id: &str) -> Report {
-        let id = id.to_owned();
+    /// What goes once it has been held, through `mapping`.
+    fn report(self, id: &str, mapping: &InputMapping) -> Report {
         match self {
-            Self::Button { button, code } => Report::Pressed { id, button, code },
-            Self::Position(position) => Report::Positioned { id, position },
+            Self::Button {
+                button,
+                code,
+                binding,
+            } => fired(id, mapping, (code, button), binding),
+            Self::Position(position) => Report::Positioned {
+                id: id.to_owned(),
+                position,
+            },
         }
     }
+}
+
+/// A button's binding going: as a press of the button when it is its
+/// plain press, which the engine finds by the button, else as itself.
+fn fired(
+    id: &str,
+    mapping: &InputMapping,
+    (code, button): (Option<u32>, Option<GamepadButton>),
+    binding: ButtonBinding,
+) -> Report {
+    let id = id.to_owned();
+    if mapping.button(button, code) == Some(&binding) {
+        Report::Pressed { id, button, code }
+    } else {
+        Report::Gesture { id, binding }
+    }
+}
+
+/// Which Shift's layer a press is on (S418): none held, one, or more
+/// than one, when it does nothing at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Layer {
+    #[default]
+    Base,
+    Shift(ShiftButton),
+    Mixed,
+}
+
+impl Layer {
+    /// The Shift its bindings name: none on the base layer, and with two
+    /// Shifts held at once, which has no bindings (see `is_mixed`).
+    const fn shift(self) -> Option<ShiftButton> {
+        match self {
+            Self::Shift(shift) => Some(shift),
+            Self::Base | Self::Mixed => None,
+        }
+    }
+
+    /// Two Shifts held at once: no layer, so nothing is bound on it.
+    const fn is_mixed(self) -> bool {
+        matches!(self, Self::Mixed)
+    }
+}
+
+/// The command bindings of one input on one layer, by gesture (S418).
+#[derive(Default)]
+struct Gestures<'a> {
+    press: Option<&'a ButtonBinding>,
+    long: Option<&'a ButtonBinding>,
+    double: Option<&'a ButtonBinding>,
+}
+
+impl<'a> Gestures<'a> {
+    fn of(
+        mapping: &'a InputMapping,
+        (code, button): (Option<u32>, Option<GamepadButton>),
+        shift: Option<ShiftButton>,
+    ) -> Self {
+        let mut gestures = Self::default();
+        for binding in mapping
+            .buttons
+            .iter()
+            .filter(|b| b.matches(button, code) && b.shift == shift)
+        {
+            let slot = match (binding.gesture, binding.hold_ms) {
+                (ButtonGesture::DoublePress, _) => &mut gestures.double,
+                (ButtonGesture::Press, Some(_)) => &mut gestures.long,
+                (ButtonGesture::Press, None) => &mut gestures.press,
+            };
+            slot.get_or_insert(binding);
+        }
+        gestures
+    }
+}
+
+/// A press of an input with more than one gesture bound (S418), until it
+/// is decided.
+#[derive(Debug)]
+struct Gesturing {
+    key: (Option<u32>, Option<GamepadButton>),
+    /// The layer of its first press, kept if the Shift is let go.
+    shift: Option<ShiftButton>,
+    stage: Stage,
+}
+
+#[derive(Debug, PartialEq)]
+enum Stage {
+    /// Down: a long press may still complete.
+    Down,
+    /// Let go after a first press: a second within `DOUBLE_PRESS_MS` is a
+    /// double press, timed from the first tick after.
+    Up { since_us: Option<u64> },
+    /// A long or a double press went: nothing more until let go.
+    Done,
+}
+
+/// A step its button repeats while held (S418).
+#[derive(Debug)]
+struct Repeat {
+    key: (Option<u32>, Option<GamepadButton>),
+    binding: ButtonBinding,
+    /// The first tick after the press.
+    since_us: Option<u64>,
+    /// How many times it went again since.
+    sent: u64,
 }
 
 /// A hold under way: since the first tick after it began, as input
@@ -231,6 +393,9 @@ struct Button {
     seen: bool,
     /// How many times it has gone down.
     presses: u32,
+    /// The Shift layer it was last pressed on (S418), which its held
+    /// action keeps until it is let go.
+    layer: Layer,
 }
 
 #[derive(Debug, Default)]
@@ -271,6 +436,26 @@ struct Device {
     gripper: Option<GripperAction>,
     /// What its gimbal inputs are doing (S407).
     turn: Turn,
+    /// What its camera inputs are doing (S416).
+    zoom: Zoom,
+    /// When the window navigating with it last refreshed Navigate (S420).
+    navigating: Option<u64>,
+    /// Presses not yet decided between a press, a long press and a
+    /// double press (S418).
+    gestures: Vec<Gesturing>,
+    /// Steps repeated while their buttons are held (S418).
+    repeats: Vec<Repeat>,
+}
+
+/// A device's camera inputs (S416): what the engine was last told and
+/// when.
+#[derive(Debug, Default)]
+struct Zoom {
+    /// The route's camera axes that were off their centre when the route
+    /// began, as `Turn::stale`.
+    stale: Vec<bool>,
+    told: [f32; 2],
+    told_us: u64,
 }
 
 /// A device's gimbal inputs: what they ask for and the gimbal they turn.
@@ -323,6 +508,26 @@ impl Levels {
 }
 
 impl Device {
+    /// Whether Navigate has the button (S420): it then sends nothing.
+    fn paused(&self, button: Option<GamepadButton>) -> bool {
+        self.navigating.is_some() && button.is_some_and(|b| NAVIGATE_BUTTONS.contains(&b))
+    }
+
+    /// Navigate gives its buttons back: one bound to an action and still
+    /// held acts only once let go and pressed again, as after a new route.
+    fn end_navigating(&mut self) {
+        if self.navigating.take().is_none() {
+            return;
+        }
+        let held: Vec<_> = self
+            .pressed_actions()
+            .into_iter()
+            .filter(|(_, button)| button.is_some_and(|b| NAVIGATE_BUTTONS.contains(&b)))
+            .collect();
+        self.stale_actions.extend(held);
+        self.settle_gripper();
+    }
+
     /// A binding's raw value: by its code when it has one, else by its
     /// gamepad axis. A known gamepad's stick at rest reports nothing and
     /// springs to the centre, so it reads zero until it moves; any other
@@ -346,15 +551,236 @@ impl Device {
         self.holds.len() != before
     }
 
-    /// The route's gripper buttons held now, by code and name.
-    fn pressed_actions(&self) -> Vec<(Option<u32>, Option<GamepadButton>)> {
+    /// Ends a button's hold, whichever of its bindings it is for: whether
+    /// there was one.
+    fn let_go_button(&mut self, key: (Option<u32>, Option<GamepadButton>)) -> bool {
+        let before = self.holds.len();
+        self.holds.retain(|pending| {
+            !matches!(&pending.held, Held::Button { button, code, .. } if (*code, *button) == key)
+        });
+        self.holds.len() != before
+    }
+
+    /// The Shift layer a press now would be on (S418): the one Shift of
+    /// the route's mapping held, none, or more than one.
+    fn layer(&self) -> Layer {
         let Some(route) = self.route.as_ref() else {
+            return Layer::Base;
+        };
+        let mut held = route.mapping.shifts().filter(|shift| {
+            self.buttons.iter().any(|((code, button), state)| {
+                state.held && !self.paused(*button) && shift.matches(*button, *code)
+            })
+        });
+        match (held.next(), held.next()) {
+            (None, _) => Layer::Base,
+            (Some(shift), None) => Layer::Shift(shift),
+            (Some(_), Some(_)) => Layer::Mixed,
+        }
+    }
+
+    /// The held action a button pressed on `layer` is bound to in the
+    /// route's mapping, if any.
+    fn held_action(
+        &self,
+        (code, button): (Option<u32>, Option<GamepadButton>),
+        layer: Layer,
+    ) -> Option<&ActionBinding> {
+        if layer.is_mixed() {
+            return None;
+        }
+        let mapping = &self.route.as_ref()?.mapping;
+        mapping.action_in(button, code, layer.shift())
+    }
+
+    /// A button let go: its hold ends, its repeat stops, and a press that
+    /// was waiting to see whether it was a long press goes, unless a
+    /// double press may still follow (S418).
+    fn button_up(
+        &mut self,
+        id: &str,
+        key: (Option<u32>, Option<GamepadButton>),
+        was: bool,
+    ) -> Vec<Report> {
+        let mut reports = Vec::new();
+        self.repeats.retain(|repeat| repeat.key != key);
+        if was && self.let_go_button(key) {
+            reports.push(Report::LetGo { id: id.to_owned() });
+        }
+        let Some(at) = self.gestures.iter().position(|g| g.key == key) else {
+            return reports;
+        };
+        let Some(mapping) = self.route.as_ref().map(|route| &route.mapping) else {
+            return reports;
+        };
+        let gesture = &mut self.gestures[at];
+        if gesture.stage != Stage::Down {
+            if gesture.stage == Stage::Done {
+                self.gestures.remove(at);
+            }
+            return reports;
+        }
+        let gestures = Gestures::of(mapping, key, gesture.shift);
+        if gestures.double.is_some() {
+            gesture.stage = Stage::Up { since_us: None };
+            return reports;
+        }
+        let press = gestures.press.cloned();
+        self.gestures.remove(at);
+        reports.extend(press.map(|binding| fired(id, mapping, key, binding)));
+        reports
+    }
+
+    /// A button pressed on `layer`: what goes now, or what it waits for.
+    fn button_down(
+        &mut self,
+        id: &str,
+        key: (Option<u32>, Option<GamepadButton>),
+        layer: Layer,
+    ) -> Vec<Report> {
+        let (code, button) = key;
+        let Some(mapping) = self.route.as_ref().map(|route| &route.mapping) else {
+            return vec![Report::Pressed {
+                id: id.to_owned(),
+                button,
+                code,
+            }];
+        };
+        let mut reports = Vec::new();
+        // The second press of a double press, on the layer of the first.
+        // On another layer the first goes as a press and this one is new.
+        if let Some(at) = self
+            .gestures
+            .iter()
+            .position(|g| g.key == key && matches!(g.stage, Stage::Up { .. }))
+        {
+            let first = self.gestures.remove(at);
+            let gestures = Gestures::of(mapping, key, first.shift);
+            if let Some(double) = gestures
+                .double
+                .filter(|_| !layer.is_mixed() && layer.shift() == first.shift)
+            {
+                let double = double.clone();
+                self.gestures.push(Gesturing {
+                    key,
+                    shift: first.shift,
+                    stage: Stage::Done,
+                });
+                return vec![fired(id, mapping, key, double)];
+            }
+            reports.extend(
+                gestures
+                    .press
+                    .cloned()
+                    .map(|binding| fired(id, mapping, key, binding)),
+            );
+        }
+        // Two Shifts held at once: no layer, so nothing.
+        if layer.is_mixed() {
+            return reports;
+        }
+        let shift = layer.shift();
+        let gestures = Gestures::of(mapping, key, shift);
+        let hold = |long: &ButtonBinding| {
+            let hold_ms = long.hold_ms.unwrap_or_default();
+            (
+                Pending {
+                    held: Held::Button {
+                        button,
+                        code,
+                        binding: long.clone(),
+                    },
+                    since_us: None,
+                    hold_ms,
+                },
+                Report::Holding {
+                    id: id.to_owned(),
+                    command: long.command.clone(),
+                    hold_ms,
+                },
+            )
+        };
+        match (gestures.press, gestures.long, gestures.double) {
+            (None, None, None) => {
+                if shift.is_none() {
+                    reports.push(Report::Pressed {
+                        id: id.to_owned(),
+                        button,
+                        code,
+                    });
+                }
+            }
+            (Some(press), None, None) => {
+                if press.repeat_ms.is_some() {
+                    self.repeats.push(Repeat {
+                        key,
+                        binding: press.clone(),
+                        since_us: None,
+                        sent: 0,
+                    });
+                }
+                reports.push(fired(id, mapping, key, press.clone()));
+            }
+            (None, Some(long), None) => {
+                let (pending, report) = hold(long);
+                self.holds.push(pending);
+                reports.push(report);
+            }
+            (_, long, _) => {
+                let started = long.map(hold);
+                self.gestures.push(Gesturing {
+                    key,
+                    shift,
+                    stage: Stage::Down,
+                });
+                if let Some((pending, report)) = started {
+                    self.holds.push(pending);
+                    reports.push(report);
+                }
+            }
+        }
+        reports
+    }
+
+    /// Presses whose double press did not come in time go as presses, and
+    /// held steps repeat (S418). Timed from the first call after each
+    /// began, as `due` times a hold.
+    fn due_gestures(&mut self, id: &str, now_us: u64) -> Vec<Report> {
+        let Some(mapping) = self.route.as_ref().map(|route| &route.mapping) else {
             return Vec::new();
         };
+        let mut reports = Vec::new();
+        self.gestures.retain_mut(|gesture| {
+            let Stage::Up { since_us } = &mut gesture.stage else {
+                return true;
+            };
+            let since = *since_us.get_or_insert(now_us);
+            if now_us.saturating_sub(since) < u64::from(DOUBLE_PRESS_MS) * 1_000 {
+                return true;
+            }
+            if let Some(press) = Gestures::of(mapping, gesture.key, gesture.shift).press {
+                reports.push(fired(id, mapping, gesture.key, press.clone()));
+            }
+            false
+        });
+        for repeat in &mut self.repeats {
+            let since = *repeat.since_us.get_or_insert(now_us);
+            let every = u64::from(repeat.binding.repeat_ms.unwrap_or(u32::MAX)).max(1) * 1_000;
+            let due = now_us.saturating_sub(since) / every;
+            if due > repeat.sent {
+                repeat.sent = due;
+                reports.push(fired(id, mapping, repeat.key, repeat.binding.clone()));
+            }
+        }
+        reports
+    }
+
+    /// The route's gripper buttons held now, by code and name.
+    fn pressed_actions(&self) -> Vec<(Option<u32>, Option<GamepadButton>)> {
         self.buttons
             .iter()
-            .filter(|((code, button), state)| {
-                state.held && route.mapping.action(*button, *code).is_some()
+            .filter(|(key, state)| {
+                state.held && !self.paused(key.1) && self.held_action(**key, state.layer).is_some()
             })
             .map(|(key, _)| *key)
             .collect()
@@ -365,17 +791,14 @@ impl Device {
     /// until every gripper input is let go.
     fn settle_gripper(&mut self) {
         let mut asked: Vec<GripperAction> = self
-            .route
-            .as_ref()
-            .map(|route| {
-                self.buttons
-                    .iter()
-                    .filter(|(key, state)| state.held && !self.stale_actions.contains(key))
-                    .filter_map(|((code, button), _)| route.mapping.action(*button, *code))
-                    .filter_map(|binding| binding.action.gripper())
-                    .collect()
+            .buttons
+            .iter()
+            .filter(|(key, state)| {
+                state.held && !self.stale_actions.contains(key) && !self.paused(key.1)
             })
-            .unwrap_or_default();
+            .filter_map(|(key, state)| self.held_action(*key, state.layer))
+            .filter_map(|binding| binding.action.gripper())
+            .collect();
         asked.extend(self.screen.map(|(action, _)| action));
         asked.sort_unstable();
         asked.dedup();
@@ -419,13 +842,11 @@ impl Device {
                 demand[index(binding.control)] += value;
             }
         }
-        for (key, _) in self
-            .buttons
-            .iter()
-            .filter(|(key, state)| state.held && !self.stale_actions.contains(key))
-        {
-            if let Some((control, value)) = mapping
-                .action(key.1, key.0)
+        for (key, state) in self.buttons.iter().filter(|(key, state)| {
+            state.held && !self.stale_actions.contains(key) && !self.paused(key.1)
+        }) {
+            if let Some((control, value)) = self
+                .held_action(*key, state.layer)
                 .and_then(|binding| binding.action.gimbal())
             {
                 demand[index(control)] += value;
@@ -433,6 +854,56 @@ impl Device {
         }
         self.turn.stale = stale;
         demand.map(|value| value.clamp(-1.0, 1.0))
+    }
+
+    /// What the route's camera inputs ask for now (S416), zoom then
+    /// focus: its axes in quarters, so a trigger squeezed slowly asks the
+    /// camera a few times and not on every reading, and its buttons held
+    /// since the route began.
+    fn camera_demand(&mut self) -> [f32; 2] {
+        let mut stale = std::mem::take(&mut self.zoom.stale);
+        let Some(route) = self.route.as_ref() else {
+            return [0.0; 2];
+        };
+        let mapping = &route.mapping;
+        let inputs: Vec<_> = self.axes.keys().copied().collect();
+        let axes = mapping.camera_axes(|binding| self.read(binding));
+        stale.resize(axes.len(), false);
+        let mut demand = [0.0; 2];
+        for ((binding, value), stale) in mapping.camera.iter().zip(axes).zip(&mut stale) {
+            if *stale {
+                *stale = value != 0.0;
+                continue;
+            }
+            if !mapping.camera_conflicts(binding, &inputs) {
+                demand[0] += (value * 4.0).round() / 4.0;
+            }
+        }
+        for (key, state) in self.buttons.iter().filter(|(key, state)| {
+            state.held && !self.stale_actions.contains(key) && !self.paused(key.1)
+        }) {
+            if let Some((index, value)) = self
+                .held_action(*key, state.layer)
+                .and_then(|binding| binding.action.camera())
+            {
+                demand[index] += value;
+            }
+        }
+        self.zoom.stale = stale;
+        #[allow(clippy::cast_possible_truncation, reason = "within ±1")]
+        demand.map(|value| value.clamp(-1.0, 1.0) as f32)
+    }
+
+    /// The zeros the engine is owed when the camera inputs stop asking
+    /// with no input let go: the route ended or changed, or the
+    /// controller went.
+    #[allow(clippy::float_cmp, reason = "the zeros are set exactly")]
+    fn camera_ended(&mut self, id: &str) -> Option<Report> {
+        let told = std::mem::take(&mut self.zoom.told);
+        (told != [0.0; 2]).then(|| Report::CameraDrive {
+            id: id.to_owned(),
+            drive: [0.0; 2],
+        })
     }
 
     /// The rates stop going to the gimbal it turned, which is told to
@@ -563,6 +1034,8 @@ impl Controls {
                     if device.turn.asking {
                         reports.push(Report::GimbalLetGo { id: id.clone() });
                     }
+                    // And a zoom or focus it was holding (S416).
+                    reports.extend(device.camera_ended(&id));
                 }
                 reports.push(Report::Disconnected { id });
                 reports
@@ -595,7 +1068,14 @@ impl Controls {
                 button,
                 code,
                 pressed,
-            } => self.button(id, button, code, pressed),
+            } => self.button(&id, button, code, pressed),
+            InputEvent::Power { id, power } => {
+                if self.devices.contains_key(&id) {
+                    vec![Report::Power { id, power }]
+                } else {
+                    Vec::new()
+                }
+            }
             InputEvent::Gripper { id, action, at_us } => {
                 if let Some(device) = self.devices.get_mut(&id) {
                     match action {
@@ -612,6 +1092,7 @@ impl Controls {
                 }
                 Vec::new()
             }
+            InputEvent::Navigate { id, on, at_us } => self.navigate(&id, on, at_us),
             InputEvent::Present { id, axes, buttons } => {
                 let device = self.devices.entry(id.clone()).or_default();
                 for (code, axis, value) in axes {
@@ -641,19 +1122,27 @@ impl Controls {
     }
 
     /// A button went down or up: a press sends, or starts the hold its
-    /// binding asks for; letting go ends that hold.
+    /// binding asks for; letting go ends that hold. With more than one
+    /// gesture bound on the press's layer (S418), the press goes when let
+    /// go, or once no second press came when a double press is bound.
     fn button(
         &mut self,
-        id: String,
+        id: &str,
         button: Option<GamepadButton>,
         code: Option<u32>,
         pressed: bool,
     ) -> Vec<Report> {
-        let device = self.devices.entry(id.clone()).or_default();
+        let device = self.devices.entry(id.to_owned()).or_default();
         let button = device.named(code, button);
         let key = (code, button);
         let before = device.buttons.get(&key).copied().unwrap_or_default();
         let was = before.held;
+        // A press's layer is the Shift held as it goes down (S418).
+        let layer = if pressed && !was {
+            device.layer()
+        } else {
+            before.layer
+        };
         if pressed || device.buttons.contains_key(&key) {
             device.buttons.insert(
                 key,
@@ -661,49 +1150,63 @@ impl Controls {
                     held: pressed,
                     seen: before.seen || pressed,
                     presses: before.presses.saturating_add(u32::from(pressed && !was)),
+                    layer,
                 },
             );
         }
-        let action_bound = device
-            .route
-            .as_ref()
-            .is_some_and(|route| route.mapping.action(button, code).is_some());
-        if action_bound {
+        if device.paused(button) {
             if !pressed {
                 device.stale_actions.retain(|held| *held != (code, button));
+            }
+            return Vec::new();
+        }
+        if device.held_action(key, layer).is_some() {
+            if !pressed {
+                device.stale_actions.retain(|held| *held != key);
             }
             device.settle_gripper();
             return Vec::new();
         }
         if !pressed {
-            let held = Held::Button { button, code };
-            return if was && device.let_go(&held) {
-                vec![Report::LetGo { id }]
-            } else {
-                Vec::new()
-            };
+            return device.button_up(id, key, was);
         }
         if was || (button.is_none() && code.is_none()) {
             return Vec::new();
         }
-        let hold = device.route.as_ref().and_then(|route| {
-            let binding = route.mapping.button(button, code)?;
-            Some((binding.command.clone(), binding.hold_ms?))
+        device.button_down(id, key, layer)
+    }
+
+    /// Navigate on or off for a controller (S420). Starting it lets go a
+    /// hold under way on one of its buttons and stops what they hold, such
+    /// as the gimbal; ending it gives them back.
+    fn navigate(&mut self, id: &str, on: bool, at_us: u64) -> Vec<Report> {
+        let Some(device) = self.devices.get_mut(id) else {
+            return Vec::new();
+        };
+        if !on {
+            device.end_navigating();
+            return Vec::new();
+        }
+        let started = device.navigating.replace(at_us).is_none();
+        if !started {
+            return Vec::new();
+        }
+        let before = device.holds.len();
+        device.holds.retain(|pending| {
+            !matches!(pending.held, Held::Button { button, .. }
+                if button.is_some_and(|b| NAVIGATE_BUTTONS.contains(&b)))
         });
-        match hold {
-            Some((command, hold_ms)) => {
-                device.holds.push(Pending {
-                    held: Held::Button { button, code },
-                    since_us: None,
-                    hold_ms,
-                });
-                vec![Report::Holding {
-                    id,
-                    command,
-                    hold_ms,
-                }]
-            }
-            None => vec![Report::Pressed { id, button, code }],
+        // Its buttons' undecided gestures and repeats end too (S418).
+        let navigating = |(_, button): &(Option<u32>, Option<GamepadButton>)| {
+            button.is_some_and(|b| NAVIGATE_BUTTONS.contains(&b))
+        };
+        device.gestures.retain(|gesture| !navigating(&gesture.key));
+        device.repeats.retain(|repeat| !navigating(&repeat.key));
+        device.settle_gripper();
+        if device.holds.len() == before {
+            Vec::new()
+        } else {
+            vec![Report::LetGo { id: id.to_owned() }]
         }
     }
 
@@ -716,22 +1219,40 @@ impl Controls {
         for (id, device) in &mut self.devices {
             let inputs: Vec<_> = device.axes.keys().copied().collect();
             let safe = |held: &Held| match held {
-                Held::Button { .. } => true,
+                Held::Button { binding, .. } => device
+                    .route
+                    .as_ref()
+                    .is_some_and(|r| r.mapping.buttons.contains(binding)),
                 Held::Position(p) => device.route.as_ref().is_some_and(|r| {
                     r.mapping.positions.contains(p) && !r.mapping.position_conflicts(p, &inputs)
                 }),
             };
+            let mut done = Vec::new();
             for held in due(&mut device.holds, now_us) {
                 reports.push(Report::LetGo { id: id.clone() });
-                if safe(&held) {
-                    reports.push(held.report(id));
+                if let Held::Button { button, code, .. } = &held {
+                    done.push((*code, *button));
+                }
+                if safe(&held)
+                    && let Some(route) = device.route.as_ref()
+                {
+                    reports.push(held.report(id, &route.mapping));
+                }
+            }
+            // A long press that went decides its press: nothing more goes.
+            for gesture in &mut device.gestures {
+                if done.contains(&gesture.key) {
+                    gesture.stage = Stage::Done;
                 }
             }
             for held in due(&mut device.settling, now_us) {
-                if safe(&held) {
-                    reports.push(held.report(id));
+                if safe(&held)
+                    && let Some(route) = device.route.as_ref()
+                {
+                    reports.push(held.report(id, &route.mapping));
                 }
             }
+            reports.extend(device.due_gestures(id, now_us));
         }
         reports
     }
@@ -750,6 +1271,13 @@ impl Controls {
                 device.screen_stale = true;
                 device.settle_gripper();
                 expired = true;
+            }
+            // A window that stopped refreshing Navigate gives its buttons back (S420).
+            if device
+                .navigating
+                .is_some_and(|at| now_us.saturating_sub(at) >= NAVIGATE_LEASE_US)
+            {
+                device.end_navigating();
             }
         }
         expired
@@ -855,6 +1383,7 @@ impl Controls {
                         })
                         .collect(),
                     gripper: device.gripper.map(Into::into),
+                    navigating: device.navigating.is_some(),
                 })
                 .collect(),
         }
@@ -867,7 +1396,17 @@ impl Controls {
         // an axis off its centre now turns nothing until centred once.
         self.stops.extend(device.gimbal_ended());
         let asked = std::mem::take(&mut device.turn.asking);
+        // So does a zoom or focus it was holding (S416).
+        let zoomed = device.camera_ended(id);
         device.route = route;
+        device.zoom.stale = device.route.as_ref().map_or_else(Vec::new, |route| {
+            route
+                .mapping
+                .camera_axes(|binding| device.read(binding))
+                .into_iter()
+                .map(|value| value != 0.0)
+                .collect()
+        });
         device.turn.stale = device.route.as_ref().map_or_else(Vec::new, |route| {
             route
                 .mapping
@@ -890,6 +1429,10 @@ impl Controls {
         let let_go = !device.holds.is_empty();
         device.holds.clear();
         device.settling.clear();
+        // Nor a press waiting to be told from a long or double press, or a
+        // repeat (S418).
+        device.gestures.clear();
+        device.repeats.clear();
         let mut reports = Vec::new();
         if let_go {
             reports.push(Report::LetGo { id: id.to_owned() });
@@ -897,6 +1440,7 @@ impl Controls {
         if asked {
             reports.push(Report::GimbalLetGo { id: id.to_owned() });
         }
+        reports.extend(zoomed);
         // Neutral is judged through the mapping in use.
         reports.extend(self.neutral_changed(id));
         reports
@@ -951,6 +1495,29 @@ impl Controls {
             }
         }
         outputs
+    }
+
+    /// What the camera inputs of the routed controllers ask for now
+    /// (S416), for the engine: call on every pilot tick. A change is said
+    /// at once, and a zoom or focus still held is said again every
+    /// [`CAMERA_REPEAT_MS`].
+    #[allow(clippy::float_cmp, reason = "demands are quarter steps and exact")]
+    pub fn camera_outputs(&mut self, now_us: u64) -> Vec<Report> {
+        let mut reports = Vec::new();
+        for (id, device) in &mut self.devices {
+            let drive = device.camera_demand();
+            let again = drive != [0.0; 2]
+                && now_us.saturating_sub(device.zoom.told_us) >= CAMERA_REPEAT_MS * 1_000;
+            if drive != device.zoom.told || again {
+                device.zoom.told = drive;
+                device.zoom.told_us = now_us;
+                reports.push(Report::CameraDrive {
+                    id: id.clone(),
+                    drive,
+                });
+            }
+        }
+        reports
     }
 
     /// The gimbals whose rates just ended, each to be told to stop: after
@@ -2134,11 +2701,13 @@ mod gripper_tests {
                 button: GamepadButton::RightTrigger,
                 code: None,
                 action: HeldAction::Open,
+                shift: None,
             },
             ActionBinding {
                 button: GamepadButton::LeftTrigger,
                 code: None,
                 action: HeldAction::Close,
+                shift: None,
             },
         ];
         ControlRoute {
@@ -2202,6 +2771,7 @@ mod gripper_tests {
             button: GamepadButton::North,
             code: None,
             action: HeldAction::Talk,
+            shift: None,
         });
         controls.route("g", Some(talking));
         let sticks = controls.outputs();
@@ -2701,5 +3271,762 @@ mod gimbal_tests {
         pad(&mut controls, mapping);
         controls.input(axis(GamepadAxis::RightStickX, 1.0));
         assert_eq!(controls.gimbal_outputs(), super::GimbalOutputs::default());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod camera_tests {
+    use uxduck_core::domain::controller::{
+        ActionBinding, AxisBinding, CameraAxis, CameraAxisBinding, GamepadAxis, GamepadButton,
+        HeldAction, InputMapping,
+    };
+    use uxduck_core::domain::settings::PilotInputMethod;
+
+    use super::{CAMERA_REPEAT_MS, Controls, InputEvent, Report};
+    use crate::runtime::ControlRoute;
+
+    /// Mode 2 with Zoom in and Focus far held on the bumpers and the right
+    /// trigger as the zoom axis.
+    fn camera_pad() -> InputMapping {
+        let held = |button, action| ActionBinding {
+            button,
+            code: None,
+            action,
+            shift: None,
+        };
+        InputMapping {
+            actions: vec![
+                held(GamepadButton::RightTrigger, HeldAction::ZoomIn),
+                held(GamepadButton::LeftTrigger, HeldAction::FocusFar),
+            ],
+            camera: vec![CameraAxisBinding {
+                control: CameraAxis::Zoom,
+                input: AxisBinding {
+                    axis: GamepadAxis::RightZ,
+                    code: None,
+                    inverted: false,
+                    calibration: None,
+                },
+            }],
+            ..InputMapping::mode_2()
+        }
+    }
+
+    fn pad(controls: &mut Controls) {
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        controls.route(
+            "g",
+            Some(ControlRoute {
+                vehicle_id: "copter".into(),
+                mapping: camera_pad(),
+                pilot_input_method: PilotInputMethod::ManualControl,
+                gripper: None,
+            }),
+        );
+    }
+
+    fn press(button: GamepadButton, pressed: bool) -> InputEvent {
+        InputEvent::Button {
+            id: "g".into(),
+            button: Some(button),
+            code: None,
+            pressed,
+        }
+    }
+
+    fn drive(drive: [f32; 2]) -> Vec<Report> {
+        vec![Report::CameraDrive {
+            id: "g".into(),
+            drive,
+        }]
+    }
+
+    #[test]
+    fn a_held_zoom_is_said_at_once_again_while_held_and_zero_when_let_go() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        assert!(controls.camera_outputs(0).is_empty());
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(controls.camera_outputs(0), drive([1.0, 0.0]));
+        assert!(controls.camera_outputs(100_000).is_empty(), "said once");
+        let again = CAMERA_REPEAT_MS * 1_000;
+        assert_eq!(controls.camera_outputs(again), drive([1.0, 0.0]));
+        controls.input(press(GamepadButton::LeftTrigger, true));
+        assert_eq!(controls.camera_outputs(again + 1), drive([1.0, 1.0]));
+        controls.input(press(GamepadButton::RightTrigger, false));
+        controls.input(press(GamepadButton::LeftTrigger, false));
+        assert_eq!(controls.camera_outputs(again + 2), drive([0.0, 0.0]));
+        assert!(
+            controls.camera_outputs(10 * again).is_empty(),
+            "nothing held"
+        );
+    }
+
+    #[test]
+    fn the_zoom_axis_goes_in_quarters_and_only_once_it_has_been_centred() {
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        let squeeze = |value| InputEvent::Axis {
+            id: "g".into(),
+            axis: Some(GamepadAxis::RightZ),
+            code: None,
+            value,
+        };
+        controls.input(squeeze(0.9));
+        pad(&mut controls);
+        assert!(controls.camera_outputs(0).is_empty(), "not centred yet");
+        controls.input(squeeze(0.0));
+        assert!(controls.camera_outputs(1).is_empty());
+        controls.input(squeeze(1.0));
+        assert_eq!(controls.camera_outputs(2), drive([1.0, 0.0]));
+        controls.input(squeeze(0.98));
+        assert!(controls.camera_outputs(3).is_empty(), "the same quarter");
+        controls.input(squeeze(-0.55));
+        let [zoom, focus] = match controls.camera_outputs(4).as_slice() {
+            [Report::CameraDrive { drive, .. }] => *drive,
+            other => panic!("{other:?}"),
+        };
+        assert!((zoom + 0.5).abs() < 1e-6 && focus == 0.0, "{zoom}");
+    }
+
+    #[test]
+    fn a_zoom_held_when_the_route_ends_or_the_controller_goes_is_owed_its_zero() {
+        let mut controls = Controls::default();
+        pad(&mut controls);
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(controls.camera_outputs(0), drive([1.0, 0.0]));
+        assert_eq!(controls.route("g", None), drive([0.0, 0.0]));
+        assert!(controls.camera_outputs(1).is_empty());
+
+        pad(&mut controls);
+        controls.input(press(GamepadButton::RightTrigger, false));
+        controls.input(press(GamepadButton::RightTrigger, true));
+        assert_eq!(controls.camera_outputs(2), drive([1.0, 0.0]));
+        let gone = controls.input(InputEvent::Disconnected { id: "g".into() });
+        assert!(
+            gone.contains(&Report::CameraDrive {
+                id: "g".into(),
+                drive: [0.0, 0.0]
+            }),
+            "{gone:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod navigate_tests {
+    use uxduck_core::domain::command::Command;
+    use uxduck_core::domain::controller::{
+        ActionBinding, ButtonBinding, ButtonGesture, GamepadAxis, GamepadButton, HeldAction,
+        InputMapping,
+    };
+    use uxduck_core::domain::settings::PilotInputMethod;
+
+    use super::{Controls, InputEvent, NAVIGATE_LEASE_US, Report};
+    use crate::runtime::{ControlRoute, GimbalRoute};
+
+    /// Mode 2 with the direction pad on the gimbal, Select as Navigate and
+    /// South held for two seconds to land.
+    fn mapping() -> InputMapping {
+        let mut mapping = InputMapping::mode_2().with_gimbal_pad();
+        mapping.actions.push(ActionBinding {
+            button: GamepadButton::Select,
+            code: None,
+            action: HeldAction::Navigate,
+            shift: None,
+        });
+        mapping.buttons.push(ButtonBinding {
+            button: GamepadButton::South,
+            code: None,
+            command: Command::Land,
+            hold_ms: Some(2_000),
+            gesture: ButtonGesture::Press,
+            shift: None,
+            repeat_ms: None,
+        });
+        mapping
+    }
+
+    fn routed() -> Controls {
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        controls.route(
+            "g",
+            Some(ControlRoute {
+                vehicle_id: "copter".into(),
+                mapping: mapping(),
+                pilot_input_method: PilotInputMethod::ManualControl,
+                gripper: None,
+            }),
+        );
+        controls
+    }
+
+    fn press(button: GamepadButton, pressed: bool) -> InputEvent {
+        InputEvent::Button {
+            id: "g".into(),
+            button: Some(button),
+            code: None,
+            pressed,
+        }
+    }
+
+    fn navigate(on: bool, at_us: u64) -> InputEvent {
+        InputEvent::Navigate {
+            id: "g".into(),
+            on,
+            at_us,
+        }
+    }
+
+    fn tap(controls: &mut Controls, button: GamepadButton) -> Vec<Report> {
+        let mut reports = controls.input(press(button, true));
+        reports.extend(controls.input(press(button, false)));
+        reports
+    }
+
+    fn presses(controls: &Controls, button: GamepadButton) -> u32 {
+        controls.snapshot().controllers[0]
+            .buttons
+            .iter()
+            .find(|b| b.button == Some(button.into()))
+            .map_or(0, |b| b.presses)
+    }
+
+    fn turning(controls: &mut Controls) -> bool {
+        let outputs = controls.gimbal_outputs();
+        outputs
+            .reports
+            .iter()
+            .any(|r| *r == Report::GimbalAsked { id: "g".into() })
+            || !outputs.rates.is_empty()
+    }
+
+    #[test]
+    fn navigating_pauses_the_direction_pad_south_and_east_and_the_sticks_still_fly() {
+        let mut controls = routed();
+        assert!(controls.input(navigate(true, 0)).is_empty());
+        assert!(controls.snapshot().controllers[0].navigating);
+
+        // East is Return in Mode 2 and South a hold: neither goes, and the
+        // window still counts their presses.
+        assert!(tap(&mut controls, GamepadButton::East).is_empty());
+        assert!(controls.input(press(GamepadButton::South, true)).is_empty());
+        assert!(controls.due_holds(3_000_000).is_empty());
+        controls.input(press(GamepadButton::South, false));
+        assert!(tap(&mut controls, GamepadButton::DpadUp).is_empty());
+        assert_eq!(presses(&controls, GamepadButton::East), 1);
+        assert_eq!(presses(&controls, GamepadButton::DpadUp), 1);
+        controls.input(press(GamepadButton::DpadLeft, true));
+        assert!(!turning(&mut controls), "the direction pad turns no gimbal");
+        controls.input(press(GamepadButton::DpadLeft, false));
+
+        // North still sends its mode, and the sticks fly as before.
+        assert_eq!(
+            tap(&mut controls, GamepadButton::North),
+            [Report::Pressed {
+                id: "g".into(),
+                button: Some(GamepadButton::North),
+                code: None,
+            }]
+        );
+        let before = controls.outputs();
+        controls.input(InputEvent::Axis {
+            id: "g".into(),
+            axis: Some(GamepadAxis::RightStickX),
+            code: None,
+            value: 0.8,
+        });
+        assert_ne!(controls.outputs(), before, "the stick still rolls");
+
+        // Ended, East is Return again.
+        controls.input(navigate(false, 0));
+        assert!(!controls.snapshot().controllers[0].navigating);
+        assert_eq!(
+            controls.input(press(GamepadButton::East, true)),
+            [Report::Pressed {
+                id: "g".into(),
+                button: Some(GamepadButton::East),
+                code: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn starting_navigate_stops_what_its_buttons_hold_and_ending_it_needs_a_fresh_press() {
+        let mut controls = routed();
+        controls.input(press(GamepadButton::DpadUp, true));
+        assert!(turning(&mut controls));
+        controls.steer_gimbal(
+            "g",
+            Some(GimbalRoute {
+                vehicle_id: "copter".into(),
+                component_id: 1,
+                device_id: 1,
+            }),
+        );
+        assert!(turning(&mut controls));
+
+        // A hold on South under way is let go.
+        controls.input(press(GamepadButton::South, true));
+        assert_eq!(
+            controls.input(navigate(true, 0)),
+            [Report::LetGo { id: "g".into() }]
+        );
+        assert!(controls.due_holds(3_000_000).is_empty());
+        let outputs = controls.gimbal_outputs();
+        assert_eq!(outputs.reports, [Report::GimbalLetGo { id: "g".into() }]);
+        assert_eq!(
+            controls.gimbal_stops().len(),
+            1,
+            "the gimbal is told to stop"
+        );
+
+        // Ended with the button still down: nothing until it is pressed again.
+        controls.input(navigate(false, 0));
+        assert!(!turning(&mut controls));
+        assert!(controls.due_holds(6_000_000).is_empty());
+        controls.input(press(GamepadButton::DpadUp, false));
+        controls.input(press(GamepadButton::DpadUp, true));
+        assert!(turning(&mut controls));
+    }
+
+    #[test]
+    fn navigate_not_refreshed_gives_the_buttons_back() {
+        let mut controls = routed();
+        controls.input(navigate(true, 0));
+        controls.input(navigate(true, NAVIGATE_LEASE_US - 1));
+        controls.expire_screen_holds(NAVIGATE_LEASE_US + 1);
+        assert!(
+            controls.snapshot().controllers[0].navigating,
+            "refreshed in time"
+        );
+        controls.expire_screen_holds(2 * NAVIGATE_LEASE_US);
+        assert!(!controls.snapshot().controllers[0].navigating);
+        assert_eq!(
+            tap(&mut controls, GamepadButton::East).len(),
+            1,
+            "Return again"
+        );
+    }
+
+    #[test]
+    fn a_window_action_asks_nothing_of_the_vehicle() {
+        let mut controls = routed();
+        let sticks = controls.outputs();
+        for action in [
+            HeldAction::NextVehicle,
+            HeldAction::PreviousVehicle,
+            HeldAction::CockpitTab,
+            HeldAction::CameraTab,
+            HeldAction::MapTab,
+            HeldAction::NextCamera,
+            HeldAction::CameraFullWindow,
+            HeldAction::ShowOnMap,
+            HeldAction::Navigate,
+        ] {
+            assert!(action.for_window());
+            assert!(action.gripper().is_none() && action.gimbal().is_none());
+        }
+        assert!(tap(&mut controls, GamepadButton::Select).is_empty());
+        assert!(
+            !controls.snapshot().controllers[0].navigating,
+            "the window starts it"
+        );
+        assert_eq!(presses(&controls, GamepadButton::Select), 1);
+        assert_eq!(controls.outputs(), sticks);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod gesture_tests {
+    //! Gestures, Shift layers and repeats (S418).
+    use super::*;
+    use uxduck_core::domain::camera::CameraAction;
+    use uxduck_core::domain::controller::{HeldAction, ShiftButton};
+    use uxduck_core::domain::settings::PilotInputMethod;
+
+    const LB: ShiftButton = ShiftButton {
+        button: GamepadButton::LeftTrigger,
+        code: None,
+    };
+
+    fn binding(button: GamepadButton, command: Command) -> ButtonBinding {
+        ButtonBinding {
+            button,
+            code: None,
+            command,
+            hold_ms: None,
+            gesture: ButtonGesture::Press,
+            shift: None,
+            repeat_ms: None,
+        }
+    }
+
+    fn photo() -> Command {
+        Command::Camera {
+            component_id: None,
+            device_id: None,
+            action: CameraAction::TakePhoto,
+        }
+    }
+
+    fn zoom() -> Command {
+        Command::Camera {
+            component_id: None,
+            device_id: None,
+            action: CameraAction::ZoomStep { steps: 1 },
+        }
+    }
+
+    fn shift(button: GamepadButton) -> ActionBinding {
+        ActionBinding {
+            button,
+            code: None,
+            action: HeldAction::Shift,
+            shift: None,
+        }
+    }
+
+    /// South: a photo on a press, Return on a long press of 1 s and Land on
+    /// a double press; LB a Shift, with Shift + South as Arm.
+    fn mapping() -> InputMapping {
+        let mut mapping = InputMapping::mode_2();
+        mapping.buttons = vec![
+            binding(GamepadButton::South, photo()),
+            ButtonBinding {
+                hold_ms: Some(1_000),
+                ..binding(GamepadButton::South, Command::Rtl)
+            },
+            ButtonBinding {
+                gesture: ButtonGesture::DoublePress,
+                ..binding(GamepadButton::South, Command::Land)
+            },
+            ButtonBinding {
+                shift: Some(LB),
+                ..binding(GamepadButton::South, Command::Arm)
+            },
+            binding(GamepadButton::East, Command::Rtl),
+        ];
+        mapping.actions = vec![shift(GamepadButton::LeftTrigger)];
+        assert_eq!(mapping.button_problem(), None);
+        mapping
+    }
+
+    fn pad(mapping: InputMapping) -> Controls {
+        let mut controls = Controls::default();
+        controls.input(InputEvent::Connected {
+            id: "g".into(),
+            name: "Pad".into(),
+            layout_known: true,
+        });
+        controls.route(
+            "g",
+            Some(ControlRoute {
+                pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
+                vehicle_id: "v".into(),
+                mapping,
+            }),
+        );
+        controls
+    }
+
+    fn press(controls: &mut Controls, button: GamepadButton, pressed: bool) -> Vec<Report> {
+        controls.input(InputEvent::Button {
+            id: "g".into(),
+            button: Some(button),
+            code: None,
+            pressed,
+        })
+    }
+
+    /// The commands among `reports`, as the engine would send them.
+    fn sent(reports: &[Report], mapping: &InputMapping) -> Vec<Command> {
+        reports
+            .iter()
+            .filter_map(|report| match report {
+                Report::Pressed { button, code, .. } => {
+                    mapping.button(*button, *code).map(|b| b.command.clone())
+                }
+                Report::Gesture { binding, .. } => Some(binding.command.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_press_waits_only_as_long_as_its_double_press_needs() {
+        let m = mapping();
+        let mut c = pad(m.clone());
+        // A press: down, up, and it goes once 300 ms pass without a second.
+        assert!(sent(&press(&mut c, GamepadButton::South, true), &m).is_empty());
+        assert!(matches!(
+            c.due_holds(1_000_000).as_slice(),
+            [] | [Report::Holding { .. }]
+        ));
+        let up = press(&mut c, GamepadButton::South, false);
+        assert_eq!(up, [Report::LetGo { id: "g".into() }], "no long press");
+        assert!(
+            sent(&c.due_holds(1_040_000), &m).is_empty(),
+            "its window starts"
+        );
+        assert!(
+            sent(&c.due_holds(1_300_000), &m).is_empty(),
+            "260 ms: waits"
+        );
+        assert_eq!(sent(&c.due_holds(1_340_000), &m), [photo()], "300 ms: goes");
+        assert!(sent(&c.due_holds(3_000_000), &m).is_empty(), "once");
+
+        // A double press: the second press goes at once and nothing else.
+        press(&mut c, GamepadButton::South, true);
+        press(&mut c, GamepadButton::South, false);
+        c.due_holds(4_000_000);
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::South, true), &m),
+            [Command::Land]
+        );
+        assert!(sent(&press(&mut c, GamepadButton::South, false), &m).is_empty());
+        assert!(sent(&c.due_holds(9_000_000), &m).is_empty());
+
+        // East has only a press, so it goes on the press without waiting.
+        assert_eq!(
+            press(&mut c, GamepadButton::East, true),
+            [Report::Pressed {
+                id: "g".into(),
+                button: Some(GamepadButton::East),
+                code: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_long_press_goes_when_held_and_its_press_does_not() {
+        let m = mapping();
+        let mut c = pad(m.clone());
+        assert_eq!(
+            press(&mut c, GamepadButton::South, true),
+            [Report::Holding {
+                id: "g".into(),
+                command: Command::Rtl,
+                hold_ms: 1_000,
+            }]
+        );
+        c.due_holds(10_000_000);
+        assert!(sent(&c.due_holds(10_900_000), &m).is_empty());
+        let done = c.due_holds(11_000_000);
+        assert_eq!(done[0], Report::LetGo { id: "g".into() });
+        assert_eq!(sent(&done, &m), [Command::Rtl]);
+        assert!(press(&mut c, GamepadButton::South, false).is_empty());
+        assert!(
+            sent(&c.due_holds(20_000_000), &m).is_empty(),
+            "no press after"
+        );
+
+        // Without a double press bound, its press goes on letting go.
+        let mut m = mapping();
+        m.buttons.retain(|b| b.gesture.is_press());
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::South, true);
+        c.due_holds(0);
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::South, false), &m),
+            [photo()]
+        );
+    }
+
+    #[test]
+    fn a_shift_gives_every_other_button_its_layer_and_sends_nothing_itself() {
+        let m = mapping();
+        let mut c = pad(m.clone());
+        assert!(press(&mut c, GamepadButton::LeftTrigger, true).is_empty());
+        let layered = press(&mut c, GamepadButton::South, true);
+        assert_eq!(
+            layered,
+            [Report::Gesture {
+                id: "g".into(),
+                binding: m.buttons[3].clone(),
+            }]
+        );
+        press(&mut c, GamepadButton::South, false);
+        // East has nothing on the Shift's layer, so nothing goes.
+        assert!(press(&mut c, GamepadButton::East, true).is_empty());
+        press(&mut c, GamepadButton::East, false);
+        assert!(press(&mut c, GamepadButton::LeftTrigger, false).is_empty());
+        assert!(sent(&c.due_holds(5_000_000), &m).is_empty());
+        // Without the Shift, South is its own again.
+        press(&mut c, GamepadButton::South, true);
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::East, true), &m),
+            [Command::Rtl]
+        );
+    }
+
+    #[test]
+    fn a_shift_let_go_mid_press_keeps_the_layer_the_press_began_on() {
+        let mut m = mapping();
+        m.buttons.push(ButtonBinding {
+            shift: Some(LB),
+            hold_ms: Some(1_000),
+            ..binding(GamepadButton::North, Command::Land)
+        });
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::LeftTrigger, true);
+        assert!(matches!(
+            press(&mut c, GamepadButton::North, true).as_slice(),
+            [Report::Holding {
+                command: Command::Land,
+                ..
+            }]
+        ));
+        c.due_holds(0);
+        press(&mut c, GamepadButton::LeftTrigger, false);
+        assert_eq!(sent(&c.due_holds(1_000_000), &m), [Command::Land]);
+
+        // Two Shifts held at once: no layer, so nothing goes.
+        m.actions.push(shift(GamepadButton::RightTrigger));
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::LeftTrigger, true);
+        press(&mut c, GamepadButton::RightTrigger, true);
+        assert!(press(&mut c, GamepadButton::South, true).is_empty());
+        press(&mut c, GamepadButton::South, false);
+        assert!(sent(&c.due_holds(5_000_000), &m).is_empty());
+    }
+
+    #[test]
+    fn a_route_ending_mid_gesture_sends_nothing_of_it() {
+        let m = mapping();
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::South, true);
+        press(&mut c, GamepadButton::South, false);
+        c.due_holds(0);
+        // Its press is waiting for a second when the route ends.
+        assert!(c.route("g", None).is_empty() || !c.routed());
+        assert!(c.due_holds(5_000_000).is_empty());
+        // And a long press under way.
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::South, true);
+        c.due_holds(0);
+        let ended = c.route("g", None);
+        assert!(
+            ended.contains(&Report::LetGo { id: "g".into() }),
+            "{ended:?}"
+        );
+        assert!(c.due_holds(5_000_000).is_empty());
+        assert!(press(&mut c, GamepadButton::South, false).is_empty());
+        // Unplugged mid-gesture, the same.
+        let mut c = pad(m);
+        press(&mut c, GamepadButton::South, true);
+        press(&mut c, GamepadButton::South, false);
+        c.input(InputEvent::Disconnected { id: "g".into() });
+        assert!(c.due_holds(5_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_step_repeats_while_held_and_stops_when_let_go() {
+        let mut m = InputMapping::mode_2();
+        m.buttons = vec![ButtonBinding {
+            repeat_ms: Some(250),
+            ..binding(GamepadButton::DpadUp, zoom())
+        }];
+        assert_eq!(m.button_problem(), None);
+        let mut c = pad(m.clone());
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::DpadUp, true), &m),
+            [zoom()]
+        );
+        assert!(
+            sent(&c.due_holds(1_000_000), &m).is_empty(),
+            "its time starts"
+        );
+        assert!(sent(&c.due_holds(1_200_000), &m).is_empty());
+        assert_eq!(sent(&c.due_holds(1_250_000), &m), [zoom()]);
+        assert_eq!(sent(&c.due_holds(1_500_000), &m), [zoom()]);
+        // A late tick sends one, not every one it missed.
+        assert_eq!(sent(&c.due_holds(2_600_000), &m), [zoom()]);
+        press(&mut c, GamepadButton::DpadUp, false);
+        assert!(sent(&c.due_holds(5_000_000), &m).is_empty());
+    }
+
+    /// Navigate (S420) takes the direction pad, South and East: a step
+    /// repeating on one stops, and a press waiting for its double press
+    /// sends nothing.
+    #[test]
+    fn navigate_ends_its_buttons_repeats_and_undecided_presses() {
+        let mut m = mapping();
+        m.buttons.push(ButtonBinding {
+            repeat_ms: Some(250),
+            ..binding(GamepadButton::DpadUp, zoom())
+        });
+        assert_eq!(m.button_problem(), None);
+        let mut c = pad(m.clone());
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::DpadUp, true), &m),
+            [zoom()]
+        );
+        c.due_holds(1_000_000);
+        press(&mut c, GamepadButton::South, true);
+        press(&mut c, GamepadButton::South, false);
+        c.input(InputEvent::Navigate {
+            id: "g".into(),
+            on: true,
+            at_us: 1_000_000,
+        });
+        assert!(sent(&c.due_holds(1_100_000), &m).is_empty());
+        assert!(sent(&c.due_holds(3_000_000), &m).is_empty());
+    }
+
+    #[test]
+    fn a_held_action_on_a_shift_layer_holds_while_its_button_does() {
+        let mut m = InputMapping::mode_2();
+        m.actions = vec![
+            shift(GamepadButton::LeftTrigger),
+            ActionBinding {
+                button: GamepadButton::DpadUp,
+                code: None,
+                action: HeldAction::GimbalUp,
+                shift: Some(LB),
+            },
+        ];
+        m.buttons = vec![binding(GamepadButton::DpadUp, Command::Rtl)];
+        assert_eq!(m.button_problem(), None);
+        let mut c = pad(m.clone());
+        press(&mut c, GamepadButton::LeftTrigger, true);
+        assert!(
+            press(&mut c, GamepadButton::DpadUp, true).is_empty(),
+            "no command"
+        );
+        assert_eq!(
+            c.gimbal_outputs().reports,
+            [Report::GimbalAsked { id: "g".into() }]
+        );
+        // Shift let go: Up still holds the gimbal's action it was pressed for.
+        press(&mut c, GamepadButton::LeftTrigger, false);
+        assert!(c.gimbal_outputs().reports.is_empty());
+        press(&mut c, GamepadButton::DpadUp, false);
+        assert_eq!(
+            c.gimbal_outputs().reports,
+            [Report::GimbalLetGo { id: "g".into() }]
+        );
+        // Without the Shift, Up sends its command.
+        assert_eq!(
+            sent(&press(&mut c, GamepadButton::DpadUp, true), &m),
+            [Command::Rtl]
+        );
     }
 }

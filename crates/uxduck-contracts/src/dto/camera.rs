@@ -253,6 +253,32 @@ pub enum CameraAction {
     /// Ends the camera's tracking. Needs `tracking-point` or
     /// `tracking-rectangle`.
     StopTracking,
+    /// Starts recording when the camera last said it was not, and stops
+    /// when it said it was: a controller's one button (S416). Sent and
+    /// receipted as `start-recording` or `stop-recording`. Refused while
+    /// the camera has not said whether it records. Needs `capture-video`.
+    ToggleRecording,
+    /// Video mode when the camera last said photo, and photo otherwise
+    /// (S416). Sent and receipted as `set-mode`. Refused while the camera
+    /// has not said its mode. Needs `modes`.
+    ToggleMode,
+    /// The daylight picture when the camera last showed its thermal one,
+    /// and the thermal one otherwise (S416). Sent and receipted as
+    /// `set-source`. Refused while the camera has named no stream.
+    ToggleSource,
+    /// Zooms on until told otherwise, at `rate` from -1 to 1: in when
+    /// positive, out when negative, and 0 stops (S416). A controller's
+    /// held zoom sends it. A camera that refuses it is zoomed by steps.
+    /// Needs `basic-zoom`.
+    ZoomRate {
+        rate: f32,
+    },
+    /// Focuses on until told otherwise, at `rate` from -1 to 1: farther
+    /// when positive, nearer when negative, and 0 stops (S416). Needs
+    /// `basic-focus`.
+    FocusRate {
+        rate: f32,
+    },
 }
 
 /// The type of one of a camera's own settings, as its definition file

@@ -22,6 +22,7 @@ pub mod approvals;
 mod attachments;
 mod battery_alerts;
 mod calculated;
+mod camera_drives;
 mod camera_settings;
 mod cameras;
 mod checklist;
@@ -30,6 +31,7 @@ pub mod commands;
 pub mod companions;
 pub mod connection_history;
 mod controller_cleanup;
+mod controller_feedback;
 pub mod controller_input;
 pub mod controllers;
 pub mod diagnostics;
@@ -40,6 +42,7 @@ mod engaged_sim_usage;
 pub mod feedback;
 pub mod finds;
 mod firmware_profiles;
+mod flight_actions;
 mod flight_time;
 mod flight_usage;
 mod forwarding;
@@ -351,6 +354,9 @@ pub struct Engine {
     /// Who has each gimbal, the ones UXDuck took, and who looks at them
     /// (S406).
     gimbals: gimbals::Gimbals,
+    /// The zoom and focus controllers drive, and the photos they asked
+    /// for (S416).
+    camera_drives: camera_drives::Drives,
     /// Each camera's definition file and the values of the settings it
     /// names (S411).
     camera_settings: camera_settings::Book,
@@ -374,6 +380,8 @@ pub struct Engine {
     definitions: param_definitions::Definitions,
     /// Controllers' neutral state, holders and selections.
     live: controllers::Live,
+    /// Controllers' battery warnings and what they rumble for (S419).
+    controller_feedback: controller_feedback::Feedback,
     /// Camera streams' live counters and watches (S38).
     video: video::Video,
     /// Who is looking for vehicles and what was found (S44).
@@ -617,6 +625,7 @@ impl Engine {
             awaiting: BTreeMap::new(),
             take_offs: BTreeMap::new(),
             gimbals: gimbals::Gimbals::default(),
+            camera_drives: camera_drives::Drives::default(),
             camera_settings: camera_settings::Book::default(),
             held: BTreeMap::new(),
             one_shot: None,
@@ -639,6 +648,7 @@ impl Engine {
             companions: companions::Companions::default(),
             marker_live: markers::Live::default(),
             live: controllers::Live::default(),
+            controller_feedback: controller_feedback::Feedback::default(),
             restart: false,
             app_update: app_update::Updates::default(),
             stop: false,
@@ -980,6 +990,7 @@ impl Engine {
         self.cameras_after(&event.change);
         self.camera_settings_after(&event.change);
         self.gimbals_after(&event.change);
+        self.controller_feedback_after(&event.change);
         self.since_checkpoint += 1;
         if self.since_checkpoint >= self.config.checkpoint_every {
             self.checkpoint();

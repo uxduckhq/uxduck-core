@@ -980,8 +980,10 @@ mod tests {
             target: None,
             input_pause: None,
             holding: None,
+            power: uxduck_core::domain::controller::ControllerPower::default(),
             pending_target: None,
             mapping_id: "mode-2".into(),
+            photo: None,
             version: 1,
         };
         let count = |db: &Connection| -> i64 {

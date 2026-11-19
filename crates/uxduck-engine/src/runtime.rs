@@ -267,6 +267,11 @@ pub trait LinkPort: Send {
     fn steer_gimbal(&mut self, controller_id: &str, gimbal: Option<GimbalRoute>) {
         let _ = (controller_id, gimbal);
     }
+    /// Rumbles a controller (S419), where its platform can. A data plane
+    /// that reads no controller that rumbles has none to rumble.
+    fn rumble(&mut self, controller_id: &str, rumble: uxduck_core::domain::controller::Rumble) {
+        let _ = (controller_id, rumble);
+    }
 }
 
 /// The gimbal a controller's inputs turn (S407): its vehicle, its

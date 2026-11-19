@@ -17,6 +17,9 @@ use uxduck_engine::controller_input::InputEvent;
 pub const METHOD: &str = "browser/gamepads";
 /// Diagnostic notification for the page whose input was interrupted.
 pub const INTERRUPTED: &str = "browser/controllerInputInterrupted";
+/// A rumble for the page that reads the pad, which plays it through the
+/// pad's `vibrationActuator` (S419).
+pub const RUMBLE: &str = "browser/rumble";
 
 /// Input older than this cannot drive a vehicle.
 pub const STALE_US: u64 = 500_000;
@@ -161,6 +164,12 @@ impl Pads {
     /// Drained before the engine pauses output or releases a closing page's claims.
     pub fn take_interruptions(&mut self) -> Vec<Interruption> {
         std::mem::take(&mut self.interruptions)
+    }
+
+    /// The page that reported this pad last (S419).
+    #[must_use]
+    pub fn page_of(&self, id: &str) -> Option<u32> {
+        self.known.get(id).map(|known| known.last_page)
     }
 
     /// Whether any page reports a pad, so sticks may be sent.

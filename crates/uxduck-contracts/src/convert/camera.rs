@@ -139,6 +139,11 @@ impl From<core::CameraAction> for dto::CameraAction {
                 bottom,
             },
             core::CameraAction::StopTracking => Self::StopTracking,
+            core::CameraAction::ToggleRecording => Self::ToggleRecording,
+            core::CameraAction::ToggleMode => Self::ToggleMode,
+            core::CameraAction::ToggleSource => Self::ToggleSource,
+            core::CameraAction::ZoomRate { rate } => Self::ZoomRate { rate },
+            core::CameraAction::FocusRate { rate } => Self::FocusRate { rate },
         }
     }
 }
@@ -182,6 +187,11 @@ impl From<dto::CameraAction> for core::CameraAction {
                 bottom,
             },
             dto::CameraAction::StopTracking => Self::StopTracking,
+            dto::CameraAction::ToggleRecording => Self::ToggleRecording,
+            dto::CameraAction::ToggleMode => Self::ToggleMode,
+            dto::CameraAction::ToggleSource => Self::ToggleSource,
+            dto::CameraAction::ZoomRate { rate } => Self::ZoomRate { rate },
+            dto::CameraAction::FocusRate { rate } => Self::FocusRate { rate },
         }
     }
 }

@@ -896,6 +896,7 @@ fn check(name: &str) {
             | "folder_delete"
             | "link_remove"
             | "controller_release"
+            | "controller_navigate"
             | "controller_keyboardInput"
             | "controller_keyboardStop"
             | "gripper_hold"
