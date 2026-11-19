@@ -46,6 +46,10 @@ fn golden() -> String {
         boot_instant_us: Some(123),
         synced_at_us: Some(456),
         progress: None,
+        items_read: None,
+        fence_read: None,
+        rally_read: None,
+        sent: Vec::new(),
     });
     let record = wire::MissionRecord::from(&domain::MissionRecord {
         id: "wire-record".into(),
@@ -106,16 +110,42 @@ fn golden() -> String {
         plan,
         mission: mission.clone(),
     };
+    let get = get_result(&mission);
     let mut value = json!({
         "mission": mission, "snapshot": snapshot, "delta": delta,
         "history": wire::MissionHistoryResult { records: vec![record] },
         "upload": upload, "restore": restore, "planUpload": plan_upload,
+        "get": get,
     });
     let frames = read_frames(&value);
     value["frames"] = Value::Object(frames);
     let mut text = serde_json::to_string_pretty(&value).unwrap();
     text.push('\n');
     text
+}
+
+/// `mission/get` around the golden mission (FB-256).
+fn get_result(mission: &wire::Mission) -> wire::MissionGetResult {
+    let part = wire::MissionPart {
+        status: wire::MissionPartStatus::Synced,
+        count: 7,
+        complete: true,
+        read_at_us: Some(456),
+        detail: None,
+    };
+    wire::MissionGetResult {
+        mission: mission.clone(),
+        items: part.clone(),
+        fence: part.clone(),
+        rally: part,
+        fence_shapes: wire::FenceShapes {
+            polygons: Vec::new(),
+            circles: Vec::new(),
+            return_point: None,
+        },
+        rally_points: Vec::new(),
+        unreadable: vec!["Fence item 0 is command 32001, which is not a fence shape.".into()],
+    }
 }
 
 fn read_frames(value: &Value) -> serde_json::Map<String, Value> {
@@ -126,6 +156,7 @@ fn read_frames(value: &Value) -> serde_json::Map<String, Value> {
         ("mission/history", "history"),
         ("mission/upload", "upload"),
         ("mission/restore", "restore"),
+        ("mission/get", "get"),
         ("plan/upload", "planUpload"),
     ] {
         frames.insert(
@@ -174,6 +205,7 @@ fn production_mission_read_wire_golden() {
         ("mission/history", "history"),
         ("mission/upload", "upload"),
         ("mission/restore", "restore"),
+        ("mission/get", "get"),
         ("plan/upload", "planUpload"),
     ] {
         uxduck_contracts::dto::mission_read::validate_mission_read_result(method, &parsed[field])

@@ -671,6 +671,9 @@ fn check(name: &str) {
         ("result", "mission_refresh") => {
             round_trip::<uxduck_contracts::dto::mission::Mission>(name, &json);
         }
+        ("result", "mission_get") => {
+            round_trip::<uxduck_contracts::dto::mission::MissionGetResult>(name, &json);
+        }
         ("result", "mission_upload") => {
             round_trip::<uxduck_contracts::dto::mission::MissionUploadResult>(name, &json);
         }

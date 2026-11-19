@@ -410,6 +410,74 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(text).unwrap(), error);
     }
 
+    /// FB-256: an MCP client finds the read-only mission tool, which asks the
+    /// daemon for `mission/get` and answers with where each part stands and
+    /// the exact items.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mission_get_is_a_tool_that_reads_what_the_vehicle_holds() {
+        let (client, peer) = LocalClient::test_pair();
+        let mut peer = BufReader::new(peer);
+        let catalogue = tools();
+        let found = catalogue::search(
+            &catalogue,
+            json!({ "query": "fence polygons rally points" }),
+        )
+        .unwrap();
+        assert!(
+            found["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "mission_get"),
+            "{found}"
+        );
+        let mut session = Session {
+            daemon: Some(client),
+            pending: BTreeMap::new(),
+        };
+        let queued = session
+            .invoke(
+                &catalogue,
+                json!("get"),
+                json!({ "name": "mission_get", "arguments": { "id": "v" } }),
+            )
+            .await
+            .unwrap();
+        assert!(queued.is_none());
+        let mut line = String::new();
+        peer.read_line(&mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "mission/get");
+        assert_eq!(request["params"], json!({ "id": "v" }));
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../uxduck-contracts/tests/goldens/mission-read.json"
+        )))
+        .unwrap();
+        let mut frame: Value =
+            serde_json::from_str(fixture["frames"]["mission/get"].as_str().unwrap()).unwrap();
+        frame["id"] = request["id"].clone();
+        let bytes = format!("{frame}\n");
+        let (written, frame) = tokio::join!(
+            peer.get_mut().write_all(bytes.as_bytes()),
+            daemon_frame(&mut session.daemon)
+        );
+        written.unwrap();
+        let routed = session.route_daemon_frame(frame).unwrap().unwrap();
+        assert_eq!(routed["id"], "get");
+        let output = &routed["result"];
+        assert_eq!(output["isError"], false, "{output}");
+        let content = &output["structuredContent"];
+        assert_eq!(content["fence"]["status"], "synced");
+        assert_eq!(content["fence"]["complete"], true);
+        assert_eq!(
+            content["mission"]["fence"][3]["param4"]["nonFiniteF64"],
+            "7ff8000000000001"
+        );
+        assert!(session.pending.is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::too_many_lines, reason = "one MCP session protocol scenario")]
@@ -496,6 +564,7 @@ mod tests {
         for name in [
             "mission_history",
             "mission_refresh",
+            "mission_get",
             "mission_restore",
             "plan_upload",
         ] {

@@ -52,6 +52,74 @@ pub struct Mission {
     pub fence: Vec<MissionItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rally: Vec<MissionItem>,
+    /// How the last read of each part from the vehicle ended (FB-256):
+    /// the items, the fence and the rally points. Absent until one ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_read: Option<PartRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence_read: Option<PartRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rally_read: Option<PartRead>,
+    /// The parts UXDuck sent, or tried to, since each was last read:
+    /// `MAV_MISSION_TYPE` 0 the mission, 1 the fence, 2 rally points. What
+    /// is kept of them is what was sent, not what the vehicle answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sent: Vec<u8>,
+}
+
+impl Mission {
+    /// The last read of one part: 0 the mission, 1 the fence, 2 rally points.
+    #[must_use]
+    pub fn part_read(&self, kind: u8) -> Option<&PartRead> {
+        match kind {
+            0 => self.items_read.as_ref(),
+            1 => self.fence_read.as_ref(),
+            _ => self.rally_read.as_ref(),
+        }
+    }
+
+    /// Records how a read of one part ended. Once read, whole or not, it is
+    /// no longer one UXDuck sent without reading back.
+    pub fn read_part(&mut self, kind: u8, read: PartRead) {
+        self.sent.retain(|sent| *sent != kind);
+        match kind {
+            0 => self.items_read = Some(read),
+            1 => self.fence_read = Some(read),
+            _ => self.rally_read = Some(read),
+        }
+    }
+
+    /// UXDuck sent one part, or tried to: what the vehicle holds of it is
+    /// not known again until it is read.
+    pub fn sent_part(&mut self, kind: u8) {
+        if !self.sent.contains(&kind) {
+            self.sent.push(kind);
+            self.sent.sort_unstable();
+        }
+    }
+}
+
+/// How a read of one part of a vehicle's mission ended (FB-256).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartRead {
+    pub outcome: ReadOutcome,
+    /// When it ended, in the daemon's clock.
+    pub at_us: u64,
+    /// Why it was not read, in the vehicle's or UXDuck's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadOutcome {
+    /// Every item the vehicle said it holds came, none at all included.
+    Read,
+    /// It did not come whole: no answer, or a refusal.
+    Failed,
+    /// The autopilot does not keep this part through the mission protocol.
+    Unsupported,
 }
 
 /// How a mission came to be on a vehicle (ADR-0029 P7, S134).

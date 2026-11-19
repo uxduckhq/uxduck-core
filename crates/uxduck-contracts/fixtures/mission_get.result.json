@@ -1,0 +1,177 @@
+{
+  "mission": {
+    "vehicleId": "12f72d2c-5e0b-5c1f-9a55-3d0c1f2b8e41",
+    "items": [
+      {
+        "command": 16,
+        "frame": 0,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.3632611,
+        "longitudeDeg": 149.1652302,
+        "altitudeM": 584.0,
+        "autocontinue": true
+      },
+      {
+        "command": 22,
+        "frame": 3,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": 0.0,
+        "longitudeDeg": 0.0,
+        "altitudeM": 20.0,
+        "autocontinue": true
+      }
+    ],
+    "status": "synced",
+    "bootInstantUs": 1790668000000000,
+    "syncedAtUs": 1790668900000000,
+    "version": 4,
+    "fence": [
+      {
+        "command": 5001,
+        "frame": 0,
+        "param1": 4.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.36,
+        "longitudeDeg": 149.16,
+        "altitudeM": 0.0,
+        "autocontinue": true
+      },
+      {
+        "command": 5001,
+        "frame": 0,
+        "param1": 4.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.36,
+        "longitudeDeg": 149.17,
+        "altitudeM": 0.0,
+        "autocontinue": true
+      },
+      {
+        "command": 5001,
+        "frame": 0,
+        "param1": 4.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.37,
+        "longitudeDeg": 149.17,
+        "altitudeM": 0.0,
+        "autocontinue": true
+      },
+      {
+        "command": 5001,
+        "frame": 0,
+        "param1": 4.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.37,
+        "longitudeDeg": 149.16,
+        "altitudeM": 0.0,
+        "autocontinue": true
+      },
+      {
+        "command": 5004,
+        "frame": 0,
+        "param1": 50.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.365,
+        "longitudeDeg": 149.165,
+        "altitudeM": 0.0,
+        "autocontinue": true
+      }
+    ],
+    "rally": [
+      {
+        "command": 5100,
+        "frame": 3,
+        "param1": 0.0,
+        "param2": 0.0,
+        "param3": 0.0,
+        "param4": 0.0,
+        "latitudeDeg": -35.362,
+        "longitudeDeg": 149.163,
+        "altitudeM": 40.0,
+        "autocontinue": true
+      }
+    ]
+  },
+  "items": {
+    "status": "synced",
+    "count": 2,
+    "complete": true,
+    "readAtUs": 1790668900000000
+  },
+  "fence": {
+    "status": "synced",
+    "count": 5,
+    "complete": true,
+    "readAtUs": 1790668900000000
+  },
+  "rally": {
+    "status": "sent",
+    "count": 1,
+    "complete": false,
+    "readAtUs": 1790668800000000,
+    "detail": "UXDuck sent it and has not read it back since."
+  },
+  "fenceShapes": {
+    "polygons": [
+      {
+        "inclusion": true,
+        "firstItem": 0,
+        "points": [
+          {
+            "latitudeDeg": -35.36,
+            "longitudeDeg": 149.16
+          },
+          {
+            "latitudeDeg": -35.36,
+            "longitudeDeg": 149.17
+          },
+          {
+            "latitudeDeg": -35.37,
+            "longitudeDeg": 149.17
+          },
+          {
+            "latitudeDeg": -35.37,
+            "longitudeDeg": 149.16
+          }
+        ]
+      }
+    ],
+    "circles": [
+      {
+        "inclusion": false,
+        "item": 4,
+        "center": {
+          "latitudeDeg": -35.365,
+          "longitudeDeg": 149.165
+        },
+        "radiusM": 50.0
+      }
+    ]
+  },
+  "rallyPoints": [
+    {
+      "item": 0,
+      "frame": 3,
+      "latitudeDeg": -35.362,
+      "longitudeDeg": 149.163,
+      "altitudeM": 40.0
+    }
+  ],
+  "unreadable": []
+}

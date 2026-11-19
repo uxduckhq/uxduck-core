@@ -1007,6 +1007,10 @@ CameraAction::TrackRectangle.bottom
 CameraAction::TrackRectangle.left
 CameraAction::TrackRectangle.right
 CameraAction::TrackRectangle.top
+# How each part of a mission was last read (FB-256, 2026-11-18): a new
+# type inside optional fields, which no release has stored.
+PartRead.at_us
+PartRead.outcome
 # Where a picture of UXDuck's map shows (FB-248, 2026-11-18): an optional
 # field of an attached file, a type no release has stored.
 MapFrame.bearing_deg

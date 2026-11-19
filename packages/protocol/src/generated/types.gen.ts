@@ -3338,6 +3338,9 @@ export type ClientRequest = {
     method: 'mission/history';
     params: IdParams;
 } | {
+    method: 'mission/get';
+    params: IdParams;
+} | {
     method: 'mission/restore';
     params: MissionRestoreParams;
 } | {
@@ -6810,6 +6813,18 @@ export type FencePolygon = {
 export type FenceSettings = {
     action?: FenceAction | null;
     ceilingM?: number | null;
+};
+
+/**
+ * A fence's shapes, as the mission protocol carries them (FB-256).
+ */
+export type FenceShapes = {
+    circles: Array<OnboardFenceCircle>;
+    polygons: Array<OnboardFencePolygon>;
+    /**
+     * Where a plane returns to on a breach.
+     */
+    returnPoint?: LatLon | null;
 };
 
 /**
@@ -10346,6 +10361,38 @@ export type Mission = {
 };
 
 /**
+ * `mission/get` (FB-256): what UXDuck holds of a vehicle's mission, fence
+ * and rally points, how each part was last read from the vehicle, and the
+ * fence's shapes and rally points read from those items.
+ */
+export type MissionGetResult = {
+    fence: MissionPart;
+    /**
+     * The shapes `mission.fence` makes.
+     */
+    fenceShapes: FenceShapes;
+    /**
+     * Where each part stands: the mission's items, the fence and the rally
+     * points.
+     */
+    items: MissionPart;
+    /**
+     * The items, fence and rally points exactly as UXDuck holds them.
+     */
+    mission: Mission;
+    rally: MissionPart;
+    /**
+     * The points `mission.rally` holds.
+     */
+    rallyPoints: Array<OnboardRallyPoint>;
+    /**
+     * Fence and rally items that make no shape or point, each in words with
+     * its item number. None is left out without being named here.
+     */
+    unreadable: Array<string>;
+};
+
+/**
  * `mission/history`: a vehicle's missions, newest first; the first is the
  * one it holds, when UXDuck knows it.
  */
@@ -10393,6 +10440,33 @@ export type MissionOrigin = {
 } | {
     kind: 'changed-elsewhere';
 };
+
+/**
+ * Where one part of a vehicle's mission stands (FB-256).
+ */
+export type MissionPart = {
+    /**
+     * True only while `status` is `synced`: the last read brought every
+     * item the vehicle said it holds, and nothing was sent since.
+     */
+    complete: boolean;
+    /**
+     * How many items UXDuck holds for it.
+     */
+    count: number;
+    /**
+     * Why it stands as it does, in words.
+     */
+    detail?: string | null;
+    /**
+     * When it was last read from the vehicle, whether or not that read
+     * came whole.
+     */
+    readAtUs?: number | null;
+    status: MissionPartStatus;
+};
+
+export type MissionPartStatus = 'never-read' | 'reading' | 'synced' | 'sent' | 'failed' | 'unsupported';
 
 export type MissionReadFloat = number | NonFiniteMissionFloat;
 
@@ -10763,6 +10837,46 @@ export type NotificationState = 'active' | 'acknowledged' | 'resolved';
  * unless an operator sets `force`. The UI uses the same table.
  */
 export type OfflineBehaviour = 'allow' | 'warn' | 'block';
+
+export type OnboardFenceCircle = {
+    center: LatLon;
+    /**
+     * Inside is allowed. Otherwise inside is kept out of.
+     */
+    inclusion: boolean;
+    /**
+     * Its item in `mission.fence`, from 0.
+     */
+    item: number;
+    radiusM: number;
+};
+
+export type OnboardFencePolygon = {
+    /**
+     * Its first item in `mission.fence`, from 0.
+     */
+    firstItem: number;
+    /**
+     * Inside is allowed. Otherwise inside is kept out of.
+     */
+    inclusion: boolean;
+    points: Array<LatLon>;
+};
+
+export type OnboardRallyPoint = {
+    altitudeM: number;
+    /**
+     * `MAV_FRAME` of its height: 0 or 5 above mean sea level, 3 or 6 above
+     * home, 10 or 11 above terrain.
+     */
+    frame: number;
+    /**
+     * Its item in `mission.rally`, from 0.
+     */
+    item: number;
+    latitudeDeg: number;
+    longitudeDeg: number;
+};
 
 /**
  * An operation and what it holds.

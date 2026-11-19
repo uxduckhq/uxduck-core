@@ -58,6 +58,114 @@ pub struct Mission {
     pub rally: Vec<ReadMissionItem>,
 }
 
+/// `mission/get` (FB-256): what UXDuck holds of a vehicle's mission, fence
+/// and rally points, how each part was last read from the vehicle, and the
+/// fence's shapes and rally points read from those items.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionGetResult {
+    /// The items, fence and rally points exactly as UXDuck holds them.
+    pub mission: Mission,
+    /// Where each part stands: the mission's items, the fence and the rally
+    /// points.
+    pub items: MissionPart,
+    pub fence: MissionPart,
+    pub rally: MissionPart,
+    /// The shapes `mission.fence` makes.
+    pub fence_shapes: FenceShapes,
+    /// The points `mission.rally` holds.
+    pub rally_points: Vec<OnboardRallyPoint>,
+    /// Fence and rally items that make no shape or point, each in words with
+    /// its item number. None is left out without being named here.
+    pub unreadable: Vec<String>,
+}
+
+/// Where one part of a vehicle's mission stands (FB-256).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionPart {
+    pub status: MissionPartStatus,
+    /// How many items UXDuck holds for it.
+    pub count: u32,
+    /// True only while `status` is `synced`: the last read brought every
+    /// item the vehicle said it holds, and nothing was sent since.
+    pub complete: bool,
+    /// When it was last read from the vehicle, whether or not that read
+    /// came whole.
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at_us: Option<u64>,
+    /// Why it stands as it does, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MissionPartStatus {
+    /// Not read from the vehicle yet. Its items, if any, say nothing about
+    /// what the vehicle holds.
+    NeverRead,
+    /// Being read now.
+    Reading,
+    /// Read whole. No items means the autopilot reported none.
+    Synced,
+    /// UXDuck is sending it, or sent it or tried to and has not read it
+    /// since. Its items are what was sent.
+    Sent,
+    /// The last read did not come whole. Its items are from an earlier
+    /// read or what was sent.
+    Failed,
+    /// The autopilot does not keep it through the mission protocol, or
+    /// UXDuck does not read it from this kind of vehicle.
+    Unsupported,
+}
+
+/// A fence's shapes, as the mission protocol carries them (FB-256).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FenceShapes {
+    pub polygons: Vec<OnboardFencePolygon>,
+    pub circles: Vec<OnboardFenceCircle>,
+    /// Where a plane returns to on a breach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_point: Option<crate::dto::plan::LatLon>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardFencePolygon {
+    /// Inside is allowed. Otherwise inside is kept out of.
+    pub inclusion: bool,
+    /// Its first item in `mission.fence`, from 0.
+    pub first_item: u32,
+    pub points: Vec<crate::dto::plan::LatLon>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardFenceCircle {
+    /// Inside is allowed. Otherwise inside is kept out of.
+    pub inclusion: bool,
+    /// Its item in `mission.fence`, from 0.
+    pub item: u32,
+    pub center: crate::dto::plan::LatLon,
+    pub radius_m: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardRallyPoint {
+    /// Its item in `mission.rally`, from 0.
+    pub item: u32,
+    /// `MAV_FRAME` of its height: 0 or 5 above mean sea level, 3 or 6 above
+    /// home, 10 or 11 above terrain.
+    pub frame: u8,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    pub altitude_m: f64,
+}
+
 /// Uploads a mission edited from `expectedVersion`; refused with
 /// `version-conflict` if another write came first.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

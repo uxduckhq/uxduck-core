@@ -38,6 +38,7 @@ impl Engine {
                 .contains(&uxduck_contracts::dto::state::EntityType::Mission),
             ClientRequest::MissionRefresh(_)
             | ClientRequest::MissionHistory(_)
+            | ClientRequest::MissionGet(_)
             | ClientRequest::MissionUpload(_)
             | ClientRequest::MissionRestore(_)
             | ClientRequest::PlanUpload(_) => true,
@@ -186,6 +187,7 @@ mod tests {
                     ),
                     ("mission/refresh", json!({ "id": "v" })),
                     ("mission/history", json!({ "id": "v" })),
+                    ("mission/get", json!({ "id": "v" })),
                     (
                         "mission/upload",
                         json!({ "vehicleId": "v", "expectedVersion": 1, "items": items }),

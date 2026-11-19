@@ -793,6 +793,7 @@ pub(crate) fn handle(
         | ClientRequest::ParamSet(_)
         | ClientRequest::MissionRefresh(_)
         | ClientRequest::MissionHistory(_)
+        | ClientRequest::MissionGet(_)
         | ClientRequest::MissionRestore(_)
         | ClientRequest::TransferCancel(_)
         | ClientRequest::MissionUpload(_)) => {

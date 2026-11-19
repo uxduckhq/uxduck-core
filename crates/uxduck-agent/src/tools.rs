@@ -61,6 +61,9 @@ pub const AGENT_METHODS: &[&str] = &[
     "plan/simulate",
     "mission/refresh",
     "mission/history",
+    // What a vehicle holds as UXDuck last read it, with where its mission,
+    // fence and rally points stand (FB-256): asks the vehicle nothing.
+    "mission/get",
     "mission/restore",
     // Simulated vehicles (S17): starting and stopping one asks the operator
     // first, unless the agent was given the configuration capability.
@@ -620,6 +623,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "plan/simulate",
     "mission/refresh",
     "mission/history",
+    "mission/get",
     "mission/restore",
     "sim/binaries",
     "sim/frames",

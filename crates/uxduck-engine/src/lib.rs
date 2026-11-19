@@ -58,6 +58,7 @@ pub mod looks;
 pub mod markers;
 pub mod mavlink_inspect;
 mod messages;
+mod mission_get;
 pub mod mission_history;
 mod mission_reads;
 pub mod nmea;

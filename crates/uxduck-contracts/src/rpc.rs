@@ -650,6 +650,18 @@ pub enum ClientRequest {
     /// vehicle. Needs `read`. Result: `MissionHistoryResult`.
     #[serde(rename = "mission/history")]
     MissionHistory(IdParams),
+    /// What a vehicle holds as UXDuck last read it (FB-256): its mission,
+    /// fence and rally points, and where each part stands. `synced` is read
+    /// whole, and no items then means the autopilot reported none.
+    /// `reading` is being read now, `sent` was sent and not read back,
+    /// `failed` did not come whole, `unsupported` is not kept by this
+    /// autopilot or vehicle, and `never-read` is not read yet. Each part
+    /// says when it was last read. Also the fence's inclusion and exclusion
+    /// polygons and circles and the rally points, from those items. Asks the
+    /// vehicle nothing and changes nothing. `mission/refresh` reads it
+    /// again. `id` is the vehicle. Needs `read`. Result: `MissionGetResult`.
+    #[serde(rename = "mission/get")]
+    MissionGet(IdParams),
     /// Puts a mission from a vehicle's history back (S134), with its fence
     /// and rally points, and answers once it is read back. Replaces what
     /// the vehicle holds. Needs `control`. Result: `MissionRestoreResult`.
@@ -2271,7 +2283,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 404] = [
+    pub const METHODS: [&'static str; 405] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2381,6 +2393,7 @@ impl ClientRequest {
         "vehicle/deleteNote",
         "mission/refresh",
         "mission/history",
+        "mission/get",
         "mission/restore",
         "mission/upload",
         "controller/claim",

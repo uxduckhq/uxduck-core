@@ -27,7 +27,7 @@ use uxduck_contracts::rpc::ClientRequest;
 use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::history::ParamSource;
 use uxduck_core::domain::link::LinkPolicy;
-use uxduck_core::domain::mission::{Mission, MissionItem, MissionOrigin};
+use uxduck_core::domain::mission::{Mission, MissionItem, MissionOrigin, PartRead, ReadOutcome};
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::parameter::{
     ParamKind, Parameter, ParameterSet, TransferProgress, TransferStatus, parameter_id, same_value,
@@ -178,6 +178,9 @@ pub(crate) struct Pending {
     /// Vehicles whose mission changed on board while it was being read
     /// (S199): read again once that read ends.
     reread: std::collections::BTreeSet<String>,
+    /// The part each vehicle's running read has reached, once past the
+    /// mission's own items: 1 the fence, 2 rally points (FB-256).
+    pub(crate) reading_part: BTreeMap<String, u8>,
     /// The boot instant the data plane last reported, by vehicle.
     pub(crate) boots: BTreeMap<String, u64>,
     /// What the data plane's session says of each vehicle's RC calibration
@@ -263,6 +266,14 @@ pub(crate) fn handle(
                     .map(Into::into)
                     .collect(),
             })
+        }
+        ClientRequest::MissionGet(IdParams { id }) => {
+            require(Capability::Read)?;
+            let id = engine
+                .vehicle(&id)
+                .map(|v| v.id.clone())
+                .ok_or_else(|| ApiError::new(ErrorKind::NotFound, format!("no vehicle {id}")))?;
+            to_value(&engine.mission_get(&id))
         }
         ClientRequest::MissionRestore(params) => {
             require(Capability::Control)?;
@@ -661,6 +672,10 @@ impl Engine {
                 progress: None,
                 fence: Vec::new(),
                 rally: Vec::new(),
+                items_read: None,
+                fence_read: None,
+                rally_read: None,
+                sent: Vec::new(),
             })
     }
 
@@ -682,6 +697,53 @@ impl Engine {
             .is_none_or(|vehicle| vehicle.vehicle_type != "Airship")
         {
             self.transfers.with_parts.insert(vehicle_id.to_owned());
+        }
+    }
+
+    /// Which parts of the vehicle's mission the running read will still
+    /// bring (FB-256): the items, the fence, the rally points.
+    pub(crate) fn reading_parts(&self, vehicle_id: &str) -> [bool; 3] {
+        if self.mission(vehicle_id).status != TransferStatus::Downloading {
+            return [false; 3];
+        }
+        let parts = self.transfers.with_parts.contains(vehicle_id);
+        let reached = self
+            .transfers
+            .reading_part
+            .get(vehicle_id)
+            .copied()
+            .unwrap_or(0);
+        [reached == 0, parts && reached <= 1, parts]
+    }
+
+    /// The parts of the vehicle's mission an upload is sending now (FB-256):
+    /// the items, the fence, the rally points.
+    pub(crate) fn uploading_parts(&self, vehicle_id: &str) -> [bool; 3] {
+        let mut parts = [false; 3];
+        for upload in self.transfers.uploads.values() {
+            if upload.vehicle_id == vehicle_id
+                && let Some(part) = parts.get_mut(usize::from(upload.kind))
+            {
+                *part = true;
+            }
+        }
+        parts
+    }
+
+    /// How a read of one part ended, for the mission's record (FB-256). An
+    /// autopilot that answers `MAV_MISSION_UNSUPPORTED` does not keep that
+    /// part through the mission protocol.
+    fn part_read(&self, failure: Option<&Failure>) -> PartRead {
+        let unsupported = uxduck_mavlink::transfers::mission_result_text(3);
+        let outcome = match failure {
+            None => ReadOutcome::Read,
+            Some(Failure::Rejected(why)) if why == unsupported => ReadOutcome::Unsupported,
+            Some(_) => ReadOutcome::Failed,
+        };
+        PartRead {
+            outcome,
+            at_us: self.clock.now_us(),
+            detail: failure.map(|failure| failure.detail(0)),
         }
     }
 
@@ -722,6 +784,7 @@ impl Engine {
         }
         mission.status = TransferStatus::Downloading;
         mission.detail = None;
+        self.transfers.reading_part.remove(vehicle_id);
         self.commit_as(daemon(), Change::MissionUpserted { mission });
         self.links.transfer(TransferOrder::DownloadMission {
             vehicle_id: vehicle_id.to_owned(),
@@ -1223,6 +1286,7 @@ impl Engine {
         };
         let mut mission = self.mission(&id);
         mission.progress = None;
+        mission.read_part(0, self.part_read(result.as_ref().err()));
         match result {
             Ok(items) => {
                 if items != mission.items {
@@ -1231,6 +1295,7 @@ impl Engine {
                 }
                 // The fence and rally points next, when they were asked for.
                 if self.transfers.with_parts.contains(&id) {
+                    self.transfers.reading_part.insert(id.clone(), 1);
                     self.commit_as(daemon(), Change::MissionUpserted { mission });
                     self.links.transfer(TransferOrder::DownloadMissionPart {
                         vehicle_id: id,
@@ -1255,6 +1320,7 @@ impl Engine {
             Err(failure) => {
                 let detail = failure.detail(0);
                 self.transfers.with_parts.remove(&id);
+                self.transfers.reading_part.remove(&id);
                 self.transfers.boot_reads.remove(&id);
                 // Not again at once: it could not be read.
                 self.transfers.reread.remove(&id);
@@ -1271,8 +1337,9 @@ impl Engine {
     }
 
     /// A fence (1) or rally points (2) download ended (S128). One the
-    /// autopilot cannot give (an older ArduPilot) is left as it was known;
-    /// the mission is synced either way once rally points are done.
+    /// autopilot cannot give (an older ArduPilot) is left as it was known,
+    /// with how its read ended (FB-256). The mission is synced either way
+    /// once rally points are done.
     pub fn mission_part_downloaded(
         &mut self,
         vehicle_id: &str,
@@ -1284,6 +1351,7 @@ impl Engine {
         };
         let mut mission = self.mission(&id);
         mission.progress = None;
+        mission.read_part(kind, self.part_read(result.as_ref().err()));
         if let Ok(items) = result {
             let part = if kind == 1 {
                 &mut mission.fence
@@ -1296,6 +1364,7 @@ impl Engine {
             }
         }
         if kind == 1 {
+            self.transfers.reading_part.insert(id.clone(), 2);
             self.commit_as(daemon(), Change::MissionUpserted { mission });
             self.links.transfer(TransferOrder::DownloadMissionPart {
                 vehicle_id: id,
@@ -1304,6 +1373,7 @@ impl Engine {
             return;
         }
         self.transfers.with_parts.remove(&id);
+        self.transfers.reading_part.remove(&id);
         mission.status = TransferStatus::Synced;
         mission.detail = None;
         mission.boot_instant_us = self.transfers.boots.get(&id).copied();
@@ -1372,6 +1442,11 @@ impl Engine {
             self.mission_arriving(&upload.vehicle_id, origin, upload.actor.clone());
         }
         let kind = upload.kind;
+        // Accepted or not, once sent what the vehicle holds of it is known
+        // again only when it is read (FB-256).
+        if !matches!(&result, Err(Failure::NotSent(_))) {
+            mission.sent_part(kind);
+        }
         let (status, detail, actor) = match result {
             Ok(()) => {
                 match upload.kind {

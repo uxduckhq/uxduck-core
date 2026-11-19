@@ -207,7 +207,7 @@ fn check_mission_read_result(
                 .map(|_| ())
                 .map_err(|error| invalid("result", error.to_string(), false))
         }
-        "mission/upload" | "mission/restore" | "plan/upload" => mission(
+        "mission/upload" | "mission/restore" | "mission/get" | "plan/upload" => mission(
             result
                 .get("mission")
                 .ok_or_else(|| invalid("result.mission", "missing mission result".into(), false))?,
@@ -271,6 +271,7 @@ pub fn mission_read_request(method: &str, params: &serde_json::Value) -> bool {
         method,
         "mission/refresh"
             | "mission/history"
+            | "mission/get"
             | "mission/upload"
             | "mission/restore"
             | "plan/upload"
