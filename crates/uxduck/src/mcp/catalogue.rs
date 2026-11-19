@@ -4,6 +4,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uxduck_agent::tools::Tool;
 
+mod search;
+
 pub const SEARCH: &str = "uxduck_search_tools";
 pub const CALL: &str = "uxduck_call_tool";
 
@@ -12,6 +14,8 @@ pub fn definition(tool: &Tool) -> Value {
         "name": tool.name,
         "description": tool.description,
         "inputSchema": tool.parameters,
+        "outputSchema": uxduck_agent::tools::mcp::output_schema(&tool.method),
+        "annotations": uxduck_agent::tools::mcp::annotations(&tool.method),
     })
 }
 
@@ -22,7 +26,7 @@ pub fn list(catalogue: &[Tool], all_tools: bool) -> Value {
     json!({ "tools": [
         {
             "name": SEARCH,
-            "description": "Find UXDuck tools by name or words: vehicles, telemetry, messages, history, parameters, missions and plans, commands, simulations, places and addresses, links, terrain, files, video and plugins. Returns matching names and full input schemas; use uxduck_call_tool to run one. Search an exact name for one schema. No vehicle action.",
+            "description": "Find UXDuck tools by name or words: vehicles, telemetry, messages, history, parameters, missions and plans, commands, simulations, places and addresses, links, terrain, files, video and plugins. Word searches return short candidates without schemas. Search an exact returned name for its full input/output schemas before calling it with uxduck_call_tool. No vehicle action.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -51,6 +55,24 @@ pub fn list(catalogue: &[Tool], all_tools: bool) -> Value {
     ] })
 }
 
+/// Search pages stay small even when a tool has a large settings schema.
+fn summary(tool: &Tool) -> Value {
+    let purpose = tool.description.split("\n\n").next().unwrap_or_default();
+    let mut description = purpose.split_whitespace().collect::<Vec<_>>().join(" ");
+    if description.len() > 360 {
+        let boundary = description
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|i| *i <= 357)
+            .last()
+            .unwrap_or(0);
+        description.truncate(boundary);
+        description.push('…');
+    }
+    json!({ "name": tool.name, "description": description,
+        "schemaQuery": tool.name, "annotations": uxduck_agent::tools::mcp::annotations(&tool.method) })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Search {
@@ -65,33 +87,6 @@ const fn default_limit() -> usize {
     3
 }
 
-fn schema_has_action(schema: &Value, word: &str) -> bool {
-    let matches = |value: &Value| {
-        value.as_str().is_some_and(|value| {
-            value
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|part| part.eq_ignore_ascii_case(word))
-        })
-    };
-    match schema {
-        Value::Object(fields) => {
-            fields
-                .get("properties")
-                .and_then(|properties| properties.get("type"))
-                .is_some_and(|kind| {
-                    kind.get("const").is_some_and(matches)
-                        || kind
-                            .get("enum")
-                            .and_then(Value::as_array)
-                            .is_some_and(|values| values.iter().any(matches))
-                })
-                || fields.values().any(|value| schema_has_action(value, word))
-        }
-        Value::Array(values) => values.iter().any(|value| schema_has_action(value, word)),
-        _ => false,
-    }
-}
-
 /// Local discovery only: never calls the daemon or broadens its allowlist.
 pub fn search(catalogue: &[Tool], arguments: Value) -> Result<Value, String> {
     let search: Search = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
@@ -103,60 +98,42 @@ pub fn search(catalogue: &[Tool], arguments: Value) -> Result<Value, String> {
     if !(1..=5).contains(&limit) {
         return Err("limit must be between 1 and 5".into());
     }
-    let words: Vec<_> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() > 1)
-        .collect();
     let exact = catalogue.iter().find(|tool| tool.name == query);
-    // An unknown tool identifier must not expand into a broad word search:
-    // `does_not_exist_uxduck` would otherwise match incidental schema prose.
     let identifier =
         query.contains('_') && query.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    let mut matches: Vec<(usize, &Tool)> = if let Some(tool) = exact {
-        vec![(1, tool)]
-    } else {
+    let matches: Vec<&Tool> = if let Some(tool) = exact {
+        vec![tool]
+    } else if identifier {
         catalogue
             .iter()
-            .filter_map(|tool| {
-                if identifier {
-                    return tool.name.starts_with(&query).then_some((1, tool));
-                }
-                let description = tool.description.to_lowercase();
-                // Action names such as arm and pattern names such as survey
-                // often occur only in the generated argument schema.
-                let schema = tool.parameters.to_string().to_lowercase();
-                let score: usize = words
-                    .iter()
-                    .map(|word| {
-                        let name = tool.name.contains(*word);
-                        let about = description.contains(*word);
-                        let argument = schema.contains(*word);
-                        // Prefer matching more query words over mentioning a
-                        // single word in a high-weight field.
-                        100 * usize::from(name || about || argument)
-                            + 3 * usize::from(name)
-                            + usize::from(about)
-                            + usize::from(argument)
-                            + 10 * usize::from(schema_has_action(&tool.parameters, word))
-                    })
-                    .sum();
-                (score > 0).then_some((score, tool))
-            })
+            .filter(|tool| tool.name.starts_with(&query))
             .collect()
+    } else {
+        search::ranked(catalogue, &query)
     };
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     let total = matches.len();
-    let tools: Vec<_> = matches
-        .into_iter()
-        .skip(search.offset)
-        .take(limit)
-        .map(|(_, tool)| definition(tool))
-        .collect();
+    let mut tools = Vec::new();
+    // Leave room for the page envelope. Full contracts are returned only
+    // when explicitly requested by exact name, and are never truncated.
+    let mut bytes = 256;
+    for tool in matches.into_iter().skip(search.offset).take(limit) {
+        let result = if exact.is_some() {
+            definition(tool)
+        } else {
+            summary(tool)
+        };
+        bytes += result.to_string().len() + 1;
+        if exact.is_none() && bytes > 4_000 {
+            break;
+        }
+        tools.push(result);
+    }
     let end = search.offset.saturating_add(tools.len());
     Ok(json!({
         "tools": tools,
         "total": total,
         "nextOffset": (end < total).then_some(end),
+        "detail": if exact.is_some() { "schema" } else { "summary" },
     }))
 }
 
@@ -181,6 +158,83 @@ mod tests {
 
     use super::*;
     use uxduck_agent::tools::tools;
+
+    #[test]
+    fn diagnostic_questions_find_the_right_operation_before_configuration() {
+        let catalogue = tools();
+        for (query, expected) in [
+            ("GPS fix quality", "telemetry_get"),
+            ("gps", "telemetry_get"),
+            ("read battery voltage", "telemetry_get"),
+            ("battery voltage last minute", "telemetry_window"),
+            ("change flight mode", "command_send"),
+            ("arm vehicle", "command_send"),
+            ("why will my vehicle not arm", "preflight_state"),
+            ("prearm", "preflight_state"),
+            ("inspect connection", "link_diagnose"),
+            ("flight logs", "flight_list"),
+            ("download simulator", "sim_download"),
+        ] {
+            let found = search(&catalogue, json!({"query":query})).unwrap();
+            let names: Vec<_> = found["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names[0], expected, "{query}: {names:?}");
+            assert_eq!(found["detail"], "summary");
+        }
+    }
+
+    #[test]
+    fn broad_searches_are_bounded_and_exact_searches_keep_complete_contracts() {
+        let catalogue = tools();
+        for query in [
+            "change flight mode",
+            "battery voltage last minute",
+            "settings",
+            "plugin",
+            "vehicle",
+        ] {
+            let found = search(&catalogue, json!({"query":query,"limit":5})).unwrap();
+            assert!(
+                found.to_string().len() <= 4_000,
+                "{query}: {} bytes",
+                found.to_string().len()
+            );
+            for candidate in found["tools"].as_array().unwrap() {
+                assert!(candidate.get("inputSchema").is_none());
+                let exact = search(&catalogue, json!({"query":candidate["schemaQuery"]})).unwrap();
+                assert_eq!(exact["detail"], "schema");
+                assert!(exact["tools"][0]["inputSchema"].is_object());
+                assert!(exact["tools"][0]["outputSchema"].is_object());
+            }
+        }
+        let exact = search(&catalogue, json!({"query":"operator_update"})).unwrap();
+        let original = catalogue
+            .iter()
+            .find(|tool| tool.name == "operator_update")
+            .unwrap();
+        assert_eq!(exact["tools"][0]["inputSchema"], original.parameters);
+    }
+
+    #[test]
+    fn telemetry_window_advertises_the_enforced_numeric_and_selector_limits() {
+        let catalogue = tools();
+        let result = search(&catalogue, json!({"query":"telemetry_window"})).unwrap();
+        let params = &result["tools"][0]["inputSchema"]["properties"];
+        for (field, min, max) in [("durationMs", 1, 300_000), ("maxSamples", 1, 3000)] {
+            assert_eq!(params[field]["minimum"], min);
+            assert_eq!(params[field]["maximum"], max);
+        }
+        assert!(
+            params["durationMs"].get("format").is_none(),
+            "duration stays a JSON number in generated clients"
+        );
+        assert_eq!(params["keys"]["maxItems"], 32);
+        assert_eq!(params["positionSources"]["maxItems"], 8);
+    }
 
     #[test]
     fn default_catalogue_has_a_fixed_budget_and_every_tool_remains_discoverable() {

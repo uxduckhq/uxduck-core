@@ -45,6 +45,17 @@ impl std::fmt::Debug for LocalClient {
     }
 }
 
+fn connect_error(data_dir: &Path, endpoint: &str, error: &std::io::Error) -> CliError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            CliError::NoDaemon(data_dir.display().to_string())
+        }
+        _ => CliError::Usage(format!(
+            "cannot connect to UXDuck at {endpoint}: {error}. Check socket permissions and the client's sandbox access, then reconnect MCP."
+        )),
+    }
+}
+
 impl LocalClient {
     /// # Errors
     /// When no daemon listens for `data_dir`.
@@ -54,7 +65,7 @@ impl LocalClient {
             let path = crate::paths::socket_path(data_dir);
             tokio::net::UnixStream::connect(&path)
                 .await
-                .map_err(|_| CliError::NoDaemon(data_dir.display().to_string()))?
+                .map_err(|error| connect_error(data_dir, &path.display().to_string(), &error))?
         };
         #[cfg(windows)]
         let stream = open_named_pipe(
@@ -62,13 +73,7 @@ impl LocalClient {
             std::time::Duration::from_secs(5),
         )
         .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::TimedOut {
-                CliError::Io(error)
-            } else {
-                CliError::NoDaemon(data_dir.display().to_string())
-            }
-        })?;
+        .map_err(|error| connect_error(data_dir, &crate::paths::pipe_name(data_dir), &error))?;
         let (reader, writer) = tokio::io::split(stream);
         Ok(Self {
             lines: BufReader::new(reader).lines(),
@@ -605,5 +610,40 @@ mod tests {
             LocalClient::connect(directory.path()).await,
             Err(CliError::NoDaemon(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod connection_error_tests {
+    use super::*;
+
+    #[test]
+    fn socket_denial_is_not_reported_as_a_stopped_daemon() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let error = connect_error(
+                Path::new("profile"),
+                "profile/socket",
+                &std::io::Error::from(kind),
+            );
+            assert!(!matches!(error, CliError::NoDaemon(_)));
+            assert!(error.to_string().contains("profile/socket"));
+            assert!(error.to_string().contains("sandbox"));
+        }
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(matches!(
+                connect_error(
+                    Path::new("profile"),
+                    "profile/socket",
+                    &std::io::Error::from(kind)
+                ),
+                CliError::NoDaemon(_)
+            ));
+        }
     }
 }

@@ -164,7 +164,7 @@ impl Session {
                                 "instructions": if all_tools {
                                     INSTRUCTIONS.to_owned()
                                 } else {
-                                    format!("Find tool names and input schemas with uxduck_search_tools, then run them with uxduck_call_tool. Search exact names to fetch just one schema; reuse it instead of searching again. Use limits and filters for large results. {INSTRUCTIONS}")
+                                    format!("Find candidates with uxduck_search_tools, then search an exact returned name for its full input/output schemas before using uxduck_call_tool. Word searches return summaries only. Reuse fetched schemas. Use limits and filters for large results. {INSTRUCTIONS}")
                                 }
                             }),
                         )

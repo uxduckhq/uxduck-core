@@ -50,7 +50,8 @@ An empty vehicle list means the connection reached UXDuck but has no vehicle to 
 ## Keep the agent's context small
 
 `uxduck mcp` offers two tools at connection time. `uxduck_search_tools` finds
-vehicle tools by name or words and returns their full argument schemas;
+vehicle tools by name or words. Word searches return short candidates, and an
+exact-name search returns the complete input and output schemas.
 `uxduck_call_tool` runs one with its name and arguments. The vehicle tools named
 below are found this way. The agent loads only the schemas it needs, even in a
 client that loads every advertised MCP tool at startup. All vehicle tools still
@@ -58,15 +59,36 @@ come from the same API contracts.
 
 For example, search with `{"query":"vehicle_list"}`, then call with
 `{"name":"vehicle_list","arguments":{}}`. Exact names return one schema. Word
-searches return three matches by default, at most five; `nextOffset` continues the
+searches return three short matches by default, at most five, within a 4 KB page
+budget. Search a candidate's `schemaQuery` to fetch its schema before calling it. `nextOffset` continues the
 same query without returning the whole catalogue. Reuse a schema once found.
 Discovery reads no telemetry and performs no vehicle action. Calls keep the same
 permissions, approvals, results and structured errors as direct vehicle tools.
 
 For a client or integration that needs every tool listed individually, including
 client-side per-tool allow/deny rules, run `uxduck mcp --all-tools` instead.
-Existing direct tool names remain callable in
-both modes. Reconnect the MCP client after changing modes or updating UXDuck.
+Each direct tool exposes its read/write annotations and a result schema from the
+Rust contracts. Annotations help a client choose its approval policy. UXDuck's
+own permissions and approvals still apply.
+Existing direct tool names remain callable in both modes. Reconnect the MCP
+client after changing modes or updating UXDuck.
+
+For Codex with native tool discovery, prefer direct tools so it can discover,
+validate and apply per-tool policies itself:
+
+```sh
+codex mcp add uxduck -- /usr/local/bin/uxduck mcp --all-tools
+```
+
+On Windows use `uxduck` in place of `/usr/local/bin/uxduck`. In
+`~/.codex/config.toml`, set `tool_timeout_sec = 90` under `[mcp_servers.uxduck]`.
+This leaves time for UXDuck's 60-second operator approval window to return its
+result. Unusually long operations can need a larger timeout. Keep the default
+compact mode for clients that load every advertised schema into context.
+
+If connecting fails with a socket permission or sandbox error, allow the MCP
+process access to UXDuck's local socket. That error does not mean the daemon has
+stopped. Start or restart UXDuck only when it is actually offline.
 
 MCP keeps reads and health checks responsive while another tool awaits approval.
 Cancelling a request withdraws its pending approval, not other requests' approvals.

@@ -17348,7 +17348,11 @@ export type TelemetryTextState = {
     text: string;
 };
 
-export type TelemetryWindowParams = {
+export type TelemetryWindowParams = ({
+    keys: Array<string>;
+} | {
+    positionSources: Array<string>;
+}) & {
     /**
      * Last N milliseconds ending at `endTimeUs` (default: now), from 1 to
      * 300000. Defaults to 120000. Cannot be combined with `startTimeUs`.

@@ -7,19 +7,25 @@ use super::telemetry::{PositionEstimate, Unit};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(transform = window_constraints)]
 pub struct TelemetryWindowParams {
     pub vehicle_id: String,
     /// Up to 32 exact telemetry keys. Empty selects no item series.
     #[serde(default)]
+    #[schemars(length(max = 32))]
     pub keys: Vec<String>,
     /// Up to eight exact position sources, such as `fused` or `gps`.
     /// Empty selects no positions. At least one selector is required.
     #[serde(default)]
+    #[schemars(length(max = 8))]
     pub position_sources: Vec<String>,
     /// Last N milliseconds ending at `endTimeUs` (default: now), from 1 to
     /// 300000. Defaults to 120000. Cannot be combined with `startTimeUs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::safe::optional_integer")]
+    #[schemars(
+        schema_with = "crate::safe::optional_integer",
+        range(min = 1, max = 300_000)
+    )]
     pub duration_ms: Option<u64>,
     /// Inclusive daemon receive time, in Unix microseconds. An explicit
     /// window may span no more than five minutes.
@@ -33,7 +39,26 @@ pub struct TelemetryWindowParams {
     /// Returned points per series, 1–3000 (default 20). Summaries always use
     /// every retained observation in the requested interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 3000))]
     pub max_samples: Option<u16>,
+}
+
+// An omitted or null bound is unset, as in the runtime validator. At least
+// one nonempty selector is needed; an explicit start and duration conflict.
+fn window_constraints(schema: &mut schemars::Schema) {
+    schema.insert(
+        "anyOf".into(),
+        serde_json::json!([
+            {"required":["keys"],"properties":{"keys":{"type":"array","items":{"type":"string"},"minItems":1}}},
+            {"required":["positionSources"],"properties":{"positionSources":{"type":"array","items":{"type":"string"},"minItems":1}}}
+        ]),
+    );
+    schema.insert(
+        "not".into(),
+        serde_json::json!({"required":["durationMs","startTimeUs"],"properties":{
+            "durationMs":{"type":"integer"},"startTimeUs":{"type":"integer"}
+        }}),
+    );
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

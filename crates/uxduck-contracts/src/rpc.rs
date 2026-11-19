@@ -344,7 +344,8 @@ pub enum ClientRequest {
     TelemetrySubscribe(Empty),
     /// One vehicle's latest telemetry: its position estimates (with the
     /// altitude frame of each altitude) and values such as battery, attitude
-    /// and GPS, in SI units, and how its MAVLink link is doing
+    /// and GPS fix quality, satellites and HDOP, battery voltage and current,
+    /// in SI units, and how its MAVLink link is doing
     /// (`linkHealth`: round trip, its one-way half, loss and telemetry age, as Stats for nerds
     /// shows them). Needs `read`. Result: `VehicleTelemetry`.
     #[serde(rename = "telemetry/get")]
@@ -368,7 +369,8 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `SerialListResult`.
     #[serde(rename = "serial/list")]
     SerialList(Empty),
-    /// Sends a command to one vehicle and answers when the vehicle has
+    /// Arm, disarm, change flight mode, take off, land or send another command
+    /// to one vehicle. Answers when the vehicle has
     /// acknowledged it or every retry has timed out, with the receipt. While
     /// the vehicle is not online, `offlineBehaviour` decides (see
     /// `command/list`). Needs `control`. Result: `Receipt`.
@@ -1037,7 +1039,8 @@ pub enum ClientRequest {
     /// coverage. Exact bytes are opt-in. Result: `RouterEventsResult`.
     #[serde(rename = "router/events")]
     RouterEvents(RouterEventsParams),
-    /// Resolve an exact link/vehicle id or name into its endpoints, vehicles,
+    /// Inspect a connection or diagnose a forwarding failure. Resolve an exact link/vehicle
+    /// id or name into its endpoints, vehicles,
     /// forwarding relationships and recent failures. Read only. Result: `LinkDiagnoseResult`.
     #[serde(rename = "link/diagnose")]
     LinkDiagnose(LinkDiagnoseParams),
@@ -1151,7 +1154,8 @@ pub enum ClientRequest {
     /// Result: `TrafficStatus`.
     #[serde(rename = "traffic/status")]
     TrafficStatus(Empty),
-    /// A vehicle's own messages, oldest first, a run of the same message
+    /// A vehicle's own messages, including pre-arm failures, errors and warnings,
+    /// oldest first, a run of the same message
     /// with nothing between folded into one entry with a count. With
     /// `subscribe`, `vehicle/message` follows. Needs `read`. Result:
     /// `VehicleMessagesResult`.
@@ -1528,7 +1532,7 @@ pub enum ClientRequest {
     /// Needs `read`. Result: `FileSaveResult`.
     #[serde(rename = "files/save")]
     FilesSave(crate::dto::files::FileTransferParams),
-    /// A vehicle's preflight checks (S192, ADR-0038): its own pre-arm
+    /// Diagnose why a vehicle will not arm: preflight checks (S192, ADR-0038): its own pre-arm
     /// reasons first, then UXDuck's checks, each with its source, severity
     /// (block or warn), status and detail in words, and how UXDuck's are
     /// set. Arming is never refused for a check. While a `block` check
@@ -2017,7 +2021,8 @@ pub enum ClientRequest {
     /// first. Result: `FindResult`.
     #[serde(rename = "find/vehicles")]
     FindVehicles(FindStartParams),
-    /// Recent selected telemetry with timestamps, coverage and full-window
+    /// Compare battery voltage, GPS fix and EKF health over time, including
+    /// the last minute. Recent selected telemetry with timestamps, coverage and full-window
     /// extrema; captured in memory before callers poll. Up to five minutes,
     /// bounded by memory, coalesced at the telemetry producer's rate.
     /// Needs `read`. Result: `TelemetryWindowResult`.

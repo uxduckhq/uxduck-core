@@ -3,6 +3,8 @@
 //! variant's doc comment and its parameters are the variant's params schema.
 //! Only the methods in [`AGENT_METHODS`] are offered.
 
+pub mod mcp;
+
 use schemars::generate::SchemaSettings;
 use serde_json::{Value, json};
 use uxduck_contracts::rpc::ClientRequest;
