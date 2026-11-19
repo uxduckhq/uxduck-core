@@ -1015,6 +1015,13 @@ impl System for Host {
         self.simulators.read_frames(params)
     }
 
+    fn sim_own_build(
+        &self,
+        params: &uxduck_contracts::dto::sim::SimOwnBuildParams,
+    ) -> Result<uxduck_contracts::dto::sim::SimOwnBuildResult, String> {
+        crate::sim::own_build(std::path::Path::new(&params.binary))
+    }
+
     fn sim_catalogue(&mut self, refresh: bool) -> uxduck_contracts::dto::sim::SimCatalogueResult {
         self.catalogue.result(refresh)
     }

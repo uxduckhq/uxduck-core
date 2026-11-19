@@ -1,0 +1,4 @@
+{
+  "method": "sim/ownBuild",
+  "params": { "binary": "/downloads/my-vtol" }
+}

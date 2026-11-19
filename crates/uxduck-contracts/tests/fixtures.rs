@@ -709,6 +709,9 @@ fn check(name: &str) {
         ("result", "sim_frames") => {
             round_trip::<uxduck_contracts::dto::sim::SimFramesResult>(name, &json);
         }
+        ("result", "sim_ownBuild") => {
+            round_trip::<uxduck_contracts::dto::sim::SimOwnBuildResult>(name, &json);
+        }
         (
             "result",
             "sim_start" | "sim_restart" | "sim_pause" | "sim_crash" | "sim_fault"

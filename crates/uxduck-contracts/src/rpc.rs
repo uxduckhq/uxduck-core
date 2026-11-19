@@ -70,7 +70,8 @@ use crate::dto::search::{
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams, StorageRevealParams};
 use crate::dto::sim::{
     SimBuildParams, SimCatalogueParams, SimCrashParams, SimFaultParams, SimFramesParams,
-    SimPauseParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams, SnapshotStartParams,
+    SimOwnBuildParams, SimPauseParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams,
+    SnapshotStartParams,
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
@@ -1309,6 +1310,11 @@ pub enum ClientRequest {
     /// Poll without `refresh` (read permission) while `reading` is true.
     #[serde(rename = "sim/frames")]
     SimFrames(SimFramesParams),
+    /// Which ArduPilot program a build of your own is, and what it flies,
+    /// read from the firmware name its file holds. Runs nothing. Result:
+    /// `SimOwnBuildResult`.
+    #[serde(rename = "sim/ownBuild")]
+    SimOwnBuild(SimOwnBuildParams),
     /// The simulator catalogue's builds for this platform (S18), and which
     /// are installed or downloading. Result: `SimCatalogueResult`.
     #[serde(rename = "sim/catalogue")]
@@ -2291,7 +2297,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 406] = [
+    pub const METHODS: [&'static str; 407] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2694,6 +2700,7 @@ impl ClientRequest {
         "mavlink/dialects/use",
         "agent/connection",
         "sim/frames",
+        "sim/ownBuild",
         "firmware/rename",
         "feedback/file",
         "feedback/add",

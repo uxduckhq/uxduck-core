@@ -517,6 +517,7 @@ pub(crate) fn handle(
         | ClientRequest::SimCrash(_)
         | ClientRequest::SimBinaries(_)
         | ClientRequest::SimFrames(_)
+        | ClientRequest::SimOwnBuild(_)
         | ClientRequest::SimCatalogue(_)
         | ClientRequest::SimDownload(_)
         | ClientRequest::SimDelete(_)

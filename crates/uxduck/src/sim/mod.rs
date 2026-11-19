@@ -19,7 +19,9 @@ use uxduck_contracts::dto::link::{
     ArdupilotGimbal as ArdupilotGimbalDto, SimAutopilot as SimAutopilotDto,
     SimVehicle as SimVehicleDto,
 };
-use uxduck_contracts::dto::sim::{CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult};
+use uxduck_contracts::dto::sim::{
+    CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult, SimOwnBuildResult,
+};
 use uxduck_core::domain::link::{
     ArdupilotGimbal, JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle,
 };
@@ -516,10 +518,18 @@ impl Simulators {
             ));
         }
         let simulated = match binary {
-            Some(path) if Path::new(path).is_file() => match ardupilot_gimbal {
-                Some(_) => own_gimbals_in(Path::new(path))?,
-                None => return Ok(()),
-            },
+            Some(path) if Path::new(path).is_file() => {
+                if autopilot == SimAutopilot::Ardupilot
+                    && let Some((program, vehicles)) = own_program(Path::new(path))?
+                    && !vehicles.contains(&dto_vehicle(vehicle))
+                {
+                    return Err(does_not_fly(program, vehicle));
+                }
+                match ardupilot_gimbal {
+                    Some(_) => own_gimbals_in(Path::new(path))?,
+                    None => return Ok(()),
+                }
+            }
             Some(path) => {
                 return Err(format!(
                     "There is no simulator build at {path}. Choose another build."
@@ -592,7 +602,7 @@ impl Simulators {
             None => self.installed_build(autopilot, vehicle, frame.as_deref())?,
         };
         if !build.vehicles.contains(&wanted) {
-            return Err(format!("{} does not run this vehicle", build.program));
+            return Err(does_not_fly(&build.program, vehicle));
         }
         let frame = frame
             .clone()
@@ -1039,6 +1049,89 @@ fn probe_found(path: &Path, own_gimbals: OwnGimbalsOf) -> Result<SimBinary, Stri
     probe_ardupilot(path, program, vehicles, None, own_gimbals)
 }
 
+/// The ArduPilot program a build is named for, and what it flies:
+/// `arducopter`, `arduplane.exe`. None for a name that is none of them.
+fn named_program(path: &Path) -> Option<(&'static str, &'static [SimVehicleDto])> {
+    let name = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    PROGRAMS
+        .iter()
+        .filter(|(program, _)| name.starts_with(program))
+        .max_by_key(|(program, _)| program.len())
+        .copied()
+}
+
+/// The firmware name each of ArduPilot's programs holds before its version,
+/// as `ArduCopter V4.6.3`. A helicopter's build holds `arducopter`'s too.
+const FIRMWARE_NAMES: [(&str, &str); 5] = [
+    ("ArduCopter V", "arducopter"),
+    ("ArduPlane V", "arduplane"),
+    ("ArduRover V", "ardurover"),
+    ("ArduSub V", "ardusub"),
+    ("Blimp V", "blimp"),
+];
+
+/// The ArduPilot program a build of the person's own is, and what it flies.
+/// Its file's name can be anything, so the firmware name the build holds
+/// as text decides (`ArduCopter V4.6.3`). Only when it holds none, or more
+/// than one, does the file's name. The helicopter build is told by its
+/// name, `arducopter-heli`, since it holds `arducopter`'s firmware name.
+/// None when neither tells. Nothing is run.
+///
+/// # Errors
+/// When the build's file cannot be read.
+fn own_program(path: &Path) -> Result<Option<(&'static str, &'static [SimVehicleDto])>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut held: Vec<&str> = Vec::new();
+    for text in bytes.split(|byte| *byte == 0) {
+        for (firmware, program) in FIRMWARE_NAMES {
+            if text
+                .strip_prefix(firmware.as_bytes())
+                .is_some_and(|version| version.first().is_some_and(u8::is_ascii_digit))
+                && !held.contains(&program)
+            {
+                held.push(program);
+            }
+        }
+    }
+    let named = named_program(path);
+    let program = match held.as_slice() {
+        ["arducopter"] if named.is_some_and(|(name, _)| name.starts_with("arducopter")) => {
+            return Ok(named);
+        }
+        [program] => *program,
+        _ => return Ok(named),
+    };
+    Ok(PROGRAMS.iter().find(|(name, _)| *name == program).copied())
+}
+
+/// [`own_program`], as `sim/ownBuild` answers it.
+///
+/// # Errors
+/// When the build's file cannot be read.
+pub fn own_build(path: &Path) -> Result<SimOwnBuildResult, String> {
+    Ok(match own_program(path)? {
+        Some((program, vehicles)) => SimOwnBuildResult {
+            program: Some(program.to_owned()),
+            vehicles: vehicles.to_vec(),
+        },
+        None => SimOwnBuildResult {
+            program: None,
+            vehicles: Vec::new(),
+        },
+    })
+}
+
+fn does_not_fly(program: &str, vehicle: SimVehicle) -> String {
+    let vehicle = vehicle_name(vehicle);
+    format!(
+        "This build is {program}, which cannot fly a {vehicle}. Choose a vehicle {program} flies, or a build that flies a {vehicle}."
+    )
+}
+
 /// A directly supplied executable need not be named like a catalogue build
 /// or ship a frame table. Its selected vehicle and frame are explicit.
 fn probe_own(
@@ -1050,22 +1143,15 @@ fn probe_own(
     if autopilot == SimAutopilot::Px4 {
         return probe(path);
     }
-    let name = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
     let wanted = dto_vehicle(vehicle);
-    let (program, vehicles) = PROGRAMS
-        .iter()
-        .filter(|(program, _)| name.starts_with(program))
-        .max_by_key(|(program, _)| program.len())
+    let (program, vehicles) = own_program(path)?
         .or_else(|| {
             PROGRAMS
                 .iter()
                 .find(|(_, vehicles)| vehicles.contains(&wanted))
+                .copied()
         })
-        .map(|(program, vehicles)| (*program, vehicles.to_vec()))
+        .map(|(program, vehicles)| (program, vehicles.to_vec()))
         .ok_or("No ArduPilot simulator runs this vehicle")?;
     let usual = match vehicle {
         SimVehicle::Multicopter => "quad",
@@ -2327,6 +2413,98 @@ mod tests {
         let builds = found();
         assert!(builds.contains(&copter) && !builds.contains(&plane));
         assert_eq!(kept(), builds);
+    }
+
+    /// A build of the person's own is the program whose firmware name it
+    /// holds, whatever its file is called, and flies only that program's
+    /// vehicles: another is refused before a link is made. Its file's name
+    /// tells only when it holds no firmware name, and a build that says
+    /// neither runs as the chosen vehicle.
+    #[test]
+    fn an_own_build_is_the_program_its_firmware_name_says() {
+        let dir = tempfile::tempdir().expect("data directory");
+        let simulators = Simulators::new(dir.path());
+        let kind = |binary: &Path, vehicle| LinkKind::Simulator {
+            vehicle,
+            autopilot: SimAutopilot::Ardupilot,
+            instance: Some(0),
+            latitude_deg: -35.36,
+            longitude_deg: 149.16,
+            altitude_m: 584.0,
+            heading_deg: 0.0,
+            frame: None,
+            speedup: None,
+            in_air_m: None,
+            snapshot_id: None,
+            binary: Some(binary.display().to_string()),
+            allow_network: false,
+            wipe: false,
+            with_mission: false,
+            traffic: false,
+            camera: false,
+            gimbal: false,
+            ardupilot_gimbal: None,
+            payload_profile: None,
+        };
+        let build = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        // As real builds hold it: their own firmware name with its version,
+        // and the other programs' names without one.
+        let copter = b"\x7fELF\0ArduPlane\0ArduSub\0ArduCopter V4.6.3 (92b0cd78)\0";
+        let vtol = build("vtol", copter);
+        assert_eq!(
+            simulators.check_build(&kind(&vtol, SimVehicle::Vtol)),
+            Err("This build is arducopter, which cannot fly a VTOL. Choose a vehicle arducopter flies, or a build that flies a VTOL.".into())
+        );
+        assert_eq!(
+            simulators.check_build(&kind(&vtol, SimVehicle::Multicopter)),
+            Ok(())
+        );
+        assert_eq!(
+            own_build(&vtol),
+            Ok(SimOwnBuildResult {
+                program: Some("arducopter".into()),
+                vehicles: vec![SimVehicleDto::Multicopter],
+            })
+        );
+        // A name that says another program loses to the firmware name.
+        let plane = build("arducopter", b"\x7fELF\0ArduCopter\0ArduPlane V4.8.0-dev\0");
+        assert_eq!(
+            simulators.check_build(&kind(&plane, SimVehicle::Vtol)),
+            Ok(())
+        );
+        assert_eq!(
+            own_build(&plane).unwrap().program.as_deref(),
+            Some("arduplane")
+        );
+        // ArduCopter's helicopter holds ArduCopter's firmware name.
+        let heli = build("arducopter-heli", copter);
+        assert_eq!(
+            own_build(&heli).unwrap().program.as_deref(),
+            Some("arducopter-heli")
+        );
+        // No firmware name: the file's name, then nothing.
+        let named = build("ArduRover.exe", b"\x7fELF\0");
+        assert_eq!(
+            simulators.check_build(&kind(&named, SimVehicle::Vtol)),
+            Err("This build is ardurover, which cannot fly a VTOL. Choose a vehicle ardurover flies, or a build that flies a VTOL.".into())
+        );
+        let unknown = build("my-build", b"\x7fELF\0");
+        assert_eq!(
+            simulators.check_build(&kind(&unknown, SimVehicle::Vtol)),
+            Ok(())
+        );
+        assert_eq!(
+            own_build(&unknown),
+            Ok(SimOwnBuildResult {
+                program: None,
+                vehicles: vec![],
+            })
+        );
+        assert!(own_build(&dir.path().join("missing")).is_err());
     }
 
     /// A start with a gimbal the chosen build cannot simulate is refused

@@ -1172,6 +1172,16 @@ pub trait System: Send {
     ) -> Result<uxduck_contracts::dto::sim::SimFramesResult, String> {
         Err("This UXDuck cannot read frames from a custom executable.".into())
     }
+    /// Which ArduPilot program a selected native executable is, read from
+    /// its file without running it.
+    /// # Errors
+    /// When the host cannot read it.
+    fn sim_own_build(
+        &self,
+        _params: &uxduck_contracts::dto::sim::SimOwnBuildParams,
+    ) -> Result<uxduck_contracts::dto::sim::SimOwnBuildResult, String> {
+        Err("This UXDuck cannot read a custom executable.".into())
+    }
     /// The simulator catalogue for this platform as last fetched, fetching
     /// it again first when `refresh` (S18). None by default.
     fn sim_catalogue(&mut self, refresh: bool) -> uxduck_contracts::dto::sim::SimCatalogueResult {

@@ -3801,6 +3801,9 @@ export type ClientRequest = {
     method: 'sim/frames';
     params: SimFramesParams;
 } | {
+    method: 'sim/ownBuild';
+    params: SimOwnBuildParams;
+} | {
     method: 'sim/catalogue';
     params: SimCatalogueParams;
 } | {
@@ -15911,6 +15914,28 @@ export type SimFramesResult = {
      */
     frames: Array<string>;
     reading?: boolean;
+};
+
+/**
+ * Which ArduPilot program a build of your own is (`sim/ownBuild`). This
+ * reads the file and runs nothing.
+ */
+export type SimOwnBuildParams = {
+    binary: string;
+};
+
+export type SimOwnBuildResult = {
+    /**
+     * The program, as `SimBinary.program` names it (`arducopter`), from the
+     * firmware name the build holds (`ArduCopter V4.6.3`), or from its file's
+     * name when it holds none. None when neither tells, and then the build
+     * starts as the chosen vehicle's program.
+     */
+    program?: string | null;
+    /**
+     * What that program flies. Empty without a program.
+     */
+    vehicles: Array<SimVehicle>;
 };
 
 /**

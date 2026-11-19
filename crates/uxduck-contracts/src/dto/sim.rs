@@ -170,6 +170,27 @@ pub struct SimFramesResult {
     pub default_frame: Option<String>,
 }
 
+/// Which ArduPilot program a build of your own is (`sim/ownBuild`). This
+/// reads the file and runs nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimOwnBuildParams {
+    pub binary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimOwnBuildResult {
+    /// The program, as `SimBinary.program` names it (`arducopter`), from the
+    /// firmware name the build holds (`ArduCopter V4.6.3`), or from its file's
+    /// name when it holds none. None when neither tells, and then the build
+    /// starts as the chosen vehicle's program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// What that program flies. Empty without a program.
+    pub vehicles: Vec<SimVehicle>,
+}
+
 /// The simulator catalogue's manifest (S18, ADR-0011 M12): prebuilt SITL
 /// builds for each platform, signed with the release key (ADR-0008) as
 /// `catalogue.json.minisig`.
