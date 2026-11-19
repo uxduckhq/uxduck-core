@@ -1,0 +1,36 @@
+{
+  "runs": [
+    {
+      "id": "tm7a3b4c1d9e2f",
+      "vehicleId": "v1a2b3c4d5e6f708",
+      "vehicleName": "Buggy",
+      "computerId": "cc3f9a1b2c4d5e6f",
+      "computerName": "Camera Pi",
+      "clientId": "cl9f3a1c2b4d5e6f70",
+      "clientName": "Claude Code",
+      "shellCommandShown": "journalctl -u mediamtx -f",
+      "shownFirst": false,
+      "deadlineS": 30,
+      "startedAtUs": 1790668990000000,
+      "leftOutBytes": 0
+    },
+    {
+      "id": "tm4c1d9e2f7a3b",
+      "vehicleId": "v1a2b3c4d5e6f708",
+      "vehicleName": "Buggy",
+      "computerId": "cc3f9a1b2c4d5e6f",
+      "computerName": "Camera Pi",
+      "clientId": "cl9f3a1c2b4d5e6f70",
+      "clientName": "Claude Code",
+      "shellCommandShown": "systemctl status mediamtx --no-pager⏎\necho done⇥⟨U+000D⟩⟨U+202E⟩",
+      "shownFirst": true,
+      "deadlineS": 20,
+      "startedAtUs": 1790668960000000,
+      "endedAtUs": 1790668960412000,
+      "end": "exited",
+      "exitStatus": 3,
+      "leftOutBytes": 92000
+    }
+  ],
+  "keptPerComputer": 20
+}

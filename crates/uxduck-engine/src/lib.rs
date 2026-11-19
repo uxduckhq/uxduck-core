@@ -109,6 +109,7 @@ pub mod sync;
 mod telemetry;
 mod telemetry_alarms;
 mod telemetry_window;
+pub mod terminals;
 pub mod terms;
 pub mod terrain;
 mod terrain_check;
@@ -242,6 +243,8 @@ struct Shutdown {
 struct ReadCapabilities {
     mission_read_float_bits: bool,
     replay_step_marks: bool,
+    /// It shows a command an agent asks to run, whole (ADR-0065 T14).
+    shell_commands: bool,
 }
 
 #[derive(Debug)]
@@ -402,6 +405,8 @@ pub struct Engine {
     published_dialects: dialects::Published,
     places: places::Places,
     companions: companions::Companions,
+    /// Who holds each open terminal, and the tickets not used yet (S422).
+    terminals: terminals::Terminals,
     marker_live: markers::Live,
     /// A client asked for a restart.
     restart: bool,
@@ -646,6 +651,7 @@ impl Engine {
             published_dialects: dialects::Published::default(),
             places: places::Places::default(),
             companions: companions::Companions::default(),
+            terminals: terminals::Terminals::default(),
             marker_live: markers::Live::default(),
             live: controllers::Live::default(),
             controller_feedback: controller_feedback::Feedback::default(),
@@ -874,6 +880,8 @@ impl Engine {
         self.stop_looks(id, None);
         self.release_claims_of(id);
         self.drop_video_watches(id);
+        // A terminal ends with the connection that opened it (ADR-0065 T13).
+        self.terminals_disconnected(id);
         self.gimbals_unwatched_by(id);
         self.stop_finding_for(id);
         self.feature_watchers.remove(&id);
@@ -1061,6 +1069,21 @@ impl Engine {
                 .folder
                 .as_ref()
                 .is_none_or(|f| sees(self, connection, f.operator_id.as_deref())),
+            // A client's own request for a terminal, and its notice, are
+            // not shown to it (ADR-0065 T7). A command an agent asks to
+            // run is shown to operators only (T14).
+            EntityType::Approval => change.approval.as_ref().is_none_or(|a| {
+                !self.hides_approval(
+                    connection,
+                    &a.client_id,
+                    a.capability.into(),
+                    a.shell_command_shown.is_some(),
+                )
+            }),
+            EntityType::Notification => change
+                .notification
+                .as_ref()
+                .is_none_or(|n| !self.hides_notice(connection, n.condition.as_deref())),
             _ => true,
         }
     }
@@ -1425,6 +1448,7 @@ pub(crate) fn upsert(entity: EntityType, id: &str) -> EntityChange {
         preflight: None,
         camera: None,
         gimbal: None,
+        terminal: None,
     }
 }
 
@@ -1530,6 +1554,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         change @ (Change::GimbalUpserted { .. } | Change::GimbalRemoved { .. }) => {
             gimbals::entity_changes(change)
         }
+        change @ (Change::TerminalOpened { .. } | Change::TerminalEnded { .. }) => {
+            terminals::entity_changes(change)
+        }
         change @ (Change::VideoRecordingUpserted { .. } | Change::VideoRecordingRemoved { .. }) => {
             recordings::entity_changes(change)
         }
@@ -1574,7 +1601,10 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::PluginPublished { .. }
         | Change::PluginDeclined { .. }
         // Read with `mission/history` (S134).
-        | Change::MissionRecorded { .. } => Vec::new(),
+        | Change::MissionRecorded { .. }
+        // A run's record is read with `computer/runs` by an operator, and
+        // is in nobody's state.
+        | Change::ComputerRunUpserted { .. } => Vec::new(),
         Change::NotificationUpserted { notification } => vec![notification_change(notification)],
     }
 }

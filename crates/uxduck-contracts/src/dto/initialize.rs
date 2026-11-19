@@ -35,6 +35,11 @@ pub enum Capability {
     Approve,
     /// Reading where this computer is (S137): an agent asks first.
     Location,
+    /// Opening a terminal on a vehicle's companion computer (ADR-0065 T7).
+    /// The person's own clients on the computer UXDuck runs on hold it.
+    /// Pairing never grants it: every other client's `terminal/open` is held
+    /// as an approval for an operator.
+    Terminal,
 }
 
 /// Who is connecting.
@@ -85,6 +90,13 @@ pub struct ClientCapabilities {
     /// a mark has that kind, so the daemon leaves those marks out for it.
     #[serde(default)]
     pub replay_step_marks: bool,
+    /// It shows the command an agent asks to run on a companion computer,
+    /// whole, before its operator answers (S425, ADR-0065 T14). UXDuck's
+    /// page from before it would show the request's buttons without the
+    /// command, so the daemon sends it neither the request nor its notice
+    /// and takes no answer for one from it.
+    #[serde(default)]
+    pub shell_commands: bool,
 }
 
 /// Parameters of `initialize`.

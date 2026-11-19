@@ -274,6 +274,7 @@ fn tab_to_dto(kind: core::TabKind) -> dto::TabKind {
         core::TabKind::Setup => dto::TabKind::Setup,
         core::TabKind::Checklist => dto::TabKind::Checklist,
         core::TabKind::Tuning => dto::TabKind::Tuning,
+        core::TabKind::Terminal => dto::TabKind::Terminal,
     }
 }
 
@@ -319,6 +320,7 @@ fn tab_from_dto(kind: dto::TabKind) -> core::TabKind {
         dto::TabKind::Setup => core::TabKind::Setup,
         dto::TabKind::Checklist => core::TabKind::Checklist,
         dto::TabKind::Tuning => core::TabKind::Tuning,
+        dto::TabKind::Terminal => core::TabKind::Terminal,
     }
 }
 
@@ -414,6 +416,7 @@ fn dock_to_dto(value: &core::DockNode) -> dto::DockNode {
                     camera_behind: t.camera_behind,
                     chart: t.chart.as_ref().map(chart_to_dto),
                     section: t.section.map(Into::into),
+                    computer: t.computer.clone(),
                 })
                 .collect(),
             active: *active,
@@ -501,6 +504,7 @@ fn dock_from_dto(value: dto::DockNode) -> core::DockNode {
                     camera_behind: t.camera_behind,
                     chart: t.chart.map(chart_from_dto),
                     section: t.section.map(Into::into),
+                    computer: t.computer,
                 })
                 .collect(),
             active,

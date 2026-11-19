@@ -1,0 +1,8 @@
+{
+  "method": "terminal/open",
+  "params": {
+    "computerId": "cc3f9a1b2c4d5e6f",
+    "cols": 132,
+    "rows": 41
+  }
+}

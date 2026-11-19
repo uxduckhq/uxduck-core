@@ -265,6 +265,11 @@ pub enum TabKind {
     /// per axis and snapshots, a view of its parameters. It follows the
     /// selected vehicle, or the one it is pinned to.
     Tuning,
+    /// A terminal on a companion computer (S423, ADR-0065 T6): which one is
+    /// the tab's `computer`. The session is the page's and ends with it,
+    /// so a stored tab comes back with no session until it is opened again.
+    /// It follows no vehicle.
+    Terminal,
 }
 
 impl TabKind {
@@ -310,6 +315,7 @@ impl TabKind {
             Self::Setup => "setup",
             Self::Checklist => "checklist",
             Self::Tuning => "tuning",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -372,6 +378,9 @@ pub struct Tab {
     /// The part a Tuning tab was last asked to show (S333).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<TuningSection>,
+    /// The companion computer a Terminal tab opens on (S423): its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 /// A part of the Tuning tab (S333). Roll, Pitch and Yaw are How it flies
@@ -517,6 +526,8 @@ enum StoredTab {
         chart: Option<ChartSpec>,
         #[serde(default)]
         section: Option<TuningSection>,
+        #[serde(default)]
+        computer: Option<String>,
     },
 }
 
@@ -538,6 +549,7 @@ impl From<StoredTab> for Tab {
                 camera_behind,
                 chart,
                 section,
+                computer,
             } => Self {
                 id,
                 // A Map drawn in 3D before 2026-10-04 is a 3D map tab, in its place.
@@ -556,6 +568,7 @@ impl From<StoredTab> for Tab {
                 camera_behind,
                 chart,
                 section,
+                computer,
             },
         }
     }
@@ -578,6 +591,7 @@ impl Tab {
             camera_behind: false,
             chart: None,
             section: None,
+            computer: None,
         }
     }
 
@@ -604,12 +618,14 @@ impl Tab {
             camera_behind: false,
             chart: None,
             section: None,
+            computer: None,
         })
     }
 
-    /// Drops a pin, camera or panel that is empty or too long, a camera or
-    /// camera view on a tab other than a Camera tab, and a panel on one
-    /// other than a Plugin tab.
+    /// Drops a pin, camera, panel or computer that is empty or too long, a
+    /// camera or camera view on a tab other than a Camera tab, a panel on one
+    /// other than a Plugin tab and a computer on one other than a Terminal
+    /// tab.
     fn drop_bad_ids(&mut self) {
         let bad = |id: &Option<String>| {
             id.as_ref()
@@ -645,6 +661,9 @@ impl Tab {
         }
         if self.kind != TabKind::Tuning {
             self.section = None;
+        }
+        if self.kind != TabKind::Terminal || bad(&self.computer) {
+            self.computer = None;
         }
     }
 }
@@ -2115,6 +2134,7 @@ mod tests {
                             camera_behind: false,
                             chart: None,
                             section: None,
+                            computer: None,
                         }],
                         active: 0,
                     }
@@ -2422,6 +2442,7 @@ mod tests {
             camera_behind: false,
             chart: None,
             section: None,
+            computer: None,
         };
         let layout = Layout {
             pane_open: true,

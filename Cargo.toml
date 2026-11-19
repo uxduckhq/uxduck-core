@@ -111,6 +111,11 @@ tokio = { version = "1", features = [
   "process",
 ] }
 tokio-tungstenite = "0.30"
+# The pseudo-terminal a companion computer's `ssh -tt` runs under, ConPTY on
+# Windows (ADR-0065 T3).
+portable-pty = "0.9"
+# Raw mode and the window's size for `uxduck ssh` (ADR-0065 T3).
+crossterm = { version = "0.29", default-features = false, features = ["windows"] }
 tower-http = { version = "0.7", features = ["fs"] }
 tracing = "0.1"
 uuid = { version = "1", default-features = false, features = ["v5"] }

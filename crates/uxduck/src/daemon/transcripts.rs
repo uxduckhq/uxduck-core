@@ -99,6 +99,17 @@ impl Transcripts {
         }
     }
 
+    /// Removes a chat's transcript, so its next turn is rebuilt from the
+    /// journal.
+    pub fn forget(&self, thread_id: &str) {
+        if let Some(path) = self.path(thread_id)
+            && let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "a chat's transcript was not removed");
+        }
+    }
+
     /// Keeps a transcript, replacing the last; a failed write only costs
     /// the next turn a rebuild.
     pub fn keep(&self, thread_id: &str, saved: &Saved) {

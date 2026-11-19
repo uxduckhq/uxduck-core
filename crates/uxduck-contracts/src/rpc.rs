@@ -292,6 +292,55 @@ pub enum ClientRequest {
     /// Select the vehicle internet gateway and its cellular video policy. Needs config. Result: Vehicle.
     #[serde(rename = "computer/connectivity")]
     ComputerConnectivity(crate::dto::companion::ComputerConnectivityParams),
+    /// Runs one command on a vehicle's companion computer over SSH, signed
+    /// in as that computer's SSH user, and returns what it printed and its
+    /// exit status. This is a real vehicle's computer: prefer commands that
+    /// only read (`systemctl status`, `journalctl -n 50 --no-pager`, `df -h`)
+    /// unless the person asked for a change. One command per call, with no
+    /// input and no terminal, so nothing interactive (`top`, `vim`, `sudo`
+    /// asking for a password) and nothing that never ends (`journalctl -f`,
+    /// `tail -f`): it is stopped at `deadlineS`, 30 s if left out, and what
+    /// it printed until then is returned. Each of its two streams keeps its
+    /// first and last bytes, and the answer says how many were left out and
+    /// from where. Needs `terminal`. Without it every call waits for the
+    /// operator's approval: they are shown the whole command and answer,
+    /// which can take a minute. Call it and wait, do not say you cannot.
+    /// Denied or unanswered it answers `capability-denied`: tell the
+    /// person, and do not call it again unless they ask. The computer must
+    /// have been checked. Result: `ComputerRunResult`.
+    #[serde(rename = "computer/run")]
+    ComputerRun(crate::dto::terminal::ComputerRunParams),
+    /// The commands agents ran on companion computers with `computer/run`,
+    /// newest first: who, where, when, the command, how it ended and
+    /// whether its answer left output out. Never what a command printed.
+    /// Only for an operator on the computer UXDuck runs on. Result:
+    /// `ComputerRunsResult`.
+    #[serde(rename = "computer/runs")]
+    ComputerRuns(crate::dto::terminal::ComputerRunsParams),
+    /// Opens a terminal on a companion computer (ADR-0065): the daemon's
+    /// own `ssh` with the computer's pinned host key and a check's way of
+    /// signing in. Answers with the terminal's id and a ticket that opens
+    /// `/terminal?ticket=<ticket>` once, where raw bytes flow as binary
+    /// frames and the last frame is a `TerminalEnded` as text. With
+    /// `command`, runs that one command with no pseudo-terminal instead.
+    /// The computer must have been checked. Needs `terminal`, which the
+    /// person's own clients on the computer UXDuck runs on hold and pairing
+    /// never grants. From any other client it is held as an approval for an
+    /// operator, who allows it once, for the connection or always, and
+    /// answers `capability-denied` when denied or not answered in time.
+    /// Such a client cannot send `command`, and an agent or a plugin is
+    /// refused. Result: `TerminalOpenResult`.
+    #[serde(rename = "terminal/open")]
+    TerminalOpen(crate::dto::terminal::TerminalOpenParams),
+    /// Tells an open terminal its new size, which reaches the computer.
+    /// From the client holding it, or an operator. Result: `Empty`.
+    #[serde(rename = "terminal/resize")]
+    TerminalResize(crate::dto::terminal::TerminalResizeParams),
+    /// Ends a terminal. The client holding it closes its own, and an
+    /// operator ends any, which its holder is told on the socket. Result:
+    /// `Empty`.
+    #[serde(rename = "terminal/close")]
+    TerminalClose(crate::dto::terminal::TerminalCloseParams),
     /// A vehicle's web pages, such as its radio's settings page, all of
     /// them in order; an empty list removes them. Doesn't save it. Needs
     /// `config`. Result: `Vehicle`.
@@ -2336,7 +2385,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 411] = [
+    pub const METHODS: [&'static str; 416] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2382,6 +2431,11 @@ impl ClientRequest {
         "computer/cameras",
         "computer/network",
         "computer/connectivity",
+        "computer/run",
+        "computer/runs",
+        "terminal/open",
+        "terminal/resize",
+        "terminal/close",
         "vehicle/bookmarks",
         "vehicle/dismiss",
         "vehicle/hide",

@@ -350,6 +350,50 @@ mod tests {
         }
     }
 
+    /// A command on a companion computer is found by what it does (S425),
+    /// never hinted as only reading, and its exact name answers with the
+    /// whole contract. What agents ran, and a terminal, are not offered.
+    #[test]
+    fn a_companion_computers_command_is_found_by_what_it_does() {
+        let catalogue = tools();
+        for query in [
+            "run a command on the companion computer",
+            "ssh command on the vehicle's computer",
+            "systemctl status on the Raspberry Pi over SSH",
+        ] {
+            let found = search(&catalogue, json!({ "query": query })).unwrap();
+            let first = &found["tools"][0];
+            assert_eq!(first["name"], "computer_run", "{query}: {found}");
+            assert_eq!(first["annotations"]["readOnlyHint"], false);
+            assert_eq!(first["annotations"]["destructiveHint"], true);
+        }
+        let exact = search(&catalogue, json!({ "query": "computer_run" })).unwrap();
+        let contract = &exact["tools"][0];
+        assert_eq!(exact["detail"], "schema");
+        assert!(
+            contract["description"]
+                .as_str()
+                .unwrap()
+                .contains("Result: `ComputerRunResult`.")
+        );
+        assert_eq!(contract["outputSchema"]["title"], "ComputerRunResult");
+        for field in ["stdout", "stderr"] {
+            assert!(
+                contract["outputSchema"]["properties"][field].is_object(),
+                "{field}: {contract}"
+            );
+        }
+        assert_eq!(
+            contract["inputSchema"]["required"],
+            json!(["computerId", "command"])
+        );
+        for kept in ["computer_runs", "terminal_open", "terminal_close"] {
+            let found = search(&catalogue, json!({ "query": kept })).unwrap();
+            assert_eq!(found["total"], 0, "{kept}: {found}");
+            assert!(invocation(&catalogue, json!({ "name": kept })).is_err());
+        }
+    }
+
     #[test]
     fn calls_cannot_escape_the_vehicle_tool_allowlist_or_hide_invalid_arguments() {
         let catalogue = tools();

@@ -59,6 +59,12 @@ pub(crate) fn handle(
     {
         return Err(ApiError::new(ErrorKind::CapabilityDenied, why));
     }
+    // What no approval lets through for a terminal (ADR-0065 T7): an agent
+    // or a plugin, one command from a client that asks, and a terminal that
+    // could not open anyway.
+    if let Some(refused) = crate::terminals::refusal(engine, connection, &request) {
+        return Err(refused);
+    }
     let granted = engine.granted(connection);
     // Escalation instead of rejection (ADR-0005): held, answered later.
     if !operator && engine.escalate(connection, &request, &granted) {
@@ -194,6 +200,20 @@ pub(crate) fn handle(
         ClientRequest::ComputerCheck(params) => {
             require(Config)?;
             engine.check_computer(connection, params)
+        }
+        request @ (ClientRequest::TerminalOpen(_) | ClientRequest::ComputerRun(_)) => {
+            require(Terminal)?;
+            crate::terminals::handle(engine, connection, request)
+        }
+        // What agents ran is the operator's to read.
+        request @ ClientRequest::ComputerRuns(_) => {
+            require_operator()?;
+            crate::terminals::handle(engine, connection, request)
+        }
+        // The engine lets only a terminal's holder or an operator through.
+        request @ (ClientRequest::TerminalResize(_) | ClientRequest::TerminalClose(_)) => {
+            require(Read)?;
+            crate::terminals::handle(engine, connection, request)
         }
         request @ (ClientRequest::VehicleList(_)
         | ClientRequest::VehicleGet(_)
@@ -931,7 +951,7 @@ fn set_operator(
     Ok(json!({}))
 }
 
-use uxduck_core::domain::client::Capability::{Config, Read};
+use uxduck_core::domain::client::Capability::{Config, Read, Terminal};
 
 /// Registers the subscriber and copies the state in one step of the single
 /// writer, so no event can fall between them: the first delta this
@@ -968,15 +988,36 @@ fn subscribe(
         clients: types
             .contains(&EntityType::Client)
             .then(|| engine.state.clients.values().map(Into::into).collect()),
-        approvals: types
-            .contains(&EntityType::Approval)
-            .then(|| engine.state.approvals.values().map(Into::into).collect()),
+        // Without a client's own request for a terminal (ADR-0065 T7), and
+        // without a command only an operator is to read (T14).
+        approvals: types.contains(&EntityType::Approval).then(|| {
+            engine
+                .state
+                .approvals
+                .values()
+                .filter(|a| {
+                    !engine.hides_approval(
+                        connection,
+                        &a.client_id,
+                        a.capability,
+                        a.shell_command.is_some(),
+                    )
+                })
+                .map(Into::into)
+                .collect()
+        }),
         receipts: types
             .contains(&EntityType::Receipt)
             .then(|| engine.state.receipts.values().map(Into::into).collect()),
-        notifications: types
-            .contains(&EntityType::Notification)
-            .then(|| each(&engine.state.notifications)),
+        notifications: types.contains(&EntityType::Notification).then(|| {
+            engine
+                .state
+                .notifications
+                .values()
+                .filter(|n| !engine.hides_notice(connection, n.condition.as_deref()))
+                .map(Into::into)
+                .collect()
+        }),
         vehicles: types
             .contains(&EntityType::Vehicle)
             .then(|| super::vehicles::vehicles(engine)),
@@ -1028,6 +1069,9 @@ fn subscribe(
         gimbals: types
             .contains(&EntityType::Gimbal)
             .then(|| crate::gimbals::listed(engine)),
+        terminals: types
+            .contains(&EntityType::Terminal)
+            .then(|| crate::terminals::listed(engine)),
         setups: types
             .contains(&EntityType::Setup)
             .then(|| engine.state.setups.values().map(Into::into).collect()),
@@ -1369,6 +1413,14 @@ fn layout_open(
             "the chat is always open",
         ));
     }
+    // A Terminal tab is opened by the person, from its computer's card or
+    // the palette, with the computer it is for (ADR-0065 T6).
+    if kind == operator::TabKind::Terminal {
+        return Err(ApiError::new(
+            ErrorKind::InvalidParams,
+            "a terminal is opened from its computer's card",
+        ));
+    }
     let tab = given_tab(engine, kind, params)?;
     let plan_id = given_plan(engine, kind, params)?;
     let result = |operator_id| LayoutOpenResult {
@@ -1571,6 +1623,7 @@ pub(crate) fn notify(
             engine.cancel_approval(connection, &json!(params.id));
             engine.cancel_place_area(connection, &json!(params.id));
             engine.stop_looks(connection, Some(&json!(params.id)));
+            engine.stop_runs(connection, &json!(params.id));
             if let Some(client) = engine.connections.get_mut(&connection) {
                 client.pending.remove(&params.id);
                 client.private_requests.remove(&params.id);
@@ -1715,6 +1768,7 @@ fn initialize(
             reads: ReadCapabilities {
                 mission_read_float_bits: capabilities.mission_read_float_bits,
                 replay_step_marks: capabilities.replay_step_marks,
+                shell_commands: capabilities.shell_commands,
             },
             operator,
             record,

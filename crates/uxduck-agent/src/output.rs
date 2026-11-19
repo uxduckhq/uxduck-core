@@ -50,6 +50,68 @@ pub fn take_images(value: &mut Value) -> Vec<Shown> {
     images
 }
 
+/// What a chat keeps of a `computer/run` call's params (ADR-0065 T14): the
+/// computer, never the command. A chat is journaled, synced to the account
+/// and can go in a feedback bundle, and the command belongs to none of
+/// those. It is in the run's record on the computer UXDuck runs on.
+#[must_use]
+pub fn kept_run_params(params: &Value) -> Value {
+    let mut kept = params.clone();
+    if let Some(command) = kept.get_mut("command") {
+        *command =
+            json!("(not kept in the chat: it is in this run's record, on its computer's card)");
+    }
+    kept
+}
+
+/// What a chat keeps of a `computer/run` answer: everything but what the
+/// command printed, which went to the model and is kept nowhere.
+#[must_use]
+pub fn kept_run_result(result: &Value) -> Value {
+    let mut kept = result.clone();
+    for (stream, bytes) in [("stdout", "stdoutBytes"), ("stderr", "stderrBytes")] {
+        let printed = kept[bytes].as_u64().unwrap_or_default();
+        if let Some(text) = kept.get_mut(stream) {
+            *text = json!(format!(
+                "({printed} bytes, which went to the assistant and are not kept)"
+            ));
+        }
+    }
+    kept
+}
+
+/// A `computer/run` answer as the model reads it: plain text, so what the
+/// command printed is not made longer by JSON's escapes and stays inside
+/// what one tool result holds (`turn::MAX_TOOL_OUTPUT_CHARS`) at the
+/// daemon's bounds.
+#[must_use]
+pub fn run_text(result: &Value) -> String {
+    let seconds = result["durationMs"].as_f64().unwrap_or_default() / 1000.0;
+    let ended = result["ended"].as_str().unwrap_or("exited");
+    let mut text = match result["exitStatus"].as_i64() {
+        Some(status) => format!("Exit status {status} after {seconds:.1} s."),
+        None => format!("Ended ({ended}) with no exit status after {seconds:.1} s."),
+    };
+    for note in result["notes"].as_array().into_iter().flatten() {
+        text.push('\n');
+        text.push_str(note.as_str().unwrap_or_default());
+    }
+    for (name, stream, bytes) in [
+        ("standard output", "stdout", "stdoutBytes"),
+        ("standard error", "stderr", "stderrBytes"),
+    ] {
+        let printed = result[bytes].as_u64().unwrap_or_default();
+        let said = result[stream].as_str().unwrap_or_default();
+        let part = if printed == 0 {
+            format!("\n--- {name}: nothing ---")
+        } else {
+            format!("\n--- {name}, {printed} bytes ---\n{said}")
+        };
+        text.push_str(&part);
+    }
+    text
+}
+
 /// An MCP tool result's `content`: the result as text, then any frames as
 /// MCP images.
 #[must_use]

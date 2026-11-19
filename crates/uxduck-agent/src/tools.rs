@@ -30,6 +30,11 @@ pub const AGENT_METHODS: &[&str] = &[
     "command/list",
     "command/send",
     "search/query",
+    // One command at a time on a vehicle's companion computer over SSH
+    // (S425, ADR-0065 T14): behind `terminal`, which no agent has until an
+    // operator, shown the whole command, allows it. The interactive
+    // `terminal/*` stays a person's.
+    "computer/run",
     "place/search",
     "place/locate",
     // A named area's outline (FB-177): it waits on the map for the
@@ -304,6 +309,14 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "computer/cameras",
     "computer/network",
     "computer/connectivity",
+    // What agents ran on companion computers is the operator's to read.
+    "computer/runs",
+    // A terminal on a companion computer is a shell on the vehicle, typed
+    // into by a person (ADR-0065 T14). An agent gets one command at a time
+    // through `computer/run` (S425), behind the `terminal` capability.
+    "terminal/open",
+    "terminal/resize",
+    "terminal/close",
     // Whether a vehicle is a simulation is the person's word (ADR-0039 R14).
     "vehicle/simulated",
     // Agreeing to the Terms of Service is the person's (ADR-0047).
@@ -593,6 +606,7 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
 /// and runs them with `tool_call`. Every tool the instructions name stays
 /// loaded. MCP discovery searches the full generated catalogue separately.
 pub const DEFERRED_METHODS: &[&str] = &[
+    "computer/run",
     "tuning/state",
     "tuning/prepare",
     "place/search",
@@ -813,7 +827,8 @@ pub fn model_tools() -> Vec<Tool> {
         search.description.push_str(
             " Also finds deferred UXDuck tools in uxduckTools: plans, missions, simulations, \
              terrain, files, parameters, history, link diagnostics, practice, cameras, \
-             checklists and plugin writing. Run them with tool_call.",
+             commands on companion computers, checklists and plugin writing. Run them with \
+             tool_call.",
         );
     }
     sent.push(Tool {

@@ -1,0 +1,18 @@
+{
+  "runId": "tm4c1d9e2f7a3b",
+  "ended": "deadline",
+  "durationMs": 30004,
+  "stdout": "line 1\n[UXDuck left out 92000 bytes here]\nline 9000\n",
+  "stderr": "caf�\n",
+  "stdoutBytes": 92017,
+  "stderrBytes": 5,
+  "stdoutLeftOut": {
+    "bytes": 92000,
+    "afterBytes": 7
+  },
+  "notes": [
+    "Stopped at its deadline of 30 s, and ended on the computer. What it printed until then is here.",
+    "Standard output was 92017 bytes. Its first 7 and its last 10 are here, and the 92000 between them were left out, because a tool answer holds only so much. Run it again with less output, such as through head, tail or grep.",
+    "Standard error held bytes that are not UTF-8 text. Each is shown as �."
+  ]
+}

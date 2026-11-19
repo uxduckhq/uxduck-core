@@ -434,6 +434,26 @@ pub enum Change {
     ChecklistUpdated {
         checklist: crate::domain::checklist::Checklist,
     },
+    /// A terminal on a companion computer opened (ADR-0065 T9): who holds
+    /// it, on which computer and when. Never what is typed or shown in it,
+    /// nor a command it was opened to run.
+    TerminalOpened {
+        terminal: crate::domain::terminal::Terminal,
+    },
+    /// A terminal ended, and how. The remote exit status when `ssh` exited
+    /// on its own.
+    TerminalEnded {
+        id: String,
+        end: crate::domain::terminal::TerminalEnd,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_status: Option<i32>,
+    },
+    /// A command an agent ran on a companion computer (ADR-0065 T14), when
+    /// it started and again when it ended: the receipt of what it ran. The
+    /// command is kept. What it printed never is.
+    ComputerRunUpserted {
+        run: crate::domain::terminal::ComputerRun,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -94,7 +94,8 @@ impl LocalClient {
             "initialize",
             json!({
                 "clientInfo": { "name": "uxduck-cli", "version": env!("CARGO_PKG_VERSION"), "kind": "operator-cli" },
-                "capabilities": { "protocolVersion": uxduck_contracts::version::PROTOCOL_VERSION, "missionReadFloatBits": true, "replayStepMarks": true }
+                // `uxduck approvals` prints a command an agent asks to run, whole (S425).
+                "capabilities": { "protocolVersion": uxduck_contracts::version::PROTOCOL_VERSION, "missionReadFloatBits": true, "replayStepMarks": true, "shellCommands": true }
             }),
         )
         .await

@@ -1,0 +1,17 @@
+{
+  "method": "approval/requested",
+  "params": {
+    "id": "ap1a2b3c4d5e6f7a8b",
+    "clientId": "cl9f3a1c2b4d5e6f70",
+    "clientName": "Claude Code",
+    "capability": "terminal",
+    "method": "computer/run",
+    "summary": "run a command on Buggy › Camera Pi",
+    "question": "Claude Code wants to run a command on Buggy › Camera Pi",
+    "shellCommandShown": "systemctl status mediamtx --no-pager⏎\necho done⇥⟨U+000D⟩⟨U+202E⟩",
+    "state": "pending",
+    "deadlineUs": 1790668960000000,
+    "createdAtUs": 1790668900000000,
+    "version": 1
+  }
+}

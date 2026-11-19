@@ -1,0 +1,7 @@
+{
+  "method": "computer/run",
+  "params": {
+    "computerId": "cc3f9a1b2c4d5e6f",
+    "command": "uptime"
+  }
+}

@@ -26,6 +26,9 @@ const EVERY: Duration = Duration::from_secs(2);
 pub struct Served {
     pub interfaces: Arc<Interfaces>,
     pub video: Arc<crate::video::hub::Hub>,
+    /// The daemon's terminals: a paired page that an operator allowed one
+    /// attaches to it here (ADR-0065 T7).
+    pub terminals: Arc<crate::terminals::Hub>,
     pub files: crate::vehicle_files::Store,
     /// This computer's own page, sent as the referrer of relayed map
     /// requests: the map keys allow it.
@@ -145,6 +148,7 @@ async fn listen(
         http::Network::new(address, stopped, served.referrer.clone()),
         served.interfaces.clone(),
         served.video.clone(),
+        served.terminals.clone(),
         served.files.clone(),
     );
     let task = tokio::spawn(async move {

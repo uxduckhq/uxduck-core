@@ -121,6 +121,39 @@ fn own_key(credentials: &mut FileCredentials) -> Result<OwnKey, String> {
     })
 }
 
+/// What signs in to a computer through its pinned host key, from the
+/// credential store: the private key the person gave for it, when they gave
+/// one, and UXDuck's own key.
+pub(crate) fn saved_sign_in(
+    data_dir: &Path,
+    computer: &CompanionComputer,
+) -> Result<(Option<String>, OwnKey), String> {
+    let mut credentials = FileCredentials::new(data_dir);
+    let key = if computer.key {
+        Some(
+            credentials
+                .get(&computer.key_name())
+                .ok_or_else(|| "Its saved SSH private key is missing.".to_owned())?,
+        )
+    } else {
+        None
+    };
+    Ok((key, own_key(&mut credentials)?))
+}
+
+/// The ways to sign in through a pinned host key, in the order they are
+/// tried: the key the person gave for the computer alone, else their own SSH
+/// config and agent and then UXDuck's own key. Never a password.
+pub(crate) fn pinned_ways<'a>(pasted: Option<&'a str>, own: Option<&'a OwnKey>) -> Vec<Way<'a>> {
+    if let Some(key) = pasted {
+        vec![Way::Pasted(key)]
+    } else if let Some(own) = own {
+        vec![Way::Person, Way::Own(own)]
+    } else {
+        vec![Way::Person]
+    }
+}
+
 /// What the computer is asked: its system, architecture and UXDuck, then
 /// its clock (S356), whether the kernel says it is synchronised and network
 /// time is on (`timedatectl`, where there is one) and which time service
@@ -170,20 +203,17 @@ impl Host {
         input: String,
     ) {
         let dir = self.dir.clone();
-        let mut credentials = FileCredentials::new(&self.data_dir);
-        let key = computer.key.then(|| credentials.get(&computer.key_name()));
-        let own = own_key(&mut credentials);
+        let saved = saved_sign_in(&self.data_dir, &computer);
         let engine = self.engine.clone();
         tokio::spawn(async move {
-            let result = match (key, own) {
-                (Some(None), _) => Err("Its saved SSH private key is missing.".to_owned()),
-                (_, Err(why)) => Err(why),
-                (key, Ok(own)) => {
+            let result = match saved {
+                Err(why) => Err(why),
+                Ok((key, own)) => {
                     pinned(
                         &dir,
                         &computer,
                         SignIn {
-                            pasted: key.as_ref().and_then(Option::as_deref),
+                            pasted: key.as_deref(),
                             own: Some(&own),
                             password: None,
                         },
@@ -272,7 +302,7 @@ impl CompanionPort for Host {
 
 /// One way a check tries to sign in.
 #[derive(Clone, Copy)]
-enum Way<'a> {
+pub(crate) enum Way<'a> {
     /// The key the person gave for this computer, alone.
     Pasted(&'a str),
     /// The person's SSH config and agent, as in their terminal.
@@ -325,7 +355,7 @@ pub(crate) async fn check(
 }
 
 /// Whether `ssh` was refused the sign-in, rather than not reaching it.
-fn refused(stderr: &str) -> bool {
+pub(crate) fn refused(stderr: &str) -> bool {
     stderr.contains("Permission denied") || stderr.contains("Too many authentication failures")
 }
 
@@ -356,64 +386,12 @@ async fn pinned(
     let temporary =
         tempfile::tempdir().map_err(|_| "Cannot prepare SSH host verification".to_owned())?;
     let trusted = temporary.path().join("known_hosts");
-    let mut files = vec![dir.join(format!("{}.known_hosts", computer.id))];
-    files.extend(
-        their_known_hosts(None, computer)
-            .await
-            .into_iter()
-            .map(|path| {
-                if let Some(suffix) = path.strip_prefix("~/") {
-                    directories::BaseDirs::new()
-                        .map_or_else(|| PathBuf::from(&path), |base| base.home_dir().join(suffix))
-                } else {
-                    PathBuf::from(path)
-                }
-            }),
-    );
-    let mut matched = false;
-    'files: for file in files {
-        let Ok(contents) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        for line in contents.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() < 3 || fields[0].starts_with(['@', '#']) {
-                continue;
-            }
-            write_private(
-                &trusted,
-                &format!("uxduck-network {} {}", fields[1], fields[2]),
-            )?;
-            let output = tokio::process::Command::new("ssh-keygen")
-                .args(["-l", "-E", "sha256", "-f"])
-                .arg(&trusted)
-                .output()
-                .await
-                .map_err(|_| "Cannot run ssh-keygen to verify the pinned host".to_owned())?;
-            if output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .split_whitespace()
-                    .nth(1)
-                    == Some(pinned)
-            {
-                matched = true;
-                break 'files;
-            }
-        }
-    }
-    if !matched {
+    if !trust_pinned(dir, computer, pinned, &trusted).await? {
         return Err(format!(
             "The pinned SSH host key is missing from known_hosts. Check the computer with its raw host key before setting up its {what}."
         ));
     }
-    let ways = if let Some(key) = sign_in.pasted {
-        vec![Way::Pasted(key)]
-    } else if let Some(own) = sign_in.own {
-        vec![Way::Person, Way::Own(own)]
-    } else {
-        vec![Way::Person]
-    };
-    for way in ways {
+    for way in pinned_ways(sign_in.pasted, sign_in.own) {
         let ran = run_adapter(dir, None, computer, &trusted, way, Some((adapter, input))).await?;
         let output = &ran.output;
         if !output.status.success() && refused(&String::from_utf8_lossy(&output.stderr)) {
@@ -452,6 +430,69 @@ async fn pinned(
     Err(format!(
         "SSH could not sign in. Check the computer again before setting up its {what}."
     ))
+}
+
+/// Writes `trusted`, a known-hosts file holding only the raw host key whose
+/// fingerprint is `pinned`, under the alias [`HostKeys::Pinned`] gives
+/// `ssh`. The key is looked for in UXDuck's own file for the computer and
+/// in the files the person's own `ssh` reads. `false` when none of them has
+/// it.
+pub(crate) async fn trust_pinned(
+    dir: &Path,
+    computer: &CompanionComputer,
+    pinned: &str,
+    trusted: &Path,
+) -> Result<bool, String> {
+    let mut files = vec![dir.join(format!("{}.known_hosts", computer.id))];
+    files.extend(
+        their_known_hosts(None, computer)
+            .await
+            .into_iter()
+            .map(|path| {
+                if let Some(suffix) = path.strip_prefix("~/") {
+                    directories::BaseDirs::new()
+                        .map_or_else(|| PathBuf::from(&path), |base| base.home_dir().join(suffix))
+                } else {
+                    PathBuf::from(path)
+                }
+            }),
+    );
+    let mut matched = false;
+    'files: for file in files {
+        let Ok(contents) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 3 || fields[0].starts_with(['@', '#']) {
+                continue;
+            }
+            write_private(
+                trusted,
+                &format!("{PINNED_ALIAS} {} {}", fields[1], fields[2]),
+            )?;
+            let output = tokio::process::Command::new("ssh-keygen")
+                .args(["-l", "-E", "sha256", "-f"])
+                .arg(trusted)
+                .output()
+                .await
+                .map_err(|_| "Cannot run ssh-keygen to verify the pinned host".to_owned())?;
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .nth(1)
+                    == Some(pinned)
+            {
+                matched = true;
+                break 'files;
+            }
+        }
+    }
+    if !matched {
+        // The last key tried is not the pinned one: nothing is trusted.
+        let _ = std::fs::remove_file(trusted);
+    }
+    Ok(matched)
 }
 
 /// Why the camera adapter failed, for people: its own reason when it gave
@@ -494,10 +535,200 @@ async fn run(
     .await
 }
 
+/// The alias a pinned host key is kept under, so only that key counts
+/// whatever the computer's name or address resolves to.
+const PINNED_ALIAS: &str = "uxduck-network";
+
+/// How one `ssh` verifies the host it reaches.
+#[derive(Clone, Copy)]
+pub(crate) enum HostKeys<'a> {
+    /// A check: UXDuck's own file for the computer first, where a new key
+    /// is pinned, then the files the person's own `ssh` reads.
+    AcceptNew {
+        known_hosts: &'a Path,
+        theirs: &'a [String],
+    },
+    /// Only the exact pinned key, alone in this file ([`trust_pinned`]).
+    /// Networks, cameras and terminals.
+    Pinned(&'a Path),
+}
+
+/// What one `ssh` is for, which decides its terminal and where it writes
+/// what it says about itself.
+#[derive(Clone, Copy)]
+pub(crate) enum Session<'a> {
+    /// One batch command with no terminal. `ssh -v` writes on its standard
+    /// error, where a check reads the host key it was sent.
+    Batch,
+    /// A terminal (ADR-0065): a pseudo-terminal when `tty`, no escape
+    /// character, and what `ssh` says about itself in `log`, so none of it
+    /// reaches the terminal's bytes. At `LogLevel=VERBOSE` it says when it
+    /// signed in and never the command it runs.
+    Terminal { tty: bool, log: &'a Path },
+}
+
+/// The arguments and environment of one `ssh` to a computer.
+pub(crate) struct Ssh {
+    pub args: Vec<std::ffi::OsString>,
+    pub envs: Vec<(&'static str, std::ffi::OsString)>,
+}
+
+/// The one place `ssh`'s options are chosen, for checks, network and camera
+/// changes and terminals: signing in one `way`, verifying the host with
+/// `host_keys`, never adding keys to the person's agent, and running
+/// `remote` on the computer, or what it gives someone who signs in when
+/// there is none. A key or password `way` needs is written to `key_file` or
+/// `askpass_file`, which the caller removes when `ssh` has ended.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every choice a caller makes about one ssh, in one place"
+)]
+pub(crate) fn ssh(
+    key_file: &Path,
+    askpass_file: &Path,
+    config: Option<&Path>,
+    computer: &CompanionComputer,
+    way: Way<'_>,
+    host_keys: HostKeys<'_>,
+    session: Session<'_>,
+    remote: Option<&str>,
+) -> Result<Ssh, String> {
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = Vec::new();
+    let mut envs: Vec<(&'static str, OsString)> = Vec::new();
+    let option = |args: &mut Vec<OsString>, option: &str| {
+        args.push("-o".into());
+        args.push(option.into());
+    };
+    let only = |args: &mut Vec<OsString>, key: &str| -> Result<(), String> {
+        write_private(key_file, key)?;
+        args.push("-i".into());
+        args.push(key_file.into());
+        args.push("-o".into());
+        args.push("IdentitiesOnly=yes".into());
+        Ok(())
+    };
+    match way {
+        Way::Pasted(key) => {
+            only(&mut args, key)?;
+            option(&mut args, "BatchMode=yes");
+        }
+        Way::Person => option(&mut args, "BatchMode=yes"),
+        Way::Own(own) => {
+            only(&mut args, &own.private)?;
+            option(&mut args, "IdentityAgent=none");
+            option(&mut args, "BatchMode=yes");
+        }
+        Way::Password(own, password) => {
+            only(&mut args, &own.private)?;
+            write_private(askpass_file, password)?;
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("Cannot find UXDuck to answer ssh's password prompt: {e}"))?;
+            option(&mut args, "IdentityAgent=none");
+            option(&mut args, "BatchMode=no");
+            option(&mut args, "NumberOfPasswordPrompts=1");
+            envs.push(("SSH_ASKPASS", exe.into()));
+            envs.push(("SSH_ASKPASS_REQUIRE", "force".into()));
+            envs.push((ASKPASS_FILE, askpass_file.into()));
+        }
+    }
+    if matches!(host_keys, HostKeys::Pinned(_)) {
+        // Trust only the key matching the stored pin. A user known-hosts
+        // entry changed elsewhere cannot authorize a change or a terminal.
+        option(&mut args, &format!("HostKeyAlias={PINNED_ALIAS}"));
+        option(&mut args, "GlobalKnownHostsFile=none");
+        option(&mut args, "CheckHostIP=no");
+        option(&mut args, "ControlMaster=no");
+        option(&mut args, "ControlPath=none");
+    }
+    match session {
+        Session::Batch | Session::Terminal { tty: false, .. } => args.push("-T".into()),
+        Session::Terminal { tty: true, .. } => {
+            args.push("-tt".into());
+            // Every byte typed goes to the computer: `~.` ends nothing here.
+            option(&mut args, "EscapeChar=none");
+        }
+    }
+    option(&mut args, "ConnectTimeout=10");
+    option(&mut args, "AddKeysToAgent=no");
+    option(
+        &mut args,
+        match host_keys {
+            HostKeys::Pinned(_) => "StrictHostKeyChecking=yes",
+            HostKeys::AcceptNew { .. } => "StrictHostKeyChecking=accept-new",
+        },
+    );
+    option(&mut args, "HashKnownHosts=no");
+    match session {
+        Session::Batch => args.push("-v".into()),
+        Session::Terminal { log, .. } => {
+            args.push("-E".into());
+            args.push(log.into());
+            option(&mut args, "LogLevel=VERBOSE");
+        }
+    }
+    let (known_hosts, theirs) = match host_keys {
+        HostKeys::AcceptNew {
+            known_hosts,
+            theirs,
+        } => (known_hosts, theirs.join(" ")),
+        HostKeys::Pinned(trusted) => (trusted, String::new()),
+    };
+    option(
+        &mut args,
+        &format!("UserKnownHostsFile=\"{}\" {theirs}", known_hosts.display()),
+    );
+    if let Some(config) = config {
+        args.push("-F".into());
+        args.push(config.into());
+    }
+    if let Some(port) = computer.port {
+        args.push("-p".into());
+        args.push(port.to_string().into());
+    }
+    if let Some(user) = &computer.user {
+        args.push("-l".into());
+        args.push(user.into());
+    }
+    args.push("--".into());
+    args.push((&computer.host).into());
+    if let Some(remote) = remote {
+        args.push(remote.into());
+    }
+    Ok(Ssh { args, envs })
+}
+
+/// OpenSSH's `ssh` on this computer's `PATH`, as a check runs it.
+pub(crate) fn ssh_program() -> Option<PathBuf> {
+    program_in(std::env::var_os("PATH").as_deref(), "ssh")
+}
+
+pub(crate) fn program_in(path: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(path?)
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+}
+
+/// What a check or a terminal says when this computer has no `ssh`, with
+/// how to get it.
+pub(crate) fn ssh_missing() -> String {
+    let get = if cfg!(windows) {
+        "Add OpenSSH Client in Windows Settings under System, Optional features."
+    } else if cfg!(target_os = "macos") {
+        "macOS comes with it, so check that /usr/bin is on UXDuck's PATH."
+    } else {
+        "Install your system's OpenSSH client package, such as openssh-client."
+    };
+    format!(
+        "UXDuck reaches companion computers with OpenSSH's ssh command, and it is not installed on this computer. {get}"
+    )
+}
+
 /// One `ssh` to the computer, signing in one `way`.
 #[allow(
     clippy::too_many_lines,
-    reason = "SSH options and temporary credential lifetimes stay in one scope"
+    reason = "the script and temporary credential lifetimes stay in one scope"
 )]
 async fn run_adapter(
     dir: &Path,
@@ -518,44 +749,9 @@ async fn run_adapter(
         Vec::new()
     };
     let mut script = SCRIPT.to_owned();
-    let mut command = tokio::process::Command::new("ssh");
-    let only = |command: &mut tokio::process::Command, key: &str| -> Result<(), String> {
-        write_private(&key_file, key)?;
-        command
-            .arg("-i")
-            .arg(&key_file)
-            .args(["-o", "IdentitiesOnly=yes"]);
-        Ok(())
-    };
-    match way {
-        Way::Pasted(key) => {
-            only(&mut command, key)?;
-            command.args(["-o", "BatchMode=yes"]);
-        }
-        Way::Person => {
-            command.args(["-o", "BatchMode=yes"]);
-        }
-        Way::Own(own) => {
-            only(&mut command, &own.private)?;
-            command
-                .args(["-o", "IdentityAgent=none"])
-                .args(["-o", "BatchMode=yes"]);
-        }
-        Way::Password(own, password) => {
-            only(&mut command, &own.private)?;
-            write_private(&askpass_file, password)?;
-            let exe = std::env::current_exe()
-                .map_err(|e| format!("Cannot find UXDuck to answer ssh's password prompt: {e}"))?;
-            command
-                .args(["-o", "IdentityAgent=none"])
-                .args(["-o", "BatchMode=no"])
-                .args(["-o", "NumberOfPasswordPrompts=1"])
-                .env("SSH_ASKPASS", exe)
-                .env("SSH_ASKPASS_REQUIRE", "force")
-                .env(ASKPASS_FILE, &askpass_file);
-            script.push_str("; ");
-            script.push_str(&add_key(&own.public));
-        }
+    if let Way::Password(own, _) = way {
+        script.push_str("; ");
+        script.push_str(&add_key(&own.public));
     }
     if network.is_some() {
         let script_python = include_str!("companions/network.py").replace('\'', "'\"'\"'");
@@ -581,54 +777,40 @@ async fn run_adapter(
             let quoted = include_str!("companions/camera.py").replace('\'', "'\"'\"'");
             script = format!("{SCRIPT}; {sudo}python3 -c '{quoted}'");
         }
-        // For any network operation trust only the key matching the stored pin.
-        // A user known-hosts entry changed elsewhere cannot authorize a mutation.
-        command.args([
-            "-o",
-            "HostKeyAlias=uxduck-network",
-            "-o",
-            "GlobalKnownHostsFile=none",
-            "-o",
-            "CheckHostIP=no",
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            "ControlPath=none",
-        ]);
     }
+    // For any network or camera operation trust only the key matching the
+    // stored pin.
+    let host_keys = if network.is_some() {
+        HostKeys::Pinned(known_hosts)
+    } else {
+        HostKeys::AcceptNew {
+            known_hosts,
+            theirs: &theirs,
+        }
+    };
+    let built = ssh(
+        &key_file,
+        &askpass_file,
+        config,
+        computer,
+        way,
+        host_keys,
+        Session::Batch,
+        Some(&script),
+    );
+    let built = match built {
+        Ok(built) => built,
+        Err(why) => {
+            for file in [&key_file, &askpass_file] {
+                let _ = std::fs::remove_file(file);
+            }
+            return Err(why);
+        }
+    };
+    let mut command = tokio::process::Command::new("ssh");
     command
-        .arg("-T")
-        .args(["-o", "ConnectTimeout=10"])
-        .args(["-o", "AddKeysToAgent=no"])
-        .args([
-            "-o",
-            if network.is_some() {
-                "StrictHostKeyChecking=yes"
-            } else {
-                "StrictHostKeyChecking=accept-new"
-            },
-        ])
-        .args(["-o", "HashKnownHosts=no"])
-        .arg("-v")
-        .arg("-o")
-        .arg(format!(
-            "UserKnownHostsFile=\"{}\" {}",
-            known_hosts.display(),
-            theirs.join(" ")
-        ));
-    if let Some(config) = config {
-        command.arg("-F").arg(config);
-    }
-    if let Some(port) = computer.port {
-        command.arg("-p").arg(port.to_string());
-    }
-    if let Some(user) = &computer.user {
-        command.arg("-l").arg(user);
-    }
-    command
-        .arg("--")
-        .arg(&computer.host)
-        .arg(&script)
+        .args(&built.args)
+        .envs(built.envs.iter().map(|(name, value)| (*name, value)))
         .stdin(if network.is_some() {
             Stdio::piped()
         } else {
@@ -662,10 +844,7 @@ async fn run_adapter(
             computer.host,
             timeout.as_secs()
         )),
-        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Err(
-            "UXDuck reaches companion computers with OpenSSH's ssh command, and it is not installed on this computer"
-                .to_owned(),
-        ),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Err(ssh_missing()),
         Ok(Err(error)) => Err(format!("Cannot run ssh: {error}")),
         Ok(Ok(output)) => Ok(Ran {
             output,
@@ -810,7 +989,7 @@ fn add_key(public: &str) -> String {
     )
 }
 
-fn write_private(path: &Path, key: &str) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, key: &str) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -877,6 +1056,41 @@ fn changed(host: &str, pinned: &str, now: Option<&str>) -> String {
         "{host}'s host key changed: UXDuck pinned {pinned}, and it now sends {}. Someone may be pretending to be it. If it was reinstalled, remove it and add it again.",
         now.unwrap_or("another")
     )
+}
+
+/// Whether a terminal's `ssh` signed in, as its log says at
+/// `LogLevel=VERBOSE`.
+pub(crate) fn signed_in(log: &str) -> bool {
+    log.lines()
+        .any(|line| line.starts_with("Authenticated to "))
+}
+
+/// Why a terminal's `ssh` did not sign in, for people, from what it wrote
+/// in its log: a check's own words, with both fingerprints for a host key
+/// that changed.
+pub(crate) fn terminal_failure(computer: &CompanionComputer, log: &str) -> String {
+    let pinned = computer.check.as_ref().and_then(|c| c.host_key.as_deref());
+    if log.contains("Host key verification failed")
+        && !log.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    {
+        return changed(&computer.host, pinned.unwrap_or("its first key"), None);
+    }
+    failure(&computer.host, pinned, log)
+}
+
+/// The last thing `ssh` said about itself, such as that the connection
+/// closed: never anything typed or shown, which its log does not hold.
+pub(crate) fn last_said(log: &str) -> Option<String> {
+    log.lines()
+        .map(str::trim)
+        .rfind(|l| {
+            !l.is_empty()
+                && !l.starts_with("Authenticated to ")
+                && !l.starts_with("Transferred:")
+                && !l.starts_with("Bytes per second")
+                && !l.starts_with("debug")
+        })
+        .map(str::to_owned)
 }
 
 /// Why ssh failed, for people.

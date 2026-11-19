@@ -359,6 +359,9 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::CameraRemoved { .. }
             | Change::GimbalUpserted { .. }
             | Change::GimbalRemoved { .. }
+            | Change::TerminalOpened { .. }
+            | Change::TerminalEnded { .. }
+            | Change::ComputerRunUpserted { .. }
             | Change::VideoRecordingUpserted { .. }
             | Change::VideoPhotoUpserted { .. }
             | Change::VideoRecordingRemoved { .. }

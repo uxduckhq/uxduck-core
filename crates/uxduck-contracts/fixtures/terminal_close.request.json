@@ -1,0 +1,6 @@
+{
+  "method": "terminal/close",
+  "params": {
+    "terminalId": "tm4c1d9e2f7a3b"
+  }
+}

@@ -1051,3 +1051,29 @@ Command::SpeedStep.by_mps
 # A button's Shift and an axis's feel (S418, 2026-11-18).
 AxisFeel.axis
 ShiftButton.button
+
+# A terminal on a companion computer, opened and ended (S422, 2026-11-17).
+Change::TerminalEnded.end
+Change::TerminalEnded.id
+Change::TerminalOpened.terminal
+Terminal.client_id
+Terminal.client_name
+Terminal.computer_id
+Terminal.id
+Terminal.kind
+Terminal.opened_at_us
+Terminal.vehicle_id
+# A command an agent ran on a companion computer, the journaled receipt
+# (S425, 2026-11-17): a new type no release has stored.
+Change::ComputerRunUpserted.run
+ComputerRun.client_id
+ComputerRun.client_name
+ComputerRun.computer_id
+ComputerRun.computer_name
+ComputerRun.deadline_s
+ComputerRun.id
+ComputerRun.shell_command
+ComputerRun.shown_first
+ComputerRun.started_at_us
+ComputerRun.vehicle_id
+ComputerRun.vehicle_name

@@ -1,0 +1,9 @@
+{
+  "method": "terminal/open",
+  "params": {
+    "computerId": "cc3f9a1b2c4d5e6f",
+    "cols": 80,
+    "rows": 24,
+    "command": "journalctl -u mediamtx -n 50"
+  }
+}

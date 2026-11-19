@@ -812,9 +812,20 @@ async fn run(
         Ok(()) => {}
     }
 
-    if outcome.result.is_ok() {
-        let now = items_now(&rpc, &thread_id)
-            .await
+    let items = items_now(&rpc, &thread_id).await;
+    // A chat that ran a command on a companion computer keeps no
+    // transcript (ADR-0065 T14): it would hold the command and what it
+    // printed, which UXDuck keeps nowhere. Its next turn is rebuilt from
+    // the journal, which has neither.
+    let ran_a_command = items.iter().any(|item| {
+        item.tool_call
+            .as_ref()
+            .is_some_and(|call| call.method == "computer/run")
+    });
+    if ran_a_command {
+        services.transcripts.forget(&thread_id);
+    } else if outcome.result.is_ok() {
+        let now = items
             .into_iter()
             .filter(Item::in_history)
             .map(|item| item.id)

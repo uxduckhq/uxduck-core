@@ -1,0 +1,32 @@
+{
+  "method": "state/delta",
+  "params": {
+    "seq": 2210,
+    "tsUs": 1794934910482337,
+    "actor": {
+      "clientId": "c7ef4e84544236752",
+      "operatorId": "op1"
+    },
+    "changes": [
+      {
+        "entity": "terminal",
+        "id": "tm4c1d9e2f7a3b",
+        "op": "upsert",
+        "terminal": {
+          "id": "tm4c1d9e2f7a3b",
+          "vehicleId": "5b0c2e1a-7d3f-5e8b-9c4a-2f1e0d3c4b5a",
+          "computerId": "cc3f9a1b2c4d5e6f",
+          "clientId": "cle9393fb970359453",
+          "clientName": "uxduck-cli",
+          "kind": "interactive",
+          "openedAtUs": 1794934910482337
+        }
+      },
+      {
+        "entity": "terminal",
+        "id": "tm0a1b2c3d4e5f",
+        "op": "remove"
+      }
+    ]
+  }
+}

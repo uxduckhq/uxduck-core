@@ -63,6 +63,7 @@ fn words(capability: Capability) -> &'static str {
         Capability::Config => "change links and settings",
         Capability::Approve => "answer approvals",
         Capability::Location => "see where this computer is",
+        Capability::Terminal => "open terminals on companion computers",
     }
 }
 
@@ -74,6 +75,7 @@ fn name(capability: Capability) -> &'static str {
         Capability::Config => "config",
         Capability::Approve => "approve",
         Capability::Location => "location",
+        Capability::Terminal => "terminal",
     }
 }
 

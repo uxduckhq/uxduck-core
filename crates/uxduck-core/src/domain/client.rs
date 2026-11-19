@@ -64,15 +64,21 @@ pub enum Capability {
     Approve,
     /// Reading where this computer is (ADR-0030 L4): an agent asks first.
     Location,
+    /// Opening a terminal on a vehicle's companion computer (ADR-0065 T7).
+    /// A shell on the vehicle is more than control of it: only the person's
+    /// own clients on the computer UXDuck runs on hold it, pairing never
+    /// grants it, and every other client asks an operator.
+    Terminal,
 }
 
 impl Capability {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Read,
         Self::Control,
         Self::Config,
         Self::Approve,
         Self::Location,
+        Self::Terminal,
     ];
 
     /// The error a connection gets when it lacks this capability, in the
@@ -85,6 +91,7 @@ impl Capability {
             Self::Config => "change settings",
             Self::Approve => "answer requests from other connections",
             Self::Location => "see where this computer is",
+            Self::Terminal => "open a terminal on a vehicle's computer",
         };
         format!("This connection isn't allowed to {verb}.")
     }
@@ -119,6 +126,17 @@ mod tests {
         assert!(!ClientKind::Agent.is_operator());
         assert!(!ClientKind::RemoteOperator.is_operator());
         assert!(!ClientKind::NetworkUi.is_operator());
+    }
+
+    #[test]
+    fn pairing_never_grants_a_terminal_whatever_was_chosen() {
+        for access in [NetworkAccess::Watch, NetworkAccess::Fly] {
+            assert!(
+                !access.capabilities().contains(&Capability::Terminal),
+                "{access:?}"
+            );
+        }
+        assert!(Capability::ALL.contains(&Capability::Terminal));
     }
 
     #[test]

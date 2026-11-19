@@ -77,6 +77,49 @@ mod tests {
         assert_eq!(granted(ClientKind::Shell, &browser()), [Capability::Read]);
     }
 
+    /// ADR-0065 T7: the person's own clients on this computer hold
+    /// `terminal`, and nobody else is admitted with it.
+    #[test]
+    fn only_the_persons_own_clients_on_this_computer_are_admitted_with_a_terminal() {
+        let phone = Trust::NetworkBrowser {
+            origin: "http://192.168.1.20:45000".into(),
+            client: "clnet0".into(),
+        };
+        let holds = |kind, trust: &Trust| granted(kind, trust).contains(&Capability::Terminal);
+        for kind in [
+            ClientKind::OperatorUi,
+            ClientKind::OperatorCli,
+            ClientKind::Shell,
+        ] {
+            assert!(holds(kind, &Trust::LocalUser), "{kind:?}");
+        }
+        assert!(holds(ClientKind::OperatorUi, &browser()));
+        for kind in [
+            ClientKind::OperatorUi,
+            ClientKind::OperatorCli,
+            ClientKind::Shell,
+            ClientKind::Agent,
+            ClientKind::ThirdParty,
+            ClientKind::Exporter,
+            ClientKind::RemoteOperator,
+            ClientKind::Plugin,
+            ClientKind::NetworkUi,
+        ] {
+            assert!(!holds(kind, &phone), "{kind:?} on the network");
+        }
+        for kind in [
+            ClientKind::Agent,
+            ClientKind::ThirdParty,
+            ClientKind::Exporter,
+            ClientKind::RemoteOperator,
+            ClientKind::Plugin,
+            ClientKind::NetworkUi,
+        ] {
+            assert!(!holds(kind, &Trust::LocalUser), "{kind:?} on the socket");
+            assert!(!holds(kind, &browser()), "{kind:?} in a paired browser");
+        }
+    }
+
     #[test]
     fn a_page_on_the_network_is_never_an_operator() {
         let phone = Trust::NetworkBrowser {

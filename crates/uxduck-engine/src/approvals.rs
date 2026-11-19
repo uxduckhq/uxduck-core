@@ -175,6 +175,15 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         // Where this computer is (ADR-0030 L4): an agent asks first, and
         // "Always allow" remembers it for that agent.
         ClientRequest::LocationStatus(_) => Some(Capability::Location),
+        // A terminal on a vehicle's computer (ADR-0065 T7): every client
+        // but the person's own on this computer asks, in
+        // `terminals::asked`'s words. Resizing and ending one are never
+        // asked for. One command an agent runs there (T14) is behind the
+        // same capability and asked in the same place's words, with the
+        // command itself shown whole.
+        ClientRequest::TerminalOpen(_) | ClientRequest::ComputerRun(_) => {
+            Some(Capability::Terminal)
+        }
         // Searching the network asks first; looking nearby does not (F10).
         request @ (ClientRequest::FindStart(_) | ClientRequest::FindVehicles(_)) => {
             crate::finds::needed(request).filter(|c| *c == Capability::Config)
@@ -296,7 +305,8 @@ impl Engine {
             return false;
         };
         let now = self.clock.now_us();
-        let words = camera.as_ref().or(setting.as_ref());
+        let terminal = crate::terminals::asked(self, request, &name);
+        let words = camera.as_ref().or(setting.as_ref()).or(terminal.as_ref());
         let (summary, body) = match words {
             Some(words) => (words.summary.clone(), words.body.clone()),
             None => self.approval_words(request, capability, &preflight),
@@ -312,6 +322,7 @@ impl Engine {
             question: words.map(|words| words.question.clone()),
             preflight,
             item_id,
+            shell_command: crate::terminals::asked_command(request),
             state: ApprovalState::Pending,
             remember: None,
             deadline_us: now + APPROVAL_DEADLINE_US,
@@ -976,12 +987,89 @@ impl Engine {
         self.state.markers.get(id).map_or(id, |m| m.name.as_str())
     }
 
+    /// Whether a connection must not be shown an approval: its own, for a
+    /// terminal (ADR-0065 T7). The client asking for a shell on a vehicle
+    /// never sees its request, and so cannot be led to answer it. And one
+    /// that carries a command an agent asks to run (T14) is shown only to
+    /// those who answer it, the operators on the computer UXDuck runs on:
+    /// the command is no other client's to read. Of those, only a client
+    /// that says it shows the command gets it: a page or a command from
+    /// before S425 would offer the answers without what they allow.
+    pub(crate) fn hides_approval(
+        &self,
+        connection: ConnectionId,
+        client_id: &str,
+        capability: Capability,
+        command: bool,
+    ) -> bool {
+        capability == Capability::Terminal
+            && self
+                .connections
+                .get(&connection)
+                .and_then(|c| c.admitted.as_ref())
+                .is_some_and(|a| {
+                    (command && !a.reads.shell_commands)
+                        || (!a.operator && (command || a.record == client_id))
+                })
+    }
+
+    /// The same for the notice of a pending approval, by its condition.
+    pub(crate) fn hides_notice(&self, connection: ConnectionId, condition: Option<&str>) -> bool {
+        condition
+            .and_then(|condition| condition.strip_prefix("approval:"))
+            .and_then(|id| self.state.approvals.get(id))
+            .is_some_and(|a| {
+                self.hides_approval(
+                    connection,
+                    &a.client_id,
+                    a.capability,
+                    a.shell_command.is_some(),
+                )
+            })
+    }
+
+    /// Tells a connection what it may do now: its record's capabilities and
+    /// what was allowed for the connection.
+    fn tell_capabilities(&mut self, connection: ConnectionId) {
+        let Some(admitted) = self
+            .connections
+            .get(&connection)
+            .and_then(|c| c.admitted.as_ref())
+        else {
+            return;
+        };
+        let mut granted = admitted.granted.clone();
+        granted.extend(admitted.extra.iter().copied());
+        granted.sort();
+        granted.dedup();
+        let frame = rpc::router::notification(&ServerNotification::ClientCapabilitiesChanged(
+            CapabilitiesChanged {
+                granted: granted.into_iter().map(Into::into).collect(),
+            },
+        ));
+        self.send(connection, &frame);
+    }
+
     fn broadcast_approval(&mut self, notification: &ServerNotification) {
         let frame = rpc::router::notification(notification);
+        let about = match notification {
+            ServerNotification::ApprovalRequested(approval)
+            | ServerNotification::ApprovalResolved(approval) => Some((
+                approval.client_id.as_str(),
+                Capability::from(approval.capability),
+                approval.shell_command_shown.is_some(),
+            )),
+            _ => None,
+        };
         let targets: Vec<ConnectionId> = self
             .connections
             .iter()
             .filter(|(_, c)| c.admitted.as_ref().is_some_and(|a| a.approvals))
+            .filter(|(id, _)| {
+                !about.is_some_and(|(client, capability, command)| {
+                    self.hides_approval(**id, client, capability, command)
+                })
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in targets {
@@ -1032,7 +1120,9 @@ impl Engine {
                         },
                     )
                 }
-                _ => format!("{why} (approval {id})"),
+                // A terminal's asker is a person at a page: plain words.
+                request => crate::terminals::not_allowed(request, state == ApprovalState::Expired)
+                    .map_or_else(|| format!("{why} (approval {id})"), str::to_owned),
             };
             let error = ApiError::new(ErrorKind::CapabilityDenied, message);
             self.send(
@@ -1080,6 +1170,7 @@ impl Engine {
                 {
                     admitted.extra.push(held.capability);
                 }
+                self.tell_capabilities(held.connection);
             }
             Remember::Always => {
                 if let Some(mut client) = self.state.clients.get(&record).cloned() {
@@ -1242,7 +1333,7 @@ pub(crate) fn handle(
     match request {
         ClientRequest::ClientList(_) if operator => list_clients(engine),
         ClientRequest::ClientSetCapabilities(params) if operator => {
-            set_capabilities(engine, params)
+            set_capabilities(engine, connection, params)
         }
         ClientRequest::ClientForget(params) if operator => {
             if engine.forget_network_client(&params.id) {
@@ -1263,8 +1354,20 @@ pub(crate) fn handle(
             Err(denied(&Capability::Approve.denied_message()))
         }
         ClientRequest::ApprovalList(_) => {
-            let mut approvals: Vec<ApprovalDto> =
-                engine.state.approvals.values().map(Into::into).collect();
+            let mut approvals: Vec<ApprovalDto> = engine
+                .state
+                .approvals
+                .values()
+                .filter(|a| {
+                    !engine.hides_approval(
+                        connection,
+                        &a.client_id,
+                        a.capability,
+                        a.shell_command.is_some(),
+                    )
+                })
+                .map(Into::into)
+                .collect();
             approvals.sort_by_key(|a| a.created_at_us);
             to_value(&ApprovalListResult { approvals })
         }
@@ -1304,6 +1407,7 @@ fn list_clients(engine: &Engine) -> Result<Value, ApiError> {
 
 fn set_capabilities(
     engine: &mut Engine,
+    connection: ConnectionId,
     ClientSetCapabilitiesParams {
         id,
         expected_version,
@@ -1336,10 +1440,15 @@ fn set_capabilities(
     let mut capabilities: Vec<Capability> = capabilities.into_iter().map(Into::into).collect();
     capabilities.sort();
     capabilities.dedup();
-    client.capabilities = capabilities;
+    // Before the edit, which also replaces what a connection was allowed.
+    let held_terminal = engine.holds_terminal(&id);
+    client.capabilities.clone_from(&capabilities);
     client.version += 1;
     let result = ClientDto::from(&client);
     engine.store_capabilities(client);
+    // Taking `terminal` away ends that client's terminals (ADR-0065 T7).
+    let actor = engine.actor(connection);
+    engine.terminal_capability_set(&id, held_terminal, &capabilities, &actor);
     to_value(&result)
 }
 
@@ -1369,6 +1478,32 @@ fn resolve_approval(
             "a client cannot answer its own approval",
         ));
     }
+    // A shell on a vehicle is more than control of it (ADR-0065 T7): an
+    // operator answers, never another client that was given `approve`.
+    let operator = engine
+        .connections
+        .get(&connection)
+        .and_then(|c| c.admitted.as_ref())
+        .is_some_and(|a| a.operator);
+    if done.capability == Capability::Terminal && !operator {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "Only an operator on the computer UXDuck runs on can answer a request for a terminal.",
+        ));
+    }
+    // The command is read before it is allowed (T14): a client that does
+    // not show it cannot answer for it, either way.
+    let shows = engine
+        .connections
+        .get(&connection)
+        .and_then(|c| c.admitted.as_ref())
+        .is_some_and(|a| a.reads.shell_commands);
+    if done.shell_command.is_some() && !shows {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            "This request is to run a command, and this client cannot show the command. Answer it in an up-to-date UXDuck window, or with `uxduck approvals`.",
+        ));
+    }
     let remember = allow.then(|| remember.map_or(Remember::Once, Into::into));
     if allow {
         engine.finish(&id, ApprovalState::Allowed, remember, "");
@@ -1387,10 +1522,10 @@ fn resolve_approval(
 
 /// The words a camera look, or a change to whether the assistant sees
 /// cameras, is asked for in (FB-244).
-struct Asked {
-    summary: String,
-    question: String,
-    body: String,
+pub(crate) struct Asked {
+    pub(crate) summary: String,
+    pub(crate) question: String,
+    pub(crate) body: String,
 }
 
 #[cfg(test)]

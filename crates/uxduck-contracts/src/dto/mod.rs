@@ -53,6 +53,7 @@ pub mod support;
 pub mod sync;
 pub mod telemetry;
 pub mod telemetry_window;
+pub mod terminal;
 pub mod terrain;
 pub mod thread;
 pub mod trace;

@@ -131,6 +131,14 @@ pub struct State {
     /// Each vehicle's gimbals, by gimbal id (S406).
     #[serde(default)]
     pub gimbals: BTreeMap<String, uxduck_core::domain::gimbal::Gimbal>,
+    /// The terminals open on companion computers, by terminal id (S422).
+    #[serde(default)]
+    pub terminals: BTreeMap<String, uxduck_core::domain::terminal::Terminal>,
+    /// The commands agents ran on companion computers, by run id (S425):
+    /// the running ones and the latest finished of each computer. The
+    /// journal keeps every one.
+    #[serde(default)]
+    pub computer_runs: BTreeMap<String, uxduck_core::domain::terminal::ComputerRun>,
     /// Each vehicle's checklist, by vehicle id (S193): kept with the
     /// vehicle, removed with it.
     #[serde(default)]
@@ -199,6 +207,12 @@ pub struct State {
 
 /// Receipts kept per vehicle in the state (and so in snapshots).
 pub const RECEIPTS_PER_VEHICLE: usize = 20;
+
+/// How many finished runs of each companion computer the state holds
+/// (S425): the state is what every snapshot and checkpoint carries, so it
+/// keeps the latest, as it does a vehicle's receipts. The journal keeps
+/// every run, and `computer/runs` says how many it lists.
+pub const RUNS_PER_COMPUTER: usize = 20;
 
 /// An event that does not follow the state it is applied to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -444,6 +458,16 @@ impl State {
             Change::GimbalRemoved { id } => {
                 self.gimbals.remove(id);
             }
+            Change::TerminalOpened { terminal } => {
+                self.terminals.insert(terminal.id.clone(), terminal.clone());
+            }
+            Change::TerminalEnded { id, .. } => {
+                self.terminals.remove(id);
+            }
+            Change::ComputerRunUpserted { run } => {
+                self.computer_runs.insert(run.id.clone(), run.clone());
+                self.trim_runs(&run.computer_id);
+            }
             Change::VideoRecordingUpserted { recording } => {
                 self.video_recordings
                     .insert(recording.id.clone(), recording.clone());
@@ -567,6 +591,24 @@ impl State {
                     .insert(mission.vehicle_id.clone(), mission.clone());
             }
             _ => {}
+        }
+    }
+
+    /// Drops a computer's oldest finished runs past the limit. Part of
+    /// applying an event, so replay trims the same way.
+    fn trim_runs(&mut self, computer_id: &str) {
+        let mut finished: Vec<(u64, String)> = self
+            .computer_runs
+            .values()
+            .filter(|r| r.computer_id == computer_id && r.end.is_some())
+            .map(|r| (r.started_at_us, r.id.clone()))
+            .collect();
+        if finished.len() <= RUNS_PER_COMPUTER {
+            return;
+        }
+        finished.sort();
+        for (_, id) in &finished[..finished.len() - RUNS_PER_COMPUTER] {
+            self.computer_runs.remove(id);
         }
     }
 

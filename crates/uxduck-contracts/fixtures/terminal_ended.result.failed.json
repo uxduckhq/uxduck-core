@@ -1,0 +1,5 @@
+{
+  "how": "failed",
+  "exitStatus": 255,
+  "problem": "192.168.1.42's host key changed: UXDuck pinned SHA256:ld0pRnPj6iBw1VlXhDyqJMO6rdQ6axMIiQSimgq72bg, and it now sends SHA256:9f2QvYc1rQ0m3o8J5s2Jc0l1c1o5V8e3wq7Jm1Yb0aE. Someone may be pretending to be it. If it was reinstalled, remove it and add it again."
+}

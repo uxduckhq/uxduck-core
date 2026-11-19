@@ -191,6 +191,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     // recordings kept elsewhere before move there before anything reads them.
     let media = crate::paths::move_recordings(data_dir);
     start_online(&engine, data_dir, terrain).await;
+    // Terminals on companion computers (S422): the daemon's own `ssh`.
+    let terminals = std::sync::Arc::new(crate::terminals::Hub::default());
+    let host = crate::terminals::Host::new(data_dir, engine.clone(), terminals.clone());
+    let _ = engine.run(move |e| e.set_terminals(Box::new(host))).await;
 
     let (socket, accept_local) = local::bind(data_dir, engine.clone()).await?;
     tokio::spawn(accept_local);
@@ -217,6 +221,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         crate::network::Served {
             interfaces: interfaces.clone(),
             video: video.clone(),
+            terminals: terminals.clone(),
             files: vehicle_files.clone(),
             referrer: ui_url.clone(),
         },
@@ -226,6 +231,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
         http::Allowlist::new(port, &extra_origins).with_hosted(&options.hosted_origins),
         interfaces,
         video,
+        terminals,
         vehicle_files,
         options
             .dev_origin
@@ -292,6 +298,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), DaemonError> {
     }
     // Input is read no more: a gimbal a controller was turning stops (S407).
     input_end.stop().await;
+    // No terminal is left signed in on a vehicle (ADR-0065 T13).
+    let _ = engine.run(uxduck_engine::Engine::stop_terminals).await;
     // A final checkpoint, so the next start replays nothing (ADR-0007).
     let _ = engine.checkpoint().await;
     store.close();
@@ -848,6 +856,10 @@ async fn expire_approvals(engine: EngineHandle) {
                 e.review_preflights();
                 e.expire_display_pulls(now);
                 e.expire_video_watches(now);
+                // Terminals nobody attached to (S422).
+                e.expire_terminal_tickets(now);
+                // Commands agents ran that are past their deadlines (S425).
+                e.stop_runs_at_deadline(now);
                 e.connectivity_tick(now);
                 e.expire_pairings();
                 // Aircraft not heard for a minute (S168).

@@ -53,6 +53,11 @@ pub struct Approval {
     /// chat answers it in place rather than the notification tray.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    /// The command an agent asks to run on a companion computer
+    /// (ADR-0065 T14), exactly as it gave it. A person is shown
+    /// `domain::terminal::shown` of it, whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_command: Option<String>,
     pub state: ApprovalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember: Option<Remember>,

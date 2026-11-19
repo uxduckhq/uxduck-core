@@ -1,0 +1,10 @@
+{
+  "runId": "tm4c1d9e2f7a3b",
+  "ended": "exited",
+  "exitStatus": 3,
+  "durationMs": 412,
+  "stdout": "× mediamtx.service - MediaMTX\n     Active: failed (Result: exit-code)\n",
+  "stderr": "",
+  "stdoutBytes": 68,
+  "stderrBytes": 0
+}

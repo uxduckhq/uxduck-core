@@ -128,6 +128,19 @@ fn an_older_page_does_not_claim_replay_step_marks() {
 }
 
 #[test]
+fn an_older_page_does_not_claim_to_show_shell_commands() {
+    let mut value = fixture("initialize.request.json");
+    let shows: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(shows.capabilities.shell_commands);
+    value["params"]["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("shellCommands");
+    let hello: InitializeParams = serde_json::from_value(value["params"].clone()).unwrap();
+    assert!(!hello.capabilities.shell_commands);
+}
+
+#[test]
 fn mission_read_and_replay_mark_capabilities_default_independently() {
     for mission in [None, Some(false), Some(true)] {
         for replay in [None, Some(false), Some(true)] {
@@ -249,6 +262,19 @@ fn check(name: &str) {
         }
         ("result", "gimbal_list") => {
             round_trip::<uxduck_contracts::dto::gimbal::GimbalListResult>(name, &json);
+        }
+        ("result", "terminal_open") => {
+            round_trip::<uxduck_contracts::dto::terminal::TerminalOpenResult>(name, &json);
+        }
+        ("result", "computer_run") => {
+            round_trip::<uxduck_contracts::dto::terminal::ComputerRunResult>(name, &json);
+        }
+        ("result", "computer_runs") => {
+            round_trip::<uxduck_contracts::dto::terminal::ComputerRunsResult>(name, &json);
+        }
+        // The last frame on a `/terminal` socket.
+        ("result", "terminal_ended") => {
+            round_trip::<uxduck_contracts::dto::terminal::TerminalEnded>(name, &json);
         }
         ("result", "link_list") => {
             round_trip::<uxduck_contracts::dto::link::LinkListResult>(name, &json);
@@ -965,7 +991,9 @@ fn check(name: &str) {
             | "marker_unshare"
             | "mavlink_dialects_remove"
             | "firmware_remove"
-            | "gimbal_watch",
+            | "gimbal_watch"
+            | "terminal_resize"
+            | "terminal_close",
         ) => {
             round_trip::<Empty>(name, &json);
         }

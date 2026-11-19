@@ -59,7 +59,7 @@ or add one only when asked, with the camera tools tool_search finds. When asked 
 vehicle, look with find_vehicles (scope nearby; network only when they agree) and explain \
 each reason it gives. More of UXDuck's tools load when asked for: plans and missions (checking, \
 uploading, examples, a vehicle's missions over time), simulations and snapshots, global place names and addresses, terrain, a \
-vehicle's files, parameter lists and history, link diagnostics, practice exercises, adding and assigning cameras, writing a vehicle's checklist and writing plugins. Before starting a simulation at a named place, find its place-search tools, locate the requested result, ask if the place is ambiguous, and read its ground elevation; never invent coordinates or height. A plan you create shows on the map by itself. To show a saved plan when asked, open the map with layout_open giving its planId. To survey a named area, such as a park, a field or a suburb, find the named-area outline tool with tool_search and give it the name and its town or district: it shows OpenStreetMap's outline on the map and answers only once the person confirms it there. Plan a named area's survey only from the outline that answers, by giving the plan its id in placeAreas as the answer says, or from one the person drew, never from its preview, a point or a guess. If it finds no outline, or the person says it is not the area, say so plainly and ask them to draw it on the map. Find one with tool_search \
+vehicle's files, parameter lists and history, link diagnostics, practice exercises, adding and assigning cameras, writing a vehicle's checklist and writing plugins. One runs a command on a vehicle's companion computer over SSH: when looking at that computer would answer the question, such as why a camera or a service on it is down, find it and call it instead of saying you cannot reach the computer. The operator may be shown the command first and can take a minute to answer. If they do not allow it, say so and do not call it again unless they ask. Before starting a simulation at a named place, find its place-search tools, locate the requested result, ask if the place is ambiguous, and read its ground elevation; never invent coordinates or height. A plan you create shows on the map by itself. To show a saved plan when asked, open the map with layout_open giving its planId. To survey a named area, such as a park, a field or a suburb, find the named-area outline tool with tool_search and give it the name and its town or district: it shows OpenStreetMap's outline on the map and answers only once the person confirms it there. Plan a named area's survey only from the outline that answers, by giving the plan its id in placeAreas as the answer says, or from one the person drew, never from its preview, a point or a guess. If it finds no outline, or the person says it is not the area, say so plainly and ask them to draw it on the map. Find one with tool_search \
 (its uxduckTools), then run it with tool_call, giving its name and params. To use an installed \
 plugin, find its commands with tool_search, then \
 run one with plugin_call, giving params its schema allows; say which plugin did it. When asked \
@@ -239,6 +239,10 @@ fn image_limit(turn: &Turn) -> Option<(usize, String)> {
 
 /// The method whose result carries a camera's frames (FB-244).
 const LOOK: &str = "video/frame";
+
+/// A command on a companion computer (ADR-0065 T14). The chat keeps that
+/// it ran, never the command or what it printed.
+const RUN: &str = "computer/run";
 
 /// The method whose result carries a picture the operator attached
 /// (FB-248).
@@ -517,7 +521,16 @@ async fn run_tools(
                 }
                 let query = params["query"].as_str().unwrap_or_default().to_owned();
                 let limit = params["limit"].as_u64().map_or(10, |n| n.clamp(1, 50));
-                let item = host.tool_start(method.clone(), params.clone()).await;
+                let item = host
+                    .tool_start(
+                        method.clone(),
+                        if method == RUN {
+                            crate::output::kept_run_params(&params)
+                        } else {
+                            params.clone()
+                        },
+                    )
+                    .await;
                 let mut outcome = if inputs.pending() {
                     Err(
                         json!({"code":-32800,"message":"Superseded by an operator update before execution."}),
@@ -548,8 +561,14 @@ async fn run_tools(
                         *left = left.saturating_sub(shown.len());
                     }
                 }
-                host.tool_finish(item, outcome.clone()).await;
+                if method == RUN {
+                    let kept = outcome.as_ref().map(crate::output::kept_run_result);
+                    host.tool_finish(item, kept.map_err(Clone::clone)).await;
+                } else {
+                    host.tool_finish(item, outcome.clone()).await;
+                }
                 match outcome {
+                    Ok(value) if method == RUN => (crate::output::run_text(&value), false),
                     Ok(value) => (for_model(&method, value).to_string(), false),
                     Err(value) if shows_images(&method) && value["message"].is_string() => {
                         (json!({ "error": value["message"] }).to_string(), true)
@@ -1639,6 +1658,184 @@ mod tests {
                 .push(format!("app {}", outcome.unwrap_or_else(|e| e)));
             async {}.boxed()
         }
+    }
+
+    /// Answers `computer/run` as the daemon does at the bounds of its
+    /// answer, or refuses it, and records what the daemon was asked and
+    /// what the chat was given to keep.
+    #[derive(Default)]
+    struct Runner {
+        log: Mutex<Vec<String>>,
+        denied: bool,
+    }
+
+    impl Host for Runner {
+        fn message_start(&self) -> BoxFuture<'_, String> {
+            async { "m1".to_owned() }.boxed()
+        }
+        fn text_delta(&self, _: String, _: String) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn message_finish(&self, _: String, _: Option<String>) -> BoxFuture<'_, ()> {
+            async {}.boxed()
+        }
+        fn tool_start(&self, method: String, params: Value) -> BoxFuture<'_, String> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("chat starts {method} {params}"));
+            async { "t1".to_owned() }.boxed()
+        }
+        fn call(&self, method: String, params: Value) -> BoxFuture<'_, Result<Value, Value>> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("daemon {method} {params}"));
+            let answer = if self.denied {
+                Err(json!({ "code": -32003,
+                    "message": "The operator did not allow this command, so it was not run. Tell the person, and do not ask again unless they ask.",
+                    "data": { "kind": "capability-denied" } }))
+            } else {
+                // Both streams at the daemon's bounds: 4,000 and 4,000
+                // bytes of standard output, 1,000 and 1,000 of standard
+                // error, each with its middle marked, and every note.
+                Ok(json!({
+                    "runId": "tm1", "ended": "deadline", "durationMs": 30_412,
+                    "stdout": format!("{}out-marker\n[UXDuck left out 92000 bytes here]\n{}", "a".repeat(3_990), "z".repeat(4_000)),
+                    "stderr": format!("{}\n[UXDuck left out 3000 bytes here]\n{}err-marker", "e".repeat(1_000), "f".repeat(990)),
+                    "stdoutBytes": 100_000, "stderrBytes": 5_000,
+                    "stdoutLeftOut": { "bytes": 92_000, "afterBytes": 4_000 },
+                    "stderrLeftOut": { "bytes": 3_000, "afterBytes": 1_000 },
+                    "notes": [
+                        "Stopped at its deadline of 30 s, and ended on the computer. What it printed until then is here.",
+                        "Standard output was 100000 bytes. Its first 4000 and its last 4000 are here, and the 92000 between them were left out, because a tool answer holds only so much. Run it again with less output, such as through head, tail or grep.",
+                        "Standard output held bytes that are not UTF-8 text. Each is shown as \u{fffd}.",
+                        "Standard error was 5000 bytes. Its first 1000 and its last 1000 are here, and the 3000 between them were left out, because a tool answer holds only so much. Run it again with less output, such as through head, tail or grep.",
+                        "Standard error held bytes that are not UTF-8 text. Each is shown as \u{fffd}."
+                    ]
+                }))
+            };
+            async move { answer }.boxed()
+        }
+        fn tool_finish(&self, _: String, outcome: Result<Value, Value>) -> BoxFuture<'_, ()> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("chat keeps {}", outcome.unwrap_or_else(|e| e)));
+            async {}.boxed()
+        }
+    }
+
+    /// S425, ADR-0065 T14: the daemon is given the command exactly, the
+    /// model reads all of the answer as plain text, and the chat, which is
+    /// journaled and synced, keeps neither the command nor what it printed.
+    #[test]
+    fn a_command_on_a_companion_computer_reaches_the_model_whole_and_the_chat_not_at_all() {
+        let command = "journalctl -u mediamtx --command-marker\n# second line";
+        let call = json!({ "name": "computer_run", "params": { "computerId": "cc1", "command": command } });
+        let host = Runner::default();
+        let mut stats = TurnStats::default();
+        let results = run_tools(
+            &host,
+            &tools(),
+            vec![("c1".into(), TOOL_CALL.into(), call.to_string())],
+            &mut stats,
+            &mut Images::default(),
+        )
+        .now_or_never()
+        .unwrap();
+        let log = host.log.lock().unwrap().clone();
+        assert_eq!(log.len(), 3, "{log:?}");
+        // The daemon runs the command as it was given.
+        assert_eq!(
+            log[1],
+            format!(
+                "daemon computer/run {}",
+                json!({ "computerId": "cc1", "command": command })
+            )
+        );
+        // The chat keeps where it ran and how it ended.
+        assert_eq!(
+            log[0],
+            format!(
+                "chat starts computer/run {}",
+                json!({ "computerId": "cc1", "command": "(not kept in the chat: it is in this run's record, on its computer's card)" })
+            )
+        );
+        let kept: Value =
+            serde_json::from_str(log[2].strip_prefix("chat keeps ").unwrap()).unwrap();
+        assert_eq!(
+            kept["stdout"],
+            "(100000 bytes, which went to the assistant and are not kept)"
+        );
+        assert_eq!(
+            kept["stderr"],
+            "(5000 bytes, which went to the assistant and are not kept)"
+        );
+        assert_eq!(kept["ended"], "deadline");
+        assert_eq!(kept["stdoutLeftOut"]["bytes"], 92_000);
+        for line in [&log[0], &log[2]] {
+            for marker in [
+                "command-marker",
+                "journalctl",
+                "out-marker",
+                "err-marker",
+                "aaaa",
+            ] {
+                assert!(!line.contains(marker), "{marker} in {line}");
+            }
+        }
+        // The model reads it all, as text: how it ended, every note, and
+        // both streams to their last byte, inside what one result holds.
+        let read = &results[0].output;
+        assert!(!results[0].failed);
+        assert!(
+            read.starts_with(
+                "Ended (deadline) with no exit status after 30.4 s.\nStopped at its deadline of 30 s"
+            ),
+            "{}",
+            &read[..120]
+        );
+        assert!(read.contains("\n--- standard output, 100000 bytes ---\naaaa"));
+        assert!(read.contains("out-marker\n[UXDuck left out 92000 bytes here]\nzzzz"));
+        assert!(read.contains("\n--- standard error, 5000 bytes ---\neeee"));
+        assert!(
+            read.ends_with("ffffer-marker") || read.ends_with("err-marker"),
+            "cut short"
+        );
+        assert!(read.contains("Standard error held bytes that are not UTF-8 text."));
+        assert!(
+            read.chars().count() < MAX_TOOL_OUTPUT_CHARS,
+            "{} characters",
+            read.chars().count()
+        );
+
+        // Not allowed: the model reads the daemon's words, and the chat
+        // keeps them, which hold no command.
+        let host = Runner {
+            denied: true,
+            ..Runner::default()
+        };
+        let results = run_tools(
+            &host,
+            &tools(),
+            vec![("c1".into(), TOOL_CALL.into(), call.to_string())],
+            &mut stats,
+            &mut Images::default(),
+        )
+        .now_or_never()
+        .unwrap();
+        assert!(results[0].failed);
+        assert!(
+            results[0]
+                .output
+                .contains("do not ask again unless they ask"),
+            "{}",
+            results[0].output
+        );
+        let log = host.log.lock().unwrap().clone();
+        assert!(log[2].contains("capability-denied"), "{log:?}");
+        assert!(!log[0].contains("journalctl") && !log[2].contains("journalctl"));
     }
 
     #[test]

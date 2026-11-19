@@ -27,6 +27,7 @@ use crate::dto::search::SavedPlace;
 use crate::dto::settings::Settings;
 use crate::dto::setup::Setup;
 use crate::dto::sim::SimSnapshot;
+use crate::dto::terminal::Terminal;
 use crate::dto::thread::{Folder, Item, Thread};
 use crate::dto::vehicle::Vehicle;
 use crate::dto::video::{VideoPhoto, VideoRecording, VideoSource};
@@ -92,6 +93,8 @@ pub enum EntityType {
     /// A gimbal of a vehicle, keyed `<vehicle id>/<its manager's component
     /// id>/<device id>` (S406).
     Gimbal,
+    /// An open terminal on a companion computer (ADR-0065).
+    Terminal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -180,6 +183,9 @@ pub struct Snapshot {
     /// Every vehicle's gimbals (S406).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gimbals: Option<Vec<Gimbal>>,
+    /// The terminals open on companion computers (ADR-0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminals: Option<Vec<Terminal>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -271,6 +277,8 @@ pub struct EntityChange {
     pub camera: Option<Camera>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gimbal: Option<Gimbal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<Terminal>,
 }
 
 /// Immutable identity at the time an action began.

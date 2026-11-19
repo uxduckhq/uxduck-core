@@ -221,6 +221,10 @@ pub enum TabKind {
     /// Feel, gains and snapshots.
     // S329.
     Tuning,
+    /// A terminal on a companion computer. Follows no vehicle.
+    // S423, ADR-0065 T6: which computer is the tab's `computer`. The page
+    // that draws it opens the session, which ends with that page.
+    Terminal,
 }
 
 /// One tab: what it shows and, when pinned, the vehicle it shows instead of
@@ -269,6 +273,10 @@ pub struct Tab {
     /// other kinds of tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<TuningSection>,
+    /// The companion computer a Terminal tab opens on: its id, up to 64
+    /// bytes; dropped from other kinds of tab (S423).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 // A part of the Tuning tab; `roll`, `pitch` and `yaw` graph that axis. No

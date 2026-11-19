@@ -1104,6 +1104,15 @@ export type Approval = {
      */
     question?: string | null;
     remember?: Remember | null;
+    /**
+     * The command an agent asks to run on a companion computer
+     * (`computer/run`), as a person reads it: whole, never shortened, with
+     * every character they could not otherwise see made visible (a newline
+     * as `⏎` and then the line break, a tab as `⇥`, and any other control,
+     * invisible or bidirectional character as its code point, `⟨U+202E⟩`).
+     * Show all of it before offering an answer.
+     */
+    shellCommandShown?: string | null;
     state: ApprovalState;
     /**
      * For people: "arm Copter 1".
@@ -2337,7 +2346,7 @@ export type CapabilitiesChanged = {
 /**
  * What a client may do.
  */
-export type Capability = 'read' | 'control' | 'config' | 'approve' | 'location';
+export type Capability = 'read' | 'control' | 'config' | 'approve' | 'location' | 'terminal';
 
 /**
  * A video device, or a sound input, visible to the daemon's operating system.
@@ -3015,6 +3024,14 @@ export type ClientCapabilities = {
      */
     replayStepMarks?: boolean;
     /**
+     * It shows the command an agent asks to run on a companion computer,
+     * whole, before its operator answers (S425, ADR-0065 T14). UXDuck's
+     * page from before it would show the request's buttons without the
+     * command, so the daemon sends it neither the request nor its notice
+     * and takes no answer for one from it.
+     */
+    shellCommands?: boolean;
+    /**
      * Every protocol version the client talks, when it talks more than
      * `protocolVersion` (ADR-0025 D4: an interface talks the current
      * protocol and the two before it). The daemon admits a client that
@@ -3224,6 +3241,21 @@ export type ClientRequest = {
 } | {
     method: 'computer/connectivity';
     params: ComputerConnectivityParams;
+} | {
+    method: 'computer/run';
+    params: ComputerRunParams;
+} | {
+    method: 'computer/runs';
+    params: ComputerRunsParams;
+} | {
+    method: 'terminal/open';
+    params: TerminalOpenParams;
+} | {
+    method: 'terminal/resize';
+    params: TerminalResizeParams;
+} | {
+    method: 'terminal/close';
+    params: TerminalCloseParams;
 } | {
     method: 'vehicle/bookmarks';
     params: VehicleBookmarksParams;
@@ -5013,6 +5045,146 @@ export type ComputerRenameParams = {
 };
 
 /**
+ * A command an agent ran on a companion computer: the record an operator
+ * reads. Never what the command printed.
+ */
+export type ComputerRun = {
+    /**
+     * The record of the client that ran it, as in `client/list`.
+     */
+    clientId: string;
+    clientName: string;
+    computerId: string;
+    computerName: string;
+    deadlineS: number;
+    /**
+     * How it ended. Absent while it runs.
+     */
+    end?: TerminalEnd | null;
+    endedAtUs?: number | null;
+    exitStatus?: number | null;
+    id: string;
+    /**
+     * The bytes of what it printed that its answer left out.
+     */
+    leftOutBytes: number;
+    /**
+     * The command as a person reads it: whole, with every character they
+     * could not otherwise see made visible (a newline as `⏎`, a tab as `⇥`,
+     * and any other control, invisible or bidirectional character as its
+     * code point, `⟨U+202E⟩`).
+     */
+    shellCommandShown: string;
+    /**
+     * Whether an operator was shown this command and allowed it. False
+     * when it ran under an earlier "Allow for this connection" or "Always
+     * allow", or from an operator's own client.
+     */
+    shownFirst: boolean;
+    /**
+     * Microseconds since the Unix epoch.
+     */
+    startedAtUs: number;
+    vehicleId: string;
+    /**
+     * The vehicle and the computer as they were named then.
+     */
+    vehicleName: string;
+};
+
+/**
+ * `computer/run`.
+ */
+export type ComputerRunParams = {
+    /**
+     * The one command, as the computer's shell takes it after `ssh host`.
+     * It gets no input and no terminal. The operator is shown all of it,
+     * with every character they could not otherwise see made visible.
+     */
+    command: string;
+    /**
+     * The companion computer, by its id: `vehicle/get` lists a vehicle's
+     * in `companions`.
+     */
+    computerId: string;
+    /**
+     * How many seconds it may run, 30 if left out and at least 1. A command
+     * still running then is stopped on the computer, and what it printed
+     * until then is returned.
+     */
+    deadlineS?: number | null;
+};
+
+/**
+ * `computer/run`'s answer.
+ */
+export type ComputerRunResult = {
+    durationMs: number;
+    /**
+     * How it ended: `exited` on its own, `deadline` when it was stopped at
+     * its deadline, `ended-by-operator` or `capability-removed` when the
+     * operator stopped it, `stopped` when UXDuck stopped.
+     */
+    ended: TerminalEnd;
+    /**
+     * The command's exit status when it exited on its own. 255 is `ssh`'s
+     * own, for a connection lost while it ran.
+     */
+    exitStatus?: number | null;
+    /**
+     * In plain words, everything about this answer that is not the
+     * command's own doing: that it was stopped and why, what was left out
+     * and from where, and that bytes that were not UTF-8 were replaced.
+     */
+    notes?: Array<string>;
+    /**
+     * The run's id, as in its record on the computer UXDuck runs on.
+     */
+    runId: string;
+    /**
+     * What it printed on standard error, the same way.
+     */
+    stderr: string;
+    stderrBytes: number;
+    stderrLeftOut?: PrintedLeftOut | null;
+    /**
+     * What it printed on standard output, with `[UXDuck left out N bytes
+     * here]` on a line of its own where the middle was left out.
+     */
+    stdout: string;
+    /**
+     * How many bytes it printed on standard output, kept or not.
+     */
+    stdoutBytes: number;
+    stdoutLeftOut?: PrintedLeftOut | null;
+};
+
+/**
+ * `computer/runs`.
+ */
+export type ComputerRunsParams = {
+    /**
+     * Only this computer's. Every computer's if left out.
+     */
+    computerId?: string | null;
+};
+
+/**
+ * `computer/runs`'s answer.
+ */
+export type ComputerRunsResult = {
+    /**
+     * How many finished runs of each computer this list holds at most.
+     * UXDuck's journal keeps every one.
+     */
+    keptPerComputer: number;
+    /**
+     * Newest first.
+     */
+    runs: Array<ComputerRun>;
+};
+
+/**
  * An outline the person confirmed, for planning by its `id` (FB-177): a
  * plan takes it from `plan/create`'s `placeAreas`, so it uses exactly the
  * confirmed corners, which are never carried by the answer itself.
@@ -6477,6 +6649,7 @@ export type EntityChange = {
     settings?: Settings | null;
     setup?: Setup | null;
     snapshot?: SimSnapshot | null;
+    terminal?: Terminal | null;
     thread?: Thread | null;
     vehicle?: Vehicle | null;
     videoPhoto?: VideoPhoto | null;
@@ -6487,7 +6660,7 @@ export type EntityChange = {
 /**
  * The entity types a client can subscribe to.
  */
-export type EntityType = 'operator' | 'thread' | 'item' | 'folder' | 'link' | 'vehicle' | 'receipt' | 'notification' | 'client' | 'approval' | 'controller' | 'input-mapping' | 'plugin' | 'parameter-set' | 'parameter' | 'mission' | 'settings' | 'place' | 'marker' | 'plan' | 'snapshot' | 'param-definitions' | 'history-entry' | 'video-source' | 'video-recording' | 'video-photo' | 'practice-attempt' | 'file-transfer' | 'setup' | 'preflight' | 'camera' | 'gimbal';
+export type EntityType = 'operator' | 'thread' | 'item' | 'folder' | 'link' | 'vehicle' | 'receipt' | 'notification' | 'client' | 'approval' | 'controller' | 'input-mapping' | 'plugin' | 'parameter-set' | 'parameter' | 'mission' | 'settings' | 'place' | 'marker' | 'plan' | 'snapshot' | 'param-definitions' | 'history-entry' | 'video-source' | 'video-recording' | 'video-photo' | 'practice-attempt' | 'file-transfer' | 'setup' | 'preflight' | 'camera' | 'gimbal' | 'terminal';
 
 export type EntryKind = {
     category?: NoteCategory | null;
@@ -13948,6 +14121,21 @@ export type PresetSettings = {
 };
 
 /**
+ * What a command's answer left out of one of its two streams.
+ */
+export type PrintedLeftOut = {
+    /**
+     * They came after this many bytes from the start, which are kept. The
+     * end is kept too.
+     */
+    afterBytes: number;
+    /**
+     * How many bytes were left out.
+     */
+    bytes: number;
+};
+
+/**
  * A telemetry item the plugin produces for a vehicle; it appears in the
  * vehicle panel like any other. Its key ends in its unit's suffix, as
  * `home.distance_m` (ADR-0006 X2). With no vehicle it is the plugin's
@@ -16621,6 +16809,10 @@ export type Snapshot = {
      */
     setups?: Array<Setup> | null;
     snapshots?: Array<SimSnapshot> | null;
+    /**
+     * The terminals open on companion computers (ADR-0065).
+     */
+    terminals?: Array<Terminal> | null;
     threads?: Array<Thread> | null;
     vehicles?: Array<Vehicle> | null;
     videoPhotos?: Array<VideoPhoto> | null;
@@ -17310,6 +17502,11 @@ export type Tab = {
      */
     chart?: ChartSpec | null;
     /**
+     * The companion computer a Terminal tab opens on: its id, up to 64
+     * bytes; dropped from other kinds of tab (S423).
+     */
+    computer?: string | null;
+    /**
      * Unticked in the Layouts menu: kept in its place and not drawn.
      */
     hidden?: boolean;
@@ -17344,7 +17541,7 @@ export type Tab = {
  * What a tab shows: the focused vehicle's, or the pinned one's, unless it
  * follows no vehicle.
  */
-export type TabKind = 'chat' | 'home' | 'map' | 'map-3d' | 'vehicle-view' | 'globe' | 'telemetry' | 'control' | 'messages' | 'files' | 'vehicles' | 'parameters' | 'mission' | 'controllers' | 'instruments' | 'flight-display' | 'history' | 'camera' | 'get-started' | 'inspector' | 'settings' | 'plugin' | 'readout' | 'chart' | 'practice' | 'places' | 'flights' | 'missions' | 'profile' | 'duck' | 'airspace' | 'setup' | 'checklist' | 'tuning';
+export type TabKind = 'chat' | 'home' | 'map' | 'map-3d' | 'vehicle-view' | 'globe' | 'telemetry' | 'control' | 'messages' | 'files' | 'vehicles' | 'parameters' | 'mission' | 'controllers' | 'instruments' | 'flight-display' | 'history' | 'camera' | 'get-started' | 'inspector' | 'settings' | 'plugin' | 'readout' | 'chart' | 'practice' | 'places' | 'flights' | 'missions' | 'profile' | 'duck' | 'airspace' | 'setup' | 'checklist' | 'tuning' | 'terminal';
 
 /**
  * How a talk-mode turn was ended: sent by hand, or by open mic (ADR-0012 V8).
@@ -17586,6 +17783,104 @@ export type TelemetryWindowSeries = {
 };
 
 export type TemperatureUnit = 'celsius' | 'fahrenheit';
+
+/**
+ * An open terminal: its computer, the client holding it and when it
+ * opened. Never what is typed or shown in it.
+ */
+export type Terminal = {
+    /**
+     * The record of the client holding it, as in `client/list`.
+     */
+    clientId: string;
+    clientName: string;
+    computerId: string;
+    id: string;
+    kind: TerminalKind;
+    /**
+     * Microseconds since the Unix epoch.
+     */
+    openedAtUs: number;
+    vehicleId: string;
+};
+
+/**
+ * `terminal/close`.
+ */
+export type TerminalCloseParams = {
+    terminalId: string;
+};
+
+/**
+ * How a terminal ended.
+ */
+export type TerminalEnd = 'exited' | 'failed' | 'closed' | 'hung-up' | 'unclaimed' | 'stopped' | 'ended-by-operator' | 'capability-removed' | 'deadline';
+
+/**
+ * The last frame on a `/terminal` socket, as JSON text.
+ */
+export type TerminalEnded = {
+    /**
+     * The remote exit status, or 255 as `ssh` gives when it failed.
+     */
+    exitStatus?: number | null;
+    how: TerminalEnd;
+    /**
+     * Why, for people: when `ssh` failed or lost its connection, or when an
+     * operator ended it.
+     */
+    problem?: string | null;
+};
+
+/**
+ * What a terminal runs.
+ */
+export type TerminalKind = 'interactive' | 'command' | 'run';
+
+/**
+ * `terminal/open`.
+ */
+export type TerminalOpenParams = {
+    /**
+     * The terminal's width in columns, at least 1.
+     */
+    cols: number;
+    /**
+     * Runs this one command with no pseudo-terminal and no input instead
+     * of an interactive session, as `ssh host command` does. Its output
+     * and exit status arrive on the socket. Its text is private, as what
+     * is typed in a terminal is: never journaled, logged or traced.
+     */
+    command?: string | null;
+    /**
+     * The companion computer, by its id on its vehicle.
+     */
+    computerId: string;
+    /**
+     * The terminal's height in rows, at least 1.
+     */
+    rows: number;
+};
+
+/**
+ * `terminal/open`'s answer.
+ */
+export type TerminalOpenResult = {
+    terminalId: string;
+    /**
+     * Opens `/terminal?ticket=<ticket>` once, from the client that asked.
+     */
+    ticket: string;
+};
+
+/**
+ * `terminal/resize`.
+ */
+export type TerminalResizeParams = {
+    cols: number;
+    rows: number;
+    terminalId: string;
+};
 
 /**
  * The connection's operator agrees to the current Terms of Service, which

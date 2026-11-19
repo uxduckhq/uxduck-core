@@ -51,6 +51,7 @@ mod spool;
 mod startup;
 mod store;
 mod sync;
+mod terminals;
 mod terrain;
 mod tlog_index;
 mod tray;

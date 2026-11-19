@@ -155,6 +155,8 @@ struct AppState {
     allow: Arc<Allowlist>,
     daemon_version: &'static str,
     video: Arc<crate::video::hub::Hub>,
+    /// The daemon's terminals (S422), on both listeners (S424).
+    terminals: Arc<crate::terminals::Hub>,
     interfaces: Arc<Interfaces>,
     files: crate::vehicle_files::Store,
     /// In development, the pairing screen shows the command for this
@@ -171,6 +173,7 @@ pub fn router(
     allow: Allowlist,
     interfaces: Arc<Interfaces>,
     video: Arc<crate::video::hub::Hub>,
+    terminals: Arc<crate::terminals::Hub>,
     files: crate::vehicle_files::Store,
     dev_cli: Option<crate::paths::DevCli>,
 ) -> Router {
@@ -179,6 +182,7 @@ pub fn router(
         allow: Arc::new(allow),
         daemon_version: env!("CARGO_PKG_VERSION"),
         video,
+        terminals,
         interfaces,
         files,
         dev_cli: dev_cli.map(Arc::new),
@@ -195,6 +199,7 @@ pub fn router(
         .route("/api/pairing/{id}", get(pairing_poll))
         .route("/rpc", get(rpc))
         .route("/video", get(video_socket))
+        .route("/terminal", get(terminal_socket))
         .route("/sim-camera", get(sim_camera_socket))
         .route("/recordings/{file}", get(recording))
         .route("/photos/{file}", get(photo))
@@ -216,6 +221,7 @@ pub fn network_router(
     network: Network,
     interfaces: Arc<Interfaces>,
     video: Arc<crate::video::hub::Hub>,
+    terminals: Arc<crate::terminals::Hub>,
     files: crate::vehicle_files::Store,
 ) -> Router {
     let state = AppState {
@@ -223,6 +229,7 @@ pub fn network_router(
         allow: Arc::new(Allowlist::network(&network)),
         daemon_version: env!("CARGO_PKG_VERSION"),
         video,
+        terminals,
         interfaces,
         files,
         dev_cli: None,
@@ -234,6 +241,8 @@ pub fn network_router(
         .route("/api/pairing", post(pairing_start))
         .route("/api/pairing/{id}", get(pairing_poll))
         .route("/rpc", get(rpc))
+        // A terminal an operator allowed this paired page (ADR-0065 T7).
+        .route("/terminal", get(terminal_socket))
         .route("/api/maps/relay", get(map_relay))
         // Not live video: a page on plain HTTP cannot decode it (S97).
         .route("/recordings/{file}", get(recording))
@@ -827,6 +836,63 @@ async fn video_socket(
     upgrade.on_upgrade(move |socket| {
         crate::video::socket::serve(socket, query.token, watcher, hub, engine)
     })
+}
+
+#[derive(Deserialize)]
+struct TerminalQuery {
+    ticket: String,
+}
+
+/// A terminal's bytes (ADR-0065 T4). The ticket came from `terminal/open`
+/// and works once, and it is not enough alone: the engine lets in only the
+/// client that opened the terminal, while it is still connected. A page
+/// shows its paired session, as for `/rpc`: on the network listener that is
+/// the device's own record, so another paired device holding the ticket is
+/// not it (T7). A program on this computer, such as `uxduck ssh`, is known
+/// by sending no `Origin` on this computer's own listener, which a page
+/// cannot leave out. On the network nothing is known without a session.
+async fn terminal_socket(
+    State(state): State<AppState>,
+    Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let presented = match (current_session(&state, &headers).await, &state.network) {
+        (Some((token, session)), Some(_)) => Trust::NetworkBrowser {
+            origin: session.origin,
+            client: uxduck_engine::pairing::network_client(&token),
+        },
+        (Some((_, session)), None) => Trust::PairedBrowser {
+            origin: session.origin,
+        },
+        (None, None) if origin_of(&headers).is_none() => Trust::LocalUser,
+        (None, _) => {
+            return (StatusCode::UNAUTHORIZED, "pair this browser first").into_response();
+        }
+    };
+    let ticket = query.ticket;
+    let terminal_id = match state
+        .engine
+        .run(move |e| e.terminal_attach(&ticket, &presented))
+        .await
+    {
+        Ok(Ok(terminal_id)) => terminal_id,
+        Ok(Err(why)) => return (StatusCode::FORBIDDEN, why).into_response(),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let engine = state.engine.clone();
+    let closed = {
+        let (engine, terminal_id) = (engine.clone(), terminal_id.clone());
+        move || engine.post(move |e| e.terminal_socket_closed(&terminal_id))
+    };
+    let Some(attached) = state.terminals.attach(&terminal_id) else {
+        closed();
+        return (StatusCode::GONE, "This terminal has ended.").into_response();
+    };
+    upgrade
+        // A socket that never opened is a socket that closed (T13).
+        .on_failed_upgrade(move |_| closed())
+        .on_upgrade(move |socket| crate::terminals::serve(socket, terminal_id, attached, engine))
 }
 
 /// Where a window draws simulated cameras' pictures (ADR-0063 Y7). The

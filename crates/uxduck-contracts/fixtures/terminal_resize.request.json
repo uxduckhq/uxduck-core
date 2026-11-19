@@ -1,0 +1,8 @@
+{
+  "method": "terminal/resize",
+  "params": {
+    "terminalId": "tm4c1d9e2f7a3b",
+    "cols": 100,
+    "rows": 30
+  }
+}

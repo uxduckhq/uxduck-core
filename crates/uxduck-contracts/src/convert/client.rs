@@ -49,6 +49,10 @@ impl From<&a::Approval> for dto::Approval {
             question: v.question.clone(),
             preflight: v.preflight.iter().map(Into::into).collect(),
             item_id: v.item_id.clone(),
+            shell_command_shown: v
+                .shell_command
+                .as_deref()
+                .map(uxduck_core::domain::terminal::shown),
             state: match v.state {
                 a::ApprovalState::Pending => dto::ApprovalState::Pending,
                 a::ApprovalState::Allowed => dto::ApprovalState::Allowed,

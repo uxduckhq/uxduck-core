@@ -29,6 +29,7 @@ pub mod settings;
 mod setup;
 mod snapshot;
 mod telemetry;
+mod terminal;
 mod thread;
 pub mod tuning;
 mod vehicle;
@@ -96,6 +97,7 @@ impl From<core::Capability> for dto::Capability {
             core::Capability::Config => Self::Config,
             core::Capability::Approve => Self::Approve,
             core::Capability::Location => Self::Location,
+            core::Capability::Terminal => Self::Terminal,
         }
     }
 }
@@ -108,6 +110,7 @@ impl From<dto::Capability> for core::Capability {
             dto::Capability::Config => Self::Config,
             dto::Capability::Approve => Self::Approve,
             dto::Capability::Location => Self::Location,
+            dto::Capability::Terminal => Self::Terminal,
         }
     }
 }

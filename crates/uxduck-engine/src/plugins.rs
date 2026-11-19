@@ -628,6 +628,7 @@ impl Engine {
                 reads: ReadCapabilities {
                     mission_read_float_bits: false,
                     replay_step_marks: false,
+                    shell_commands: false,
                 },
                 operator: false,
                 record,

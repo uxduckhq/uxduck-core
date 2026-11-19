@@ -127,6 +127,11 @@ impl FakeProvider {
         reason = "one scripted answer per test phrase, read top to bottom"
     )]
     fn answer(input: &[Input]) -> Result<Vec<ProviderEvent>, String> {
+        // First: a command's answer is plain text, which the scripts below
+        // would read as JSON.
+        if let Some(events) = Self::runs(input) {
+            return Ok(events);
+        }
         if let Some(events) = Self::file(input)? {
             return Ok(events);
         }
@@ -334,6 +339,48 @@ impl FakeProvider {
         } else {
             None
         })
+    }
+
+    /// Asked to "run on computer <id>: <command>" (S425): runs the command
+    /// on that companion computer, which waits for the operator, then says
+    /// how it ended from the answer's first line, never repeating what the
+    /// command printed. Not allowed, it says so and does not ask again.
+    fn runs(input: &[Input]) -> Option<Vec<ProviderEvent>> {
+        for item in input {
+            let Input::ToolOutput { call_id, output } = item else {
+                continue;
+            };
+            if call_id != RUN {
+                continue;
+            }
+            // A refusal is JSON with a message. An answer is plain text.
+            let refused = serde_json::from_str::<Value>(output)
+                .ok()
+                .and_then(|answer| answer["message"].as_str().map(str::to_owned));
+            let text = match refused {
+                Some(why) => format!("I did not run it: {why}"),
+                None => format!("It ran. {}", output.lines().next().unwrap_or_default()),
+            };
+            return Some(vec![ProviderEvent::TextDelta(text)]);
+        }
+        let (computer, command) = input.iter().find_map(|item| {
+            let Input::UserText(text) = item else {
+                return None;
+            };
+            let asked = "run on computer ";
+            let start = text.to_ascii_lowercase().find(asked)?;
+            let (computer, command) = text[start + asked.len()..].split_once(": ")?;
+            Some((computer.trim().to_owned(), command.to_owned()))
+        })?;
+        Some(vec![ProviderEvent::ToolCall {
+            call_id: RUN.into(),
+            name: TOOL_CALL_NAME.into(),
+            arguments: json!({
+                "name": "computer_run",
+                "params": { "computerId": computer, "command": command }
+            })
+            .to_string(),
+        }])
     }
 
     /// Asked for a photo (S57): list the vehicles, search the plugins'
@@ -1107,6 +1154,7 @@ fn tested_text(answer: &Value) -> String {
 }
 
 /// Tool call ids that carry a plugin's writing across turns (S58).
+const RUN: &str = "call_run";
 const DRAFT: &str = "call_draft";
 const DRAFT_TEST: &str = "call_draft_test";
 const DRAFTS: &str = "call_drafts";

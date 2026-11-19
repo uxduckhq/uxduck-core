@@ -5,8 +5,14 @@ use serde_json::{Map, Value};
 use uxduck_contracts::dto::trace::{FrameKind, RequestId};
 
 /// Object keys whose string values are never shown by the tap.
-const SENSITIVE_KEYS: [&str; 11] = [
+const SENSITIVE_KEYS: [&str; 14] = [
     "token",
+    // A command an agent asks to run or ran on a vehicle's computer
+    // (ADR-0065 T14), in an approval and in a run's record.
+    "shellCommand",
+    "shellCommandShown",
+    // What opens a terminal's socket (ADR-0065 T4).
+    "ticket",
     "followUpKey",
     "bootstrap",
     "session",
@@ -22,6 +28,8 @@ const SENSITIVE_KEYS: [&str; 11] = [
 pub const REDACTED: &str = "[redacted]";
 
 pub(crate) fn private_method(method: Option<&str>) -> bool {
+    // A command an agent runs and what it printed, and the list of what
+    // agents ran (ADR-0065 T14), beside where a person searched.
     matches!(
         method,
         Some(
@@ -31,6 +39,8 @@ pub(crate) fn private_method(method: Option<&str>) -> bool {
                 | "place/areas"
                 | "place/areaAnswer"
                 | "place/areasChanged"
+                | "computer/run"
+                | "computer/runs"
         )
     )
 }
@@ -128,6 +138,15 @@ pub fn classify(value: &Value) -> Parsed {
     let mut payload = redact(value);
     if private_method(method.as_deref()) {
         payload["params"] = Value::String(REDACTED.into());
+    }
+    // A command a terminal is opened to run is as private as what is typed
+    // in one (ADR-0065 T9).
+    if method.as_deref() == Some("terminal/open")
+        && let Some(command) = payload
+            .get_mut("params")
+            .and_then(|params| params.get_mut("command"))
+    {
+        *command = Value::String(REDACTED.into());
     }
     Parsed {
         kind,

@@ -108,6 +108,14 @@ pub struct Approval {
     /// chat shows its buttons on that call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    /// The command an agent asks to run on a companion computer
+    /// (`computer/run`), as a person reads it: whole, never shortened, with
+    /// every character they could not otherwise see made visible (a newline
+    /// as `⏎` and then the line break, a tab as `⇥`, and any other control,
+    /// invisible or bidirectional character as its code point, `⟨U+202E⟩`).
+    /// Show all of it before offering an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_command_shown: Option<String>,
     pub state: ApprovalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember: Option<Remember>,

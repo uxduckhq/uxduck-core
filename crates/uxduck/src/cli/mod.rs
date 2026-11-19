@@ -23,6 +23,7 @@ mod replay_wire_tests;
 pub mod setup;
 mod sim_build;
 mod sim_own;
+mod ssh;
 pub mod terrain;
 mod traffic;
 pub mod vehicle;
@@ -69,6 +70,13 @@ pub enum Command {
     /// memory and storage to the ground station as an onboard computer.
     /// `uxduck companion --to udp:192.168.1.20:15010 --computer-id 192`
     Companion(companion::CompanionArgs),
+    /// A terminal on a vehicle's companion computer, through UXDuck on this
+    /// computer, which signs in with the host key and the key a check uses.
+    /// `uxduck ssh buggy camera` gives its prompt. The computer is left
+    /// out when the vehicle has one. After `--`, one command runs with no
+    /// terminal and this exits with its exit status.
+    /// `uxduck ssh buggy camera -- journalctl -u mediamtx -n 50`
+    Ssh(ssh::SshArgs),
     /// A Model Context Protocol server on stdio, for coding agents: add
     /// `uxduck mcp` to Claude Code or Codex. Reading vehicles needs nothing;
     /// commands wait until an operator allows them. Start UXDuck yourself
@@ -1430,6 +1438,8 @@ async fn run_command(cli: Cli) -> ExitCode {
         Some(Command::Preflight(args)) => preflight::run(&data_dir, args).await,
         Some(Command::Replay(args)) => replay::run(&data_dir, args).await,
         Some(Command::Companion(args)) => companion::run(args).await,
+        // Exits with the remote exit status.
+        Some(Command::Ssh(args)) => return ssh::run(&data_dir, args).await,
         Some(Command::Operation { command }) => operation::run(&data_dir, command).await,
         Some(Command::Checklist(args)) => checklist::run(&data_dir, args).await,
         Some(Command::Trace) => trace(&data_dir).await,
@@ -4031,6 +4041,77 @@ fn ports_free(port: u16, tcp: bool, yes: bool) {
     }
 }
 
+/// A command an agent asks to run, as `uxduck approvals` prints it: every
+/// line of it, each behind a bar, never shortened (ADR-0065 T14). The text
+/// is UXDuck's own, in which a character a person could not otherwise see
+/// is already a mark.
+fn command_lines(shown: &str) -> Vec<String> {
+    shown
+        .split('\n')
+        .map(|line| format!("    | {line}"))
+        .collect()
+}
+
+/// One waiting approval as `uxduck approvals` lists it, with its command
+/// under it when it asks to run one.
+fn approval_lines(approval: &serde_json::Value, left_s: u128) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {} wants to {}  ({} s left)",
+        approval["id"].as_str().unwrap_or(""),
+        approval["clientName"].as_str().unwrap_or(""),
+        approval["summary"].as_str().unwrap_or(""),
+        left_s
+    )];
+    if let Some(command) = approval["shellCommandShown"].as_str() {
+        lines.push(
+            "    The command, all of it. ⏎ ends a line, ⇥ is a tab and ⟨U+000D⟩ and the like are characters you could not otherwise see. What it prints goes to the agent and its AI model.".into(),
+        );
+        lines.extend(command_lines(command));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod approval_lines_tests {
+    use super::*;
+
+    #[test]
+    fn a_command_is_listed_whole_under_its_request_and_another_request_is_one_line() {
+        let long = format!("echo {}; rm -rf ~", "a".repeat(3000));
+        let shown = format!("echo one⏎\n⇥echo two⟨U+000D⟩three⏎\n{long}");
+        let lines = approval_lines(
+            &serde_json::json!({
+                "id": "ap1", "clientName": "claude-code",
+                "summary": "run a command on Buggy › Camera Pi",
+                "shellCommandShown": shown,
+            }),
+            42,
+        );
+        assert_eq!(
+            lines[0],
+            "ap1  claude-code wants to run a command on Buggy › Camera Pi  (42 s left)"
+        );
+        assert!(lines[1].contains("The command, all of it."), "{}", lines[1]);
+        assert_eq!(
+            lines[2..],
+            [
+                "    | echo one⏎".to_owned(),
+                "    | ⇥echo two⟨U+000D⟩three⏎".to_owned(),
+                format!("    | {long}"),
+            ]
+        );
+        // Every character of it is there, in order.
+        let printed: Vec<&str> = lines[2..].iter().map(|l| &l[6..]).collect();
+        assert_eq!(printed.join("\n"), shown);
+
+        let other = approval_lines(
+            &serde_json::json!({ "id": "ap2", "clientName": "Codex", "summary": "arm Buggy" }),
+            7,
+        );
+        assert_eq!(other, ["ap2  Codex wants to arm Buggy  (7 s left)"]);
+    }
+}
+
 /// `uxduck approvals`: the pending list, or an answer to one.
 async fn approvals(
     data_dir: &std::path::Path,
@@ -4052,13 +4133,9 @@ async fn approvals(
                 let left = u128::from(approval["deadlineUs"].as_u64().unwrap_or(0))
                     .saturating_sub(now)
                     / 1_000_000;
-                println!(
-                    "{}  {} wants to {}  ({} s left)",
-                    approval["id"].as_str().unwrap_or(""),
-                    approval["clientName"].as_str().unwrap_or(""),
-                    approval["summary"].as_str().unwrap_or(""),
-                    left
-                );
+                for line in approval_lines(&approval, left) {
+                    println!("{line}");
+                }
             }
             println!("Answer with `uxduck approvals allow <id>` or `uxduck approvals deny <id>`.");
         }
@@ -4068,6 +4145,18 @@ async fn approvals(
                 RememberChoice::Connection => "connection",
                 RememberChoice::Always => "always",
             };
+            // A command is printed before it is allowed, so what was
+            // allowed is on the screen whether or not the list was read.
+            let list = client.call("approval/list", serde_json::json!({})).await?;
+            let asked = list["approvals"]
+                .as_array()
+                .and_then(|all| all.iter().find(|a| a["id"].as_str() == Some(id.as_str())));
+            if let Some(command) = asked.and_then(|a| a["shellCommandShown"].as_str()) {
+                println!("Allowing this command:");
+                for line in command_lines(command) {
+                    println!("{line}");
+                }
+            }
             client
                 .call(
                     "approval/resolve",

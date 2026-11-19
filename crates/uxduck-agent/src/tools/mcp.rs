@@ -225,6 +225,7 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "telemetry/calculate" => schema::<dto::telemetry::TelemetryCalculateResult>(),
         "telemetry/get" => schema::<dto::telemetry::VehicleTelemetry>(),
         "telemetry/window" => schema::<dto::telemetry_window::TelemetryWindowResult>(),
+        "computer/run" => schema::<dto::terminal::ComputerRunResult>(),
         "terrain/keepArea" => schema::<dto::terrain::TerrainArea>(),
         "terrain/areaSize" => schema::<dto::terrain::TerrainAreaSize>(),
         "terrain/areas" => schema::<dto::terrain::TerrainAreasResult>(),
@@ -313,6 +314,7 @@ mod tests {
             "feedback/add",
             "command/send",
             "param/set",
+            "computer/run",
             "unknown",
         ] {
             assert_eq!(annotations(method)["readOnlyHint"], false, "{method}");

@@ -40,6 +40,7 @@ pub mod snapshot;
 pub mod sync;
 pub mod telemetry;
 pub mod telemetry_layout;
+pub mod terminal;
 pub mod thread;
 pub mod traffic;
 pub mod tuning;
