@@ -54,7 +54,7 @@ pub(super) fn rumbled(rumbler: impl Fn(&str, Rumble) + Send + 'static) {
 }
 
 /// What gilrs says of a pad's power, as the engine takes it.
-#[cfg(feature = "gamepad")]
+#[cfg(all(feature = "gamepad", any(not(target_os = "macos"), test)))]
 fn power_of(info: gilrs::PowerInfo) -> ControllerPower {
     match info {
         gilrs::PowerInfo::Unknown => ControllerPower::Unknown,

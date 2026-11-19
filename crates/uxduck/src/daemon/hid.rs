@@ -110,9 +110,7 @@ fn with_device<T>(
     if manager.open(kIOHIDOptionsTypeNone) != kIOReturnSuccess {
         return None;
     }
-    let Some(devices) = manager.devices() else {
-        return None;
-    };
+    let devices = manager.devices()?;
     let count = usize::try_from(devices.count()).unwrap_or(0);
     let mut values: Vec<*const c_void> = vec![std::ptr::null(); count];
     // SAFETY: `values` holds `count` pointers, as many as the set has.
