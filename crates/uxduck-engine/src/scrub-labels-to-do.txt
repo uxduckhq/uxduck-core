@@ -1,0 +1,320 @@
+# Labelled logins in free feedback text, for a follow-up to FB-229. No
+# test reads this file yet. The samples under "Hide" hold "hunter2" as
+# their secret, and the ones under "Keep" must come out unchanged. Samples
+# are separated by blank lines, and a line starting with # is a comment.
+#
+# Known gaps found while writing them (#1063, rounds 4 to 7):
+# - An unquoted passphrase of plain words, "password: my long phrase",
+#   reads like "My password: is not saved".
+# - A one-word value after a bare label that starts its line,
+#   "Session: started", reads like YAML's "pass: hunter2".
+# - Mid-line weak labels ("session: 8f3a…"), prefixed session cookies
+#   (laravel_session=), BASIC_AUTH=, Proxy-Authorization:, authkey=,
+#   dbpass= and PASSWORD1=, against Controls bindings such as HotKey: F5
+#   and ArmKey=Space, which must stay.
+
+# Hide
+
+SECRET_KEY=hunter2
+
+SECRET_KEY: hunter2
+
+DJANGO_SECRET_KEY = "hunter2"
+
+DJANGO_SECRET_KEY=hunter2
+
+SECRET_KEY_BASE=hunter2
+
+SECRET_KEY_BASE: hunter2
+
+STRIPE_SECRET_KEY=sk_live_hunter2
+
+STRIPE_KEY: hunter2
+
+STRIPE_KEY=hunter2
+
+AUTH_KEY=hunter2
+
+AUTH_KEY: hunter2
+
+SIGNING_KEY: hunter2
+
+SIGNING_KEY=hunter2
+
+MAVLINK_SIGNING_KEY=hunter2
+
+MAVLINK_SIGNING_KEY: hunter2
+
+secrets:
+  secret_key: hunter2
+  auth_key: hunter2
+  signing_key: hunter2
+
+[server]
+secret_key = hunter2
+signing_key = hunter2
+stripe_key = hunter2
+
+[keys]
+STRIPE_SECRET_KEY = "hunter2"
+AUTH_KEY = "hunter2"
+
+{"secret_key":"hunter2"}
+
+{"secretKey": "hunter2"}
+
+{"authKey":"hunter2"}
+
+{"key":"hunter2"}
+
+{"signingKey":"hunter2"}
+
+X-Auth-Key: hunter2abc123
+
+Ocp-Apim-Subscription-Key: hunter2abc123
+
+X-Session-Key: hunter2abc123
+
+X-Signature: hunter2abc123
+
+RTSP_PASS=hunter2
+
+RTSP_PASS: hunter2
+
+CAMERA_PASS: hunter2
+
+MQTT_PASS=hunter2
+
+MQTT_PWD: hunter2
+
+MQTT_PWD=hunter2
+
+pass: hunter2
+
+camera:
+  user: pilot
+  pass: hunter2
+
+GET /api/cameras?key=hunter2&stream=1
+
+GET /api/cameras?stream=1&key=hunter2
+
+session=hunter2
+
+key=hunter2
+
+Cookie: session=hunter2; theme=dark
+
+Set-Cookie: session=hunter2; Path=/; HttpOnly
+
+JSESSIONID=hunter2
+
+Cookie: JSESSIONID=hunter2
+
+{"signature":"hunter2"}
+
+{"sig":"hunter2"}
+
+login: hunter2
+
+{"login":"hunter2"}
+
+signing key: hunter2
+
+Bearer password: hunter2
+
+refused ?pass=hunter2&stream=1, token=hunter2 now
+
+token=hunter2.
+
+password: hunter2 then
+
+password:hunter2 then
+
+{"password":"hunter2"}
+
+{"password":hunter2}
+
+{"password":"my long hunter2 phrase","user":"bob"}
+
+{"Pass_Word": "hunter2"}
+
+{"pass":"hunter2"}
+
+password = hunter2
+
+password= hunter2
+
+password=hunter2 then
+
+pass=hunter2 then
+
+token: hunter2
+
+auth: hunter2 now
+
+Authorization: Bearer hunter2abc123 sent
+
+Authorization=Bearer hunter2abc123 sent
+
+Authorization: Basic hunter2abc123
+
+Bearer: hunter2 sent
+
+sent bearer hunter2abc123 once
+
+sid=hunter2 side=1
+
+/user=admin_pass_word=hunter2
+
+wifi_password: hunter2
+
+wifi_password=hunter2
+
+{"wifi_password":"hunter2"}
+
+db_password: hunter2
+
+db_password=hunter2
+
+{"db_password":"hunter2"}
+
+rtsp_password: hunter2
+
+rtsp_password=hunter2
+
+{"rtsp_password":"hunter2"}
+
+mqtt_password: hunter2
+
+mqtt_password=hunter2
+
+{"mqtt_password":"hunter2"}
+
+WiFi-Password: hunter2
+
+WiFi-Password=hunter2
+
+{"WiFi-Password":"hunter2"}
+
+X-Api-Key: hunter2
+
+X-Api-Key=hunter2
+
+{"X-Api-Key":"hunter2"}
+
+api_token: hunter2
+
+api_token=hunter2
+
+{"api_token":"hunter2"}
+
+x-auth-token: hunter2
+
+x-auth-token=hunter2
+
+{"x-auth-token":"hunter2"}
+
+session_token: hunter2
+
+session_token=hunter2
+
+{"session_token":"hunter2"}
+
+id_token: hunter2
+
+id_token=hunter2
+
+{"id_token":"hunter2"}
+
+auth: hunter2
+
+auth=hunter2
+
+{"auth":"hunter2"}
+
+aws_secret_access_key: hunter2
+
+aws_secret_access_key=hunter2
+
+{"aws_secret_access_key":"hunter2"}
+
+dbPassword: hunter2
+
+dbPassword=hunter2
+
+{"dbPassword":"hunter2"}
+
+
+# Keep
+
+Compass: calibrated
+
+Signal: -71
+
+Author: Ben
+
+passed: all
+
+the key: press it
+
+Pre-arm checks pass: GPS ok, compass ok
+
+Bearer of bad news
+
+My password: is not saved, the app forgot it
+
+The token: expired after a minute
+
+Secret: no idea why
+
+auth: failed with code 401
+
+basic mode on
+
+{"password":"","user":"bob"}
+
+keyframe=1
+
+signal=-71
+
+login failed twice
+
+ACRO_BAL_PITCH,1
+ACRO_BAL_ROLL,1
+AHRS_EKF_TYPE,3
+ARMING_CHECK,1
+ARSPD_BYPASS,0
+BATT_CAPACITY,5200
+BATT_MONITOR,4
+BRD_SAFETY_DEFLT,0
+COMPASS_AUTODEC,1
+COMPASS_USE,1
+COMPASS_USE2,1
+COMPASS_USE3,0
+EK3_SRC1_YAW,1
+FRAME_CLASS,1
+FS_THR_ENABLE,1
+KEY_MAP,0
+LOG_BITMASK,176126
+RC_OPTIONS,0
+SERIAL1_BAUD,57
+SERIAL1_PASS2,0
+SERIAL1_PROTOCOL,2
+SERIAL_PASS1,0
+SERIAL_PASS2,-1
+SERIAL_PASSTIMO,15
+SIGNAL_MIN,-90
+SYSID_THISMAV,1
+WPNAV_SPEED,500
+
+COMPASS_USE      1
+COMPASS_OFS_X    -12.5
+ARSPD_BYPASS     0
+SERIAL1_PASS2    0
+KEY_MAP          3
+SIGNAL_MIN       -90
+FLTMODE1         5
+
+COMPASS_USE=1 ARSPD_BYPASS=1 SERIAL1_PASS2=0 SIGNAL_MIN=-90 KEY_MAP=3 keyframe=1 signal=-71
+

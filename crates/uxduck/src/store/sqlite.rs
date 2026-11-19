@@ -331,6 +331,9 @@ pub fn project(db: &mut Connection, events: &[Event]) -> Result<(), SqliteError>
             | Change::LibraryUpserted { .. }
             | Change::LinkLibraryUpserted { .. }
             | Change::LinkLibraryRemoved { .. }
+            | Change::CameraShared { .. }
+            | Change::CameraLibraryUpserted { .. }
+            | Change::CameraLibraryRemoved { .. }
             | Change::BaselineUpserted { .. }
             | Change::BaselineRemoved { .. }
             | Change::SavedParamsUpserted { .. }

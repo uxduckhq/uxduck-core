@@ -125,7 +125,9 @@ enum Step {
 
 #[derive(Deserialize)]
 struct PullPage {
-    changes: Vec<Pulled>,
+    /// Read one by one, so a kind of change a newer UXDuck sends is passed
+    /// over instead of stopping every pull (FB-229).
+    changes: Vec<serde_json::Value>,
     cursor: u64,
     more: bool,
 }
@@ -187,7 +189,8 @@ impl Syncer {
             engine.sync_problem(Some(problem));
             return None;
         }
-        let state = engine.sync_round();
+        // A browser has no cameras of its own, so it asks for none (FB-229).
+        let state = engine.sync_round(&[]);
         let (through, waiting) = {
             let outbox = lock(&self.outbox);
             let waiting: Vec<SyncChange> = outbox
@@ -296,7 +299,12 @@ impl Syncer {
                     return None;
                 };
                 let (cursor, more) = (page.cursor, page.more);
-                engine.sync_pulled(page.changes, cursor);
+                let changes = page
+                    .changes
+                    .into_iter()
+                    .filter_map(|change| serde_json::from_value::<Pulled>(change).ok())
+                    .collect();
+                engine.sync_pulled(changes, cursor);
                 if more && cursor > after {
                     return Some(self.pull(engine, cursor));
                 }

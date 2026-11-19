@@ -24,6 +24,7 @@ use uxduck_core::domain::client::ClientKind;
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::thread::ItemKind;
+use uxduck_core::domain::video::without_login;
 
 use crate::rpc::handlers::to_value;
 use crate::{ConnectionId, Engine};
@@ -363,27 +364,85 @@ fn scrub_under(value: &mut Value, key: &str) {
 #[must_use]
 pub fn scrub_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut String| {
-        if !word.is_empty() {
-            out.push_str(&scrub_word(word));
-            word.clear();
-        }
-    };
-    for c in text.chars() {
-        if c.is_whitespace()
-            || matches!(
-                c,
-                '"' | '\'' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '=' | '<' | '>'
-            )
-        {
-            flush(&mut word, &mut out);
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            out.push_str(&scrub_spaceless(&text[start..i]));
             out.push(c);
-        } else {
-            word.push(c);
+            start = i + c.len_utf8();
         }
     }
-    flush(&mut word, &mut out);
+    out.push_str(&scrub_spaceless(&text[start..]));
+    out
+}
+
+/// Text without whitespace, scrubbed word by word. A camera's address also
+/// loses its login, as it does on its way to the account (FB-229), and a
+/// word the scrub hid in the address as written stays hidden.
+fn scrub_spaceless(text: &str) -> String {
+    let (words, separators) = words_of(text);
+    let scrubbed = joined(words.iter().map(|word| scrub_word(word)), &separators);
+    let Some(at) = text.find("://") else {
+        return scrubbed;
+    };
+    if let Some((bare, _)) = without_login(text) {
+        if bare == text {
+            return scrubbed;
+        }
+        let (bare_words, bare_separators) = words_of(&bare);
+        if bare_separators == separators {
+            return joined(
+                words.iter().zip(&bare_words).map(|(word, bare)| {
+                    let hidden = scrub_word(word);
+                    if hidden == *word {
+                        scrub_word(bare)
+                    } else {
+                        hidden
+                    }
+                }),
+                &separators,
+            );
+        }
+    }
+    let kept_scheme = words
+        .iter()
+        .find(|word| word.contains("://"))
+        .is_some_and(|word| scrub_word(word) == *word);
+    if kept_scheme {
+        format!("{}://[redacted]", scrub_spaceless(&text[..at]))
+    } else {
+        "[redacted]".to_owned()
+    }
+}
+
+/// The words of text without whitespace, split at quotes, brackets, commas,
+/// `=`, `<` and `>`, and the separators between them. A word may be empty.
+fn words_of(text: &str) -> (Vec<&str>, Vec<char>) {
+    let mut words = Vec::new();
+    let mut separators = Vec::new();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if matches!(
+            c,
+            '"' | '\'' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '=' | '<' | '>'
+        ) {
+            words.push(&text[start..i]);
+            separators.push(c);
+            start = i + c.len_utf8();
+        }
+    }
+    words.push(&text[start..]);
+    (words, separators)
+}
+
+fn joined(words: impl Iterator<Item = String>, separators: &[char]) -> String {
+    let mut out = String::new();
+    for (i, word) in words.enumerate() {
+        if let Some(separator) = i.checked_sub(1).map(|i| separators[i]) {
+            out.push(separator);
+        }
+        out.push_str(&word);
+    }
     out
 }
 
@@ -1288,6 +1347,169 @@ mod tests {
         let before = bundle.clone();
         scrub(&mut bundle);
         assert_eq!(bundle, before);
+    }
+
+    /// The samples of a corpus beside this file: blocks between blank lines,
+    /// without comment lines.
+    fn samples(corpus: &str) -> Vec<String> {
+        corpus
+            .split("\n\n")
+            .map(|block| {
+                block
+                    .lines()
+                    .filter(|line| !line.starts_with('#'))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|sample| !sample.trim().is_empty())
+            .collect()
+    }
+
+    /// FB-229: a camera's address pasted into feedback loses its login as it
+    /// does on its way to the account.
+    #[test]
+    fn a_cameras_login_never_goes_with_feedback() {
+        let hide = samples(include_str!("scrub-must-hide.txt"));
+        let leaks: Vec<(&String, String)> = hide
+            .iter()
+            .map(|sample| (sample, scrub_text(sample)))
+            .filter(|(_, scrubbed)| scrubbed.contains("hunter2"))
+            .collect();
+        assert!(
+            leaks.is_empty(),
+            "{} of {} leak: {leaks:#?}",
+            leaks.len(),
+            hide.len()
+        );
+        let keep = samples(include_str!("scrub-must-keep.txt"));
+        let changed: Vec<(&String, String)> = keep
+            .iter()
+            .map(|sample| (sample, scrub_text(sample)))
+            .filter(|(sample, scrubbed)| *sample != scrubbed)
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "{} of {} change: {changed:#?}",
+            changed.len(),
+            keep.len()
+        );
+        assert_eq!(
+            scrub_text("opening rtsp://admin:hunter2@cam/main failed"),
+            "opening rtsp://cam/main failed"
+        );
+        assert_eq!(
+            scrub_text("rtsp://admin:12/34@cam/main"),
+            "rtsp://[redacted]"
+        );
+    }
+
+    /// Main's scrub before FB-229, kept as it was to compare against.
+    fn scrub_text_before_cameras(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut word = String::new();
+        let flush = |word: &mut String, out: &mut String| {
+            if !word.is_empty() {
+                out.push_str(&scrub_word(word));
+                word.clear();
+            }
+        };
+        for c in text.chars() {
+            if c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\'' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '=' | '<' | '>'
+                )
+            {
+                flush(&mut word, &mut out);
+                out.push(c);
+            } else {
+                word.push(c);
+            }
+        }
+        flush(&mut word, &mut out);
+        out
+    }
+
+    /// FB-229: taking a camera's login out of feedback text shows nothing
+    /// the scrub hid before, and leaves no login.
+    #[test]
+    fn a_cameras_login_goes_and_nothing_hidden_before_comes_back() {
+        let hex = "3f9a0c6b1d2e4f5a6b7c8d9e0f1a2b3c4d5e6f7a";
+        let inputs = [
+            "https://u:p4ss@api.example.com/v1/sk-abcdef1234567890xyz".to_owned(),
+            format!("https://ana:pw@files.example.com/s/{hex}/x"),
+            "rtsp://admin:hunter2@cam.local:554/live/ghp_abcdefghijklmnop1234".to_owned(),
+            "rtsp://admin:hunter2@cam.corp.example.com/main".to_owned(),
+            "wss://ana@example.com@gw.example.com/socket?token=hunter2".to_owned(),
+            "sent to 10.0.0.5:14551 from COM4 and /dev/ttyUSB0, mail ana@example.com".to_owned(),
+            format!("key sk-abc123def456ghi789, session {hex}, sessionid={hex}"),
+            "data_dir=/Users/ana/Library and /home/ana/.config".to_owned(),
+            "peer [fe80::1]:14550 and udp://10.0.0.5:14550".to_owned(),
+            "rtsp://admin:hunter2@10.0.0.5:554/main".to_owned(),
+            "rtsp://admin:hunter2@[fd7a::1]:8554/front".to_owned(),
+            "rtsp://admin:hunter2@cam/main?sessionid=hunter2".to_owned(),
+            "http://gw.example.com/front/whep?token=hunter2".to_owned(),
+            "http://10.0.0.5:8889/whep?token=hunter2&stream=1".to_owned(),
+            "rtsp://10.0.0.5:554/user=admin&password=hunter2&channel=1".to_owned(),
+            "rtsp://cam.example.com/live?user=admin&password=hunter2".to_owned(),
+            format!("rtsp://admin:hunter2@cam.example.com/main?password=hunter2&s={hex}"),
+            "http://[fd7a::5]/cgi?loginuse=admin&loginpas=hunter2".to_owned(),
+            "\"url\": \"rtsp://admin:hunter2@cam/main\", (rtsp://admin:hunter2@cam.lan/x)"
+                .to_owned(),
+            "rtsp://admin:12/hunter2@cam/main and rtsp://admin:hunter2@cam/a@b.example".to_owned(),
+            "url=rtsp://admin:hunter2@ana@example.com/main".to_owned(),
+        ];
+        let fragments = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let markers = ["redacted", "address", "email", "path", "device"];
+        for input in &inputs {
+            let before = scrub_text_before_cameras(input);
+            let now = scrub_text(input);
+            let shown = fragments(&before);
+            for part in fragments(&now) {
+                assert!(
+                    shown.contains(&part) || markers.contains(&part.as_str()),
+                    "{input}: {now} shows {part}, which {before} hid"
+                );
+            }
+            for login in ["hunter2", "p4ss", ":pw@", "admin"] {
+                assert!(!now.contains(login), "{input}: {now} keeps {login}");
+            }
+            if !input.contains("://") {
+                assert_eq!(now, before, "{input}");
+            }
+        }
+    }
+
+    /// FB-229: what was hidden before camera addresses were is hidden still.
+    #[test]
+    fn what_was_hidden_before_cameras_still_is() {
+        for (given, kept) in [
+            (
+                "sent to 10.0.0.5:14551 from COM4, mail ana@example.com, key sk-abc123def456ghi789",
+                "sent to [address] from [device], mail [email], key [redacted]",
+            ),
+            (
+                "session 3f9a0c6b1d2e4f5a6b7c8d9e0f1a2b3c4d5e6f7a",
+                "session [redacted]",
+            ),
+            ("token ghp_abcdefghijklmnop1234", "token [redacted]"),
+            ("link opened on /dev/ttyUSB0.", "link opened on [device]."),
+            (
+                "data_dir=/Users/ana/Library/Application Support",
+                "data_dir=[path] Support",
+            ),
+            ("peer [fe80::1]:14550", "peer [[address]]:14550"),
+        ] {
+            assert_eq!(scrub_text(given), kept, "{given}");
+        }
+        let mut bundle = json!({ "password": "hunter2", "apiKey": "hunter2", "note": "rtsp://admin:hunter2@cam/main" });
+        scrub(&mut bundle);
+        assert!(!bundle.to_string().contains("hunter2"), "{bundle}");
     }
 
     #[test]

@@ -82,11 +82,19 @@ pub struct SyncStatus {
     /// when everything fits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub too_large: Vec<SyncTooLarge>,
+    /// Cameras someone added that stay on this computer, and why: an
+    /// address whose login's end cannot be told, or more than a camera's
+    /// copy in the account holds (FB-229). Empty when every one syncs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_here: Vec<SyncKeptHere>,
     /// Vehicles other computers published to the account.
     pub library: Vec<LibraryVehicle>,
     /// Connections other computers published to the account (C2).
     #[serde(default)]
     pub links: Vec<LibraryLink>,
+    /// Cameras other computers published to the account (FB-229).
+    #[serde(default)]
+    pub cameras: Vec<LibraryCamera>,
 }
 
 /// Something whose latest change the account would not keep for its size,
@@ -115,6 +123,21 @@ pub struct SyncTooLarge {
     /// to take, and syncs once the account has room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_room: Option<SyncNoRoom>,
+}
+
+/// Something that stays on this computer and never goes to the account
+/// while it is as it is (FB-229).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncKeptHere {
+    /// `camera`.
+    pub entity: String,
+    pub id: String,
+    /// What stays, by its name, such as "The camera Front stays on this
+    /// computer".
+    pub title: String,
+    /// Why, and what to change for it to sync, in words.
+    pub detail: String,
 }
 
 /// Why the account had no room for a change, in its server's numbers.
@@ -150,6 +173,38 @@ pub struct LibraryLink {
     pub active: bool,
 }
 
+/// A camera another computer published to the account (FB-229): how to
+/// add it here. Its login never travels.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCamera {
+    pub id: String,
+    pub name: String,
+    /// The vehicle it was given there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// Its RTSP or WHEP addresses, preferred first, without a login.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
+    /// For a camera that sends to UXDuck, the UDP port it listens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port: Option<u16>,
+    /// An address had a login there, so `sync/activate` takes one typed
+    /// here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_login: bool,
+    /// An address had a token, a key or a signature there, which no user
+    /// name or password stands for, so its address is edited here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_address: bool,
+    /// The computer that published it, by name.
+    pub device: String,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub updated_at_us: u64,
+    /// Used on this computer.
+    pub active: bool,
+}
+
 /// What `sync/activate` uses here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -157,6 +212,17 @@ pub enum SyncEntity {
     #[default]
     Vehicle,
     Link,
+    Camera,
+}
+
+/// The login a camera from the account needs on this computer (FB-229).
+/// It is kept here and never goes to the account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraLogin {
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -194,10 +260,14 @@ pub struct SyncSetParams {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncActivateParams {
-    /// A vehicle, or with `entity: link` a connection, in the library.
+    /// A vehicle, or with `entity: link` a connection, or with
+    /// `entity: camera` a camera, in the library.
     pub id: String,
     #[serde(default, skip_serializing_if = "is_vehicle")]
     pub entity: SyncEntity,
+    /// For a camera that needs one, its login on this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<CameraLogin>,
 }
 
 #[allow(

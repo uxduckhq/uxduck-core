@@ -24,8 +24,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uxduck_contracts::dto::operator::DEFAULT_OPERATOR_NAME;
 use uxduck_contracts::dto::sync::{
-    LibraryLink as LibraryLinkDto, LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity,
-    SyncNoRoom, SyncStatus, SyncTooLarge,
+    LibraryCamera as LibraryCameraDto, LibraryLink as LibraryLinkDto,
+    LibraryVehicle as LibraryVehicleDto, SyncActivation, SyncEntity, SyncKeptHere, SyncNoRoom,
+    SyncStatus, SyncTooLarge,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::ClientRequest;
@@ -35,9 +36,11 @@ use uxduck_core::domain::notification::{NotificationKind, Severity, Subject};
 use uxduck_core::domain::operator::Operator;
 use uxduck_core::domain::plan::{Plan, PlanRevision};
 use uxduck_core::domain::sync::{
-    Activation, LibraryLink, LibraryVehicle, NoRoom, RefusedCopy, SyncState, TooLarge,
+    Activation, LibraryCamera, LibraryLink, LibraryVehicle, NoRoom, RefusedCopy, SharedCamera,
+    SyncState, TooLarge,
 };
 use uxduck_core::domain::vehicle::{Presence, Vehicle};
+use uxduck_core::domain::video::{VideoSource, udp_name, unclear_at_is_in_its_path, without_login};
 use uxduck_core::events::{Actor, Change, Event};
 
 use crate::commands::Raise;
@@ -46,6 +49,11 @@ use crate::{ConnectionId, Engine};
 
 /// The actor prefix of changes taken from the account.
 pub const FROM_ACCOUNT: &str = "sync:";
+
+/// Kinds of entity the account sends only to a UXDuck that says it takes
+/// them, because one released before them stops reading a page that holds
+/// one (FB-229).
+pub const TAKES: &[&str] = &["camera"];
 
 /// The version of a removal: it outranks every edit. The largest integer
 /// JavaScript and Postgres both hold exactly.
@@ -101,6 +109,10 @@ pub struct PushAnswer {
     /// Which ones the account had no room for (from 2026-11-15).
     #[serde(default)]
     pub no_room: Vec<NoRoomChange>,
+    /// Which ones it would not take for what they hold: a camera's copy
+    /// that may carry a login (FB-229). The rest of the push is taken.
+    #[serde(default)]
+    pub invalid: Vec<InvalidChange>,
     /// What the account holds after this push, and what its plan allows
     /// (from 2026-11-15).
     #[serde(default)]
@@ -116,6 +128,17 @@ pub struct RefusedChange {
     pub entity: String,
     pub id: String,
     pub bytes: u64,
+}
+
+/// One change the account would not take for what it holds.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvalidChange {
+    pub entity: String,
+    pub id: String,
+    pub bytes: u64,
+    /// The account server's reason, for the log. Never shown as it is.
+    pub why: String,
 }
 
 /// One change the account had no room for.
@@ -166,6 +189,7 @@ impl PushAnswer {
                 bytes: refused.bytes,
                 max_bytes: self.max_change_bytes,
                 no_room: None,
+                not_taken: None,
                 copy: Some(copy(&refused.entity, &refused.id)?),
             })
         });
@@ -180,10 +204,22 @@ impl PushAnswer {
                     account_bytes,
                     allowance_bytes,
                 }),
+                not_taken: None,
                 copy: Some(copy(&refused.entity, &refused.id)?),
             })
         });
-        too_large.chain(no_room).collect()
+        let invalid = self.invalid.iter().filter_map(|refused| {
+            Some(TooLarge {
+                entity: refused.entity.clone(),
+                id: refused.id.clone(),
+                bytes: refused.bytes,
+                max_bytes: None,
+                no_room: None,
+                not_taken: Some(refused.why.clone()),
+                copy: Some(copy(&refused.entity, &refused.id)?),
+            })
+        });
+        too_large.chain(no_room).chain(invalid).collect()
     }
 }
 
@@ -203,6 +239,7 @@ fn refused_here(change: &SyncChange, max_bytes: Option<u64>) -> TooLarge {
         bytes: size(change),
         max_bytes,
         no_room: None,
+        not_taken: None,
         copy: Some(copy_of(change)),
     }
 }
@@ -259,7 +296,9 @@ pub(crate) fn size_words(bytes: u64, round_up: bool) -> String {
 /// title and body, and the same words in Settings. Every number in them is
 /// the account server's.
 fn too_large_words(name: &str, refused: &TooLarge) -> (String, String) {
-    let body = if let Some(room) = &refused.no_room {
+    let body = if refused.not_taken.is_some() {
+        "Your account would not take this copy of it, so it stays on this computer. Edit it here to try again.".to_owned()
+    } else if let Some(room) = &refused.no_room {
         format!(
             "This change takes {} to keep, more than the room left in your account, which holds {} of the {} it allows, so it stays on this computer. It syncs once your account has room.",
             size_words(room.adds_bytes, true),
@@ -340,6 +379,128 @@ fn recipe(link: &Link) -> Link {
     }
 }
 
+/// The longest name or address, and the most addresses, a camera's copy in
+/// the account holds. They are the account server's bounds on what a
+/// computer it does not control sends for one camera (`CAMERA_TEXT` and
+/// `CAMERA_ADDRESSES` in apps/api syncApp.ts), counted as it counts them,
+/// in UTF-16 code units.
+pub const CAMERA_TEXT: usize = 4096;
+pub const CAMERA_ADDRESSES: usize = 256;
+
+/// Why a camera someone added stays on this computer (FB-229).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptHere {
+    /// An address has an `@` where its login's end cannot be told.
+    UnclearLogin,
+    /// An address has an `@` in its path or query, which may be a login's.
+    AtInItsPath,
+    /// Its name has this many characters, more than [`CAMERA_TEXT`].
+    LongName(usize),
+    /// One of its addresses, without its login, has this many.
+    LongAddress(usize),
+    /// It has this many addresses, more than [`CAMERA_ADDRESSES`].
+    ManyAddresses(usize),
+}
+
+/// What a camera is in the account (FB-229): one someone added, as a recipe
+/// to add it again, with every login left on this computer. A capture
+/// device, a file and a camera UXDuck found by itself are not the
+/// account's. One the account cannot be sent stays here, and says why.
+#[must_use]
+pub fn shared_camera(source: &VideoSource) -> Option<Result<SharedCamera, KeptHere>> {
+    if !source.added_by_hand || source.capture.is_some() || source.file.is_some() {
+        return None;
+    }
+    let mut logins = Vec::new();
+    let mut urls = Vec::new();
+    for (place, url) in source.url.iter().chain(&source.fallback_urls).enumerate() {
+        let Some((url, had)) = without_login(url) else {
+            return Some(Err(if unclear_at_is_in_its_path(url) {
+                KeptHere::AtInItsPath
+            } else {
+                KeptHere::UnclearLogin
+            }));
+        };
+        if had {
+            logins.push(place);
+        }
+        urls.push(url);
+    }
+    // A camera on a UDP port is that port on every computer.
+    let udp_port = source.url.is_none().then_some(source.port);
+    let id = udp_port.map_or_else(|| source.id.clone(), |port| format!("udp-{port}"));
+    let name = if source.named_by_hand {
+        source.name.clone()
+    } else {
+        urls.first()
+            .cloned()
+            .unwrap_or_else(|| udp_name(&id, source.port, ""))
+    };
+    let chars = |text: &str| text.encode_utf16().count();
+    if urls.len() > CAMERA_ADDRESSES {
+        return Some(Err(KeptHere::ManyAddresses(urls.len())));
+    }
+    if let Some(long) = urls.iter().map(|url| chars(url)).find(|&n| n > CAMERA_TEXT) {
+        return Some(Err(KeptHere::LongAddress(long)));
+    }
+    if chars(&name) > CAMERA_TEXT {
+        return Some(Err(KeptHere::LongName(chars(&name))));
+    }
+    Some(Ok(SharedCamera {
+        id,
+        name,
+        named_by_hand: source.named_by_hand,
+        vehicle_id: source
+            .vehicle_id
+            .clone()
+            .filter(|_| source.assigned_by_hand),
+        urls,
+        logins,
+        udp_port,
+        record_alone: source.record_alone,
+        vehicle_camera: source
+            .vehicle_camera_by_hand
+            .then_some(source.vehicle_camera),
+    }))
+}
+
+/// What a camera that stays here is told as in Settings: its title and why.
+fn kept_here_words(name: &str, why: KeptHere) -> (String, String) {
+    let holds = "a camera's copy in your account holds";
+    let detail = match why {
+        KeptHere::UnclearLogin => "UXDuck can't tell where its login ends, so none of its address goes to your account. To sync it, write any @ or / inside its login or parameters as %40 or %2F.".to_owned(),
+        KeptHere::AtInItsPath => "Its address has an @ that UXDuck can't share safely. Write it as %40.".to_owned(),
+        KeptHere::LongName(n) => format!(
+            "Its name is {n} characters long, longer than the {CAMERA_TEXT} {holds}. A shorter name syncs."
+        ),
+        KeptHere::LongAddress(n) => format!(
+            "One of its addresses is {n} characters long, longer than the {CAMERA_TEXT} {holds}. Shorten that address or remove it from the camera, and the camera syncs."
+        ),
+        KeptHere::ManyAddresses(n) => format!(
+            "It has {n} addresses, more than the {CAMERA_ADDRESSES} {holds}. Remove addresses until it has {CAMERA_ADDRESSES} or fewer, and it syncs."
+        ),
+    };
+    (format!("{name} stays on this computer"), detail)
+}
+
+/// The camera in the account a removed source was: one added by its
+/// address, or the camera on a UDP port, whichever sender it had. A second
+/// stream from one sender (`-from-`) was never one.
+fn removed_camera(id: &str) -> Option<String> {
+    if id.starts_with("vs") {
+        return Some(id.to_owned());
+    }
+    let rest = id.strip_prefix("udp-")?;
+    let (port, sender) = rest
+        .split_once('-')
+        .map_or((rest, None), |(p, s)| (p, Some(s)));
+    let port: u16 = port.parse().ok()?;
+    if sender.is_some_and(|s| s.contains("-from-")) {
+        return None;
+    }
+    Some(format!("udp-{port}"))
+}
+
 /// What a plan is in the account (C3): its current body, not this
 /// computer's undo history, uploads or local version.
 fn shared_plan(plan: &Plan) -> Change {
@@ -418,6 +579,9 @@ fn identify(change: &Change) -> Option<(&'static str, &str, Option<u64>)> {
         // A connection's version is when it changed here, as a vehicle's (C2).
         Change::LinkUpserted { link } => ("link", &link.id, None),
         Change::LinkRemoved { id } => ("link", id, None),
+        // A camera someone added, ordered by when it changed (FB-229).
+        Change::CameraShared { camera } => ("camera", &camera.id, None),
+        Change::VideoSourceRemoved { id, .. } => ("camera", id, None),
         Change::HistoryUpserted { entry } => ("history", &entry.id, Some(entry.version)),
         // Its time orders it: a plugin removed and installed again wins.
         Change::PluginPublished { plugin } => ("plugin", &plugin.id, Some(plugin.at_us)),
@@ -493,6 +657,45 @@ pub fn outgoing(event: &Event) -> Outgoing {
             }
         }
         Change::LinkUpserted { link } => Change::LinkUpserted { link: recipe(link) },
+        // One that stays here takes back the copy that went before, if one
+        // did. The account keeps a removal it had no copy for as nothing.
+        Change::VideoSourceUpserted { source } => match shared_camera(source) {
+            Some(Ok(camera)) => Change::CameraShared { camera },
+            // One taken from the account is another computer's to remove.
+            Some(Err(_)) if source.from_account => {
+                return removed_camera(&source.id).map_or(Outgoing::Ignore, |id| {
+                    Outgoing::Withdraw {
+                        entity: "camera".into(),
+                        id,
+                    }
+                });
+            }
+            Some(Err(_)) => match removed_camera(&source.id) {
+                Some(id) => Change::VideoSourceRemoved {
+                    id,
+                    here_only: false,
+                },
+                None => return Outgoing::Ignore,
+            },
+            None => return Outgoing::Ignore,
+        },
+        // Removed here alone: what waited to go about it does not.
+        Change::VideoSourceRemoved {
+            id,
+            here_only: true,
+        } => {
+            return removed_camera(id).map_or(Outgoing::Ignore, |id| Outgoing::Withdraw {
+                entity: "camera".into(),
+                id,
+            });
+        }
+        Change::VideoSourceRemoved { id, .. } => match removed_camera(id) {
+            Some(id) => Change::VideoSourceRemoved {
+                id,
+                here_only: false,
+            },
+            None => return Outgoing::Ignore,
+        },
         change => change.clone(),
     };
     let Some((entity, id, version)) = identify(&change) else {
@@ -500,6 +703,11 @@ pub fn outgoing(event: &Event) -> Outgoing {
     };
     let version = match (&change, entity, version) {
         (Change::LinkUpserted { .. }, _, _) | (_, "vehicle", _) => event.ts_us,
+        // A camera's copy and its removal go by when they happened. At the
+        // same instant the copy wins: that is a camera waiting on a UDP port
+        // becoming its first stream, never someone removing it.
+        (Change::CameraShared { .. }, _, _) => event.ts_us.saturating_mul(2) + 1,
+        (Change::VideoSourceRemoved { .. }, _, _) => event.ts_us.saturating_mul(2),
         (_, _, Some(version)) => version,
         (_, _, None) => REMOVED,
     };
@@ -522,6 +730,7 @@ pub fn exportable(event: &Event) -> Option<SyncChange> {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one arm per sync method and entity")]
 pub(crate) fn handle(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -589,6 +798,7 @@ pub(crate) fn handle(
                     engine.activate(connection, &entry);
                 }
                 engine.use_waiting_links(connection);
+                engine.use_waiting_cameras(connection);
             }
             engine.wake_sync();
         }
@@ -611,6 +821,26 @@ pub(crate) fn handle(
                 identity: None,
             };
             engine.use_link_as(actor, &entry)?;
+        }
+        ClientRequest::SyncActivate(params) if params.entity == SyncEntity::Camera => {
+            let entry = engine
+                .state
+                .camera_library
+                .get(&params.id)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::new(ErrorKind::NotFound, "no such camera in the account")
+                })?;
+            let actor = Actor {
+                client_id: format!("{FROM_ACCOUNT}library"),
+                operator_id: engine.actor(connection).operator_id,
+                identity: None,
+            };
+            let login = params
+                .login
+                .as_ref()
+                .map(|l| (l.user.as_str(), l.password.as_str()));
+            engine.use_camera_as(actor, &entry.camera, login)?;
         }
         ClientRequest::SyncActivate(params) => {
             let entry = engine
@@ -759,6 +989,7 @@ impl Engine {
             .sync
             .too_large
             .iter()
+            .filter(|one| one.not_taken.is_none())
             .filter(|one| match &one.no_room {
                 Some(room) => answer
                     .account_bytes
@@ -789,6 +1020,12 @@ impl Engine {
                 None,
                 Change::LinkUpserted {
                     link: recipe(state.links.get(id)?),
+                },
+            ),
+            "camera" => (
+                None,
+                Change::CameraShared {
+                    camera: shared_camera(self.camera_here(id)?)?.ok()?,
                 },
             ),
             _ => {
@@ -863,6 +1100,7 @@ impl Engine {
                 let link = state.links.get(id).filter(|link| shared_link(link))?;
                 named("The connection", &link.name, "A connection")
             }
+            "camera" => named("The camera", &self.camera_here(id)?.name, "A camera"),
             "plan" => {
                 let plan = state.plans.get(id).filter(|p| p.vehicle_copy.is_none())?;
                 // In Deleted it still holds all it held, so its deletion is
@@ -944,12 +1182,22 @@ impl Engine {
 
     /// Where sync has got, for a round to start from: once it is on, with
     /// this computer's id in the account, minted the first time.
-    pub fn sync_round(&mut self) -> SyncState {
+    /// Starts a round that asks the account for the kinds in `takes`.
+    pub fn sync_round(&mut self, takes: &[&str]) -> SyncState {
         if self.state.sync.enabled && self.state.sync.device_id.is_empty() {
             let mut sync = self.state.sync.clone();
             sync.device_id = format!("dv{}", &self.random.token()[..16]);
             sync.version += 1;
             self.commit_as(sync_actor("device"), Change::SyncChanged { sync });
+        }
+        // The first pull that takes a new kind reads the account from the
+        // start: what of that kind the cursor passed was left out.
+        if self.state.sync.takes != takes {
+            let mut sync = self.state.sync.clone();
+            sync.takes = takes.iter().map(|&entity| entity.to_owned()).collect();
+            sync.pulled_through = 0;
+            sync.version += 1;
+            self.commit_as(sync_actor("takes"), Change::SyncChanged { sync });
         }
         // What was too large and has since gone from here is no longer said.
         if !self.state.sync.too_large.is_empty() {
@@ -1116,6 +1364,29 @@ impl Engine {
                     return false;
                 }
                 self.commit_as(actor, Change::LinkLibraryRemoved { id: id.clone() });
+                return true;
+            }
+            // A camera goes into the library too (FB-229). Its removal
+            // empties the library entry and leaves a camera in use alone.
+            Change::CameraShared { camera } => {
+                return self.take_camera(
+                    actor,
+                    &pulled.device,
+                    camera,
+                    change.version,
+                    change.ts_us,
+                );
+            }
+            Change::VideoSourceRemoved { id, .. } => {
+                if self
+                    .state
+                    .camera_library
+                    .get(id)
+                    .is_none_or(|entry| entry.version >= change.version)
+                {
+                    return false;
+                }
+                self.commit_as(actor, Change::CameraLibraryRemoved { id: id.clone() });
                 return true;
             }
             _ => {}
@@ -1473,6 +1744,75 @@ impl Engine {
         crate::rpc::vehicles::create_link_as(self, actor, params, entry.id.clone()).map(|_| ())
     }
 
+    /// A camera from the account: into the library if newer. One used here
+    /// takes its new name only: its addresses and login are this
+    /// computer's. "Use them all" uses one that needs no login as it
+    /// arrives.
+    fn take_camera(
+        &mut self,
+        actor: Actor,
+        device: &str,
+        camera: &SharedCamera,
+        version: u64,
+        ts_us: u64,
+    ) -> bool {
+        if self
+            .state
+            .camera_library
+            .get(&camera.id)
+            .is_some_and(|entry| entry.version >= version)
+        {
+            return false;
+        }
+        self.commit_as(
+            actor.clone(),
+            Change::CameraLibraryUpserted {
+                camera: LibraryCamera {
+                    camera: camera.clone(),
+                    device: device.to_owned(),
+                    version,
+                    updated_at_us: ts_us,
+                },
+            },
+        );
+        match self.camera_here(&camera.id).cloned() {
+            Some(mut here) if camera.named_by_hand && here.name != camera.name => {
+                here.name.clone_from(&camera.name);
+                here.named_by_hand = true;
+                here.version += 1;
+                self.commit_as(actor, Change::VideoSourceUpserted { source: here });
+            }
+            None if self.state.sync.activation == Activation::MirrorAll
+                && !camera.needs_login() =>
+            {
+                // An address in use here says so on the next look.
+                let _ = self.use_camera_as(actor, camera, None);
+            }
+            Some(_) | None => {}
+        }
+        true
+    }
+
+    /// "Use them all" for cameras: every one waiting in the library that
+    /// needs no login. One that does waits for its login to be typed here.
+    fn use_waiting_cameras(&mut self, connection: ConnectionId) {
+        let cameras: Vec<SharedCamera> = self
+            .state
+            .camera_library
+            .values()
+            .filter(|c| !c.camera.needs_login() && self.camera_here(&c.camera.id).is_none())
+            .map(|c| c.camera.clone())
+            .collect();
+        for camera in cameras {
+            let actor = Actor {
+                client_id: format!("{FROM_ACCOUNT}library"),
+                operator_id: self.actor(connection).operator_id,
+                identity: None,
+            };
+            let _ = self.use_camera_as(actor, &camera, None);
+        }
+    }
+
     fn used_here(&self, id: &str) -> bool {
         self.state.vehicles.get(id).is_some_and(|v| v.saved)
     }
@@ -1572,6 +1912,29 @@ impl Engine {
         }
     }
 
+    /// The cameras someone added that stay on this computer, and why
+    /// (FB-229). None while cameras are left out of sync.
+    fn kept_here(&self) -> Vec<SyncKeptHere> {
+        if !self.state.sync.syncs("camera") {
+            return Vec::new();
+        }
+        self.state
+            .video_sources
+            .values()
+            .filter_map(|source| {
+                let why = shared_camera(source)?.err()?;
+                let name = named("The camera", &source.name, "A camera");
+                let (title, detail) = kept_here_words(&name, why);
+                Some(SyncKeptHere {
+                    entity: "camera".into(),
+                    id: source.id.clone(),
+                    title,
+                    detail,
+                })
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn sync_status(&self) -> SyncStatus {
         let sync = &self.state.sync;
@@ -1613,6 +1976,7 @@ impl Engine {
                     })
                 })
                 .collect(),
+            kept_here: self.kept_here(),
             library: self
                 .state
                 .library
@@ -1640,6 +2004,23 @@ impl Engine {
                     device: l.device.clone(),
                     updated_at_us: l.updated_at_us,
                     active: self.state.links.contains_key(&l.id),
+                })
+                .collect(),
+            cameras: self
+                .state
+                .camera_library
+                .values()
+                .map(|c| LibraryCameraDto {
+                    id: c.camera.id.clone(),
+                    name: c.camera.name.clone(),
+                    vehicle_id: c.camera.vehicle_id.clone(),
+                    urls: c.camera.urls.clone(),
+                    udp_port: c.camera.udp_port,
+                    needs_login: c.camera.needs_login(),
+                    needs_address: c.camera.needs_its_address(),
+                    device: c.device.clone(),
+                    updated_at_us: c.updated_at_us,
+                    active: self.camera_here(&c.camera.id).is_some(),
                 })
                 .collect(),
         }

@@ -1,0 +1,14 @@
+# Camera addresses in feedback text that the scrub must leave as they are (FB-229). The test
+# checks that each sample comes out unchanged.
+# Samples are separated by blank lines, and a line starting with # is a
+# comment.
+
+rtsp://cam/main?stream=1&channel=2
+
+watching rtsp://cam/main now
+
+rtsp://cam#track=2
+
+http://gw:8889/front/whep
+
+udp://:5601 is open

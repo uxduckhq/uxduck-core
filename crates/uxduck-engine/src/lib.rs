@@ -1556,6 +1556,9 @@ fn entity_changes(change: &Change) -> Vec<EntityChange> {
         | Change::LibraryUpserted { .. }
         | Change::LinkLibraryUpserted { .. }
         | Change::LinkLibraryRemoved { .. }
+        | Change::CameraShared { .. }
+        | Change::CameraLibraryUpserted { .. }
+        | Change::CameraLibraryRemoved { .. }
         | Change::BaselineUpserted { .. }
         | Change::BaselineRemoved { .. }
         // Read with `param/sets` (S217).

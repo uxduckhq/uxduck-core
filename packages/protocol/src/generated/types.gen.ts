@@ -2037,6 +2037,15 @@ export type CameraListResult = {
 };
 
 /**
+ * The login a camera from the account needs on this computer (FB-229).
+ * It is kept here and never goes to the account.
+ */
+export type CameraLogin = {
+    password?: string;
+    user: string;
+};
+
+/**
  * A camera's mode.
  */
 export type CameraMode = 'photo' | 'video' | 'survey';
@@ -9449,6 +9458,46 @@ export type LeftOut = {
      */
     limitBytes: number;
     toUs?: number | null;
+};
+
+/**
+ * A camera another computer published to the account (FB-229): how to
+ * add it here. Its login never travels.
+ */
+export type LibraryCamera = {
+    /**
+     * Used on this computer.
+     */
+    active: boolean;
+    /**
+     * The computer that published it, by name.
+     */
+    device: string;
+    id: string;
+    name: string;
+    /**
+     * An address had a token, a key or a signature there, which no user
+     * name or password stands for, so its address is edited here.
+     */
+    needsAddress?: boolean;
+    /**
+     * An address had a login there, so `sync/activate` takes one typed
+     * here.
+     */
+    needsLogin?: boolean;
+    /**
+     * For a camera that sends to UXDuck, the UDP port it listens on.
+     */
+    udpPort?: number | null;
+    updatedAtUs: number;
+    /**
+     * Its RTSP or WHEP addresses, preferred first, without a login.
+     */
+    urls?: Array<string>;
+    /**
+     * The vehicle it was given there.
+     */
+    vehicleId?: string | null;
 };
 
 /**
@@ -16868,9 +16917,14 @@ export type SurveyStart = 'north-west' | 'north-east' | 'south-east' | 'south-we
 export type SyncActivateParams = {
     entity?: SyncEntity;
     /**
-     * A vehicle, or with `entity: link` a connection, in the library.
+     * A vehicle, or with `entity: link` a connection, or with
+     * `entity: camera` a camera, in the library.
      */
     id: string;
+    /**
+     * For a camera that needs one, its login on this computer.
+     */
+    login?: CameraLogin | null;
 };
 
 /**
@@ -16893,7 +16947,28 @@ export type SyncContent = 'summaries' | 'logs' | 'video';
 /**
  * What `sync/activate` uses here.
  */
-export type SyncEntity = 'vehicle' | 'link';
+export type SyncEntity = 'vehicle' | 'link' | 'camera';
+
+/**
+ * Something that stays on this computer and never goes to the account
+ * while it is as it is (FB-229).
+ */
+export type SyncKeptHere = {
+    /**
+     * Why, and what to change for it to sync, in words.
+     */
+    detail: string;
+    /**
+     * `camera`.
+     */
+    entity: string;
+    id: string;
+    /**
+     * What stays, by its name, such as "The camera Front stays on this
+     * computer".
+     */
+    title: string;
+};
 
 /**
  * Why the account had no room for a change, in its server's numbers.
@@ -16947,11 +17022,21 @@ export type SyncStatus = {
      * Whether this UXDuck can sync: an installed one with an account server.
      */
     available: boolean;
+    /**
+     * Cameras other computers published to the account (FB-229).
+     */
+    cameras?: Array<LibraryCamera>;
     enabled: boolean;
     /**
      * Changes sent to the account so far.
      */
     exported: number;
+    /**
+     * Cameras someone added that stay on this computer, and why: an
+     * address whose login's end cannot be told, or more than a camera's
+     * copy in the account holds (FB-229). Empty when every one syncs.
+     */
+    keptHere?: Array<SyncKeptHere>;
     lastSyncedAtUs?: number | null;
     /**
      * Vehicles other computers published to the account.

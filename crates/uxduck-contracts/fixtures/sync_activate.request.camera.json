@@ -1,0 +1,8 @@
+{
+  "method": "sync/activate",
+  "params": {
+    "id": "vs4f1c2a9b7e3d5a60",
+    "entity": "camera",
+    "login": { "user": "pilot", "password": "typed-here" }
+  }
+}

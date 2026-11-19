@@ -22,11 +22,13 @@ use uxduck_core::domain::client::Capability;
 use uxduck_core::domain::notification::{
     Action, NotificationAction, NotificationKind, Severity, Subject,
 };
+use uxduck_core::domain::sync::SharedCamera;
 use uxduck_core::domain::telemetry::ClockMeasured;
 use uxduck_core::domain::vehicle::{Vehicle, VehicleRoute};
 use uxduck_core::domain::video::{
     AddressAhead, AddressChoice, AddressMove, AddressReason, AddressStandby, CaptureInput,
-    VideoReport, VideoSource, VideoState, VideoTrack, redact, sender_host, udp_name, url_host,
+    VideoReport, VideoSource, VideoState, VideoTrack, redact, same_address, sender_host, udp_name,
+    url_host, with_login, without_login,
 };
 use uxduck_core::events::{Actor, Change};
 use uxduck_media::latency::{Companion, CompanionClock, Offset};
@@ -557,7 +559,13 @@ impl Engine {
             .map(|s| s.id.clone())
             .collect();
         for id in stale {
-            self.commit_as(actor(), Change::VideoSourceRemoved { id });
+            self.commit_as(
+                actor(),
+                Change::VideoSourceRemoved {
+                    id,
+                    here_only: false,
+                },
+            );
         }
         // Named before 2026-10-05 by the host alone: now by the address.
         let renamed: Vec<VideoSource> = self
@@ -776,6 +784,7 @@ impl Engine {
                 active_url: None,
                 active_choice: None,
                 added_by_hand: false,
+                from_account: false,
                 capture: None,
                 file: None,
                 tracks: Vec::new(),
@@ -918,6 +927,7 @@ impl Engine {
             active_url: None,
             active_choice: None,
             added_by_hand: false,
+            from_account: false,
             capture: None,
             file: None,
             tracks: Vec::new(),
@@ -935,8 +945,15 @@ impl Engine {
             source.vehicle_camera = waiting.vehicle_camera;
             source.vehicle_camera_by_hand = waiting.vehicle_camera_by_hand;
             source.record_alone = waiting.record_alone;
+            source.from_account = waiting.from_account;
             source.added_by_hand = true;
-            self.commit_as(actor(), Change::VideoSourceRemoved { id: waiting.id });
+            self.commit_as(
+                actor(),
+                Change::VideoSourceRemoved {
+                    id: waiting.id,
+                    here_only: waiting.from_account,
+                },
+            );
         }
         let was_stopped = before
             .as_ref()
@@ -1330,7 +1347,7 @@ impl Engine {
                     "Fallback addresses must use RTSP or WHEP.",
                 ));
             }
-            if urls.iter().any(|u: &String| redact(u) == redact(&url)) {
+            if urls.iter().any(|u: &String| same_address(u, &url)) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
                     "Each camera address must be different.",
@@ -1340,7 +1357,7 @@ impl Engine {
                 .internet
                 .as_ref()
                 .and_then(|i| i.low_data_url.as_ref())
-                .is_some_and(|low| redact(low) == redact(&url))
+                .is_some_and(|low| same_address(low, &url))
             {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
@@ -1359,7 +1376,7 @@ impl Engine {
                                 .iter()
                                 .filter_map(|i| i.low_data_url.as_ref()),
                         )
-                        .any(|u| redact(u) == redact(&url))
+                        .any(|u| same_address(u, &url))
             }) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
@@ -2271,6 +2288,7 @@ impl Engine {
                 active_url: None,
                 active_choice: None,
                 added_by_hand: true,
+                from_account: false,
                 capture: None,
                 file: None,
                 tracks: Vec::new(),
@@ -2385,6 +2403,7 @@ impl Engine {
             active_url: None,
             active_choice: None,
             added_by_hand: true,
+            from_account: false,
             capture: None,
             file: None,
             tracks: Vec::new(),
@@ -2520,7 +2539,7 @@ impl Engine {
         match input(url)? {
             Input::Udp(port) => {
                 self.add_video_port(port)?;
-                let source = self.camera_on_port(port, name, params.vehicle_id.clone());
+                let source = self.camera_on_port(actor(), port, name, params.vehicle_id.clone());
                 Ok(VideoAddResult {
                     source: Some((&source).into()),
                     port: Some(port),
@@ -2535,7 +2554,7 @@ impl Engine {
                     .find(|s| s.url.as_deref() == Some(url.as_str()))
                     .cloned()
                 {
-                    let same = self.name_and_assign(same, name, params.vehicle_id.clone());
+                    let same = self.name_and_assign(actor(), same, name, params.vehicle_id.clone());
                     return Ok(VideoAddResult {
                         source: Some((&same).into()),
                         port: None,
@@ -2552,47 +2571,9 @@ impl Engine {
                         "This address is already a fallback for another camera.",
                     ));
                 }
-                let now = self.clock.now_us();
-                let source = VideoSource {
-                    recording_requested: false,
-                    reencoding: None,
-                    id: format!("vs{}", &self.random.token()[..16]),
-                    name: name.clone().unwrap_or_else(|| redact(&url)),
-                    named_by_hand: name.is_some(),
-                    port,
-                    sender: format!("{host}:{port}"),
-                    container: uxduck_core::domain::video::VideoContainer::Rtp,
-                    codec: None,
-                    width: None,
-                    height: None,
-                    frame_rate: None,
-                    state: VideoState::Stopped,
-                    state_detail: Some(format!(
-                        "Connecting to {}",
-                        uxduck_core::domain::video::redact(&url)
-                    )),
-                    vehicle_id: params.vehicle_id.clone(),
-                    assigned_by_hand: params.vehicle_id.is_some(),
-                    vehicle_camera: false,
-                    vehicle_camera_by_hand: false,
-                    served_by: None,
-                    record_alone: false,
-                    klv: false,
-                    url: Some(url.clone()),
-                    fallback_urls: Vec::new(),
-                    internet: None,
-                    active_url: None,
-                    active_choice: None,
-                    added_by_hand: true,
-                    capture: None,
-                    file: None,
-                    tracks: Vec::new(),
-                    audio: None,
-                    counters: uxduck_core::domain::video::VideoCounters::default(),
-                    first_seen_us: now,
-                    changed_at_us: now,
-                    version: 1,
-                };
+                let id = format!("vs{}", &self.random.token()[..16]);
+                let source =
+                    self.added_by_address(id, url, name, params.vehicle_id.clone(), &host, port);
                 self.commit_as(
                     actor(),
                     Change::VideoSourceUpserted {
@@ -2608,12 +2589,180 @@ impl Engine {
         }
     }
 
+    /// A camera added by its RTSP or WHEP address, before it is connected.
+    fn added_by_address(
+        &self,
+        id: String,
+        url: String,
+        name: Option<String>,
+        vehicle_id: Option<String>,
+        host: &str,
+        port: u16,
+    ) -> VideoSource {
+        let now = self.clock.now_us();
+        VideoSource {
+            recording_requested: false,
+            reencoding: None,
+            id,
+            named_by_hand: name.is_some(),
+            name: name.unwrap_or_else(|| redact(&url)),
+            port,
+            sender: format!("{host}:{port}"),
+            container: uxduck_core::domain::video::VideoContainer::Rtp,
+            codec: None,
+            width: None,
+            height: None,
+            frame_rate: None,
+            state: VideoState::Stopped,
+            state_detail: Some(format!("Connecting to {}", redact(&url))),
+            assigned_by_hand: vehicle_id.is_some(),
+            vehicle_id,
+            vehicle_camera: false,
+            vehicle_camera_by_hand: false,
+            served_by: None,
+            record_alone: false,
+            klv: false,
+            url: Some(url),
+            fallback_urls: Vec::new(),
+            internet: None,
+            active_url: None,
+            active_choice: None,
+            added_by_hand: true,
+            from_account: false,
+            capture: None,
+            file: None,
+            tracks: Vec::new(),
+            audio: None,
+            counters: uxduck_core::domain::video::VideoCounters::default(),
+            first_seen_us: now,
+            changed_at_us: now,
+            version: 1,
+        }
+    }
+
+    /// The camera here that a camera in the account is (FB-229): the one
+    /// added under its id, or for `udp-<port>` the camera added on that
+    /// port, whichever sender it has.
+    pub(crate) fn camera_here(&self, id: &str) -> Option<&VideoSource> {
+        let sources = &self.state.video_sources;
+        let by_id = sources.get(id).filter(|s| s.added_by_hand);
+        let Some(port) = id.strip_prefix("udp-").and_then(|p| p.parse::<u16>().ok()) else {
+            return by_id;
+        };
+        by_id.or_else(|| {
+            sources
+                .values()
+                .filter(|s| {
+                    s.added_by_hand
+                        && s.port == port
+                        && s.url.is_none()
+                        && s.capture.is_none()
+                        && s.file.is_none()
+                })
+                .min_by_key(|s| s.first_seen_us)
+        })
+    }
+
+    /// Adds a camera from the account here (FB-229), under its own id, with
+    /// the login typed here for each address that had one there.
+    pub(crate) fn use_camera_as(
+        &mut self,
+        actor: Actor,
+        camera: &SharedCamera,
+        login: Option<(&str, &str)>,
+    ) -> Result<(), ApiError> {
+        if self.camera_here(&camera.id).is_some() {
+            return Ok(());
+        }
+        let invalid = |why: String| ApiError::new(ErrorKind::InvalidValue, why);
+        let vehicle_id = camera
+            .vehicle_id
+            .clone()
+            .filter(|id| self.state.vehicles.contains_key(id));
+        let name = camera.named_by_hand.then(|| camera.name.clone());
+        let mut source = if let Some(port) = camera.udp_port {
+            self.add_video_port(port)?;
+            self.camera_on_port(actor.clone(), port, name, vehicle_id)
+        } else {
+            let login = login.filter(|(user, _)| !user.trim().is_empty());
+            if camera.needs_login() && login.is_none() {
+                return Err(invalid(
+                    "This camera needs its login on this computer. Type its user name and password."
+                        .to_owned(),
+                ));
+            }
+            let urls: Vec<String> = camera
+                .urls
+                .iter()
+                .enumerate()
+                .map(|(place, url)| match login {
+                    Some((user, password)) if camera.logins.contains(&place) => {
+                        with_login(url, user.trim(), password)
+                    }
+                    _ => url.clone(),
+                })
+                .collect();
+            let Some((primary, fallbacks)) = urls.split_first() else {
+                return Err(invalid("This camera has no address.".to_owned()));
+            };
+            for url in &urls {
+                if !matches!(input(url)?, Input::Rtsp { .. } | Input::Whep { .. }) {
+                    return Err(invalid("A camera's addresses use RTSP or WHEP.".to_owned()));
+                }
+                let without = |u: &str| without_login(u).map_or_else(|| redact(u), |(u, _)| u);
+                let bare = without(url);
+                if self.state.video_sources.values().any(|other| {
+                    other
+                        .url
+                        .iter()
+                        .chain(&other.fallback_urls)
+                        .chain(
+                            other
+                                .internet
+                                .iter()
+                                .filter_map(|i| i.low_data_url.as_ref()),
+                        )
+                        .any(|u| without(u) == bare)
+                }) {
+                    return Err(invalid(format!(
+                        "A camera on this computer already has the address {bare}."
+                    )));
+                }
+            }
+            let (Input::Rtsp { host, port } | Input::Whep { host, port }) = input(primary)? else {
+                return Err(invalid("A camera's addresses use RTSP or WHEP.".to_owned()));
+            };
+            let mut source = self.added_by_address(
+                camera.id.clone(),
+                primary.clone(),
+                name,
+                vehicle_id,
+                &host,
+                port,
+            );
+            source.fallback_urls = fallbacks.to_vec();
+            source
+        };
+        source.added_by_hand = true;
+        source.from_account = true;
+        source.record_alone = camera.record_alone;
+        if let Some(on) = camera.vehicle_camera {
+            source.vehicle_camera = on;
+            source.vehicle_camera_by_hand = true;
+        }
+        source.version += 1;
+        self.commit_as(actor, Change::VideoSourceUpserted { source });
+        self.review_recordings();
+        Ok(())
+    }
+
     /// The camera a UDP port added by hand stands for (S39): the one waiting
     /// there, else the first already arriving, else a new one waiting for
     /// its first picture, so it can be named and given its vehicle before
     /// anything is switched on (maintainer, 2026-10-29).
     fn camera_on_port(
         &mut self,
+        by: Actor,
         port: u16,
         name: Option<String>,
         vehicle_id: Option<String>,
@@ -2633,7 +2782,7 @@ impl Engine {
             })
             .cloned();
         if let Some(source) = existing {
-            return self.name_and_assign(source, name, vehicle_id);
+            return self.name_and_assign(by, source, name, vehicle_id);
         }
         let now = self.clock.now_us();
         let id = waiting_id(port);
@@ -2665,6 +2814,7 @@ impl Engine {
             active_url: None,
             active_choice: None,
             added_by_hand: true,
+            from_account: false,
             capture: None,
             file: None,
             tracks: Vec::new(),
@@ -2676,7 +2826,7 @@ impl Engine {
             version: 1,
         };
         self.commit_as(
-            actor(),
+            by,
             Change::VideoSourceUpserted {
                 source: source.clone(),
             },
@@ -2687,6 +2837,7 @@ impl Engine {
     /// Applies what was typed with a camera added again: a name, a vehicle.
     fn name_and_assign(
         &mut self,
+        by: Actor,
         mut source: VideoSource,
         name: Option<String>,
         vehicle_id: Option<String>,
@@ -2704,7 +2855,7 @@ impl Engine {
         }
         source.version += 1;
         self.commit_as(
-            actor(),
+            by,
             Change::VideoSourceUpserted {
                 source: source.clone(),
             },
@@ -2728,11 +2879,15 @@ impl Engine {
             let after = settings.video_ports.clone();
             self.commit_as(actor(), Change::SettingsChanged { settings });
             self.listen_video_ports(&before, &after);
-            if self.state.video_sources.contains_key(&waiting_id(port)) {
+            // One another computer shares in the account leaves this
+            // computer alone (FB-229).
+            if let Some(waiting) = self.state.video_sources.get(&waiting_id(port)) {
+                let here_only = waiting.from_account;
                 self.commit_as(
                     actor(),
                     Change::VideoSourceRemoved {
                         id: waiting_id(port),
+                        here_only,
                     },
                 );
             }
@@ -2789,7 +2944,16 @@ impl Engine {
             self.video.by_hand.remove(id);
             // A camera still waiting was its port: nothing else is there.
             let waiting = is_waiting(source).then_some(source.port);
-            self.commit_as(actor(), Change::VideoSourceRemoved { id: id.clone() });
+            // One another computer shares in the account leaves this
+            // computer alone (FB-229).
+            let here_only = source.from_account;
+            self.commit_as(
+                actor(),
+                Change::VideoSourceRemoved {
+                    id: id.clone(),
+                    here_only,
+                },
+            );
             if let Some(port) = waiting
                 && self.state.settings.video_ports.contains(&port)
                 && !self.state.video_sources.values().any(|s| s.port == port)
@@ -3310,7 +3474,7 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
             video_source: Some(source.into()),
             ..upsert(EntityType::VideoSource, &source.id)
         }],
-        Change::VideoSourceRemoved { id } => vec![EntityChange {
+        Change::VideoSourceRemoved { id, .. } => vec![EntityChange {
             op: uxduck_contracts::dto::state::ChangeOp::Remove,
             ..upsert(EntityType::VideoSource, id)
         }],

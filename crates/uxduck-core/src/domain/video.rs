@@ -434,6 +434,10 @@ pub struct VideoSource {
     /// Someone added it; it stays until removed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added_by_hand: bool,
+    /// Used here from the account (FB-229): removing it here leaves it in
+    /// the account for the computer it came from.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_account: bool,
     /// Local device capture and its encoding provenance; absent for network cameras.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInput>,
@@ -780,31 +784,436 @@ pub struct CameraMetadata {
     pub corners: Option<[(f64, f64); 4]>,
 }
 
-/// An address without its password, to show: `rtsp://admin@10.0.0.5/main`.
+/// An address to show (FB-229): its password and the value of any login
+/// parameter hidden, its user name kept, as in `rtsp://admin@10.0.0.5/main`.
+/// An address whose login cannot be told from its host shows only what
+/// follows its last `@`.
 #[must_use]
 pub fn redact(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
+    let login = split_login(url);
+    let Some((scheme, rest)) = login.bare.split_once("://") else {
+        return login.bare;
     };
-    let (authority, path) = rest
-        .split_once('/')
-        .map_or((rest, None), |(a, p)| (a, Some(p)));
-    let shown = match authority.rsplit_once('@') {
-        Some((credentials, host)) => {
-            let user = credentials.split_once(':').map_or(credentials, |(u, _)| u);
-            format!("{user}@{host}")
-        }
-        None => authority.to_owned(),
-    };
-    match path {
-        Some(path) => format!("{scheme}://{shown}/{path}"),
-        None => format!("{scheme}://{shown}"),
+    // What comes before its last @ may hold a password only with a colon.
+    if login.ambiguous
+        && let Some((before, host)) = rest.rsplit_once('@')
+        && before.contains(':')
+    {
+        return format!("{scheme}://{host}");
     }
+    match login.user.filter(|user| !user.is_empty()) {
+        Some(user) => format!("{scheme}://{user}@{rest}"),
+        None => login.bare.clone(),
+    }
+}
+
+/// An address as it goes to the account (FB-229), and whether it had a
+/// login. The user name and password before the host go, however they are
+/// written (percent-encoded, with an `@`, `:`, `?`, `#` or `/` in the
+/// password, before an IPv6 host), and so does the value of every parameter
+/// that carries one. None when any `@` is left after that, so the login's
+/// end cannot be told: nothing of that address goes. The account server
+/// refuses any `@` after `://` by the same rule.
+#[must_use]
+pub fn without_login(url: &str) -> Option<(String, bool)> {
+    let login = split_login(url);
+    (!login.ambiguous).then_some((login.bare, login.had))
+}
+
+/// An address with the login typed on this computer, written as the
+/// camera's players read it: percent-encoded, so an `@`, `:` or `/` in it
+/// stays part of it. An address that took its user name and password as
+/// parameters, as in `/user=…&password=…`, gets them back there. Any
+/// other takes them before its host, replacing any login it had.
+#[must_use]
+pub fn with_login(url: &str, user: &str, password: &str) -> String {
+    let bare = split_login(url).bare;
+    let Some((scheme, rest)) = bare.split_once("://") else {
+        return bare;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, tail) = rest.split_at(host_end);
+    let mut filled = false;
+    let tail = map_segments(tail, |segment| {
+        let (key, value) = segment.split_once('=')?;
+        if !value.is_empty() {
+            return None;
+        }
+        let value = match login_key(key)? {
+            LoginKey::User => user,
+            LoginKey::Password => password,
+            LoginKey::Other => return None,
+        };
+        filled = true;
+        Some(format!("{key}={}", percent_encode(value)))
+    });
+    if filled {
+        format!("{scheme}://{host}{tail}")
+    } else if password.is_empty() {
+        format!("{scheme}://{}@{host}{tail}", percent_encode(user))
+    } else {
+        format!(
+            "{scheme}://{}:{}@{host}{tail}",
+            percent_encode(user),
+            percent_encode(password)
+        )
+    }
+}
+
+/// Whether an address as it came from the account has an emptied login
+/// parameter that a user name and password cannot fill, such as a token or
+/// a signature: someone edits its address on this computer instead.
+#[must_use]
+pub fn needs_its_address(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let tail = &rest[rest.find(['/', '?', '#']).unwrap_or(rest.len())..];
+    let mut other = false;
+    map_segments(tail, |segment| {
+        if let Some((key, "")) = segment.split_once('=') {
+            other |= login_key(key) == Some(LoginKey::Other);
+        }
+        None
+    });
+    other
+}
+
+/// An address split from its login.
+struct Login {
+    /// The address with its user name, password and login parameters out.
+    bare: String,
+    /// The user name before its host, if it had one.
+    user: Option<String>,
+    /// It had a login.
+    had: bool,
+    /// An `@` is left after its login is taken out.
+    ambiguous: bool,
+    /// The address from its host on, as written: its parameters' values
+    /// kept.
+    from_host: String,
+}
+
+fn split_login(url: &str) -> Login {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Login {
+            bare: url.to_owned(),
+            user: None,
+            had: false,
+            ambiguous: false,
+            from_host: url.to_owned(),
+        };
+    };
+    let host_end_from = |from: usize| {
+        rest[from..]
+            .find(['/', '?', '#'])
+            .map_or(rest.len(), |i| from + i)
+    };
+    // The login ends at the last @ before the path. A raw ? or # may be in
+    // a password, so neither ends it, but the host ends at the first one
+    // after it.
+    let path = rest.find('/').unwrap_or(rest.len());
+    let mut host_start = rest[..path].rfind('@').map_or(0, |at| at + 1);
+    let mut host_end = host_end_from(host_start);
+    // A login with a raw /: what came before it has no port, so it is no
+    // host. The login ends at the first @ before a host.
+    if host_start == 0 && !rest.starts_with('[') {
+        let host = &rest[..host_end];
+        let no_port = host
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()));
+        let tail = &rest[host_end..];
+        let tail = &tail[..tail.find(['?', '#']).unwrap_or(tail.len())];
+        let login_end = tail
+            .match_indices('@')
+            .map(|(i, _)| host_end + i)
+            .find(|&at| {
+                let next = &rest[at + 1..host_end_from(at + 1)];
+                no_port && !next.is_empty() && !next.contains('@')
+            });
+        if let Some(at) = login_end {
+            host_start = at + 1;
+            host_end = host_end_from(host_start);
+        }
+    }
+    let user = (host_start > 0).then(|| {
+        let login = &rest[..host_start - 1];
+        login
+            .split_once(':')
+            .map_or(login, |(user, _)| user)
+            .to_owned()
+    });
+    let mut had = user.is_some();
+    let mut strip = |segment: &str| {
+        let (key, value) = segment.split_once('=')?;
+        if value.is_empty() || login_key(key).is_none() {
+            return None;
+        }
+        had = true;
+        Some(format!("{key}="))
+    };
+    // A host never holds parameters, so one that seems to, such as
+    // `cam;pwd=…`, is no address UXDuck can tell apart from its login.
+    let raw_host = &rest[host_start..host_end];
+    let host = map_segments(raw_host, &mut strip);
+    let tail = map_segments(&rest[host_end..], &mut strip);
+    let bare = format!("{scheme}://{host}{tail}");
+    let ambiguous = bare[scheme.len() + 3..].contains('@') || raw_host.contains(HOST_PARAMETERS);
+    Login {
+        bare,
+        user,
+        had,
+        ambiguous,
+        from_host: rest[host_start..].to_owned(),
+    }
+}
+
+/// What in a host can only be a parameter, never part of a host name.
+const HOST_PARAMETERS: [char; 5] = ['=', ';', ',', '+', '&'];
+
+/// Whether what keeps an address from the account is an `@` in its path
+/// or query alone: before them is a host, with a port if any, and what
+/// follows the `@` is no host, or is in the query.
+#[must_use]
+pub fn unclear_at_is_in_its_path(url: &str) -> bool {
+    let Some((_, rest)) = url.trim().split_once("://") else {
+        return false;
+    };
+    let host = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let plain_host = !host.contains('@')
+        && !host.contains(HOST_PARAMETERS)
+        && (host.starts_with('[')
+            || host
+                .split_once(':')
+                .is_none_or(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())));
+    let in_query = rest
+        .find(['?', '#'])
+        .is_some_and(|query| rest.find('@').is_some_and(|at| at > query));
+    let after = rest.rsplit_once('@').map_or("", |(_, after)| after);
+    let after = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
+    plain_host && (in_query || !after.contains(['.', ':', '[']))
+}
+
+/// Whether two addresses are one: the same but for their passwords. The
+/// values of their parameters count, so `?keyframe=1` and `?keyframe=2`
+/// are two addresses, though both are shown as `?keyframe=`.
+#[must_use]
+pub fn same_address(a: &str, b: &str) -> bool {
+    let (a, b) = (split_login(a), split_login(b));
+    a.from_host == b.from_host && a.user == b.user
+}
+
+/// What a parameter of a camera's address carries, if it is a login.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginKey {
+    User,
+    Password,
+    /// A token, key, secret or signature, which no user name or password
+    /// stands for.
+    Other,
+}
+
+/// A parameter's key as a login, read without case, `_`, `-` or
+/// percent-encoding: `password`, `Pass_Word`, `loginpas`, `X-Amz-Signature`.
+fn login_key(key: &str) -> Option<LoginKey> {
+    let key: String = percent_decode(key)
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .collect();
+    if ["pas", "pwd", "psw"].iter().any(|part| key.contains(part)) || key == "pw" || key == "p" {
+        return Some(LoginKey::Password);
+    }
+    if ["u", "usr", "user", "username"].contains(&key.as_str())
+        || (key.contains("login") && key.contains("use"))
+    {
+        return Some(LoginKey::User);
+    }
+    let other = [
+        "token",
+        "secret",
+        "key",
+        "auth",
+        "sig",
+        "login",
+        "credential",
+        "session",
+        "accesscode",
+        "bearer",
+    ]
+    .iter()
+    .any(|part| key.contains(part))
+        || key == "jwt"
+        || key == "sid";
+    other.then_some(LoginKey::Other)
+}
+
+/// Each part of an address's path, query and fragment, replaced where
+/// `replace` says. Parts end at `/ ? & ; # , +` and at an `_` before a
+/// `key=` that follows a value, as in `/user=admin_password=…_channel=1`.
+fn map_segments(tail: &str, mut replace: impl FnMut(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(tail.len());
+    let mut start = 0;
+    let mut push = |out: &mut String, segment: &str| match replace(segment) {
+        Some(replaced) => out.push_str(&replaced),
+        None => out.push_str(segment),
+    };
+    for (i, c) in tail.char_indices() {
+        let ends = matches!(c, '/' | '?' | '&' | ';' | '#' | ',' | '+')
+            || (c == '_' && tail[start..i].contains('=') && starts_with_key(&tail[i + 1..]));
+        if ends {
+            push(&mut out, &tail[start..i]);
+            out.push(c);
+            start = i + c.len_utf8();
+        }
+    }
+    push(&mut out, &tail[start..]);
+    out
+}
+
+fn starts_with_key(text: &str) -> bool {
+    text.find('=').is_some_and(|eq| {
+        eq > 0
+            && text[..eq]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'%' | b'-' | b'_'))
+    })
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn percent_encode(text: &str) -> String {
+    text.bytes().fold(String::new(), |mut out, byte| {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+        out
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cases the account server tests too (apps/api sync.test.ts).
+    #[derive(serde::Deserialize)]
+    struct Addresses {
+        stripped: Vec<(String, String)>,
+        unclear: Vec<String>,
+        plain: Vec<String>,
+    }
+
+    #[test]
+    fn no_form_of_a_login_goes_with_an_address() {
+        let cases: Addresses =
+            serde_json::from_str(include_str!("camera-addresses.json")).expect("the cases");
+        for (given, kept) in &cases.stripped {
+            let (shared, had) = without_login(given).expect(given);
+            assert_eq!(&shared, kept, "{given}");
+            assert!(had, "{given}");
+            let lower = shared.to_lowercase();
+            assert!(
+                ["hush", "=secret", ":secret", "admin"]
+                    .iter()
+                    .all(|value| !lower.contains(value)),
+                "{given}"
+            );
+            assert_eq!(without_login(kept), Some((kept.clone(), false)), "{kept}");
+        }
+        // Where the login ends cannot be told: none of it goes.
+        for unclear in &cases.unclear {
+            assert_eq!(without_login(unclear), None, "{unclear}");
+        }
+        for plain in &cases.plain {
+            assert_eq!(
+                without_login(plain),
+                Some((plain.clone(), false)),
+                "{plain}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_addresses_are_one_but_for_their_passwords() {
+        assert!(same_address(
+            "rtsp://admin:secret@cam/main?keyframe=1",
+            "rtsp://admin@cam/main?keyframe=1"
+        ));
+        assert!(!same_address(
+            "rtsp://cam/main?keyframe=1",
+            "rtsp://cam/main?keyframe=2"
+        ));
+        assert_eq!(
+            redact("rtsp://cam/main?keyframe=1"),
+            redact("rtsp://cam/main?keyframe=2")
+        );
+        assert!(!same_address(
+            "rtsp://admin@cam/main",
+            "rtsp://viewer@cam/main"
+        ));
+    }
+
+    #[test]
+    fn a_login_typed_here_is_written_as_players_read_it() {
+        assert_eq!(
+            with_login("rtsp://[fd7a::1]:8554/front#track=2", "ad@min", "p:a/s s"),
+            "rtsp://ad%40min:p%3Aa%2Fs%20s@[fd7a::1]:8554/front#track=2"
+        );
+        assert_eq!(
+            with_login("rtsp://old:login@cam/x", "admin", ""),
+            "rtsp://admin@cam/x"
+        );
+        assert_eq!(
+            redact(&with_login("rtsp://cam/x", "admin", "secret")),
+            "rtsp://admin@cam/x"
+        );
+        // An address that took its login as parameters gets it back there.
+        assert_eq!(
+            with_login(
+                "rtsp://10.0.0.5:554/user=_password=_channel=1_stream=0.sdp",
+                "admin",
+                "p@ss"
+            ),
+            "rtsp://10.0.0.5:554/user=admin_password=p%40ss_channel=1_stream=0.sdp"
+        );
+        assert_eq!(
+            with_login("http://cam/cgi?loginuse=&loginpas=&chn=0", "admin", "pw"),
+            "http://cam/cgi?loginuse=admin&loginpas=pw&chn=0"
+        );
+        assert!(!needs_its_address(
+            "rtsp://10.0.0.5/user=&password=&channel=1"
+        ));
+        // A token no user name or password stands for: its address is
+        // edited here instead.
+        assert!(needs_its_address("http://gw/front/whep?token="));
+        assert!(!needs_its_address("rtsp://10.0.0.5/main"));
+    }
 
     #[test]
     fn an_http_address_is_whep_and_an_rtsp_one_is_not() {
@@ -862,6 +1271,15 @@ mod tests {
         );
         assert_eq!(redact("rtsp://10.0.0.5/a@b"), "rtsp://10.0.0.5/a@b");
         assert_eq!(redact("rtsp://cam"), "rtsp://cam");
+        assert_eq!(redact("rtsp://admin:12/34@cam/main"), "rtsp://cam/main");
+        assert_eq!(
+            redact("rtsp://admin:secret@cam/x?password=secret&token=secret"),
+            "rtsp://admin@cam/x?password=&token="
+        );
+        assert_eq!(
+            redact("rtsp://10.0.0.5:554/user=admin_password=secret_channel=1"),
+            "rtsp://10.0.0.5:554/user=_password=_channel=1"
+        );
     }
 }
 

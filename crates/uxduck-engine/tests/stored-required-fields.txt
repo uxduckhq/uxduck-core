@@ -94,6 +94,9 @@ CaptureInput.name
 Change::ApprovalUpserted.approval
 Change::BaselineRemoved.id
 Change::BaselineUpserted.baseline
+Change::CameraLibraryRemoved.id
+Change::CameraLibraryUpserted.camera
+Change::CameraShared.camera
 Change::ChecklistUpdated.checklist
 Change::ClientRemoved.id
 Change::ClientUpserted.client
@@ -425,6 +428,9 @@ Launch.stage
 LayoutPreset.base
 LayoutPreset.kind
 LayoutPreset.version
+LibraryCamera.device
+LibraryCamera.updated_at_us
+LibraryCamera.version
 LibraryLink.device
 LibraryLink.id
 LibraryLink.kind
@@ -453,6 +459,8 @@ LinkKind::Simulator.heading_deg
 LinkKind::Simulator.latitude_deg
 LinkKind::Simulator.longitude_deg
 LinkKind::Simulator.vehicle
+SharedCamera.id
+SharedCamera.name
 SimBuild.id
 SimBuild.name
 SimBuild.path

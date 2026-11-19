@@ -7,6 +7,26 @@
   "pulled": 7,
   "lastSyncedAtUs": 1790770548834528,
   "links": [],
+  "cameras": [
+    {
+      "id": "vs4f1c2a9b7e3d5a60",
+      "name": "Front",
+      "vehicleId": "0b6e5f3c-6f1d-5a8e-9d2e-3c1f4a7b8e90",
+      "urls": ["rtsp://192.168.144.25:8554/main", "rtsp://[fd7a::25]:8554/main"],
+      "needsLogin": true,
+      "device": "Hangar laptop",
+      "updatedAtUs": 1790770548000000,
+      "active": false
+    },
+    {
+      "id": "udp-5601",
+      "name": "Belly",
+      "udpPort": 5601,
+      "device": "Hangar laptop",
+      "updatedAtUs": 1790770548000000,
+      "active": true
+    }
+  ],
   "library": [
     {
       "id": "0b6e5f3c-6f1d-5a8e-9d2e-3c1f4a7b8e90",

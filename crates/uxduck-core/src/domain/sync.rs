@@ -28,8 +28,8 @@ pub enum SyncCategory {
     /// Chats and their folders.
     Chats,
     Places,
-    /// Saved vehicles, their history and snapshots, connections
-    /// and parameter definition sets.
+    /// Saved vehicles, their history and snapshots, connections,
+    /// cameras and parameter definition sets.
     Vehicles,
     Plans,
 }
@@ -43,7 +43,7 @@ impl SyncCategory {
             "operator" | "plugin" => Self::Settings,
             "thread" | "item" | "folder" => Self::Chats,
             "place" => Self::Places,
-            "vehicle" | "history" | "snapshot" | "link" | "own-set" | "dialect"
+            "vehicle" | "history" | "snapshot" | "link" | "camera" | "own-set" | "dialect"
             | "firmware-profile" => Self::Vehicles,
             "plan" => Self::Plans,
             _ => return None,
@@ -77,6 +77,10 @@ pub struct SyncState {
     /// The account's cursor: changes from other computers taken up to here.
     #[serde(default)]
     pub pulled_through: u64,
+    /// The kinds of entity the account leaves out unless they are asked
+    /// for, that this computer has asked for since its cursor began (FB-229).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<String>,
     /// Changes taken so far.
     #[serde(default)]
     pub pulled: u64,
@@ -114,6 +118,11 @@ pub struct TooLarge {
     /// not too large to take, the account's allowance is used up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_room: Option<NoRoom>,
+    /// Set when the account would not take it for what it holds, not its
+    /// size: a camera's copy its server read as carrying a login (FB-229).
+    /// The server's reason, kept for the log. It is not sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_taken: Option<String>,
     /// Which copy was refused, so that copy is sent again once the account
     /// can take it. None for one listed before 2026-11-15.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +164,7 @@ impl Default for SyncState {
             exported_through: 0,
             exported: 0,
             pulled_through: 0,
+            takes: Vec::new(),
             pulled: 0,
             last_synced_at_us: None,
             account_id: String::new(),
@@ -237,6 +247,77 @@ pub struct LibraryLink {
     pub carries: crate::domain::link::LinkCarries,
     /// The computer that published this copy.
     pub device: String,
+    /// When that computer changed it.
+    pub updated_at_us: u64,
+}
+
+/// A camera someone added, as it goes to the account (FB-229): a recipe to
+/// add it again, never its login. Used on another computer only once
+/// someone there chooses it, where any login it needs is typed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedCamera {
+    /// Its id here, and for a camera on a UDP port `udp-<port>`, the
+    /// same on every computer.
+    pub id: String,
+    pub name: String,
+    /// Someone named it; otherwise its name is its address.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_by_hand: bool,
+    /// The vehicle someone chose for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// Its RTSP or WHEP addresses, preferred first, each without its login.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
+    /// Which of `urls` had a login here, by place, so another computer
+    /// asks for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logins: Vec<usize>,
+    /// For a camera that sends to UXDuck, the UDP port it listens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port: Option<u16>,
+    /// "Record with the others" is off (S153).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_alone: bool,
+    /// Its vehicle's own camera takes a photo and records along with it,
+    /// as someone set it (S145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_camera: Option<bool>,
+}
+
+impl SharedCamera {
+    /// It asks for a user name and password typed here: an address had one
+    /// there, and that address needs nothing else edited.
+    #[must_use]
+    pub fn needs_login(&self) -> bool {
+        self.logins.iter().any(|&place| {
+            self.urls
+                .get(place)
+                .is_some_and(|url| !crate::domain::video::needs_its_address(url))
+        })
+    }
+
+    /// An address had a token, a key or a signature there, which no user
+    /// name or password stands for, so its address is edited here.
+    #[must_use]
+    pub fn needs_its_address(&self) -> bool {
+        self.urls
+            .iter()
+            .any(|url| crate::domain::video::needs_its_address(url))
+    }
+}
+
+/// A camera another computer published to the account (FB-229).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCamera {
+    #[serde(flatten)]
+    pub camera: SharedCamera,
+    /// The computer that published this copy.
+    pub device: String,
+    /// The copy's version in the account, which orders it against a removal.
+    pub version: u64,
     /// When that computer changed it.
     pub updated_at_us: u64,
 }

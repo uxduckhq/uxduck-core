@@ -1,0 +1,91 @@
+{
+  "about": "Camera addresses as UXDuck shares them with the account (FB-229). The client (without_login in crates/uxduck-core/src/domain/video.rs) and the account server (addressHasLogin in apps/api/src/features/sync/syncApp.ts) both test against this list. stripped: the login goes and kept is what is shared. unclear: where the login ends cannot be told, so nothing is shared. plain: no login, shared as it is.",
+  "stripped": [
+    ["rtsp://admin:secret@10.0.0.5:554/main", "rtsp://10.0.0.5:554/main"],
+    ["rtsp://admin@10.0.0.5/main", "rtsp://10.0.0.5/main"],
+    ["rtsp://admin:@10.0.0.5", "rtsp://10.0.0.5"],
+    ["RTSP://Admin:Secret@Cam.local:8554/a#track=2", "RTSP://Cam.local:8554/a#track=2"],
+    ["rtsp://ad%40min:se%3Acr%2Fet%40@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se@cr:et@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se#cret@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se?cret@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se#cr@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se?cr@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:se?cr@cam", "rtsp://cam"],
+    ["rtsp://admin:se/cret@10.0.0.5/x", "rtsp://10.0.0.5/x"],
+    ["rtsp://admin:p/w@[fe80::1]/x", "rtsp://[fe80::1]/x"],
+    ["rtsp://admin:secret@[fd7a::1]:8554/front", "rtsp://[fd7a::1]:8554/front"],
+    ["rtsp://admin:secret@[fe80::1%25eth0]/front", "rtsp://[fe80::1%25eth0]/front"],
+    ["rtsp://admin:secret@[::1]", "rtsp://[::1]"],
+    ["https://viewer:secret@gw:8889/front/whep#sha256=00", "https://gw:8889/front/whep#sha256=00"],
+    ["http://viewer:secret@gw/front/whep?token=secret", "http://gw/front/whep?token="],
+    ["http://gw:8889?token=secret", "http://gw:8889?token="],
+    ["rtsp://cam?password=secret", "rtsp://cam?password="],
+    ["http://admin:secret@gw:8889?token=secret", "http://gw:8889?token="],
+    [
+      "rtsp://10.0.0.5:554/user=admin&password=secret&channel=1",
+      "rtsp://10.0.0.5:554/user=&password=&channel=1"
+    ],
+    [
+      "rtsp://10.0.0.5:554/user=admin_password=secret_channel=1_stream=0.sdp?real_stream",
+      "rtsp://10.0.0.5:554/user=_password=_channel=1_stream=0.sdp?real_stream"
+    ],
+    [
+      "rtsp://10.0.0.5/live?PWD=secret;Auth=secret&stream=0",
+      "rtsp://10.0.0.5/live?PWD=;Auth=&stream=0"
+    ],
+    [
+      "http://cam/cgi?loginuse=admin&loginpas=secret&pw=secret&p=secret&u=admin&usr=admin",
+      "http://cam/cgi?loginuse=&loginpas=&pw=&p=&u=&usr="
+    ],
+    [
+      "http://gw/x?key=hush&apikey=hush&api_key=hush&secret=hush&jwt=hush&access-token=hush&auth_token=hush&sig=hush&X-Amz-Signature=hush&pass%77ord=hush&Pass_Word=hush&stream=1",
+      "http://gw/x?key=&apikey=&api_key=&secret=&jwt=&access-token=&auth_token=&sig=&X-Amz-Signature=&pass%77ord=&Pass_Word=&stream=1"
+    ],
+    [
+      "http://gw/x?credentials=hush&psw=hush&session=hush&sessionid=hush&stream=1",
+      "http://gw/x?credentials=&psw=&session=&sessionid=&stream=1"
+    ],
+    ["http://gw/x?%70wd%=hush", "http://gw/x?%70wd%="],
+    ["http://gw/x?%70%77%64=hush", "http://gw/x?%70%77%64="],
+    ["http://gw/x?a=1,token=hush", "http://gw/x?a=1,token="],
+    ["http://gw/x?a=1+pwd=hush", "http://gw/x?a=1+pwd="],
+    ["  rtsp://admin:secret@10.0.0.5/x  ", "rtsp://10.0.0.5/x"],
+    ["rtsp://10.0.0.5/user=admin_pass_word=hush", "rtsp://10.0.0.5/user=_pass_word="],
+    [
+      "http://gw/x?sid=hush&access_code=hush&Access-Code=hush&bearer=hush&stream=1",
+      "http://gw/x?sid=&access_code=&Access-Code=&bearer=&stream=1"
+    ]
+  ],
+  "unclear": [
+    "rtsp://admin:12/34@cam/main",
+    "rtsp://admin:12/34@10.0.0.5/main",
+    "rtsp://admin:12/34cret@10.0.0.5/x",
+    "rtsp://admin:12/se@cret@[fd7a::1]/x",
+    "rtsp://admin:1234/@cam/x",
+    "rtsp://12:34/56@cam/x",
+    "rtsp://ad/min:secret@cam.local:554/x",
+    "rtsp://cam/a@b",
+    "rtsp://10.0.0.5/a@b",
+    "rtsp://10.0.0.5:12/34@cam/main",
+    "rtsp://10.0.0.5:554/admin:pw@10.0.0.6/x",
+    "http://gw/x?mail=a@b.example",
+    "rtsp://admin:se?cr/et@10.0.0.5/x",
+    "rtsp://cam;pwd=hunter2",
+    "rtsp://cam:554;password=x/main",
+    "rtsp://cam,token=x/main",
+    "rtsp://cam&pw=x"
+  ],
+  "plain": [
+    "rtsp://10.0.0.5:554/main",
+    "rtsp://[fd7a::1]:8554/front",
+    "rtsp://cam/main?stream=1&channel=2",
+    "rtsp://cam#track=2",
+    "rtsp://cam/live?stream_id=3&keyframe",
+    "http://gw/x?a=1,b=2+c=3",
+    "http://gw/x?%zzpwd",
+    "udp://:5601",
+    "udp:5601",
+    "rtsp://cam/main?side=1"
+  ]
+}

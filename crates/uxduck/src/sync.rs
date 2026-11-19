@@ -20,7 +20,6 @@ use serde_json::json;
 use tokio::sync::Notify;
 use uxduck_core::domain::sync::SyncState;
 use uxduck_core::events::Event;
-use uxduck_engine::Engine;
 use uxduck_engine::sync::{
     Outgoing, Pulled, PushAnswer, SyncChange, SyncPort, outgoing, refused_alone,
 };
@@ -138,9 +137,26 @@ enum Stop {
 
 #[derive(Deserialize)]
 struct PullPage {
-    changes: Vec<Pulled>,
+    /// Read one by one, so a kind of change a newer UXDuck sends is passed
+    /// over instead of stopping every pull (FB-229).
+    changes: Vec<serde_json::Value>,
     cursor: u64,
     more: bool,
+}
+
+/// The changes of a page this UXDuck can read. The cursor still passes
+/// the others.
+fn readable(changes: Vec<serde_json::Value>) -> Vec<Pulled> {
+    changes
+        .into_iter()
+        .filter_map(|change| match serde_json::from_value::<Pulled>(change) {
+            Ok(pulled) => Some(pulled),
+            Err(error) => {
+                tracing::debug!(%error, "passed over a change this UXDuck cannot read");
+                None
+            }
+        })
+        .collect()
 }
 
 impl Task {
@@ -174,7 +190,7 @@ impl Task {
     async fn round(&mut self) -> Result<(), Stop> {
         let state = self
             .engine
-            .run(Engine::sync_round)
+            .run(|e| e.sync_round(uxduck_engine::sync::TAKES))
             .await
             .map_err(|_| Stop::Gone)?;
         if !state.enabled {
@@ -206,6 +222,7 @@ impl Task {
                 .query(&[
                     ("device", state.device_id.as_str()),
                     ("after", &after.to_string()),
+                    ("takes", &uxduck_engine::sync::TAKES.join(",")),
                 ])
                 .bearer_auth(&token)
                 .send()
@@ -218,7 +235,7 @@ impl Task {
             if self.credentials.get(crate::account::TOKEN).as_deref() != Some(token.as_str()) {
                 return Err(Stop::Problem("The account changed. Sync is paused.".into()));
             }
-            let (changes, cursor, more) = (page.changes, page.cursor, page.more);
+            let (changes, cursor, more) = (readable(page.changes), page.cursor, page.more);
             let credentials = self.credentials.clone();
             let expected = token.clone();
             let applied = self
@@ -656,6 +673,37 @@ mod tests {
             },
         };
         format!("{}\n", serde_json::to_string(&event).unwrap())
+    }
+
+    /// FB-229 review: a kind of change a newer UXDuck sends is passed over,
+    /// so the rest of its page is still taken.
+    #[test]
+    fn a_change_this_uxduck_cannot_read_is_passed_over() {
+        let known: Event = serde_json::from_str(event(1, "Survey", 1, false).trim_end()).unwrap();
+        let known = serde_json::to_value(Pulled {
+            device: "hangar".into(),
+            change: SyncChange {
+                entity: "folder".into(),
+                id: "f-Survey".into(),
+                version: 1,
+                digest: "0".repeat(64),
+                ts_us: 1,
+                change: known.change,
+            },
+        })
+        .unwrap();
+        let unknown = serde_json::json!({
+            "device": "hangar",
+            "entity": "camera",
+            "id": "vs1",
+            "version": 1,
+            "digest": "0".repeat(64),
+            "tsUs": 1,
+            "change": { "type": "somethingNewer", "camera": {} },
+        });
+        let taken = readable(vec![unknown, known]);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].change.id, "f-Survey");
     }
 
     #[test]

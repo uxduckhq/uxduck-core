@@ -25,7 +25,7 @@ use uxduck_core::domain::plan::{Plan, PlanRevisions};
 use uxduck_core::domain::plugin::{Plugin, PublishedPlugin};
 use uxduck_core::domain::settings::Settings;
 use uxduck_core::domain::snapshot::Snapshot;
-use uxduck_core::domain::sync::{LibraryLink, LibraryVehicle, SyncState};
+use uxduck_core::domain::sync::{LibraryCamera, LibraryLink, LibraryVehicle, SyncState};
 use uxduck_core::domain::thread::{Folder, Item, Thread};
 use uxduck_core::domain::vehicle::{Vehicle, is_callsign};
 use uxduck_core::domain::video::{VideoPhoto, VideoRecording, VideoSource};
@@ -177,6 +177,9 @@ pub struct State {
     /// Connections other computers published to the account, by id (C2).
     #[serde(default)]
     pub link_library: BTreeMap<String, LibraryLink>,
+    /// Cameras other computers published to the account, by id (FB-229).
+    #[serde(default)]
+    pub camera_library: BTreeMap<String, LibraryCamera>,
     /// Flights, by id (C8).
     #[serde(default)]
     pub flights: BTreeMap<String, uxduck_core::domain::flight::Flight>,
@@ -426,7 +429,7 @@ impl State {
             Change::VideoSourceUpserted { source } => {
                 self.video_sources.insert(source.id.clone(), source.clone());
             }
-            Change::VideoSourceRemoved { id } => {
+            Change::VideoSourceRemoved { id, .. } => {
                 self.video_sources.remove(id);
             }
             Change::CameraUpserted { camera } => {
@@ -490,6 +493,13 @@ impl State {
             }
             Change::LinkLibraryRemoved { id } => {
                 self.link_library.remove(id);
+            }
+            Change::CameraLibraryUpserted { camera } => {
+                self.camera_library
+                    .insert(camera.camera.id.clone(), camera.clone());
+            }
+            Change::CameraLibraryRemoved { id } => {
+                self.camera_library.remove(id);
             }
             Change::FlightUpserted { flight } => {
                 if !self.forgotten_flights.contains(&flight.id) {

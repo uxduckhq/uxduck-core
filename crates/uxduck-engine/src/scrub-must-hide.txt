@@ -1,0 +1,59 @@
+# Camera addresses in feedback text that the scrub must take a login out of (FB-229). The test
+# checks that no sample still holds "hunter2" once scrubbed.
+# Every secret value here holds it.
+# Samples are separated by blank lines, and a line starting with # is a
+# comment.
+
+opening rtsp://admin:hunter2@cam/main failed
+
+rtsp://admin:hunter2@10.0.0.5:554/main
+
+RTSP://Admin:hunter2@Cam.local:8554/a#track=2
+
+rtsp://ad%40min:hunter2%2F@cam/x
+
+rtsp://admin:se@hunter2@cam/x
+
+rtsp://admin:hunter2#x@cam/x
+
+rtsp://admin:hunter2?x@cam/x
+
+rtsp://admin:hunter2/x@cam/x
+
+rtsp://admin:hunter2@[fd7a::1]:8554/front
+
+https://viewer:hunter2@gw:8889/front/whep
+
+http://gw/front/whep?token=hunter2
+
+http://gw:8889?token=hunter2
+
+rtsp://cam?password=hunter2
+
+rtsp://10.0.0.5:554/user=admin&password=hunter2&channel=1
+
+rtsp://10.0.0.5:554/user=admin_password=hunter2_channel=1_stream=0.sdp
+
+rtsp://10.0.0.5/live?PWD=hunter2;Auth=hunter2&stream=0
+
+http://cam/cgi?loginuse=admin&loginpas=hunter2
+
+http://gw/x?%70wd%=hunter2
+
+http://gw/x?a=1,token=hunter2
+
+rtsp://10.0.0.5/live?Pass_Word=hunter2
+
+rtsp://cam;pwd=hunter2
+
+rtsp://cam:554;password=hunter2/main
+
+rtsp://admin:12/hunter2@cam/main
+
+rtsp://10.0.0.5/a@hunter2
+
+"url": "rtsp://admin:hunter2@cam/main"
+
+url=rtsp://admin:hunter2@cam/main
+
+Camera failed: rtsp://admin:hunter2@192.168.1.20/main (timeout)

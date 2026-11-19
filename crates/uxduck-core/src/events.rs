@@ -25,7 +25,7 @@ use crate::domain::plan::{Plan, PlanRevision};
 use crate::domain::plugin::{Plugin, PublishedPlugin};
 use crate::domain::settings::Settings;
 use crate::domain::snapshot::Snapshot;
-use crate::domain::sync::{LibraryLink, LibraryVehicle, SyncState};
+use crate::domain::sync::{LibraryCamera, LibraryLink, LibraryVehicle, SharedCamera, SyncState};
 use crate::domain::thread::{Folder, Item, Thread};
 use crate::domain::vehicle::Vehicle;
 use crate::domain::video::{VideoPhoto, VideoRecording, VideoSource};
@@ -350,6 +350,21 @@ pub enum Change {
     LinkLibraryRemoved {
         id: String,
     },
+    /// A camera someone added, as it goes to the account (FB-229). Only
+    /// sent, never journaled: the computer that takes it keeps it as
+    /// [`Change::CameraLibraryUpserted`].
+    CameraShared {
+        camera: SharedCamera,
+    },
+    /// A camera from the account's library, as another computer published
+    /// it (FB-229).
+    CameraLibraryUpserted {
+        camera: LibraryCamera,
+    },
+    /// Another computer removed a camera it had published (FB-229).
+    CameraLibraryRemoved {
+        id: String,
+    },
     /// A camera stream appeared, started or stopped, changed its picture,
     /// or was assigned to a vehicle (ADR-0017 V4). Its counters are written
     /// with those, and at most every half minute while it receives.
@@ -359,6 +374,10 @@ pub enum Change {
     /// A source added by hand was removed (S39).
     VideoSourceRemoved {
         id: String,
+        /// A camera another computer shares in the account, removed here
+        /// alone: its removal stays on this computer (FB-229).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        here_only: bool,
     },
     /// A camera of a vehicle was heard, said what it is, changed its
     /// streams, or went or returned (ADR-0063 Y5, S404).
