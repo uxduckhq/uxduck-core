@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "e68ca00dbfa627ddb9bf1931c3de4b8f7bb092c5",
+  "sourceCommit": "a4f4e5cd74bc3a81e683d754111d7c367c6f3d80",
   "licenseReady": true,
   "files": [
     {
@@ -9081,7 +9081,7 @@
     },
     {
       "path": "docs/site/troubleshooting.md",
-      "sha256": "aa3dbeddcd62a231ebdec425b2e1799d5dd221e49c1f011ec430c103162a23b1",
+      "sha256": "dfa1d2ff7de8d86c967898e74188dc9422615ba4303db4296b6869122c98e1ef",
       "executable": false
     },
     {

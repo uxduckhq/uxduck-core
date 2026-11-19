@@ -47,7 +47,7 @@ Check the active radio model's channel monitor and USB joystick mode, then compa
 
 ## Show your location on Linux
 
-UXDuck asks GeoClue, Linux's location service, where this computer is, and GeoClue asks you through an agent on your desktop the first time. If **Show your location** says this computer has no location service, install GeoClue:
+UXDuck reads a GPS receiver plugged into this computer first, through gpsd. Without one, it asks GeoClue, Linux's location service, where this computer is, and GeoClue asks you through an agent on your desktop the first time. If **Show your location** says this computer has no location service, install GeoClue:
 
 | Distribution                    | Command                                    |
 | ------------------------------- | ------------------------------------------ |
@@ -67,7 +67,9 @@ sudo systemctl restart geoclue
 
 If UXDuck says GeoClue has no agent, the agent hasn't started yet. Sign out and back in. If your desktop doesn't start the programs in `/etc/xdg/autostart`, add `/usr/libexec/geoclue-2.0/demos/agent` (`/usr/lib/geoclue-2.0/demos/agent` on Arch) to its autostart settings. If location is off for UXDuck, allow it when the agent asks, or in your desktop's privacy or location settings.
 
-UXDuck doesn't guess where you are. Until GeoClue works, use **Search places** to go to a place or coordinates on the map.
+To use a USB GPS receiver, install gpsd (`sudo apt install gpsd gpsd-clients` on Debian, Ubuntu and Raspberry Pi OS, `sudo dnf install gpsd gpsd-clients` on Fedora, `sudo pacman -S gpsd` on Arch) and plug the receiver in. `gpspipe -w -n 10` should show `TPV` lines. If it lists no device, name the receiver, such as `/dev/ttyACM0`, in `DEVICES` in `/etc/default/gpsd` (`/etc/sysconfig/gpsd` on Fedora) and run `sudo systemctl restart gpsd`. Until the receiver can see the sky, UXDuck says it hasn't found its position yet. If gpsd has no receiver, or the receiver is unplugged, UXDuck asks GeoClue instead. After plugging a receiver in, turn **Show your location** off and on again.
+
+UXDuck doesn't guess where you are. Until gpsd or GeoClue works, use **Search places** to go to a place or coordinates on the map.
 
 ## Prepare a useful report
 
