@@ -187,7 +187,7 @@ impl Host for BrowserHost {
             uxduck_contracts::dto::mission_read::mission_read_request(&method, &params);
         if matches!(
             method.as_str(),
-            "layout/open" | "plugin/draft" | "feedback/file" | "feedback/add"
+            "layout/open" | "place/area" | "plugin/draft" | "feedback/file" | "feedback/add"
         ) && let Some(fields) = params.as_object_mut()
         {
             fields.insert("threadId".into(), Value::String(self.scope.thread.clone()));

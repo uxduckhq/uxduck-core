@@ -102,6 +102,96 @@ pub struct PlaceLocateResult {
     pub attribution: String,
 }
 
+/// A named area to outline for a survey (FB-177): a park, a field, a
+/// suburb. `near`, rounded to a neighbourhood like `place/search`'s, picks
+/// between places of the same name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAreaParams {
+    /// The area's name as the person said it, then its town or district,
+    /// such as "Great Lawn, Manhattan" or "Central Park, New York", not a
+    /// street address: 2 to 200 characters.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<Coordinates>,
+    /// The chat asking; the agent's turns fill it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// An outline found for a named area, from OpenStreetMap: waiting on the
+/// map for a person to confirm it, or confirmed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceArea {
+    pub id: String,
+    pub name: String,
+    /// Where it is, for people: "Central Park, Manhattan, New York, United States".
+    pub detail: String,
+    /// What OpenStreetMap calls it, such as "park" or "suburb".
+    pub kind: String,
+    /// 3 or more corners in order round it, as a survey's `area` takes them.
+    pub points: Vec<crate::dto::plan::LatLon>,
+    /// What the outline leaves out of OpenStreetMap's, in words: other parts
+    /// of the place, or holes in it such as a pond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub attribution: String,
+    /// The chat that asked, whose operator's windows show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+}
+
+/// The outline a person confirmed on the map.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAreaResult {
+    pub area: ConfirmedPlaceArea,
+}
+
+/// An outline the person confirmed, for planning by its `id` (FB-177): a
+/// plan takes it from `plan/create`'s `placeAreas`, so it uses exactly the
+/// confirmed corners, which are never carried by the answer itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmedPlaceArea {
+    pub id: String,
+    pub name: String,
+    pub detail: String,
+    pub kind: String,
+    /// How many corners the confirmed outline has.
+    pub corners: u32,
+    pub south_deg: f64,
+    pub west_deg: f64,
+    pub north_deg: f64,
+    pub east_deg: f64,
+    /// Some of its corners, evenly spaced round it, only to see its shape.
+    /// A plan never takes these.
+    pub preview: Vec<crate::dto::plan::LatLon>,
+    /// How to plan from it, and how much of it `preview` shows, in words.
+    pub how_to_plan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub attribution: String,
+}
+
+/// The outlines waiting for a person on the map.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAreasResult {
+    pub areas: Vec<PlaceArea>,
+}
+
+/// A person's word on an outline waiting on the map: it is the area, or it is not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceAreaAnswerParams {
+    pub id: String,
+    pub confirmed: bool,
+}
+
 /// One hit: what it is, and where it lives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

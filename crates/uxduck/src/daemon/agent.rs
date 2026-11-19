@@ -311,8 +311,9 @@ impl Host for LocalHost {
                 .entry("threadId")
                 .or_insert_with(|| Value::String(self.thread_id.clone()));
         }
-        // A tab opens for the person in this chat (S43), whatever was asked.
-        if method == "layout/open"
+        // A tab opens for the person in this chat (S43), whatever was asked,
+        // and an outline waits on this chat's operator's maps (FB-177).
+        if matches!(method.as_str(), "layout/open" | "place/area")
             && let Some(fields) = params.as_object_mut()
         {
             fields.insert("threadId".into(), Value::String(self.thread_id.clone()));
@@ -669,6 +670,33 @@ impl Drop for Disconnect {
     }
 }
 
+/// A connection to the engine for one turn, closed when the turn ends or is
+/// stopped. Turns of several chats run at once, and what a turn finds, such
+/// as an outline a person confirmed (FB-177), belongs to its chat, so no two
+/// turns share one. When it cannot connect, the chat says why.
+async fn turn_connection(
+    engine: &EngineHandle,
+    thread_id: &str,
+    turn_id: u64,
+    why: &'static str,
+) -> Option<(Arc<Rpc>, Disconnect)> {
+    let Some(rpc) = Rpc::open(engine.clone()).await.map(Arc::new) else {
+        let thread = thread_id.to_owned();
+        let _ = engine
+            .run(move |e| {
+                e.agent_error(None, &thread, why);
+                e.agent_turn_finish(&thread, turn_id, None);
+            })
+            .await;
+        return None;
+    };
+    let disconnect = Disconnect {
+        engine: engine.clone(),
+        connection: rpc.connection,
+    };
+    Some((rpc, disconnect))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the existing hosted turn preparation and transcript lifecycle stay together"
@@ -728,8 +756,18 @@ async fn run(
     );
     let previous = last_response.or_else(|| request.previous_response_id.clone());
 
+    let Some((turn_rpc, _disconnect)) = turn_connection(
+        &engine,
+        &thread_id,
+        turn_id,
+        "Could not connect the agent to UXDuck.",
+    )
+    .await
+    else {
+        return;
+    };
     let host = LocalHost {
-        rpc: rpc.clone(),
+        rpc: turn_rpc,
         thread_id: thread_id.clone(),
         clock: std::time::Instant::now(),
         inputs,
@@ -875,22 +913,15 @@ async fn run_local(
     let Some((provider, model)) = request.model.split_once(':') else {
         return;
     };
-    let Some(turn_rpc) = Rpc::open(engine.clone()).await.map(Arc::new) else {
-        let _ = engine
-            .run(move |e| {
-                e.agent_error(
-                    None,
-                    &thread_id,
-                    "Could not connect the local agent runtime.",
-                );
-                e.agent_turn_finish(&thread_id, turn_id, None);
-            })
-            .await;
+    let Some((turn_rpc, _disconnect)) = turn_connection(
+        &engine,
+        &thread_id,
+        turn_id,
+        "Could not connect the local agent runtime.",
+    )
+    .await
+    else {
         return;
-    };
-    let _disconnect = Disconnect {
-        engine: engine.clone(),
-        connection: turn_rpc.connection,
     };
     let host = Arc::new(LocalHost {
         rpc: turn_rpc,
@@ -1284,5 +1315,29 @@ mod tests {
             rpc.call("vehicle/list", json!({})).await.unwrap()["vehicles"],
             json!([])
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, reason = "in-process engine fixture")]
+    async fn turns_of_two_chats_at_once_have_their_own_connections() {
+        let engine = super::runtime_tests::engine();
+        let count = |engine: &EngineHandle| {
+            let engine = engine.clone();
+            async move { engine.run(|e| e.connection_count()).await.unwrap() }
+        };
+        let before = count(&engine).await;
+        let (a, a_open) = turn_connection(&engine, "chat-a", 1, "unused")
+            .await
+            .unwrap();
+        let (b, b_open) = turn_connection(&engine, "chat-b", 1, "unused")
+            .await
+            .unwrap();
+        assert_ne!(a.connection, b.connection);
+        assert_eq!(count(&engine).await, before + 2);
+        drop(a_open);
+        assert_eq!(count(&engine).await, before + 1);
+        drop(b_open);
+        assert_eq!(count(&engine).await, before);
     }
 }

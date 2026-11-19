@@ -147,6 +147,9 @@ impl Engine {
 
     /// Starts an agent message; text follows through [`Engine::agent_text_delta`].
     pub fn agent_message_start(&mut self, agent: Option<ConnectionId>, thread_id: &str) -> String {
+        if let Some(agent) = agent {
+            self.note_turn(agent, thread_id);
+        }
         let actor = self.agent_actor(agent);
         let id = self.add_item(
             actor,
@@ -220,6 +223,7 @@ impl Engine {
         method: &str,
         params: String,
     ) -> String {
+        self.note_turn(agent, thread_id);
         let actor = self.actor(agent);
         let tool_call = ToolCall {
             method: method.to_owned(),

@@ -1,0 +1,8 @@
+{
+  "method": "layout/open",
+  "params": {
+    "kind": "map",
+    "planId": "pl0000000001234abcd",
+    "threadId": "th0000000001234abcd"
+  }
+}

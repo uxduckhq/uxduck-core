@@ -351,6 +351,12 @@ pub struct PlanCreateParams {
     /// any copy that vehicle already has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_copy: Option<VehicleCopy>,
+    /// Outlines of named areas a person confirmed (FB-177), by the id of the
+    /// survey pattern each becomes the area of, from `place/area`'s `id`.
+    /// The survey's `area` is replaced by exactly the confirmed outline, so
+    /// give it `[]`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub place_areas: std::collections::BTreeMap<String, String>,
 }
 
 /// `plan/update`: the plan's whole body as edited from `expectedVersion`.

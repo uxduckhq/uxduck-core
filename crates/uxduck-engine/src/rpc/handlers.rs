@@ -254,8 +254,12 @@ pub(crate) fn handle(
         | ClientRequest::MarkerUnshare(_)) => {
             crate::markers::handle(engine, connection, request, &granted)
         }
-        request @ (ClientRequest::PlaceSearch(_) | ClientRequest::PlaceLocate(_)) => {
-            crate::places::handle(engine, connection, request, &granted)
+        request @ (ClientRequest::PlaceSearch(_)
+        | ClientRequest::PlaceLocate(_)
+        | ClientRequest::PlaceArea(_)
+        | ClientRequest::PlaceAreas(_)
+        | ClientRequest::PlaceAreaAnswer(_)) => {
+            crate::places::handle(engine, connection, request, &granted, operator)
         }
         request @ (ClientRequest::PlanList(_)
         | ClientRequest::PlanGet(_)
@@ -922,6 +926,8 @@ fn set_operator(
         state.operator_id = operator_id;
     }
     engine.operator_changed(connection);
+    // The outlines a window shows are its operator's (FB-177).
+    engine.send_areas_to(connection);
     Ok(json!({}))
 }
 
@@ -1364,6 +1370,7 @@ fn layout_open(
         ));
     }
     let tab = given_tab(engine, kind, params)?;
+    let plan_id = given_plan(engine, kind, params)?;
     let result = |operator_id| LayoutOpenResult {
         operator_id,
         kind: params.kind,
@@ -1371,6 +1378,7 @@ fn layout_open(
         chart: tab.chart.as_ref().map(Into::into),
         item: tab.item.clone(),
         section: tab.section.map(Into::into),
+        plan_id: plan_id.clone(),
     };
     let from_thread = params
         .thread_id
@@ -1394,6 +1402,31 @@ fn layout_open(
     operator.version += 1;
     engine.commit(connection, Change::OperatorUpserted { operator });
     to_value(&opened)
+}
+
+/// The saved plan `layout/open` shows on a map (FB-178): one that is there,
+/// on a map, so the agent never says it showed a plan the map cannot draw.
+fn given_plan(
+    engine: &Engine,
+    kind: operator::TabKind,
+    params: &LayoutOpenParams,
+) -> Result<Option<String>, ApiError> {
+    let Some(id) = params.plan_id.as_deref() else {
+        return Ok(None);
+    };
+    if !matches!(kind, operator::TabKind::Map | operator::TabKind::Map3d) {
+        return Err(ApiError::new(
+            ErrorKind::InvalidParams,
+            "a plan is shown on a map or a map-3d tab",
+        ));
+    }
+    match engine.state.plans.get(id) {
+        Some(plan) if plan.deleted_at_us.is_none() => Ok(Some(plan.id.clone())),
+        _ => Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no plan {id}. Read the saved plans with plan_list"),
+        )),
+    }
 }
 
 /// The tab `layout/open` asks for, with what it shows checked, so a tab
@@ -1536,6 +1569,7 @@ pub(crate) fn notify(
     match notification {
         ClientNotification::Cancel(params) => {
             engine.cancel_approval(connection, &json!(params.id));
+            engine.cancel_place_area(connection, &json!(params.id));
             engine.stop_looks(connection, Some(&json!(params.id)));
             if let Some(client) = engine.connections.get_mut(&connection) {
                 client.pending.remove(&params.id);

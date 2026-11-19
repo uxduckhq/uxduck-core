@@ -22,7 +22,17 @@ const SENSITIVE_KEYS: [&str; 11] = [
 pub const REDACTED: &str = "[redacted]";
 
 pub(crate) fn private_method(method: Option<&str>) -> bool {
-    matches!(method, Some("place/search" | "place/locate"))
+    matches!(
+        method,
+        Some(
+            "place/search"
+                | "place/locate"
+                | "place/area"
+                | "place/areas"
+                | "place/areaAnswer"
+                | "place/areasChanged"
+        )
+    )
 }
 
 pub(crate) fn hide_place_reply(payload: &mut Value) {

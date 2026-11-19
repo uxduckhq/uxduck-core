@@ -71,8 +71,9 @@ pub(crate) fn handle(
             require(Capability::Read)?;
             to_value(&PlanDto::from(plan(engine, &id)?))
         }
-        ClientRequest::PlanCreate(params) => {
+        ClientRequest::PlanCreate(mut params) => {
             require(Capability::Config)?;
+            confirmed_areas(engine, connection, &mut params)?;
             let copy = params.vehicle_copy.clone();
             let body = new_body(params)?;
             let plan = create(engine, connection, body, copy);
@@ -449,6 +450,47 @@ fn editable<'a>(engine: &'a Engine, id: &str, expected_version: u64) -> Result<&
         ));
     }
     Ok(plan)
+}
+
+/// Each survey `placeAreas` names takes exactly the outline a person
+/// confirmed (FB-177), whatever the request gave as its area, so a plan
+/// never surveys a shape other than the one the person said yes to.
+fn confirmed_areas(
+    engine: &Engine,
+    connection: ConnectionId,
+    params: &mut PlanCreateParams,
+) -> Result<(), ApiError> {
+    use uxduck_contracts::dto::plan::PatternShape as Shape;
+    let areas = std::mem::take(&mut params.place_areas);
+    if areas.is_empty() {
+        return Ok(());
+    }
+    let invalid = |message: String| ApiError::new(ErrorKind::InvalidValue, message);
+    let Some(body) = params.body.as_mut() else {
+        return Err(invalid(
+            "placeAreas needs a body with the survey patterns the outlines become the areas of."
+                .into(),
+        ));
+    };
+    for (pattern_id, area_id) in areas {
+        let area = engine.confirmed_area(&area_id, connection)?;
+        let pattern = body
+            .patterns
+            .iter_mut()
+            .find(|pattern| pattern.id == pattern_id)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "placeAreas names pattern {pattern_id}, which the plan does not have."
+                ))
+            })?;
+        let Shape::Survey { area: corners, .. } = &mut pattern.shape else {
+            return Err(invalid(format!(
+                "Pattern {pattern_id} is not a survey, so it takes no outline."
+            )));
+        };
+        corners.clone_from(&area.points);
+    }
+    Ok(())
 }
 
 fn new_body(params: PlanCreateParams) -> Result<PlanBody, ApiError> {

@@ -1,0 +1,7 @@
+{
+  "method": "place/areaAnswer",
+  "params": {
+    "id": "pa0123456789abcdef",
+    "confirmed": true
+  }
+}

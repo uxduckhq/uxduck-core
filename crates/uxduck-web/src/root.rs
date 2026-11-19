@@ -889,7 +889,7 @@ impl Browser {
                                 retry.and_then(uxduck_engine::places::retry_after),
                                 limit.and_then(uxduck_engine::places::Limit::from_header),
                             ),
-                            status => uxduck_engine::places::failed(status),
+                            status => order.action.failed(status),
                         }
                     })
                     .and_then(|bytes| uxduck_engine::places::response(&order.action, &bytes));

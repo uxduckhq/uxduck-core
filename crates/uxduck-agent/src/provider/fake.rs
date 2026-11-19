@@ -145,6 +145,7 @@ impl FakeProvider {
             Self::parameters,
             Self::history,
             Self::instruments,
+            Self::survey,
             Self::chart,
             Self::suggestion,
             Self::filing,
@@ -665,6 +666,85 @@ impl FakeProvider {
 }
 
 impl FakeProvider {
+    /// Asked to survey a named area (FB-177): its outline from `place_area`,
+    /// which answers once the person confirms it on the map, then a survey
+    /// plan of it, which shows on the map by itself (FB-178). A name with no
+    /// outline, or one the person says is not the area, is said plainly.
+    fn survey(input: &[Input]) -> Result<Option<Vec<ProviderEvent>>, String> {
+        for item in input.iter().rev() {
+            let Input::ToolOutput { call_id, output } = item else {
+                continue;
+            };
+            let answer: Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
+            if call_id == SURVEY_AREA {
+                let area = &answer["area"];
+                let Some(id) = area["id"]
+                    .as_str()
+                    .filter(|_| area["corners"].as_u64() >= Some(3))
+                else {
+                    let why = answer["message"].as_str().unwrap_or("no outline came back");
+                    return Ok(Some(vec![ProviderEvent::TextDelta(format!(
+                        "I could not plan it from an outline: {why}"
+                    ))]));
+                };
+                let name = format!("{} survey", area["name"].as_str().unwrap_or("Area"));
+                return Ok(Some(vec![ProviderEvent::ToolCall {
+                    call_id: SURVEY_PLAN.into(),
+                    name: TOOL_CALL_NAME.into(),
+                    arguments: json!({ "name": "plan_create", "params": { "placeAreas": { "survey": id }, "body": {
+                        "name": name,
+                        "vehicleType": "multicopter",
+                        "autopilot": "ardupilot",
+                        "frame": "above-terrain",
+                        "items": [],
+                        "fence": { "polygons": [], "circles": [], "settings": {} },
+                        "rally": [],
+                        "patterns": [{ "id": "survey", "shape": {
+                            "kind": "survey",
+                            "area": [],
+                            "spacingM": 25.0,
+                            "angleDeg": 0.0,
+                            "turnaroundM": 10.0,
+                            "altitudeM": 40.0,
+                        } }],
+                        "nextAltitudeM": 40.0,
+                        "minClearanceM": 0.0,
+                        "labels": [],
+                        "notes": "",
+                    } } })
+                    .to_string(),
+                }]));
+            }
+            if call_id == SURVEY_PLAN {
+                let text = answer["name"].as_str().map_or_else(
+                    || {
+                        format!(
+                            "I could not make the plan: {}",
+                            answer["message"].as_str().unwrap_or("it was refused")
+                        )
+                    },
+                    |name| format!("{name} is planned at 40 m and on the map."),
+                );
+                return Ok(Some(vec![ProviderEvent::TextDelta(text)]));
+            }
+        }
+        let asked = input.iter().rev().find_map(|item| match item {
+            Input::UserText(text) => Some(text.clone()),
+            Input::ToolOutput { .. } => None,
+        });
+        Ok(asked.and_then(|text| {
+            let lower = text.to_lowercase();
+            let at = lower.find("survey of ")? + "survey of ".len();
+            let end = lower[at..].find(" at ").map_or(text.len(), |n| at + n);
+            let name = text[at..end].trim().trim_end_matches('.');
+            Some(vec![ProviderEvent::ToolCall {
+                call_id: SURVEY_AREA.into(),
+                name: TOOL_CALL_NAME.into(),
+                arguments: json!({ "name": "place_area", "params": { "name": name } }).to_string(),
+            }])
+        }))
+    }
+
     /// Asked to chart vibration (Ben, 2026-10-31): open a chart of its
     /// three axes that follows the selected vehicle (Ben, 2026-11-01: not
     /// pinned to one), and say what opened only when it did.
@@ -942,6 +1022,9 @@ const INSTRUMENTS: &str = "call_instruments";
 
 /// The tool call id of a request to chart vibration.
 const CHART_OPEN: &str = "call_chart_open";
+/// A named area's outline, and the survey planned from it (FB-177).
+const SURVEY_AREA: &str = "call_survey_area";
+const SURVEY_PLAN: &str = "call_survey_plan";
 
 /// The script the fake agent drafts: the distance from home, and with
 /// `warn` a notice once it is within 100 m.
@@ -1217,6 +1300,57 @@ mod tests {
         assert_eq!(
             refused,
             "I could not see the picture: This chat's AI model can't take images."
+        );
+    }
+
+    #[test]
+    fn a_named_survey_waits_for_its_outline_then_plans_from_it() {
+        let asked = FakeProvider::answer(&[Input::UserText(
+            "Plan a survey of Great Lawn, Manhattan at 40 m".into(),
+        )])
+        .unwrap();
+        let [
+            ProviderEvent::ToolCall {
+                name, arguments, ..
+            },
+        ] = &asked[..]
+        else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(name, TOOL_CALL_NAME);
+        let arguments: Value = serde_json::from_str(arguments).unwrap();
+        assert_eq!(
+            arguments,
+            json!({ "name": "place_area", "params": { "name": "Great Lawn, Manhattan" } })
+        );
+        let planned = FakeProvider::answer(&[Input::ToolOutput {
+            call_id: SURVEY_AREA.into(),
+            output: json!({ "area": { "id": "pa1", "name": "The Great Lawn", "corners": 215 } })
+                .to_string(),
+        }])
+        .unwrap();
+        let [ProviderEvent::ToolCall { arguments, .. }] = &planned[..] else {
+            panic!("{planned:?}");
+        };
+        let arguments: Value = serde_json::from_str(arguments).unwrap();
+        assert_eq!(arguments["name"], "plan_create");
+        // The plan takes the confirmed outline by its id, never its points.
+        assert_eq!(
+            arguments["params"]["placeAreas"],
+            json!({ "survey": "pa1" })
+        );
+        assert_eq!(
+            arguments["params"]["body"]["patterns"][0]["shape"]["area"],
+            json!([])
+        );
+        let refused = FakeProvider::answer(&[Input::ToolOutput {
+            call_id: SURVEY_AREA.into(),
+            output: json!({ "message": "The person said it is not the area." }).to_string(),
+        }])
+        .unwrap();
+        assert!(
+            matches!(&refused[..], [ProviderEvent::TextDelta(text)] if text.contains("not the area")),
+            "{refused:?}"
         );
     }
 }

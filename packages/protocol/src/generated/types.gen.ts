@@ -3531,6 +3531,15 @@ export type ClientRequest = {
     method: 'place/locate';
     params: PlaceLocateParams;
 } | {
+    method: 'place/area';
+    params: PlaceAreaParams;
+} | {
+    method: 'place/areas';
+    params: Empty;
+} | {
+    method: 'place/areaAnswer';
+    params: PlaceAreaAnswerParams;
+} | {
     method: 'place/save';
     params: PlaceSaveParams;
 } | {
@@ -5001,6 +5010,37 @@ export type ComputerRenameParams = {
      */
     name: string;
     vehicleId: string;
+};
+
+/**
+ * An outline the person confirmed, for planning by its `id` (FB-177): a
+ * plan takes it from `plan/create`'s `placeAreas`, so it uses exactly the
+ * confirmed corners, which are never carried by the answer itself.
+ */
+export type ConfirmedPlaceArea = {
+    attribution: string;
+    /**
+     * How many corners the confirmed outline has.
+     */
+    corners: number;
+    detail: string;
+    eastDeg: number;
+    /**
+     * How to plan from it, and how much of it `preview` shows, in words.
+     */
+    howToPlan: string;
+    id: string;
+    kind: string;
+    name: string;
+    northDeg: number;
+    note?: string | null;
+    /**
+     * Some of its corners, evenly spaced round it, only to see its shape.
+     * A plan never takes these.
+     */
+    preview: Array<LatLon>;
+    southDeg: number;
+    westDeg: number;
 };
 
 export type ConnectedModel = {
@@ -9438,6 +9478,12 @@ export type LayoutOpenParams = {
     items?: Array<string>;
     kind: TabKind;
     operatorId?: string | null;
+    /**
+     * A saved plan to show on a `map` or `map-3d`, the map fitted to it
+     * (FB-178), without choosing a vehicle. It is shown read only until the
+     * person edits or hides it.
+     */
+    planId?: string | null;
     section?: TuningSection | null;
     /**
      * The chat asking; the agent's turns fill it in.
@@ -9459,6 +9505,10 @@ export type LayoutOpenResult = {
     item?: string | null;
     kind: TabKind;
     operatorId?: string | null;
+    /**
+     * The plan shown on the map.
+     */
+    planId?: string | null;
     section?: TuningSection | null;
     /**
      * What the new tab was given, as it will show it.
@@ -12485,6 +12535,79 @@ export type PlaceAmsl = {
 };
 
 /**
+ * An outline found for a named area, from OpenStreetMap: waiting on the
+ * map for a person to confirm it, or confirmed.
+ */
+export type PlaceArea = {
+    attribution: string;
+    /**
+     * Where it is, for people: "Central Park, Manhattan, New York, United States".
+     */
+    detail: string;
+    id: string;
+    /**
+     * What OpenStreetMap calls it, such as "park" or "suburb".
+     */
+    kind: string;
+    name: string;
+    /**
+     * What the outline leaves out of OpenStreetMap's, in words: other parts
+     * of the place, or holes in it such as a pond.
+     */
+    note?: string | null;
+    operatorId?: string | null;
+    /**
+     * 3 or more corners in order round it, as a survey's `area` takes them.
+     */
+    points: Array<LatLon>;
+    /**
+     * The chat that asked, whose operator's windows show it.
+     */
+    threadId?: string | null;
+};
+
+/**
+ * A person's word on an outline waiting on the map: it is the area, or it is not.
+ */
+export type PlaceAreaAnswerParams = {
+    confirmed: boolean;
+    id: string;
+};
+
+/**
+ * A named area to outline for a survey (FB-177): a park, a field, a
+ * suburb. `near`, rounded to a neighbourhood like `place/search`'s, picks
+ * between places of the same name.
+ */
+export type PlaceAreaParams = {
+    /**
+     * The area's name as the person said it, then its town or district,
+     * such as "Great Lawn, Manhattan" or "Central Park, New York", not a
+     * street address: 2 to 200 characters.
+     */
+    name: string;
+    near?: Coordinates | null;
+    /**
+     * The chat asking; the agent's turns fill it in.
+     */
+    threadId?: string | null;
+};
+
+/**
+ * The outline a person confirmed on the map.
+ */
+export type PlaceAreaResult = {
+    area: ConfirmedPlaceArea;
+};
+
+/**
+ * The outlines waiting for a person on the map.
+ */
+export type PlaceAreasResult = {
+    areas: Array<PlaceArea>;
+};
+
+/**
  * The chosen suggestion's key, full text and original proximity hint.
  */
 export type PlaceLocateParams = {
@@ -12703,6 +12826,15 @@ export type PlanCreateParams = {
      */
     body?: PlanBody | null;
     name?: string | null;
+    /**
+     * Outlines of named areas a person confirmed (FB-177), by the id of the
+     * survey pattern each becomes the area of, from `place/area`'s `id`.
+     * The survey's `area` is replaced by exactly the confirmed outline, so
+     * give it `[]`.
+     */
+    placeAreas?: {
+        [key: string]: string;
+    };
     /**
      * Makes it a vehicle's copy of its mission (ADR-0029 P17), replacing
      * any copy that vehicle already has.
@@ -15072,6 +15204,9 @@ export type ServerNotification = {
 } | {
     method: 'marker/live';
     params: MarkerLiveChanged;
+} | {
+    method: 'place/areasChanged';
+    params: PlaceAreasResult;
 } | {
     method: 'app/focus';
     params: Empty;

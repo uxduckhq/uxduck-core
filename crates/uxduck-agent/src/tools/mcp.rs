@@ -207,6 +207,7 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "replay/open" | "replay/seek" | "replay/state" | "replay/close" | "replay/add" => {
             schema::<dto::replay::ReplayState>()
         }
+        "place/area" => schema::<dto::search::PlaceAreaResult>(),
         "place/locate" => schema::<dto::search::PlaceLocateResult>(),
         "place/search" => schema::<dto::search::PlaceSearchResult>(),
         "search/query" => schema::<dto::search::SearchResult>(),

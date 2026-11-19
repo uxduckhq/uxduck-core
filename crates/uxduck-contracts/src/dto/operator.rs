@@ -823,6 +823,11 @@ pub struct LayoutOpenParams {
     pub items: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<TuningSection>,
+    /// A saved plan to show on a `map` or `map-3d`, the map fitted to it
+    /// (FB-178), without choosing a vehicle. It is shown read only until the
+    /// person edits or hides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
     /// The chat asking; the agent's turns fill it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
@@ -847,6 +852,9 @@ pub struct LayoutOpenResult {
     pub item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<TuningSection>,
+    /// The plan shown on the map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
 }
 
 /// Which operator this connection acts as; journal entries name it.

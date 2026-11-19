@@ -32,6 +32,9 @@ pub const AGENT_METHODS: &[&str] = &[
     "search/query",
     "place/search",
     "place/locate",
+    // A named area's outline (FB-177): it waits on the map for the
+    // person's word, and the agent gets it only once they confirm it.
+    "place/area",
     // Markers on the map (ADR-0035): reading changes nothing; adding and
     // changing one asks first without `config`, as saved places do.
     "marker/list",
@@ -273,6 +276,10 @@ pub const AGENT_METHODS: &[&str] = &[
 /// they cover every method, so a new one (a new setting's, say) must be
 /// placed in one or the other, and is not forgotten from MCP.
 pub const KEPT_FROM_AGENTS: &[&str] = &[
+    // Outlines waiting on the map, and the word on one, are the person's
+    // (FB-177): the agent waits for that word in its own `place_area` call.
+    "place/areas",
+    "place/areaAnswer",
     // The response graph's sample rate follows the Tuning tab being open (S330).
     "tuning/live",
     // The graph's samples, 25 a second, are more than a tool answer holds;
@@ -590,6 +597,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "tuning/prepare",
     "place/search",
     "place/locate",
+    "place/area",
     "marker/add",
     "marker/update",
     "marker/remove",

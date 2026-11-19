@@ -1,0 +1,35 @@
+{
+  "method": "place/areasChanged",
+  "params": {
+    "areas": [
+      {
+        "id": "pa0123456789abcdef",
+        "name": "The Great Lawn",
+        "detail": "East Drive, Manhattan, New York, United States",
+        "kind": "pitch",
+        "points": [
+          {
+            "latitudeDeg": 40.779,
+            "longitudeDeg": -73.968
+          },
+          {
+            "latitudeDeg": 40.779,
+            "longitudeDeg": -73.964
+          },
+          {
+            "latitudeDeg": 40.783,
+            "longitudeDeg": -73.964
+          },
+          {
+            "latitudeDeg": 40.783,
+            "longitudeDeg": -73.968
+          }
+        ],
+        "note": "It has 1 hole inside, such as a pond or a building, which this outline covers.",
+        "attribution": "© OpenStreetMap contributors",
+        "threadId": "th0000000001234abcd",
+        "operatorId": "op0000000001234abcd"
+      }
+    ]
+  }
+}

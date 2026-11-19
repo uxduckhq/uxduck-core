@@ -64,12 +64,12 @@ async fn lookup(api: Option<&str>, order: &Order) -> Result<Value, ApiError> {
         ));
     }
     if !result.status().is_success() {
-        return Err(places::failed(Some(result.status().as_u16())));
+        return Err(order.action.failed(Some(result.status().as_u16())));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = result.chunk().await.map_err(|_| places::failed(None))? {
-        if bytes.len() + chunk.len() > places::MAX_RESPONSE_BYTES {
-            return Err(places::failed(None));
+        if bytes.len() + chunk.len() > order.action.max_bytes() {
+            return Err(order.action.too_large());
         }
         bytes.extend_from_slice(&chunk);
     }

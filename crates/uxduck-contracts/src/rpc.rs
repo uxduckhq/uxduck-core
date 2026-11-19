@@ -65,7 +65,8 @@ use crate::dto::plugin::{
     PluginTestParams, PluginTokenParams, ToolSearchParams,
 };
 use crate::dto::search::{
-    PlaceLocateParams, PlaceSaveParams, PlaceSearchParams, PlaceUpdateParams, SearchQueryParams,
+    PlaceAreaAnswerParams, PlaceAreaParams, PlaceLocateParams, PlaceSaveParams, PlaceSearchParams,
+    PlaceUpdateParams, SearchQueryParams,
 };
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams, StorageRevealParams};
 use crate::dto::sim::{
@@ -852,6 +853,28 @@ pub enum ClientRequest {
     /// setting and needs `read`. Result: `PlaceLocateResult`.
     #[serde(rename = "place/locate")]
     PlaceLocate(PlaceLocateParams),
+    /// Finds the outline of a named area, such as a park, a field or a
+    /// suburb, from OpenStreetMap, for a survey's `area`. The outline is
+    /// shown on the map and this waits until the person confirms it there:
+    /// it answers the outline they confirmed, or an error when they say it
+    /// is not the area, when no outline is found (say so plainly and ask them
+    /// to draw the area) or when the lookup fails. Never plan a survey of a
+    /// named area from anything else. Pass `near` from `place_locate` when
+    /// the name could be in several places. Saves nothing and touches no
+    /// vehicle. Respects the operator's place-search setting and needs
+    /// `read`. Result: `PlaceAreaResult`.
+    #[serde(rename = "place/area")]
+    PlaceArea(PlaceAreaParams),
+    /// The outlines from `place/area` waiting on the map for a person, and
+    /// `place/areasChanged` to this connection as they change. Needs
+    /// `read`. Result: `PlaceAreasResult`.
+    #[serde(rename = "place/areas")]
+    PlaceAreas(Empty),
+    /// A person's word on an outline waiting on the map: `confirmed` gives
+    /// it to the `place/area` call that found it, otherwise that call is
+    /// told it is not the area. Only an operator answers. Result: `Empty`.
+    #[serde(rename = "place/areaAnswer")]
+    PlaceAreaAnswer(PlaceAreaAnswerParams),
     /// Saves a place on the connection's operator's list. Needs `config`.
     /// Result: `SavedPlace`.
     #[serde(rename = "place/save")]
@@ -2313,7 +2336,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 408] = [
+    pub const METHODS: [&'static str; 411] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2477,6 +2500,9 @@ impl ClientRequest {
         "search/query",
         "place/search",
         "place/locate",
+        "place/area",
+        "place/areas",
+        "place/areaAnswer",
         "place/save",
         "place/update",
         "place/remove",
@@ -2842,6 +2868,11 @@ pub enum ServerNotification {
     /// hold `location`. Not journaled.
     #[serde(rename = "marker/live")]
     MarkerLive(crate::dto::marker::MarkerLiveChanged),
+    /// The outlines waiting on the map for a person changed (FB-177): all
+    /// of them, to the connections that called `place/areas`. Not
+    /// journaled.
+    #[serde(rename = "place/areasChanged")]
+    PlaceAreasChanged(crate::dto::search::PlaceAreasResult),
     /// Opening UXDuck again found this page open: it comes forward, or
     /// flashes its title where the browser will not let it (S107). Sent to
     /// one page. Not journaled.

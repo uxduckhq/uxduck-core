@@ -1,0 +1,41 @@
+{
+  "method": "plan/create",
+  "params": {
+    "body": {
+      "name": "Great Lawn survey",
+      "vehicleType": "multicopter",
+      "autopilot": "ardupilot",
+      "frame": "above-terrain",
+      "items": [],
+      "fence": {
+        "polygons": [],
+        "circles": [],
+        "settings": {}
+      },
+      "rally": [],
+      "patterns": [
+        {
+          "id": "survey",
+          "shape": {
+            "kind": "survey",
+            "area": [],
+            "spacingM": 25.0,
+            "angleDeg": 0.0,
+            "turnaroundM": 10.0,
+            "altitudeM": 40.0,
+            "crosshatch": false,
+            "marginM": 0.0,
+            "shortest": false
+          }
+        }
+      ],
+      "nextAltitudeM": 40.0,
+      "minClearanceM": 0.0,
+      "labels": [],
+      "notes": ""
+    },
+    "placeAreas": {
+      "survey": "pa0123456789abcdef"
+    }
+  }
+}

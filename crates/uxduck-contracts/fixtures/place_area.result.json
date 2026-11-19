@@ -1,0 +1,34 @@
+{
+  "area": {
+    "id": "pa0123456789abcdef",
+    "name": "The Great Lawn",
+    "detail": "East Drive, Manhattan, New York, United States",
+    "kind": "pitch",
+    "corners": 4,
+    "southDeg": 40.779,
+    "westDeg": -73.968,
+    "northDeg": 40.783,
+    "eastDeg": -73.964,
+    "preview": [
+      {
+        "latitudeDeg": 40.779,
+        "longitudeDeg": -73.968
+      },
+      {
+        "latitudeDeg": 40.779,
+        "longitudeDeg": -73.964
+      },
+      {
+        "latitudeDeg": 40.783,
+        "longitudeDeg": -73.964
+      },
+      {
+        "latitudeDeg": 40.783,
+        "longitudeDeg": -73.968
+      }
+    ],
+    "howToPlan": "The person confirmed this outline. To survey it, give plan_create placeAreas with the survey pattern's id and “pa0123456789abcdef”, and the survey's area as []. The plan then takes exactly the 4 confirmed corners. The preview shows all 4 corners. Never plan from the preview.",
+    "note": "It has 1 hole inside, such as a pond or a building, which this outline covers.",
+    "attribution": "© OpenStreetMap contributors"
+  }
+}

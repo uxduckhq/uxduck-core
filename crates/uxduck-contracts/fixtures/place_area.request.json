@@ -1,0 +1,11 @@
+{
+  "method": "place/area",
+  "params": {
+    "name": "Great Lawn, Manhattan",
+    "near": {
+      "latitudeDeg": 40.78,
+      "longitudeDeg": -73.97
+    },
+    "threadId": "th0000000001234abcd"
+  }
+}

@@ -279,6 +279,12 @@ fn check(name: &str) {
         ("result", "place_locate") => {
             round_trip::<uxduck_contracts::dto::search::PlaceLocateResult>(name, &json);
         }
+        ("result", "place_area") => {
+            round_trip::<uxduck_contracts::dto::search::PlaceAreaResult>(name, &json);
+        }
+        ("result", "place_areas") => {
+            round_trip::<uxduck_contracts::dto::search::PlaceAreasResult>(name, &json);
+        }
         ("result", "place_save" | "place_update") => {
             round_trip::<uxduck_contracts::dto::search::SavedPlace>(name, &json);
         }
@@ -954,6 +960,7 @@ fn check(name: &str) {
             | "terrain_removeArea"
             | "tray_location"
             | "marker_remove"
+            | "place_areaAnswer"
             | "marker_share"
             | "marker_unshare"
             | "mavlink_dialects_remove"
