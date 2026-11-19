@@ -116,18 +116,10 @@ pub fn start(engine: EngineHandle, data_dir: PathBuf, port: u16, enabled: bool) 
                 let Ok(channel) = DownloadChannel::current(&engine).await else {
                     return;
                 };
-                match download_selected(channel, &data_dir, &url, &key).await {
-                    Ok(path) => ready = path,
-                    Err(why) => {
-                        ready = None;
-                        publish_channel_failure(&engine, channel.include_beta, why).await;
-                    }
-                }
-                let spread = Duration::from_secs(u64::from(std::process::id() % 3600));
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
-                next = tokio::time::Instant::now() + crate::update::until_next_day(now, spread);
+                let (staged, wait) =
+                    check_once(channel, &data_dir, &url, &key, daily_check()).await;
+                ready = staged;
+                next = tokio::time::Instant::now() + wait;
             }
             let Ok(true) = engine.run(|e| e.app_update_approved()).await else {
                 // Only a consented update waiting for work to finish polls.
@@ -334,14 +326,48 @@ async fn publish_current(
     Ok(())
 }
 
+/// How long until the daily check: just after the next UTC midnight, spread
+/// by this process so installs do not all ask in the same second.
+fn daily_check() -> Duration {
+    let spread = Duration::from_secs(u64::from(std::process::id() % 3600));
+    crate::update::until_next_day(crate::update::now_us(), spread)
+}
+
+/// One check: the version it staged, if any, and how long until the next.
+/// That is `daily`, or within the hour when the signed release
+/// could not be read (FB-135). A failure after that, getting or checking
+/// the installer, waits for the daily check, so a bad installer is not
+/// downloaded again every hour.
+async fn check_once(
+    channel: DownloadChannel<'_>,
+    data_dir: &Path,
+    url: &str,
+    key: &str,
+    daily: Duration,
+) -> (Option<PathBuf>, Duration) {
+    let mut read = false;
+    let checked = download_selected(channel, data_dir, url, key, &mut read).await;
+    let unread = checked.is_err() && !read;
+    let staged = match checked {
+        Ok(path) => path,
+        Err(why) => {
+            publish_channel_failure(channel.engine, channel.include_beta, why).await;
+            None
+        }
+    };
+    (staged, crate::update::next_check(unread, daily))
+}
+
 /// Cancel even a stalled network read promptly when eligibility changes.
+/// `read` says whether the signed release was read before it stopped.
 async fn download_selected(
     channel: DownloadChannel<'_>,
     data_dir: &Path,
     url: &str,
     key: &str,
+    read: &mut bool,
 ) -> Result<Option<PathBuf>, String> {
-    let download = download(channel, data_dir, url, key);
+    let download = download(channel, data_dir, url, key, read);
     tokio::pin!(download);
     loop {
         tokio::select! {
@@ -362,6 +388,7 @@ async fn download(
     data_dir: &Path,
     url: &str,
     key: &str,
+    read: &mut bool,
 ) -> Result<Option<PathBuf>, String> {
     let DownloadChannel {
         engine,
@@ -370,6 +397,7 @@ async fn download(
     let report = crate::update::check_channels(url, include_beta, Some(key), data_dir)
         .await
         .map_err(|e| e.to_string())?;
+    *read = true;
     if !matches!(
         report.verdict,
         crate::update::Verdict::Available(_) | crate::update::Verdict::RolledBack(_)

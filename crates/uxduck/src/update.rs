@@ -502,7 +502,7 @@ fn newest(stable: Report, beta: Option<Report>, target: &str) -> Result<Report, 
     Ok(stable)
 }
 
-fn now_us() -> u64 {
+pub(crate) fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
@@ -517,6 +517,24 @@ pub fn until_next_day(now_us: u64, spread: Duration) -> Duration {
     const DAY_US: u64 = 86_400_000_000;
     let into_day = now_us % DAY_US;
     Duration::from_micros(DAY_US - into_day) + spread
+}
+
+/// How soon a check that could not read the signed release is tried
+/// again: within the hour, as the interface check is, so a connection lost
+/// for a moment does not leave the app update failed until the next day's
+/// check or a retry in Settings (FB-135). Only the small manifest is asked
+/// for again. A failure after it was read waits for the daily check.
+pub const RETRY_FAILED_CHECK: Duration = Duration::from_hours(1);
+
+/// How long until the next check, when it is otherwise `scheduled` that
+/// far ahead and this one `unread` the signed release.
+#[must_use]
+pub fn next_check(unread: bool, scheduled: Duration) -> Duration {
+    if unread {
+        scheduled.min(RETRY_FAILED_CHECK)
+    } else {
+        scheduled
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +598,27 @@ mod tests {
         assert_eq!(
             until_next_day(10 * day, Duration::ZERO),
             Duration::from_hours(24)
+        );
+    }
+
+    #[test]
+    fn a_failed_check_is_tried_again_within_the_hour_not_the_next_day() {
+        // FB-135: the stable manifest could not be fetched at 01:58 UTC and
+        // the app showed the update failed until it was retried by hand
+        // at 22:45, twenty hours later.
+        let day = 86_400_000_000u64;
+        let at = 10 * day + (60 + 58) * 60_000_000;
+        let daily = until_next_day(at, Duration::from_secs(30));
+        assert!(daily > Duration::from_hours(20));
+        assert_eq!(next_check(true, daily), Duration::from_hours(1));
+        assert_eq!(next_check(false, daily), daily);
+        // A check due sooner than that anyway keeps its time.
+        let soon = Duration::from_mins(10);
+        assert_eq!(next_check(true, soon), soon);
+        // The Mac updater checks a day after the last check.
+        assert_eq!(
+            next_check(true, Duration::from_hours(24)),
+            Duration::from_hours(1)
         );
     }
 

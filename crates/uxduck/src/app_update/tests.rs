@@ -479,6 +479,97 @@ async fn obsolete_download_progress_and_failures_cannot_replace_the_new_channel(
     assert!(pending, "the new check must remain queued");
 }
 
+/// A signed stable release of version 99.0.0 naming `artifacts`, served as
+/// the release bucket serves it: its manifest's address and the key it is
+/// signed with.
+#[cfg(unix)]
+pub(super) async fn publish_release(artifacts: Vec<ReleaseArtifact>) -> (String, String) {
+    let key = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+    let public = key.pk.to_box().unwrap().into_string();
+    let public = public.lines().nth(1).unwrap().to_owned();
+    let manifest = ReleaseManifest {
+        schema: 1,
+        channel: "stable".into(),
+        version: "99.0.0".into(),
+        published_at: "2026-11-18T00:00:00Z".into(),
+        rollback: false,
+        notes_url: None,
+        desktop_app: None,
+        artifacts,
+    };
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = minisign::sign(
+        None,
+        &key.sk,
+        std::io::Cursor::new(&bytes),
+        Some("test"),
+        None,
+    )
+    .unwrap()
+    .into_string();
+    let (base, _) = serve(
+        [
+            ("/stable.json".to_owned(), bytes),
+            ("/stable.json.minisig".to_owned(), signature.into_bytes()),
+        ]
+        .into(),
+    )
+    .await;
+    (format!("{base}/stable.json"), public)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn only_a_release_that_could_not_be_read_is_checked_again_within_the_hour() {
+    // FB-135: a check that could not read the signed release tries again
+    // within the hour. An installer that fails its checksum waits for the
+    // daily check, so a bad installer is not downloaded every hour.
+    let engine = EngineHandle::spawn(test_engine());
+    let channel = DownloadChannel::current(&engine).await.unwrap();
+    let phase = || async { engine.run(|e| e.app_update_status()).await.unwrap() };
+    // The daily check is given, not read off the clock, so the time of
+    // day cannot change the answer. One is sooner than the hour, as in the
+    // hour before UTC midnight.
+    let (later, sooner) = (Duration::from_hours(20), Duration::from_mins(10));
+    let (_, key) = publish_release(Vec::new()).await;
+    let unread = tempfile::tempdir().unwrap();
+    for (daily, expected) in [(later, Duration::from_hours(1)), (sooner, sooner)] {
+        let (staged, wait) = check_once(
+            channel,
+            unread.path(),
+            "http://127.0.0.1:1/stable.json",
+            &key,
+            daily,
+        )
+        .await;
+        assert!(staged.is_none());
+        assert_eq!(wait, expected);
+        assert_eq!(phase().await.phase, UpdatePhase::Failed);
+    }
+
+    let (files, asked) = serve([("/package".to_owned(), b"tampered".to_vec())].into()).await;
+    let (url, key) = publish_release(vec![ReleaseArtifact {
+        target: crate::update::TARGET.into(),
+        kind: PACKAGE_KIND.into(),
+        file: format!("package.{PACKAGE_KIND}"),
+        url: format!("{files}/package"),
+        size: 8,
+        sha256: checksum(b"expected"),
+    }])
+    .await;
+    for (attempt, daily) in [later, sooner].into_iter().enumerate() {
+        let data = tempfile::tempdir().unwrap();
+        let (staged, wait) = check_once(channel, data.path(), &url, &key, daily).await;
+        assert_eq!(asked.lock().unwrap().len(), attempt + 1);
+        assert!(staged.is_none());
+        assert_eq!(wait, daily);
+        let failed = phase().await;
+        assert_eq!(failed.phase, UpdatePhase::Failed);
+        assert_eq!(failed.version.as_deref(), Some("99.0.0"));
+    }
+    assert!(asked.lock().unwrap().iter().all(|path| path == "/package"));
+}
+
 #[test]
 fn only_the_staged_download_is_kept() {
     let data = tempfile::tempdir().unwrap();

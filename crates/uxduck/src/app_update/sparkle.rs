@@ -130,9 +130,15 @@ pub(super) fn start(engine: EngineHandle, data: PathBuf, port: u16) {
             let Ok(include_beta) = engine.run(|e| e.state().settings.include_beta).await else {
                 return;
             };
-            if let Err(why) = cycle(&engine, &data, port, include_beta).await {
-                publish_channel_failure(&engine, include_beta, why).await;
-            }
+            let wait = check_once(
+                &engine,
+                &data,
+                port,
+                include_beta,
+                crate::update::DEFAULT_URL,
+                crate::update::APP_UPDATE_PUBLIC_KEY,
+            )
+            .await;
             if engine
                 .run(|e| e.app_update_installing())
                 .await
@@ -144,14 +150,32 @@ pub(super) fn start(engine: EngineHandle, data: PathBuf, port: u16) {
                 .run(|e| e.app_update_pending())
                 .await
                 .unwrap_or(false);
-            next = tokio::time::Instant::now()
-                + if recheck {
-                    Duration::ZERO
-                } else {
-                    Duration::from_hours(24)
-                };
+            next = tokio::time::Instant::now() + if recheck { Duration::ZERO } else { wait };
         }
     });
+}
+
+/// One check and how long until the next: a day, or within the hour when
+/// the signed release could not be read (FB-135). A failure after that,
+/// getting the archive or starting the Mac updater, waits the day, so a
+/// bad archive is not downloaded again every hour.
+async fn check_once(
+    engine: &EngineHandle,
+    data: &Path,
+    port: u16,
+    include_beta: bool,
+    url: &str,
+    key: Option<&str>,
+) -> Duration {
+    let mut read = false;
+    let unread = match cycle(engine, data, port, include_beta, url, key, &mut read).await {
+        Ok(()) => false,
+        Err(why) => {
+            publish_channel_failure(engine, include_beta, why).await;
+            !read
+        }
+    };
+    crate::update::next_check(unread, Duration::from_hours(24))
 }
 
 struct ReleaseFeed {
@@ -165,15 +189,14 @@ async fn release_feed(
     engine: &EngineHandle,
     data: &Path,
     include_beta: bool,
+    url: &str,
+    key: Option<&str>,
+    read: &mut bool,
 ) -> Result<Option<ReleaseFeed>, String> {
-    let report = crate::update::check_channels(
-        crate::update::DEFAULT_URL,
-        include_beta,
-        crate::update::APP_UPDATE_PUBLIC_KEY,
-        data,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let report = crate::update::check_channels(url, include_beta, key, data)
+        .await
+        .map_err(|e| e.to_string())?;
+    *read = true;
     if !matches!(report.verdict, crate::update::Verdict::Available(_)) {
         super::forget_downloads(data, |_| false);
         super::publish_current(engine, include_beta, report.warning).await?;
@@ -271,13 +294,16 @@ async fn cycle(
     data: &Path,
     port: u16,
     include_beta: bool,
+    url: &str,
+    key: Option<&str>,
+    read: &mut bool,
 ) -> Result<(), String> {
     let Some(ReleaseFeed {
         version: expected_version,
         url: feed,
         warning,
         archive,
-    }) = release_feed(engine, data, include_beta).await?
+    }) = release_feed(engine, data, include_beta, url, key, read).await?
     else {
         return Ok(());
     };
@@ -425,6 +451,43 @@ async fn cycle(
 #[allow(clippy::unwrap_used, reason = "test fixtures")]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn only_a_release_that_could_not_be_read_is_checked_again_within_the_hour() {
+        // FB-135: as on other platforms. A failure once the signed release
+        // was read, here the missing app bundle that a download needs,
+        // waits the day.
+        let engine = EngineHandle::spawn(super::super::tests::test_engine());
+        let (_, key) = super::super::tests::publish_release(Vec::new()).await;
+        let data = tempfile::tempdir().unwrap();
+        let unread = check_once(
+            &engine,
+            data.path(),
+            0,
+            false,
+            "http://127.0.0.1:1/stable.json",
+            Some(&key),
+        )
+        .await;
+        assert_eq!(unread, Duration::from_hours(1));
+        let (archive, asked) =
+            super::super::tests::serve([("/update.dmg".into(), b"archive".to_vec())].into()).await;
+        let artifact = |kind: &str| uxduck_contracts::dto::release::ReleaseArtifact {
+            target: crate::update::TARGET.into(),
+            kind: kind.into(),
+            file: format!("update.{kind}"),
+            url: format!("{archive}/update.{kind}"),
+            size: 7,
+            sha256: "ab".repeat(32),
+        };
+        let (url, key) =
+            super::super::tests::publish_release(vec![artifact("sparkle"), artifact("dmg")]).await;
+        let read = check_once(&engine, data.path(), 0, false, &url, Some(&key)).await;
+        assert_eq!(read, Duration::from_hours(24));
+        assert!(asked.lock().unwrap().is_empty());
+        let failed = engine.run(|e| e.app_update_status()).await.unwrap();
+        assert_eq!(failed.phase, UpdatePhase::Failed);
+    }
+
     #[test]
     fn bundle_location_follows_the_running_copy() {
         for path in [

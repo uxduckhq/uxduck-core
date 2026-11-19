@@ -282,7 +282,7 @@ fn mac_devices(text: &str) -> Result<Discovered, String> {
         let device = CaptureDevice {
             id: id.clone(),
             name: name.trim().into(),
-            persistent: true,
+            persistent: in_audio || !moves_with_its_port(uid),
         };
         if in_audio {
             sound.insert(id, device);
@@ -521,11 +521,44 @@ fn problem(text: &str, fallback: &str) -> String {
     )
 }
 
+/// Whether a Mac camera's identity is `0x` then its USB location, vendor and
+/// product, which changes when it is plugged into another port (FB-156).
+/// Apple's own (vendor `05ac`) is built in, as an Intel Mac's camera is.
+fn moves_with_its_port(uid: &str) -> bool {
+    uid.strip_prefix("0x").is_some_and(|hex| {
+        hex.len() > 8
+            && hex.bytes().all(|b| b.is_ascii_hexdigit())
+            && !hex[hex.len() - 8..hex.len() - 4].eq_ignore_ascii_case("05ac")
+    })
+}
+
+/// Says which camera was asked for and which were found, once for each
+/// different set found, not on every retry while the camera stays away.
+fn note_missing(
+    source: &str,
+    selected: &str,
+    cameras: &[CaptureDevice],
+    said: &mut Option<Vec<String>>,
+) -> bool {
+    let found: Vec<String> = cameras.iter().map(|d| d.id.clone()).collect();
+    if said.as_ref() == Some(&found) {
+        return false;
+    }
+    tracing::info!(
+        source,
+        selected,
+        ?found,
+        "the selected camera is not among the cameras found"
+    );
+    *said = Some(found);
+    true
+}
+
 fn disconnected(device_id: &str) -> &'static str {
     if device_id.starts_with("v4l2:") {
         "This Linux camera is unavailable. Reconnect it, or remove this entry in Camera settings and add the camera again. An older entry may point to the webcam's metadata device, which does not send pictures."
     } else {
-        "Camera disconnected. Reconnect the selected camera. UXDuck will resume capture automatically."
+        "Camera disconnected. Reconnect the selected camera and UXDuck will resume capture automatically. If it is connected, choose it again in Camera settings."
     }
 }
 
@@ -746,6 +779,8 @@ pub fn spawn(
         // Why the camera's own microphone, picked by itself, couldn't be
         // opened: then the pictures go on without it (S161).
         let mut own_refused: Option<String> = None;
+        // The cameras found when the selected one was not, last said in the log.
+        let mut missing: Option<Vec<String>> = None;
         let mut first = if let Some(mut answer) = selection {
             let report_id = id.clone();
             let config = input.clone();
@@ -776,7 +811,7 @@ pub fn spawn(
             };
             tracing::info!(source = %id, permission_ms = permission_started.elapsed().as_millis(), "local camera permission ready");
             let (result, refused) =
-                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref(), &access, &devices).await;
+                run(&id, &input, epoch, &hub, &engine, own_refused.as_deref(), &access, &devices, &mut missing).await;
             if refused.is_some() {
                 own_refused = refused;
                 backoff = 0;
@@ -887,6 +922,7 @@ async fn run(
     own_refused: Option<&str>,
     access: &super::permission::Access,
     devices: &Devices,
+    missing: &mut Option<Vec<String>>,
 ) -> (String, Option<String>) {
     let started = Instant::now();
     let automatic = !input.no_sound && !input.record_sound;
@@ -899,7 +935,11 @@ async fn run(
             None => discover().await?,
         };
         let discovery_ms = started.elapsed().as_millis();
-        let device = found.cameras.into_iter().find(|d| d.id == input.device_id).ok_or_else(|| disconnected(&input.device_id))?;
+        let Some(device) = found.cameras.iter().find(|d| d.id == input.device_id).cloned() else {
+            // So a camera plugged in under another identity shows as such (FB-156).
+            note_missing(id, &input.device_id, &found.cameras, missing);
+            return Err(disconnected(&input.device_id).into());
+        };
         // A sound input that is missing leaves the pictures playing, and says so.
         let (mut sound, mut note) = match input.sound_input.as_ref().filter(|_| input.record_sound && !input.no_sound) {
             // Not chosen: the camera's own microphone, when it has one (S161).
@@ -1097,6 +1137,80 @@ mod tests {
             "{missing}"
         );
         assert!(missing.contains("add the camera again"), "{missing}");
+    }
+
+    #[test]
+    fn a_missing_camera_is_logged_once_for_each_set_of_cameras_found() {
+        let camera = |id: &str| CaptureDevice {
+            id: id.into(),
+            name: "Camera".into(),
+            persistent: true,
+        };
+        let mut said = None;
+        let found = [camera("avfoundation:built-in")];
+        assert!(note_missing(
+            "vs1",
+            "avfoundation:0x2000002ca30023",
+            &found,
+            &mut said
+        ));
+        for _ in 0..10 {
+            assert!(!note_missing(
+                "vs1",
+                "avfoundation:0x2000002ca30023",
+                &found,
+                &mut said
+            ));
+        }
+        let moved = [
+            camera("avfoundation:built-in"),
+            camera("avfoundation:0x1000002ca30023"),
+        ];
+        assert!(note_missing(
+            "vs1",
+            "avfoundation:0x2000002ca30023",
+            &moved,
+            &mut said
+        ));
+        assert!(!note_missing(
+            "vs1",
+            "avfoundation:0x2000002ca30023",
+            &moved,
+            &mut said
+        ));
+    }
+
+    #[test]
+    fn a_camera_that_is_not_found_says_to_choose_it_again_when_it_is_plugged_in() {
+        // FB-156: a USB camera plugged in under another identity, as macOS
+        // gives one moved to another port, is listed but not the saved one.
+        let missing = disconnected("avfoundation:0x2000002ca30023");
+        assert!(missing.starts_with("Camera disconnected."), "{missing}");
+        assert!(
+            missing.contains("If it is connected, choose it again in Camera settings."),
+            "{missing}"
+        );
+        assert!(!missing.contains(';'), "{missing}");
+        // The list says so when the camera is chosen.
+        let found = mac_devices("[AVFoundation indev @ a] AVFoundation video devices:\n[AVFoundation indev @ a] [0] OsmoPocket4  [uid:0x1000002ca30023]\n[AVFoundation indev @ a] [1] MacBook Air Camera  [uid:6C707041-05AC-0011-0004-000000000001]\n[AVFoundation indev @ a] AVFoundation audio devices:\n[AVFoundation indev @ a] [0] OsmoPocket4  [uid:AppleUSBAudioEngine:DJI:OsmoPocket4:4,3]").unwrap();
+        let usb = found
+            .cameras
+            .iter()
+            .find(|d| d.name == "OsmoPocket4")
+            .unwrap();
+        assert!(!usb.persistent);
+        let built_in = found
+            .cameras
+            .iter()
+            .find(|d| d.name == "MacBook Air Camera")
+            .unwrap();
+        assert!(built_in.persistent);
+        // An Intel Mac's built-in camera is Apple's, and stays.
+        assert!(moves_with_its_port("0x1000002ca30023"));
+        assert!(!moves_with_its_port("0x8020000005ac8514"));
+        assert!(!moves_with_its_port("6C707041-05AC-0011-0004-000000000001"));
+        assert!(!moves_with_its_port("0x"));
+        assert!(found.sound_inputs.iter().all(|d| d.persistent));
         assert!(!disconnected("avfoundation:camera").contains("metadata"));
     }
 

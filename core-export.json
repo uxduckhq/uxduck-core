@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "874bc2ecdf836c07d58d603d5ff264f83246f5c1",
+  "sourceCommit": "e68ca00dbfa627ddb9bf1931c3de4b8f7bb092c5",
   "licenseReady": true,
   "files": [
     {
@@ -8141,17 +8141,17 @@
     },
     {
       "path": "crates/uxduck/src/app_update/mod.rs",
-      "sha256": "e11c28d5eeeba0a9ba1000b75e939821c3206612697898122937974592e1121b",
+      "sha256": "d3136c0171525a9cef8b1a79b9780c85e529b9cd538fc46d9041b59fc1ba50b1",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/app_update/sparkle.rs",
-      "sha256": "5b61d1062dcb6c3335adfe280df8f99f01334f392e11c2c9151dbda145b7e665",
+      "sha256": "229f587182d6b8b6a81dc5470224c090d7c05fa0ed6ddfeb605c84b19c17858a",
       "executable": false
     },
     {
       "path": "crates/uxduck/src/app_update/tests.rs",
-      "sha256": "2c68d5855b3f64aecd693669a4ad11e446ce7f3ae31b9d0f4f1135cfad624231",
+      "sha256": "d8fdb5a177a7e81546c8d38a2ba2bd93125763b8aa59591b178e98a1635af6e6",
       "executable": false
     },
     {
@@ -8836,7 +8836,7 @@
     },
     {
       "path": "crates/uxduck/src/update.rs",
-      "sha256": "a51e1e6875e714bb448c7b2f8958ce9b32890e6997040b2407c38350d3c54d28",
+      "sha256": "168cc31fba395112d6c21795c2a1f9224374abbb289c420dba28c8f8eb779426",
       "executable": false
     },
     {
@@ -8851,7 +8851,7 @@
     },
     {
       "path": "crates/uxduck/src/video/capture.rs",
-      "sha256": "60cbc4cb61605398286c6b3e1e7837e46b449d98d6ac7fbb036285d89f0a4003",
+      "sha256": "1beb9b13bb153716fb9a4096856caa4178c37a58d0f0a5db998096d173302bc6",
       "executable": false
     },
     {
