@@ -6695,7 +6695,8 @@ export type FeedbackLeftOut = {
 export type FeedbackMap = {
     /**
      * What it draws under the vehicles: `esri`, `esri-loading`,
-     * `esri-failed`, `no-key`, `google`, `tiles` or `none`.
+     * `esri-failed`, `no-key`, `google`, `tiles`, `custom` (a tile server
+     * the person added) or `none`.
      */
     basemap: string;
     contextLost?: boolean | null;

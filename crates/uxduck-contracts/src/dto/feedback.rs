@@ -75,7 +75,8 @@ pub struct FeedbackMap {
     /// The map's size in CSS pixels, such as `822×165`.
     pub size: String,
     /// What it draws under the vehicles: `esri`, `esri-loading`,
-    /// `esri-failed`, `no-key`, `google`, `tiles` or `none`.
+    /// `esri-failed`, `no-key`, `google`, `tiles`, `custom` (a tile server
+    /// the person added) or `none`.
     pub basemap: String,
     /// The GPU as the browser names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
