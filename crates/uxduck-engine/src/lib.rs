@@ -363,6 +363,10 @@ pub struct Engine {
     /// Each camera's definition file and the values of the settings it
     /// names (S411).
     camera_settings: camera_settings::Book,
+    /// The photos each camera described this run, by camera id: the newest
+    /// `Camera::PHOTOS_KEPT` of each. A camera carries the newest of them,
+    /// and `camera/images` reads the rest a page at a time.
+    camera_photos: BTreeMap<String, cameras::Photos>,
     /// Requests held for an approval, by approval id.
     held: BTreeMap<String, approvals::Held>,
     /// A capability allowed once, for the replay of one held request.
@@ -632,6 +636,7 @@ impl Engine {
             gimbals: gimbals::Gimbals::default(),
             camera_drives: camera_drives::Drives::default(),
             camera_settings: camera_settings::Book::default(),
+            camera_photos: BTreeMap::new(),
             held: BTreeMap::new(),
             one_shot: None,
             running_approved: false,

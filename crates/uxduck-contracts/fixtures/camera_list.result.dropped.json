@@ -1,0 +1,72 @@
+{
+  "cameras": [
+    {
+      "id": "v9b1c2d3e4f5a6b7c/100",
+      "vehicleId": "v9b1c2d3e4f5a6b7c",
+      "componentId": 100,
+      "present": true,
+      "identified": true,
+      "vendor": "UXDuck",
+      "model": "SimCamera",
+      "firmware": "1.0.0",
+      "capabilities": [
+        "capture-video",
+        "capture-image",
+        "modes",
+        "basic-zoom",
+        "basic-focus",
+        "video-stream"
+      ],
+      "flags": 455,
+      "streams": [],
+      "settings": {
+        "mode": "video",
+        "zoomPct": 20.0,
+        "focusPct": 100.0
+      },
+      "capture": {
+        "intervalS": 2.0,
+        "recording": true,
+        "recordingSinceUs": 1790668890000000,
+        "photoCount": 104464,
+        "photosLost": 1,
+        "photosNotAsked": 6,
+        "photosAwaited": 3,
+        "availableMib": 12.0,
+        "cardFull": true
+      },
+      "storage": {
+        "storageId": 1,
+        "count": 1,
+        "status": "ready",
+        "totalMib": 32000.0,
+        "usedMib": 31988.0,
+        "availableMib": 12.0,
+        "name": "SD"
+      },
+      "photos": [
+        {
+          "index": 104462,
+          "takenAtUs": 1790668880000000,
+          "place": {
+            "latitudeDeg": 47.397742,
+            "longitudeDeg": 8.545594,
+            "altitudeAmslM": 520.0,
+            "relativeAltitudeM": 32.0
+          },
+          "ok": true,
+          "file": "IMG_4463.JPG"
+        },
+        {
+          "index": 104463,
+          "takenAtUs": 1790668882000000,
+          "ok": false
+        }
+      ],
+      "photosListed": 100000,
+      "photosDropped": 4464,
+      "photosNotListed": "4,464 older photos are not listed here, because UXDuck keeps at most 100,000 photos from one camera, whose list is its own to send. The photos themselves stay on the camera's card.",
+      "version": 9
+    }
+  ]
+}

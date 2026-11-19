@@ -4,10 +4,14 @@
 //! one its autopilot speaks for. One that is gone is kept and marked so.
 //! Each of its video streams is joined to the video source it arrives as.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 
 use serde_json::Value;
-use uxduck_contracts::dto::camera::{Camera as CameraDto, CameraCommandParams, CameraListResult};
+use uxduck_contracts::dto::camera::{
+    Camera as CameraDto, CameraCommandParams, CameraImagesParams, CameraImagesResult,
+    CameraListResult,
+};
 use uxduck_contracts::dto::command::{Command as CommandDto, CommandSendParams};
 use uxduck_contracts::dto::state::{ChangeOp, EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -26,6 +30,67 @@ use uxduck_mavlink::camera_control as control;
 use crate::rpc::handlers::to_value;
 use crate::vehicles::data_plane;
 use crate::{Engine, upsert};
+
+/// How many photos one answer of `camera/images` carries when no number
+/// is asked for, and the most it carries. They size an answer and cut
+/// nothing: each answer says how many photos come before its first, and
+/// the next call reads on from there. What bounds the list itself is
+/// [`Camera::PHOTOS_KEPT`].
+const PHOTOS_PAGE: usize = 50;
+const PHOTOS_PAGE_MOST: usize = 500;
+
+/// One camera's photos by their index in the camera's own list: the newest
+/// [`Camera::PHOTOS_KEPT`] it described. They are a map, so that keeping
+/// one costs the same wherever its index falls. A camera sets the order it
+/// describes its photos in, and one that sends its indexes downward has
+/// each placed before all the others: no kept photo is moved to make room
+/// for it, on the engine's thread.
+#[derive(Debug, Default)]
+pub(crate) struct Photos {
+    kept: BTreeMap<u32, CameraPhoto>,
+    /// The lowest index dropped so far, to count each dropped photo once.
+    dropped_from: Option<u32>,
+}
+
+impl Photos {
+    /// Keeps a photo by its index, in place of one already kept with it,
+    /// and drops the photo with the lowest index when that makes more
+    /// than [`Camera::PHOTOS_KEPT`]. Whether one was dropped that was not
+    /// counted as dropped before.
+    fn place(&mut self, photo: CameraPhoto) -> bool {
+        let index = photo.index;
+        self.kept.insert(index, photo);
+        if self.kept.len() <= Camera::PHOTOS_KEPT {
+            return false;
+        }
+        let Some((gone, _)) = self.kept.pop_first() else {
+            return false;
+        };
+        // Nothing of a dropped photo is kept to know it by. One described
+        // below the whole list, at or above the lowest index dropped so
+        // far, is taken as a dropped photo told again and is not counted
+        // twice. One below that index was not dropped before.
+        let again = gone == index && self.dropped_from.is_some_and(|from| gone >= from);
+        self.dropped_from = Some(self.dropped_from.map_or(gone, |from| from.min(gone)));
+        !again
+    }
+
+    /// The newest [`Camera::PHOTOS_SENT`] of them, oldest first. Taken
+    /// from the end and turned round: an iterator told to give the last
+    /// few in order walks every photo before them to find where they
+    /// start, at each photo a camera describes.
+    fn newest(&self) -> Vec<CameraPhoto> {
+        let mut newest: Vec<CameraPhoto> = self
+            .kept
+            .values()
+            .rev()
+            .take(Camera::PHOTOS_SENT)
+            .cloned()
+            .collect();
+        newest.reverse();
+        newest
+    }
+}
 
 fn information(said: seen::Information) -> CameraInformation {
     CameraInformation {
@@ -84,7 +149,10 @@ impl Engine {
             capture: before.and_then(|b| b.capture),
             storage: before.and_then(|b| b.storage.clone()),
             photos: before.map(|b| b.photos.clone()).unwrap_or_default(),
+            photos_listed: before.map_or(0, |b| b.photos_listed),
+            photos_dropped: before.map_or(0, |b| b.photos_dropped),
             sources: Vec::new(),
+            recording_not_asked: before.and_then(|b| b.recording_not_asked.clone()),
             version: before.map_or(0, |b| b.version),
         };
         // The sensors it has said it has, with those it said before
@@ -112,8 +180,10 @@ impl Engine {
 
     /// Nothing is heard until the data plane reports again: every camera
     /// starts a daemon run gone, as every vehicle starts it offline, and
-    /// with nothing said yet of its settings, its card or its photos.
+    /// with nothing said yet of its settings, its card or its photos. A
+    /// daemon that starts has asked no camera to record yet.
     pub(crate) fn cameras_unheard(&mut self) {
+        self.camera_photos.clear();
         let heard: Vec<Camera> = self
             .state
             .cameras
@@ -124,15 +194,21 @@ impl Engine {
                     || camera.capture.is_some()
                     || camera.storage.is_some()
                     || !camera.photos.is_empty()
+                    || camera.photos_listed > 0
+                    || camera.photos_dropped > 0
+                    || camera.recording_not_asked.is_some()
             })
             .cloned()
             .collect();
         for mut camera in heard {
             camera.present = false;
+            camera.recording_not_asked = None;
             camera.settings = None;
             camera.capture = None;
             camera.storage = None;
             camera.photos.clear();
+            camera.photos_listed = 0;
+            camera.photos_dropped = 0;
             camera.version += 1;
             self.commit_as(data_plane(), Change::CameraUpserted { camera });
         }
@@ -187,6 +263,8 @@ impl Engine {
             recording_since_us: capture.recording_since_us,
             photo_count: capture.image_count,
             photos_lost: capture.images_lost,
+            photos_not_asked: capture.images_not_asked,
+            photos_awaited: capture.images_awaited,
             available_mib: capture.available_mib,
         });
         let shorter = matches!(
@@ -195,17 +273,26 @@ impl Engine {
         );
         if shorter {
             camera.photos.clear();
+            camera.photos_listed = 0;
+            camera.photos_dropped = 0;
         }
         if camera == *before {
             return;
+        }
+        if shorter {
+            self.camera_photos.remove(&camera.id);
         }
         camera.version += 1;
         self.commit_as(data_plane(), Change::CameraUpserted { camera });
     }
 
-    /// A photo a camera said it took (S405), kept with where it was taken:
-    /// the latest [`Camera::PHOTOS_KEPT`] of them, in the order of the
-    /// camera's own list.
+    /// A photo a camera said it took (S405), kept with where it was taken,
+    /// in the order of the camera's own list. The newest
+    /// [`Camera::PHOTOS_KEPT`] are kept, for as long as this run lasts or
+    /// until a format empties the list, and the camera says how many
+    /// older ones are not. The newest [`Camera::PHOTOS_SENT`] go with the
+    /// camera, with how many there are, and `camera/images` reads the
+    /// rest.
     pub fn camera_image(
         &mut self,
         vehicle_id: &str,
@@ -239,16 +326,13 @@ impl Engine {
             ok: image.ok,
             file: image.file_url,
         };
-        match camera
-            .photos
-            .binary_search_by_key(&photo.index, |kept| kept.index)
-        {
-            Ok(at) => camera.photos[at] = photo,
-            Err(at) => camera.photos.insert(at, photo),
+        let all = self.camera_photos.entry(camera.id.clone()).or_default();
+        if all.place(photo) {
+            camera.photos_dropped = camera.photos_dropped.saturating_add(1);
         }
-        let over = camera.photos.len().saturating_sub(Camera::PHOTOS_KEPT);
-        camera.photos.drain(..over);
-        if camera == *before {
+        camera.photos = all.newest();
+        camera.photos_listed = u32::try_from(all.kept.len()).unwrap_or(u32::MAX);
+        if self.state.cameras.get(&camera.id) == Some(&camera) {
             return;
         }
         camera.version += 1;
@@ -488,6 +572,9 @@ impl Engine {
     /// nothing that takes images or records is not told to (V20), until
     /// someone says so by hand.
     pub(crate) fn cameras_after(&mut self, change: &Change) {
+        if let Change::CameraRemoved { id } = change {
+            self.camera_photos.remove(id);
+        }
         if self.state.cameras.is_empty() {
             return;
         }
@@ -607,6 +694,61 @@ pub(crate) fn list(engine: &Engine, granted: &[Capability]) -> Result<Value, Api
     })
 }
 
+/// `camera/images`, for anyone who may read: the page of a camera's photos
+/// before the place named, or the newest.
+pub(crate) fn photos(
+    engine: &Engine,
+    params: &CameraImagesParams,
+    granted: &[Capability],
+) -> Result<Value, ApiError> {
+    if !granted.contains(&Capability::Read) {
+        return Err(ApiError::new(
+            ErrorKind::CapabilityDenied,
+            Capability::Read.denied_message(),
+        ));
+    }
+    let Some(camera) = engine.state.cameras.get(&params.camera_id) else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no camera {}", params.camera_id),
+        ));
+    };
+    let kept = engine
+        .camera_photos
+        .get(&camera.id)
+        .map(|photos| &photos.kept);
+    let limit = params.limit.map_or(PHOTOS_PAGE, |limit| {
+        usize::try_from(limit).map_or(PHOTOS_PAGE_MOST, |limit| limit.min(PHOTOS_PAGE_MOST))
+    });
+    let mut page: Vec<&CameraPhoto> = kept.map_or_else(Vec::new, |kept| {
+        let before = params.before.map_or(Bound::Unbounded, Bound::Excluded);
+        kept.range((Bound::Unbounded, before))
+            .rev()
+            .take(limit)
+            .map(|(_, photo)| photo)
+            .collect()
+    });
+    page.reverse();
+    // How many come before the page, counted by walking them: at most
+    // the photos kept of one camera, for a read someone asked for.
+    let earlier = match (
+        kept,
+        page.first().map(|photo| photo.index).or(params.before),
+    ) {
+        (Some(kept), Some(from)) => kept.range(..from).count(),
+        (Some(kept), None) => kept.len(),
+        (None, _) => 0,
+    };
+    to_value(&CameraImagesResult {
+        camera_id: camera.id.clone(),
+        photos: page.into_iter().map(Into::into).collect(),
+        total: u32::try_from(kept.map_or(0, BTreeMap::len)).unwrap_or(u32::MAX),
+        earlier: u32::try_from(earlier).unwrap_or(u32::MAX),
+        dropped: camera.photos_dropped,
+        not_listed: camera.photos_not_listed(),
+    })
+}
+
 /// The wire form of a camera change.
 pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
     match change {
@@ -619,5 +761,57 @@ pub(crate) fn entity_changes(change: &Change) -> Vec<EntityChange> {
             ..upsert(EntityType::Camera, id)
         }],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where each kept photo is in memory, by its index.
+    fn places(photos: &Photos) -> BTreeMap<u32, usize> {
+        photos
+            .kept
+            .iter()
+            .map(|(index, photo)| (*index, std::ptr::from_ref(photo).addr()))
+            .collect()
+    }
+
+    // A camera that sends its indexes downward has each photo placed
+    // before all the others. Keeping one must not move the rest to make
+    // room, or each photo costs more the longer the list is, on the
+    // engine's thread. Held by how many kept photos are somewhere else in
+    // memory after one more is kept, and not by a clock.
+    #[test]
+    fn a_photo_placed_before_all_the_others_moves_no_more_of_them_as_the_list_grows() {
+        let mut photos = Photos::default();
+        for index in (0..20_000_u32).rev() {
+            let before = index.is_multiple_of(500).then(|| places(&photos));
+            photos.place(CameraPhoto {
+                index,
+                taken_at_us: 0,
+                place: None,
+                ok: true,
+                file: String::new(),
+            });
+            let Some(before) = before else {
+                continue;
+            };
+            let after = places(&photos);
+            let moved = before
+                .iter()
+                .filter(|(index, at)| after[*index] != **at)
+                .count();
+            // A map by index moves the photos of the nodes it touches: a
+            // dozen at most in each of a few levels.
+            assert!(
+                moved <= 100,
+                "{moved} of {} kept photos moved for one more",
+                before.len()
+            );
+        }
+        assert_eq!(places(&photos).len(), 20_000);
+        let newest: Vec<u32> = photos.newest().iter().map(|photo| photo.index).collect();
+        assert_eq!(newest, (19_980..20_000).collect::<Vec<_>>());
     }
 }

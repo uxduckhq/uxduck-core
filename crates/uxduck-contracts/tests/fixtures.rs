@@ -257,6 +257,9 @@ fn check(name: &str) {
         ("result", "camera_list") => {
             round_trip::<uxduck_contracts::dto::camera::CameraListResult>(name, &json);
         }
+        ("result", "camera_images") => {
+            round_trip::<uxduck_contracts::dto::camera::CameraImagesResult>(name, &json);
+        }
         ("result", "camera_settings" | "camera_definition_fetch") => {
             round_trip::<uxduck_contracts::dto::camera::CameraSettingsResult>(name, &json);
         }

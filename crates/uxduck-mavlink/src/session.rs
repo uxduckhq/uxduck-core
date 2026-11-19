@@ -1838,6 +1838,7 @@ impl Session {
                 component_id: key.3,
                 device_id: listed.device_id,
                 device_component_id: listed.device_component_id,
+                device_silent_since_us: listed.device_silent_since_us,
                 // A gimbal of a vehicle that is not heard is gone with it.
                 present: listed.heard && vehicle.observation.presence != Presence::Offline,
                 cap_flags: listed.cap_flags,
@@ -2865,9 +2866,10 @@ impl Session {
 
         let (config, gcs) = (self.config, self.config.gcs_system_id);
         let (vehicles, paused) = (&self.vehicles, &self.paused);
-        let due = self
-            .cameras
-            .control_requests(now_us, |(link, peer, system, _)| {
+        let due = self.cameras.control_requests(
+            now_us,
+            config.stale_after_us,
+            |(link, peer, system, _)| {
                 !paused.contains(link)
                     && vehicles
                         .get(&(link.clone(), peer.clone(), *system))
@@ -2875,7 +2877,8 @@ impl Session {
                             presence_at(config, vehicle.observation.last_heartbeat_us, now_us)
                                 == Presence::Online
                         })
-            });
+            },
+        );
         due.into_iter()
             .map(|((link_id, peer, system, component), send)| {
                 let sequence = self.next_sequence();
@@ -3263,10 +3266,15 @@ impl Session {
             });
         effects.extend(self.ask_cameras(now_us));
         let paused = &self.paused;
-        self.gimbals
-            .silent(now_us, config.offline_after_us, |link| {
-                paused.contains(link)
-            });
+        // A gimbal device counts as quiet at the heartbeat age at which a
+        // vehicle counts as stale, and as gone at the age at which one
+        // counts as offline.
+        self.gimbals.silent(
+            now_us,
+            config.stale_after_us,
+            config.offline_after_us,
+            |link| paused.contains(link),
+        );
         effects.extend(self.ask_gimbals(now_us));
         effects.extend(self.gimbal_stops_due(now_us));
         let mut sends = Vec::new();

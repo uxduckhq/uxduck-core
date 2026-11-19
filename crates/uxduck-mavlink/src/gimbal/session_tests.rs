@@ -208,6 +208,50 @@ fn a_gimbal_that_manages_itself_is_found_with_no_one_holding_it() {
 }
 
 #[test]
+fn a_gimbal_that_stops_talking_beside_its_autopilot_is_told_with_when_it_was_last_heard() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.gimbal().device_silent_since_us, None);
+    let silent = |rig: &mut Rig, gimbal_silent: bool| {
+        let payload = rig.vehicle.payload.as_mut().expect("a payload");
+        let faults = crate::payload::Faults {
+            gimbal_silent,
+            ..payload.faults()
+        };
+        payload.set_faults(faults);
+    };
+    silent(&mut rig, true);
+    let stopped_us = rig.now_us;
+    // Its autopilot's heartbeats go on. A vehicle counts as stale three
+    // seconds after its last, and so does the gimbal.
+    for _ in 0..5 {
+        rig.second();
+    }
+    let seen = rig.gimbal().clone();
+    let since = seen.device_silent_since_us.expect("said to be silent");
+    assert!(
+        since <= stopped_us && stopped_us - since < 2 * SECOND,
+        "its last heartbeat, {since}, was before it stopped at {stopped_us}"
+    );
+    assert!(seen.present, "not gone yet");
+    // It manages itself, so it is gone at the age a vehicle is offline,
+    // and when it was last heard is still told.
+    for _ in 0..15 {
+        rig.second();
+    }
+    let seen = rig.gimbal().clone();
+    assert!(!seen.present);
+    assert_eq!(seen.device_silent_since_us, Some(since));
+    // Back, and nothing is said of a silence.
+    silent(&mut rig, false);
+    for _ in 0..3 {
+        rig.second();
+    }
+    let seen = rig.gimbal().clone();
+    assert!(seen.present);
+    assert_eq!(seen.device_silent_since_us, None);
+}
+
+#[test]
 fn control_is_taken_the_gimbal_pointed_and_control_given_back() {
     let mut rig = Rig::new();
     // The simulated manager moves only for whoever is in control.

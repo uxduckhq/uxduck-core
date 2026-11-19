@@ -161,6 +161,14 @@ pub struct Gimbal {
     /// heard: a camera's `gimbalDeviceId` names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_component_id: Option<u8>,
+    /// When the gimbal device itself was last heard, in microseconds since
+    /// the Unix epoch, while its heartbeats have stopped and its
+    /// autopilot's go on. An autopilot still answers for such a gimbal, so
+    /// a command may be accepted and move nothing. Absent while the device
+    /// is heard, and for one that never was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    pub device_silent_since_us: Option<u64>,
     /// Whether its manager's heartbeats are heard now. A gimbal that is
     /// gone is kept, and asked again when it returns.
     pub present: bool,

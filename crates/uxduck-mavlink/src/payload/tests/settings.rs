@@ -220,6 +220,28 @@ fn its_settings_are_listed_read_and_written_as_extended_parameters() {
 // Camera definition file, "Exclusion Rules" and "Required Option Updates":
 // what a mode rules out the camera refuses, and automatic exposure sets
 // the ISO and the shutter speed itself.
+// The seam for a camera whose list is longer than a ground station keeps:
+// settings beyond its own, each a number that stays 0.
+#[test]
+fn a_camera_can_be_made_to_list_more_settings_than_its_file_names() {
+    let mut payload = camera();
+    payload.camera.as_mut().unwrap().more_settings = 1030;
+    // A long list comes a few at a time, as a camera paces one.
+    let mut frames = ask(&mut payload, &Out::List);
+    assert_eq!(values(&frames).len(), 32);
+    frames.extend(run(&mut payload, 0, 1000));
+    let listed = values(&frames);
+    assert_eq!(listed.len(), NAMES.len() + 1030);
+    assert!(listed.iter().all(|(_, _, _, count)| *count == 1039));
+    assert!(values(&run(&mut payload, 1000, 2000)).is_empty());
+    assert_eq!(listed[8].0, "CAM_SHUTTERCNT");
+    assert_eq!(listed[9], ("X9".to_owned(), Value::Uint8(0), 9, 1039));
+    assert_eq!(listed[1038].0, "X1038");
+    let by_index = values(&ask(&mut payload, &Out::ReadIndex(1038)));
+    assert_eq!(by_index[0].0, "X1038");
+    assert!(ask(&mut payload, &Out::ReadIndex(1039)).is_empty());
+}
+
 #[test]
 fn a_setting_its_exposure_mode_rules_out_is_refused() {
     let mut payload = camera();

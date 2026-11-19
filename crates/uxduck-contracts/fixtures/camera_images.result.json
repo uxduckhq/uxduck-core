@@ -1,0 +1,24 @@
+{
+  "cameraId": "v9b1c2d3e4f5a6b7c/100",
+  "photos": [
+    {
+      "index": 23,
+      "takenAtUs": 1790668880000000,
+      "place": {
+        "latitudeDeg": 47.397742,
+        "longitudeDeg": 8.545594,
+        "altitudeAmslM": 520.0,
+        "relativeAltitudeM": 32.0
+      },
+      "ok": true,
+      "file": "IMG_0024.JPG"
+    },
+    {
+      "index": 24,
+      "takenAtUs": 1790668882000000,
+      "ok": false
+    }
+  ],
+  "total": 45,
+  "earlier": 23
+}

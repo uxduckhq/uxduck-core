@@ -25,7 +25,7 @@ mod tests;
 
 use mavio::dialects::ardupilotmega::Ardupilotmega;
 
-pub use camera::{Camera, View};
+pub use camera::{Camera, PhotosSaid, View};
 pub use faults::Faults;
 pub use gimbal::Gimbal;
 pub use link::{Defined, Heard, OnLink};

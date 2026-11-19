@@ -287,6 +287,8 @@ impl From<&core::Camera> for dto::Camera {
                 recording_since_us: capture.recording_since_us,
                 photo_count: capture.photo_count,
                 photos_lost: capture.photos_lost,
+                photos_not_asked: capture.photos_not_asked,
+                photos_awaited: capture.photos_awaited,
                 available_mib: v.available_mib().map(widen),
                 card_full: v.card_full(),
             }),
@@ -307,7 +309,11 @@ impl From<&core::Camera> for dto::Camera {
                 name: words(&storage.name),
             }),
             photos: v.photos.iter().map(Into::into).collect(),
+            photos_listed: v.photos_listed,
+            photos_dropped: v.photos_dropped,
+            photos_not_listed: v.photos_not_listed(),
             sources: v.sources.iter().copied().map(Into::into).collect(),
+            recording_not_asked: v.recording_not_asked.clone(),
             version: v.version,
         }
     }
@@ -330,7 +336,10 @@ mod tests {
             capture: None,
             storage: None,
             photos: Vec::new(),
+            photos_listed: 0,
+            photos_dropped: 0,
             sources: Vec::new(),
+            recording_not_asked: None,
             version: 1,
         }
     }

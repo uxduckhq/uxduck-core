@@ -1024,6 +1024,21 @@ pub enum DevCommand {
         /// definition file would be.
         #[arg(long, requires = "camera")]
         camera_definition_file: Option<PathBuf>,
+        /// Its camera lists this many settings beyond the ones its
+        /// definition file names, each named `X` and its place in the
+        /// list: for a camera whose list is longer than UXDuck keeps.
+        #[arg(long, value_name = "COUNT", requires = "camera")]
+        camera_more_settings: Option<u16>,
+        /// When its camera describes a photo it took: `when-asked` for
+        /// one that only counts a photo until it is asked for it, or
+        /// `never` for one that answers no such request either.
+        #[arg(
+            long,
+            value_name = "WHEN",
+            value_parser = ["when-asked", "never"],
+            requires = "camera"
+        )]
+        camera_photos_said: Option<String>,
         /// A gimbal on component 154 that manages itself.
         #[arg(long)]
         gimbal: bool,
@@ -1560,6 +1575,8 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
             payload_fault,
             camera_definition,
             camera_definition_file,
+            camera_more_settings,
+            camera_photos_said,
             gimbal,
             gimbal_held_by,
             autopilot_camera,
@@ -1616,6 +1633,12 @@ async fn dev(command: DevCommand) -> Result<(), CliError> {
                             })
                         })
                         .transpose()?,
+                },
+                camera_more_settings: camera_more_settings.unwrap_or(0),
+                camera_photos_said: match camera_photos_said.as_deref() {
+                    Some("when-asked") => uxduck_mavlink::payload::PhotosSaid::WhenAsked,
+                    Some("never") => uxduck_mavlink::payload::PhotosSaid::Never,
+                    _ => uxduck_mavlink::payload::PhotosSaid::AsTaken,
                 },
                 gimbal,
                 gimbal_held_by: gimbal_held_by
@@ -3519,6 +3542,10 @@ struct FakeOptions {
     ),
     /// What its camera says of its definition file, when not its own.
     camera_defined: uxduck_mavlink::payload::Defined,
+    /// How many settings its camera lists beyond its own.
+    camera_more_settings: u16,
+    /// When its camera describes a photo it took.
+    camera_photos_said: uxduck_mavlink::payload::PhotosSaid,
     gimbal: bool,
     /// The system and component its gimbal starts in the control of.
     gimbal_held_by: Option<(u8, u8)>,
@@ -3662,6 +3689,8 @@ async fn fake_vehicle(
         camera_card_left_mib,
         payload: (profile, faults),
         camera_defined,
+        camera_more_settings,
+        camera_photos_said,
         gimbal,
         gimbal_held_by,
         autopilot_camera,
@@ -3722,6 +3751,8 @@ async fn fake_vehicle(
                     camera.leave_room(mib);
                 }
                 camera_defined.apply(camera);
+                camera.more_settings = camera_more_settings;
+                camera.photos_said = camera_photos_said;
             }
         }
         if gimbal && !unit {

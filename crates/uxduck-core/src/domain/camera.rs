@@ -624,10 +624,18 @@ pub struct CameraCapture {
     /// The photos in its list, which a format empties.
     #[serde(default)]
     pub photo_count: u32,
-    /// Photos it counted and did not describe, asked for again without
-    /// an answer.
+    /// Photos it counted and did not describe, each asked for three
+    /// times without an answer.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub photos_lost: u32,
+    /// Photos it counted that UXDuck did not ask for, because the camera
+    /// had described none of the photos it was last asked for.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_not_asked: u32,
+    /// Photos it counts and has not described yet, which UXDuck is asking
+    /// for a few at a time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_awaited: u32,
     /// Room left on its card, in mebibytes, in coarse steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_mib: Option<f32>,
@@ -750,23 +758,79 @@ pub struct Camera {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<CameraStorage>,
     /// The photos it said it took while UXDuck listened, oldest first:
-    /// the last [`Camera::PHOTOS_KEPT`] of them.
+    /// the newest [`Camera::PHOTOS_SENT`] of them. The engine keeps the
+    /// newest [`Camera::PHOTOS_KEPT`], and `photos_listed` says how many
+    /// it has.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub photos: Vec<CameraPhoto>,
+    /// How many photos the engine keeps of it: the ones it described
+    /// while UXDuck listened, since its list was last emptied, and at
+    /// most the newest [`Camera::PHOTOS_KEPT`]. `photos` holds the newest
+    /// of them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_listed: u32,
+    /// How many older photos it described that are not kept, since the
+    /// list was last emptied: the ones past [`Camera::PHOTOS_KEPT`]. Each
+    /// is counted once.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_dropped: u32,
     /// The sensors it has said it has, in what it can do and in its
     /// streams, since UXDuck first heard it (ADR-0063 Y5). A camera with
     /// one stream shows one at a time, so what it showed before is kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<CameraSource>,
+    /// The receipt of UXDuck's own Start recording that was not sent to
+    /// this camera, because it is in a mode it says it does not record in
+    /// ([`Camera::cannot_record_in_its_mode`]). There for as long as UXDuck
+    /// means the vehicle's camera to record along with its own recording
+    /// (S145), so the Camera tab can say so. UXDuck does not switch the
+    /// mode for the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_not_asked: Option<String>,
     pub version: u64,
 }
 
 impl Camera {
-    /// How many of a camera's photos are kept in its list. A camera says
-    /// of each photo it takes on its MAVLink stream, as many as it likes,
-    /// and the whole list goes to every window with the camera each time
-    /// it changes, so the list is a ring of the newest.
-    pub const PHOTOS_KEPT: usize = 20;
+    /// How many of a camera's photos go with it: the newest. A camera
+    /// goes whole to every window each time it changes, which is at every
+    /// photo it takes, so its list goes a page at a time. It sizes a page
+    /// and drops nothing: `photos_listed` says how many photos the engine
+    /// has, and `camera/images` reads the pages before this one.
+    pub const PHOTOS_SENT: usize = 20;
+
+    /// The most photos UXDuck keeps of one camera: a ring in memory. A
+    /// camera says on its MAVLink stream how many photos it took and
+    /// describes as many as it likes, each one kept is held for as long
+    /// as the daemon runs, and nothing else bounds them, so a faulty or
+    /// hostile camera could otherwise grow the daemon without end. A
+    /// photo kept measures 185 bytes with a file name as cameras write
+    /// them and 363 with the longest MAVLink carries, 205 bytes, so a
+    /// full ring is 18.5 MB and never more than 36.3 MB. A camera that
+    /// takes a photo every second fills it in 28 hours of taking them,
+    /// several times what the longest flight makes. Past it the photo
+    /// with the lowest index is dropped, `photos_dropped` counts those,
+    /// and [`Camera::photos_not_listed`] says so wherever the list is
+    /// read. The photos stay on the camera's card.
+    pub const PHOTOS_KEPT: usize = 100_000;
+
+    /// What a person is told when older photos are not in the list: how
+    /// many, why, and that they are still on the camera's card. None
+    /// while every photo the camera described is listed.
+    #[must_use]
+    pub fn photos_not_listed(&self) -> Option<String> {
+        let (photos, stay) = match self.photos_dropped {
+            0 => return None,
+            1 => ("1 older photo is".to_owned(), "The photo itself stays"),
+            dropped => (
+                format!("{} older photos are", grouped(u64::from(dropped))),
+                "The photos themselves stay",
+            ),
+        };
+        Some(format!(
+            "{photos} not listed here, because UXDuck keeps at most {} photos from one camera, whose list is its own to send. {stay} on the camera's card.",
+            grouped(Self::PHOTOS_KEPT as u64)
+        ))
+    }
 
     /// Room left on its card, from what it last said of its captures or
     /// of the card.
@@ -782,6 +846,24 @@ impl Camera {
     pub fn card_full(&self) -> bool {
         self.available_mib()
             .is_some_and(|left| left < CARD_FULL_BELOW_MIB)
+    }
+
+    /// Whether it says it cannot record in the mode it is in: it has
+    /// modes, has said it is in one that is not video, and does not say it
+    /// records there too. Such a camera answers Start recording with a
+    /// refusal. One that has not said its mode, or what it can do, may
+    /// record.
+    #[must_use]
+    pub fn cannot_record_in_its_mode(&self) -> bool {
+        let Some(information) = &self.information else {
+            return false;
+        };
+        let can = CameraCapability::of(information.flags);
+        self.settings
+            .and_then(|settings| settings.mode)
+            .is_some_and(|mode| mode != CameraMode::Video)
+            && can.contains(&CameraCapability::Modes)
+            && !can.contains(&CameraCapability::VideoInImageMode)
     }
 
     /// Whether it says it can do what an action needs. A camera that has
@@ -906,9 +988,59 @@ impl Camera {
     }
 }
 
+/// A whole number with its thousands apart, as it is said to a person:
+/// "1,039". For the sentences that say how much UXDuck kept of what a
+/// camera sent.
+#[must_use]
+pub fn grouped(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photos_not_listed_are_said_with_their_number_and_where_they_still_are() {
+        let mut camera = camera(0);
+        assert_eq!(camera.photos_not_listed(), None);
+        camera.photos_dropped = 1;
+        assert_eq!(
+            camera.photos_not_listed().as_deref(),
+            Some(
+                "1 older photo is not listed here, because UXDuck keeps at most 100,000 photos from one camera, whose list is its own to send. The photo itself stays on the camera's card."
+            )
+        );
+        camera.photos_dropped = 12_345;
+        assert_eq!(
+            camera.photos_not_listed().as_deref(),
+            Some(
+                "12,345 older photos are not listed here, because UXDuck keeps at most 100,000 photos from one camera, whose list is its own to send. The photos themselves stay on the camera's card."
+            )
+        );
+    }
+
+    #[test]
+    fn a_number_is_said_with_its_thousands_apart() {
+        for (count, said) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (1_039, "1,039"),
+            (100_000, "100,000"),
+            (4_294_967_295, "4,294,967,295"),
+        ] {
+            assert_eq!(grouped(count), said);
+        }
+    }
 
     fn information(flags: u32) -> CameraInformation {
         CameraInformation {
@@ -1003,7 +1135,10 @@ mod tests {
             capture: None,
             storage: None,
             photos: Vec::new(),
+            photos_listed: 0,
+            photos_dropped: 0,
             sources: Vec::new(),
+            recording_not_asked: None,
             version: 1,
         }
     }

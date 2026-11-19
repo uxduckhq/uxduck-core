@@ -216,6 +216,13 @@ pub(crate) struct Source {
     pub(crate) watch: crate::camera_tracking::Watch,
 }
 
+impl Source {
+    /// Whether its own heartbeat came no longer than `within_us` ago.
+    pub(crate) fn heard_within(&self, now_us: u64, within_us: u64) -> bool {
+        now_us.saturating_sub(self.heartbeat_us) <= within_us
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Cameras {
     /// Camera components, asked for their streams from their first

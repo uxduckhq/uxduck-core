@@ -235,6 +235,8 @@ pub const AGENT_METHODS: &[&str] = &[
     // (S405) is a command to its vehicle: it needs control, as
     // command/send does.
     "camera/command",
+    // The photos a camera said it took, a page at a time, freely.
+    "camera/images",
     // A camera's own settings, from its definition file (S411), freely.
     // Setting one is a camera/command.
     "camera/settings",
@@ -617,6 +619,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "marker/remove",
     "camera/list",
     "camera/command",
+    "camera/images",
     "camera/settings",
     "gimbal/list",
     "gimbal/command",

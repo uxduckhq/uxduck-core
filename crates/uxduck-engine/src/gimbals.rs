@@ -121,6 +121,7 @@ impl Engine {
             component_id: observed.component_id,
             device_id: observed.device_id,
             device_component_id: observed.device_component_id,
+            device_silent_since_us: observed.device_silent_since_us,
             present: observed.present,
             capabilities: observed.cap_flags,
             limits: observed.limits,
@@ -156,7 +157,9 @@ impl Engine {
     }
 
     /// Nothing is heard until the data plane reports again: every gimbal
-    /// starts a daemon run gone, with nothing said yet of who has it.
+    /// starts a daemon run gone, with nothing said yet of who has it. A
+    /// device's silence is what one run measured, so the next starts
+    /// without it.
     pub(crate) fn gimbals_unheard(&mut self) {
         let heard: Vec<Gimbal> = self
             .state
@@ -164,6 +167,7 @@ impl Engine {
             .values()
             .filter(|gimbal| {
                 gimbal.present
+                    || gimbal.device_silent_since_us.is_some()
                     || gimbal.holder != GimbalHolder::Unknown
                     || gimbal.primary.is_some()
                     || gimbal.secondary.is_some()
@@ -172,6 +176,7 @@ impl Engine {
             .collect();
         for mut gimbal in heard {
             gimbal.present = false;
+            gimbal.device_silent_since_us = None;
             gimbal.holder = GimbalHolder::Unknown;
             gimbal.primary = None;
             gimbal.secondary = None;

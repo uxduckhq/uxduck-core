@@ -139,6 +139,9 @@ pub enum Why {
     NoWindow,
     NoEncoder,
     Hidden,
+    /// The window that would draw it already draws as many cameras as one
+    /// message to it names ([`wire::MOST_DRAWN`]).
+    Full,
 }
 
 impl Why {
@@ -154,6 +157,9 @@ impl Why {
             }
             Self::Hidden => {
                 "The browser tab that draws this simulated camera's picture is hidden. Show it, or open UXDuck Desktop, which draws in the background."
+            }
+            Self::Full => {
+                "The UXDuck window that draws simulated cameras already draws 255 pictures, the most one window is told of. Stop a simulation that carries a camera to see this one's picture."
             }
         }
     }
@@ -390,6 +396,8 @@ impl Pictures {
         let mut guard = self.lock();
         let inner = &mut *guard;
         let mut silent = Vec::new();
+        // How many cameras each window is given so far in this review.
+        let mut given: BTreeMap<u64, usize> = BTreeMap::new();
         for (port, camera) in &mut inner.cameras {
             if !wanted(*port) {
                 camera.wanted_since = None;
@@ -399,7 +407,17 @@ impl Pictures {
                 continue;
             }
             let wanted_since = *camera.wanted_since.get_or_insert(now);
-            match choose(camera.drawer, &inner.windows) {
+            // One message names so many cameras and no more, so a window is
+            // given no more to draw, and the rest say why.
+            let chosen = choose(camera.drawer, &inner.windows).and_then(|window| {
+                let count = given.entry(window).or_insert(0);
+                if *count >= wire::MOST_DRAWN {
+                    return Err(Why::Full);
+                }
+                *count += 1;
+                Ok(window)
+            });
+            match chosen {
                 Ok(window) => {
                     if camera.drawer != Some(window) {
                         camera.drawer = Some(window);
@@ -570,6 +588,35 @@ mod tests {
 
     fn said(from: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
         std::iter::from_fn(|| from.try_recv().ok()).collect()
+    }
+
+    // One message names at most 255 cameras, its count being a byte. A
+    // window is given no more to draw than it can be told of, and a camera
+    // past that says why nobody draws it.
+    #[test]
+    fn a_window_is_given_no_more_cameras_than_one_message_names() {
+        let pictures = Pictures::default();
+        for port in 20_000..20_256 {
+            pictures.carry(port);
+        }
+        let (window, mut to_window) = pictures.join();
+        pictures.able(window, DESKTOP);
+        let start = Instant::now();
+        assert!(pictures.review_at(start, |_| true).is_empty());
+        let named: Vec<u16> = (20_000..20_255).collect();
+        assert_eq!(said(&mut to_window)[0], wire::draws(&named));
+        // The camera it was not told of is nobody's, and says so once it
+        // has waited as long as any camera without a window.
+        let silent = pictures.review_at(start + SETTLE_FOR, |_| true);
+        let ports: Vec<u16> = silent.iter().map(|(port, _)| *port).collect();
+        assert_eq!(ports, [20_255]);
+        assert_eq!(silent[0].1, Why::Full);
+        assert!(Why::Full.says().contains(&wire::MOST_DRAWN.to_string()));
+        // One of the 255 stops: the last camera takes its place.
+        pictures.leave(20_000, 1);
+        assert!(pictures.review_at(start + SETTLE_FOR, |_| true).is_empty());
+        let named: Vec<u16> = (20_001..20_256).collect();
+        assert_eq!(said(&mut to_window)[0], wire::draws(&named));
     }
 
     // ADR-0063 Y7: drawn by one window, only while watched or recorded.

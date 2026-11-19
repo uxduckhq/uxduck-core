@@ -96,18 +96,27 @@ A camera that speaks the MAVLink camera protocol has its own controls in the Cam
 - **Photo to card**, and photos at an interval: give the seconds between them, press **Start interval**, and later **Stop interval**.
 - **Record to card** and **Stop card recording**, with the camera's own count of the recording.
 - **Zoom** and **Focus**, a step at a time, and **Autofocus**.
-- The card: how many photos it holds and the room left on it. Open it to see the photos the camera took while UXDuck listened, each with where it was taken, and to **Reset settings** or hold **Format card**. Formatting erases every photo and video on the card.
+- The card: how many photos it holds and the room left on it. The line follows the card as it fills, is formatted or is swapped. Open it to see the photos the camera took while UXDuck listened, each with where it was taken, and to **Reset settings** or hold **Format card**. Formatting erases every photo and video on the card.
 
 Each control says what the camera answered: waiting, working on it, accepted, or refused and why. A full card refuses photos and recordings until it is formatted or changed. A camera that only sends video has no controls, and neither has one that has not yet said what it is.
 
-These photos and recordings stay on the camera's card. **Take a photo** and **Record** in the toolbar keep the picture on this computer, and with **Also save on the vehicle** they send the camera the same commands.
+The list of photos shows the newest 20 and says how many there are, **Show 50 earlier** reads the ones before them, and **Show all** reads every one. UXDuck keeps the list until it stops, and formatting the card empties it.
+
+UXDuck keeps the newest 100,000 photos a camera describes, because the camera sets how many it describes and UXDuck holds them in memory. A camera taking a photo every second reaches that after 28 hours of taking them. When a camera describes more, the oldest leave the list, and the list says how many older photos are not listed. The photos themselves stay on the camera's card.
+
+A camera describes each photo as it takes it. When a camera counts a photo and does not describe it, UXDuck asks for it, however many are missing, a few at a time, and the list says how many it is still asking for. A photo asked for three times without an answer is counted as lost. A camera that describes none of 64 photos in a row does not answer such requests, so UXDuck stops asking it. The list then says how many photos were asked for and lost, and how many were not asked for. UXDuck asks again once the card is formatted, or once the camera has gone away and come back. A camera that is not heard itself is not asked for photos until it is heard again, so a request it could not hear does not count against it.
+
+These photos and recordings stay on the camera's card. **Take a photo** and **Record** in the toolbar keep the picture on this computer, and with **Also save on the vehicle** they send the camera the same commands. A camera in photo mode that says it records only in video mode is not sent the recording command, because it would refuse it. The Camera tab says the card is not recording, and UXDuck does not switch the camera's mode for you: press **Video mode**, then **Record to card**.
 
 Agents and other programs use the same commands:
 
 ```
 uxduck rpc call camera/list
 uxduck rpc call camera/command --json '{"cameraId":"CAMERA_ID","action":{"type":"take-photo"}}'
+uxduck rpc call camera/images --json '{"cameraId":"CAMERA_ID","before":25,"limit":20}'
 ```
+
+`camera/list` carries each camera's newest 20 photos, and `photosListed` says how many there are. `camera/images` reads the ones before them: `before` is the `index` of the first photo already read, and `earlier` in the answer says how many come before the page. When older photos are not listed, `photosDropped` in `camera/list` and `dropped` in `camera/images` say how many, and `photosNotListed` and `notListed` say it in words.
 
 ## The camera's own settings
 
@@ -118,6 +127,8 @@ Some cameras describe their own settings in a file, a camera definition, and nam
 - Each change says what the camera answered: waiting, accepted, or refused and why. Once the camera accepts, UXDuck reads the value back from it, and reads again the settings the file says may change with it.
 - **Read again** reads every value from the camera.
 - A setting the file gives no control of its own, such as the camera's mode, is left out, because the Camera tab already has it.
+- UXDuck reads at most 1,024 names from one camera's list of settings, because the list is the camera's own to send. When a camera lists more, Camera settings says how many were read and how many were not, and a setting that shows no value may be one that was not read.
+- Text in the file, such as a setting's description, is kept to 256 characters. Longer text is shown cut and ends in …, and Camera settings says how many texts were cut.
 
 A camera usually serves the file itself over MAVLink FTP, and UXDuck fetches that without asking. A camera can name an `http` or `https` address instead. UXDuck Desktop then shows the address and fetches the file only when you press **Fetch the file**. UXDuck Web does not fetch from an address and says so. The file is read as a list of settings and nothing in it is run. UXDuck keeps the file with its version and fetches it again only when the camera names another version.
 
@@ -170,6 +181,8 @@ UXDuck takes control of the gimbal by itself before it turns it, and gives contr
 When the autopilot, a mission's gimbal step or another station has the gimbal, turning it would take it from them, so UXDuck asks first: **Take the gimbal** or **Leave it**. An ArduPilot autopilot does not say when a mission has the gimbal, so UXDuck works it out from the mission being flown.
 
 While a Camera tab or the 3D map's Drone camera shows the gimbal, UXDuck asks it to say where it points ten times a second, and once a second otherwise.
+
+A gimbal can stop talking while its autopilot goes on answering for it. Its row then says when the gimbal itself was last heard, and that a command may be accepted and move nothing. The angles beside it are marked as possibly not where it points now, and the Cockpit's Controls and **Look here** say the same. The buttons stay, because the autopilot still takes the commands. When the gimbal is heard again the line goes.
 
 ### With PX4
 

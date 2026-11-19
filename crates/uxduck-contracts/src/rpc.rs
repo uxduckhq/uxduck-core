@@ -15,7 +15,9 @@ use crate::dto::analytics::{
 use crate::dto::app::{
     AppOpenParams, ClientVisibilityParams, DesktopAppChooseParams, DesktopAppStatusParams,
 };
-use crate::dto::camera::{CameraCommandParams, CameraDefinitionFetchParams, CameraSettingsParams};
+use crate::dto::camera::{
+    CameraCommandParams, CameraDefinitionFetchParams, CameraImagesParams, CameraSettingsParams,
+};
 use crate::dto::client::{
     Approval, ApprovalResolveParams, CapabilitiesChanged, ClientForgetParams,
     ClientSetCapabilitiesParams, DisplayPullParams, DisplayRegisterParams, DisplayReplyParams,
@@ -1911,6 +1913,24 @@ pub enum ClientRequest {
     /// Needs `control`. Result: `Receipt`.
     #[serde(rename = "camera/command")]
     CameraCommand(CameraCommandParams),
+    /// A page of the photos a camera said it took while UXDuck listened
+    /// (S405), oldest first, each with where the camera was.
+    /// `camera/list` carries the newest 20 with the camera and how many
+    /// there are as `photosListed`, and this reads the ones before them.
+    /// `before` is the `index` of the first photo already read, and
+    /// `earlier` in the answer says how many come before the page, so
+    /// reading on until it is 0 gives every photo listed. A format of the
+    /// card empties the list, and UXDuck keeps it until it stops. The
+    /// list holds the newest 100,000 photos of one camera, because a
+    /// camera describes as many as it likes and each is held in memory.
+    /// Past that the oldest leave it: `dropped` says how many are not
+    /// listed and `notListed` says it in words, and the photos stay on
+    /// the camera's card. It is named for MAVLink's
+    /// `CAMERA_IMAGE_CAPTURED`, so that words about a photo to be made
+    /// find `camera/command` first.
+    /// Needs `read`. Result: `CameraImagesResult`.
+    #[serde(rename = "camera/images")]
+    CameraImages(CameraImagesParams),
     /// A camera's own settings (S411): the ones its camera definition file
     /// names, such as its ISO or its video's size, each with the value the
     /// camera last gave, the values it can take as the camera is set now,
@@ -2385,7 +2405,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 416] = [
+    pub const METHODS: [&'static str; 417] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2687,6 +2707,7 @@ impl ClientRequest {
         "video/list",
         "camera/list",
         "camera/command",
+        "camera/images",
         "camera/settings",
         "camera/definition/fetch",
         "gimbal/list",

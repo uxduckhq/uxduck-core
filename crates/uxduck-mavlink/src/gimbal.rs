@@ -179,6 +179,11 @@ pub struct Observation {
     pub device_id: u8,
     /// The gimbal device's own component, when it has one that is heard.
     pub device_component_id: Option<u8>,
+    /// When the gimbal device's own heartbeat was last heard, once its
+    /// heartbeats have stopped while the rest of its vehicle is still
+    /// heard. None while it is heard, and for a gimbal with no MAVLink
+    /// component of its own.
+    pub device_silent_since_us: Option<u64>,
     /// Whether its manager's heartbeats are heard.
     pub present: bool,
     pub cap_flags: u32,
@@ -260,9 +265,26 @@ pub enum Kind {
 /// A component that may manage a gimbal: an autopilot, a gimbal, or any
 /// other that is not a ground station.
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is one thing known of it, and none follows from another"
+)]
 struct Source {
     kind: Kind,
     heartbeat_us: u64,
+    /// When its last heartbeat was truly heard. `heartbeat_us` is moved
+    /// forward when a paused link runs again, and this is not.
+    heard_us: u64,
+    /// When its heartbeats began again after it was last quiet. A gimbal's
+    /// silence is counted from its autopilot's, so a link that drops makes
+    /// no gimbal quieter than its vehicle.
+    run_us: u64,
+    /// Not heard for longer than a vehicle may be before it counts as
+    /// stale, as the last `silent` saw it, until its next heartbeat.
+    quiet: bool,
+    /// A gimbal not heard that long while its vehicle's autopilot was,
+    /// until its own next heartbeat.
+    silent: bool,
     gone: bool,
     information: Ask,
     /// When it last said what it manages, and when it was last asked
@@ -294,6 +316,8 @@ impl Gimbals {
                 Source {
                     kind,
                     heartbeat_us: now_us,
+                    heard_us: now_us,
+                    run_us: now_us,
                     ..Source::default()
                 },
             );
@@ -302,6 +326,13 @@ impl Gimbals {
             return;
         };
         source.heartbeat_us = source.heartbeat_us.max(now_us);
+        source.heard_us = source.heard_us.max(now_us);
+        if source.quiet || source.gone {
+            source.run_us = now_us;
+            source.quiet = false;
+        }
+        // Heard again: no longer quieter than its vehicle.
+        self.changed |= std::mem::take(&mut source.silent);
         if source.gone || source.kind != kind {
             let kept = if source.kind == kind {
                 std::mem::take(&mut source.gimbals)
@@ -311,6 +342,8 @@ impl Gimbals {
             *source = Source {
                 kind,
                 heartbeat_us: source.heartbeat_us,
+                heard_us: source.heard_us,
+                run_us: source.run_us,
                 gimbals: kept
                     .into_iter()
                     .map(|(device, managed)| {
@@ -333,15 +366,57 @@ impl Gimbals {
     }
 
     /// Marks the gimbals gone whose manager's heartbeats stopped
-    /// `after_us` ago, except on a link that is paused.
-    pub fn silent(&mut self, now_us: u64, after_us: u64, paused: impl Fn(&str) -> bool) {
+    /// `after_us` ago, and marks a gimbal silent whose own heartbeats
+    /// stopped `quiet_after_us` ago while its vehicle's autopilot went on
+    /// being heard. Neither on a link that is paused.
+    ///
+    /// A gimbal behind an autopilot is not gone when it stops: the
+    /// autopilot still answers as its manager, accepts its commands and
+    /// goes on saying where it points. Its own heartbeat is the one thing
+    /// that is measured of it, so that is what its silence is read from.
+    /// One that was never heard is not called silent: a link may carry an
+    /// autopilot's messages and not its gimbal's.
+    pub fn silent(
+        &mut self,
+        now_us: u64,
+        quiet_after_us: u64,
+        after_us: u64,
+        paused: impl Fn(&str) -> bool,
+    ) {
         for (key, source) in &mut self.sources {
-            if !source.gone
-                && now_us.saturating_sub(source.heartbeat_us) > after_us
-                && !paused(&key.0)
-            {
+            if paused(&key.0) {
+                continue;
+            }
+            let age = now_us.saturating_sub(source.heartbeat_us);
+            source.quiet |= age > quiet_after_us;
+            if !source.gone && age > after_us {
                 source.gone = true;
                 self.changed |= source.kind == Kind::Gimbal || !source.gimbals.is_empty();
+            }
+        }
+        let silent: Vec<Key> = self
+            .sources
+            .iter()
+            .filter(|(key, gimbal)| {
+                !gimbal.silent
+                    && (gimbal.kind == Kind::Gimbal
+                        || (gimbal.kind == Kind::Other && !gimbal.gimbals.is_empty()))
+                    && !paused(&key.0)
+                    && self.sources.iter().any(|(other, autopilot)| {
+                        (&other.0, &other.1, other.2) == (&key.0, &key.1, key.2)
+                            && autopilot.kind == Kind::Autopilot
+                            && !autopilot.gone
+                            && !autopilot.quiet
+                            && now_us.saturating_sub(gimbal.heartbeat_us.max(autopilot.run_us))
+                                > quiet_after_us
+                    })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in silent {
+            if let Some(source) = self.sources.get_mut(&key) {
+                source.silent = true;
+                self.changed = true;
             }
         }
     }
@@ -352,6 +427,8 @@ impl Gimbals {
         for (key, source) in &mut self.sources {
             if key.0 == link_id && !source.gone {
                 source.heartbeat_us = now_us;
+                // A silence is counted from here, not across the pause.
+                source.run_us = now_us;
                 for managed in source.gimbals.values_mut() {
                     managed.status_us = now_us;
                     managed.window_us = now_us;
@@ -595,22 +672,37 @@ impl Gimbals {
         let mut out = Vec::new();
         for (key, source) in &self.sources {
             for (device, managed) in &source.gimbals {
-                let device_component_id = if *device > 6 {
+                // The device's own component, heard or not: itself when it
+                // manages itself, else the one its manager's number names.
+                let own = source.kind != Kind::Autopilot;
+                let behind = if *device > 6 {
                     Some(*device)
-                } else if source.kind != Kind::Autopilot {
-                    // It manages itself.
-                    Some(key.3)
                 } else {
                     device
                         .checked_sub(1)
                         .and_then(|index| DEVICE_COMPONENTS.get(usize::from(index)))
                         .copied()
-                        .filter(|component| {
-                            self.sources
-                                .get(&(key.0.clone(), key.1.clone(), key.2, *component))
-                                .is_some_and(|heard| heard.kind == Kind::Gimbal && !heard.gone)
-                        })
                 };
+                let device_source = if own {
+                    Some(source)
+                } else {
+                    behind.and_then(|component| {
+                        self.sources
+                            .get(&(key.0.clone(), key.1.clone(), key.2, component))
+                            .filter(|heard| heard.kind == Kind::Gimbal)
+                    })
+                };
+                let device_component_id = if *device > 6 {
+                    Some(*device)
+                } else if own {
+                    // It manages itself.
+                    Some(key.3)
+                } else {
+                    behind.filter(|_| device_source.is_some_and(|heard| !heard.gone))
+                };
+                let device_silent_since_us = device_source
+                    .filter(|heard| heard.silent)
+                    .map(|heard| heard.heard_us);
                 let degrees = |radians: f32| radians.is_finite().then(|| radians.to_degrees());
                 let [roll, pitch, yaw] = managed.information.limits;
                 let flags = managed.attitude.map(|attitude| attitude.flags);
@@ -619,6 +711,7 @@ impl Gimbals {
                     Listed {
                         device_id: *device,
                         device_component_id,
+                        device_silent_since_us,
                         heard: !source.gone,
                         cap_flags: managed.information.cap_flags,
                         limits: GimbalLimits {
@@ -682,6 +775,9 @@ impl Gimbals {
 pub struct Listed {
     pub device_id: u8,
     pub device_component_id: Option<u8>,
+    /// When the device's own heartbeat was last heard, while it is quiet
+    /// and the rest of its vehicle is not.
+    pub device_silent_since_us: Option<u64>,
     pub heard: bool,
     pub cap_flags: u32,
     pub limits: GimbalLimits,
@@ -1227,6 +1323,124 @@ mod tests {
         assert_eq!(run(&mut gimbals, 1, (30, 60), true), [fast; 3]);
     }
 
+    /// Time going by a second at a go from `from` to `to`, with a
+    /// heartbeat from each of `heard` every second.
+    fn beats(gimbals: &mut Gimbals, heard: &[(Key, Kind)], (from, to): (u64, u64)) {
+        for second in from..=to {
+            for (key, kind) in heard {
+                gimbals.heartbeat(key, *kind, second * SECOND);
+            }
+            gimbals.silent(second * SECOND, 3 * SECOND, 15 * SECOND, |_| false);
+        }
+    }
+
+    #[test]
+    fn a_gimbal_device_that_goes_quiet_behind_its_autopilot_is_said_so() {
+        let both = [(autopilot(), Kind::Autopilot), (device(), Kind::Gimbal)];
+        let autopilot_alone = [(autopilot(), Kind::Autopilot)];
+        let mut gimbals = Gimbals::default();
+        beats(&mut gimbals, &both, (0, 0));
+        gimbals.information(&autopilot(), information(1), 0);
+        beats(&mut gimbals, &both, (1, 10));
+        gimbals.take_changed();
+        let listed = gimbals.listed()[0].1;
+        assert_eq!(listed.device_component_id, Some(154));
+        assert_eq!(listed.device_silent_since_us, None, "it is heard");
+
+        // The device stops and its autopilot goes on. Three seconds of
+        // that, the heartbeat age at which a vehicle counts as stale, and
+        // it is said, with when it was last heard.
+        beats(&mut gimbals, &autopilot_alone, (11, 13));
+        assert!(
+            !gimbals.take_changed(),
+            "three seconds are not more than three"
+        );
+        assert_eq!(gimbals.listed()[0].1.device_silent_since_us, None);
+        beats(&mut gimbals, &autopilot_alone, (14, 14));
+        assert!(gimbals.take_changed());
+        let listed = gimbals.listed()[0].1;
+        assert_eq!(listed.device_silent_since_us, Some(10 * SECOND));
+        assert!(listed.heard, "its manager still answers for it");
+        // Told once, not at every heartbeat.
+        beats(&mut gimbals, &autopilot_alone, (15, 20));
+        assert!(!gimbals.take_changed());
+
+        // Fifteen seconds and its component is gone, and it is still
+        // said, for as long as the autopilot is heard.
+        beats(&mut gimbals, &autopilot_alone, (21, 40));
+        assert!(gimbals.take_changed());
+        let listed = gimbals.listed()[0].1;
+        assert_eq!(listed.device_component_id, None);
+        assert_eq!(listed.device_silent_since_us, Some(10 * SECOND));
+
+        // It is heard again: no longer said.
+        beats(&mut gimbals, &both, (41, 41));
+        assert!(gimbals.take_changed());
+        let listed = gimbals.listed()[0].1;
+        assert_eq!(listed.device_component_id, Some(154));
+        assert_eq!(listed.device_silent_since_us, None);
+    }
+
+    #[test]
+    fn a_vehicle_that_goes_quiet_whole_does_not_call_its_gimbal_silent() {
+        let both = [(autopilot(), Kind::Autopilot), (device(), Kind::Gimbal)];
+        let mut gimbals = Gimbals::default();
+        beats(&mut gimbals, &both, (0, 0));
+        gimbals.information(&autopilot(), information(1), 0);
+        beats(&mut gimbals, &both, (1, 10));
+        // Nothing of the vehicle is heard, as when its link drops: the
+        // gimbal is no quieter than the rest, and goes with its vehicle.
+        beats(&mut gimbals, &[], (11, 14));
+        assert_eq!(gimbals.listed()[0].1.device_silent_since_us, None);
+        beats(&mut gimbals, &[], (15, 60));
+        let listed = gimbals.listed()[0].1;
+        assert!(!listed.heard);
+        assert_eq!(listed.device_silent_since_us, None);
+        // The autopilot is back a moment before the device: the device's
+        // silence is counted from then, not from before the gap.
+        gimbals.take_changed();
+        gimbals.heartbeat(&autopilot(), Kind::Autopilot, 61 * SECOND);
+        gimbals.silent(61 * SECOND, 3 * SECOND, 15 * SECOND, |_| false);
+        assert_eq!(gimbals.listed()[0].1.device_silent_since_us, None);
+        // It never comes back: said, with when it was truly last heard.
+        beats(&mut gimbals, &[(autopilot(), Kind::Autopilot)], (62, 65));
+        assert_eq!(
+            gimbals.listed()[0].1.device_silent_since_us,
+            Some(10 * SECOND)
+        );
+        // A link that is paused holds everything where it was.
+        let mut paused = Gimbals::default();
+        beats(&mut paused, &both, (0, 0));
+        paused.information(&autopilot(), information(1), 0);
+        paused.silent(60 * SECOND, 3 * SECOND, 15 * SECOND, |_| true);
+        assert_eq!(paused.listed()[0].1.device_silent_since_us, None);
+    }
+
+    #[test]
+    fn a_gimbal_that_manages_itself_and_goes_quiet_beside_its_autopilot_is_said_so() {
+        let unit: Key = ("udp".into(), "peer".into(), 1, 100);
+        let both = [(autopilot(), Kind::Autopilot), (unit.clone(), Kind::Gimbal)];
+        let mut gimbals = Gimbals::default();
+        beats(&mut gimbals, &both, (0, 0));
+        gimbals.information(&unit, information(1), 0);
+        beats(&mut gimbals, &both, (1, 5));
+        let listed = gimbals.listed()[0].1;
+        assert_eq!(listed.device_component_id, Some(100));
+        assert_eq!(listed.device_silent_since_us, None);
+        beats(&mut gimbals, &[(autopilot(), Kind::Autopilot)], (6, 9));
+        assert_eq!(
+            gimbals.listed()[0].1.device_silent_since_us,
+            Some(5 * SECOND)
+        );
+        // With no autopilot beside it there is nothing to be quieter
+        // than: it is heard, and then gone.
+        let mut alone = Gimbals::default();
+        beats(&mut alone, &[(unit.clone(), Kind::Gimbal)], (0, 0));
+        alone.information(&unit, information(1), 0);
+        beats(&mut alone, &[], (1, 9));
+        assert_eq!(alone.listed()[0].1.device_silent_since_us, None);
+    }
+
     #[test]
     fn a_manager_gone_is_kept_and_asked_again_when_it_returns() {
         let mut gimbals = Gimbals::default();
@@ -1235,9 +1449,9 @@ mod tests {
         gimbals.information(&autopilot(), information(1), 0);
         gimbals.status(&autopilot(), status((255, 190)), 0);
         gimbals.take_changed();
-        gimbals.silent(20 * SECOND, 15 * SECOND, |_| true);
+        gimbals.silent(20 * SECOND, 3 * SECOND, 15 * SECOND, |_| true);
         assert!(!gimbals.take_changed(), "a paused link's is not gone");
-        gimbals.silent(20 * SECOND, 15 * SECOND, |_| false);
+        gimbals.silent(20 * SECOND, 3 * SECOND, 15 * SECOND, |_| false);
         assert!(gimbals.take_changed());
         let listed = gimbals.listed()[0].1;
         assert!(!listed.heard);

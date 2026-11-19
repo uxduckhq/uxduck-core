@@ -30,6 +30,8 @@
         "recordingSinceUs": 1790668890000000,
         "photoCount": 2,
         "photosLost": 1,
+        "photosNotAsked": 6,
+        "photosAwaited": 3,
         "availableMib": 12.0,
         "cardFull": true
       },

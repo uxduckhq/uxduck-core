@@ -78,6 +78,9 @@ struct PhotoAsked {
     component_id: Option<u8>,
     device_id: Option<u8>,
     asked_us: u64,
+    /// How many photos each of the vehicle's cameras had counted when this
+    /// was sent, by camera id. A camera that had said no count is not here.
+    counted: BTreeMap<String, u32>,
 }
 
 impl Engine {
@@ -389,6 +392,13 @@ impl Engine {
         else {
             return;
         };
+        let counted = self
+            .state
+            .cameras
+            .values()
+            .filter(|camera| camera.vehicle_id == receipt.vehicle_id)
+            .filter_map(|camera| Some((camera.id.clone(), camera.capture?.photo_count)))
+            .collect();
         let asked = PhotoAsked {
             receipt_id: receipt_id.to_owned(),
             controller_id: controller_id.to_owned(),
@@ -396,13 +406,16 @@ impl Engine {
             component_id: *component_id,
             device_id: *device_id,
             asked_us: self.clock.now_us(),
+            counted,
         };
         self.camera_drives.photos.push(asked);
     }
 
     /// A photo a camera said it took (S416): the answer to the oldest Take
     /// photo a controller sent it, said in the controller's row and in a
-    /// short notice.
+    /// short notice. A photo the camera had already counted when the
+    /// controller asked is an earlier one, described late or read from a
+    /// backlog, and is no answer to it.
     pub(crate) fn controller_photo_heard(&mut self, camera: &Camera, index: u32, ok: bool) {
         let now = self.clock.now_us();
         let Some(at) = self.camera_drives.photos.iter().position(|asked| {
@@ -412,6 +425,10 @@ impl Engine {
                     .is_none_or(|id| id == camera.component_id)
                 && (asked.component_id.is_none() || asked.device_id == camera.device_id)
                 && now.saturating_sub(asked.asked_us) < PHOTO_ANSWER_US
+                && asked
+                    .counted
+                    .get(&camera.id)
+                    .is_none_or(|counted| index >= *counted)
         }) else {
             return;
         };

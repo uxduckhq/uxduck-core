@@ -8,9 +8,19 @@
 //! command that superseded. It is asked to send `CAMERA_CAPTURE_STATUS`
 //! every second, and asked for it again whenever five seconds pass without
 //! one. After a command it accepts, what the command changes is asked for
-//! again, unless the camera says so first. Each photo it takes arrives as a
+//! again, unless the camera says so first. Its card is asked for again
+//! when the room its capture status gives moves by a hundredth of the
+//! card, so the card's own numbers follow one that fills, is formatted on
+//! the camera or is swapped. Each photo it takes arrives as a
 //! `CAMERA_IMAGE_CAPTURED`. A photo it counts and does not describe is
-//! asked for by its index, three times, and then counted as lost.
+//! asked for by its index, three times, and then counted as lost. However
+//! many are missing at once, each is asked for in its turn, a few at a
+//! time. Only a camera that describes none of a whole run of them is asked
+//! for no more, and those are counted apart as not asked for. The asking
+//! starts again when the camera is plainly in a new state: its list was
+//! emptied, as a format leaves it, or it is back after it was gone. A
+//! camera component that is not heard itself is not asked for photos
+//! meanwhile, so that an ask it could not hear does not count against it.
 //!
 //! Nothing here is sent by itself: the session sends what is due when a
 //! heartbeat or a message arrives.
@@ -75,9 +85,22 @@ const IMAGE_RETRY_US: u64 = 2_000_000;
 /// the vehicle.
 const IMAGES_AT_ONCE: usize = 2;
 /// The most photos waited for at a time. More than this missing at once
-/// are counted as lost without asking. The count is the camera's to say
-/// on its MAVLink stream, and one that leaps by millions must not make a
-/// list that long.
+/// wait their turn as a range of indexes and not as a list: the count is
+/// the camera's to say on its MAVLink stream, and one that leaps by
+/// millions must not make a list that long, or a loop that long.
+///
+/// It is also the most photos asked for without one of them being
+/// described. A camera that answers none of a whole window, each asked for
+/// [`ATTEMPTS`] times, does not answer such requests, and a count that
+/// leapt must not have UXDuck ask without end on a link the camera shares
+/// with its vehicle. The photos still waiting their turn are then given up
+/// unasked, and so is each one after them until the camera is plainly in
+/// a new state: nothing it was asked for is left that it could still
+/// describe. They are counted apart, so that nobody is told they were
+/// asked for. A list that was emptied, as a format leaves it, is such a
+/// state, and so is a camera back after it was gone, which is read from
+/// the beginning. A photo the camera describes by itself is not: it does
+/// not show that the camera answers an ask.
 const IMAGES_WAITED_FOR: usize = 64;
 /// How many described photos are remembered, to tell a photo told twice:
 /// a ring, since a camera describes as many as it likes.
@@ -282,8 +305,15 @@ pub struct Capture {
     /// clock the messages are timed with.
     pub recording_since_us: Option<u64>,
     pub image_count: u32,
-    /// Photos counted, asked for again and never described.
+    /// Photos counted, asked for [`ATTEMPTS`] times each and never
+    /// described.
     pub images_lost: u32,
+    /// Photos counted and never asked for, because the camera had
+    /// described none of the last [`IMAGES_WAITED_FOR`] it was asked for.
+    pub images_not_asked: u32,
+    /// Photos counted and not described yet, which are being asked for or
+    /// wait their turn.
+    pub images_awaited: u32,
     /// Room left on the card, in steps of a hundredth of the card.
     pub available_mib: Option<f32>,
 }
@@ -398,11 +428,22 @@ pub(crate) struct Control {
     state: State,
     /// The card's size, to keep the room left in steps.
     total_mib: Option<f32>,
+    /// The room left as the capture status last gave it, in the same
+    /// steps. The card is asked what it holds when this moves, and not
+    /// when it differs from the card's own number, so a camera whose two
+    /// messages disagree is not asked without end.
+    said_mib: Option<f32>,
     /// The camera's count of photos when it was first heard. Photos
     /// before it were taken before UXDuck listened, and are not asked for.
     baseline: Option<u32>,
     /// The photos looked for so far: every index below it.
     looked_to: u32,
+    /// The camera's count of photos, as far as it has gone. The photos
+    /// from `looked_to` up to it wait their turn to be asked for.
+    counted: u32,
+    /// Photos given up in a row, each after [`ATTEMPTS`] asks, since the
+    /// camera last described one it was asked for.
+    unanswered: u32,
     /// The photos described, by index: the latest of them.
     described: BTreeSet<u32>,
     missing: BTreeMap<u32, Missing>,
@@ -411,42 +452,85 @@ pub(crate) struct Control {
 }
 
 impl Control {
-    /// The list of photos starts again, as a format leaves it.
+    /// The list of photos starts again, as a format leaves it, and so
+    /// does the asking: what the camera left unanswered of the old list
+    /// does not say that it answers nothing of the new one.
     fn emptied(&mut self, count: u32) {
         self.baseline = Some(count);
         self.looked_to = count;
+        self.counted = count;
+        self.unanswered = 0;
         self.described.clear();
         self.missing.clear();
     }
 
-    /// Notes the photos the camera counts and has not described. More
-    /// than can be asked for one by one are counted as lost.
-    fn find_missing(&mut self, count: u32, now_us: u64) -> u32 {
+    /// Notes the photos the camera counts and has not described: some are
+    /// waited for, and the rest wait their turn.
+    fn find_missing(&mut self, count: u32, now_us: u64) {
         let Some(baseline) = self.baseline else {
-            return 0;
+            return;
         };
-        let mut lost = 0;
-        for index in self.looked_to.max(baseline)..count {
-            if self.described.contains(&index) {
-                continue;
-            }
-            if self.missing.len() >= IMAGES_WAITED_FOR {
-                lost += 1;
-                continue;
-            }
-            self.missing.entry(index).or_insert(Missing {
-                noticed_us: now_us,
-                attempts: 0,
-                asked_us: 0,
-            });
-        }
-        self.looked_to = self.looked_to.max(count);
-        lost
+        self.looked_to = self.looked_to.max(baseline);
+        self.counted = self.counted.max(count);
+        self.fill(now_us);
     }
 
-    /// The photos to ask for now, and how many were asked for three times
-    /// and are given up.
-    fn due_images(&mut self, now_us: u64) -> (Vec<u32>, u32) {
+    /// Takes photos that wait their turn into the ones waited for, while
+    /// there is room. The photos given up since the camera last described
+    /// one it was asked for take room too, so that no more than
+    /// [`IMAGES_WAITED_FOR`] are ever asked for without an answer. Each
+    /// pass takes one in or passes one described, and no more than
+    /// [`DESCRIBED_KEPT`] are remembered as described, so it ends after
+    /// that many and a window however far the count leapt.
+    fn fill(&mut self, now_us: u64) {
+        while self.missing.len() + (self.unanswered as usize) < IMAGES_WAITED_FOR
+            && self.looked_to < self.counted
+        {
+            let index = self.looked_to;
+            self.looked_to += 1;
+            if !self.described.contains(&index) {
+                self.missing.insert(
+                    index,
+                    Missing {
+                        noticed_us: now_us,
+                        attempts: 0,
+                        asked_us: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Photos the camera counts and has not described, which are waited
+    /// for or wait their turn.
+    fn awaited(&self) -> u32 {
+        let described = self.described.range(self.looked_to..self.counted).count();
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "at most 64 are waited for, and 512 remembered"
+        )]
+        (self.counted - self.looked_to.min(self.counted))
+            .saturating_sub(described as u32)
+            .saturating_add(self.missing.len() as u32)
+    }
+
+    /// Brings what is told of the photos awaited up to date. Whether it
+    /// changed.
+    fn tell_awaited(&mut self) -> bool {
+        let awaited = self.awaited();
+        match &mut self.state.capture {
+            Some(capture) if capture.images_awaited != awaited => {
+                capture.images_awaited = awaited;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The photos to ask for now, how many were asked for [`ATTEMPTS`]
+    /// times and are given up, and how many are given up unasked because
+    /// the camera described none of a whole window.
+    fn due_images(&mut self, now_us: u64) -> (Vec<u32>, u32, u32) {
         let mut due = Vec::new();
         let mut lost = Vec::new();
         for (index, missing) in &mut self.missing {
@@ -470,11 +554,32 @@ impl Control {
             self.missing.remove(index);
         }
         #[allow(clippy::cast_possible_truncation, reason = "at most 64 are waited for")]
-        (due, lost.len() as u32)
+        let lost = lost.len() as u32;
+        self.unanswered = self.unanswered.saturating_add(lost);
+        let mut not_asked = 0;
+        if self.unanswered as usize >= IMAGES_WAITED_FOR && self.looked_to < self.counted {
+            let described = self.described.range(self.looked_to..self.counted).count();
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "at most 512 are remembered"
+            )]
+            let described = described as u32;
+            not_asked = (self.counted - self.looked_to).saturating_sub(described);
+            self.looked_to = self.counted;
+        }
+        self.fill(now_us);
+        (due, lost, not_asked)
     }
 
     fn described(&mut self, index: u32) -> bool {
-        self.missing.remove(&index);
+        // One it was asked for and gave: it answers such requests.
+        if self
+            .missing
+            .remove(&index)
+            .is_some_and(|missing| missing.attempts > 0)
+        {
+            self.unanswered = 0;
+        }
         let new = self.described.insert(index);
         while self.described.len() > DESCRIBED_KEPT {
             self.described.pop_first();
@@ -614,6 +719,18 @@ impl Cameras {
         };
         let control = &mut camera.control;
         let before = control.state.capture;
+        // The room left moved, by the camera's own count of it: the card
+        // is asked what it holds now. Not at the first status, which comes
+        // while the card is being read anyway.
+        let room = said.available_mib.is_finite().then(|| {
+            coarse(
+                control.said_mib,
+                said.available_mib.max(0.0),
+                control.total_mib,
+            )
+        });
+        let moved = control.said_mib.is_some() && room != control.said_mib;
+        control.said_mib = room;
         let count = u32::try_from(said.image_count).unwrap_or(0);
         // A count that went down is a list emptied by a format.
         let emptied = before.is_some_and(|before| count < before.image_count);
@@ -622,7 +739,7 @@ impl Cameras {
         } else if control.baseline.is_none() {
             control.baseline = Some(count);
         }
-        let lost = control.find_missing(count, now_us);
+        control.find_missing(count, now_us);
         let recording = said.video_status == 1;
         let counted = now_us.saturating_sub(u64::from(said.recording_time_ms) * 1000);
         let since = before.and_then(|before| before.recording_since_us);
@@ -641,8 +758,11 @@ impl Cameras {
             image_count: count,
             images_lost: before
                 .filter(|_| !emptied)
-                .map_or(0, |before| before.images_lost)
-                + lost,
+                .map_or(0, |before| before.images_lost),
+            images_not_asked: before
+                .filter(|_| !emptied)
+                .map_or(0, |before| before.images_not_asked),
+            images_awaited: control.awaited(),
             available_mib: said.available_mib.is_finite().then(|| {
                 coarse(
                     before.and_then(|before| before.available_mib),
@@ -654,6 +774,9 @@ impl Cameras {
         if before != Some(now) {
             control.state.capture = Some(now);
             self.control_changed = true;
+        }
+        if moved || emptied {
+            source.reads.storage.want(now_us);
         }
     }
 
@@ -682,6 +805,7 @@ impl Cameras {
             capture.image_count = index + 1;
             self.control_changed = true;
         }
+        self.control_changed |= control.tell_awaited();
         let scaled = |value: i32, by: f64| f64::from(value) / by;
         self.images.push((
             key.clone(),
@@ -786,10 +910,12 @@ impl Cameras {
     }
 
     /// What to send now to read the cameras back, among those whose
-    /// vehicle is known and heard.
+    /// vehicle is known and heard. A camera whose own heartbeat is older
+    /// than `heard_within_us` is not asked for photos.
     pub fn control_requests(
         &mut self,
         now_us: u64,
+        heard_within_us: u64,
         known: impl Fn(&Key) -> bool,
     ) -> Vec<(Key, Send)> {
         let mut out = Vec::new();
@@ -847,14 +973,23 @@ impl Cameras {
                     },
                 ));
             }
+            // A camera component can go quiet while its vehicle is still
+            // heard. An ask it cannot hear is not one it left unanswered:
+            // none is made or given up until its heartbeat comes again,
+            // and the asking then goes on from where it stopped.
+            if !source.heard_within(now_us, heard_within_us) {
+                continue;
+            }
             for camera in source.cameras.values_mut() {
-                let (due, lost) = camera.control.due_images(now_us);
-                if lost > 0
+                let (due, lost, not_asked) = camera.control.due_images(now_us);
+                if (lost > 0 || not_asked > 0)
                     && let Some(capture) = &mut camera.control.state.capture
                 {
                     capture.images_lost += lost;
+                    capture.images_not_asked += not_asked;
                     self.control_changed = true;
                 }
+                self.control_changed |= camera.control.tell_awaited();
                 #[allow(clippy::cast_precision_loss, reason = "an index asked for exactly")]
                 out.extend(due.into_iter().map(|index| {
                     (
@@ -1280,6 +1415,231 @@ mod tests {
         assert_eq!((capture.image_count, capture.images_lost), (1, 1));
     }
 
+    /// Seventy photos taken while none of their reports arrive, so that
+    /// the camera's count then shows them all missing at once.
+    fn seventy_undescribed(rig: &mut Rig) {
+        rig.lost.push(CAMERA_IMAGE_CAPTURED);
+        for photo in 0..70 {
+            rig.act(&format!("photo-{photo}"), CameraAction::TakePhoto);
+        }
+        assert!(rig.images().is_empty());
+    }
+
+    // More photos missing at once than are waited for at a time: each is
+    // asked for in its turn, and none is given up unasked.
+    #[test]
+    fn every_photo_missing_at_once_is_asked_for_in_its_turn() {
+        let mut rig = Rig::new();
+        seventy_undescribed(&mut rig);
+        // The link is whole again.
+        rig.lost.clear();
+        for _ in 0..90 {
+            rig.second();
+        }
+        let capture = rig.state().capture.expect("its capture status");
+        assert_eq!(capture.image_count, 70);
+        assert_eq!(rig.images().len(), 70, "each was asked for and described");
+        assert_eq!(capture.images_lost, 0);
+        assert_eq!(rig.asked(CAMERA_IMAGE_CAPTURED), 70, "each once");
+        assert_eq!((capture.images_not_asked, capture.images_awaited), (0, 0));
+    }
+
+    // A camera that describes none of a whole window of photos does not
+    // answer such requests. The rest are not asked for, and are counted
+    // apart from the ones that were.
+    #[test]
+    fn a_camera_that_describes_none_of_a_window_is_not_asked_for_the_rest() {
+        let mut rig = Rig::new();
+        seventy_undescribed(&mut rig);
+        for _ in 0..200 {
+            rig.second();
+        }
+        let capture = rig.state().capture.expect("its capture status");
+        assert_eq!(capture.image_count, 70);
+        assert_eq!(rig.asked(CAMERA_IMAGE_CAPTURED), 64 * 3);
+        assert_eq!(capture.images_lost, 64, "those asked for, three times each");
+        assert_eq!(capture.images_not_asked, 6, "and the rest, which were not");
+        assert_eq!(capture.images_awaited, 0);
+    }
+
+    /// A camera's control that listens from its first photo.
+    fn listening() -> Control {
+        Control {
+            baseline: Some(0),
+            state: State {
+                capture: Some(Capture::default()),
+                ..State::default()
+            },
+            ..Control::default()
+        }
+    }
+
+    /// A second at a go for `seconds` after `from`. What is asked for is
+    /// described at once when the camera `answers`. How many were asked
+    /// for, given up after their asks, and given up unasked.
+    fn ask_on(control: &mut Control, from: u64, seconds: u64, answers: bool) -> (usize, u32, u32) {
+        let (mut asked, mut lost, mut not_asked) = (0, 0, 0);
+        for second in from + 1..=from + seconds {
+            let (due, gave_up, skipped) = control.due_images(second * SECOND);
+            asked += due.len();
+            lost += gave_up;
+            not_asked += skipped;
+            if answers {
+                for index in due {
+                    assert!(control.described(index));
+                }
+            }
+        }
+        (asked, lost, not_asked)
+    }
+
+    #[test]
+    fn photos_missing_by_the_hundred_wait_their_turn_and_are_all_asked_for() {
+        let mut control = listening();
+        control.find_missing(300, 0);
+        assert_eq!(control.missing.len(), IMAGES_WAITED_FOR);
+        assert_eq!(control.awaited(), 300);
+        assert_eq!(ask_on(&mut control, 0, 200, true), (300, 0, 0));
+        assert_eq!(control.awaited(), 0);
+        // Photos it describes unasked while others wait are not asked for.
+        control.find_missing(400, 300 * SECOND);
+        for index in 380..400 {
+            control.described(index);
+        }
+        assert_eq!(control.awaited(), 80);
+        assert_eq!(ask_on(&mut control, 300, 100, true), (80, 0, 0));
+        assert_eq!(control.awaited(), 0);
+    }
+
+    // A count that leaps as far as the field goes is looked at a window at
+    // a time: no list that long, no loop that long. The camera describes
+    // none, so the rest are given up unasked, and counted.
+    #[test]
+    fn a_count_that_leaps_by_millions_makes_no_list_and_no_asking_without_end() {
+        let mut control = listening();
+        let began = std::time::Instant::now();
+        control.find_missing(u32::MAX, 0);
+        assert_eq!(control.missing.len(), IMAGES_WAITED_FOR);
+        assert_eq!(control.awaited(), u32::MAX);
+        let (asked, lost, not_asked) = ask_on(&mut control, 0, 400, false);
+        assert_eq!((asked, lost), (64 * 3, 64));
+        assert_eq!(not_asked, u32::MAX - 64);
+        assert_eq!(control.awaited(), 0);
+        assert!(control.missing.is_empty());
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    // A camera whose list is emptied, as a format leaves it, is plainly in
+    // a new state. What it left unanswered of the old list no longer says
+    // that it answers none, so the photos of the new list are asked for.
+    #[test]
+    fn a_camera_whose_list_is_emptied_is_asked_for_its_photos_again() {
+        let mut control = listening();
+        control.find_missing(70, 0);
+        assert_eq!(ask_on(&mut control, 0, 400, false), (64 * 3, 64, 6));
+        // The same list still: one more photo of it is not asked for.
+        control.find_missing(71, 400 * SECOND);
+        assert_eq!(ask_on(&mut control, 400, 10, false), (0, 0, 1));
+
+        control.emptied(0);
+        control.find_missing(100, 410 * SECOND);
+        assert_eq!(control.missing.len(), IMAGES_WAITED_FOR);
+        assert_eq!(ask_on(&mut control, 410, 60, true), (100, 0, 0));
+        assert_eq!(control.awaited(), 0);
+    }
+
+    // A camera component whose own heartbeats stop is not asked for its
+    // photos while its vehicle is still heard: an ask it cannot hear is
+    // not one it left unanswered. Heard again, it is asked on from where
+    // the asking stopped.
+    #[test]
+    fn a_camera_that_is_not_heard_is_not_asked_for_photos_and_none_is_given_up() {
+        let key: Key = ("l1".into(), PEER.into(), 1, 100);
+        let mut cameras = Cameras::default();
+        cameras.heartbeat(&key, false, 0);
+        cameras.information(
+            &key,
+            crate::camera::Information {
+                flags: 1 | 2,
+                ..Default::default()
+            },
+        );
+        let status = |image_count| CaptureSaid {
+            image_count,
+            available_mib: 1000.0,
+            ..CaptureSaid::default()
+        };
+        cameras.capture_status(&key, status(0), 0);
+        // Ten photos it counts and does not describe. Its last heartbeat
+        // for a while comes with them, a second in.
+        cameras.heartbeat(&key, false, SECOND);
+        cameras.capture_status(&key, status(10), SECOND);
+        // How many photos are asked for at a tenth of a second.
+        let asks = |cameras: &mut Cameras, tenth: u64| {
+            cameras
+                .control_requests(tenth * SECOND / 10, 3 * SECOND, |_| true)
+                .into_iter()
+                .filter(|(_, send)| {
+                    matches!(
+                        send,
+                        Send::Message {
+                            id: CAMERA_IMAGE_CAPTURED,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        let mut asked = Vec::new();
+        let lost = |cameras: &Cameras| {
+            let (_, _, state) = cameras.states().next().expect("the camera");
+            state.capture.expect("its capture status").images_lost
+        };
+        // Its vehicle is heard for thirteen seconds more, and it is not.
+        for tenth in 10..140 {
+            asked.extend(std::iter::repeat_n(tenth, asks(&mut cameras, tenth)));
+        }
+        // Each was asked for once, and two a second time, while it still
+        // counted as heard: three seconds after its last heartbeat.
+        assert_eq!(asked.len(), 12, "{asked:?}");
+        assert!(asked.iter().all(|tenth| *tenth <= 40), "{asked:?}");
+        assert_eq!(lost(&cameras), 0, "none is given up while it is not heard");
+
+        // Heard again, and it still describes none: each is asked for
+        // three times in all, and then given up.
+        for tenth in 140..300 {
+            if tenth % 10 == 0 {
+                cameras.heartbeat(&key, false, tenth * SECOND / 10);
+            }
+            asked.extend(std::iter::repeat_n(tenth, asks(&mut cameras, tenth)));
+        }
+        assert_eq!(asked.len(), 30, "{asked:?}");
+        assert_eq!(lost(&cameras), 10);
+    }
+
+    // The room that photos given up took comes back when the camera
+    // describes one it was asked for: a camera that answers some of the
+    // time is asked for every photo.
+    #[test]
+    fn a_camera_that_answers_some_of_the_time_is_asked_for_every_photo() {
+        let mut control = listening();
+        control.find_missing(200, 0);
+        let (mut asked, mut lost, mut not_asked) = (0, 0, 0);
+        for second in 1..=2000 {
+            let (due, gave_up, skipped) = control.due_images(second * SECOND);
+            asked += due.len();
+            lost += gave_up;
+            not_asked += skipped;
+            // It describes every tenth photo.
+            for index in due.into_iter().filter(|index| index % 10 == 0) {
+                assert!(control.described(index));
+            }
+        }
+        assert_eq!((lost, not_asked), (180, 0));
+        assert_eq!(asked, 20 + 180 * 3);
+        assert_eq!(control.awaited(), 0);
+    }
+
     // The guide's interval capture: images until it is stopped.
     #[test]
     fn an_interval_takes_photos_until_it_is_stopped() {
@@ -1513,6 +1873,102 @@ mod tests {
         let images = rig.images();
         assert_eq!(images.len(), 2);
         assert_eq!(images[1].index, 0);
+    }
+
+    // The card's own line follows the camera. Its capture status says the
+    // room left every second and the card's message is read once, so the
+    // card is asked again when the room moves: as it fills, and when it is
+    // emptied by something other than UXDuck's own format, such as a card
+    // swapped or formatted on the camera.
+    #[test]
+    fn the_card_is_read_again_when_the_room_left_moves() {
+        let mut rig = Rig::new();
+        let card = rig.state().storage.expect("its card");
+        assert_eq!(
+            (card.total_mib, card.used_mib, card.available_mib),
+            (32_000.0, 0.0, 32_000.0)
+        );
+        // While nothing moves the card is not asked about again.
+        let asked = rig.asked(STORAGE_INFORMATION);
+        for _ in 0..5 {
+            rig.second();
+        }
+        assert_eq!(rig.asked(STORAGE_INFORMATION), asked);
+
+        // It fills, with no command of UXDuck's.
+        rig.camera().leave_room(0.0);
+        rig.second();
+        rig.second();
+        let state = rig.state();
+        assert_eq!(
+            state.capture.and_then(|capture| capture.available_mib),
+            Some(0.0)
+        );
+        let card = state.storage.expect("its card");
+        assert_eq!((card.used_mib, card.available_mib), (32_000.0, 0.0));
+        assert_eq!(rig.asked(STORAGE_INFORMATION), asked + 1, "asked once");
+
+        // It is emptied on the camera, or another card is put in.
+        rig.camera().leave_room(32_000.0);
+        rig.second();
+        rig.second();
+        let card = rig.state().storage.expect("its card");
+        assert_eq!((card.used_mib, card.available_mib), (0.0, 32_000.0));
+        assert_eq!(rig.asked(STORAGE_INFORMATION), asked + 2);
+
+        // Room that moves by less than a hundredth of the card is not
+        // told, and does not have the card asked: a recording does not
+        // make a request every second.
+        rig.camera().leave_room(31_900.0);
+        for _ in 0..3 {
+            rig.second();
+        }
+        assert_eq!(rig.asked(STORAGE_INFORMATION), asked + 2);
+        // A hundredth and it is.
+        rig.camera().leave_room(31_600.0);
+        rig.second();
+        rig.second();
+        let card = rig.state().storage.expect("its card");
+        assert_eq!((card.used_mib, card.available_mib), (400.0, 31_600.0));
+        assert_eq!(rig.asked(STORAGE_INFORMATION), asked + 3);
+    }
+
+    // A camera whose two messages disagree is not asked without end: the
+    // card is read again when the capture status's own number moves, not
+    // each time it differs from the card's.
+    #[test]
+    fn a_card_that_disagrees_with_the_capture_status_is_not_asked_every_second() {
+        let key: Key = ("l1".into(), "peer".into(), 1, 100);
+        let mut cameras = Cameras::default();
+        cameras.heartbeat(&key, false, 0);
+        cameras.heard(key.clone());
+        let card = |available_mib: f32| StorageSaid {
+            storage_id: 1,
+            storage_count: 1,
+            status: 2,
+            total_mib: 32_000.0,
+            used_mib: 32_000.0 - available_mib,
+            available_mib,
+            name: String::new(),
+        };
+        let status = |available_mib: f32| CaptureSaid {
+            available_mib,
+            ..CaptureSaid::default()
+        };
+        cameras.storage(&key, card(32_000.0), 0);
+        cameras.capture_status(&key, status(32_000.0), 0);
+        let wanted = |cameras: &Cameras| cameras.sources[&key].reads.storage.wanted_us.is_some();
+        assert!(!wanted(&cameras));
+        // The capture status says the card is full and the card says it
+        // is empty, again and again.
+        cameras.capture_status(&key, status(0.0), SECOND);
+        assert!(wanted(&cameras), "its number moved: the card is asked");
+        for second in 2..10 {
+            cameras.storage(&key, card(32_000.0), second * SECOND);
+            assert!(!wanted(&cameras), "answered");
+            cameras.capture_status(&key, status(0.0), second * SECOND);
+            assert!(!wanted(&cameras), "the same number as before");
+        }
     }
 
     // A camera busy capturing refuses a format, and the refusal is its own.
@@ -1893,7 +2349,7 @@ mod tests {
         );
         let mut asked = Vec::new();
         for second in 0..40 {
-            for (_, send) in cameras.control_requests(second * SECOND, |_| true) {
+            for (_, send) in cameras.control_requests(second * SECOND, 3 * SECOND, |_| true) {
                 asked.push((second, send));
             }
         }
@@ -1931,11 +2387,11 @@ mod tests {
         );
         // It answers the older command for its capture status: five
         // seconds without one, and that is what is sent.
-        cameras.control_requests(40 * SECOND, |_| true);
+        cameras.control_requests(40 * SECOND, 3 * SECOND, |_| true);
         cameras.acknowledged(&key, IMAGE_START_CAPTURE, 0, 40 * SECOND);
         let mut later = Vec::new();
         for tenth in 400..420 {
-            later.extend(cameras.control_requests(tenth * SECOND / 10, |_| true));
+            later.extend(cameras.control_requests(tenth * SECOND / 10, 3 * SECOND, |_| true));
         }
         assert_eq!(later.len(), 1);
         // The first three tries of a new want are the newer command's.

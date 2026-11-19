@@ -418,8 +418,16 @@ pub struct CameraSettingsResult {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reading: bool,
     /// Why the camera's values could not all be read, when they could not.
+    /// A camera that lists more settings than the 1,024 names UXDuck
+    /// keeps from one camera is said here too, with how many it read and
+    /// how many it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_failure: Option<String>,
+    /// How much of the file's text is shown cut, as a sentence, when any
+    /// is. A name, a unit or a description longer than 256 characters is
+    /// kept to that length and ends in `…`, and this says how many were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_cut: Option<String>,
     /// The settings the file names, in its order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings: Vec<CameraSetting>,
@@ -455,9 +463,23 @@ pub struct CameraCapture {
     pub recording_since_us: Option<u64>,
     /// The photos in the camera's list, which a format empties.
     pub photo_count: u32,
-    /// Photos it counted and never described, though asked again.
+    /// Photos it counted and never described, though UXDuck asked for
+    /// each of them three times.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub photos_lost: u32,
+    /// Photos it counted that UXDuck did not ask for. UXDuck asks for a
+    /// photo the camera counts and does not describe, however many are
+    /// missing at once, a few at a time. Once the camera has described
+    /// none of 64 in a row, each asked for three times, it does not answer
+    /// such requests. UXDuck then asks this camera for no more, and counts
+    /// here the ones it did not ask for.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_not_asked: u32,
+    /// Photos it counts and has not described yet, which UXDuck is asking
+    /// for or will. They join `photos` as the camera describes them, or
+    /// `photosLost` or `photosNotAsked`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_awaited: u32,
     /// Room left on its card, in mebibytes, in coarse steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available_mib: Option<f64>,
@@ -528,6 +550,46 @@ pub struct CameraPhoto {
     /// The file's name or address on the camera, without its password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+}
+
+/// `camera/images`: which of a camera's photos.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraImagesParams {
+    /// The camera's `id` from `camera/list`.
+    pub camera_id: String,
+    /// Only photos before this place in the camera's list: the `index` of
+    /// the first photo already read, from `camera/list` or an earlier
+    /// answer. None for the newest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u32>,
+    /// How many to answer: 50 when omitted, at most 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// `camera/images`: one page of the photos a camera said it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraImagesResult {
+    pub camera_id: String,
+    /// The page, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub photos: Vec<CameraPhoto>,
+    /// How many photos UXDuck has of this camera, as `photosListed` says.
+    pub total: u32,
+    /// How many of them come before this page's first. Read on with that
+    /// photo's `index` as `before` until this is 0.
+    pub earlier: u32,
+    /// How many older photos the camera described that are not listed, as
+    /// `photosDropped` says. Absent when every photo is listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped: u32,
+    /// The same in words for a person, as `photosNotListed` says: how
+    /// many photos are not listed, why, and that they stay on the
+    /// camera's card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_listed: Option<String>,
 }
 
 /// `camera/command`: has a camera do something.
@@ -601,9 +663,32 @@ pub struct Camera {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<CameraStorage>,
     /// The photos it said it took while UXDuck listened, oldest first: the
-    /// last 20 of them, each with where it was taken.
+    /// newest 20 of them, each with where it was taken. `photosListed`
+    /// says how many there are, and `camera/images` reads the ones before
+    /// these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub photos: Vec<CameraPhoto>,
+    /// How many photos UXDuck lists of it: the ones it described while
+    /// UXDuck listened, since its list was last emptied by a format, and
+    /// at most the newest 100,000 of them. UXDuck keeps them until it
+    /// stops. Absent when there is none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_listed: u32,
+    /// How many older photos it described that are not listed. UXDuck
+    /// keeps at most the newest 100,000 photos of one camera, because a
+    /// camera describes as many as it likes on its MAVLink stream and
+    /// each is held in memory. Past that the photo with the lowest
+    /// `index` leaves the list, and stays on the camera's card. Each is
+    /// counted once: one first described among indexes already dropped is
+    /// not counted, since nothing of a dropped photo is kept to tell it
+    /// from one described twice. Absent when every photo is listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub photos_dropped: u32,
+    /// `photosDropped` in words for a person, when it is not 0: how many
+    /// photos are not listed, why, and that they stay on the camera's
+    /// card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photos_not_listed: Option<String>,
     /// The sensors it has said it has since UXDuck first heard it:
     /// `thermal` from a thermal range it can give or a stream that is
     /// thermal, and `daylight` from a stream that is not. A camera with
@@ -611,6 +696,14 @@ pub struct Camera {
     /// stream.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<CameraSource>,
+    /// The receipt of UXDuck's own Start recording that it did not send to
+    /// this camera, because the camera is in photo mode and says it
+    /// records in video mode only. Present for as long as UXDuck means the
+    /// vehicle's camera to record along with its own recording ("Also save
+    /// on the vehicle"). UXDuck does not switch the camera's mode: send
+    /// `set-mode` and `start-recording` to have it record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_not_asked: Option<String>,
     #[schemars(schema_with = "crate::safe::integer")]
     pub version: u64,
 }

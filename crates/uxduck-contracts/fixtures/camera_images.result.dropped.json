@@ -1,0 +1,27 @@
+{
+  "cameraId": "v9b1c2d3e4f5a6b7c/100",
+  "photos": [
+    {
+      "index": 104461,
+      "takenAtUs": 1790668880000000,
+      "ok": true,
+      "file": "IMG_4462.JPG"
+    },
+    {
+      "index": 104462,
+      "takenAtUs": 1790668882000000,
+      "ok": true,
+      "file": "IMG_4463.JPG"
+    },
+    {
+      "index": 104463,
+      "takenAtUs": 1790668884000000,
+      "ok": true,
+      "file": "IMG_4464.JPG"
+    }
+  ],
+  "total": 100000,
+  "earlier": 99997,
+  "dropped": 4464,
+  "notListed": "4,464 older photos are not listed here, because UXDuck keeps at most 100,000 photos from one camera, whose list is its own to send. The photos themselves stay on the camera's card."
+}

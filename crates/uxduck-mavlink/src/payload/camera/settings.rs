@@ -49,6 +49,10 @@ const AUTO_SHUTTER_S: f32 = 0.002;
 const LARGEST: u32 = 0;
 /// How long the video's size takes to change, in milliseconds.
 const RESIZE_MS: u64 = 1000;
+/// How many settings of a list it sends at once, and again at each step,
+/// as a camera paces a long list. One sent whole is lost in part on its
+/// way: a UDP socket holds a few hundred frames and drops the rest.
+const LIST_AT_ONCE: usize = 32;
 
 /// What the camera keeps of its own settings. Its mode is the camera's.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +68,8 @@ pub(super) struct Settings {
     photo_format: u32,
     /// The size its video is changing to, and when it has changed.
     resizing: Option<(u32, u64)>,
+    /// The next setting of a list it is part of the way through sending.
+    listing: Option<usize>,
 }
 
 impl Default for Settings {
@@ -77,6 +83,7 @@ impl Default for Settings {
             video_rate: 30,
             photo_format: 0,
             resizing: None,
+            listing: None,
         }
     }
 }
@@ -148,9 +155,10 @@ impl Camera {
                     .collect()
             }
             _ if !self.has_settings() => Vec::new(),
-            Ardupilotmega::ParamExtRequestList(_) => (0..NAMES.len())
-                .filter_map(|index| self.setting_said(index))
-                .collect(),
+            Ardupilotmega::ParamExtRequestList(_) => {
+                self.settings.listing = Some(0);
+                self.list_on()
+            }
             Ardupilotmega::ParamExtRequestRead(m) => {
                 let index = usize::try_from(m.param_index).ok().or_else(|| {
                     let name = crate::decode::param_name(&m.param_id);
@@ -181,18 +189,32 @@ impl Camera {
     /// What is due of its settings by now: a video size that has changed
     /// is acknowledged again, as accepted.
     pub(super) fn settings_step(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = self.list_on();
         let Some((size, at_ms)) = self.settings.resizing else {
-            return Vec::new();
+            return frames;
         };
         if self.now_ms < at_ms {
-            return Vec::new();
+            return frames;
         }
         self.settings.resizing = None;
         self.settings.video_size = size;
         if size == LARGEST && self.settings.video_rate > 30 {
             self.settings.video_rate = 30;
         }
-        vec![self.setting_acked("CAM_VIDRES", &Value::Uint32(size), ParamAck::Accepted)]
+        frames.push(self.setting_acked("CAM_VIDRES", &Value::Uint32(size), ParamAck::Accepted));
+        frames
+    }
+
+    /// The next [`LIST_AT_ONCE`] settings of a list it is sending.
+    fn list_on(&mut self) -> Vec<Vec<u8>> {
+        let Some(from) = self.settings.listing else {
+            return Vec::new();
+        };
+        let to = (from + LIST_AT_ONCE).min(self.listed());
+        self.settings.listing = (to < self.listed()).then_some(to);
+        (from..to)
+            .filter_map(|index| self.setting_said(index))
+            .collect()
     }
 
     /// One setting's value now, by its place in the list.
@@ -295,13 +317,27 @@ impl Camera {
         (result, self.setting(index).unwrap_or(held))
     }
 
+    /// How many settings its list has: its own, and any it was given
+    /// beyond them ([`Camera::more_settings`]).
+    fn listed(&self) -> usize {
+        NAMES.len() + usize::from(self.more_settings)
+    }
+
     fn setting_said(&mut self, index: usize) -> Option<Vec<u8>> {
-        let value = self.setting(index)?;
-        #[allow(clippy::cast_possible_truncation, reason = "nine settings")]
+        // One beyond its own is a number that is always 0.
+        let (name, value) = match NAMES.get(index) {
+            Some(name) => ((*name).to_owned(), self.setting(index)?),
+            None if index < self.listed() => (format!("X{index}"), Value::Uint8(0)),
+            None => return None,
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "nine settings, and at most 65,535 more"
+        )]
         let said = ParamExtValue {
-            param_count: NAMES.len() as u16,
+            param_count: self.listed().min(usize::from(u16::MAX)) as u16,
             param_index: index as u16,
-            param_id: wire::text(NAMES[index]),
+            param_id: wire::text(&name),
             param_value: value.bytes(),
             param_type: crate::sim::ext_type(value.kind()),
         };

@@ -178,6 +178,19 @@ struct Recording {
     status: Option<Every>,
 }
 
+/// When a simulated camera describes a photo it took
+/// (`CAMERA_IMAGE_CAPTURED`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhotosSaid {
+    /// As it takes each, and again when asked.
+    #[default]
+    AsTaken,
+    /// Only when asked for one by its index.
+    WhenAsked,
+    /// Never: it only counts them.
+    Never,
+}
+
 /// A camera that takes images, records video, zooms and focuses, and keeps
 /// count of all of it.
 #[derive(Clone, Debug)]
@@ -208,6 +221,13 @@ pub struct Camera {
     /// It tracks a point or a box in its picture (ADR-0063 Y5), and says
     /// where that is in the picture and on the ground.
     pub tracks: bool,
+    /// When it describes a photo it took. A seam for what a ground station
+    /// does with photos a camera counts and does not describe.
+    pub photos_said: PhotosSaid,
+    /// How many settings it lists beyond the ones its definition file
+    /// names, each named `X` and its place in the list. A seam for a
+    /// camera whose list is longer than a ground station keeps.
+    pub more_settings: u16,
     /// The component id of the gimbal device it sits on, 1 to 6 for a
     /// gimbal that is no component of its own, or 0 for a camera fixed to
     /// the airframe.
@@ -279,6 +299,8 @@ impl Camera {
             attitude: [1.0, 0.0, 0.0, 0.0],
             definition_uri: Some(settings::DEFINITION_URI.to_owned()),
             files: Self::own_files(settings::DEFINITION.as_bytes()),
+            photos_said: PhotosSaid::default(),
+            more_settings: 0,
             settings: settings::Settings::default(),
             shots: 0,
             sent: 0,
@@ -433,7 +455,7 @@ impl Camera {
             && sequence.every.due(now_ms)
         {
             let taken = self.capture();
-            reports.extend(taken);
+            reports.extend(taken.filter(|_| self.photos_said == PhotosSaid::AsTaken));
             sequence.left = sequence.left.map(|left| left.saturating_sub(1));
             // A full card ends the sequence, and so does its last image.
             if taken.is_none() || sequence.left == Some(0) {
@@ -562,7 +584,11 @@ impl Camera {
             return None;
         }
         let there = match report {
-            Report::Image(index) => !param.is_nan() && index < self.images.len(),
+            Report::Image(index) => {
+                !param.is_nan()
+                    && index < self.images.len()
+                    && self.photos_said != PhotosSaid::Never
+            }
             Report::Storage => first_or_all(param),
             Report::StreamInformation | Report::StreamStatus => {
                 self.stream.is_some() && first_or_all(param)
@@ -782,7 +808,13 @@ impl Camera {
                 left: count.checked_sub(1),
             });
         }
-        (ACCEPTED, vec![first])
+        (
+            ACCEPTED,
+            (self.photos_said == PhotosSaid::AsTaken)
+                .then_some(first)
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Takes an image if the card has room for it.

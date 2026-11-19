@@ -135,6 +135,7 @@ impl From<&core::Gimbal> for dto::Gimbal {
             component_id: v.component_id,
             device_id: v.device_id,
             device_component_id: v.device_component_id,
+            device_silent_since_us: v.device_silent_since_us,
             present: v.present,
             capabilities: CAPABILITIES
                 .into_iter()
@@ -171,6 +172,7 @@ mod tests {
             component_id: 1,
             device_id: 1,
             device_component_id: Some(154),
+            device_silent_since_us: None,
             present: true,
             // What ArduPilot 4.8 says of the simulated gimbal (S406).
             capabilities: 206_847,
@@ -226,6 +228,7 @@ mod tests {
                 component_id: 1,
                 device_id: 1,
                 device_component_id: Some(154),
+                device_silent_since_us: None,
                 present: true,
                 capabilities: 206_847,
                 limits: core::GimbalLimits::default(),

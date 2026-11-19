@@ -21,7 +21,10 @@ const MAX_SETTINGS: usize = 512;
 const MAX_IN_A_LIST: usize = 512;
 /// How many values it may list in all.
 const MAX_VALUES: usize = 20_000;
-/// The longest name, value or condition, and where free text is cut.
+/// The longest name, value or condition, and where free text is cut. The
+/// file is the camera's own or its maker's, fetched from wherever the
+/// camera names, so what it says is bounded. Text that is cut ends in a
+/// mark ([`cut`]), so that whoever reads it sees the file said more.
 const MAX_TEXT: usize = 256;
 
 /// What a camera's definition file says.
@@ -33,6 +36,37 @@ pub struct Definition {
     pub model: String,
     /// The settings, in the file's order.
     pub settings: Vec<Setting>,
+}
+
+impl Definition {
+    /// How much of the file's free text was cut, as a sentence: how many
+    /// of its names, units and descriptions were longer than
+    /// [`MAX_TEXT`] characters. None when all of it was kept whole.
+    #[must_use]
+    pub fn text_cut(&self) -> Option<String> {
+        // [`cut`] leaves a text it cut one character longer than is kept,
+        // ending in its mark.
+        let cut = [&self.version, &self.vendor, &self.model]
+            .into_iter()
+            .map(String::as_str)
+            .chain(self.settings.iter().flat_map(|setting| {
+                std::iter::once(setting.description.as_str())
+                    .chain(setting.unit.as_deref())
+                    .chain(setting.choices.iter().map(|choice| choice.name.as_str()))
+            }))
+            .filter(|text| text.ends_with('…') && text.chars().count() > MAX_TEXT)
+            .count();
+        match cut {
+            0 => None,
+            1 => Some(format!(
+                "The camera's definition file has 1 text longer than {MAX_TEXT} characters. UXDuck shows its first {MAX_TEXT} characters, and … marks where it was cut."
+            )),
+            _ => Some(format!(
+                "The camera's definition file has {} texts longer than {MAX_TEXT} characters. UXDuck shows the first {MAX_TEXT} characters of each, and … marks where each was cut.",
+                uxduck_core::domain::camera::grouped(cut as u64)
+            )),
+        }
+    }
 }
 
 /// One of the camera's own settings.
@@ -676,14 +710,15 @@ fn number(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
-/// Free text, cut at [`MAX_TEXT`] characters, without control
-/// characters.
+/// Free text without control characters. Text longer than [`MAX_TEXT`]
+/// characters is cut there and ends in "…", the mark that it was cut.
 fn cut(text: &str) -> String {
-    text.trim()
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_TEXT)
-        .collect()
+    let mut all = text.trim().chars().filter(|c| !c.is_control());
+    let mut kept: String = all.by_ref().take(MAX_TEXT).collect();
+    if all.next().is_some() {
+        kept.push('…');
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -1035,6 +1070,23 @@ mod tests {
         );
     }
 
+    // Text as long as is kept is whole, and is not marked as cut.
+    #[test]
+    fn free_text_that_fits_is_not_marked() {
+        let fits = "y".repeat(256);
+        let file = parse(
+            format!(
+                r#"<mavlinkcamera><definition version="1"><model>M</model><vendor>V</vendor></definition>
+                <parameters><parameter name="A" type="bool"><description>  {fits}  </description></parameter></parameters>
+                </mavlinkcamera>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(file.settings[0].description, fits);
+        assert_eq!(file.text_cut(), None);
+    }
+
     #[test]
     fn what_is_not_read_is_skipped_and_free_text_is_cut() {
         let long = "x".repeat(1000);
@@ -1066,7 +1118,17 @@ mod tests {
             "a setting inside an unknown element is not one"
         );
         let a = &file.settings[0];
-        assert_eq!(a.description.len(), 256);
+        assert_eq!(
+            a.description,
+            format!("{}…", "x".repeat(256)),
+            "256 characters, and a mark that the file said more"
+        );
+        assert_eq!(
+            file.text_cut().as_deref(),
+            Some(
+                "The camera's definition file has 1 text longer than 256 characters. UXDuck shows its first 256 characters, and … marks where it was cut."
+            )
+        );
         assert_eq!(a.choices[0].name, "<b>One</b>", "kept as text");
         assert_eq!(a.choices[0].exclusions, ["B"]);
         assert_eq!(a.updates, ["B"]);

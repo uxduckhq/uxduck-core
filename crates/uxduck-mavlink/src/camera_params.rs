@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use uxduck_core::domain::camera::CameraSettingKind;
+use uxduck_core::domain::camera::{CameraSettingKind, grouped};
 
 use crate::camera::Key;
 
@@ -27,16 +27,23 @@ pub const IN_PROGRESS: u8 = 3;
 
 /// The most names kept for one camera: a camera that sends more is not
 /// believed past this. The names come on its MAVLink stream, and it may
-/// say it has 65,535 of them.
+/// say it has 65,535 of them. A list that names more ends by saying how
+/// many of its settings were read and how many were not ([`not_read`]),
+/// and every read after it says so until a list fits. A setting UXDuck
+/// asks for or writes by name is one it chose, from the camera's
+/// definition file, so the camera's answer about it is kept all the same.
 const NAMES_KEPT: usize = 1024;
 /// How often an ask is sent before it counts as unanswered, and how long
 /// each waits.
 const ATTEMPTS: u8 = 3;
 const RETRY_US: u64 = 1_500_000;
-/// Silence during a list before its gaps are asked for, how many at once
-/// and how many times.
+/// Silence during a list before its gaps are asked for, and how many at
+/// once, so that a slow link is not filled with asks. Every gap is asked
+/// for in its turn: an asking that brings a value is followed by the next.
 const QUIET_US: u64 = 1_000_000;
 const GAPS_AT_ONCE: usize = 16;
+/// How many askings in a row may bring nothing before the camera counts as
+/// having stopped answering, as [`ATTEMPTS`] is for one ask.
 const ROUNDS: u8 = 3;
 /// How long a camera that said it is working on a write is waited for.
 const WORKING_US: u64 = 30_000_000;
@@ -252,7 +259,13 @@ struct Listing {
     heard_us: Option<u64>,
     count: Option<u16>,
     got: BTreeSet<u16>,
+    /// How many of the settings it gave were not kept, their names being
+    /// past [`NAMES_KEPT`].
+    unkept: u16,
+    /// How many askings for its gaps in a row have brought nothing.
     rounds: u8,
+    /// How many values it had given when its gaps were last asked for.
+    had: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -281,16 +294,39 @@ struct One {
     heard: BTreeMap<String, Value>,
     /// A read that ended since.
     ended: Option<Result<(), String>>,
+    /// What its last list left unread, its names being more than are
+    /// kept. A read that ends well still says so.
+    cut: Option<String>,
 }
 
 impl One {
-    /// A read that nothing is left of has ended well, unless it ended
-    /// already.
+    /// A read that nothing is left of has ended, unless it ended already:
+    /// well, or with what the last list left unread.
     fn settle(&mut self) {
         if self.list.is_none() && self.reads.is_empty() && self.ended.is_none() {
-            self.ended = Some(Ok(()));
+            self.ended = Some(self.cut.clone().map_or(Ok(()), Err));
         }
     }
+}
+
+/// How many settings a camera's list said it has, in words.
+fn listed(count: u16) -> String {
+    format!("The camera listed {} settings.", grouped(u64::from(count)))
+}
+
+/// What a list left unread because its names are more than are kept, in
+/// words. `first` says how many settings the camera gave, and `given` is
+/// that number.
+fn not_read(first: &str, given: usize, unkept: u16) -> Option<String> {
+    let read = given.saturating_sub(usize::from(unkept));
+    (unkept > 0).then(|| {
+        format!(
+            "{first} UXDuck read {} of them and not the other {}, because it keeps at most {} names from one camera, whose list is its own to send. A setting here that shows no value may be one it did not read.",
+            grouped(read as u64),
+            grouped(u64::from(unkept)),
+            grouped(NAMES_KEPT as u64),
+        )
+    })
 }
 
 /// The cameras whose settings are read and written, by the component
@@ -311,7 +347,9 @@ impl Params {
             heard_us: None,
             count: None,
             got: BTreeSet::new(),
+            unkept: 0,
             rounds: 0,
+            had: 0,
         });
         vec![Out::List]
     }
@@ -380,25 +418,29 @@ impl Params {
         let Some(one) = self.cameras.get_mut(key) else {
             return;
         };
-        if !one.names.contains(&said.name) {
-            if one.names.len() >= NAMES_KEPT {
-                return;
-            }
-            one.names.insert(said.name.clone());
-        }
+        // A value asked for by name is kept whatever else the camera named.
+        let kept = one.reads.contains_key(&said.name)
+            || one.names.contains(&said.name)
+            || (one.names.len() < NAMES_KEPT && one.names.insert(said.name.clone()));
         let asked = one.list.is_some() || !one.reads.is_empty();
+        // A value whose name is not kept still counts as given, so that
+        // the list ends when the camera has given it all and is not asked
+        // again for what it sent.
         if let Some(list) = &mut one.list {
             list.heard_us = Some(now_us);
             list.count = Some(said.count);
-            if said.index < said.count {
-                list.got.insert(said.index);
+            if said.index < said.count && list.got.insert(said.index) && !kept {
+                list.unkept += 1;
             }
             if list.got.len() >= usize::from(said.count) {
+                one.cut = not_read(&listed(said.count), list.got.len(), list.unkept);
                 one.list = None;
             }
         }
-        one.reads.remove(&said.name);
-        one.heard.insert(said.name, said.value);
+        if kept {
+            one.reads.remove(&said.name);
+            one.heard.insert(said.name, said.value);
+        }
         // A value sent unasked ends no read.
         if asked {
             one.settle();
@@ -425,7 +467,9 @@ impl Params {
             }
             return told;
         }
-        if let Some(write) = one.writes.remove(&acked.name) {
+        let written = one.writes.remove(&acked.name);
+        let ours = written.is_some();
+        if let Some(write) = written {
             let outcome = match acked.result {
                 ACCEPTED => Outcome::Accepted,
                 VALUE_UNSUPPORTED => Outcome::Refused(
@@ -441,11 +485,14 @@ impl Params {
             });
         }
         // An accepted write carries the value the camera now has. A
-        // refusal carries the one it keeps, when it knows the setting.
+        // refusal carries the one it keeps, when it knows the setting. The
+        // answer to a write of UXDuck's own is kept whatever else the
+        // camera named.
         if (acked.result == ACCEPTED || acked.result == FAILED)
-            && (one.names.contains(&acked.name) || one.names.len() < NAMES_KEPT)
+            && (ours
+                || one.names.contains(&acked.name)
+                || (one.names.len() < NAMES_KEPT && one.names.insert(acked.name.clone())))
         {
-            one.names.insert(acked.name.clone());
             one.heard.insert(acked.name, acked.value);
         }
         told
@@ -476,21 +523,33 @@ impl Params {
                         let missing: Vec<u16> = (0..count)
                             .filter(|index| !list.got.contains(index))
                             .collect();
+                        // An asking that brought a value was answered, so
+                        // the camera is asked on. Its count is 16 bits,
+                        // which is as long as that goes on.
+                        if list.got.len() > list.had {
+                            list.rounds = 0;
+                        }
                         if list.rounds < ROUNDS && !missing.is_empty() {
                             list.rounds += 1;
+                            list.had = list.got.len();
                             list.asked_us = now_us;
                             for index in missing.into_iter().take(GAPS_AT_ONCE) {
                                 outs.push((key.clone(), Out::ReadIndex(index)));
                             }
                         } else {
-                            let got = list.got.len();
+                            let (got, unkept) = (list.got.len(), list.unkept);
                             one.list = None;
                             one.ended = Some(if missing.is_empty() {
-                                Ok(())
+                                one.cut = not_read(&listed(count), got, unkept);
+                                one.cut.clone().map_or(Ok(()), Err)
                             } else {
-                                Err(format!(
-                                    "The camera gave {got} of its {count} settings and stopped answering."
-                                ))
+                                let stopped = format!(
+                                    "The camera gave {} of its {} settings and stopped answering.",
+                                    grouped(got as u64),
+                                    grouped(u64::from(count))
+                                );
+                                one.cut = not_read(&stopped, got, unkept);
+                                Err(one.cut.clone().unwrap_or(stopped))
                             });
                         }
                     }
@@ -703,6 +762,103 @@ mod tests {
         );
     }
 
+    // A list with more gaps than are asked for at once, or than three
+    // askings fill, is read whole: a camera that answers each asking is
+    // asked on, and is not said to have stopped answering.
+    #[test]
+    fn a_camera_that_answers_every_asking_is_asked_for_every_gap() {
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        let count = 200_u16;
+        let give = |params: &mut Params, index: u16, now: u64| {
+            params.value(
+                &key(),
+                said(&format!("S{index}"), Value::Uint8(1), index, count),
+                now,
+            );
+        };
+        // It gave one in two, as over a radio that drops the rest.
+        for index in (0..count).step_by(2) {
+            give(&mut params, index, 0);
+        }
+        let mut now = 0;
+        let mut askings = 0;
+        loop {
+            now += QUIET_US;
+            let asked: Vec<u16> = params
+                .tick(now)
+                .0
+                .into_iter()
+                .filter_map(|(_, out)| match out {
+                    Out::ReadIndex(index) => Some(index),
+                    _ => None,
+                })
+                .collect();
+            if asked.is_empty() {
+                break;
+            }
+            assert!(asked.len() <= GAPS_AT_ONCE);
+            askings += 1;
+            assert!(askings <= 100, "asked without end");
+            for index in asked {
+                give(&mut params, index, now);
+            }
+        }
+        // 100 gaps, 16 at an asking.
+        assert_eq!(askings, 7);
+        let told = params.take();
+        assert!(
+            matches!(&told[..], [Told::Values { values, read: Some(Ok(())), .. }] if values.len() == 200),
+            "{told:?}"
+        );
+    }
+
+    // One that answers some askings and then none is asked three times
+    // for what is left, and only then said to have stopped.
+    #[test]
+    fn a_camera_that_stops_part_way_through_its_gaps_is_asked_three_times_more() {
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        let count = 100_u16;
+        for index in 0..40 {
+            params.value(
+                &key(),
+                said(&format!("S{index}"), Value::Uint8(1), index, count),
+                0,
+            );
+        }
+        let mut now = 0;
+        let mut askings = 0;
+        loop {
+            now += QUIET_US;
+            let asked = params.tick(now).0;
+            if asked.is_empty() {
+                break;
+            }
+            askings += 1;
+            assert!(askings <= 100, "asked without end");
+            // It answers the first two askings and no more.
+            if askings <= 2 {
+                for (_, out) in asked {
+                    if let Out::ReadIndex(index) = out {
+                        params.value(
+                            &key(),
+                            said(&format!("S{index}"), Value::Uint8(1), index, count),
+                            now,
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(askings, 2 + usize::from(ROUNDS));
+        let told = params.take();
+        assert!(
+            matches!(&told[..], [Told::Values { read: Some(Err(why)), .. }]
+                if why == "The camera gave 72 of its 100 settings and stopped answering."),
+            "{told:?}"
+        );
+    }
+
     #[test]
     fn a_list_that_stops_short_says_how_far_it_got() {
         let mut params = Params::default();
@@ -847,6 +1003,151 @@ mod tests {
             "{}",
             told.len()
         );
+    }
+
+    // A camera lists more settings than UXDuck keeps the names of: the
+    // read ends when the camera has given them all, and says how many it
+    // read and how many it did not.
+    #[test]
+    fn a_list_longer_than_the_names_kept_ends_saying_what_was_not_read() {
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        let count = u16::try_from(NAMES_KEPT + 10).unwrap();
+        for index in 0..count {
+            let name = format!("N{index}");
+            params.value(&key(), said(&name, Value::Uint8(0), index, count), 1);
+        }
+        assert!(!params.waiting(), "the camera gave every one it listed");
+        let told = params.take();
+        let [Told::Values { values, read, .. }] = &told[..] else {
+            panic!("{}", told.len());
+        };
+        assert_eq!(values.len(), NAMES_KEPT);
+        assert_eq!(
+            read.clone(),
+            Some(Err(
+                "The camera listed 1,034 settings. UXDuck read 1,024 of them and not the other 10, because it keeps at most 1,024 names from one camera, whose list is its own to send. A setting here that shows no value may be one it did not read."
+                    .to_owned()
+            ))
+        );
+        // Nothing is asked for again: no value is missing from the list.
+        let (outs, told) = params.tick(1 + 10 * QUIET_US);
+        assert!(outs.is_empty() && told.is_empty());
+
+        // A setting UXDuck asks for by name is one it chose: its value is
+        // kept past the limit, and the read still says what the list left.
+        assert_eq!(
+            params.read(&key(), vec!["N1030".into()], 20 * QUIET_US),
+            [Out::Read("N1030".into())]
+        );
+        params.value(
+            &key(),
+            said("N1030", Value::Uint8(7), 1030, count),
+            20 * QUIET_US + 1,
+        );
+        assert!(!params.waiting());
+        let told = params.take();
+        let [Told::Values { values, read, .. }] = &told[..] else {
+            panic!("{}", told.len());
+        };
+        assert_eq!(values[..], [("N1030".to_owned(), Value::Uint8(7))]);
+        assert!(
+            matches!(read, Some(Err(why)) if why.contains("not the other 10")),
+            "{read:?}"
+        );
+
+        // A new list that fits says nothing of the last one.
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        for index in 0..3 {
+            let name = format!("N{index}");
+            params.value(&key(), said(&name, Value::Uint8(0), index, 3), 1);
+        }
+        assert!(matches!(
+            &params.take()[..],
+            [Told::Values {
+                read: Some(Ok(())),
+                ..
+            }]
+        ));
+    }
+
+    // A camera that stops part of the way through a list longer than the
+    // names kept says both: what it did not give, and what was not read of
+    // what it gave.
+    #[test]
+    fn a_long_list_that_stops_says_what_was_given_and_what_was_read() {
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        let count = u16::try_from(NAMES_KEPT + 10).unwrap();
+        for index in 0..count - 4 {
+            let name = format!("N{index}");
+            params.value(&key(), said(&name, Value::Uint8(0), index, count), 1);
+        }
+        let mut now = 1;
+        let mut asked = Vec::new();
+        for _ in 0..=ROUNDS {
+            now += QUIET_US;
+            asked.extend(params.tick(now).0.into_iter().map(|(_, out)| out));
+        }
+        assert_eq!(
+            asked.len(),
+            usize::from(ROUNDS) * 4,
+            "only what it did not give"
+        );
+        assert!(matches!(asked[0], Out::ReadIndex(1030)));
+        let told = params.take();
+        let [Told::Values { read, .. }] = &told[..] else {
+            panic!("{}", told.len());
+        };
+        assert_eq!(
+            read.clone(),
+            Some(Err(
+                "The camera gave 1,030 of its 1,034 settings and stopped answering. UXDuck read 1,024 of them and not the other 6, because it keeps at most 1,024 names from one camera, whose list is its own to send. A setting here that shows no value may be one it did not read."
+                    .to_owned()
+            ))
+        );
+    }
+
+    // The camera's answer to a write of UXDuck's own is kept, though the
+    // setting's name came after the last name kept.
+    #[test]
+    fn a_write_to_a_setting_past_the_names_kept_keeps_its_answer() {
+        let mut params = Params::default();
+        params.list(&key(), 0);
+        let count = u16::try_from(NAMES_KEPT + 1).unwrap();
+        for index in 0..count {
+            let name = format!("N{index}");
+            params.value(&key(), said(&name, Value::Uint8(0), index, count), 1);
+        }
+        params.take();
+        params
+            .set(&key(), "r1".into(), "N1024", Value::Uint8(9), 2)
+            .unwrap();
+        let acked = Acked {
+            name: "N1024".into(),
+            value: Value::Uint8(9),
+            result: ACCEPTED,
+        };
+        assert!(matches!(
+            &params.ack(&key(), acked.clone(), 3)[..],
+            [Told::Done {
+                outcome: Outcome::Accepted,
+                ..
+            }]
+        ));
+        let told = params.take();
+        assert!(
+            matches!(&told[..], [Told::Values { values, .. }] if values[..] == [("N1024".to_owned(), Value::Uint8(9))]),
+            "{told:?}"
+        );
+        // Another station's write of a name not kept stays unkept.
+        let other = Acked {
+            name: "N9999".into(),
+            ..acked
+        };
+        assert!(params.ack(&key(), other, 4).is_empty());
+        assert!(params.take().is_empty());
     }
 
     #[test]

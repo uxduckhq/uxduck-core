@@ -511,6 +511,7 @@ impl Engine {
             kept: false,
             reading: false,
             read_failure: None,
+            text_cut: None,
             settings: Vec::new(),
         };
         let Some(entry) = self.camera_settings.0.get(&camera.id) else {
@@ -550,6 +551,7 @@ impl Engine {
             File::Loaded(definition) => definition,
         };
         result.status = CameraDefinitionStatus::Loaded;
+        result.text_cut = definition.text_cut();
         let value = |name: &str| entry.value(name);
         result.settings = definition
             .settings

@@ -4,6 +4,7 @@
   "uri": "mftp:///camera.xml",
   "reading": true,
   "readFailure": "The camera did not answer.",
+  "textCut": "The camera's definition file has 1 text longer than 256 characters. UXDuck shows its first 256 characters, and … marks where it was cut.",
   "settings": [
     {
       "name": "CAM_IRLOCK",

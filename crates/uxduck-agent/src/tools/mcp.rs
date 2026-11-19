@@ -84,6 +84,7 @@ pub fn annotations(method: &str) -> Value {
             | "video/list"
             | "video/frame"
             | "camera/list"
+            | "camera/images"
             | "camera/settings"
             | "gimbal/list"
             | "video/devices"
@@ -119,6 +120,7 @@ pub fn output_schema(method: &str) -> Option<Value> {
         "marker/remove" | "sim/download" | "sim/stop" | "files/remove" | "video/record"
         | "video/recordAll" | "plugin/command" => schema::<dto::Empty>(),
         "camera/list" => schema::<dto::camera::CameraListResult>(),
+        "camera/images" => schema::<dto::camera::CameraImagesResult>(),
         "camera/settings" => schema::<dto::camera::CameraSettingsResult>(),
         "checklist/export" => schema::<dto::checklist::ChecklistFile>(),
         "checklist/runs" => schema::<dto::checklist::ChecklistRunsResult>(),

@@ -604,6 +604,7 @@ pub(crate) fn handle(
             ErrorKind::Internal,
             "camera/command is handled as command/send",
         )),
+        ClientRequest::CameraImages(params) => crate::cameras::photos(engine, &params, &granted),
         ClientRequest::CameraSettings(params) => {
             crate::camera_settings::settings(engine, &params, &granted)
         }

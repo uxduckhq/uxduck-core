@@ -63,6 +63,14 @@ impl Engine {
     /// controls send (S405). It goes to `camera` when one is named, else to
     /// the vehicle's only camera that says it can do this, else to every
     /// camera through the autopilot, as it always did.
+    ///
+    /// A Start recording for the vehicle's only camera is not sent while
+    /// that camera says it cannot record in the mode it is in. It would
+    /// answer with a refusal, and a person would be told that the vehicle
+    /// refused a recording they never asked its camera for, at each armed
+    /// start (S410). The receipt says why it was not sent, the camera
+    /// carries it for the Camera tab to say, and its mode is left as the
+    /// person has it.
     pub(crate) fn tell_vehicle_camera(
         &mut self,
         vehicle_id: &str,
@@ -91,12 +99,41 @@ impl Engine {
                 action,
             },
         );
+        let held = match &command {
+            Command::Camera {
+                component_id: Some(component),
+                device_id,
+                action: uxduck_core::domain::camera::CameraAction::StartRecording,
+            } => self
+                .camera_at(&vehicle.id, *component, *device_id)
+                .filter(|camera| camera.cannot_record_in_its_mode())
+                .cloned(),
+            _ => None,
+        };
+        let mode = held
+            .as_ref()
+            .and_then(|camera| camera.settings)
+            .and_then(|settings| settings.mode)
+            .map(|mode| match mode {
+                uxduck_core::domain::camera::CameraMode::Survey => "survey",
+                _ => "photo",
+            });
+        let now_us = self.clock.now_us();
         let receipt = Receipt {
             id: format!("rc{}", &self.random.token()[..16]),
             vehicle_id: vehicle.id.clone(),
             command: command.clone(),
-            status: ReceiptStatus::Sent,
-            detail: None,
+            status: if held.is_some() {
+                ReceiptStatus::NotSent
+            } else {
+                ReceiptStatus::Sent
+            },
+            detail: mode.map(|mode| {
+                format!(
+                    "The camera is in {mode} mode and says it records in video mode only. \
+                     UXDuck did not ask it to record and left its mode as it is."
+                )
+            }),
             reason: None,
             preflight: Vec::new(),
             preflight_override: None,
@@ -108,13 +145,19 @@ impl Engine {
             sent_by: None,
             remote: None,
             progress: None,
-            created_at_us: self.clock.now_us(),
-            completed_at_us: None,
+            created_at_us: now_us,
+            completed_at_us: held.is_some().then_some(now_us),
             version: 1,
         };
         let id = receipt.id.clone();
         let vehicle_id = vehicle.id.clone();
         self.commit_as(actor(), Change::ReceiptUpserted { receipt });
+        if let Some(mut camera) = held {
+            camera.recording_not_asked = Some(id.clone());
+            camera.version += 1;
+            self.commit_as(actor(), Change::CameraUpserted { camera });
+            return Some(id);
+        }
         self.links.command(CommandOrder {
             receipt_id: id.clone(),
             vehicle_id,
@@ -163,6 +206,19 @@ impl Engine {
                 continue;
             }
             self.video.camera_recording.remove(&vehicle_id);
+            // A camera that was not asked says so no longer.
+            let not_asked: Vec<_> = self
+                .state
+                .cameras
+                .values()
+                .filter(|camera| camera.recording_not_asked.as_ref() == Some(&receipt_id))
+                .cloned()
+                .collect();
+            for mut camera in not_asked {
+                camera.recording_not_asked = None;
+                camera.version += 1;
+                self.commit_as(actor(), Change::CameraUpserted { camera });
+            }
             // A definitive refusal/not-sent means there is no recording from
             // this start to stop. Unknown or timed-out starts still need Stop:
             // the camera may have acted even when its acknowledgement was lost.

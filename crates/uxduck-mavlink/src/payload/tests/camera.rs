@@ -261,6 +261,35 @@ fn an_image_message_lost_on_the_way_is_asked_for_by_its_index() {
     assert_eq!(told(&mut payload, 512, &[263.0, 3.0]), DENIED);
 }
 
+// The seams for photos a camera counts and does not describe: one that
+// describes a photo only when asked for it, and one that never does.
+#[test]
+fn a_camera_can_be_made_to_count_photos_it_does_not_describe() {
+    for said in [
+        crate::payload::PhotosSaid::WhenAsked,
+        crate::payload::PhotosSaid::Never,
+    ] {
+        let mut payload = camera();
+        payload.camera.as_mut().unwrap().photos_said = said;
+        payload.step(1000);
+        // One by hand and two at their interval: counted, and none told.
+        let first = ask(&mut payload, 2000, &[0.0, 1.0, 3.0]);
+        assert_eq!(result(&first, CAMERA, 2000), ACCEPTED);
+        assert!(of!(first, CameraImageCaptured).is_empty());
+        assert!(of!(run(&mut payload, 1000, 3000), CameraImageCaptured).is_empty());
+        assert_eq!(capture_status(&mut payload).image_count, 3);
+
+        let frames = ask(&mut payload, 512, &[263.0, 1.0]);
+        if said == crate::payload::PhotosSaid::Never {
+            assert_eq!(result(&frames, CAMERA, 512), DENIED);
+            assert!(of!(frames, CameraImageCaptured).is_empty());
+        } else {
+            assert_eq!(result(&frames, CAMERA, 512), ACCEPTED);
+            assert_eq!(of!(frames, CameraImageCaptured).remove(0).image_index, 1);
+        }
+    }
+}
+
 // Guide: video streaming. MAV_CMD_REQUEST_MESSAGE (269, stream 0 for
 // all), MAV_RESULT_ACCEPTED, VIDEO_STREAM_INFORMATION for each stream.
 #[test]

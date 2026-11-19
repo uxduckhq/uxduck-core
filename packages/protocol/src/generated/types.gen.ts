@@ -1788,14 +1788,49 @@ export type Camera = {
     model?: string | null;
     /**
      * The photos it said it took while UXDuck listened, oldest first: the
-     * last 20 of them, each with where it was taken.
+     * newest 20 of them, each with where it was taken. `photosListed`
+     * says how many there are, and `camera/images` reads the ones before
+     * these.
      */
     photos?: Array<CameraPhoto>;
+    /**
+     * How many older photos it described that are not listed. UXDuck
+     * keeps at most the newest 100,000 photos of one camera, because a
+     * camera describes as many as it likes on its MAVLink stream and
+     * each is held in memory. Past that the photo with the lowest
+     * `index` leaves the list, and stays on the camera's card. Each is
+     * counted once: one first described among indexes already dropped is
+     * not counted, since nothing of a dropped photo is kept to tell it
+     * from one described twice. Absent when every photo is listed.
+     */
+    photosDropped?: number;
+    /**
+     * How many photos UXDuck lists of it: the ones it described while
+     * UXDuck listened, since its list was last emptied by a format, and
+     * at most the newest 100,000 of them. UXDuck keeps them until it
+     * stops. Absent when there is none.
+     */
+    photosListed?: number;
+    /**
+     * `photosDropped` in words for a person, when it is not 0: how many
+     * photos are not listed, why, and that they stay on the camera's
+     * card.
+     */
+    photosNotListed?: string | null;
     /**
      * Whether its heartbeats, or its autopilot's, are heard now. A camera
      * that is gone is kept, and identified again when it returns.
      */
     present: boolean;
+    /**
+     * The receipt of UXDuck's own Start recording that it did not send to
+     * this camera, because the camera is in photo mode and says it
+     * records in video mode only. Present for as long as UXDuck means the
+     * vehicle's camera to record along with its own recording ("Also save
+     * on the vehicle"). UXDuck does not switch the camera's mode: send
+     * `set-mode` and `start-recording` to have it record.
+     */
+    recordingNotAsked?: string | null;
     sensor?: CameraSensor | null;
     /**
      * Its mode, zoom and focus, once it has said them.
@@ -1938,9 +1973,25 @@ export type CameraCapture = {
      */
     photoCount: number;
     /**
-     * Photos it counted and never described, though asked again.
+     * Photos it counts and has not described yet, which UXDuck is asking
+     * for or will. They join `photos` as the camera describes them, or
+     * `photosLost` or `photosNotAsked`.
+     */
+    photosAwaited?: number;
+    /**
+     * Photos it counted and never described, though UXDuck asked for
+     * each of them three times.
      */
     photosLost?: number;
+    /**
+     * Photos it counted that UXDuck did not ask for. UXDuck asks for a
+     * photo the camera counts and does not describe, however many are
+     * missing at once, a few at a time. Once the camera has described
+     * none of 64 in a row, each asked for three times, it does not answer
+     * such requests. UXDuck then asks this camera for no more, and counts
+     * here the ones it did not ask for.
+     */
+    photosNotAsked?: number;
     recording: boolean;
     /**
      * When the recording began by the camera's own count of it, in
@@ -2001,6 +2052,57 @@ export type CameraDefinitionFetchParams = {
  * Where UXDuck is with a camera's definition file.
  */
 export type CameraDefinitionStatus = 'none' | 'ask' | 'fetching' | 'failed' | 'refused' | 'loaded';
+
+/**
+ * `camera/images`: which of a camera's photos.
+ */
+export type CameraImagesParams = {
+    /**
+     * Only photos before this place in the camera's list: the `index` of
+     * the first photo already read, from `camera/list` or an earlier
+     * answer. None for the newest.
+     */
+    before?: number | null;
+    /**
+     * The camera's `id` from `camera/list`.
+     */
+    cameraId: string;
+    /**
+     * How many to answer: 50 when omitted, at most 500.
+     */
+    limit?: number | null;
+};
+
+/**
+ * `camera/images`: one page of the photos a camera said it took.
+ */
+export type CameraImagesResult = {
+    cameraId: string;
+    /**
+     * How many older photos the camera described that are not listed, as
+     * `photosDropped` says. Absent when every photo is listed.
+     */
+    dropped?: number;
+    /**
+     * How many of them come before this page's first. Read on with that
+     * photo's `index` as `before` until this is 0.
+     */
+    earlier: number;
+    /**
+     * The same in words for a person, as `photosNotListed` says: how
+     * many photos are not listed, why, and that they stay on the
+     * camera's card.
+     */
+    notListed?: string | null;
+    /**
+     * The page, oldest first.
+     */
+    photos?: Array<CameraPhoto>;
+    /**
+     * How many photos UXDuck has of this camera, as `photosListed` says.
+     */
+    total: number;
+};
 
 export type CameraInternet = {
     localUrls: Array<string>;
@@ -2212,6 +2314,9 @@ export type CameraSettingsResult = {
     kept?: boolean;
     /**
      * Why the camera's values could not all be read, when they could not.
+     * A camera that lists more settings than the 1,024 names UXDuck
+     * keeps from one camera is said here too, with how many it read and
+     * how many it did not.
      */
     readFailure?: string | null;
     /**
@@ -2228,6 +2333,12 @@ export type CameraSettingsResult = {
      */
     settings?: Array<CameraSetting>;
     status: CameraDefinitionStatus;
+    /**
+     * How much of the file's text is shown cut, as a sentence, when any
+     * is. A name, a unit or a description longer than 256 characters is
+     * kept to that length and ends in `…`, and this says how many were.
+     */
+    textCut?: string | null;
     /**
      * Where the camera says the file is, without its password. Absent
      * when it names none.
@@ -4135,6 +4246,9 @@ export type ClientRequest = {
 } | {
     method: 'camera/command';
     params: CameraCommandParams;
+} | {
+    method: 'camera/images';
+    params: CameraImagesParams;
 } | {
     method: 'camera/settings';
     params: CameraSettingsParams;
@@ -8712,6 +8826,14 @@ export type Gimbal = {
      * itself, or the gimbal device's MAVLink component.
      */
     deviceId: number;
+    /**
+     * When the gimbal device itself was last heard, in microseconds since
+     * the Unix epoch, while its heartbeats have stopped and its
+     * autopilot's go on. An autopilot still answers for such a gimbal, so
+     * a command may be accepted and move nothing. Absent while the device
+     * is heard, and for one that never was.
+     */
+    deviceSilentSinceUs?: number | null;
     /**
      * What the gimbal says is wrong with it, in the order MAVLink's
      * `GIMBAL_DEVICE_ERROR_FLAGS` has them. Empty for nothing. A limit it

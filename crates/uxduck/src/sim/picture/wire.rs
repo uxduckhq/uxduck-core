@@ -5,8 +5,9 @@
 //! To a window:
 //!
 //! - `DRAWS`: the cameras this window draws now, each named by the UDP port
-//!   its picture is sent to. A count in a byte, then each port in two.
-//!   None is a message too: it stops drawing.
+//!   its picture is sent to. A count in a byte, then each port in two, so
+//!   one message names at most [`MOST_DRAWN`]. None is a message too: it
+//!   stops drawing.
 //! - `VIEW`: what a camera it draws sees. The port, latitude and longitude
 //!   in degrees as 64-bit floats, then as 32-bit floats its height above sea
 //!   level and above home in metres, its attitude as a quaternion (w, x, y,
@@ -38,15 +39,25 @@ const THERMAL: u8 = 1;
 const VISIBLE: u8 = 1;
 const BACKGROUND: u8 = 2;
 
-/// The cameras a window draws now.
-///
-/// A window is told of at most 255, since their count is one byte: far
-/// more than a computer simulates.
+/// The most cameras one `DRAWS` names: their count is one byte, which the
+/// page's half reads. No window is given more to draw
+/// ([`super::Pictures::review`]), and a camera past that says why nobody
+/// draws it ([`super::Why::Full`]). A simulation's instance is a byte too,
+/// and each carries one camera at most, so a computer has no more than
+/// 255 of them and this is not reached today.
+pub const MOST_DRAWN: usize = u8::MAX as usize;
+
+/// The cameras a window draws now: [`MOST_DRAWN`] at most, which is the
+/// caller's to keep to.
 #[must_use]
 pub fn draws(ports: &[u16]) -> Vec<u8> {
-    let ports = &ports[..ports.len().min(255)];
+    debug_assert!(
+        ports.len() <= MOST_DRAWN,
+        "a window is given no more cameras than one message names"
+    );
+    let ports = &ports[..ports.len().min(MOST_DRAWN)];
     let mut message = Vec::with_capacity(2 + ports.len() * 2);
-    #[allow(clippy::cast_possible_truncation, reason = "255 at most")]
+    #[allow(clippy::cast_possible_truncation, reason = "MOST_DRAWN at most")]
     message.extend_from_slice(&[DRAWS, ports.len() as u8]);
     for port in ports {
         message.extend_from_slice(&port.to_be_bytes());

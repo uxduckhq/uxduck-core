@@ -87,6 +87,14 @@ pub struct Gimbal {
     /// heard: what a camera names as the gimbal it sits on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_component_id: Option<u8>,
+    /// When the gimbal device's own heartbeat was last heard, in
+    /// microseconds since the Unix epoch, while it is quieter than its
+    /// vehicle: its heartbeats stopped and the autopilot's went on. An
+    /// autopilot still answers for such a gimbal as its manager, so this
+    /// is the one sign that it is not there. None while it is heard, and
+    /// for a device that never was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_silent_since_us: Option<u64>,
     /// Whether its manager's heartbeats are heard. A gimbal that is gone
     /// is kept, and asked again when it returns.
     pub present: bool,
@@ -325,6 +333,7 @@ mod tests {
             component_id: 1,
             device_id: 1,
             device_component_id: Some(154),
+            device_silent_since_us: None,
             present: true,
             capabilities: CAP_POINT_AT_PLACE | CAP_YAW_LOCK,
             limits: GimbalLimits::default(),
