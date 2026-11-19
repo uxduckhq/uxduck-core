@@ -57,7 +57,7 @@ Use your own ArduPilot checkout, with its submodules and ArduPilot's build tools
 uxduck sim build path/to/your/ardupilot
 ```
 
-Then choose the path it prints under **New simulation › Advanced › Your own build**. The ⓘ beside that field repeats these steps.
+Then choose the path it prints under **New simulation › Advanced › Your own build**. The ⓘ beside that field repeats these steps. **Save to your builds** keeps it, named, in **Settings › Custom firmware › Simulator builds**, where each build says which firmware, version and commit it is, read from the file without running it. **Saved build** then offers it in New simulation.
 
 It builds the checked-out commit in a copy of its own (your files and `build/` folder are left alone; changes not committed are left out), adds UXDuck's local-only network patch so the simulator can't be reached from other computers, and checks that it can't. Use `--vehicle plane` (or `rover`, `submarine`, `airship`) for another vehicle; macOS and Linux only. Instead of choosing it in the form, you can run `uxduck sim start --binary <path>`.
 

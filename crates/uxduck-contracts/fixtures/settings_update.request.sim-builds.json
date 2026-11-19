@@ -1,0 +1,13 @@
+{
+  "method": "settings/update",
+  "params": {
+    "expectedVersion": 3,
+    "simBuilds": [
+      {
+        "id": "build-1",
+        "name": "Acme copter",
+        "path": "/Users/ada/ardupilot/build/sitl/bin/arducopter"
+      }
+    ]
+  }
+}

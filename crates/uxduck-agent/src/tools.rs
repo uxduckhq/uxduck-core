@@ -69,6 +69,7 @@ pub const AGENT_METHODS: &[&str] = &[
     // first, unless the agent was given the configuration capability.
     "sim/binaries",
     "sim/frames",
+    "sim/inspect",
     "sim/ownBuild",
     "sim/catalogue",
     "sim/download",
@@ -630,6 +631,7 @@ pub const DEFERRED_METHODS: &[&str] = &[
     "mission/restore",
     "sim/binaries",
     "sim/frames",
+    "sim/inspect",
     "sim/ownBuild",
     "sim/catalogue",
     "sim/download",

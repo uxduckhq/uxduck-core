@@ -402,6 +402,10 @@ pub(crate) fn handle(
             })?;
             to_value(&engine.system.sim_frames(&params).map_err(invalid)?)
         }
+        ClientRequest::SimInspect(params) => {
+            require(Capability::Read)?;
+            to_value(&engine.system.sim_inspect(&params.path).map_err(invalid)?)
+        }
         ClientRequest::SimOwnBuild(params) => {
             require(Capability::Read)?;
             to_value(&engine.system.sim_own_build(&params).map_err(invalid)?)

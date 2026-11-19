@@ -3801,6 +3801,9 @@ export type ClientRequest = {
     method: 'sim/frames';
     params: SimFramesParams;
 } | {
+    method: 'sim/inspect';
+    params: SimInspectParams;
+} | {
     method: 'sim/ownBuild';
     params: SimOwnBuildParams;
 } | {
@@ -15119,6 +15122,13 @@ export type Settings = {
      */
     showInMenuBar?: boolean;
     /**
+     * Settings › Custom firmware › Simulator builds (S421, ADR-0044 F15):
+     * a person's own SITL executables on this computer, each named, in the
+     * order they were added. New simulation offers them. Empty when an
+     * older daemon left it out.
+     */
+    simBuilds?: Array<SimBuild>;
+    /**
      * Total simulator log budget in bytes; zero disables it. Absent on older hosts.
      */
     simulatorLogMaxBytes?: number | null;
@@ -15261,6 +15271,10 @@ export type SettingsUpdateParams = {
      */
     shellPath?: string | null;
     showInMenuBar?: boolean | null;
+    /**
+     * Replaces the whole list when present. However many builds.
+     */
+    simBuilds?: Array<SimBuild> | null;
     /**
      * Total simulator log budget in bytes; zero disables it. Absent on older hosts.
      */
@@ -15752,6 +15766,17 @@ export type SimBinary = {
 };
 
 /**
+ * One of a person's own simulator builds (S421): its name and the path of
+ * its executable on the computer running UXDuck. Kept, never run, until a
+ * simulation starts from it.
+ */
+export type SimBuild = {
+    id: string;
+    name: string;
+    path: string;
+};
+
+/**
  * A catalogue build, by id.
  */
 export type SimBuildParams = {
@@ -15914,6 +15939,40 @@ export type SimFramesResult = {
      */
     frames: Array<string>;
     reading?: boolean;
+};
+
+/**
+ * Reads what one of a person's own builds says of itself (S421). This
+ * reads the file's bytes and never runs it.
+ */
+export type SimInspectParams = {
+    path: string;
+};
+
+/**
+ * What a build says of itself: an ArduPilot build names its firmware,
+ * version and commit, as `ArduCopter V4.7.0-dev (1a2b3c4d)`, the words it
+ * sends in `AUTOPILOT_VERSION`. Each is absent when the build does not say.
+ */
+export type SimInspectResult = {
+    /**
+     * The first 8 hex characters of the git commit it was built from, the
+     * commit firmware profiles and dialects match (ADR-0044 F12, F13).
+     */
+    commit?: string | null;
+    /**
+     * Its firmware's name, such as `ArduCopter` or `ArduPlane`.
+     */
+    firmware?: string | null;
+    /**
+     * When the file last changed, in microseconds since the Unix epoch.
+     */
+    modifiedAtUs?: number | null;
+    sizeBytes: number;
+    /**
+     * Such as `4.7.0-dev`.
+     */
+    version?: string | null;
 };
 
 /**

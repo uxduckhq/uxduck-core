@@ -1172,6 +1172,22 @@ pub trait System: Send {
     ) -> Result<uxduck_contracts::dto::sim::SimFramesResult, String> {
         Err("This UXDuck cannot read frames from a custom executable.".into())
     }
+    /// What one of a person's own simulator builds says of itself, read
+    /// from the file without running it (S421).
+    ///
+    /// # Errors
+    /// When this host has no own builds or cannot read the file.
+    fn sim_inspect(
+        &self,
+        path: &str,
+    ) -> Result<uxduck_contracts::dto::sim::SimInspectResult, String> {
+        let _ = path;
+        Err(
+            "This UXDuck cannot read your own simulator builds. Use UXDuck Desktop for them."
+                .into(),
+        )
+    }
+
     /// Which ArduPilot program a selected native executable is, read from
     /// its file without running it.
     /// # Errors

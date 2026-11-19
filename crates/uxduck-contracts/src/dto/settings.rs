@@ -194,6 +194,12 @@ pub struct Settings {
     /// it starts, they are removed.
     #[serde(default)]
     pub recreate_simulations: bool,
+    /// Settings › Custom firmware › Simulator builds (S421, ADR-0044 F15):
+    /// a person's own SITL executables on this computer, each named, in the
+    /// order they were added. New simulation offers them. Empty when an
+    /// older daemon left it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sim_builds: Vec<SimBuild>,
     /// Settings › Airspace (S174): traffic this near an armed vehicle,
     /// across, raises a warning. 2 km when an older daemon left it out.
     #[serde(default = "traffic_alert_m")]
@@ -331,6 +337,9 @@ pub struct SettingsUpdateParams {
     pub message_notify_severity: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recreate_simulations: Option<bool>,
+    /// Replaces the whole list when present. However many builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_builds: Option<Vec<SimBuild>>,
     /// 100 m to 20 km (S174).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_alert_m: Option<u32>,
@@ -635,6 +644,17 @@ const fn battery_low_pct() -> u8 {
 
 const fn battery_critical_pct() -> u8 {
     10
+}
+
+/// One of a person's own simulator builds (S421): its name and the path of
+/// its executable on the computer running UXDuck. Kept, never run, until a
+/// simulation starts from it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimBuild {
+    pub id: String,
+    pub name: String,
+    pub path: String,
 }
 
 const fn controller_rumble() -> bool {

@@ -1,0 +1,4 @@
+{
+  "method": "sim/inspect",
+  "params": { "path": "/Users/ada/ardupilot/build/sitl/bin/arducopter" }
+}

@@ -159,6 +159,7 @@ impl From<dto::PilotInputMethod> for s::PilotInputMethod {
 
 /// The wire form, with the command line's close policy where none was set.
 #[must_use]
+#[allow(clippy::too_many_lines, reason = "one field per setting")]
 pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dto::Settings {
     dto::Settings {
         include_beta: Some(settings.include_beta),
@@ -211,6 +212,7 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
         login_item: None,
         message_notify_severity: settings.message_notify_severity,
         recreate_simulations: settings.recreate_simulations,
+        sim_builds: settings.sim_builds.iter().map(Into::into).collect(),
         traffic_alert_m: settings.traffic_alert_m,
         traffic_alert_up_m: settings.traffic_alert_up_m,
         battery_low_pct: settings.battery_low_pct,
@@ -259,6 +261,16 @@ pub fn settings_dto(settings: &s::Settings, default_close: s::ClosePolicy) -> dt
                 method: (*method).into(),
             })
             .collect(),
+    }
+}
+
+impl From<&s::SimBuild> for dto::SimBuild {
+    fn from(build: &s::SimBuild) -> Self {
+        Self {
+            id: build.id.clone(),
+            name: build.name.clone(),
+            path: build.path.clone(),
+        }
     }
 }
 

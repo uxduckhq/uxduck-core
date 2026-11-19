@@ -70,8 +70,8 @@ use crate::dto::search::{
 use crate::dto::settings::{DaemonRestartParams, SettingsUpdateParams, StorageRevealParams};
 use crate::dto::sim::{
     SimBuildParams, SimCatalogueParams, SimCrashParams, SimFaultParams, SimFramesParams,
-    SimOwnBuildParams, SimPauseParams, SimSnapshotParams, SimStartParams, SnapshotRenameParams,
-    SnapshotStartParams,
+    SimInspectParams, SimOwnBuildParams, SimPauseParams, SimSnapshotParams, SimStartParams,
+    SnapshotRenameParams, SnapshotStartParams,
 };
 use crate::dto::state::{StateDelta, StateSubscribeParams};
 use crate::dto::sync::{SyncActivateParams, SyncSetParams};
@@ -1310,6 +1310,12 @@ pub enum ClientRequest {
     /// Poll without `refresh` (read permission) while `reading` is true.
     #[serde(rename = "sim/frames")]
     SimFrames(SimFramesParams),
+    /// What one of a person's own simulator builds says of itself, read from
+    /// the file without running it (S421): its firmware, version and the
+    /// commit it was built from, its size and when it changed. Read
+    /// capability. Result: `SimInspectResult`.
+    #[serde(rename = "sim/inspect")]
+    SimInspect(SimInspectParams),
     /// Which ArduPilot program a build of your own is, and what it flies,
     /// read from the firmware name its file holds. Runs nothing. Result:
     /// `SimOwnBuildResult`.
@@ -2297,7 +2303,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 407] = [
+    pub const METHODS: [&'static str; 408] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2705,6 +2711,7 @@ impl ClientRequest {
         "feedback/file",
         "feedback/add",
         "telemetry/calculate",
+        "sim/inspect",
     ];
 }
 

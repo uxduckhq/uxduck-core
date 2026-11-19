@@ -34,7 +34,7 @@ Some values take effect only once the vehicle restarts. UXDuck says so where you
 
 ## Your own descriptions
 
-In **Settings › Parameters**, add the descriptions of your own firmware from a file, or from the URL your CI publishes them at; a set from a URL goes to your other computers with sync. From the command line: `uxduck params definitions add <file or URL>`.
+In **Settings › Custom firmware › Parameter descriptions**, add the descriptions of your own firmware from a file, or from the URL your CI publishes them at; a set from a URL goes to your other computers with sync. From the command line: `uxduck params definitions add <file or URL>`.
 
 With the ArduPilot source checkout that built your firmware, generate and add its descriptions:
 
@@ -48,7 +48,7 @@ A PX4 vehicle describes its own parameters. UXDuck reads PX4's parameter metadat
 
 ## Your fork's messages, and each vehicle's definitions
 
-In **Settings › MAVLink messages**, add your fork's MAVLink XML and give the commit of each build that has it. A vehicle reports the commit its firmware was built from, so every vehicle running those builds decodes the fork's messages in the MAVLink inspector, for the agent and for plugins, without anyone choosing. A dialect that changes a standard message applies only to those vehicles, or to the vehicles it is chosen for.
+In **Settings › Custom firmware › MAVLink dialects**, add your fork's MAVLink XML and give the commit of each build that has it. A vehicle reports the commit its firmware was built from, so every vehicle running those builds decodes the fork's messages in the MAVLink inspector, for the agent and for plugins, without anyone choosing. A dialect that changes a standard message applies only to those vehicles, or to the vehicles it is chosen for.
 
 To choose for one vehicle, open its setup's **Definitions**: turn dialects on or off, add one from its XML files, and pick ArduPilot's descriptions and your own separately. If your CI publishes a firmware profile, add its URL under **Firmware profiles** in the same settings, or with `uxduck firmware add <url>`: each build's parameters and messages arrive with its commit and are fetched again daily.
 

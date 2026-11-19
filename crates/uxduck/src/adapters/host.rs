@@ -1015,6 +1015,13 @@ impl System for Host {
         self.simulators.read_frames(params)
     }
 
+    fn sim_inspect(
+        &self,
+        path: &str,
+    ) -> Result<uxduck_contracts::dto::sim::SimInspectResult, String> {
+        crate::sim::inspect(std::path::Path::new(path))
+    }
+
     fn sim_own_build(
         &self,
         params: &uxduck_contracts::dto::sim::SimOwnBuildParams,

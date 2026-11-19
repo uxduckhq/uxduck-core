@@ -281,6 +281,11 @@ pub struct Settings {
     /// starts, they are not remembered and go with their vehicles.
     #[serde(default)]
     pub recreate_simulations: bool,
+    /// Settings › Custom firmware › Simulator builds (S421, ADR-0044 F15):
+    /// a person's own SITL executables on this computer, in the order they
+    /// were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sim_builds: Vec<SimBuild>,
     /// Settings › Airspace (S174, ADR-0034): traffic this near an armed
     /// vehicle across, and this near up or down, raises a warning.
     #[serde(default = "traffic_alert_m")]
@@ -495,6 +500,7 @@ impl Default for Settings {
             sync_merged: true,
             pilot_input_methods: BTreeMap::new(),
             recreate_simulations: false,
+            sim_builds: Vec::new(),
             traffic_alert_m: traffic_alert_m(),
             traffic_alert_up_m: traffic_alert_up_m(),
             battery_low_pct: battery_low_pct(),
@@ -761,6 +767,16 @@ mod simulator_retention_tests {
         assert_eq!(reloaded.simulator_log_max_bytes, 0);
         assert_eq!(reloaded.simulator_log_limit(), 0);
     }
+}
+
+/// One of a person's own simulator builds (S421): a name and the path of
+/// its executable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimBuild {
+    pub id: String,
+    pub name: String,
+    pub path: String,
 }
 
 /// Traffic choices are explicit and never depend on arming.

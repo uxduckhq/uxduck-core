@@ -160,6 +160,38 @@ pub struct SimFramesParams {
     pub refresh: bool,
 }
 
+/// Reads what one of a person's own builds says of itself (S421). This
+/// reads the file's bytes and never runs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimInspectParams {
+    pub path: String,
+}
+
+/// What a build says of itself: an ArduPilot build names its firmware,
+/// version and commit, as `ArduCopter V4.7.0-dev (1a2b3c4d)`, the words it
+/// sends in `AUTOPILOT_VERSION`. Each is absent when the build does not say.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SimInspectResult {
+    /// Its firmware's name, such as `ArduCopter` or `ArduPlane`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    /// Such as `4.7.0-dev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The first 8 hex characters of the git commit it was built from, the
+    /// commit firmware profiles and dialects match (ADR-0044 F12, F13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[schemars(schema_with = "crate::safe::integer")]
+    pub size_bytes: u64,
+    /// When the file last changed, in microseconds since the Unix epoch.
+    #[schemars(schema_with = "crate::safe::optional_integer")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at_us: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SimFramesResult {

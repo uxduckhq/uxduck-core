@@ -20,7 +20,8 @@ use uxduck_contracts::dto::link::{
     SimVehicle as SimVehicleDto,
 };
 use uxduck_contracts::dto::sim::{
-    CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult, SimOwnBuildResult,
+    CatalogueBuild, SimBinary, SimFramesParams, SimFramesResult, SimInspectResult,
+    SimOwnBuildResult,
 };
 use uxduck_core::domain::link::{
     ArdupilotGimbal, JET_FRAME, Link, LinkKind, SimAutopilot, SimVehicle,
@@ -1019,6 +1020,87 @@ fn find_program(directory: &Path, program: &str) -> Option<PathBuf> {
 /// When it does not run, or does not answer as SITL does.
 pub fn probe(path: &Path) -> Result<SimBinary, String> {
     probe_found(path, &own_gimbals_in)
+}
+
+/// The firmwares whose builds name themselves, as `THISFIRMWARE` does.
+const SELF_NAMING_FIRMWARES: [&str; 6] = [
+    "ArduCopter",
+    "ArduPlane",
+    "ArduRover",
+    "ArduSub",
+    "AntennaTracker",
+    "Blimp",
+];
+
+/// What one of a person's own builds says of itself (S421), read from its
+/// bytes and never run: ArduPilot keeps `ArduCopter V4.7.0-dev (1a2b3c4d)`
+/// in every build, the words it sends in `AUTOPILOT_VERSION`.
+///
+/// # Errors
+/// When the file cannot be read.
+pub fn inspect(path: &Path) -> Result<SimInspectResult, String> {
+    let cannot_read = |error: std::io::Error| format!("Can't read {}: {error}", path.display());
+    let metadata = std::fs::metadata(path).map_err(cannot_read)?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let bytes = std::fs::read(path).map_err(cannot_read)?;
+    let named = named_version(&bytes);
+    Ok(SimInspectResult {
+        firmware: named.as_ref().map(|n| n.0.clone()),
+        version: named.as_ref().map(|n| n.1.clone()),
+        commit: named.and_then(|n| n.2),
+        size_bytes: metadata.len(),
+        modified_at_us: metadata
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .and_then(|since| u64::try_from(since.as_micros()).ok()),
+    })
+}
+
+/// A build's firmware, version and commit from its own words, the one that
+/// names a commit first.
+fn named_version(bytes: &[u8]) -> Option<(String, String, Option<String>)> {
+    let mut plain = None;
+    for name in SELF_NAMING_FIRMWARES {
+        let needle = format!("{name} V");
+        let mut from = 0;
+        while let Some(at) = bytes[from..]
+            .windows(needle.len())
+            .position(|window| window == needle.as_bytes())
+        {
+            let start = from + at + needle.len();
+            from = start;
+            let text: String = bytes[start..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_graphic() || **byte == b' ')
+                .map(|byte| char::from(*byte))
+                .collect();
+            let (version, rest) = text.split_once(' ').unwrap_or((&text, ""));
+            if !version.starts_with(|c: char| c.is_ascii_digit())
+                || !version
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            {
+                continue;
+            }
+            let commit = rest
+                .strip_prefix('(')
+                .and_then(|r| r.get(..9))
+                .and_then(|r| r.strip_suffix(')'))
+                .filter(|hash| hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()));
+            match commit {
+                Some(hash) => {
+                    return Some((name.to_owned(), version.to_owned(), Some(hash.to_owned())));
+                }
+                None => {
+                    plain.get_or_insert_with(|| (name.to_owned(), version.to_owned(), None));
+                }
+            }
+        }
+    }
+    plain
 }
 
 /// What says which of ArduPilot's own gimbals a build can simulate.
@@ -2106,6 +2188,44 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_own_build_names_its_firmware_version_and_commit_without_running() {
+        let folder = tempfile::tempdir().unwrap();
+        let build = folder.path().join("arducopter");
+        let mut bytes = vec![0x7f, b'E', b'L', b'F', 0, 1, 2];
+        bytes.extend_from_slice(
+            b"ArduCopter V4.7.0-dev\0\x01ArduCopter V4.7.0-dev (1a2b3c4d)\0more",
+        );
+        std::fs::write(&build, &bytes).unwrap();
+        let found = inspect(&build).unwrap();
+        assert_eq!(found.firmware.as_deref(), Some("ArduCopter"));
+        assert_eq!(found.version.as_deref(), Some("4.7.0-dev"));
+        assert_eq!(found.commit.as_deref(), Some("1a2b3c4d"));
+        assert_eq!(found.size_bytes, bytes.len() as u64);
+        assert!(found.modified_at_us.is_some());
+
+        std::fs::write(&build, b"\0ArduPlane V4.6.2\0").unwrap();
+        let found = inspect(&build).unwrap();
+        assert_eq!(found.firmware.as_deref(), Some("ArduPlane"));
+        assert_eq!(found.version.as_deref(), Some("4.6.2"));
+        assert_eq!(found.commit, None);
+
+        std::fs::write(&build, b"not a build").unwrap();
+        let found = inspect(&build).unwrap();
+        assert_eq!(
+            (found.firmware, found.version, found.commit),
+            (None, None, None)
+        );
+
+        let missing = inspect(&folder.path().join("gone")).unwrap_err();
+        assert!(missing.starts_with("Can't read "), "{missing}");
+        assert!(
+            inspect(folder.path())
+                .unwrap_err()
+                .ends_with("is not a file")
+        );
+    }
 
     #[cfg(unix)]
     fn description_fixture(program: &Path) -> PathBuf {

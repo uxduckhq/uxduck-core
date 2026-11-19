@@ -1063,6 +1063,43 @@ fn megabytes(bytes: u64) -> String {
     }
 }
 
+/// Settings › Custom firmware › Simulator builds (S421), checked: each its
+/// own id, a name and the path of its executable.
+fn sim_builds(
+    builds: &[uxduck_contracts::dto::settings::SimBuild],
+) -> Result<Vec<uxduck_core::domain::settings::SimBuild>, ApiError> {
+    let mut ids = std::collections::BTreeSet::new();
+    if builds
+        .iter()
+        .any(|b| b.id.trim().is_empty() || !ids.insert(b.id.as_str()))
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            "Each simulator build needs its own identifier",
+        ));
+    }
+    if let Some(b) = builds
+        .iter()
+        .find(|b| b.name.trim().is_empty() || b.path.trim().is_empty())
+    {
+        return Err(ApiError::new(
+            ErrorKind::InvalidValue,
+            format!(
+                "The simulator build \"{}\" needs a name and the path of its executable",
+                b.name.trim()
+            ),
+        ));
+    }
+    Ok(builds
+        .iter()
+        .map(|b| uxduck_core::domain::settings::SimBuild {
+            id: b.id.clone(),
+            name: b.name.trim().to_owned(),
+            path: b.path.trim().to_owned(),
+        })
+        .collect())
+}
+
 /// Settings › Simulations, and Settings › Airspace's traffic alert
 /// distances (S174), checked.
 fn simulations_and_traffic(
@@ -1101,6 +1138,9 @@ fn simulations_and_traffic(
     }
     if let Some(on) = params.recreate_simulations {
         settings.recreate_simulations = on;
+    }
+    if let Some(builds) = &params.sim_builds {
+        settings.sim_builds = sim_builds(builds)?;
     }
     if let Some(on) = params.controller_rumble {
         settings.controller_rumble = on;

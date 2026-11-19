@@ -453,6 +453,9 @@ LinkKind::Simulator.heading_deg
 LinkKind::Simulator.latitude_deg
 LinkKind::Simulator.longitude_deg
 LinkKind::Simulator.vehicle
+SimBuild.id
+SimBuild.name
+SimBuild.path
 SimFault.kind
 LinkKind::TcpClient.host
 LinkKind::TcpClient.port
