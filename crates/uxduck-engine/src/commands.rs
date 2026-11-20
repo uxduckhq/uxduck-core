@@ -1409,6 +1409,11 @@ impl Engine {
                 }
                 _ => (format!("{label} wasn't sent to {name}"), "command-not-sent"),
             };
+            let (title, body, actions) = self.vehicle_copy_notice(&receipt, &name).unwrap_or((
+                title,
+                receipt.detail.clone(),
+                Vec::new(),
+            ));
             self.raise(Raise {
                 severity: Severity::Warning,
                 kind: NotificationKind::Transient,
@@ -1416,8 +1421,8 @@ impl Engine {
                     id: receipt.vehicle_id.clone(),
                 },
                 title,
-                body: receipt.detail.clone(),
-                actions: Vec::new(),
+                body,
+                actions,
                 condition: Some(condition),
                 report: Some(report.into()),
             });

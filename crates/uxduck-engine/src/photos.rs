@@ -11,6 +11,8 @@ use uxduck_contracts::dto::video::{
     VideoPlaybackResult,
 };
 use uxduck_contracts::errors::{ApiError, ErrorKind};
+use uxduck_core::domain::command::{Receipt, ReceiptStatus};
+use uxduck_core::domain::notification::{Action, NotificationAction};
 use uxduck_core::domain::telemetry::AltitudeFrame;
 use uxduck_core::domain::video::VideoPhoto;
 use uxduck_core::events::{Actor, Change};
@@ -183,6 +185,78 @@ impl Engine {
             },
         );
         Ok(photo)
+    }
+
+    /// The notice for a photo kept from the video whose copy on the
+    /// vehicle's own camera (V20) did not go through (FB-265). It says
+    /// first that the photo is kept, since "refused Take a photo" alone
+    /// reads as no photo at all. A vehicle with no camera that says what it
+    /// is gets the switch that asked it: Also save on the vehicle. None for
+    /// any other command.
+    pub(crate) fn vehicle_copy_notice(
+        &self,
+        receipt: &Receipt,
+        name: &str,
+    ) -> Option<(String, Option<String>, Vec<NotificationAction>)> {
+        let photo = self
+            .state
+            .video_photos
+            .values()
+            .find(|photo| photo.camera_receipt_id.as_deref() == Some(receipt.id.as_str()))?;
+        let source = self.state.video_sources.get(&photo.source_id);
+        let camera = source.map_or("the camera", |source| source.name.as_str());
+        let why = receipt
+            .detail
+            .as_deref()
+            .map(|why| why.trim_end_matches('.'));
+        let (title, answer) = match (receipt.status, why) {
+            (ReceiptStatus::Timeout, _) => (
+                format!("Photo saved, but {name} didn't answer"),
+                format!("{name} didn't answer when asked to take one on its own camera too."),
+            ),
+            (ReceiptStatus::Rejected, Some(why)) => (
+                format!("Photo saved, but not on {name}"),
+                format!("{name} refused to take one on its own camera too. It said: {why}."),
+            ),
+            (ReceiptStatus::Rejected, None) => (
+                format!("Photo saved, but not on {name}"),
+                format!("{name} refused to take one on its own camera too."),
+            ),
+            (_, why) => (
+                format!("Photo saved, but not on {name}"),
+                format!(
+                    "UXDuck couldn't ask {name} to take one on its own camera too{}.",
+                    why.map(|why| format!(" ({why})")).unwrap_or_default()
+                ),
+            ),
+        };
+        let reports_a_camera =
+            self.state.cameras.values().any(|camera| {
+                camera.vehicle_id == receipt.vehicle_id && camera.information.is_some()
+            });
+        let hint = if reports_a_camera {
+            String::new()
+        } else {
+            format!(
+                " {name} reports no camera of its own. If it has none UXDuck can trigger, turn off Also save on the vehicle in {camera}'s settings."
+            )
+        };
+        let actions = source
+            .map(|source| NotificationAction {
+                label: "Open camera".into(),
+                action: Action::OpenVideo {
+                    source_id: source.id.clone(),
+                },
+            })
+            .into_iter()
+            .collect();
+        Some((
+            title,
+            Some(format!(
+                "The photo from {camera} is saved under Photos and videos. {answer}{hint}"
+            )),
+            actions,
+        ))
     }
 
     fn video_photo_show(
