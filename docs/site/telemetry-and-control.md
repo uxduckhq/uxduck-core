@@ -32,6 +32,8 @@ A copter flying its mission in AUTO has **Pause mission** beside the progress: i
 
 Outside AUTO, **Fly from step 3** makes the chosen step current and starts the mission in one press. You hold it, because on the ground it arms the vehicle first. On the ground an ArduPilot copter or plane leaves only from a take-off step, and with `MIS_RESTART` at 1 AUTO always starts from step 1, so the button says so instead.
 
+**Switch to AUTO** switches the vehicle to AUTO, or Mission on PX4, to start its mission or go on with it. It sends the same mode change as a pinned mode button in **Modes**, with the same checks. You hold it unless the vehicle is in the air, or disarmed and heard by UXDuck, because armed on the ground a plane, a rover or a PX4 vehicle can leave at once in that mode. It shows pressed while the vehicle reports that mode, and greyed with the reason when it can't be sent, such as in a replay or when the vehicle has no AUTO mode.
+
 After an RTL, a battery change or a reboot, the subtab says which step the vehicle last reached, with **Resume at step 4**, the step after it. Pressing it chooses that step, and then **Fly from step 4** or **Go to step** goes on from there.
 
 The vehicle's History says how far through its mission each flight got, such as "reached mission step 4 of 6", and a replay's timeline details have a **Steps** lane with a tick at each step reached.

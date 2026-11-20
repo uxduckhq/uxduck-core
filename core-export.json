@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "296bcc977fd6ad54faea9eaefe7c866a18461acf",
+  "sourceCommit": "3661eaa4fa2d04ccc56146b635030b340e50b850",
   "licenseReady": true,
   "files": [
     {
@@ -9331,7 +9331,7 @@
     },
     {
       "path": "docs/site/telemetry-and-control.md",
-      "sha256": "4f4d590f8f35e06f399a6082c15a6138bc5c997a58fb20a0cf3bed681e0aaba4",
+      "sha256": "53744594b18a58f13d9ede00364d49a7f7fb43c5b32a3520a64b02eba3f58871",
       "executable": false
     },
     {
