@@ -15,6 +15,7 @@ use uxduck_core::domain::command::{Command, ReceiptStatus};
 use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::settings::Settings;
 use uxduck_core::domain::thread::ItemKind;
+use uxduck_core::domain::vehicle::Vehicle;
 use uxduck_core::events::{Actor, Change};
 
 use crate::runtime::AnalyticsPort;
@@ -379,16 +380,17 @@ impl Engine {
     }
 
     /// A vehicle heard for the first time.
-    pub(crate) fn track_vehicle(&mut self, autopilot: &str, vehicle_type: &str, link_id: &str) {
-        let link = match self.state.links.get(link_id).map(|l| &l.kind) {
+    pub(crate) fn track_vehicle(&mut self, vehicle: &Vehicle) {
+        let link = match self.state.links.get(&vehicle.link_id).map(|l| &l.kind) {
             Some(LinkKind::Serial { .. }) => LinkType::Serial,
             Some(LinkKind::TcpClient { .. } | LinkKind::TcpServer { .. }) => LinkType::Tcp,
             _ => LinkType::Udp,
         };
         self.track(DaemonEvent::VehicleConnected {
-            autopilot: token_or_other(autopilot),
-            vehicle_type: token_or_other(vehicle_type),
+            autopilot: token_or_other(&vehicle.autopilot),
+            vehicle_type: token_or_other(&vehicle.vehicle_type),
             link,
+            vehicle_kind: self.analytics_kind(vehicle),
         });
     }
 

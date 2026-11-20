@@ -7,9 +7,8 @@ use uxduck_contracts::dto::analytics::{
     AnalyticsVehicleKind, DaemonEvent, FlightTimeDelta, FlightTimeUsage,
 };
 use uxduck_contracts::dto::initialize::RunsIn;
-use uxduck_core::domain::link::LinkKind;
 use uxduck_core::domain::telemetry::off_the_ground;
-use uxduck_core::domain::vehicle::Presence;
+use uxduck_core::domain::vehicle::{Presence, Vehicle};
 
 use crate::Engine;
 
@@ -74,35 +73,23 @@ impl FlightUsage {
     }
 }
 
-/// A managed simulator wins. Hardware-backed USB serial plus a reported
-/// nonzero autopilot UID is hardware evidence; network/virtual serial is unknown.
-fn kind(link: Option<&LinkKind>, uid: Option<&str>) -> AnalyticsVehicleKind {
-    match link {
-        Some(LinkKind::Simulator { .. }) => AnalyticsVehicleKind::Simulated,
-        Some(LinkKind::Serial { usb: Some(usb), .. })
-            if usb.vendor_id != 0
-                && usb.product_id != 0
-                && uid.is_some_and(|id| {
-                    id.len() >= 16
-                        && id.bytes().all(|c| c.is_ascii_hexdigit())
-                        && id.bytes().any(|c| c != b'0')
-                        && id.bytes().any(|c| !matches!(c, b'f' | b'F'))
-                }) =>
-        {
+impl Engine {
+    /// Follow the vehicle profile and logbook, independently of transport
+    /// or hardware UID. Replays are not evidence of live vehicle usage.
+    pub(crate) fn analytics_kind(&self, vehicle: &Vehicle) -> AnalyticsVehicleKind {
+        if vehicle.replay {
+            AnalyticsVehicleKind::Unknown
+        } else if self.is_simulated(vehicle) {
+            AnalyticsVehicleKind::Simulated
+        } else {
             AnalyticsVehicleKind::Real
         }
-        _ => AnalyticsVehicleKind::Unknown,
     }
-}
 
-impl Engine {
     pub(crate) fn analytics_vehicle_kind(&self, vehicle_id: &str) -> AnalyticsVehicleKind {
         self.vehicle(vehicle_id)
             .map_or(AnalyticsVehicleKind::Unknown, |vehicle| {
-                kind(
-                    self.state.links.get(&vehicle.link_id).map(|l| &l.kind),
-                    vehicle.uid.as_deref(),
-                )
+                self.analytics_kind(vehicle)
             })
     }
 
@@ -118,10 +105,7 @@ impl Engine {
         };
         let now = self.clock.now_us();
         let id = vehicle.id.clone();
-        let vehicle_kind = kind(
-            self.state.links.get(&vehicle.link_id).map(|l| &l.kind),
-            vehicle.uid.as_deref(),
-        );
+        let vehicle_kind = self.analytics_kind(vehicle);
         let armed = vehicle.armed && vehicle.presence == Presence::Online;
         let ended = !armed && self.flight_usage.seen.contains_key(&id);
         let heartbeat = self
@@ -309,41 +293,5 @@ mod tests {
             }
         }
         assert_eq!(usage.take(5_000_000).reports[0].airborne_ms, 10_000);
-    }
-
-    #[test]
-    fn only_managed_simulators_and_hardware_backed_serial_are_classified() {
-        let simulator: LinkKind = serde_json::from_value(serde_json::json!({"type":"simulator","vehicle":"multicopter","latitudeDeg":0.0,"longitudeDeg":0.0,"altitudeM":0.0,"headingDeg":0.0})).unwrap();
-        let serial = LinkKind::Serial {
-            device: "ignored".into(),
-            baud: 115_200,
-            usb: Some(uxduck_core::domain::link::UsbId {
-                vendor_id: 1,
-                product_id: 2,
-                serial_number: None,
-            }),
-        };
-        let network = LinkKind::UdpListen {
-            host: "127.0.0.1".into(),
-            port: 14550,
-        };
-        assert_eq!(
-            kind(Some(&simulator), Some("abcd")),
-            AnalyticsVehicleKind::Simulated
-        );
-        assert_eq!(
-            kind(Some(&serial), Some("00000000")),
-            AnalyticsVehicleKind::Unknown
-        );
-        assert_eq!(kind(Some(&serial), None), AnalyticsVehicleKind::Unknown);
-        assert_eq!(
-            kind(Some(&serial), Some("000000001234abcd")),
-            AnalyticsVehicleKind::Real
-        );
-        assert_eq!(
-            kind(Some(&network), Some("1234abcd")),
-            AnalyticsVehicleKind::Unknown
-        );
-        assert_eq!(kind(None, Some("1234abcd")), AnalyticsVehicleKind::Unknown);
     }
 }

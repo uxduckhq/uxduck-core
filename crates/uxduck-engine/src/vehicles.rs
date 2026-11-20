@@ -321,12 +321,7 @@ impl Engine {
         let before = previous.clone();
         vehicle.version = previous.map_or(1, |p| p.version + 1);
         if first_heard {
-            let (autopilot, kind, link) = (
-                vehicle.autopilot.clone(),
-                vehicle.vehicle_type.clone(),
-                vehicle.link_id.clone(),
-            );
-            self.track_vehicle(&autopilot, &kind, &link);
+            self.track_vehicle(&vehicle);
         }
         let after = vehicle.clone();
         self.commit_as(data_plane(), Change::VehicleUpserted { vehicle });

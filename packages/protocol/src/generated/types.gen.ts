@@ -739,7 +739,7 @@ export type AnalyticsPerformanceParams = {
 };
 
 /**
- * Provenance for aggregate usage, not the safety classification of a vehicle.
+ * The app's vehicle classification at capture time. Not hardware attestation.
  */
 export type AnalyticsVehicleKind = 'real' | 'simulated' | 'unknown';
 

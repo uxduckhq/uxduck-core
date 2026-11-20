@@ -27,14 +27,16 @@ pub enum DaemonPresence {
     Installed,
 }
 
-/// Provenance for aggregate usage, not the safety classification of a vehicle.
+/// The app's vehicle classification at capture time. Not hardware attestation.
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyticsVehicleKind {
     Real,
     Simulated,
+    // Legacy reports, unavailable vehicles and replay-only evidence.
+    #[default]
     Unknown,
 }
 
@@ -618,6 +620,9 @@ pub enum DaemonEvent {
         /// Lower case, such as `copter`.
         vehicle_type: String,
         link: LinkType,
+        /// Classification when first heard; older queued events remain unknown.
+        #[serde(default)]
+        vehicle_kind: AnalyticsVehicleKind,
     },
     /// An agent turn ended: what it used and how it went, never its words.
     AgentTurn {
@@ -880,13 +885,26 @@ mod tests {
             autopilot: "ardupilot".into(),
             vehicle_type: "copter".into(),
             link: LinkType::Udp,
+            vehicle_kind: AnalyticsVehicleKind::Real,
         })
         .split();
         assert_eq!(name, "vehicle_connected");
         assert_eq!(properties["vehicle_type"], "copter");
+        assert_eq!(properties["vehicle_kind"], "real");
 
         let (name, properties) = AnalyticsEvent::App(AppEvent::TelemetryShown).split();
         assert_eq!((name.as_str(), properties.len()), ("telemetry_shown", 0));
+    }
+
+    #[test]
+    fn older_connection_events_do_not_gain_a_hardware_claim() {
+        let event: DaemonEvent = serde_json::from_value(serde_json::json!({
+            "event": "vehicle_connected", "autopilot": "ardupilot",
+            "vehicle_type": "copter", "link": "udp"
+        }))
+        .unwrap();
+        let (_, properties) = AnalyticsEvent::Daemon(event).split();
+        assert_eq!(properties["vehicle_kind"], "unknown");
     }
 
     #[test]
