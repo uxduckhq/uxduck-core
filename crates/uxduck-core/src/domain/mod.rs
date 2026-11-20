@@ -19,6 +19,7 @@ pub mod formula;
 pub mod frames;
 pub mod gimbal;
 pub mod gripper;
+pub mod ground_station;
 pub mod history;
 pub mod link;
 pub mod marker;

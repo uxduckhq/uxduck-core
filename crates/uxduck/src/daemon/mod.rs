@@ -867,6 +867,8 @@ async fn expire_approvals(engine: EngineHandle) {
                 // Controllers no reloaded window took back.
                 e.expire_detached_claims(now);
                 e.supervise(now);
+                // Manual control a vehicle drops for UXDuck's id (FB-259).
+                e.review_ground_station_ids();
                 // Downloads waiting for a vehicle that is back (S121).
                 e.resume_waiting_files(now);
                 e.review_idle_simulations();

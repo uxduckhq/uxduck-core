@@ -5436,3 +5436,472 @@ fn a_gesture_rumbles_as_a_press_does_and_one_the_hold_rule_holds_back_is_a_refus
     assert!(orders.take().is_empty());
     assert_eq!(orders.rumbles(), [("g1".to_owned(), Rumble::Refused)]);
 }
+
+/// The notifications saying a vehicle drops UXDuck's manual control
+/// (FB-259), as `title: body`.
+fn ignored(engine: &Engine) -> Vec<String> {
+    engine
+        .state()
+        .notifications
+        .values()
+        .filter(|n| {
+            n.condition
+                .as_deref()
+                .is_some_and(|c| c.starts_with("ground-station-id:"))
+        })
+        .map(|n| format!("{}: {}", n.title, n.body.clone().unwrap_or_default()))
+        .collect()
+}
+
+fn ground_station_id(engine: &mut Engine, ui: &mut Client, id: u8) {
+    let version = call(engine, ui, "settings/get", json!({}))["result"]["version"].clone();
+    let saved = call(
+        engine,
+        ui,
+        "settings/update",
+        json!({ "expectedVersion": version, "gcsSystemId": id }),
+    );
+    assert_eq!(saved["result"]["gcsSystemId"], id, "{saved}");
+}
+
+/// FB-259: `ArduPlane` 4.7 drops every RC override and `MANUAL_CONTROL`
+/// from outside `MAV_GCS_SYSID` (to `MAV_GCS_SYSID_HI`). While the keyboard
+/// flies such a vehicle UXDuck says so, naming the parameter, its value and
+/// UXDuck's id, and the warning clears once either id is changed to match or
+/// the keyboard is released. What UXDuck sends stays as it was.
+#[test]
+fn flying_a_vehicle_that_drops_uxducks_ground_station_id_says_so_until_it_takes_it() {
+    let (mut engine, mut ui, orders) = setup();
+    observe_v3(
+        &mut engine,
+        "Ardupilotmega",
+        "VtolTailsitterQuadrotor",
+        false,
+    );
+    engine.vehicle_booted("v3", 1, false);
+    parameters(
+        &mut engine,
+        "v3",
+        &[("MAV_GCS_SYSID", 254.0), ("MAV_GCS_SYSID_HI", 0.0)],
+    );
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "nothing flies it yet");
+
+    let started = call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": -1.0 }),
+    );
+    assert_eq!(started["result"]["target"], "v3", "{started}");
+    let id = started["result"]["id"].as_str().unwrap().to_owned();
+    assert!(
+        orders
+            .take()
+            .iter()
+            .any(|order| order.starts_with(&format!("route {id} v3 "))),
+        "the keyboard is routed to it as before"
+    );
+    engine.review_ground_station_ids();
+    let said = ignored(&engine);
+    assert_eq!(said.len(), 1, "{said:?}");
+    let name = &engine.state().vehicles["v3"].name;
+    assert!(
+        said[0].starts_with(&format!(
+            "{name} ignores the sticks and keys UXDuck sends: "
+        )),
+        "{said:?}"
+    );
+    assert!(
+        said[0].contains(
+            "Its MAV_GCS_SYSID is 254, and UXDuck's Ground station ID is 255. ArduPilot takes manual control only from its ground station, so it drops what UXDuck sends. Change UXDuck's Ground station ID to 254, or set MAV_GCS_SYSID to 255 on the vehicle."
+        ),
+        "{said:?}"
+    );
+    assert!(!said[0].contains(';'), "{said:?}");
+    engine.review_ground_station_ids();
+    assert_eq!(ignored(&engine), said, "said once while it holds");
+
+    ground_station_id(&mut engine, &mut ui, 254);
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "it takes 254");
+
+    ground_station_id(&mut engine, &mut ui, 253);
+    engine.review_ground_station_ids();
+    let said = ignored(&engine);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("UXDuck's Ground station ID is 253"),
+        "{said:?}"
+    );
+
+    // A range from MAV_GCS_SYSID to MAV_GCS_SYSID_HI holding 253.
+    parameters(
+        &mut engine,
+        "v3",
+        &[("MAV_GCS_SYSID", 250.0), ("MAV_GCS_SYSID_HI", 254.0)],
+    );
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "{:?}", ignored(&engine));
+    parameters(
+        &mut engine,
+        "v3",
+        &[("MAV_GCS_SYSID", 250.0), ("MAV_GCS_SYSID_HI", 252.0)],
+    );
+    engine.review_ground_station_ids();
+    let said = ignored(&engine);
+    assert!(
+        said[0].contains("Its MAV_GCS_SYSID and MAV_GCS_SYSID_HI take ground station IDs 250 to 252, and UXDuck's Ground station ID is 253."),
+        "{said:?}"
+    );
+    assert!(
+        said[0].contains("Change UXDuck's Ground station ID to one from 250 to 252, or set MAV_GCS_SYSID and MAV_GCS_SYSID_HI so 253 is from one to the other on the vehicle."),
+        "{said:?}"
+    );
+
+    call(&mut engine, &mut ui, "controller/keyboardStop", json!({}));
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "released");
+}
+
+/// Before `ArduPilot` 4.7 the id is `SYSID_MYGCS`. PX4 and other
+/// autopilots have none, and a vehicle whose parameters are not read for its
+/// current boot, or whose 4.7 `MAV_GCS_SYSID_HI` hasn't come, is not judged.
+#[test]
+fn the_old_name_counts_and_px4_or_unread_parameters_say_nothing() {
+    let (mut engine, mut ui, _) = setup();
+    observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", false);
+    engine.vehicle_booted("v3", 1, false);
+    let started = call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": -1.0 }),
+    );
+    assert_eq!(started["result"]["target"], "v3", "{started}");
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "not read yet");
+    parameters(&mut engine, "v3", &[("SYSID_MYGCS", 254.0)]);
+    engine.review_ground_station_ids();
+    let said = ignored(&engine);
+    assert!(said[0].contains("Its SYSID_MYGCS is 254"), "{said:?}");
+    assert!(
+        said[0].contains("or set SYSID_MYGCS to 255 on the vehicle."),
+        "{said:?}"
+    );
+
+    let (mut engine, mut ui, _) = setup();
+    observe_v3(&mut engine, "Px4", "Quadrotor", false);
+    engine.vehicle_booted("v3", 1, false);
+    parameters(&mut engine, "v3", &[("SYSID_MYGCS", 254.0)]);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": -1.0 }),
+    );
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "{:?}", ignored(&engine));
+
+    // Another autopilot with ArduPilot's parameters is not ArduPilot.
+    let (mut engine, mut ui, _) = setup();
+    observe_v3(&mut engine, "Generic", "Quadrotor", false);
+    engine.vehicle_booted("v3", 1, false);
+    parameters(
+        &mut engine,
+        "v3",
+        &[
+            ("SYSID_MYGCS", 254.0),
+            ("MAV_GCS_SYSID", 254.0),
+            ("MAV_GCS_SYSID_HI", 0.0),
+        ],
+    );
+    let started = call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": -1.0 }),
+    );
+    assert_eq!(started["result"]["target"], "v3", "{started}");
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "{:?}", ignored(&engine));
+
+    // ArduPilot 4.7 before its HI arrives, and parameters of an earlier boot.
+    let (mut engine, mut ui, _) = setup();
+    observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", false);
+    engine.vehicle_booted("v3", 1, false);
+    parameters(&mut engine, "v3", &[("MAV_GCS_SYSID", 250.0)]);
+    call(
+        &mut engine,
+        &mut ui,
+        "controller/keyboardStart",
+        json!({ "vehicleId": "v3", "throttle": -1.0 }),
+    );
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "{:?}", ignored(&engine));
+    parameters(
+        &mut engine,
+        "v3",
+        &[("MAV_GCS_SYSID", 250.0), ("MAV_GCS_SYSID_HI", 254.0)],
+    );
+    engine.review_ground_station_ids();
+    assert_eq!(ignored(&engine).len(), 1, "now it can tell");
+    // UXDuck's estimate of the boot moves by a second, as after a restart of
+    // UXDuck: the same boot, whose parameters are kept, so it still tells.
+    engine.vehicle_booted("v3", 1_000_001, false);
+    engine.review_ground_station_ids();
+    assert_eq!(ignored(&engine).len(), 1, "the same boot");
+    engine.vehicle_booted("v3", 120_000_000, true);
+    engine.review_ground_station_ids();
+    assert!(
+        ignored(&engine).is_empty(),
+        "a new boot waits for its own parameters: {:?}",
+        ignored(&engine)
+    );
+}
+
+/// A dismissed warning stays quiet only while the same mismatch holds: once
+/// the keyboard is released, or the ids change, it is said again.
+#[test]
+fn a_dismissed_warning_comes_back_once_it_has_cleared_or_changed() {
+    let (mut engine, mut ui, _) = setup();
+    observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", false);
+    engine.vehicle_booted("v3", 1, false);
+    parameters(
+        &mut engine,
+        "v3",
+        &[("MAV_GCS_SYSID", 254.0), ("MAV_GCS_SYSID_HI", 0.0)],
+    );
+    let start = |engine: &mut Engine, ui: &mut Client| {
+        let started = call(
+            engine,
+            ui,
+            "controller/keyboardStart",
+            json!({ "vehicleId": "v3", "throttle": -1.0 }),
+        );
+        assert_eq!(started["result"]["target"], "v3", "{started}");
+    };
+    let dismiss = |engine: &mut Engine, ui: &mut Client| {
+        let id = engine
+            .state()
+            .notifications
+            .values()
+            .find(|n| n.condition.as_deref() == Some("ground-station-id:v3"))
+            .expect("the warning")
+            .id
+            .clone();
+        let done = call(engine, ui, "notification/dismiss", json!({ "id": id }));
+        assert!(done.get("result").is_some(), "{done}");
+        engine.review_ground_station_ids();
+        assert!(
+            ignored(engine).is_empty(),
+            "dismissed: {:?}",
+            ignored(engine)
+        );
+    };
+    start(&mut engine, &mut ui);
+    engine.review_ground_station_ids();
+    dismiss(&mut engine, &mut ui);
+    engine.review_ground_station_ids();
+    assert!(ignored(&engine).is_empty(), "quiet while the same holds");
+
+    // Released and taken again before the next review.
+    call(&mut engine, &mut ui, "controller/keyboardStop", json!({}));
+    start(&mut engine, &mut ui);
+    engine.review_ground_station_ids();
+    assert_eq!(ignored(&engine).len(), 1, "said again after a release");
+
+    dismiss(&mut engine, &mut ui);
+    ground_station_id(&mut engine, &mut ui, 253);
+    engine.review_ground_station_ids();
+    let said = ignored(&engine);
+    assert_eq!(said.len(), 1, "said again once it changed");
+    assert!(
+        said[0].contains("UXDuck's Ground station ID is 253"),
+        "{said:?}"
+    );
+}
+
+/// When UXDuck stops its heartbeat to an armed vehicle nobody supervises,
+/// the alarm promises the vehicle's failsafe only where the vehicle takes
+/// UXDuck as its ground station, by either name.
+#[test]
+fn a_withheld_heartbeat_says_a_vehicle_on_another_ground_station_wont_notice() {
+    use uxduck_core::domain::history::{EntryKind, HistoryEvent};
+    for (scheme, said) in [
+        (
+            &[("SYSID_MYGCS", 254.0)][..],
+            "Its SYSID_MYGCS is 254, and UXDuck's Ground station ID is 255. Set SYSID_MYGCS to 255 on the vehicle for it to notice.",
+        ),
+        (
+            &[("MAV_GCS_SYSID", 254.0), ("MAV_GCS_SYSID_HI", 0.0)][..],
+            "Its MAV_GCS_SYSID is 254, and UXDuck's Ground station ID is 255. Set MAV_GCS_SYSID to 255 on the vehicle for it to notice.",
+        ),
+        (&[("SYSID_MYGCS", 255.0)][..], ""),
+        (
+            &[("MAV_GCS_SYSID", 250.0), ("MAV_GCS_SYSID_HI", 255.0)][..],
+            "",
+        ),
+        // MAV_GCS_SYSID_HI not read: it can't tell.
+        (&[("MAV_GCS_SYSID", 255.0)][..], "?"),
+    ] {
+        let (mut engine, ui, _) = setup();
+        observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", true);
+        engine.vehicle_booted("v3", 1, false);
+        let mut values = vec![("FS_GCS_ENABLE", 1.0)];
+        values.extend_from_slice(scheme);
+        parameters(&mut engine, "v3", &values);
+        engine.disconnect(ui.id);
+        engine.supervise(1_000);
+        engine.supervise(1_000 + 60_000_000);
+        assert!(engine.heartbeat_withheld("v3"), "{scheme:?}");
+        let body = engine
+            .state()
+            .notifications
+            .values()
+            .find(|n| n.condition.as_deref() == Some("supervision:v3"))
+            .and_then(|n| n.body.clone())
+            .unwrap_or_else(|| panic!("an alarm for {scheme:?}"));
+        let history: Vec<String> = engine
+            .state()
+            .history
+            .values()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Event {
+                    event: HistoryEvent::SupervisionLost { failsafe },
+                } => Some(failsafe.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(history.len(), 1, "{scheme:?}: {history:?}");
+        let recorded = &history[0];
+        if said.is_empty() {
+            assert!(
+                body.starts_with("The vehicle will treat this as a lost ground station. "),
+                "{scheme:?}: {body}"
+            );
+            assert!(
+                recorded
+                    .starts_with("If you lose connection and nobody is at the ground station, "),
+                "{recorded}"
+            );
+        } else if said == "?" {
+            assert!(
+                body.starts_with("UXDuck can't read which ground station ")
+                    && body.contains(" follows from its parameters, so it can't tell whether the vehicle will notice. If it accepts UXDuck's ID 255, it will treat this as a lost ground station. If you lose connection"),
+                "{body}"
+            );
+            assert!(!body.starts_with("The vehicle will treat"), "{body}");
+            assert_eq!(recorded, &body);
+        } else {
+            assert_eq!(recorded, &body);
+            assert!(body.contains("won't notice UXDuck stopping"), "{body}");
+            assert!(body.ends_with(said), "{scheme:?}: {body}");
+            assert!(
+                !body.contains("will treat this as a lost ground station"),
+                "{body}"
+            );
+        }
+        assert!(!body.contains(';'), "{body}");
+    }
+}
+
+#[test]
+fn an_alarm_without_this_boots_parameters_predicts_no_action() {
+    let (mut engine, ui, _) = setup();
+    observe_v3(&mut engine, "Ardupilotmega", "Quadrotor", true);
+    engine.vehicle_booted("v3", 100_000_000, false);
+    parameters(
+        &mut engine,
+        "v3",
+        &[("SYSID_MYGCS", 255.0), ("FS_GCS_ENABLE", 1.0)],
+    );
+    engine.vehicle_booted("v3", 200_000_000, true);
+    engine.disconnect(ui.id);
+    engine.supervise(1_000);
+    engine.supervise(60_001_000);
+    let body = engine
+        .state()
+        .notifications
+        .values()
+        .find(|n| n.condition.as_deref() == Some("supervision:v3"))
+        .and_then(|n| n.body.clone())
+        .unwrap();
+    assert!(body.contains("parameters for this boot"), "{body}");
+    assert!(body.contains("If it accepts UXDuck's ID 255"), "{body}");
+    assert!(!body.contains("will return to launch"), "{body}");
+    assert!(!body.contains("If you lose connection"), "{body}");
+    assert!(!body.contains(';'), "{body}");
+}
+
+#[test]
+fn moving_a_controller_away_ends_the_old_vehicles_dismissed_warning() {
+    for method in ["controller/setTarget", "controller/claim"] {
+        let (mut engine, mut ui, _) = setup();
+        engine.vehicle_booted("v1", 100_000_000, false);
+        parameters(&mut engine, "v1", &[("SYSID_MYGCS", 254.0)]);
+        let claimed = call(
+            &mut engine,
+            &mut ui,
+            "controller/claim",
+            json!({"id": "g1", "mode": "pinned", "vehicleId": "v1"}),
+        );
+        assert_eq!(claimed["result"]["target"], "v1", "{claimed}");
+        engine.review_ground_station_ids();
+        let id = engine
+            .state()
+            .notifications
+            .values()
+            .find(|n| n.condition.as_deref() == Some("ground-station-id:v1"))
+            .unwrap()
+            .id
+            .clone();
+        let dismissed = call(
+            &mut engine,
+            &mut ui,
+            "notification/dismiss",
+            json!({"id": id}),
+        );
+        assert!(dismissed.get("result").is_some(), "{dismissed}");
+        assert!(ignored(&engine).is_empty());
+        for vehicle_id in ["v2", "v1"] {
+            let switched = call(
+                &mut engine,
+                &mut ui,
+                method,
+                json!({"id": "g1", "mode": "pinned", "vehicleId": vehicle_id}),
+            );
+            assert_eq!(
+                switched["result"]["target"], vehicle_id,
+                "{method}: {switched}"
+            );
+        }
+        engine.review_ground_station_ids();
+        assert_eq!(
+            ignored(&engine).len(),
+            1,
+            "{method}: the dismissal ends when it moves away"
+        );
+    }
+}
+
+#[test]
+fn a_restart_on_a_read_only_link_drops_the_last_boots_ground_station_ids() {
+    let (mut engine, mut ui, _) = setup();
+    engine.vehicle_booted("v1", 100_000_000, false);
+    parameters(&mut engine, "v1", &[("SYSID_MYGCS", 254.0)]);
+    let vehicle = engine.state().vehicles["v1"].clone();
+    assert!(engine.ground_station_ids(&vehicle).is_some());
+    let changed = call(
+        &mut engine,
+        &mut ui,
+        "link/update",
+        json!({"id": vehicle.link_id, "policy": "read"}),
+    );
+    assert_eq!(changed["result"]["policy"], "read", "{changed}");
+    engine.vehicle_booted("v1", 102_000_000, true);
+    assert!(
+        engine.ground_station_ids(&vehicle).is_none(),
+        "the last boot's ids must not stand for this one"
+    );
+}

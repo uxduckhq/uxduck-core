@@ -1571,6 +1571,8 @@ impl Browser {
             self.engine.expire_setups(now);
             // Preflight checks that change with time alone (S192).
             self.engine.review_preflights();
+            // Manual control a vehicle drops for UXDuck's id (FB-259).
+            self.engine.review_ground_station_ids();
         }
         let account = self.account_id();
         if let Some(request) = self.syncer.poll(&mut self.engine, account.as_deref(), now) {

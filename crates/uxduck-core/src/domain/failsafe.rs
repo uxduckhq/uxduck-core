@@ -6,9 +6,12 @@
 //! its own.
 //!
 //! Both firmwares ship with the failsafe off. ArduPilot counts only
-//! heartbeats from its `SYSID_MYGCS`: 255 by default, as UXDuck's own
-//! ground station id is unless changed in its settings.
+//! heartbeats from its ground station ids (`SYSID_MYGCS`, or from 4.7
+//! `MAV_GCS_SYSID` and `MAV_GCS_SYSID_HI`, read by [`GroundStationIds`]):
+//! 255 by default, as UXDuck's own ground station id is unless changed in its
+//! settings.
 
+use crate::domain::ground_station::GroundStationIds;
 use crate::domain::modes::Family;
 
 /// What a vehicle would do, and whether it may be left with nobody at the
@@ -175,10 +178,12 @@ pub fn describe(
     // ArduPilot listens only to its own ground station.
     if family != Family::Px4
         && result.problem.is_none()
-        && param("SYSID_MYGCS").is_some_and(|id| (id - f64::from(gcs_system_id)).abs() > 0.5)
+        && let Some(ids) = GroundStationIds::read(&param)
+        && !ids.accepts(gcs_system_id)
     {
         result.problem = Some(format!(
-            "{name} follows a different ground station, so it won't notice if UXDuck stops. Set SYSID_MYGCS to {gcs_system_id}"
+            "{name} follows a different ground station, so it won't notice if UXDuck stops. Set {}",
+            ids.setting_for(gcs_system_id)
         ));
     }
     result
@@ -254,6 +259,33 @@ mod tests {
             params(&[("FS_GCS_ENABLE", 5.0), ("SYSID_MYGCS", 255.0)]),
         );
         assert!(plan.problem.unwrap().contains("Set SYSID_MYGCS to 254"));
+    }
+
+    #[test]
+    fn ardupilot_4_7_names_its_ground_station_mav_gcs_sysid() {
+        let plane = |pairs: &[(&str, f64)]| {
+            let mut all = vec![("FS_GCS_ENABL", 1.0)];
+            all.extend_from_slice(pairs);
+            describe(Some(Family::Plane), "Plane 1", 10, 255, params(&all))
+        };
+        let problem = plane(&[("MAV_GCS_SYSID", 254.0), ("MAV_GCS_SYSID_HI", 0.0)])
+            .problem
+            .expect("another ground station");
+        assert!(problem.contains("Set MAV_GCS_SYSID to 255"), "{problem}");
+        assert!(!problem.contains("SYSID_MYGCS"), "{problem}");
+        assert!(plane(&[("MAV_GCS_SYSID", 255.0), ("MAV_GCS_SYSID_HI", 0.0)]).unattended_ok());
+        // A range that holds UXDuck's id is its ground station too.
+        assert!(plane(&[("MAV_GCS_SYSID", 250.0), ("MAV_GCS_SYSID_HI", 255.0)]).unattended_ok());
+        let problem = plane(&[("MAV_GCS_SYSID", 240.0), ("MAV_GCS_SYSID_HI", 250.0)])
+            .problem
+            .expect("outside the range");
+        assert!(
+            problem
+                .contains("Set MAV_GCS_SYSID and MAV_GCS_SYSID_HI so 255 is from one to the other"),
+            "{problem}"
+        );
+        // Not read yet: nothing to compare.
+        assert!(plane(&[]).unattended_ok());
     }
 
     #[test]

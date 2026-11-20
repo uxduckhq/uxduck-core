@@ -568,6 +568,7 @@ fn claim(
         client_name: engine.client_name(connection),
         operator_id: actor.operator_id.clone(),
     });
+    let previous = controller.target.clone();
     controller.mode = mode;
     controller.target = target;
     remember_target(&mut controller);
@@ -593,6 +594,9 @@ fn claim(
         },
     );
     engine.route(&controller.id);
+    if let Some(previous) = previous.filter(|p| controller.target.as_ref() != Some(p)) {
+        engine.pilot_route_ended(&previous);
+    }
     engine.announce_target(&controller, false);
     to_value(&ControllerDto::from(
         &engine.state.controllers[&controller.id],
@@ -750,8 +754,8 @@ fn set_target(
         // Its first vehicle, or another mapping: judged as a claim is.
         engine.require_mapping_reads(&controller)?;
     }
+    let previous = controller.target.replace(target);
     controller.mode = mode;
-    controller.target = Some(target);
     remember_target(&mut controller);
     controller.pending_target = None;
     controller.version += 1;
@@ -763,6 +767,9 @@ fn set_target(
     );
     if moving {
         engine.route(&controller.id);
+        if let Some(previous) = previous {
+            engine.pilot_route_ended(&previous);
+        }
         engine.announce_target(&controller, swapped);
     }
     to_value(&ControllerDto::from(
@@ -1607,6 +1614,14 @@ impl Engine {
                 Some("Controller paused while the simulation restarts.".into()),
             );
             self.links.route_controller(&id, None);
+            if let Some(target) = self
+                .state
+                .controllers
+                .get(&id)
+                .and_then(|c| c.target.clone())
+            {
+                self.pilot_route_ended(&target);
+            }
         }
     }
 
@@ -1734,20 +1749,30 @@ impl Engine {
                 .any(|v| v.link_id == link_id && v.presence == Presence::Online)
     }
 
+    /// Whether a controller's input goes to its vehicle now, as `route`
+    /// tells the data plane: claimed and connected, with no pause and no lost
+    /// input.
+    pub(crate) fn routes_pilot_input(&self, controller: &Controller) -> bool {
+        controller.connected
+            && controller.claim.is_some()
+            && controller.input_pause.is_none()
+            && !self.live.input_lost.contains_key(&controller.id)
+    }
+
     /// Tells the data plane what a controller drives now, if anything.
     pub(crate) fn route(&mut self, controller_id: &str) {
         let pause = self.controller_start_pause(controller_id);
         self.set_controller_pause(controller_id, pause);
+        let target = self
+            .state
+            .controllers
+            .get(controller_id)
+            .and_then(|c| c.target.clone());
         let route = self
             .state
             .controllers
             .get(controller_id)
-            .filter(|c| {
-                c.connected
-                    && c.claim.is_some()
-                    && c.input_pause.is_none()
-                    && !self.live.input_lost.contains_key(controller_id)
-            })
+            .filter(|c| self.routes_pilot_input(c))
             .and_then(|c| {
                 let vehicle_id = c.target.clone()?;
                 let pilot_input_method = self.pilot_input_method(&vehicle_id);
@@ -1771,7 +1796,11 @@ impl Engine {
                 self.live.routed_gripper.remove(controller_id);
             }
         }
+        let ended = route.is_none();
         self.links.route_controller(controller_id, route);
+        if ended && let Some(target) = target {
+            self.pilot_route_ended(&target);
+        }
     }
 
     /// Says what a controller drives now, and with which mapping when a
@@ -1832,6 +1861,9 @@ impl Engine {
             },
         );
         self.route(id);
+        if let Some(target) = &target {
+            self.pilot_route_ended(target);
+        }
         if was_interrupted.is_some() {
             self.controller_presence(id, &controller.name, false);
         }
@@ -2417,6 +2449,9 @@ impl Engine {
             },
         );
         self.links.route_controller(id, None);
+        if let Some(target) = &controller.target {
+            self.pilot_route_ended(target);
+        }
         self.controller_presence(id, &controller.name, false);
     }
 

@@ -1013,7 +1013,7 @@ impl Engine {
     }
 
     /// The controllers driving a vehicle from UXDuck.
-    fn driving(&self, vehicle: &Vehicle) -> Vec<&Controller> {
+    pub(crate) fn driving(&self, vehicle: &Vehicle) -> Vec<&Controller> {
         let ids: Vec<&String> = std::iter::once(&vehicle.id)
             .chain(vehicle.aliases.iter())
             .collect();

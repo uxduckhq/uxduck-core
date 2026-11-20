@@ -232,7 +232,8 @@ pub struct Settings {
     pub supervision_grace_s: u32,
     /// The MAVLink system id UXDuck sends as, 1 to 255: 255, the usual
     /// ground station and `uxduck_mavlink::GCS_SYSTEM_ID`, until changed.
-    /// A vehicle's `SYSID_MYGCS` counts only this id's heartbeats.
+    /// A vehicle's `SYSID_MYGCS` (`MAV_GCS_SYSID` from `ArduPilot` 4.7)
+    /// counts only this id's heartbeats and manual control.
     #[serde(default = "gcs_system_id")]
     pub gcs_system_id: u8,
     /// Shared connection preference. Unknown and new links follow in creation order.

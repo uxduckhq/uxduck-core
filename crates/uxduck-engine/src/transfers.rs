@@ -246,7 +246,7 @@ fn daemon() -> Actor {
     }
 }
 
-fn same_boot(a: Option<u64>, b: u64) -> bool {
+pub(crate) fn same_boot(a: Option<u64>, b: u64) -> bool {
     a.is_some_and(|a| a.abs_diff(b) < SAME_BOOT_US)
 }
 
@@ -832,6 +832,13 @@ impl Engine {
             return;
         };
         if self.not_writable(&vehicle.link_id).is_some() {
+            // Nothing can be read again over this link, but the parameters
+            // held are from a boot that is over, so they no longer stand for
+            // this one (FB-259).
+            let mut set = self.parameter_set(&vehicle.id);
+            if restarted && set.boot_instant_us.take().is_some() {
+                self.commit_as(daemon(), Change::ParameterSetUpserted { set });
+            }
             return;
         }
         let set = self.parameter_set(&vehicle.id);
