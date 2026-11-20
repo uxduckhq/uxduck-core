@@ -316,6 +316,13 @@ fn navigate(
     Ok(json!({}))
 }
 
+/// Whether a keyboard holds this vehicle's throttle to drive, as a rover's
+/// or a boat's forward / reverse is: the page lets it go to neutral with
+/// the keys, and the data plane centres it when the page goes quiet.
+fn throttle_springs(vehicle: &uxduck_core::domain::vehicle::Vehicle) -> bool {
+    centred_throttle(&vehicle.autopilot, &vehicle.vehicle_type) == Some("forward / reverse")
+}
+
 /// One page, one explicitly pinned vehicle. Ordinary claims decide exclusivity.
 fn keyboard_start(
     engine: &mut Engine,
@@ -353,6 +360,7 @@ fn keyboard_start(
             format!("Start keyboard control with {control} at neutral."),
         ));
     }
+    let springs = throttle_springs(vehicle);
     let id = format!("keyboard:{}", connection.0);
     engine.drivable(&id, Some(params.vehicle_id.clone()))?;
     engine.controller_connected(&id, "Keyboard", true);
@@ -368,6 +376,7 @@ fn keyboard_start(
             id: id.clone(),
             axes: [0.0, 0.0, 0.0, params.throttle],
             at_us: now,
+            throttle_springs: springs,
         });
     let result = claim(
         engine,
@@ -420,12 +429,20 @@ fn keyboard_input(
             "Keyboard control ended because this page no longer holds the controller.",
         ));
     }
+    let springs = engine
+        .state
+        .controllers
+        .get(&id)
+        .and_then(|controller| controller.target.as_deref())
+        .and_then(|target| engine.vehicle(target))
+        .is_some_and(throttle_springs);
     engine
         .links
         .controller_input(crate::controller_input::InputEvent::Keyboard {
             id: id.clone(),
             axes,
             at_us: now,
+            throttle_springs: springs,
         });
     // The gimbal's keys, as two more of the keyboard's inputs (S407). A
     // frame that says nothing of them holds none: after one that held a

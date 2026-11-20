@@ -60,6 +60,7 @@ struct Orders(
     Arc<Mutex<Vec<ControlRoute>>>,
     Arc<Mutex<Vec<[f64; 4]>>>,
     Arc<Mutex<Vec<(String, uxduck_core::domain::controller::Rumble)>>>,
+    Arc<Mutex<Vec<bool>>>,
 );
 
 impl Orders {
@@ -68,6 +69,10 @@ impl Orders {
     }
     fn keyboard_frames(&self) -> Vec<[f64; 4]> {
         std::mem::take(&mut *self.2.lock().unwrap())
+    }
+    /// Whether each keyboard frame said its throttle is held to drive.
+    fn keyboard_springs(&self) -> Vec<bool> {
+        std::mem::take(&mut *self.4.lock().unwrap())
     }
     fn rumbles(&self) -> Vec<(String, uxduck_core::domain::controller::Rumble)> {
         std::mem::take(&mut *self.3.lock().unwrap())
@@ -84,8 +89,14 @@ impl LinkPort for Orders {
             .push(format!("command {} {:?}", order.vehicle_id, order.command));
     }
     fn controller_input(&mut self, event: InputEvent) {
-        if let InputEvent::Keyboard { axes, .. } = event {
+        if let InputEvent::Keyboard {
+            axes,
+            throttle_springs,
+            ..
+        } = event
+        {
             self.2.lock().unwrap().push(axes);
+            self.4.lock().unwrap().push(throttle_springs);
         } else if let InputEvent::Navigate { id, on, .. } = event {
             self.0.lock().unwrap().push(format!("navigate {id} {on}"));
         }
@@ -1418,6 +1429,41 @@ fn keyboard_control_starts_a_centred_throttle_at_neutral() {
     }
 }
 
+/// A rover's or boat's forward / reverse is held to drive, so its keyboard
+/// frames say so and the data plane centres it when the page goes quiet. A
+/// sub's or blimp's vertical and an aircraft's throttle stay where they are.
+#[test]
+fn a_rover_s_keyboard_throttle_springs_back_and_an_aircraft_s_stays() {
+    for (autopilot, vehicle_type, springs) in [
+        ("Ardupilotmega", "GroundRover", true),
+        ("Px4", "SurfaceBoat", true),
+        ("Ardupilotmega", "Submarine", false),
+        ("Ardupilotmega", "Quadrotor", false),
+    ] {
+        let (mut engine, mut ui, orders) = setup();
+        observe_v3(&mut engine, autopilot, vehicle_type, true);
+        let started = call(
+            &mut engine,
+            &mut ui,
+            "controller/keyboardStart",
+            json!({ "vehicleId": "v3", "throttle": 0.0 }),
+        );
+        assert_eq!(started["result"]["target"], "v3", "{started}");
+        let input = call(
+            &mut engine,
+            &mut ui,
+            "controller/keyboardInput",
+            json!({ "axes": [0.0, 0.0, 0.0, 0.4] }),
+        );
+        assert!(input.get("error").is_none(), "{vehicle_type}: {input}");
+        assert_eq!(
+            orders.keyboard_springs(),
+            [springs, springs],
+            "{autopilot} {vehicle_type}"
+        );
+    }
+}
+
 /// The keyboard's start frame, through the route the daemon gives the data
 /// plane, is the throttle stick `MANUAL_CONTROL` and RC override are built
 /// from. An armed rover's or boat's start is the centre, which `ArduRover`
@@ -1466,6 +1512,7 @@ fn a_keyboard_start_sends_a_centred_throttle_at_its_centre() {
             id: id.into(),
             axes: *axes,
             at_us: 1_000,
+            throttle_springs: false,
         });
         controls.route(id, Some(route));
         let outputs = controls.pilot_outputs();
@@ -1780,6 +1827,7 @@ fn a_rover_s_keyboard_start_goes_out_at_its_throttle_trim() {
             id: id.into(),
             axes: *axes,
             at_us: 1_000,
+            throttle_springs: false,
         });
         controls.route(id, Some(route));
         let outputs = controls.pilot_outputs();

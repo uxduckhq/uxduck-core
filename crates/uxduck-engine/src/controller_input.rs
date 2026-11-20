@@ -44,6 +44,9 @@ pub enum InputEvent {
         id: String,
         axes: [f64; 4],
         at_us: u64,
+        /// The keys hold the throttle, as a rover's or boat's forward /
+        /// reverse is held to drive: missing updates centre it too.
+        throttle_springs: bool,
     },
     Connected {
         id: String,
@@ -398,10 +401,18 @@ struct Button {
     layer: Layer,
 }
 
+/// A keyboard device's last frame: when it came, and whether its keys hold
+/// the throttle to drive, so a stale page centres it.
+#[derive(Clone, Copy, Debug)]
+struct KeyboardFrame {
+    at_us: u64,
+    throttle_springs: bool,
+}
+
 #[derive(Debug, Default)]
 struct Device {
     layout_known: bool,
-    keyboard_at_us: Option<u64>,
+    keyboard: Option<KeyboardFrame>,
     /// Every axis it has or that has moved, by its code and its gamepad
     /// axis (only for a device whose layout is known: never a guess).
     axes: BTreeMap<(Option<u32>, Option<GamepadAxis>), f64>,
@@ -995,10 +1006,18 @@ impl Controls {
     #[allow(clippy::too_many_lines, reason = "one arm per input event")]
     pub fn input(&mut self, event: InputEvent) -> Vec<Report> {
         match event {
-            InputEvent::Keyboard { id, axes, at_us } => {
+            InputEvent::Keyboard {
+                id,
+                axes,
+                at_us,
+                throttle_springs,
+            } => {
                 let device = self.devices.entry(id.clone()).or_default();
                 device.layout_known = true;
-                device.keyboard_at_us = Some(at_us);
+                device.keyboard = Some(KeyboardFrame {
+                    at_us,
+                    throttle_springs,
+                });
                 for (axis, value) in [
                     GamepadAxis::RightStickX,
                     GamepadAxis::RightStickY,
@@ -1284,7 +1303,8 @@ impl Controls {
     }
 
     /// Centre stale steering without releasing the page's keyboard session.
-    /// Throttle stays at its chosen setting until the page changes or releases it.
+    /// Throttle stays at its chosen setting until the page changes or releases
+    /// it, except where the keys hold it to drive: then it is centred too.
     /// The gimbal's keys are let go with the steering (S407).
     #[must_use]
     pub fn stale_keyboard_inputs(&self, now_us: u64) -> Vec<InputEvent> {
@@ -1299,30 +1319,35 @@ impl Controls {
         let mut events = Vec::new();
         for (id, device) in self.devices.iter().filter(|(_, device)| {
             device
-                .keyboard_at_us
-                .is_some_and(|at| now_us.saturating_sub(at) >= 500_000)
+                .keyboard
+                .is_some_and(|frame| now_us.saturating_sub(frame.at_us) >= 500_000)
         }) {
-            if pushed(
-                device,
-                &[
-                    GamepadAxis::RightStickX,
-                    GamepadAxis::RightStickY,
-                    GamepadAxis::LeftStickX,
-                ],
-            ) {
+            let springs = device.keyboard.is_some_and(|frame| frame.throttle_springs);
+            let steering = [
+                GamepadAxis::RightStickX,
+                GamepadAxis::RightStickY,
+                GamepadAxis::LeftStickX,
+            ];
+            let driving = springs && pushed(device, &[GamepadAxis::LeftStickY]);
+            if driving || pushed(device, &steering) {
                 events.push(InputEvent::Keyboard {
                     id: id.clone(),
                     axes: [
                         0.0,
                         0.0,
                         0.0,
-                        device
-                            .axes
-                            .get(&(None, Some(GamepadAxis::LeftStickY)))
-                            .copied()
-                            .unwrap_or(-1.0),
+                        if springs {
+                            0.0
+                        } else {
+                            device
+                                .axes
+                                .get(&(None, Some(GamepadAxis::LeftStickY)))
+                                .copied()
+                                .unwrap_or(-1.0)
+                        },
                     ],
                     at_us: now_us,
+                    throttle_springs: springs,
                 });
             }
             for axis in KEYBOARD_GIMBAL_AXES {
@@ -1781,12 +1806,46 @@ mod tests {
     }
 
     #[test]
+    fn a_held_drive_is_centred_with_the_steering_when_the_page_goes_quiet() {
+        let frame = |axes, at_us| InputEvent::Keyboard {
+            id: "keyboard:1".into(),
+            axes,
+            at_us,
+            throttle_springs: true,
+        };
+        let mut controls = Controls::default();
+        controls.input(frame([0.0, 0.0, 0.0, 0.0], 100));
+        controls.route(
+            "keyboard:1",
+            Some(ControlRoute {
+                vehicle_id: "rover".into(),
+                mapping: InputMapping::mode_2(),
+                pilot_input_method: PilotInputMethod::Automatic,
+                gripper: None,
+            }),
+        );
+        let neutral = controls.outputs();
+        controls.input(frame([0.0, 0.0, 0.0, 0.6], 1_000_000));
+        assert_ne!(controls.outputs(), neutral);
+        assert!(controls.stale_keyboard_inputs(1_499_999).is_empty());
+        let stale = controls.stale_keyboard_inputs(1_500_000);
+        assert_eq!(stale, [frame([0.0; 4], 1_500_000)]);
+        for event in stale {
+            controls.input(event);
+        }
+        assert_eq!(controls.outputs(), neutral);
+        assert!(controls.routed());
+        assert!(controls.stale_keyboard_inputs(2_000_000).is_empty());
+    }
+
+    #[test]
     fn keyboard_centres_stale_steering_without_releasing_or_changing_throttle() {
         let mut controls = Controls::default();
         controls.input(InputEvent::Keyboard {
             id: "keyboard:1".into(),
             axes: [0.0, 0.0, 0.0, -0.5],
             at_us: 100,
+            throttle_springs: false,
         });
         assert!(controls.outputs().is_empty());
         controls.route(
@@ -1805,6 +1864,7 @@ mod tests {
             id: "keyboard:1".into(),
             axes: [0.5, 0.0, 0.0, -0.5],
             at_us: 60_000_000,
+            throttle_springs: false,
         });
         assert!(controls.stale_keyboard_inputs(60_499_999).is_empty());
         let stale = controls.stale_keyboard_inputs(60_500_000);
@@ -1821,6 +1881,7 @@ mod tests {
             id: "keyboard:1".into(),
             axes: [-0.5, 0.0, 0.0, -0.5],
             at_us: 120_000_000,
+            throttle_springs: false,
         });
         assert_ne!(controls.outputs(), centred);
         controls.input(InputEvent::Disconnected {
@@ -3238,6 +3299,7 @@ mod gimbal_tests {
             id: "g".into(),
             axes: [0.0, 0.0, 0.0, -1.0],
             at_us,
+            throttle_springs: false,
         };
         let mut controls = Controls::default();
         controls.input(frame(0));
