@@ -3419,6 +3419,12 @@ export type ClientRequest = {
     method: 'serial/list';
     params: Empty;
 } | {
+    method: 'serial/detectBaud';
+    params: SerialDetectParams;
+} | {
+    method: 'serial/detectCancel';
+    params: SerialDetectParams;
+} | {
     method: 'command/send';
     params: CommandSendParams;
 } | {
@@ -15758,6 +15764,43 @@ export type SensorProgress = {
 
 export type SensorState = 'waiting' | 'running' | 'succeeded' | 'failed';
 
+export type SerialDetectParams = {
+    /**
+     * The device, as `serial/list` lists it.
+     */
+    device: string;
+};
+
+/**
+ * The rate `serial/detectBaud` is listening at now, to the client that asked.
+ */
+export type SerialDetectProgress = {
+    baud: number;
+    device: string;
+};
+
+/**
+ * What listening to a serial device for its baud rate heard.
+ */
+export type SerialDetectResult = {
+    baud: number;
+    outcome: 'found';
+} | {
+    name: string;
+    outcome: 'native-usb';
+} | {
+    name: string;
+    outcome: 'bootloader';
+} | {
+    outcome: 'stopped';
+} | {
+    outcome: 'not-found';
+    tried: Array<number>;
+} | {
+    outcome: 'unavailable';
+    reason: string;
+};
+
 export type SerialListResult = {
     ports: Array<SerialPort>;
 };
@@ -15819,6 +15862,9 @@ export type ServerNotification = {
 } | {
     method: 'find/changed';
     params: FindResult;
+} | {
+    method: 'serial/detectProgress';
+    params: SerialDetectProgress;
 } | {
     method: 'watchLink/viewersChanged';
     params: WatchViewersResult;

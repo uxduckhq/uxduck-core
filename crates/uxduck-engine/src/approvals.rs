@@ -124,6 +124,8 @@ fn escalatable(request: &ClientRequest) -> Option<Capability> {
         | ClientRequest::LinkDisable(_)
         | ClientRequest::LinkUpdate(_)
         | ClientRequest::SerialList(_)
+        | ClientRequest::SerialDetectBaud(_)
+        | ClientRequest::SerialDetectCancel(_)
         | ClientRequest::VehicleSave(_)
         | ClientRequest::VehicleLabel(_)
         | ClientRequest::VehicleSize(_)

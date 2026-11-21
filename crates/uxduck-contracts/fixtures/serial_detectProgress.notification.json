@@ -1,0 +1,7 @@
+{
+  "method": "serial/detectProgress",
+  "params": {
+    "device": "/dev/ttyUSB0",
+    "baud": 115200
+  }
+}

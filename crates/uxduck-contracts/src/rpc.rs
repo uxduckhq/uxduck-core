@@ -42,7 +42,7 @@ use crate::dto::history::{
 use crate::dto::initialize::InitializeParams;
 use crate::dto::inspect::{MavlinkHistoryParams, MavlinkInspectParams};
 use crate::dto::journal::JournalImportParams;
-use crate::dto::link::{IdParams, LinkAddParams, LinkUpdateParams};
+use crate::dto::link::{IdParams, LinkAddParams, LinkUpdateParams, SerialDetectParams};
 use crate::dto::location::TrayLocationParams;
 use crate::dto::marker::{MarkerAddParams, MarkerShareParams, MarkerUpdateParams};
 use crate::dto::messages::{VehicleMessage, VehicleMessagesParams};
@@ -427,6 +427,19 @@ pub enum ClientRequest {
     /// Needs `config`. Result: `SerialListResult`.
     #[serde(rename = "serial/list")]
     SerialList(Empty),
+    /// Listens to a serial device at each usual baud rate in turn, a few
+    /// seconds each, and answers with the first where whole MAVLink frames
+    /// arrive whose checksums hold. Writes nothing to it, and opens it once.
+    /// Each rate is told as `serial/detectProgress`. A flight controller on
+    /// native USB or in its bootloader is not opened, and a device a link
+    /// uses is refused. Needs `config`. Result: `SerialDetectResult`.
+    #[serde(rename = "serial/detectBaud")]
+    SerialDetectBaud(SerialDetectParams),
+    /// Stops listening to a serial device for its baud rate and lets it go:
+    /// `serial/detectBaud` answers `stopped`. Nothing happens when nothing
+    /// listens to it. Needs `config`. Result: `Empty`.
+    #[serde(rename = "serial/detectCancel")]
+    SerialDetectCancel(SerialDetectParams),
     /// Arm, disarm, change flight mode, take off, land or send another command
     /// to one vehicle. Answers when the vehicle has
     /// acknowledged it or every retry has timed out, with the receipt. While
@@ -2428,7 +2441,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 422] = [
+    pub const METHODS: [&'static str; 424] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2494,6 +2507,8 @@ impl ClientRequest {
         "link/disable",
         "link/update",
         "serial/list",
+        "serial/detectBaud",
+        "serial/detectCancel",
         "command/send",
         "command/list",
         "command/modes",
@@ -2920,6 +2935,10 @@ pub enum ServerNotification {
     /// `find/start` (S44). Not journaled.
     #[serde(rename = "find/changed")]
     FindChanged(FindResult),
+    /// The rate `serial/detectBaud` is listening at now, to the client that
+    /// asked, once per rate.
+    #[serde(rename = "serial/detectProgress")]
+    SerialDetectProgress(crate::dto::link::SerialDetectProgress),
     /// How many guests watch each vehicle changed (S95): to every operator
     /// client, as `watchLink/viewers` answers.
     #[serde(rename = "watchLink/viewersChanged")]

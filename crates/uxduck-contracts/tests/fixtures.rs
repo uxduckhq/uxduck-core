@@ -23,7 +23,7 @@ use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::initialize::{
     Capability, ClientKind, InitializeParams, InitializeResult,
 };
-use uxduck_contracts::dto::link::{Link, SerialListResult};
+use uxduck_contracts::dto::link::{Link, SerialDetectResult, SerialListResult};
 use uxduck_contracts::dto::operator::{Operator, OperatorListResult, OperatorProfile};
 use uxduck_contracts::dto::pairing::{BootstrapToken, PairingListResult};
 use uxduck_contracts::dto::state::StateSubscribeResult;
@@ -249,6 +249,7 @@ fn check(name: &str) {
             round_trip::<Link>(name, &json);
         }
         ("result", "serial_list") => round_trip::<SerialListResult>(name, &json),
+        ("result", "serial_detectBaud") => round_trip::<SerialDetectResult>(name, &json),
         ("result", "vehicle_modelRead") => {
             round_trip::<uxduck_contracts::dto::vehicle::VehicleModelReadResult>(name, &json);
         }
@@ -1006,7 +1007,8 @@ fn check(name: &str) {
             | "firmware_remove"
             | "gimbal_watch"
             | "terminal_resize"
-            | "terminal_close",
+            | "terminal_close"
+            | "serial_detectCancel",
         ) => {
             round_trip::<Empty>(name, &json);
         }

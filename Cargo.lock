@@ -5673,6 +5673,7 @@ dependencies = [
  "lzma-rs",
  "mavinspect",
  "mavio",
+ "nix 0.31.4",
  "quick-xml 0.42.0",
  "serde",
  "serde_json",

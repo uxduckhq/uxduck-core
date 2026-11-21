@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use uxduck_contracts::dto::Empty;
 use uxduck_contracts::dto::find::{Find as FindDto, FindResult, FindStartParams};
+use uxduck_contracts::dto::link::{SerialDetectParams, SerialDetectProgress, SerialDetectResult};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
 use uxduck_contracts::rpc::{ClientRequest, ServerNotification};
 use uxduck_core::domain::client::Capability;
@@ -52,6 +53,13 @@ pub trait DiscoveryPort: Send + std::fmt::Debug {
     fn subnets(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Listens to a serial device for its baud rate, writing nothing,
+    /// telling each rate through `Engine::baud_listening`, and answers
+    /// through `Engine::baud_detected`.
+    fn detect_baud(&mut self, device: String);
+    /// Stops listening to a device and lets it go: `Engine::baud_detected`
+    /// is then told it stopped.
+    fn stop_detecting(&mut self, device: &str);
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +70,9 @@ pub(crate) struct Finding {
     /// port; `once` for `find/vehicles`, which ends after a round.
     lookers: BTreeMap<ConnectionId, Looker>,
     current: Option<Look>,
+    /// Devices being listened to for their baud rate, with who asked: a
+    /// search leaves them alone meanwhile.
+    detecting: BTreeMap<String, Detecting>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,14 +91,195 @@ fn scope_capability(scope: FindScope) -> Capability {
     }
 }
 
+/// A device being listened to for its baud rate.
+#[derive(Clone, Debug)]
+struct Detecting {
+    connection: ConnectionId,
+    request: Value,
+    /// Its USB identity when it started, for a link that finds it by that.
+    usb: Option<UsbId>,
+}
+
+/// Whether a serial link's device is `device`, by its path or by the USB
+/// identity it has, as a search for vehicles matches them.
+fn same_device(kind: &LinkKind, device: &str, usb: Option<&UsbId>) -> bool {
+    let LinkKind::Serial {
+        device: path,
+        usb: by,
+        ..
+    } = kind
+    else {
+        return false;
+    };
+    path == device
+        || by.as_ref().zip(usb).is_some_and(|(by, usb)| {
+            by.vendor_id == usb.vendor_id
+                && by.product_id == usb.product_id
+                && (by.serial_number.is_none() || by.serial_number == usb.serial_number)
+        })
+}
+
 impl Engine {
+    /// Starts listening to a serial device for its baud rate, answered
+    /// later. A device a link that is on uses is refused. A flight
+    /// controller on native USB, which ignores the rate, or in its
+    /// bootloader, which speaks no MAVLink, is answered at once unopened.
+    fn detect_baud(&mut self, device: &str) -> Result<Value, ApiError> {
+        use uxduck_core::domain::link::LinkStatus;
+        use uxduck_mavlink::usb_ids::{UsbKind, lookup};
+        if device.is_empty() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidParams,
+                "Choose a serial device first.",
+            ));
+        }
+        let usb = self
+            .system
+            .serial_ports()
+            .into_iter()
+            .find(|p| p.device == device)
+            .and_then(|p| p.usb);
+        let held = self
+            .state
+            .links
+            .values()
+            .filter(|link| {
+                !matches!(
+                    link.status,
+                    LinkStatus::Disabled
+                        | LinkStatus::DisabledByLoopDetection
+                        | LinkStatus::Stopped
+                )
+            })
+            .find_map(|link| match &link.kind {
+                LinkKind::Serial { baud, .. } if same_device(&link.kind, device, usb.as_ref()) => {
+                    Some((link.name.clone(), *baud))
+                }
+                _ => None,
+            });
+        if let Some((name, baud)) = held {
+            return Err(ApiError::new(
+                ErrorKind::Busy,
+                format!(
+                    "{name} already uses this device at {baud} baud. Turn that link off to listen for its rate."
+                ),
+            ));
+        }
+        match usb.as_ref().and_then(|u| lookup(u.vendor_id, u.product_id)) {
+            Some(known) if known.kind == UsbKind::FlightController => {
+                return to_value(&SerialDetectResult::NativeUsb {
+                    name: known.name.to_owned(),
+                });
+            }
+            Some(known) if known.kind == UsbKind::Bootloader => {
+                return to_value(&SerialDetectResult::Bootloader {
+                    name: known.name.to_owned(),
+                });
+            }
+            _ => {}
+        }
+        if self.finding.port.is_none() {
+            return Err(ApiError::new(
+                ErrorKind::InvalidRequest,
+                "Detecting a baud rate needs UXDuck Desktop.",
+            ));
+        }
+        if self.finding.detecting.contains_key(device) {
+            return Err(ApiError::new(
+                ErrorKind::Busy,
+                "UXDuck is already listening to this device. Wait for it to finish.",
+            ));
+        }
+        let Some((connection, request)) = self.replying_to.take() else {
+            return Err(ApiError::new(
+                ErrorKind::InvalidRequest,
+                "Detecting a baud rate needs a request to answer.",
+            ));
+        };
+        self.finding.detecting.insert(
+            device.to_owned(),
+            Detecting {
+                connection,
+                request,
+                usb,
+            },
+        );
+        self.relook();
+        if let Some(port) = self.finding.port.as_mut() {
+            port.detect_baud(device.to_owned());
+        }
+        Ok(Value::Null)
+    }
+
+    /// Stops listening to `device` for its rate, if anything is: its
+    /// request is answered `stopped` once the device is let go.
+    fn stop_detecting(&mut self, device: &str) {
+        if !self.finding.detecting.contains_key(device) {
+            return;
+        }
+        if let Some(port) = self.finding.port.as_mut() {
+            port.stop_detecting(device);
+        }
+    }
+
+    /// A link is about to open `kind`: listening to the same device stops,
+    /// so the link has it.
+    pub(crate) fn stop_detecting_for_link(&mut self, kind: &LinkKind) {
+        let devices: Vec<String> = self
+            .finding
+            .detecting
+            .iter()
+            .filter(|(device, d)| same_device(kind, device, d.usb.as_ref()))
+            .map(|(device, _)| device.clone())
+            .collect();
+        for device in devices {
+            self.stop_detecting(&device);
+        }
+    }
+
+    /// Listening to `device` moved to `baud`: who asked is told.
+    pub fn baud_listening(&mut self, device: &str, baud: u32) {
+        let Some(connection) = self.finding.detecting.get(device).map(|d| d.connection) else {
+            return;
+        };
+        self.send(
+            connection,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "serial/detectProgress",
+                "params": SerialDetectProgress { device: device.to_owned(), baud },
+            }),
+        );
+    }
+
+    /// Listening to `device` for its baud rate ended: who asked is answered.
+    pub fn baud_detected(&mut self, device: &str, result: &SerialDetectResult) {
+        let Some(Detecting {
+            connection,
+            request,
+            ..
+        }) = self.finding.detecting.remove(device)
+        else {
+            return;
+        };
+        let result = to_value(result).unwrap_or(Value::Null);
+        self.send(
+            connection,
+            &json!({ "jsonrpc": "2.0", "id": request, "result": result }),
+        );
+        self.relook();
+    }
+
     /// The daemon's probes; the browser's daemon has none.
     pub fn set_discovery(&mut self, port: Box<dyn DiscoveryPort>) {
         self.finding.port = Some(port);
     }
 
     fn owned(&self) -> Owned {
-        let mut owned = Owned::default();
+        let mut owned = Owned {
+            devices: self.finding.detecting.keys().cloned().collect(),
+            ..Owned::default()
+        };
         for link in self.state.links.values() {
             match &link.kind {
                 LinkKind::Serial { device, usb, .. } => {
@@ -284,6 +476,16 @@ impl Engine {
         if self.finding.lookers.remove(&connection).is_some() {
             self.relook();
         }
+        let asked: Vec<String> = self
+            .finding
+            .detecting
+            .iter()
+            .filter(|(_, d)| d.connection == connection)
+            .map(|(device, _)| device.clone())
+            .collect();
+        for device in asked {
+            self.stop_detecting(&device);
+        }
     }
 }
 
@@ -346,6 +548,15 @@ pub(crate) fn handle(
             engine.relook();
             // Answered after the probes' next whole round.
             Ok(Value::Null)
+        }
+        ClientRequest::SerialDetectBaud(SerialDetectParams { device }) => {
+            require(Capability::Config)?;
+            engine.detect_baud(device.trim())
+        }
+        ClientRequest::SerialDetectCancel(SerialDetectParams { device }) => {
+            require(Capability::Config)?;
+            engine.stop_detecting(device.trim());
+            to_value(&Empty {})
         }
         _ => Err(ApiError::new(ErrorKind::Internal, "not a find method")),
     }

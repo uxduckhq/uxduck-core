@@ -505,6 +505,7 @@ fn create_link_inner(
         version: 1,
     };
     engine.commit_as(actor, Change::LinkUpserted { link: link.clone() });
+    engine.stop_detecting_for_link(&link.kind);
     engine.links.open(&link);
     engine.begin_launch(&link.id);
     if link.kind.is_forward() {
@@ -793,6 +794,7 @@ fn enable_link(engine: &mut Engine, connection: ConnectionId, id: &str) -> Resul
         if !link.carries.is_mavlink() {
             engine.traffic_sources_changed();
         }
+        engine.stop_detecting_for_link(&link.kind);
         engine.links.open(&link);
     }
     engine.resolve(&format!("link-loop:{id}"));
@@ -839,6 +841,10 @@ fn disable_link(
 /// stay its vehicles. A new kind reopens it (its vehicles go offline until
 /// heard again); a new policy or filter changes the open link's role; a
 /// name, a topology or keep-alive are only saved.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one step for each part of a link a change can touch"
+)]
 fn update_link(
     engine: &mut Engine,
     connection: ConnectionId,
@@ -935,6 +941,7 @@ fn update_link(
     link.version += 1;
     engine.commit(connection, Change::LinkUpserted { link: link.clone() });
     if reopens {
+        engine.stop_detecting_for_link(&link.kind);
         engine.links.update(&link);
         if moved {
             vehicles_offline(engine, connection, &link.id);

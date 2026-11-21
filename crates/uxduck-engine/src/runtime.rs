@@ -1362,13 +1362,15 @@ pub struct SerialPortInfo {
 }
 
 /// A host with nothing to report: every bind works, only loopback and the
-/// unspecified address are local, no serial ports. For tests.
+/// unspecified address are local, and only the serial ports given. For tests.
 #[derive(Debug, Default)]
 pub struct NoSystem {
     pub wake_lock: bool,
     pub display_awake: bool,
     /// What `controller_inputs` answers.
     pub controller_inputs: uxduck_contracts::dto::controller::ControllerInputsResult,
+    /// What `serial_ports` answers.
+    pub serial_ports: Vec<SerialPortInfo>,
 }
 
 impl System for NoSystem {
@@ -1385,7 +1387,7 @@ impl System for NoSystem {
             || host == "localhost"
     }
     fn serial_ports(&self) -> Vec<SerialPortInfo> {
-        Vec::new()
+        self.serial_ports.clone()
     }
     fn wake_lock(&mut self, hold: bool) {
         self.wake_lock = hold;

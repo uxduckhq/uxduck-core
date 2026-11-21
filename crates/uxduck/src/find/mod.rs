@@ -11,11 +11,15 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use uxduck_contracts::dto::link::SerialDetectResult;
 use uxduck_core::domain::find::{Find, FindPlace, FindReason, FindScope, FoundVehicle};
 use uxduck_core::domain::link::{LinkKind, UsbId};
 use uxduck_engine::finds::{DiscoveryPort, Look};
 use uxduck_engine::runtime::Clock;
-use uxduck_mavlink::probe::{Heard, Outcome, Plan, Timing, heartbeat_in, probe};
+use uxduck_mavlink::probe::{
+    DETECT_BAUDS, DETECT_LISTEN, Detected, Heard, Outcome, Plan, Timing, detect_baud, heartbeat_in,
+    probe,
+};
 use uxduck_mavlink::usb_ids::{UsbKind, lookup};
 
 use crate::adapters::system::SystemClock;
@@ -55,6 +59,8 @@ pub struct Finder {
     runtime: tokio::runtime::Handle,
     places: Arc<Places>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// What stops listening to each device for its baud rate.
+    detecting: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Finder {
@@ -65,6 +71,7 @@ impl Finder {
             runtime: tokio::runtime::Handle::current(),
             places: Arc::new(places),
             task: None,
+            detecting: std::collections::HashMap::new(),
         }
     }
 }
@@ -100,6 +107,36 @@ impl DiscoveryPort for Finder {
                 }
             }
         }));
+    }
+
+    fn detect_baud(&mut self, device: String) {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.detecting.insert(device.clone(), stop.clone());
+        let engine = self.engine.clone();
+        self.runtime.spawn(async move {
+            let path = device.clone();
+            let telling = engine.clone();
+            let detected = tokio::task::spawn_blocking(move || {
+                detect_baud(&path, &DETECT_BAUDS, DETECT_LISTEN, &stop, |baud| {
+                    let path = path.clone();
+                    telling.post(move |e| e.baud_listening(&path, baud));
+                })
+            })
+            .await;
+            let result = detected.map_or_else(
+                |_| SerialDetectResult::Unavailable {
+                    reason: "Listening stopped unexpectedly. Try again.".into(),
+                },
+                |detected| detect_result(&device, detected),
+            );
+            engine.post(move |e| e.baud_detected(&device, &result));
+        });
+    }
+
+    fn stop_detecting(&mut self, device: &str) {
+        if let Some(stop) = self.detecting.remove(device) {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn subnets(&self) -> Vec<String> {
@@ -255,6 +292,29 @@ fn serial_round(look: &Look) -> Vec<Find> {
     }
     finds.extend(probes.into_iter().filter_map(|p| p.join().ok()));
     finds
+}
+
+/// What listening to `device` for its baud rate heard, in words.
+fn detect_result(device: &str, detected: Detected) -> SerialDetectResult {
+    let reason = match detected {
+        Detected::Found { baud } => return SerialDetectResult::Found { baud },
+        Detected::NotFound { tried } => return SerialDetectResult::NotFound { tried },
+        Detected::Stopped => return SerialDetectResult::Stopped,
+        Detected::Unavailable(Outcome::Busy) => {
+            format!("Another program is using {device}. Close it, then try again.")
+        }
+        Detected::Unavailable(Outcome::Permission(fix)) => {
+            format!("UXDuck isn't allowed to open {device}. {fix}.")
+        }
+        Detected::Unavailable(Outcome::Failed(why)) => format!("Couldn't open {device}: {why}"),
+        Detected::Unavailable(_) => format!("Couldn't open {device}."),
+        Detected::Gone => {
+            format!(
+                "{device} is unavailable or was unplugged. Check it is connected, then try again."
+            )
+        }
+    };
+    SerialDetectResult::Unavailable { reason }
 }
 
 fn serial_find(mut base: Find, device: &str, usb: Option<UsbId>, outcome: Outcome) -> Find {
@@ -489,5 +549,32 @@ pub fn watch_usb(engine: EngineHandle) {
         });
     if let Err(error) = spawned {
         tracing::warn!(%error, "not watching USB devices");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detection_names_the_rates_it_listened_at_and_says_when_the_device_is_gone() {
+        assert_eq!(
+            detect_result(
+                "/dev/ttyUSB0",
+                Detected::NotFound {
+                    tried: vec![57_600, 460_800]
+                }
+            ),
+            SerialDetectResult::NotFound {
+                tried: vec![57_600, 460_800]
+            }
+        );
+        assert_eq!(
+            detect_result("/dev/ttyUSB0", Detected::Gone),
+            SerialDetectResult::Unavailable {
+                reason: "/dev/ttyUSB0 is unavailable or was unplugged. Check it is connected, then try again."
+                    .into()
+            }
+        );
     }
 }

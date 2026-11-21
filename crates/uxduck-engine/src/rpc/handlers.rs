@@ -584,7 +584,9 @@ pub(crate) fn handle(
         }
         request @ (ClientRequest::FindStart(_)
         | ClientRequest::FindStop(_)
-        | ClientRequest::FindVehicles(_)) => {
+        | ClientRequest::FindVehicles(_)
+        | ClientRequest::SerialDetectBaud(_)
+        | ClientRequest::SerialDetectCancel(_)) => {
             crate::finds::handle(engine, connection, request, &granted)
         }
         request @ (ClientRequest::VideoDevices(_)

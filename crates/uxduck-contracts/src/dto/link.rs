@@ -516,6 +516,46 @@ pub struct SerialListResult {
     pub ports: Vec<SerialPort>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialDetectParams {
+    /// The device, as `serial/list` lists it.
+    pub device: String,
+}
+
+/// The rate `serial/detectBaud` is listening at now, to the client that asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialDetectProgress {
+    pub device: String,
+    pub baud: u32,
+}
+
+/// What listening to a serial device for its baud rate heard.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "outcome",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum SerialDetectResult {
+    /// Whole MAVLink frames whose checksums hold arrived at this rate.
+    Found { baud: u32 },
+    /// A flight controller on its own USB port, which ignores the rate, so
+    /// it was not opened and any rate works. `name` is what people call it.
+    NativeUsb { name: String },
+    /// A flight controller in its bootloader, which speaks no MAVLink, so it
+    /// was not opened. `name` is what people call it.
+    Bootloader { name: String },
+    /// Listening was stopped by `serial/detectCancel`, by a link taking the
+    /// device, or by the asking client going away.
+    Stopped,
+    /// No MAVLink arrived at any of these rates.
+    NotFound { tried: Vec<u32> },
+    /// It could not be opened: why, in words, with the fix where there is one.
+    Unavailable { reason: String },
+}
+
 /// The configured links, including disabled and failed links and their reasons.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

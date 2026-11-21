@@ -26,11 +26,15 @@ base64.workspace = true
 # Dialect files: plugins' (S60) and people's own (S252, custom.rs).
 quick-xml.workspace = true
 
+# A serial port's settings, put back after baud detection (FB-286).
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, optional = true }
+
 [features]
 default = ["native"]
 # Links over sockets and serial devices. Everything else is logic over frames
 # and builds for wasm32 without this feature.
-native = ["dep:tokio", "dep:serialport"]
+native = ["dep:tokio", "dep:serialport", "dep:nix"]
 # Every message of the dialect by name, for plugins (S54): the dialect's
 # definitions are large, so only the installed daemon has them.
 named = ["mavio/definitions", "dep:mavinspect"]

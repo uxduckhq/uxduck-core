@@ -81,6 +81,8 @@ base64 = "0.23"
 jiff = "1"
 thiserror = "2"
 serialport = { version = "4.10", default-features = false }
+# Putting a serial port's terminal settings back after baud detection (FB-286).
+nix = { version = "0.31", default-features = false, features = ["term"] }
 # Gamepads (S12); on Linux it needs libudev.
 gilrs = "0.11"
 # gilrs's platform codes, for the axes it takes for triggers (FB-87).

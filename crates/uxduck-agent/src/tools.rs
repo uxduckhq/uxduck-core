@@ -521,6 +521,8 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     "link/disable",
     "link/update",
     "serial/list",
+    "serial/detectBaud",
+    "serial/detectCancel",
     "command/modes",
     "notification/acknowledge",
     "notification/dismiss",
