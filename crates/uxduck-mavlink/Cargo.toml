@@ -12,6 +12,8 @@ uxduck-core.workspace = true
 # The fake vehicle's terrain grid (S118), as ArduPilot keeps it.
 uxduck-terrain.workspace = true
 mavio.workspace = true
+# Frames checked against their CRC and CRC_EXTRA when tlogs are read back.
+mavlink-tlog.workspace = true
 uuid.workspace = true
 tokio = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }

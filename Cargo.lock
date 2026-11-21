@@ -2566,6 +2566,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavlink-tlog"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da742b92f6820a5de512a96a83911a29b4621b61370a2cec0baff8651a48a07b"
+
+[[package]]
 name = "mavspec"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5673,6 +5679,7 @@ dependencies = [
  "lzma-rs",
  "mavinspect",
  "mavio",
+ "mavlink-tlog",
  "quick-xml 0.42.0",
  "serde",
  "serde_json",
