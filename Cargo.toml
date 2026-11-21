@@ -78,7 +78,7 @@ zstd = { version = "0.14", default-features = false }
 md-5 = "0.11"
 base64 = "0.23"
 # The computer's time zone, for recordings named by local time (S150).
-jiff = "0.2"
+jiff = "1"
 thiserror = "2"
 serialport = { version = "4.10", default-features = false }
 # Gamepads (S12); on Linux it needs libudev.

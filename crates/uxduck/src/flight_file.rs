@@ -875,7 +875,7 @@ fn dos_time(at_us: u64) -> (u16, u16) {
     let Ok(at) = jiff::Timestamp::from_microsecond(i64::try_from(at_us).unwrap_or(0)) else {
         return (0, (1 << 5) | 1);
     };
-    let civil = at.to_zoned(jiff::tz::TimeZone::UTC).datetime();
+    let civil = at.to_zoned_datetime(jiff::tz::TimeZone::UTC).datetime();
     if civil.year() < 1980 {
         return (0, (1 << 5) | 1);
     }

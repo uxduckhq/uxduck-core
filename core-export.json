@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "https://github.com/uxduckhq/uxduck-core",
-  "sourceCommit": "503ffa200b5e484de7c55cb342e1d03c4579086c",
+  "sourceCommit": "f2fc6c4103e9a9e058faf3214d6a285bab7ad762",
   "licenseReady": true,
   "files": [
     {
@@ -51,12 +51,12 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e9d8dd235bf3d0d9ee306a73ce1ac9959972b8213782b452c18ac8f261034bf3",
+      "sha256": "11d4b8c98fd2d9f7ec0ac0d9fe8419c0928526e96842cdbc54e1539ea0b57305",
       "executable": false
     },
     {
       "path": "Cargo.toml",
-      "sha256": "c23f2b5fbe9d7cd42beee3239f5a4a5959e2f02ffafc070b88e9e73bc6b78ef4",
+      "sha256": "df7a6bdcfeeae01d0790186b9ab1df4aa0a1cc2bb73ec3d7d617a6341b3b1a75",
       "executable": false
     },
     {
@@ -8506,7 +8506,7 @@
     },
     {
       "path": "crates/uxduck/src/cli/checklist.rs",
-      "sha256": "4a25aef8d76dc811247ebcb0dd134f3eecc6892ce66314289623c14ab7cbc1f2",
+      "sha256": "f5aef0847d69bf731d2a44115bd34b8bd384fbd1c474d04284029e769d083b87",
       "executable": false
     },
     {
@@ -8856,7 +8856,7 @@
     },
     {
       "path": "crates/uxduck/src/flight_file.rs",
-      "sha256": "3fffe90f3f12afc4feff95485af77e8effe56cffd753fedb846802247299f230",
+      "sha256": "feb3466681695168cde6ad59995416bdf18901f5f6ac78a2cdf3cd51a6bc9245",
       "executable": false
     },
     {

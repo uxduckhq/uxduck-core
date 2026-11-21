@@ -387,7 +387,7 @@ fn when(us: i64) -> String {
     jiff::Timestamp::from_microsecond(us).map_or_else(
         |_| "?".into(),
         |t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M")
                 .to_string()
         },
