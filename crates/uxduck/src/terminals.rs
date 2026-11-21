@@ -75,10 +75,23 @@ const TERM: &str = "xterm-256color";
 /// failing both the command's own process alone. It asks first and insists
 /// two seconds later. The command runs in the user's own shell, as `ssh
 /// host command` runs it, and its exit status is the session's.
-const LIFELINE: &str = r#"exec 3<&0 </dev/null
-if command -v setsid >/dev/null 2>&1; then setsid "${SHELL:-/bin/sh}" -c "$1" 3<&- &
-else set -m 2>/dev/null; "${SHELL:-/bin/sh}" -c "$1" 3<&- & fi
+///
+/// The session's two streams are the command's alone. The script's own
+/// shell writes nowhere, because a shell says things of its own about a
+/// job: bash with job control, which is macOS's `sh`, prints "[1]-  Done(3)
+/// …" when the command exits, and dash prints "Terminated" of one a signal
+/// ended. Those would be read as the command's output. The script lets go
+/// of both streams before it starts the watcher, so that nothing but the
+/// command and what it started holds the session open.
+///
+/// Job control is asked for with `command set -m`: `set` is a special
+/// built-in, whose failure ends a POSIX shell, and zsh as `sh` has no job
+/// control without a terminal, so it ended there before the command ran.
+const LIFELINE: &str = r#"exec 3<&0 </dev/null 4>&1 5>&2 >/dev/null 2>&1
+if command -v setsid >/dev/null 2>&1; then setsid "${SHELL:-/bin/sh}" -c "$1" 3<&- >&4 2>&5 4>&- 5>&- &
+else command set -m 2>/dev/null; "${SHELL:-/bin/sh}" -c "$1" 3<&- >&4 2>&5 4>&- 5>&- & fi
 c=$!
+exec 4>&- 5>&-
 ( cat <&3 >/dev/null 2>&1
   kill -TERM "-$c" 2>/dev/null || kill -TERM "$c" 2>/dev/null
   sleep 2
@@ -1196,5 +1209,223 @@ mod tests {
             Some("client_loop: send disconnect: Broken pipe".to_owned())
         );
         assert_eq!(companions::last_said(signed), None);
+    }
+
+    /// [`LIFELINE`] run as a computer's SSH server runs it, under the shells
+    /// a computer's `sh` is: dash on Debian and Ubuntu, bash on macOS, which
+    /// has no `setsid`. The session's two streams must hold what the command
+    /// printed and nothing of the script's own shell, which with job control
+    /// says "[1]-  Done(3) …" and after a stop "Terminated".
+    #[cfg(unix)]
+    mod lifeline {
+        use std::io::Read as _;
+        use std::path::PathBuf;
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        use super::super::LIFELINE;
+
+        /// Long enough for a loaded runner, short enough to say what hung.
+        const PATIENCE: Duration = Duration::from_secs(30);
+
+        fn found(name: &str) -> Option<PathBuf> {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|dir| dir.join(name))
+                .find(|path| path.is_file())
+        }
+
+        /// A program these tests cannot do without, by its full path.
+        fn program(name: &str) -> PathBuf {
+            found(name).unwrap_or_else(|| {
+                panic!("`{name}` is needed to test an agent's command and is not on PATH")
+            })
+        }
+
+        /// The script's `PATH`: what it and the tests' commands run, with
+        /// or without `setsid`.
+        fn path(setsid: bool) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["cat", "sleep"]
+                .into_iter()
+                .chain(setsid.then_some("setsid"))
+            {
+                std::os::unix::fs::symlink(program(name), dir.path().join(name)).unwrap();
+            }
+            dir
+        }
+
+        /// Each shell with and without `setsid`. Linux has `setsid`, and one
+        /// without it fails here. macOS has none, so its computers only
+        /// ever take the script's other branch.
+        fn ways() -> Vec<(&'static str, bool)> {
+            let with = cfg!(target_os = "linux") || found("setsid").is_some();
+            ["sh", "bash"]
+                .into_iter()
+                .flat_map(|shell| [(shell, false), (shell, true)])
+                .filter(|(_, setsid)| with || !setsid)
+                .collect()
+        }
+
+        struct Ran {
+            status: Option<i32>,
+            stdout: String,
+            stderr: String,
+        }
+
+        /// Runs `command` under the script by `shell`, with the session's
+        /// input held open as the daemon holds it. With `stop_at`, the input
+        /// ends once the command has printed those words. Fails if the
+        /// session does not end, if what the command `started` outlives it
+        /// where the command has a process group, or if either of the
+        /// session's streams stays open after that.
+        fn run(
+            shell: &str,
+            setsid: bool,
+            command: &str,
+            stop_at: Option<&str>,
+            started: &[String],
+        ) -> Ran {
+            let path = path(setsid);
+            let how = format!("{shell}, setsid {setsid}: {command}");
+            let mut child = Command::new(program(shell))
+                .arg("-c")
+                .arg(LIFELINE)
+                .arg("uxduck-run")
+                .arg(command)
+                .env("PATH", path.path())
+                .env("SHELL", program("sh"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take();
+            let (printed, stdout) = mpsc::channel::<Vec<u8>>();
+            let mut from = child.stdout.take().unwrap();
+            std::thread::spawn(move || {
+                let mut read = [0_u8; 4096];
+                while let Ok(n) = from.read(&mut read) {
+                    if n == 0 || printed.send(read[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let (said, stderr) = mpsc::channel::<Vec<u8>>();
+            let mut from = child.stderr.take().unwrap();
+            std::thread::spawn(move || {
+                let mut all = Vec::new();
+                let _ = from.read_to_end(&mut all);
+                let _ = said.send(all);
+            });
+
+            let deadline = Instant::now() + PATIENCE;
+            let mut out = Vec::new();
+            let status = loop {
+                while let Ok(bytes) = stdout.try_recv() {
+                    out.extend(bytes);
+                }
+                if stop_at.is_some_and(|words| String::from_utf8_lossy(&out).contains(words)) {
+                    input = None;
+                }
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    panic!("the session did not end ({how})");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            // Everything it started is gone where the command has a process
+            // group: with `setsid`, or under a shell whose job control works
+            // without a terminal, as bash's does. Under dash without `setsid`
+            // only the command's own process is ended, and what it started
+            // holds the session's streams until it is ended here.
+            if setsid || shell == "bash" {
+                while started.iter().any(|words| running(words)) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{started:?} outlived the session ({how})"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            for words in started {
+                let _ = Command::new(program("pkill")).args(["-f", words]).status();
+            }
+            loop {
+                match stdout.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(bytes) => out.extend(bytes),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("the session's output stayed open ({how})")
+                    }
+                }
+            }
+            let err = stderr
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("the session's errors stayed open ({how})"));
+            drop(input);
+            Ran {
+                status: status.code(),
+                stdout: String::from_utf8(out).unwrap(),
+                stderr: String::from_utf8(err).unwrap(),
+            }
+        }
+
+        fn running(words: &str) -> bool {
+            Command::new(program("pgrep"))
+                .args(["-f", words])
+                .stdout(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+
+        #[test]
+        fn a_command_that_exits_leaves_what_it_printed_its_status_and_nothing_of_the_scripts_shell()
+        {
+            for (shell, setsid) in ways() {
+                // The input is still open when it exits, as the daemon's is.
+                let ran = run(shell, setsid, "echo out; echo err >&2; exit 3", None, &[]);
+                assert_eq!(ran.stdout, "out\n", "{shell}, setsid {setsid}");
+                assert_eq!(ran.stderr, "err\n", "{shell}, setsid {setsid}");
+                assert_eq!(ran.status, Some(3), "{shell}, setsid {setsid}");
+            }
+        }
+
+        #[test]
+        fn a_stopped_command_leaves_what_it_printed_until_then_and_nothing_of_the_scripts_shell() {
+            // Numbered by this process, nine digits each, so two runs of these
+            // tests on one computer never see or end each other's.
+            let first = 100_000_000 + 10 * usize::try_from(std::process::id()).unwrap();
+            for (case, (shell, setsid)) in ways().into_iter().enumerate() {
+                let started =
+                    [first + 2 * case, first + 2 * case + 1].map(|s| format!("sleep {s}"));
+                let command = format!(
+                    "echo told >&2; echo started; {} & {}; echo never",
+                    started[0], started[1]
+                );
+                let ran = run(shell, setsid, &command, Some("started"), &started);
+                assert_eq!(ran.stdout, "started\n", "{shell}, setsid {setsid}");
+                assert_eq!(ran.stderr, "told\n", "{shell}, setsid {setsid}");
+                // Ended by the script's TERM, which a shell reports as 128 + 15.
+                assert_eq!(ran.status, Some(143), "{shell}, setsid {setsid}");
+            }
+        }
+
+        /// The one a daemon's caller can see: the session is still up to
+        /// carry what the script's shell says of a command a signal ended.
+        #[test]
+        fn a_command_a_signal_ends_leaves_what_it_printed_and_nothing_of_the_scripts_shell() {
+            for (shell, setsid) in ways() {
+                let command = "echo out; echo told >&2; kill -TERM $$";
+                let ran = run(shell, setsid, command, None, &[]);
+                assert_eq!(ran.stdout, "out\n", "{shell}, setsid {setsid}");
+                assert_eq!(ran.stderr, "told\n", "{shell}, setsid {setsid}");
+                assert_eq!(ran.status, Some(143), "{shell}, setsid {setsid}");
+            }
+        }
     }
 }

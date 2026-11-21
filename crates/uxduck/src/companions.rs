@@ -1719,6 +1719,19 @@ async fn run_route(
     if let Some(hop) = route.hop {
         let _ = std::fs::remove_file(hop.key_file);
     }
+    // A test that fails says what its `ssh` was given and what it said. The
+    // last argument is the script, which is left out.
+    #[cfg(test)]
+    if let Ok(Ok(output)) = &ran
+        && !output.status.success()
+    {
+        eprintln!(
+            "ssh ended with {:?}, given {:?}, and said:\n{}",
+            output.status,
+            &built.args[..built.args.len() - 1],
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     match ran {
         Err(_) => Err(format!(
             "{route} did not answer within {} s",
@@ -2429,8 +2442,9 @@ mod tests {
             .output()
             .expect("ssh-keyscan is needed for the companion SSH tests");
         let sent = String::from_utf8_lossy(&scanned.stdout)
-            .split_whitespace()
-            .nth(2)
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .and_then(|line| line.split_whitespace().nth(2))
             .map(str::to_owned);
         let own = std::fs::read_to_string(host_key.with_extension("pub")).unwrap();
         assert_eq!(
