@@ -3,14 +3,16 @@
 //! itself. Every edit is a revision, so undo and redo survive a reload;
 //! deleting moves a plan to Deleted for 30 days.
 
+use std::collections::HashMap;
+
 use crate::plan_checks::{Check, Severity};
 use serde_json::Value;
 use uxduck_contracts::dto::link::IdParams;
 use uxduck_contracts::dto::plan::{
-    Plan as PlanDto, PlanCheck, PlanCheckResult, PlanCheckSeverity, PlanCreateParams,
-    PlanExamplesParams, PlanExamplesResult, PlanExportFormat, PlanExportParams, PlanExportResult,
-    PlanFile as PlanFileDto, PlanImportParams, PlanImportResult, PlanListParams, PlanListResult,
-    PlanPlaceParams, PlanStepParams, PlanUpdateParams, PlanUploadParams,
+    Plan as PlanDto, PlanAcknowledgeParams, PlanCheck, PlanCheckResult, PlanCheckSeverity,
+    PlanCreateParams, PlanExamplesParams, PlanExamplesResult, PlanExportFormat, PlanExportParams,
+    PlanExportResult, PlanFile as PlanFileDto, PlanImportParams, PlanImportResult, PlanListParams,
+    PlanListResult, PlanNote, PlanPlaceParams, PlanStepParams, PlanUpdateParams, PlanUploadParams,
 };
 use uxduck_contracts::dto::state::{ChangeOp, EntityChange, EntityType};
 use uxduck_contracts::errors::{ApiError, ErrorKind};
@@ -19,8 +21,8 @@ use uxduck_core::domain::client::{Capability, ClientKind};
 use uxduck_core::domain::mission::MissionItem;
 use uxduck_core::domain::parameter::{ParamKind, parameter_id};
 use uxduck_core::domain::plan::{
-    DELETED_KEPT_US, FenceAction, LatLon, PatternShape, Plan, PlanAuthor, PlanAutopilot, PlanBody,
-    PlanFrame, PlanRevision, PlanVehicleType, VehicleCopy,
+    DELETED_KEPT_US, FenceAction, LatLon, PatternShape, Plan, PlanAcknowledgement, PlanAuthor,
+    PlanAutopilot, PlanBody, PlanFrame, PlanRevision, PlanVehicleType, VehicleCopy,
 };
 use uxduck_core::events::Change;
 
@@ -285,22 +287,90 @@ pub(crate) fn handle(
         }
         ClientRequest::PlanCheck(params) => {
             require(Capability::Read)?;
-            let body = plan(engine, &params.id)?.body.clone();
-            let checks = checks_of(engine, &body, params.vehicle_id.as_deref());
-            to_value(&PlanCheckResult {
-                checks: checks
-                    .into_iter()
-                    .map(|c| PlanCheck {
-                        severity: match c.severity {
-                            Severity::Error => PlanCheckSeverity::Error,
-                            Severity::Warning => PlanCheckSeverity::Warning,
-                        },
-                        code: c.code.to_owned(),
-                        item: c.item,
-                        message: c.message,
-                    })
-                    .collect(),
-            })
+            let plan = plan(engine, &params.id)?.clone();
+            let checks = checks_of(engine, &plan.body, params.vehicle_id.as_deref());
+            let mut result = PlanCheckResult::default();
+            for (c, about, id) in named(&plan.body, checks) {
+                let severity = match c.severity {
+                    Severity::Error => PlanCheckSeverity::Error,
+                    Severity::Warning => PlanCheckSeverity::Warning,
+                    Severity::Note => {
+                        result.notes.push(PlanNote {
+                            code: c.code.to_owned(),
+                            item: c.item,
+                            message: c.message,
+                        });
+                        continue;
+                    }
+                };
+                result.checks.push(PlanCheck {
+                    severity,
+                    acknowledged: severity == PlanCheckSeverity::Warning
+                        && plan.acknowledged.iter().any(|a| a.about == about),
+                    code: c.code.to_owned(),
+                    item: c.item,
+                    message: c.message,
+                    id: Some(id),
+                });
+            }
+            to_value(&result)
+        }
+        ClientRequest::PlanAcknowledge(PlanAcknowledgeParams {
+            id,
+            vehicle_id,
+            check_id,
+            acknowledged,
+        }) => {
+            require(Capability::Config)?;
+            // A person's word (FB-273): an agent sees the warning as kept,
+            // and never keeps one, whatever it was granted.
+            if author(engine, connection) == PlanAuthor::Agent {
+                return Err(ApiError::new(
+                    ErrorKind::CapabilityDenied,
+                    "Only a person can keep a plan's warning as is.",
+                ));
+            }
+            let mut plan = plan(engine, &id)?.clone();
+            let checks = checks_of(engine, &plan.body, vehicle_id.as_deref());
+            let Some((found, about, _)) = named(&plan.body, checks)
+                .into_iter()
+                .find(|(_, _, named)| *named == check_id)
+            else {
+                return Err(ApiError::new(
+                    ErrorKind::NotFound,
+                    "The plan has changed since that warning was shown. Check it again.",
+                ));
+            };
+            // Ground still being fetched goes by itself: nothing to keep.
+            if found.severity != Severity::Warning || found.code == "terrain-missing" {
+                return Err(ApiError::new(
+                    ErrorKind::InvalidValue,
+                    "Only a warning can be kept as is. A problem stops the upload until it is fixed.",
+                ));
+            }
+            let before = plan.acknowledged.clone();
+            plan.acknowledged.retain(|a| a.about != about);
+            if acknowledged {
+                plan.acknowledged.push(PlanAcknowledgement {
+                    code: found.code.to_owned(),
+                    item: found.item,
+                    about,
+                });
+            }
+            if plan.acknowledged == before {
+                return to_value(&PlanDto::from(&plan));
+            }
+            // Pushed to other windows as it is, but kept outside the body's
+            // version and undo history: no edit, nothing for "Back to when I
+            // opened it" to count, and an edit in flight is no conflict.
+            engine.commit(
+                connection,
+                Change::PlanSaved {
+                    plan: plan.clone(),
+                    revision: PlanRevision::None,
+                },
+            );
+            to_value(&PlanDto::from(&plan))
         }
         ClientRequest::PlanUpload(PlanUploadParams {
             plan_id,
@@ -714,13 +784,34 @@ fn create(
             engine.commit(connection, Change::PlanRemoved { id });
         }
     }
+    let made_by = author(engine, connection);
+    // A person's copy of a vehicle's mission keeps the warnings kept in the
+    // plan it came from (FB-273), when that plan's upload became that very
+    // mission, read back the same, and the vehicle still has it. An agent's
+    // copy, or one of anything else, starts with none.
+    let acknowledged = vehicle_copy
+        .as_ref()
+        .filter(|_| made_by == PlanAuthor::Person)
+        .filter(|copy| engine.mission(&copy.vehicle_id).version == copy.mission_version)
+        .and_then(|copy| {
+            let from = engine.state.plans.get(copy.plan_id.as_ref()?)?;
+            from.uploads
+                .iter()
+                .any(|u| {
+                    u.verified
+                        && u.vehicle_id == copy.vehicle_id
+                        && u.mission_version == copy.mission_version
+                })
+                .then(|| from.acknowledged.clone())
+        })
+        .unwrap_or_default();
     let plan = Plan {
         id: format!("plan{}", &engine.random.token()[..16]),
         bounds: body.bounds(),
         body,
         place_name: None,
         place_at: None,
-        made_by: author(engine, connection),
+        made_by,
         created_at_us: now,
         changed_at_us: now,
         deleted_at_us: None,
@@ -728,6 +819,7 @@ fn create(
         undo: 0,
         redo: 0,
         version: 1,
+        acknowledged,
         vehicle_copy,
     };
     engine.commit(
@@ -1222,6 +1314,27 @@ pub(crate) fn px4_heights(
 
 /// A plan's checks, against the terrain a vehicle would use (or the
 /// default dataset), asking for what is not fetched yet.
+/// Each check with what it is about (`plan_checks::about`) and the id
+/// `plan/acknowledge` names it by: that, and a count for an identical one.
+fn named(body: &PlanBody, checks: Vec<Check>) -> Vec<(Check, String, String)> {
+    let mut seen: HashMap<String, usize> = HashMap::with_capacity(checks.len());
+    checks
+        .into_iter()
+        .map(|check| {
+            let about = crate::plan_checks::about(body, &check);
+            let count = seen.entry(about.clone()).or_default();
+            let twins = *count;
+            *count += 1;
+            let id = if twins == 0 {
+                about.clone()
+            } else {
+                format!("{about}.{twins}")
+            };
+            (check, about, id)
+        })
+        .collect()
+}
+
 fn checks_of(engine: &mut Engine, body: &PlanBody, vehicle_id: Option<&str>) -> Vec<Check> {
     let mut targeted = body.clone();
     if vehicle_id
@@ -1302,5 +1415,30 @@ mod tests {
             (-2.0, -2.0, -1.0, -1.0)
         );
         assert_eq!((handed[0].frame, handed[0].altitude_m), (2, 154.0));
+    }
+
+    #[test]
+    fn warnings_alike_on_a_large_plan_are_named_at_once() {
+        // A 57,000-item survey can give as many warnings, each named by
+        // what it is about and a count of those before it alike. Counting
+        // them one by one against every earlier warning took seconds.
+        let body = PlanBody::default();
+        let checks: Vec<Check> = (0..30_000)
+            .map(|_| Check {
+                severity: Severity::Warning,
+                code: "rally-outside-fence",
+                item: None,
+                message: "a rally point is outside the fence".into(),
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let named = named(&body, checks);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(named[0].2, named[0].1);
+        assert_eq!(named[29_999].2, format!("{}.29999", named[0].1));
     }
 }

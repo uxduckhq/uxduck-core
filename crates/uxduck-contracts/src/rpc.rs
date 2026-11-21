@@ -1029,6 +1029,12 @@ pub enum ClientRequest {
     /// Result: `PlanCheckResult`.
     #[serde(rename = "plan/check")]
     PlanCheck(crate::dto::plan::PlanCheckParams),
+    /// Keeps one of a plan's warnings as is, or warns about it again
+    /// (FB-273). A kept warning is still in `plan/check`, marked
+    /// acknowledged, until what it is about changes. Errors cannot be kept.
+    /// Changes nothing uploaded. Needs `config`. Result: `Plan`.
+    #[serde(rename = "plan/acknowledge")]
+    PlanAcknowledge(crate::dto::plan::PlanAcknowledgeParams),
     /// The example plans, one per vehicle type, placed at `at` and turned
     /// to `headingDeg` (ADR-0029 P12). Not in the library: `plan/create`
     /// with one's body makes a plan of it. Needs `read`. Result:
@@ -2411,7 +2417,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Every method name, for probing and for tests.
-    pub const METHODS: [&'static str; 419] = [
+    pub const METHODS: [&'static str; 420] = [
         "initialize",
         "trace/subscribe",
         "pairing/list",
@@ -2606,6 +2612,7 @@ impl ClientRequest {
         "plan/export",
         "plan/upload",
         "plan/check",
+        "plan/acknowledge",
         "plan/examples",
         "plan/simulate",
         "plan/simulateCheck",

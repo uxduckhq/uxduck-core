@@ -1,0 +1,9 @@
+{
+  "method": "plan/acknowledge",
+  "params": {
+    "id": "plan1a2b3c4d5e6f7a8b",
+    "vehicleId": "veh1",
+    "checkId": "3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6",
+    "acknowledged": true
+  }
+}

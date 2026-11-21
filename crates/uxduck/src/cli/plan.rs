@@ -167,16 +167,29 @@ pub async fn run(data_dir: &Path, command: PlanCommand) -> Result<(), CliError> 
                 .call("plan/check", json!({ "id": id, "vehicleId": vehicle_id }))
                 .await?;
             let checks = result["checks"].as_array().cloned().unwrap_or_default();
+            let notes = result["notes"].as_array().cloned().unwrap_or_default();
             if json {
                 println!("{result}");
-            } else if checks.is_empty() {
-                println!("Nothing to fix.");
             } else {
+                if checks.is_empty() {
+                    println!("Nothing to fix.");
+                }
                 for check in &checks {
                     println!(
                         "{:<8} {}",
-                        check["severity"].as_str().unwrap_or_default(),
+                        if check["acknowledged"].as_bool() == Some(true) {
+                            "kept"
+                        } else {
+                            check["severity"].as_str().unwrap_or_default()
+                        },
                         check["message"].as_str().unwrap_or_default()
+                    );
+                }
+                for note in &notes {
+                    println!(
+                        "{:<8} {}",
+                        "note",
+                        note["message"].as_str().unwrap_or_default()
                     );
                 }
             }

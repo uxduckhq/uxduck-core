@@ -675,6 +675,24 @@ pub struct Plan {
     /// the library's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_copy: Option<VehicleCopy>,
+    /// Warnings a person chose to keep as is (FB-273). Not part of the
+    /// body: keeping one changes nothing uploaded and is no edit to undo.
+    /// This computer's own, never sent to the account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged: Vec<PlanAcknowledgement>,
+}
+
+/// A warning kept as is: it stays kept while what it is about stays the
+/// same, and comes back when that changes (`plan_checks::about`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAcknowledgement {
+    pub code: String,
+    /// The item it was about when kept, numbered from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<u32>,
+    /// What the warning was about when kept (`plan_checks::about`).
+    pub about: String,
 }
 
 /// Plans deleted longer ago than this are gone.

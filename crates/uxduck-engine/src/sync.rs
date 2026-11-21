@@ -502,7 +502,8 @@ fn removed_camera(id: &str) -> Option<String> {
 }
 
 /// What a plan is in the account (C3): its current body, not this
-/// computer's undo history, uploads or local version.
+/// computer's undo history, uploads, local version or the warnings kept as
+/// is here (FB-273), which stay with this computer's checks.
 fn shared_plan(plan: &Plan) -> Change {
     Change::PlanSaved {
         plan: Plan {
@@ -510,6 +511,7 @@ fn shared_plan(plan: &Plan) -> Change {
             undo: 0,
             redo: 0,
             version: 0,
+            acknowledged: Vec::new(),
             ..plan.clone()
         },
         revision: PlanRevision::None,
@@ -1664,7 +1666,8 @@ impl Engine {
     }
 
     /// A plan from the account (C3): its body here, keeping this computer's
-    /// uploads and version count; the body it replaces can be undone back to.
+    /// uploads, version count and warnings kept as is; the body it replaces
+    /// can be undone back to.
     fn take_plan(&mut self, actor: Actor, from: &Plan) {
         let here = self.state.plans.get(&from.id);
         let revision = match here {
@@ -1683,6 +1686,7 @@ impl Engine {
             },
             redo: 0,
             version: here.map_or(1, |p| p.version + 1),
+            acknowledged: here.map(|p| p.acknowledged.clone()).unwrap_or_default(),
             ..from.clone()
         };
         self.commit_as(actor, Change::PlanSaved { plan, revision });

@@ -145,6 +145,11 @@ mod tests {
                 mission_version: 9,
                 plan_id: Some("plan0".into()),
             }),
+            acknowledged: vec![p::PlanAcknowledgement {
+                code: "no-end".into(),
+                item: Some(1),
+                about: "0a1b".into(),
+            }],
         };
         let wire = dto::Plan::from(&plan);
         assert_eq!(

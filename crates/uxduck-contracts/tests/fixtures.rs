@@ -326,7 +326,7 @@ fn check(name: &str) {
         (
             "result",
             "plan_get" | "plan_create" | "plan_update" | "plan_undo" | "plan_redo" | "plan_place"
-            | "sync_restore" | "plan_delete" | "plan_restore",
+            | "plan_acknowledge" | "sync_restore" | "plan_delete" | "plan_restore",
         ) => {
             round_trip::<uxduck_contracts::dto::plan::Plan>(name, &json);
         }

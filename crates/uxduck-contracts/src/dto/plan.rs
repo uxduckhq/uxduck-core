@@ -331,6 +331,23 @@ pub struct Plan {
     /// library's plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle_copy: Option<VehicleCopy>,
+    /// Warnings a person chose to keep as is (FB-273), with `plan/acknowledge`.
+    /// This computer's own, never sent to the account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged: Vec<PlanAcknowledgement>,
+}
+
+/// A warning kept as is. `plan/check` says it is acknowledged while what
+/// it is about stays the same, and warns again once that changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAcknowledgement {
+    pub code: String,
+    /// The item it was about when kept, numbered from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<u32>,
+    /// What the warning was about when kept, as a digest.
+    pub about: String,
 }
 
 /// `plan/create`: a new plan, at once, named "Untitled plan" unless named.
@@ -528,12 +545,51 @@ pub struct PlanCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<u32>,
     pub message: String,
+    /// What `plan/acknowledge` names it by. It changes when what the
+    /// check is about changes, so an old one is refused. Absent from an
+    /// earlier UXDuck's checks, which cannot be kept as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// A warning a person kept as is (FB-273): still true, and still said,
+    /// but no longer counted as a warning. Never set on an error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledged: bool,
+}
+
+/// Something the plan does on purpose, said but not counted (FB-273):
+/// `ends-loitering`, a plan that ends holding or circling at its last item.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanNote {
+    pub code: String,
+    /// The item it is about, numbered from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<u32>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanCheckResult {
     pub checks: Vec<PlanCheck>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<PlanNote>,
+}
+
+/// `plan/acknowledge`: keep one of a plan's warnings as is, or warn about
+/// it again. The warning is found by its `id` among the plan's checks
+/// against the named vehicle's terrain, as `plan/check` gives them. A
+/// person's word: refused to an agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAcknowledgeParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_id: Option<String>,
+    /// The check's `id` from `plan/check`.
+    pub check_id: String,
+    /// True keeps it as is, false warns about it again.
+    pub acknowledged: bool,
 }
 
 /// `plan/examples` (ADR-0029 P12): where to place the examples.

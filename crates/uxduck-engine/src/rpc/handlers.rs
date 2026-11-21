@@ -298,6 +298,7 @@ pub(crate) fn handle(
         | ClientRequest::PlanExport(_)
         | ClientRequest::PlanUpload(_)
         | ClientRequest::PlanCheck(_)
+        | ClientRequest::PlanAcknowledge(_)
         | ClientRequest::PlanExamples(_)) => {
             crate::plans::handle(engine, connection, request, &granted)
         }

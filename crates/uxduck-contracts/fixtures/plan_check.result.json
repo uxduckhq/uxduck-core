@@ -4,12 +4,23 @@
       "severity": "error",
       "code": "below-ground",
       "item": 3,
-      "message": "12 m below the ground at item 3"
+      "message": "12 m below the ground at item 3",
+      "id": "9b2e4c1a7f3d5e6b8c0a2f4e6d8b0c2a4e6f8a0b2c4d6e8f0a1b3c5d7e9f1a2b"
     },
     {
       "severity": "warning",
       "code": "no-end",
-      "message": "it ends without a landing or a return: the vehicle waits at the last point"
+      "item": 4,
+      "message": "it ends without a landing or a return: the vehicle waits at the last point",
+      "id": "3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6",
+      "acknowledged": true
+    }
+  ],
+  "notes": [
+    {
+      "code": "ends-loitering",
+      "item": 6,
+      "message": "it ends loitering at item 6 until you take over"
     }
   ]
 }

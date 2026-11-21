@@ -3752,6 +3752,9 @@ export type ClientRequest = {
     method: 'plan/check';
     params: PlanCheckParams;
 } | {
+    method: 'plan/acknowledge';
+    params: PlanAcknowledgeParams;
+} | {
     method: 'plan/examples';
     params: PlanExamplesParams;
 } | {
@@ -12981,6 +12984,11 @@ export type PlaceUpdateParams = {
  * someone uploads it.
  */
 export type Plan = {
+    /**
+     * Warnings a person chose to keep as is (FB-273), with `plan/acknowledge`.
+     * This computer's own, never sent to the account.
+     */
+    acknowledged?: Array<PlanAcknowledgement>;
     autopilot: PlanAutopilot;
     /**
      * Where its points are; absent while it has none.
@@ -13044,6 +13052,41 @@ export type Plan = {
     version: number;
 };
 
+/**
+ * `plan/acknowledge`: keep one of a plan's warnings as is, or warn about
+ * it again. The warning is found by its `id` among the plan's checks
+ * against the named vehicle's terrain, as `plan/check` gives them. A
+ * person's word: refused to an agent.
+ */
+export type PlanAcknowledgeParams = {
+    /**
+     * True keeps it as is, false warns about it again.
+     */
+    acknowledged: boolean;
+    /**
+     * The check's `id` from `plan/check`.
+     */
+    checkId: string;
+    id: string;
+    vehicleId?: string | null;
+};
+
+/**
+ * A warning kept as is. `plan/check` says it is acknowledged while what
+ * it is about stays the same, and warns again once that changes.
+ */
+export type PlanAcknowledgement = {
+    /**
+     * What the warning was about when kept, as a digest.
+     */
+    about: string;
+    code: string;
+    /**
+     * The item it was about when kept, numbered from 1.
+     */
+    item?: number | null;
+};
+
 export type PlanAuthor = 'person' | 'agent';
 
 export type PlanAutopilot = 'ardupilot' | 'px4';
@@ -13085,6 +13128,11 @@ export type PlanBody = {
 
 export type PlanCheck = {
     /**
+     * A warning a person kept as is (FB-273): still true, and still said,
+     * but no longer counted as a warning. Never set on an error.
+     */
+    acknowledged?: boolean;
+    /**
      * `below-ground`, `low-clearance`, `terrain-missing`, `outside-fence`,
      * `home-outside-fence`, `fence-shape`, `command-unfit`, `no-take-off`,
      * `no-end`, `no-landing-sequence`, `rally-outside-fence`, `high`,
@@ -13093,6 +13141,12 @@ export type PlanCheck = {
      * pattern holding fewer items than its settings make).
      */
     code: string;
+    /**
+     * What `plan/acknowledge` names it by. It changes when what the
+     * check is about changes, so an old one is refused. Absent from an
+     * earlier UXDuck's checks, which cannot be kept as is.
+     */
+    id?: string | null;
     /**
      * The item it is about, numbered from 1.
      */
@@ -13112,6 +13166,7 @@ export type PlanCheckParams = {
 
 export type PlanCheckResult = {
     checks: Array<PlanCheck>;
+    notes?: Array<PlanNote>;
 };
 
 export type PlanCheckSeverity = 'warning' | 'error';
@@ -13247,6 +13302,19 @@ export type PlanListParams = {
 
 export type PlanListResult = {
     plans: Array<Plan>;
+};
+
+/**
+ * Something the plan does on purpose, said but not counted (FB-273):
+ * `ends-loitering`, a plan that ends holding or circling at its last item.
+ */
+export type PlanNote = {
+    code: string;
+    /**
+     * The item it is about, numbered from 1.
+     */
+    item?: number | null;
+    message: string;
 };
 
 /**

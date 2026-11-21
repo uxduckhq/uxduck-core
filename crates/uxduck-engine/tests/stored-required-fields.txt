@@ -610,6 +610,8 @@ Plan.made_by
 Plan.redo
 Plan.undo
 Plan.version
+PlanAcknowledgement.about
+PlanAcknowledgement.code
 PlanBody.autopilot
 PlanBody.frame
 PlanBody.min_clearance_m

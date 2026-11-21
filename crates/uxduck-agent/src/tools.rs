@@ -287,6 +287,9 @@ pub const KEPT_FROM_AGENTS: &[&str] = &[
     // (FB-177): the agent waits for that word in its own `place_area` call.
     "place/areas",
     "place/areaAnswer",
+    // Keeping a plan's warning as is is the person's word (FB-273). An agent
+    // sees the warning in `plan/check`, marked acknowledged.
+    "plan/acknowledge",
     // The response graph's sample rate follows the Tuning tab being open (S330).
     "tuning/live",
     // The graph's samples, 25 a second, are more than a tool answer holds;

@@ -14,6 +14,8 @@ use uxduck_core::domain::plan::{
 pub enum Severity {
     Error,
     Warning,
+    /// Said, not counted: the plan does it on purpose (FB-273).
+    Note,
 }
 
 /// One problem: what, where (an item's number from 1, when it is one), in words.
@@ -39,6 +41,14 @@ const LEG_STEP_M: f64 = 50.0;
 
 const TAKE_OFF: [u16; 2] = [22, 84];
 const ENDS: [u16; 4] = [20, 21, 85, 189];
+/// Loiter unlimited: the vehicle holds there until it is told otherwise.
+const HOLDS: u16 = 17;
+/// Loiter for turns or for a time: done circling, the mission runs out.
+const LOITERS: [u16; 2] = [18, 19];
+/// Repeat from item, Repeat from tag and the tag it repeats from.
+const JUMP: u16 = 177;
+const JUMP_TAG: u16 = 601;
+const TAG: u16 = 600;
 /// Set home: at the vehicle, when param1 is 1, else at the item's position.
 const SET_HOME: u16 = 179;
 
@@ -344,15 +354,8 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
                 "it does not start with a take-off: from the ground it needs one".into(),
             ));
         }
-        if let Some(last) = body.items.last()
-            && body.vehicle_type != PlanVehicleType::Blimp
-            && !ENDS.contains(&last.command)
-        {
-            checks.push(warning(
-                "no-end",
-                number(body.items.len() - 1),
-                "it ends without a landing or a return: the vehicle waits at the last point".into(),
-            ));
+        if body.vehicle_type != PlanVehicleType::Blimp {
+            checks.extend(end(body));
         }
         // A landing before the end: what follows is never reached, unless it
         // takes off again.
@@ -386,8 +389,153 @@ pub fn check(body: &PlanBody, ground: &mut Ground<'_>) -> Vec<Check> {
         }
         clearance(body, ground, &mut checks);
     }
-    checks.sort_by_key(|c| c.severity == Severity::Warning);
+    checks.sort_by_key(|c| match c.severity {
+        Severity::Error => 0,
+        Severity::Warning => 1,
+        Severity::Note => 2,
+    });
     checks
+}
+
+/// The navigation commands (`AP_Mission::is_nav_cmd`): flown one after
+/// another. The others run beside the one before them.
+fn navigation(command: u16) -> bool {
+    command <= 95 || matches!(command, 213 | 42702 | 42703)
+}
+
+/// Whether a mission has a Repeat from item or from tag.
+fn repeats(body: &PlanBody) -> bool {
+    body.items
+        .iter()
+        .any(|i| matches!(i.command, JUMP | JUMP_TAG))
+}
+
+/// How the mission ends (FB-273). Where it holds or ends loitering is
+/// meant: a note. Stopping at a waypoint is a warning. A Repeat from item
+/// or tag anywhere takes it round as each firmware counts and stops it, so
+/// its end is never sure, a landing after it included: its last item warns
+/// that, promising nothing, and the warning can be kept as is. Without one,
+/// the first Loiter unlimited holds for good, else it ends at the last
+/// navigation command, past the actions after it.
+fn end(body: &PlanBody) -> Option<Check> {
+    let items = &body.items;
+    let last = items.len().checked_sub(1)?;
+    if repeats(body) {
+        return Some(Check {
+            severity: Severity::Warning,
+            code: "no-end",
+            item: u32::try_from(last + 1).ok(),
+            message: "it repeats items, so where it ends is not certain, and no landing or return is sure to be reached".into(),
+        });
+    }
+    let at = items
+        .iter()
+        .position(|i| i.command == HOLDS)
+        .or_else(|| items.iter().rposition(|i| navigation(i.command)))
+        .unwrap_or(last);
+    let command = body.items[at].command;
+    if ENDS.contains(&command) || items[last].command == 189 {
+        return None;
+    }
+    let item = u32::try_from(at + 1).ok();
+    let ardupilot = body.autopilot == PlanAutopilot::Ardupilot;
+    // ArduPlane, a VTOL's too, switches to RTL when its mission runs out
+    // (`Plane::exit_mission_callback`), or a QuadPlane to QRTL when set to.
+    // ArduCopter holds there, and lands if it cannot (`ModeAuto::exit_mission`).
+    let plane = ardupilot
+        && matches!(
+            body.vehicle_type,
+            PlanVehicleType::Plane | PlanVehicleType::Vtol
+        );
+    let copter = ardupilot && body.vehicle_type == PlanVehicleType::Multicopter;
+    let note = |message: String| Check {
+        severity: Severity::Note,
+        code: "ends-loitering",
+        item,
+        message,
+    };
+    // PX4 goes on by itself only from an item set to: one before the end
+    // with "Go on to the next item by itself" unticked waits there, so the
+    // loiter is not reached by itself. Nor does PX4 fly Loiter turns.
+    let waits = body.autopilot == PlanAutopilot::Px4 && items[..at].iter().any(|i| !i.autocontinue);
+    let loiters = !waits && LOITERS.contains(&command) && (ardupilot || command != 18);
+    Some(if !waits && command == HOLDS {
+        note(format!(
+            "it ends loitering at item {} until you take over",
+            at + 1
+        ))
+    } else if loiters {
+        let then = if plane {
+            "then ArduPilot normally switches to Return to launch"
+        } else if copter {
+            "then ArduPilot holds there until you take over, or lands if it cannot hold"
+        } else {
+            "then the vehicle waits there until you take over"
+        };
+        note(format!("it ends loitering at item {}, {then}", at + 1))
+    } else {
+        Check {
+            severity: Severity::Warning,
+            code: "no-end",
+            item,
+            message: if plane {
+                "it ends without a landing or a return of its own: ArduPilot then normally switches to Return to launch"
+            } else if copter {
+                "it ends without a landing or a return: ArduPilot holds at the last point, or lands if it cannot hold"
+            } else {
+                "it ends without a landing or a return: the vehicle waits at the last point"
+            }
+            .into(),
+        }
+    })
+}
+
+/// What a warning is about, to tell whether one kept as is (FB-273) is
+/// still the same: its code and words, the vehicle type and autopilot it
+/// was checked for, and its subject where it stands in the plan. Inserting,
+/// removing or moving items before it, or changing it, makes another. A
+/// hex SHA-256, as the subject can be the whole plan.
+#[must_use]
+pub fn about(body: &PlanBody, check: &Check) -> String {
+    use sha2::Digest as _;
+    let at = |i: usize| serde_json::json!({ "at": i + 1, "item": body.items.get(i) });
+    let index = check
+        .item
+        .and_then(|n| usize::try_from(n).ok()?.checked_sub(1));
+    let subject = match (check.code, index) {
+        // A mission with a repeat can end anywhere in it: all of it, in order.
+        ("no-end", Some(_)) if repeats(body) => {
+            serde_json::to_value(&body.items).unwrap_or_default()
+        }
+        // How it ends: the end, everything after it, and every repeat.
+        ("no-end", Some(end)) => body
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(i, item)| *i >= end || matches!(item.command, JUMP | JUMP_TAG | TAG))
+            .map(|(i, _)| at(i))
+            .collect(),
+        (_, Some(i)) => at(i),
+        ("rally-outside-fence", None) => {
+            serde_json::json!({ "rally": body.rally, "fence": body.fence })
+        }
+        ("blimp-auto", None) => serde_json::Value::Null,
+        (_, None) => serde_json::to_value(body).unwrap_or_default(),
+    };
+    let fingerprint = serde_json::json!({
+        "code": check.code,
+        "message": check.message,
+        "vehicleType": body.vehicle_type,
+        "autopilot": body.autopilot,
+        "subject": subject,
+    });
+    sha2::Sha256::digest(fingerprint.to_string().as_bytes())
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// A point the vehicle flies through, not one it looks at or marks.
@@ -911,6 +1059,355 @@ mod tests {
 
     fn codes(checks: &[Check]) -> Vec<&'static str> {
         checks.iter().map(|c| c.code).collect()
+    }
+
+    /// How the plan's end is said: its severity, code, item and words.
+    fn end(plan: &PlanBody) -> Vec<(Severity, &'static str, Option<u32>, String)> {
+        check(plan, &mut hill)
+            .into_iter()
+            .filter(|c| matches!(c.code, "no-end" | "ends-loitering"))
+            .map(|c| (c.severity, c.code, c.item, c.message))
+            .collect()
+    }
+
+    fn said(
+        severity: Severity,
+        code: &'static str,
+        item: u32,
+        message: &str,
+    ) -> Vec<(Severity, &'static str, Option<u32>, String)> {
+        vec![(severity, code, Some(item), message.to_owned())]
+    }
+
+    fn with(command: u16, params: [Option<f64>; 4]) -> PlanItem {
+        PlanItem {
+            params,
+            ..item(command, 0.0, 0.0, 0.0, 3)
+        }
+    }
+
+    const STOPS_PLANE: &str = "it ends without a landing or a return of its own: ArduPilot then normally switches to Return to launch";
+    const STOPS_COPTER: &str = "it ends without a landing or a return: ArduPilot holds at the last point, or lands if it cannot hold";
+    const STOPS: &str =
+        "it ends without a landing or a return: the vehicle waits at the last point";
+    const UNSURE: &str = "it repeats items, so where it ends is not certain, and no landing or return is sure to be reached";
+
+    #[test]
+    fn a_mission_that_ends_loitering_is_a_note_and_one_that_stops_at_a_waypoint_warns() {
+        // FB-273: a plane's mission ending on Loiter unlimited, waiting to
+        // be told, warned that it ends without a landing or a return.
+        let mut plan = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 40.0, 3),
+            item(17, 0.0002, 0.002, 40.0, 3),
+        ]);
+        plan.vehicle_type = PlanVehicleType::Plane;
+        let holds = said(
+            Severity::Note,
+            "ends-loitering",
+            3,
+            "it ends loitering at item 3 until you take over",
+        );
+        assert_eq!(end(&plan), holds);
+        plan.items[2].autocontinue = false;
+        assert_eq!(end(&plan), holds);
+        // Said after every warning, and never stopping an upload.
+        let all = check(&plan, &mut hill);
+        assert_eq!(all.last().map(|c| c.severity), Some(Severity::Note));
+        assert!(
+            !all.iter().any(|c| c.severity == Severity::Error),
+            "{all:?}"
+        );
+
+        // Loiter turns or time with nothing after: ArduPlane normally
+        // switches to RTL (a QuadPlane can take QRTL), ArduCopter holds and
+        // lands if it cannot, PX4 waits there.
+        for command in LOITERS {
+            plan.items[2].command = command;
+            plan.vehicle_type = PlanVehicleType::Plane;
+            plan.autopilot = PlanAutopilot::Ardupilot;
+            let returns = said(
+                Severity::Note,
+                "ends-loitering",
+                3,
+                "it ends loitering at item 3, then ArduPilot normally switches to Return to launch",
+            );
+            assert_eq!(end(&plan), returns, "{command}");
+            plan.vehicle_type = PlanVehicleType::Vtol;
+            assert_eq!(end(&plan), returns, "{command}");
+            plan.vehicle_type = PlanVehicleType::Multicopter;
+            assert_eq!(
+                end(&plan)[0].3,
+                "it ends loitering at item 3, then ArduPilot holds there until you take over, or lands if it cannot hold",
+                "{command}"
+            );
+            plan.autopilot = PlanAutopilot::Px4;
+            for kind in [PlanVehicleType::Multicopter, PlanVehicleType::Plane] {
+                plan.vehicle_type = kind;
+                if command == 18 {
+                    // PX4 does not fly Loiter turns: nothing reassuring.
+                    assert_eq!(end(&plan), said(Severity::Warning, "no-end", 3, STOPS));
+                } else {
+                    assert_eq!(
+                        end(&plan)[0].3,
+                        "it ends loitering at item 3, then the vehicle waits there until you take over"
+                    );
+                }
+            }
+            plan.autopilot = PlanAutopilot::Ardupilot;
+        }
+
+        // A plain waypoint last still warns.
+        plan.items[2].command = 16;
+        plan.vehicle_type = PlanVehicleType::Multicopter;
+        assert_eq!(
+            end(&plan),
+            said(Severity::Warning, "no-end", 3, STOPS_COPTER)
+        );
+        plan.autopilot = PlanAutopilot::Px4;
+        assert_eq!(end(&plan), said(Severity::Warning, "no-end", 3, STOPS));
+        plan.autopilot = PlanAutopilot::Ardupilot;
+        plan.vehicle_type = PlanVehicleType::Plane;
+        assert_eq!(
+            end(&plan),
+            said(Severity::Warning, "no-end", 3, STOPS_PLANE)
+        );
+        // Loiter unlimited before the end holds there for good.
+        plan.items[1].command = 17;
+        assert_eq!(
+            end(&plan),
+            said(
+                Severity::Note,
+                "ends-loitering",
+                2,
+                "it ends loitering at item 2 until you take over"
+            )
+        );
+        plan.items[1].command = 16;
+
+        // A return to launch or a landing says nothing about the end.
+        for command in [20, 21] {
+            plan.items[2].command = command;
+            assert!(end(&plan).is_empty(), "{command}");
+        }
+
+        // Nor does a rover's or a blimp's: the end is a flying check.
+        plan.items[2].command = 16;
+        for kind in [
+            PlanVehicleType::Rover,
+            PlanVehicleType::Boat,
+            PlanVehicleType::Blimp,
+        ] {
+            plan.vehicle_type = kind;
+            assert!(end(&plan).is_empty(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_end_is_the_last_navigation_command_flown_and_any_repeat_keeps_the_warning() {
+        let speed = with(178, [Some(0.0), Some(18.0), Some(-1.0), None]);
+        let mut plan = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 40.0, 3),
+            item(17, 0.0002, 0.002, 40.0, 3),
+            speed.clone(),
+        ]);
+        plan.vehicle_type = PlanVehicleType::Plane;
+        // An action after Loiter unlimited runs as it starts: the loiter
+        // never ends, so the plane does not return.
+        let holds = said(
+            Severity::Note,
+            "ends-loitering",
+            3,
+            "it ends loitering at item 3 until you take over",
+        );
+        assert_eq!(end(&plan), holds);
+        // A waypoint after it is never reached.
+        plan.items[3] = item(16, 0.0003, 0.003, 40.0, 3);
+        assert_eq!(end(&plan), holds);
+        // After a waypoint, it warns about the waypoint.
+        plan.items[2].command = 16;
+        plan.items[3] = speed;
+        assert_eq!(
+            end(&plan),
+            said(Severity::Warning, "no-end", 3, STOPS_PLANE)
+        );
+
+        // A Repeat from item anywhere: whether and where it stops is the
+        // firmware's to count, so the last item warns that, never a note,
+        // promising neither a hold nor a return. Forever
+        // (-1), a self-repeat ArduPilot's scan stops, -2, a number of times,
+        // or to an item that is not there.
+        plan.items[2].command = 17;
+        for params in [
+            [Some(2.0), Some(-1.0), None, None],
+            [Some(4.0), Some(-1.0), None, None],
+            [Some(2.0), Some(-2.0), None, None],
+            [Some(2.0), Some(3.0), None, None],
+            [Some(9.0), Some(-1.0), None, None],
+        ] {
+            plan.items[3] = with(JUMP, params);
+            assert_eq!(
+                end(&plan),
+                said(Severity::Warning, "no-end", 4, UNSURE),
+                "{params:?}"
+            );
+        }
+        // Forward then back again, past a timed loiter: the same.
+        let mut round = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            with(JUMP, [Some(4.0), Some(1.0), None, None]),
+            item(19, 0.0001, 0.001, 40.0, 3),
+            item(16, 0.0002, 0.002, 40.0, 3),
+            with(JUMP, [Some(3.0), Some(1.0), None, None]),
+        ]);
+        round.vehicle_type = PlanVehicleType::Plane;
+        assert_eq!(end(&round), said(Severity::Warning, "no-end", 5, UNSURE));
+        // Repeat from tag, and PX4's repeats, the same.
+        round.items[4] = with(JUMP_TAG, [Some(7.0), Some(-1.0), None, None]);
+        round.items[1] = with(TAG, [Some(7.0), None, None, None]);
+        assert_eq!(end(&round), said(Severity::Warning, "no-end", 5, UNSURE));
+        round.autopilot = PlanAutopilot::Px4;
+        round.items[4] = with(JUMP, [Some(2.0), Some(-1.0), None, None]);
+        assert_eq!(end(&round), said(Severity::Warning, "no-end", 5, UNSURE));
+        // A landing last may never be reached: it warns the same.
+        round.autopilot = PlanAutopilot::Ardupilot;
+        round.items.push(item(21, 0.0003, 0.003, 0.0, 3));
+        assert_eq!(end(&round), said(Severity::Warning, "no-end", 6, UNSURE));
+
+        // PX4 goes on by itself only from an item set to. One before the
+        // loiter that waits to be told means the loiter is not reached by
+        // itself: no note, but the warning as for any other end.
+        let mut waits = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 40.0, 3),
+            item(17, 0.0002, 0.002, 40.0, 3),
+        ]);
+        waits.autopilot = PlanAutopilot::Px4;
+        assert_eq!(end(&waits)[0].1, "ends-loitering");
+        waits.items[1].autocontinue = false;
+        assert_eq!(end(&waits), said(Severity::Warning, "no-end", 3, STOPS));
+        waits.items[2].command = 19;
+        assert_eq!(end(&waits), said(Severity::Warning, "no-end", 3, STOPS));
+        // ArduPilot goes on whatever the item says.
+        waits.autopilot = PlanAutopilot::Ardupilot;
+        assert_eq!(end(&waits)[0].1, "ends-loitering");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one case after another")]
+    fn what_a_warning_is_about_changes_with_its_subject_its_place_and_the_vehicle() {
+        let mut plan = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 40.0, 3),
+            item(16, 0.0002, 0.002, 40.0, 3),
+        ]);
+        plan.vehicle_type = PlanVehicleType::Plane;
+        let about_end = |plan: &PlanBody| {
+            let checks = check(plan, &mut hill);
+            about(plan, checks.iter().find(|c| c.code == "no-end").unwrap())
+        };
+        let first = about_end(&plan);
+        assert_eq!(first.len(), 64);
+        plan.items[1].altitude_m = 45.0;
+        assert_eq!(about_end(&plan), first, "another item changed");
+        plan.items[1].altitude_m = 40.0;
+        plan.items[2].altitude_m = 45.0;
+        assert_ne!(about_end(&plan), first, "its item changed");
+        plan.items[2].altitude_m = 40.0;
+        assert_eq!(about_end(&plan), first);
+        // Replaced by an identical item: the same.
+        plan.items[2] = item(16, 0.0002, 0.002, 40.0, 3);
+        assert_eq!(about_end(&plan), first);
+        // Another vehicle type, or autopilot.
+        plan.vehicle_type = PlanVehicleType::Vtol;
+        assert_ne!(about_end(&plan), first, "a VTOL");
+        plan.vehicle_type = PlanVehicleType::Plane;
+        plan.autopilot = PlanAutopilot::Px4;
+        assert_ne!(about_end(&plan), first, "PX4");
+        plan.autopilot = PlanAutopilot::Ardupilot;
+        assert_eq!(about_end(&plan), first);
+        // An item inserted before it, or one before it removed.
+        let mut inserted = plan.clone();
+        inserted.items.insert(1, item(16, 0.00005, 0.0005, 40.0, 3));
+        assert_ne!(about_end(&inserted), first, "inserted");
+        let mut removed = plan.clone();
+        removed.items.remove(1);
+        assert_ne!(about_end(&removed), first, "removed");
+        // An action after it, or a repeat anywhere.
+        let mut after = plan.clone();
+        after
+            .items
+            .push(with(178, [Some(0.0), Some(18.0), Some(-1.0), None]));
+        assert_ne!(about_end(&after), first, "an action after it");
+        let mut repeat = plan.clone();
+        repeat
+            .items
+            .insert(2, with(JUMP, [Some(2.0), Some(1.0), None, None]));
+        assert_ne!(about_end(&repeat), first, "a repeat");
+        // With a repeat, the end can be any item: changing one before an
+        // action at the end, or the order, makes it another.
+        repeat
+            .items
+            .push(with(178, [Some(0.0), Some(18.0), Some(-1.0), None]));
+        let repeated = about_end(&repeat);
+        let mut changed = repeat.clone();
+        changed.items[3].command = 19;
+        assert_ne!(about_end(&changed), repeated, "an item before the action");
+        let mut swapped = repeat.clone();
+        swapped.items.swap(1, 3);
+        assert_ne!(about_end(&swapped), repeated, "the order");
+
+        // An item's warning moves with its item.
+        let high = |plan: &PlanBody, n: u32| {
+            about(
+                plan,
+                &Check {
+                    severity: Severity::Warning,
+                    code: "high",
+                    item: Some(n),
+                    message: format!("more than 120 m over the ground at item {n}"),
+                },
+            )
+        };
+        let mut three = body(vec![
+            item(22, 0.0, 0.0, 40.0, 3),
+            item(16, 0.0001, 0.001, 130.0, 3),
+            item(16, 0.0002, 0.002, 40.0, 3),
+        ]);
+        let was = high(&three, 2);
+        three.items[2].altitude_m = 50.0;
+        assert_eq!(high(&three, 2), was, "another item changed");
+        // Reordered: another item is item 2.
+        three.items.swap(1, 2);
+        assert_ne!(high(&three, 2), was, "reordered");
+        three.items.swap(1, 2);
+        assert_eq!(high(&three, 2), was);
+        three.items[1] = item(16, 0.0001, 0.001, 130.0, 3);
+        assert_eq!(high(&three, 2), was, "an identical item");
+
+        // A rally point's warning, with no item: the rally points and fence.
+        let rally = |plan: &PlanBody| {
+            about(
+                plan,
+                &Check {
+                    severity: Severity::Warning,
+                    code: "rally-outside-fence",
+                    item: None,
+                    message: "rally point 1 is outside the fence".into(),
+                },
+            )
+        };
+        let was = rally(&three);
+        three.items[1].altitude_m = 60.0;
+        assert_eq!(rally(&three), was, "a mission item changed");
+        three.rally.push(uxduck_core::domain::plan::RallyPoint {
+            latitude_deg: 0.1,
+            longitude_deg: 0.1,
+            altitude_m: 30.0,
+            name: None,
+        });
+        assert_ne!(rally(&three), was, "a rally point changed");
     }
 
     #[test]
