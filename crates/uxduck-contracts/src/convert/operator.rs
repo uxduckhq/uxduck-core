@@ -632,6 +632,7 @@ impl From<&core::ControlActions> for dto::ControlActions {
         Self {
             class: value.class.into(),
             actions: value.actions.clone(),
+            known_defaults: value.known_defaults.clone(),
         }
     }
 }
@@ -641,6 +642,7 @@ impl From<&dto::ControlActions> for core::ControlActions {
         Self {
             class: value.class.into(),
             actions: value.actions.clone(),
+            known_defaults: value.known_defaults.clone(),
         }
     }
 }

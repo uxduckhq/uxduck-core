@@ -1769,6 +1769,11 @@ pub fn clean_inspector_pinned(pinned: &[String]) -> Option<Vec<String>> {
 pub struct ControlActions {
     pub class: crate::domain::telemetry_layout::VehicleClass,
     pub actions: Vec<String>,
+    /// UXDuck's own buttons for the type when these were saved, so a
+    /// default added later is shown and one taken away stays away. Empty
+    /// for buttons saved before it was kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_defaults: Vec<String>,
 }
 
 /// The mapping an operator uses with one controller on one vehicle: by the
@@ -1917,10 +1922,10 @@ impl Operator {
 /// The longest action id on the Cockpit tab, in characters.
 pub const MAX_CONTROL_ACTION_CHARS: usize = 64;
 
-/// Each type once, sorted, with each action once in the order given,
-/// however many buttons a type has; `None` if a type comes twice or an id
-/// is not `vehicle:` and lower-case letters, digits, `-`, `_`, `:` or
-/// spaces (PX4's `Precision Land`).
+/// Each type once, sorted, with each action and known default once in the
+/// order given, however many buttons a type has; `None` if a type comes
+/// twice or an id is not `vehicle:` and lower-case letters, digits, `-`,
+/// `_`, `:` or spaces (PX4's `Precision Land`).
 #[must_use]
 pub fn clean_control_actions(all: &[ControlActions]) -> Option<Vec<ControlActions>> {
     let valid = |id: &String| {
@@ -1936,18 +1941,22 @@ pub fn clean_control_actions(all: &[ControlActions]) -> Option<Vec<ControlAction
     };
     let mut kept: Vec<ControlActions> = Vec::with_capacity(all.len());
     for entry in all {
-        if !entry.actions.iter().all(valid) || kept.iter().any(|k| k.class == entry.class) {
+        if !entry.actions.iter().chain(&entry.known_defaults).all(valid)
+            || kept.iter().any(|k| k.class == entry.class)
+        {
             return None;
         }
-        let mut seen: HashSet<&str> = HashSet::with_capacity(entry.actions.len());
-        kept.push(ControlActions {
-            class: entry.class,
-            actions: entry
-                .actions
-                .iter()
+        let once = |ids: &[String]| {
+            let mut seen: HashSet<&str> = HashSet::with_capacity(ids.len());
+            ids.iter()
                 .filter(|id| seen.insert(id.as_str()))
                 .cloned()
-                .collect(),
+                .collect()
+        };
+        kept.push(ControlActions {
+            class: entry.class,
+            actions: once(&entry.actions),
+            known_defaults: once(&entry.known_defaults),
         });
     }
     kept.sort_by_key(|k| k.class);
@@ -3554,6 +3563,7 @@ mod tests {
             control_actions: vec![ControlActions {
                 class: crate::domain::telemetry_layout::VehicleClass::Copter,
                 actions: vec!["vehicle:mode:guided".into()],
+                known_defaults: vec!["vehicle:land".into()],
             }],
             me_marker_id: None,
             display: None,
@@ -3565,6 +3575,21 @@ mod tests {
         .unwrap();
         assert_eq!(stored["parameterGroups"][0]["name"], "Hover tuning");
         assert_eq!(stored["controlActions"][0]["class"], "copter");
+        assert_eq!(
+            stored["controlActions"][0]["knownDefaults"][0],
+            "vehicle:land"
+        );
+        let mut before_known: ControlActions =
+            serde_json::from_value(stored["controlActions"][0].clone()).unwrap();
+        stored["controlActions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("knownDefaults");
+        before_known.known_defaults.clear();
+        assert_eq!(
+            serde_json::from_value::<ControlActions>(stored["controlActions"][0].clone()).unwrap(),
+            before_known
+        );
         let fields = stored.as_object_mut().unwrap();
         fields.remove("parameterGroups");
         fields.remove("inspectorPinned");
@@ -3610,6 +3635,7 @@ mod tests {
         let entry = |class, actions: &[&str]| ControlActions {
             class,
             actions: actions.iter().map(|&a| a.to_owned()).collect(),
+            known_defaults: Vec::new(),
         };
         assert_eq!(
             clean_control_actions(&[
@@ -3658,6 +3684,15 @@ mod tests {
             clean_control_actions(&[entry(VehicleClass::Copter, &many)]),
             Some(vec![entry(VehicleClass::Copter, &many)])
         );
+        let known = |known: &[&str]| ControlActions {
+            known_defaults: known.iter().map(|&a| a.to_owned()).collect(),
+            ..entry(VehicleClass::Plane, &["vehicle:land"])
+        };
+        assert_eq!(
+            clean_control_actions(&[known(&["vehicle:land", "vehicle:rtl", "vehicle:land"])]),
+            Some(vec![known(&["vehicle:land", "vehicle:rtl"])])
+        );
+        assert_eq!(clean_control_actions(&[known(&["Land"])]), None);
     }
 
     fn operator_with_no_mappings() -> Operator {

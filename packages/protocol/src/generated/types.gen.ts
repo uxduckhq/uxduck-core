@@ -5481,6 +5481,12 @@ export type Contribution = 'whip' | 'srt';
 export type ControlActions = {
     actions: Array<string>;
     class: VehicleClass;
+    /**
+     * UXDuck's own buttons for the type when these were saved, so a
+     * default added later is shown and one taken away stays away. Absent
+     * for buttons saved before it was kept.
+     */
+    knownDefaults?: Array<string>;
 };
 
 /**

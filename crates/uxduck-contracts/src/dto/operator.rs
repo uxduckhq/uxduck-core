@@ -792,6 +792,11 @@ pub struct ControllerMapping {
 pub struct ControlActions {
     pub class: VehicleClass,
     pub actions: Vec<String>,
+    /// UXDuck's own buttons for the type when these were saved, so a
+    /// default added later is shown and one taken away stays away. Absent
+    /// for buttons saved before it was kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_defaults: Vec<String>,
 }
 
 /// One action's shortcut as the operator set it (ADR-0020 A4).
