@@ -1328,13 +1328,13 @@ impl Engine {
         if source.url.is_none() || !source.added_by_hand {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
-                "Only RTSP cameras you added can have fallback addresses.",
+                "Only RTSP cameras you added can have more than one address.",
             ));
         }
-        if params.urls.is_empty() || params.urls.len() > 4 {
+        if params.urls.is_empty() {
             return Err(ApiError::new(
                 ErrorKind::InvalidValue,
-                "Give one preferred address and up to three fallbacks.",
+                "Give the camera at least one address.",
             ));
         }
         let previous: Vec<_> = source
@@ -1352,7 +1352,7 @@ impl Engine {
             if !matches!(input(&url)?, Input::Rtsp { .. } | Input::Whep { .. }) {
                 return Err(ApiError::new(
                     ErrorKind::InvalidValue,
-                    "Fallback addresses must use RTSP or WHEP.",
+                    "Camera addresses must use RTSP or WHEP.",
                 ));
             }
             if urls.iter().any(|u: &String| same_address(u, &url)) {

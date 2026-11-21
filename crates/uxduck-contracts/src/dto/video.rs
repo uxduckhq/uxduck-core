@@ -443,8 +443,8 @@ pub struct VideoAddResult {
 #[serde(rename_all = "camelCase")]
 pub struct VideoAddressesParams {
     pub source_id: String,
-    /// Preferred RTSP or WHEP address first, followed by up to three
-    /// fallbacks. A WHEP address goes before the RTSP address on its host,
+    /// RTSP or WHEP addresses in order, the preferred one first, with no
+    /// fixed count. A WHEP address goes before the RTSP address on its host,
     /// which is its fallback (ADR-0064 W5). Unchanged redacted addresses
     /// retain their stored credentials.
     pub urls: Vec<String>,
