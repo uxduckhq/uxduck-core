@@ -1,7 +1,8 @@
 //! The UDP video listener (ADR-0017 V3): one thread, every sender a source.
 //! What arrives goes through that sender's [`Source`] to the hub; once a
 //! second each sender is reported to the engine, and one silent for 3 s is
-//! reported stopped.
+//! reported stopped. A watch that begins on a stopped sender is told so
+//! again, once the sender has stayed silent for 3 s of it.
 //!
 //! A sender is its address without its port, since a camera may send from
 //! another port when it restarts. Two streams at once from one address
@@ -38,7 +39,8 @@ struct Sender {
     source: Source,
     address: SocketAddr,
     heard: Instant,
-    stopped: bool,
+    /// When it was last reported stopped, while it stays silent.
+    stopped: Option<Instant>,
     processing: bool,
     /// At the last report: when, bytes and pictures, for the rates.
     reported: (Instant, u64, u64),
@@ -125,21 +127,29 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
                 source: Source::new(),
                 address: from,
                 heard: now,
-                stopped: false,
+                stopped: None,
                 processing: false,
                 reported: (now, 0, 0),
                 klv_posted: None,
             });
-            if sender.stopped {
+            if sender.stopped.take().is_some() {
                 sender.source.resume();
-                sender.stopped = false;
                 let c = sender.source.counters();
                 sender.reported = (now, c.bytes, c.pictures);
             }
             sender.heard = now;
             sender.address = from;
-            let needed = hub.needed(&id);
-            if !needed {
+            if hub.needed(&id) {
+                sender.processing = true;
+                hub.publish_ts(&id, &buffer[..len]);
+                for output in sender.source.push(&buffer[..len]) {
+                    if let Some(metadata) = metadata_due(&output, &mut sender.klv_posted) {
+                        let id = id.clone();
+                        engine.post(move |e| e.video_klv(&id, &metadata));
+                    }
+                    hub.publish(&id, &item(output));
+                }
+            } else {
                 if sender.processing {
                     // Drop demux/depacketizer state and accumulated picture buffers.
                     sender.source = Source::new();
@@ -162,18 +172,10 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
                         engine.post(move |e| e.video_observed(observed));
                     }
                 }
-                continue;
-            }
-            sender.processing = true;
-            hub.publish_ts(&id, &buffer[..len]);
-            for output in sender.source.push(&buffer[..len]) {
-                if let Some(metadata) = metadata_due(&output, &mut sender.klv_posted) {
-                    let id = id.clone();
-                    engine.post(move |e| e.video_klv(&id, &metadata));
-                }
-                hub.publish(&id, &item(output));
             }
         }
+        // Whatever arrived: a sender nobody watches, sending without a pause,
+        // must not hold back the report of the others.
         if last_tick.elapsed() >= REPORT_EVERY {
             last_tick = Instant::now();
             tick(&mut senders, port, hub, engine);
@@ -181,7 +183,7 @@ fn run(socket: &UdpSocket, port: u16, hub: &Hub, engine: &EngineHandle, stop: &A
     }
     // Stopped listening: its senders have stopped as far as UXDuck knows.
     for (id, sender) in senders {
-        if !sender.stopped {
+        if sender.stopped.is_none() {
             engine.post(move |e| e.video_stopped(&id));
         }
     }
@@ -211,7 +213,7 @@ fn claim(
         && let Some(sender) = senders.get_mut(&id)
     {
         sender.source.restart();
-        sender.stopped = false;
+        sender.stopped = None;
         let c = sender.source.counters();
         sender.reported = (now, c.bytes, c.pictures);
         return id;
@@ -277,11 +279,22 @@ pub(super) fn item(output: Output) -> Item {
 fn tick(senders: &mut HashMap<String, Sender>, port: u16, hub: &Hub, engine: &EngineHandle) {
     let now = Instant::now();
     for (id, sender) in senders.iter_mut() {
-        if sender.stopped {
+        if let Some(told) = sender.stopped {
+            // The engine tells a stopped source that a watch begins on as
+            // waiting for video. Silent for as long into the watch as it
+            // takes a source to stop, it has stopped for that watch too.
+            if let Some(since) = hub.needed_since(id)
+                && told <= since
+                && now.duration_since(since) >= STOPPED_AFTER
+            {
+                sender.stopped = Some(now);
+                let id = id.clone();
+                engine.post(move |e| e.video_stopped(&id));
+            }
             continue;
         }
         if now.duration_since(sender.heard) >= STOPPED_AFTER {
-            sender.stopped = true;
+            sender.stopped = Some(now);
             let id = id.clone();
             engine.post(move |e| e.video_stopped(&id));
             continue;

@@ -198,7 +198,8 @@ impl Watcher {
 
 #[derive(Debug, Default)]
 struct Inner {
-    needed: std::collections::HashSet<String>,
+    /// Sources someone needs, and since when.
+    needed: HashMap<String, Instant>,
     /// Tokens the engine handed out, not yet opened.
     allowed: HashMap<String, (String, Instant)>,
     /// Open sockets by token: their source and queue.
@@ -277,14 +278,22 @@ impl Hub {
     pub fn demand(&self, source_id: &str, needed: bool) {
         let mut inner = self.lock();
         if needed {
-            inner.needed.insert(source_id.to_owned());
+            inner
+                .needed
+                .entry(source_id.to_owned())
+                .or_insert_with(Instant::now);
         } else {
             inner.needed.remove(source_id);
         }
     }
 
     pub fn needed(&self, source_id: &str) -> bool {
-        self.lock().needed.contains(source_id)
+        self.lock().needed.contains_key(source_id)
+    }
+
+    /// Since when a source has been needed, while it is.
+    pub fn needed_since(&self, source_id: &str) -> Option<Instant> {
+        self.lock().needed.get(source_id).copied()
     }
 
     #[must_use]
