@@ -10087,12 +10087,20 @@ export type LibraryVehicle = {
     active: boolean;
     autopilot: string;
     /**
+     * The colour the person gave it, when they did.
+     */
+    colour?: VehicleColour | null;
+    /**
      * The computer that published it, by name.
      */
     device: string;
     firmware?: string | null;
     id: string;
     name: string;
+    /**
+     * Its size on the map, as the person set it, when they did.
+     */
+    sizeCm?: number | null;
     uid?: string | null;
     updatedAtUs: number;
     vehicleType: string;

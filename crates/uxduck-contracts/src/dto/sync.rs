@@ -236,6 +236,12 @@ pub struct LibraryVehicle {
     pub uid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
+    /// Its size on the map, as the person set it, when they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_cm: Option<u32>,
+    /// The colour the person gave it, when they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<super::vehicle::VehicleColour>,
     /// The computer that published it, by name.
     pub device: String,
     #[schemars(schema_with = "crate::safe::integer")]

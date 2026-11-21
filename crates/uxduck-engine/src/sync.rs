@@ -2030,6 +2030,8 @@ impl Engine {
                     vehicle_type: v.vehicle_type.clone(),
                     uid: v.uid.clone(),
                     firmware: v.firmware.clone(),
+                    size_cm: v.size_cm,
+                    colour: v.colour.map(Into::into),
                     device: v.device.clone(),
                     updated_at_us: v.updated_at_us,
                     active: self.used_here(&v.id),
